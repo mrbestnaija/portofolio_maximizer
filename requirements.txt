@@ -1,0 +1,20 @@
+
+# These are the absolute minimum dependencies for basic functionality
+
+# Core scientific computing
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+scipy>=1.10.0,<2.0.0
+statsmodels
+matplotlib
+scikit-learn
+tqdm
+click
+pytest
+python-dotenv
+pyyaml
+pandas-datareader
+yfinance
+
+
+
