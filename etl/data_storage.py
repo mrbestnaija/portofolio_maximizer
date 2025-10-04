@@ -117,21 +117,39 @@ class DataStorage:
 
     def train_validation_test_split(self, data: pd.DataFrame,
                                     train_ratio: float = 0.7,
-                                    val_ratio: float = 0.15) -> Dict[str, pd.DataFrame]:
-        """Chronological train/validation/test split (vectorized).
+                                    val_ratio: float = 0.15,
+                                    use_cv: bool = False,
+                                    n_splits: int = 5) -> Dict[str, pd.DataFrame]:
+        """Data splitting with backward-compatible k-fold cross-validation.
+
+        BACKWARD COMPATIBLE: Default behavior (use_cv=False) unchanged.
+        NEW: Set use_cv=True for production (prevents training/validation disparity).
 
         Mathematical Foundation:
-        - Temporal ordering preserved: t_train < t_val < t_test
-        - Split ratios: train=70%, val=15%, test=15%
-        - No data leakage: strictly chronological
+        - Simple split (use_cv=False, DEFAULT for backward compatibility):
+          * Temporal ordering: t_train < t_val < t_test
+          * Split ratios: train=70%, val=15%, test=15%
+          * LIMITATION: Training/validation disparity across time index
+
+        - Cross-validation split (use_cv=True, RECOMMENDED):
+          * k-fold moving window with test set isolation
+          * Prevents data memory decay
+          * Ensures representative sampling across entire distribution
+          * Test set (15%) completely isolated
+          * CV folds cover remaining 85% with moving window
 
         Args:
             data: Time series data with DatetimeIndex
-            train_ratio: Training set proportion
-            val_ratio: Validation set proportion
+            train_ratio: Training set proportion (used if use_cv=False)
+            val_ratio: Validation set proportion (used if use_cv=False)
+            use_cv: If True, use k-fold cross-validation. Default=False (backward compatible)
+            n_splits: Number of CV folds (default=5, only used if use_cv=True)
 
         Returns:
-            Dictionary with 'training', 'validation', 'testing' DataFrames
+            Dictionary with split DataFrames.
+            - If use_cv=False: {'training', 'validation', 'testing'} (BACKWARD COMPATIBLE)
+            - If use_cv=True: {'cv_folds': List[Dict], 'testing': DataFrame,
+                               'n_splits': int, 'split_type': str}
         """
         if not isinstance(data.index, pd.DatetimeIndex):
             raise ValueError("Data must have DatetimeIndex for chronological split")
@@ -139,20 +157,53 @@ class DataStorage:
         # Sort by timestamp (vectorized)
         data = data.sort_index()
 
-        # Calculate split indices (vectorized)
-        n = len(data)
-        train_end = int(n * train_ratio)
-        val_end = int(n * (train_ratio + val_ratio))
+        if use_cv:
+            # Use k-fold cross-validation (NEW FEATURE)
+            from etl.time_series_cv import TimeSeriesCrossValidator
 
-        # Vectorized slicing
-        splits = {
-            'training': data.iloc[:train_end],
-            'validation': data.iloc[train_end:val_end],
-            'testing': data.iloc[val_end:]
-        }
+            cv_splitter = TimeSeriesCrossValidator(
+                n_splits=n_splits,
+                test_size=0.15,
+                expanding_window=True
+            )
 
-        logger.info(f"Split: train={len(splits['training'])}, "
-                   f"val={len(splits['validation'])}, "
-                   f"test={len(splits['testing'])}")
+            cv_folds, test_indices = cv_splitter.split(data)
+            test_data = data.iloc[test_indices].copy()
 
-        return splits
+            # Extract fold data
+            fold_splits = []
+            for fold in cv_folds:
+                fold_data = cv_splitter.get_fold_data(data, fold)
+                fold_splits.append({
+                    'fold_id': fold.fold_id,
+                    'train': fold_data['train'],
+                    'validation': fold_data['validation']
+                })
+
+            logger.info(f"CV Split: {len(fold_splits)} folds, "
+                       f"test={len(test_data)}")
+
+            return {
+                'cv_folds': fold_splits,
+                'testing': test_data,
+                'n_splits': n_splits,
+                'split_type': 'cross_validation'
+            }
+
+        else:
+            # Simple chronological split (DEFAULT - BACKWARD COMPATIBLE)
+            n = len(data)
+            train_end = int(n * train_ratio)
+            val_end = int(n * (train_ratio + val_ratio))
+
+            splits = {
+                'training': data.iloc[:train_end],
+                'validation': data.iloc[train_end:val_end],
+                'testing': data.iloc[val_end:]
+            }
+
+            logger.info(f"Split: train={len(splits['training'])}, "
+                       f"val={len(splits['validation'])}, "
+                       f"test={len(splits['testing'])}")
+
+            return splits
