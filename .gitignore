@@ -1,8 +1,5 @@
-<<<<<<< HEAD
-.env
-.env
-=======
 # Sensitive files and credentials
+.env
 *.env
 *.key
 *.pem
@@ -16,6 +13,8 @@ api_keys.json
 database_credentials.json
 
 # Virtual environments
+portfolio_env/
+simpleTrader_env/
 portfolio-optimizer/
 venv/
 env/
@@ -60,12 +59,24 @@ Thumbs.db
 models/
 checkpoints/
 
-# Data files (can be large)
-data/raw/
-data/processed/
+# Data files (cached/generated - keep structure)
+data/raw/*.parquet
+data/processed/*.parquet
+data/training/*.parquet
+data/validation/*.parquet
+data/testing/*.parquet
 *.csv
-*.parquet
-*.feather
+
+# Keep directory structure but ignore large files
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/training/.gitkeep
+!data/validation/.gitkeep
+!data/testing/.gitkeep
+
+# Visualizations (generated)
+visualizations/*.png
+visualizations/training/*.png
 
 # Temporary files
 tmp/
@@ -79,4 +90,3 @@ dist/
 
 # Documentation builds
 docs/_build/
->>>>>>> 377b63eb0d301f5dc013dabfb272764e2dc29539
