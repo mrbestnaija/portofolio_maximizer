@@ -67,6 +67,8 @@ def load_config(config_path: str) -> Dict[str, Any]:
 @click.command()
 @click.option('--config', default='config/pipeline_config.yml',
               help='Path to pipeline configuration (default: config/pipeline_config.yml)')
+@click.option('--data-source', default='yfinance',
+              help='Data source to use (default: yfinance, options: yfinance, alpha_vantage, finnhub)')
 @click.option('--tickers', default='AAPL,MSFT',
               help='Comma-separated ticker symbols (default: AAPL,MSFT)')
 @click.option('--start', default='2020-01-01',
@@ -79,7 +81,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
               help='Number of CV folds (default: 5, only used with --use-cv)')
 @click.option('--verbose', is_flag=True, default=False,
               help='Enable verbose logging (DEBUG level)')
-def run_pipeline(config: str, tickers: str, start: str, end: str,
+def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
                 use_cv: bool, n_splits: int, verbose: bool) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
@@ -121,11 +123,28 @@ def run_pipeline(config: str, tickers: str, start: str, end: str,
     # Parse tickers
     ticker_list = [t.strip() for t in tickers.split(',')]
     logger.info(f"Pipeline: Portfolio Maximizer v4.0")
+    logger.info(f"Data Source: {data_source}")
     logger.info(f"Tickers: {', '.join(ticker_list)}")
     logger.info(f"Date range: {start} to {end}")
 
     # Initialize storage
     storage = DataStorage()
+
+    # Load data sources configuration (platform-agnostic)
+    try:
+        data_sources_config = load_config('config/data_sources_config.yml')
+        providers = {p['name']: p for p in data_sources_config.get('data_sources', {}).get('providers', [])}
+
+        # Validate requested data source
+        if data_source not in providers:
+            logger.warning(f"Data source '{data_source}' not found in config, falling back to yfinance")
+            data_source = 'yfinance'
+        elif not providers[data_source].get('enabled', False):
+            logger.warning(f"Data source '{data_source}' is disabled, falling back to yfinance")
+            data_source = 'yfinance'
+    except Exception as e:
+        logger.warning(f"Could not load data sources config: {e}, using default (yfinance)")
+        data_source = 'yfinance'
 
     # Determine split strategy
     if use_cv:
@@ -148,10 +167,22 @@ def run_pipeline(config: str, tickers: str, start: str, end: str,
 
         try:
             if stage_name == 'data_extraction':
-                # Stage 1: Data Extraction
-                logger.info("Extracting OHLCV data from Yahoo Finance...")
-                extractor = YFinanceExtractor(storage=storage, cache_hours=24)
-                raw_data = extractor.extract_ohlcv(ticker_list, start, end)
+                # Stage 1: Data Extraction (platform-agnostic)
+                logger.info(f"Extracting OHLCV data from {data_source}...")
+
+                # Select appropriate extractor based on data source
+                if data_source == 'yfinance':
+                    extractor = YFinanceExtractor(storage=storage, cache_hours=24)
+                    raw_data = extractor.extract_ohlcv(ticker_list, start, end)
+                elif data_source == 'alpha_vantage':
+                    logger.error("Alpha Vantage extractor not yet implemented")
+                    raise NotImplementedError("Alpha Vantage support coming soon. Use --data-source yfinance for now.")
+                elif data_source == 'finnhub':
+                    logger.error("Finnhub extractor not yet implemented")
+                    raise NotImplementedError("Finnhub support coming soon. Use --data-source yfinance for now.")
+                else:
+                    logger.error(f"Unknown data source: {data_source}")
+                    raise ValueError(f"Unsupported data source: {data_source}")
 
                 if raw_data is None or raw_data.empty:
                     raise RuntimeError("Data extraction failed - empty dataset")

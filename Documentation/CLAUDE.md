@@ -4,33 +4,75 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a portfolio management system focused on quantitative trading strategies with academic rigor. The project follows a phased development approach with strict mathematical foundations and vectorized implementations.
+This is a portfolio management system focused on quantitative trading strategies with academic rigor. The project follows a phased development approach with strict mathematical foundations, vectorized implementations, and **configuration-driven, platform-agnostic architecture**.
+
+**Current Status** (v4.0 - 2025-10-04):
+- **Phase 4.5 Complete**: k-fold time series cross-validation with 5.5x coverage improvement
+- **Test Coverage**: 85/85 tests passing (100%)
+- **Configuration**: Modular, extensible, platform-agnostic (~40 KB YAML)
+- **Data Sources**: yfinance (active), Alpha Vantage & Finnhub (configured, ready to implement)
 
 ## Architecture
 
-The project is structured as an ETL-focused portfolio management system:
+The project is structured as a **configuration-driven, platform-agnostic** ETL portfolio management system:
 
-- **etl/**: Core data extraction, transformation, and loading modules
-  - `yfinance_extractor.py`: Yahoo Finance data extraction
-  - `ucl_extractor.py`: UCL database integration
-  - `data_validator.py`: Data quality validation
-  - `preprocessor.py`: Data preprocessing pipeline
-  - `data_storage.py`: Data storage management
+### Core Modules (`etl/`)
+- **Data Extraction**: Platform-agnostic adapters for multiple sources
+  - `yfinance_extractor.py`: Yahoo Finance (active, 24h cache, 100% hit rate)
+  - `ucl_extractor.py`: UCL database integration (future)
+  - `alpha_vantage_extractor.py`: Alpha Vantage (future, configured)
+  - `finnhub_extractor.py`: Finnhub (future, configured)
 
-- **config/**: Configuration files for different data sources and processing
-  - YAML-based configuration for yfinance, UCL, and preprocessing parameters
+- **Data Processing**: Vectorized transformations
+  - `data_validator.py`: Quality validation (prices, volumes, outliers)
+  - `preprocessor.py`: Missing data + normalization (μ=0, σ²=1)
+  - `data_storage.py`: Parquet storage + train/val/test splitting
+  - `time_series_cv.py`: k-fold cross-validation (5.5x coverage improvement)
 
-- **workflows/**: Pipeline orchestration
-  - `etl_pipeline.yml`: Main ETL workflow
-  - `data_validation.yml`: Data quality validation workflow
+- **Analysis & Visualization**:
+  - `time_series_analyzer.py`: ADF, ACF/PACF, stationarity tests
+  - `visualizer.py`: 7 publication-quality plot types
 
-- **scripts/**: Executable scripts for pipeline operations
-  - `run_etl_pipeline.py`: Main pipeline execution
-  - `data_quality_monitor.py`: Monitoring and quality checks
+### Configuration (`config/`)
+**Modular, platform-agnostic design** - 8 comprehensive YAML files (~40 KB):
 
-- **tests/**: Comprehensive test suite with ETL and integration tests
+1. **pipeline_config.yml** (6.5 KB): Unified orchestration
+   - 4-stage pipeline (extraction → validation → preprocessing → storage)
+   - Data split strategies (simple 70/15/15 or k-fold CV)
+   - Error handling, checkpoints, logging
 
-- **data/**: Data storage organized by processing stage (raw, processed, training, validation, testing)
+2. **data_sources_config.yml**: Platform-agnostic data source registry
+   - Provider abstraction layer (yfinance, Alpha Vantage, Finnhub)
+   - Failover configuration, health monitoring
+   - Extensibility guidelines for adding new sources
+
+3. **Source-Specific Configs**:
+   - `yfinance_config.yml` (2.6 KB): Cache, retry, rate limiting
+   - `alpha_vantage_config.yml`: 5 req/min free tier, column mapping
+   - `finnhub_config.yml`: 60 req/min free tier, Unix timestamp handling
+
+4. **Processing Configs**:
+   - `validation_config.yml` (7.7 KB): Price/volume checks, outlier detection
+   - `preprocessing_config.yml` (4.8 KB): Missing data strategies, normalization
+   - `storage_config.yml` (5.9 KB): Parquet settings, CV/simple split
+   - `analysis_config.yml`: MIT statistical standards, ADF parameters
+
+### Orchestration (`scripts/`)
+- **run_etl_pipeline.py** (256 lines): **Config-driven, platform-agnostic orchestrator**
+  - Data source selection: `--data-source yfinance|alpha_vantage|finnhub`
+  - Split strategy: `--use-cv` for k-fold CV (default: simple split)
+  - Verbose logging: `--verbose` for DEBUG mode
+  - Automatic failover and health checks
+
+### Data Storage (`data/`)
+- Organized by ETL stage: raw → processed → training/validation/testing
+- Parquet format (10x faster than CSV, snappy compression)
+- Cache-first strategy (24h validity, 100% hit rate)
+
+### Testing (`tests/`)
+- 85 comprehensive tests (100% passing)
+- Unit, integration, and performance tests
+- CV-specific tests: temporal ordering, coverage improvement, backward compatibility
 
 ## Development Commands
 

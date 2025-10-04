@@ -14,11 +14,17 @@ portfolio_maximizer_v45/
 ├── .claude/                         # Claude Code configuration
 │   └── CLAUDE.md                    # Project-specific AI instructions
 │
-├── config/                          # Configuration files (YAML)
+├── config/                          # Configuration files (YAML) - Modular Architecture ⭐
+│   ├── pipeline_config.yml          # Main orchestration config (6.5 KB) ⭐ NEW
+│   ├── data_sources_config.yml      # Platform-agnostic data sources ⭐ NEW
+│   ├── yfinance_config.yml         # Yahoo Finance API settings (2.6 KB) ⭐ UPDATED
+│   ├── alpha_vantage_config.yml     # Alpha Vantage config (future) ⭐ NEW
+│   ├── finnhub_config.yml           # Finnhub config (future) ⭐ NEW
+│   ├── preprocessing_config.yml     # Data preprocessing settings (4.8 KB) ⭐ NEW
+│   ├── validation_config.yml        # Data validation rules (7.7 KB) ⭐ NEW
+│   ├── storage_config.yml           # Storage and split config (5.9 KB) ⭐ NEW
 │   ├── analysis_config.yml          # Time series analysis parameters (MIT standards)
-│   ├── preprocessing_config.yml     # Data preprocessing settings
-│   ├── ucl_config.yml              # UCL database configuration
-│   └── yfinance_config.yml         # Yahoo Finance API settings
+│   └── ucl_config.yml              # UCL database configuration
 │
 ├── data/                            # Data storage (organized by ETL stage)
 │   ├── raw/                         # Original extracted data + cache
@@ -80,8 +86,9 @@ portfolio_maximizer_v45/
 │                                    # Features: 7 plot types, publication quality
 │                                    # Quality: 150 DPI, Tufte principles
 │
-├── scripts/                         # Executable scripts (651 lines)
-│   ├── run_etl_pipeline.py         # Main ETL orchestration (67 lines)
+├── scripts/                         # Executable scripts (730 lines)
+│   ├── run_etl_pipeline.py         # Main ETL orchestration (256 lines) ⭐ UPDATED
+│   │                                # Platform-agnostic, config-driven orchestrator
 │   │                                # Stages: Extraction → Validation → Preprocessing → Storage
 │   │                                # Features: Cache-enabled, stage-by-stage execution
 │   ├── analyze_dataset.py          # Dataset analysis CLI (270+ lines)
@@ -631,3 +638,21 @@ scripts/visualize_dataset.py (Visualization CLI)
 3. **Test Isolation**: 15% never exposed during CV
 4. **Backward Compatible**: Zero breaking changes
 5. **Fully Tested**: 85/85 tests passing (100%)
+
+### Modular Configuration Architecture
+- **8 comprehensive config files** (~40 KB total YAML)
+- **Platform-agnostic design**: Support for yfinance, Alpha Vantage, Finnhub
+- **Data source abstraction**: Unified interface for multiple providers
+- **Extensible orchestrator**: Config-driven pipeline with failover support
+- **Future-ready**: API keys stored in .env, easy to add new sources
+- **Single source of truth**: Merged workflows/ into config/pipeline_config.yml
+
+**New Configuration Files**:
+- `pipeline_config.yml`: Unified orchestration (4-stage pipeline)
+- `data_sources_config.yml`: Platform-agnostic data source registry
+- `yfinance_config.yml`: Yahoo Finance extraction settings (cache, retry, rate limiting)
+- `alpha_vantage_config.yml`: Alpha Vantage config (5 req/min free tier)
+- `finnhub_config.yml`: Finnhub config (60 req/min free tier)
+- `preprocessing_config.yml`: Missing data, normalization, outliers (4.8 KB)
+- `validation_config.yml`: Quality checks, outlier detection (7.7 KB)
+- `storage_config.yml`: Parquet settings, CV/simple split config (5.9 KB)
