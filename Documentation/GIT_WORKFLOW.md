@@ -6,6 +6,21 @@
 
 ---
 
+## Remote Repository
+
+**GitHub Fork**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Branch**: master
+**Last Sync**: 2025-10-04 (Commit fc07d06)
+
+### Remote Configuration
+```bash
+# Current remote setup
+origin  https://github.com/mrbestnaija/portofolio_maximizer.git (fetch)
+origin  https://github.com/mrbestnaija/portofolio_maximizer.git (push)
+```
+
+---
+
 ## Git Configuration
 
 The following git settings ensure local changes always take precedence:
@@ -156,10 +171,11 @@ git push --force origin master
 
 ### Scenario 2: Local Corruption
 ```bash
-# If local git repo corrupted, restore from backup
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
-git clone <remote-url> portfolio_maximizer_recovery
+# If local git repo corrupted, restore from GitHub backup
+cd /mnt/c/Users/Bestman/personal_projects/
+git clone https://github.com/mrbestnaija/portofolio_maximizer.git portfolio_maximizer_recovery
 # Copy files from backup to main directory
+cp -r portfolio_maximizer_recovery/* portfolio_maximizer_v45/
 ```
 
 ### Scenario 3: Need Remote Changes
@@ -243,9 +259,9 @@ Follow this format:
 
 <body>
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+🤖 Generated with co-companion 
 
-Co-Authored-By: Claude <noreply@anthropic.com>
+Authored-By: Bestman Ezekwu Enock
 ```
 
 Types:
@@ -271,10 +287,17 @@ git commit -m "test(etl): Add comprehensive cache mechanism tests"
 
 ✅ **Configured**: Local-first git workflow
 ✅ **Policy**: Local is always source of truth
+✅ **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git
 ✅ **Settings**: pull.rebase=false, push.default=current, merge.ff=false
 ✅ **Conflicts**: Always resolve with `git checkout --ours`
 ✅ **Force Push**: Allowed and encouraged with `--force-with-lease`
 
-**Document Version**: 1.0
+### Recent Sync Status
+- **Last Push**: 2025-10-04
+- **Commits Pushed**: 6 commits (fc07d06 to d4db60c)
+- **Force Update**: Yes (377b63e → fc07d06)
+- **Status**: All local changes synced to GitHub ✅
+
+**Document Version**: 1.1
 **Status**: ACTIVE
 **Review**: Monthly or before major changes
