@@ -1,0 +1,160 @@
+# Data Preprocessing Configuration
+# Vectorized transformations with MIT statistical standards
+
+preprocessing:
+  # Missing data handling strategies
+  missing_data:
+    # Primary strategy
+    strategy: "hybrid"  # Options: forward, backward, hybrid, interpolate, drop
+
+    # Hybrid strategy (forward + backward + mean)
+    hybrid:
+      step1: "forward"  # Forward fill first
+      step2: "backward"  # Backward fill second
+      step3: "mean"  # Fill remaining with mean (numeric columns only)
+
+    # Interpolation settings (if strategy="interpolate")
+    interpolation:
+      method: "linear"  # Options: linear, polynomial, spline, time
+      order: 2  # For polynomial/spline methods
+      limit: 10  # Maximum consecutive NaNs to fill
+
+    # Quality thresholds
+    thresholds:
+      max_missing_rate: 0.10  # Fail if column has >10% missing
+      warn_missing_rate: 0.05  # Warn if column has >5% missing
+      drop_if_exceeds: 0.50  # Drop column if >50% missing
+
+    # Reporting
+    report_missing: true
+    log_imputation_stats: true
+
+  # Normalization/Standardization
+  normalization:
+    enabled: true
+    method: "zscore"  # Options: zscore, minmax, robust, none
+
+    # Z-score normalization (¼=0, Ã²=1)
+    zscore:
+      with_mean: true  # Center data to mean=0
+      with_std: true  # Scale to std=1
+      ddof: 1  # Degrees of freedom (1 for sample std)
+
+    # Min-Max scaling (0-1 range)
+    minmax:
+      feature_range: [0, 1]  # Target range
+      clip: false  # Clip values outside range
+
+    # Robust scaling (using median/IQR, resistant to outliers)
+    robust:
+      with_centering: true
+      with_scaling: true
+      quantile_range: [25.0, 75.0]  # IQR range
+
+    # Column selection
+    column_selection:
+      numeric_only: true  # Only normalize numeric columns
+      exclude_columns: ["ticker", "date", "symbol"]  # Never normalize these
+      include_columns: null  # If specified, only normalize these
+
+    # Store statistics for inverse transformation
+    store_stats: true
+    stats_path: "data/processed/normalization_stats.json"
+
+  # Feature engineering (future)
+  feature_engineering:
+    enabled: false
+
+    # Returns calculation
+    returns:
+      compute_returns: false
+      return_type: "log"  # Options: simple, log
+      periods: [1, 5, 20]  # 1-day, 1-week, 1-month returns
+
+      # Log returns: r_t = ln(P_t / P_{t-1})
+      # Simple returns: r_t = (P_t - P_{t-1}) / P_{t-1}
+
+    # Technical indicators (future)
+    technical_indicators:
+      compute_indicators: false
+      indicators:
+        - "SMA"  # Simple Moving Average
+        - "EMA"  # Exponential Moving Average
+        - "RSI"  # Relative Strength Index
+        - "MACD"  # Moving Average Convergence Divergence
+        - "BB"  # Bollinger Bands
+
+      # Moving average windows
+      ma_windows: [5, 10, 20, 50, 200]
+
+  # Outlier handling
+  outlier_handling:
+    enabled: false  # Disabled by default (preserve data integrity)
+    method: "zscore"  # Options: zscore, iqr, isolation_forest, none
+
+    # Z-score method (3-sigma rule)
+    zscore:
+      threshold: 3.0  # |z| > 3 considered outlier
+      action: "cap"  # Options: cap, remove, flag, none
+      cap_at: "threshold"  # Cap at ±threshold * Ã
+
+    # IQR method
+    iqr:
+      multiplier: 1.5  # Standard IQR multiplier
+      action: "cap"
+
+    # Reporting
+    log_outliers: true
+    outlier_report_path: "data/processed/outlier_report.json"
+
+  # Data type enforcement
+  data_types:
+    enforce_types: true
+
+    # Column type mappings
+    type_map:
+      date_columns: ["datetime64[ns]"]
+      price_columns: ["float64"]
+      volume_columns: ["int64"]
+      ticker_columns: ["object"]
+
+    # Automatic type inference
+    infer_types: true
+    downcast_integers: false  # Optimize memory
+    downcast_floats: false
+
+  # Data validation (post-preprocessing)
+  validation:
+    enabled: true
+
+    # Check data integrity after preprocessing
+    checks:
+      no_missing_values: true  # Ensure all missing handled
+      no_infinite_values: true  # Check for inf/-inf
+      no_duplicate_rows: true  # Check for duplicates
+      monotonic_dates: true  # Ensure dates are sorted
+
+    # Action on validation failure
+    on_failure: "raise"  # Options: raise, warn, ignore
+
+  # Performance optimization
+  performance:
+    vectorized_operations: true  # Use numpy vectorization
+    chunk_size: 10000  # Process large datasets in chunks
+    parallel_processing: false  # Not needed for small datasets
+    use_numba: false  # JIT compilation (requires numba package)
+
+  # Logging
+  logging:
+    level: "INFO"
+    log_transformations: true
+    log_statistics: true
+    log_file: "logs/preprocessing.log"
+
+# Mathematical formulas used
+formulas:
+  zscore: "z = (x - ¼) / Ã"
+  minmax: "x_scaled = (x - x_min) / (x_max - x_min)"
+  robust: "x_scaled = (x - median) / IQR"
+  log_returns: "r_t = ln(P_t / P_{t-1})"
+  simple_returns: "r_t = (P_t - P_{t-1}) / P_{t-1}"
