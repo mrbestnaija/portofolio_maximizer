@@ -1,0 +1,23 @@
+name: ETL Pipeline
+description: Extract, Transform, Load pipeline for financial time series data
+
+stages:
+  - name: data_extraction
+    description: Extract data from Yahoo Finance and UCL database
+    timeout: 300
+    retry: 3
+
+  - name: data_validation
+    description: Validate data quality (prices, volumes, outliers)
+    timeout: 60
+    retry: 1
+
+  - name: data_preprocessing
+    description: Handle missing data and normalize
+    timeout: 120
+    retry: 1
+
+  - name: data_storage
+    description: Split and save data (train/val/test or CV folds)
+    timeout: 60
+    retry: 1
