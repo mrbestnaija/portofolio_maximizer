@@ -1,2 +1,82 @@
+<<<<<<< HEAD
 .env
 .env
+=======
+# Sensitive files and credentials
+*.env
+*.key
+*.pem
+*.p12
+.env.*
+config/secrets/
+credentials/
+keys/
+.secrets/
+api_keys.json
+database_credentials.json
+
+# Virtual environments
+portfolio-optimizer/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Model files (large)
+*.pkl
+*.joblib
+*.h5
+*.model
+models/
+checkpoints/
+
+# Data files (can be large)
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.feather
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Documentation builds
+docs/_build/
+>>>>>>> 377b63eb0d301f5dc013dabfb272764e2dc29539
