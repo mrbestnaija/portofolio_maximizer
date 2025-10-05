@@ -34,11 +34,17 @@ All implementations follow MIT statistical learning standards with vectorized op
 ```
 portfolio_maximizer_v45/
 │
-├── config/                          # Configuration files (YAML)
+├── config/                          # Configuration files (YAML) - Modular Architecture ⭐
+│   ├── pipeline_config.yml          # Main orchestration config (6.5 KB) ⭐ NEW
+│   ├── data_sources_config.yml      # Platform-agnostic data sources ⭐ NEW
+│   ├── yfinance_config.yml         # Yahoo Finance settings (2.6 KB) ⭐ UPDATED
+│   ├── alpha_vantage_config.yml     # Alpha Vantage config (future) ⭐ NEW
+│   ├── finnhub_config.yml           # Finnhub config (future) ⭐ NEW
+│   ├── preprocessing_config.yml     # Data preprocessing settings (4.8 KB) ⭐ NEW
+│   ├── validation_config.yml        # Data validation rules (7.7 KB) ⭐ NEW
+│   ├── storage_config.yml           # Storage and split config (5.9 KB) ⭐ NEW
 │   ├── analysis_config.yml          # Time series analysis parameters (MIT standards)
-│   ├── preprocessing_config.yml     # Data preprocessing settings
-│   ├── ucl_config.yml              # UCL database configuration
-│   └── yfinance_config.yml         # Yahoo Finance API settings
+│   └── ucl_config.yml              # UCL database configuration
 │
 ├── data/                            # Data storage (organized by ETL stage)
 │   ├── raw/                         # Original extracted data + cache

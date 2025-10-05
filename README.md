@@ -565,7 +565,9 @@ For questions or issues:
 1. **Check Documentation**: `Documentation/` directory
 2. **Search Issues**: [GitHub Issues](https://github.com/mrbestnaija/portofolio_maximizer/issues)
 3. **Open New Issue**: Provide reproducible example
-4. **Email**: mrbestnaija@example.com
+4. **Email**: csgtmalice@protonmail.ch
+5. **Phone**: +2348061573767(Whatsapp Only)
+6. **Discord**: https://discord.gg/FVzV66Hb
 
 ---
 

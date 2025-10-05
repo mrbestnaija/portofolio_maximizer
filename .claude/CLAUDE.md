@@ -32,12 +32,14 @@
 - If you encounter errors, debug systematically
 - Use subagents for complex investigations
 - Never give up on a task without exhausting all approaches
+- Ensure backward compartibility of functional updates
 
 ## Code Standards
 - Type hints required
 - Vectorized operations preferred
 - Production-grade error handling
 - No placeholder code
+- Ensure robust unit testing
 
 
 # For complex tasks, explicitly request thinking budget
