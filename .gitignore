@@ -90,3 +90,10 @@ dist/
 
 # Documentation builds
 docs/_build/
+
+
+# Claude specific (protect AI configuration and settings)
+.Claude/
+.claude/
+.claude/*
+settings.local.json
