@@ -13,11 +13,13 @@ Success Criteria:
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime, timedelta
 import logging
 import time
 from functools import wraps
+
+from etl.base_extractor import BaseExtractor, ExtractorMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -156,28 +158,36 @@ def extract_multi_ticker(tickers: List[str], years: int = 10,
     combined = pd.concat(all_data) if all_data else pd.DataFrame()
     return combined, quality_report
 
-class YFinanceExtractor:
-    """Wrapper class for yfinance extraction operations with network robustness and caching."""
+class YFinanceExtractor(BaseExtractor):
+    """Yahoo Finance extractor with network robustness and caching.
 
-    def __init__(self, timeout: int = 30, rate_limit_delay: float = 0.5,
-                 retention_years: int = 10, cleanup_days: int = 7,
-                 cache_hours: int = 24, storage=None):
-        """Initialize extractor with network configuration, retention policy, and caching.
+    Inherits from BaseExtractor to provide standardized interface for data extraction.
+    """
+
+    def __init__(self, name: str = 'yfinance', timeout: int = 30,
+                 rate_limit_delay: float = 0.5, retention_years: int = 10,
+                 cleanup_days: int = 7, cache_hours: int = 24, storage=None,
+                 **kwargs):
+        """Initialize Yahoo Finance extractor.
 
         Args:
+            name: Data source name (default: 'yfinance')
             timeout: Request timeout in seconds
             rate_limit_delay: Delay between requests in seconds
             retention_years: Years of historical data to maintain locally
             cleanup_days: Auto-cleanup files older than this (days)
             cache_hours: Cache validity duration in hours (default: 24h)
             storage: DataStorage instance for cache operations (optional)
+            **kwargs: Additional parameters (for BaseExtractor compatibility)
         """
-        self.timeout = timeout
+        # Initialize parent class
+        super().__init__(name=name, timeout=timeout, cache_hours=cache_hours,
+                        storage=storage, **kwargs)
+
+        # YFinance-specific attributes
         self.rate_limit_delay = rate_limit_delay
         self.retention_years = retention_years
         self.cleanup_days = cleanup_days
-        self.cache_hours = cache_hours
-        self.storage = storage
 
     def _check_cache(self, ticker: str, start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
         """Check local cache for recent data matching date range.
@@ -320,6 +330,10 @@ class YFinanceExtractor:
                 cache_misses += 1
                 continue
 
+        # Update cache statistics (for BaseExtractor)
+        self._cache_hits += cache_hits
+        self._cache_misses += cache_misses
+
         # Log cache performance
         total = cache_hits + cache_misses
         if total > 0:
@@ -336,4 +350,149 @@ class YFinanceExtractor:
         if 'Date' in combined.columns:
             combined.set_index('Date', inplace=True)
 
+        # Standardize columns and flatten MultiIndex (from BaseExtractor)
+        combined = self._flatten_multiindex(combined)
+        combined = self._standardize_columns(combined)
+
         return combined
+
+    def validate_data(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Validate data quality and return validation report.
+
+        Implements BaseExtractor abstract method.
+
+        Args:
+            data: DataFrame to validate
+
+        Returns:
+            Dictionary containing validation results
+        """
+        errors = []
+        warnings = []
+        metrics = {}
+
+        # Check if data is empty
+        if data.empty:
+            errors.append("DataFrame is empty")
+            return {
+                'passed': False,
+                'errors': errors,
+                'warnings': warnings,
+                'quality_score': 0.0,
+                'metrics': metrics
+            }
+
+        # Calculate missing data rate
+        total_rows = len(data)
+        total_cells = total_rows * len(data.columns)
+        missing_cells = data.isnull().sum().sum()
+        missing_rate = missing_cells / total_cells if total_cells > 0 else 1.0
+        metrics['missing_rate'] = missing_rate
+
+        if missing_rate > 0.01:  # >1% missing
+            warnings.append(f"High missing data rate: {missing_rate:.2%}")
+
+        # Vectorized price validation (if Close column exists)
+        if 'Close' in data.columns:
+            close_prices = data['Close'].dropna()
+            if len(close_prices) > 0:
+                # Check for non-positive prices
+                if (close_prices <= 0).any():
+                    errors.append("Non-positive prices detected")
+
+                # Detect price gaps using log returns
+                log_returns = np.diff(np.log(close_prices))
+                if len(log_returns) > 0:
+                    return_std = np.std(log_returns)
+                    gaps = np.sum(np.abs(log_returns) > 3 * return_std)
+                    metrics['gap_count'] = int(gaps)
+
+                    if gaps > 5:
+                        warnings.append(f"High number of price gaps: {gaps}")
+
+        # Volume validation
+        if 'Volume' in data.columns:
+            volumes = data['Volume'].dropna()
+            if len(volumes) > 0:
+                # Check for negative volumes
+                if (volumes < 0).any():
+                    errors.append("Negative volumes detected")
+
+                # Zero volume detection
+                zero_volume_days = int(np.sum(volumes == 0))
+                metrics['zero_volume_days'] = zero_volume_days
+
+                if zero_volume_days > total_rows * 0.1:  # >10% zero volume
+                    warnings.append(f"High zero-volume days: {zero_volume_days}")
+
+        # Outlier detection (Z-score method)
+        outlier_count = 0
+        for col in ['Open', 'High', 'Low', 'Close']:
+            if col in data.columns:
+                values = data[col].dropna()
+                if len(values) > 0:
+                    z_scores = np.abs((values - values.mean()) / values.std())
+                    outlier_count += int(np.sum(z_scores > 3))
+
+        metrics['outlier_count'] = outlier_count
+        if outlier_count > total_rows * 0.05:  # >5% outliers
+            warnings.append(f"High outlier count: {outlier_count}")
+
+        # Calculate quality score (0-1)
+        quality_score = 1.0
+        quality_score -= min(missing_rate * 10, 0.5)  # Missing data penalty
+        quality_score -= min(metrics.get('gap_count', 0) / 100, 0.3)  # Gap penalty
+        quality_score -= min(outlier_count / total_rows, 0.2)  # Outlier penalty
+        quality_score = max(0.0, quality_score)
+
+        metrics['quality_score'] = quality_score
+
+        # Determine pass/fail
+        passed = len(errors) == 0 and quality_score >= 0.7
+
+        return {
+            'passed': passed,
+            'errors': errors,
+            'warnings': warnings,
+            'quality_score': quality_score,
+            'metrics': metrics
+        }
+
+    def get_metadata(self, ticker: str, data: pd.DataFrame) -> ExtractorMetadata:
+        """Generate metadata for extracted data.
+
+        Implements BaseExtractor abstract method.
+
+        Args:
+            ticker: Stock ticker symbol
+            data: Extracted DataFrame
+
+        Returns:
+            ExtractorMetadata object with extraction details
+        """
+        extraction_timestamp = datetime.now()
+
+        if data.empty:
+            return ExtractorMetadata(
+                ticker=ticker,
+                source=self.name,
+                extraction_timestamp=extraction_timestamp,
+                data_start_date=None,
+                data_end_date=None,
+                row_count=0,
+                cache_hit=False
+            )
+
+        # Get date range from index
+        data_start_date = data.index.min().to_pydatetime() if hasattr(data.index.min(), 'to_pydatetime') else data.index.min()
+        data_end_date = data.index.max().to_pydatetime() if hasattr(data.index.max(), 'to_pydatetime') else data.index.max()
+
+        return ExtractorMetadata(
+            ticker=ticker,
+            source=self.name,
+            extraction_timestamp=extraction_timestamp,
+            data_start_date=data_start_date,
+            data_end_date=data_end_date,
+            row_count=len(data),
+            cache_hit=False  # Set by caller if from cache
+        )

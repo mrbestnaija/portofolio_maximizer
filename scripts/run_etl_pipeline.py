@@ -23,7 +23,7 @@ from typing import Dict, Any
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from etl.yfinance_extractor import YFinanceExtractor
+from etl.data_source_manager import DataSourceManager
 from etl.data_validator import DataValidator
 from etl.preprocessor import Preprocessor
 from etl.data_storage import DataStorage
@@ -130,21 +130,19 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     # Initialize storage
     storage = DataStorage()
 
-    # Load data sources configuration (platform-agnostic)
+    # Initialize data source manager (platform-agnostic)
     try:
-        data_sources_config = load_config('config/data_sources_config.yml')
-        providers = {p['name']: p for p in data_sources_config.get('data_sources', {}).get('providers', [])}
-
-        # Validate requested data source
-        if data_source not in providers:
-            logger.warning(f"Data source '{data_source}' not found in config, falling back to yfinance")
-            data_source = 'yfinance'
-        elif not providers[data_source].get('enabled', False):
-            logger.warning(f"Data source '{data_source}' is disabled, falling back to yfinance")
-            data_source = 'yfinance'
+        data_source_manager = DataSourceManager(
+            config_path='config/data_sources_config.yml',
+            storage=storage
+        )
+        logger.info(f"✓ Data source manager initialized")
+        logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
+        logger.info(f"  Active source: {data_source_manager.get_active_source()}")
     except Exception as e:
-        logger.warning(f"Could not load data sources config: {e}, using default (yfinance)")
-        data_source = 'yfinance'
+        logger.error(f"Failed to initialize data source manager: {e}")
+        logger.error("Pipeline cannot continue without data source")
+        raise
 
     # Determine split strategy
     if use_cv:
@@ -168,27 +166,27 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         try:
             if stage_name == 'data_extraction':
                 # Stage 1: Data Extraction (platform-agnostic)
-                logger.info(f"Extracting OHLCV data from {data_source}...")
+                logger.info(f"Extracting OHLCV data using data source manager...")
 
-                # Select appropriate extractor based on data source
-                if data_source == 'yfinance':
-                    extractor = YFinanceExtractor(storage=storage, cache_hours=24)
-                    raw_data = extractor.extract_ohlcv(ticker_list, start, end)
-                elif data_source == 'alpha_vantage':
-                    logger.error("Alpha Vantage extractor not yet implemented")
-                    raise NotImplementedError("Alpha Vantage support coming soon. Use --data-source yfinance for now.")
-                elif data_source == 'finnhub':
-                    logger.error("Finnhub extractor not yet implemented")
-                    raise NotImplementedError("Finnhub support coming soon. Use --data-source yfinance for now.")
-                else:
-                    logger.error(f"Unknown data source: {data_source}")
-                    raise ValueError(f"Unsupported data source: {data_source}")
+                # Use data source manager for extraction (automatic failover support)
+                raw_data = data_source_manager.extract_ohlcv(
+                    tickers=ticker_list,
+                    start_date=start,
+                    end_date=end,
+                    prefer_source=data_source if data_source != 'yfinance' else None
+                )
 
                 if raw_data is None or raw_data.empty:
                     raise RuntimeError("Data extraction failed - empty dataset")
 
                 logger.info(f"✓ Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
-                # Data is auto-cached in extract_ohlcv
+                logger.info(f"  Source: {data_source_manager.get_active_source()}")
+
+                # Log cache statistics
+                cache_stats = data_source_manager.get_cache_statistics()
+                for source_name, stats in cache_stats.items():
+                    if stats['total_requests'] > 0:
+                        logger.info(f"  {source_name} cache: {stats['cache_hits']}/{stats['total_requests']} hits ({stats['hit_rate']:.1%})")
 
             elif stage_name == 'data_validation':
                 # Stage 2: Data Validation

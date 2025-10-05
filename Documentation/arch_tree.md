@@ -54,41 +54,77 @@ portfolio_maximizer_v45/
 │   ├── AGENT_DEV_CHECKLIST.md     # Development checklist
 │   └── TO_DO_LIST.md              # Task tracking
 │
-├── etl/                             # ETL pipeline modules (2,184 lines)
+├── etl/                             # ETL pipeline modules (3,500+ lines) ⭐ UPDATED
 │   ├── __init__.py                 # Package initialization
-│   ├── yfinance_extractor.py       # Yahoo Finance extraction (327 lines)
+│   │
+│   ├── base_extractor.py           # Abstract base class for extractors (280 lines) ⭐ NEW
+│   │                                # Design: Abstract Factory + Strategy Pattern
+│   │                                # Features: Standardized OHLCV interface, metadata tracking
+│   │                                # Methods: extract_ohlcv(), validate_data(), get_metadata()
+│   │
+│   ├── data_source_manager.py      # Multi-source orchestration (340 lines) ⭐ NEW
+│   │                                # Design: Strategy + Factory + Chain of Responsibility
+│   │                                # Features: Dynamic source selection, failover support
+│   │                                # Modes: priority, fallback, parallel (future)
+│   │                                # Failover: P(success) = 1 - ∏(1 - p_i) for n sources
+│   │
+│   ├── yfinance_extractor.py       # Yahoo Finance extraction (498 lines) ⭐ UPDATED
+│   │                                # Inherits: BaseExtractor (standardized interface)
 │   │                                # Features: Cache-first, retry, rate limiting
 │   │                                # Cache: 24h validity, ±3 day tolerance
 │   │                                # Performance: 100% hit rate, 20x speedup
+│   │                                # New: validate_data(), get_metadata() implementations
+│   │
+│   ├── alpha_vantage_extractor.py  # Alpha Vantage extraction (140 lines) ⭐ NEW
+│   │                                # Status: STUB - Placeholder for future implementation
+│   │                                # Inherits: BaseExtractor
+│   │                                # API Limit: 5 calls/min (free), 75 calls/min (premium)
+│   │                                # Raises: NotImplementedError (use yfinance for now)
+│   │
+│   ├── finnhub_extractor.py        # Finnhub extraction (145 lines) ⭐ NEW
+│   │                                # Status: STUB - Placeholder for future implementation
+│   │                                # Inherits: BaseExtractor
+│   │                                # API Limit: 60 calls/min (free), 300 calls/min (premium)
+│   │                                # Raises: NotImplementedError (use yfinance for now)
+│   │
 │   ├── ucl_extractor.py            # UCL database extraction
 │   │                                # Features: Direct SQL queries, structured data
+│   │
 │   ├── data_validator.py           # Data quality validation (117 lines)
 │   │                                # Features: Statistical validation, outlier detection
 │   │                                # Checks: Price positivity, volume non-negativity
+│   │
 │   ├── preprocessor.py             # Data preprocessing (101 lines)
 │   │                                # Features: Missing data handling, normalization
 │   │                                # Methods: Forward/backward fill, Z-score
-│   ├── data_storage.py             # Data persistence (210 lines) ⭐ UPDATED
+│   │
+│   ├── data_storage.py             # Data persistence (210 lines)
 │   │                                # Features: Parquet storage, CV splits, backward compatible
 │   │                                # New: use_cv parameter for k-fold cross-validation
 │   │                                # Format: Parquet (10x faster than CSV)
-│   ├── time_series_cv.py           # Cross-validation (336 lines) ⭐ NEW
+│   │
+│   ├── time_series_cv.py           # Cross-validation (336 lines)
 │   │                                # Features: k-fold CV, expanding window, test isolation
 │   │                                # Improvement: 5.5x temporal coverage (15% → 83%)
 │   │                                # Zero temporal gap (eliminates 2.5-year disparity)
+│   │
 │   ├── portfolio_math.py           # Financial calculations (45 lines)
 │   │                                # Features: Returns, volatility, Sharpe ratio
 │   │                                # Calculations: Max drawdown, correlation
+│   │
 │   ├── time_series_analyzer.py     # Time series analysis (500+ lines)
 │   │                                # Features: ADF test, ACF/PACF, stationarity
 │   │                                # Standards: MIT statistical learning conventions
+│   │
 │   └── visualizer.py               # Visualization engine (600+ lines)
 │                                    # Features: 7 plot types, publication quality
 │                                    # Quality: 150 DPI, Tufte principles
 │
 ├── scripts/                         # Executable scripts (730 lines)
-│   ├── run_etl_pipeline.py         # Main ETL orchestration (256 lines) ⭐ UPDATED
-│   │                                # Platform-agnostic, config-driven orchestrator
+│   ├── run_etl_pipeline.py         # Main ETL orchestration (292 lines) ⭐ UPDATED
+│   │                                # Platform-agnostic, multi-source orchestrator
+│   │                                # New: DataSourceManager integration, automatic failover
+│   │                                # Options: --data-source yfinance|alpha_vantage|finnhub
 │   │                                # Stages: Extraction → Validation → Preprocessing → Storage
 │   │                                # Features: Cache-enabled, stage-by-stage execution
 │   ├── analyze_dataset.py          # Dataset analysis CLI (270+ lines)
@@ -102,20 +138,23 @@ portfolio_maximizer_v45/
 │   └── validate_environment.py     # Environment validation
 │                                    # Checks: Dependencies, Python version, packages
 │
-├── tests/                           # Test suite (1,558 lines, 85 tests)
+├── tests/                           # Test suite (2,000+ lines, 100+ tests) ⭐ UPDATED
 │   ├── __init__.py
 │   ├── etl/                        # ETL module tests
 │   │   ├── __init__.py
 │   │   ├── test_yfinance_extractor.py    # 3 tests (network extraction)
 │   │   ├── test_yfinance_cache.py        # 10 tests (caching mechanism)
 │   │   │                                  # Coverage: hits/misses, freshness, coverage
-│   │   ├── test_time_series_cv.py        # 22 tests (CV mechanism) ⭐ NEW
+│   │   ├── test_data_source_manager.py   # 15 tests (multi-source orchestration) ⭐ NEW
+│   │   │                                  # Coverage: initialization, selection, failover
+│   │   │                                  # Features: priority mode, cache aggregation
+│   │   ├── test_time_series_cv.py        # 22 tests (CV mechanism)
 │   │   │                                  # Coverage: k-fold, expanding window, validation
 │   │   │                                  # Quantified: 5.5x improvement, 0 gaps
 │   │   ├── test_ucl_extractor.py         # UCL extraction tests
 │   │   ├── test_data_validator.py        # 5 tests (validation logic)
 │   │   ├── test_preprocessor.py          # 8 tests (preprocessing operations)
-│   │   ├── test_data_storage.py          # 7 tests (storage + CV operations) ⭐ UPDATED
+│   │   ├── test_data_storage.py          # 7 tests (storage + CV operations)
 │   │   ├── test_portfolio_math.py        # 5 tests (financial calculations)
 │   │   └── test_time_series_analyzer.py  # 17 tests (analysis framework)
 │   └── integration/                      # Integration tests
