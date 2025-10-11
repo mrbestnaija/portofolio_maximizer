@@ -280,7 +280,7 @@ API calls use loaded keys
 
 ### Example: Alpha Vantage Flow
 
-1. **`.env`**: `ALPHA_VANTAGE_API_KEY='UFJ93EBWE29IE2RR'`
+1. **`.env`**: `ALPHA_VANTAGE_API_KEY='api_key'
 2. **`config/alpha_vantage_config.yml`**:
    ```yaml
    authentication:
@@ -363,3 +363,4 @@ git log --all -p | grep -i "api.*key"
 **Document Version**: 1.0
 **Last Updated**: 2025-10-07
 **Next Review**: Monthly or before sharing repository
+
