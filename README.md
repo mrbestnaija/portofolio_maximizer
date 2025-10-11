@@ -571,7 +571,7 @@ For questions or issues:
 
 ---
 
-**Built with ❤️ using Python, NumPy, Pandas, and Claude Code**
+**Built with ❤️ using Python, NumPy and Pandas**
 
 **Status**: Production Ready ✅
 **Version**: 3.0

@@ -48,7 +48,8 @@ pipeline:
 
   # Data splitting configuration
   data_split:
-    # Default strategy (backward compatible)
+    # Default strategy (config-driven)
+    # Change to 'cv' for production-grade k-fold cross-validation
     default_strategy: "simple"  # Options: simple, cv
 
     # Simple chronological split (70/15/15)

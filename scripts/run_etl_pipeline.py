@@ -27,6 +27,9 @@ from etl.data_source_manager import DataSourceManager
 from etl.data_validator import DataValidator
 from etl.preprocessor import Preprocessor
 from etl.data_storage import DataStorage
+from etl.checkpoint_manager import CheckpointManager
+from etl.pipeline_logger import PipelineLogger
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -67,22 +70,26 @@ def load_config(config_path: str) -> Dict[str, Any]:
 @click.command()
 @click.option('--config', default='config/pipeline_config.yml',
               help='Path to pipeline configuration (default: config/pipeline_config.yml)')
-@click.option('--data-source', default='yfinance',
-              help='Data source to use (default: yfinance, options: yfinance, alpha_vantage, finnhub)')
+@click.option('--data-source', default=None,
+              help='Data source to use (options: yfinance, alpha_vantage, finnhub). Defaults to config value.')
 @click.option('--tickers', default='AAPL,MSFT',
               help='Comma-separated ticker symbols (default: AAPL,MSFT)')
 @click.option('--start', default='2020-01-01',
               help='Start date YYYY-MM-DD (default: 2020-01-01)')
 @click.option('--end', default='2024-01-01',
               help='End date YYYY-MM-DD (default: 2024-01-01)')
-@click.option('--use-cv', is_flag=True, default=False,
-              help='Use k-fold cross-validation (recommended for production)')
-@click.option('--n-splits', default=5,
-              help='Number of CV folds (default: 5, only used with --use-cv)')
+@click.option('--use-cv', is_flag=True, default=None,
+              help='Use k-fold cross-validation. If not set, uses config default_strategy.')
+@click.option('--n-splits', default=None, type=int,
+              help='Number of CV folds. If not set, uses config value.')
+@click.option('--test-size', default=None, type=float,
+              help='Test set size (0.0-1.0). If not set, uses config value.')
+@click.option('--gap', default=None, type=int,
+              help='Gap between train/validation periods. If not set, uses config value.')
 @click.option('--verbose', is_flag=True, default=False,
               help='Enable verbose logging (DEBUG level)')
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
-                use_cv: bool, n_splits: int, verbose: bool) -> None:
+                use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
     Data Splitting Strategy:
@@ -120,15 +127,54 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     stages_cfg = pipeline_cfg.get('stages', [])
     data_split_cfg = pipeline_cfg.get('data_split', {})
 
+    # Get CV configuration from config file
+    cv_config = data_split_cfg.get('cross_validation', {})
+    simple_config = data_split_cfg.get('simple_split', {})
+    default_strategy = data_split_cfg.get('default_strategy', 'simple')
+
+    # Determine CV parameters (CLI overrides config)
+    if use_cv is None:
+        # Use config default strategy
+        use_cv = (default_strategy == 'cv')
+
+    if n_splits is None:
+        # Use config value
+        n_splits = cv_config.get('n_splits', 5)
+
+    if test_size is None:
+        # Use config value
+        test_size = cv_config.get('test_size', 0.15)
+
+    if gap is None:
+        # Use config value
+        gap = cv_config.get('gap', 0)
+
+    # Get simple split ratios from config
+    train_ratio = simple_config.get('train_ratio', 0.7)
+    val_ratio = simple_config.get('validation_ratio', 0.15)
+
     # Parse tickers
     ticker_list = [t.strip() for t in tickers.split(',')]
     logger.info(f"Pipeline: Portfolio Maximizer v4.0")
-    logger.info(f"Data Source: {data_source}")
+    logger.info(f"Data Source: {data_source if data_source else 'from config'}")
     logger.info(f"Tickers: {', '.join(ticker_list)}")
     logger.info(f"Date range: {start} to {end}")
 
     # Initialize storage
     storage = DataStorage()
+
+    # Initialize checkpoint manager and pipeline logger
+    pipeline_id = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    checkpoint_manager = CheckpointManager(checkpoint_dir="data/checkpoints")
+    pipeline_log = PipelineLogger(log_dir="logs", retention_days=7)
+
+    logger.info(f"✓ Pipeline ID: {pipeline_id}")
+    pipeline_log.log_event('pipeline_start', pipeline_id, metadata={
+        'tickers': ticker_list,
+        'start_date': start,
+        'end_date': end,
+        'use_cv': use_cv
+    })
 
     # Initialize data source manager (platform-agnostic)
     try:
@@ -144,13 +190,18 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         logger.error("Pipeline cannot continue without data source")
         raise
 
-    # Determine split strategy
+    # Determine split strategy and log configuration
     if use_cv:
         logger.info(f"✓ Using k-fold cross-validation (k={n_splits})")
-        logger.info(f"  - Temporal coverage: 83% (5.5x improvement)")
-        logger.info(f"  - Test isolation: 15% (never exposed during CV)")
+        logger.info(f"  - Test size: {test_size*100:.0f}%")
+        logger.info(f"  - Gap between train/val: {gap} periods")
+        logger.info(f"  - Window strategy: {cv_config.get('window_strategy', 'expanding')}")
+        expected_coverage = cv_config.get('expected_coverage', 0.83)
+        logger.info(f"  - Expected validation coverage: {expected_coverage*100:.0f}%")
     else:
-        logger.info("Using simple chronological split (70/15/15)")
+        logger.info(f"Using simple chronological split ({train_ratio*100:.0f}/{val_ratio*100:.0f}/{(1-train_ratio-val_ratio)*100:.0f})")
+        logger.info(f"  - Strategy: {default_strategy}")
+        logger.info(f"  - Chronological: {simple_config.get('chronological', True)}")
 
     # Define stage names (in execution order)
     stage_names = ['data_extraction', 'data_validation', 'data_preprocessing', 'data_storage']
@@ -162,6 +213,8 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
     for stage_name in tqdm(stage_names, desc='Pipeline Progress'):
         logger.info(f"\n[Stage: {stage_name}]")
+        stage_start_time = time.time()
+        pipeline_log.log_stage_start(pipeline_id, stage_name)
 
         try:
             if stage_name == 'data_extraction':
@@ -187,6 +240,15 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 for source_name, stats in cache_stats.items():
                     if stats['total_requests'] > 0:
                         logger.info(f"  {source_name} cache: {stats['cache_hits']}/{stats['total_requests']} hits ({stats['hit_rate']:.1%})")
+
+                # Save checkpoint
+                checkpoint_id = checkpoint_manager.save_checkpoint(
+                    pipeline_id=pipeline_id,
+                    stage=stage_name,
+                    data=raw_data,
+                    metadata={'tickers': ticker_list, 'rows': len(raw_data)}
+                )
+                pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
             elif stage_name == 'data_validation':
                 # Stage 2: Data Validation
@@ -225,19 +287,25 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
             elif stage_name == 'data_storage':
                 # Stage 4: Data Storage (Split + Save)
                 logger.info("Splitting and saving datasets...")
+                logger.info(f"  Configuration source: pipeline_config.yml")
+                logger.info(f"  Split strategy: {'CV' if use_cv else 'Simple'}")
 
-                # Get split configuration
-                train_ratio = data_split_cfg.get('simple_split', {}).get('train_ratio', 0.7)
-                val_ratio = data_split_cfg.get('simple_split', {}).get('validation_ratio', 0.15)
-
-                # Perform split
-                splits = storage.train_validation_test_split(
-                    processed,
-                    train_ratio=train_ratio,
-                    val_ratio=val_ratio,
-                    use_cv=use_cv,
-                    n_splits=n_splits
-                )
+                # Perform split using configuration-driven parameters
+                if use_cv:
+                    splits = storage.train_validation_test_split(
+                        processed,
+                        use_cv=True,
+                        n_splits=n_splits,
+                        test_size=test_size,
+                        gap=gap
+                    )
+                else:
+                    splits = storage.train_validation_test_split(
+                        processed,
+                        train_ratio=train_ratio,
+                        val_ratio=val_ratio,
+                        use_cv=False
+                    )
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -272,8 +340,17 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                     logger.info(f"  - Validation: {len(splits['validation'])} rows (15%)")
                     logger.info(f"  - Testing: {len(splits['testing'])} rows (15%)")
 
+            # Log stage completion
+            stage_duration = time.time() - stage_start_time
+            pipeline_log.log_stage_complete(pipeline_id, stage_name, metadata={
+                'duration_seconds': stage_duration
+            })
+            pipeline_log.log_performance(pipeline_id, stage_name, stage_duration)
+
         except Exception as e:
             logger.error(f"✗ Stage '{stage_name}' failed: {e}")
+            pipeline_log.log_stage_error(pipeline_id, stage_name, e)
+
             if verbose:
                 import traceback
                 logger.debug(traceback.format_exc())
@@ -283,6 +360,13 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     logger.info("=" * 70)
     logger.info("✓ Pipeline completed successfully")
     logger.info("=" * 70)
+
+    # Log pipeline completion
+    pipeline_log.log_event('pipeline_complete', pipeline_id, status='success')
+
+    # Cleanup old logs and checkpoints
+    pipeline_log.cleanup_old_logs()
+    checkpoint_manager.cleanup_old_checkpoints(retention_days=7)
 
 
 if __name__ == '__main__':
