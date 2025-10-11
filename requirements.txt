@@ -1,86 +1,25 @@
-<<<<<<< HEAD
-
-# These are the absolute minimum dependencies for basic functionality
-
-# Core scientific computing
-numpy>=1.24.0,<2.0.0
+# Core scientific stack
+numpy>=1.24.0,<3.0.0
 pandas>=2.0.0,<3.0.0
 scipy>=1.10.0,<2.0.0
-statsmodels
-matplotlib
-scikit-learn
-tqdm
-click
-pytest
-python-dotenv
-pyyaml
-pandas-datareader
-yfinance
-
-
-
-=======
-# Core Scientific Computing
-numpy>=1.24.0
-pandas>=2.0.0
-scipy>=1.10.0
 scikit-learn>=1.3.0
+
+# Time series, plotting, visualization
+statsmodels>=0.14.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 
-# Financial and Time Series Analysis
+# Data access and I/O
 yfinance>=0.2.0
 pandas-datareader>=0.10.0
-ta-lib>=0.4.0
-arch>=5.6.0
-statsmodels>=0.14.0
+requests>=2.31.0
+pyarrow>=12.0.0
 
-# GPU Acceleration (PyTorch)
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
-
-# GPU Acceleration (RAPIDS) - Install separately if needed
-# cupy-cuda12x>=12.0.0
-# cudf-cu12>=23.0.0
-
-# Machine Learning & Deep Learning
-tensorflow>=2.13.0
-keras>=2.13.0
-xgboost>=1.7.0
-lightgbm>=4.0.0
-
-# Optimization Libraries
-cvxpy>=1.4.0
-cvxopt>=1.3.0
-pulp>=2.7.0
-
-# Database and Storage
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.0
-redis>=4.5.0
-
-# Configuration and Utilities
+# Configuration and utilities
 pyyaml>=6.0
 python-dotenv>=1.0.0
 click>=8.1.0
 tqdm>=4.65.0
-schedule>=1.2.0
 
-# API and Web
-fastapi>=0.100.0
-uvicorn>=0.23.0
-requests>=2.31.0
-websockets>=11.0.0
-
-# Testing and Development
+# Testing
 pytest>=7.4.0
-pytest-asyncio>=0.21.0
-black>=23.7.0
-flake8>=6.0.0
-mypy>=1.5.0
-
-# Monitoring and Logging
-prometheus-client>=0.17.0
-structlog>=23.1.0
->>>>>>> 377b63eb0d301f5dc013dabfb272764e2dc29539
