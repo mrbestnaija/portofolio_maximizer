@@ -28,40 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================
-# Stage 2: Python Dependencies Builder
+# Stage 2: Copy Existing Virtual Environment
 # =============================================================================
 FROM base AS builder
 
-# Create virtual environment
-RUN python -m venv /opt/venv
+# Copy existing virtual environment from host
+COPY simpleTrader_env /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
-# Upgrade pip and install build tools
-RUN pip install --upgrade pip setuptools wheel
-
-# Copy only requirements first (layer caching optimization)
-COPY requirements.txt /tmp/requirements.txt
-
-# Install Python dependencies
-# Note: requirements.txt has merge conflict - using comprehensive list
-RUN pip install --no-cache-dir \
-    numpy>=1.24.0 \
-    pandas>=2.0.0 \
-    scipy>=1.10.0 \
-    scikit-learn>=1.3.0 \
-    matplotlib>=3.7.0 \
-    seaborn>=0.12.0 \
-    yfinance>=0.2.0 \
-    pandas-datareader>=0.10.0 \
-    statsmodels>=0.14.0 \
-    pyyaml>=6.0 \
-    python-dotenv>=1.0.0 \
-    click>=8.1.0 \
-    tqdm>=4.65.0 \
-    pytest>=7.4.0 \
-    pytest-asyncio>=0.21.0 \
-    requests>=2.31.0 \
-    pyarrow>=12.0.0
 
 # =============================================================================
 # Stage 3: Final Production Image
@@ -128,11 +101,15 @@ CMD ["python", "scripts/run_etl_pipeline.py", "--help"]
 # =============================================================================
 # Metadata
 # =============================================================================
-LABEL maintainer="Portfolio Maximizer Team" \
+LABEL maintainer="Bestman Ezekwu Enock <mrbestnaija@example.com>" \
       version="4.5" \
       description="Portfolio Management System with Quantitative Trading Strategies" \
-      org.opencontainers.image.source="https://github.com/yourusername/portfolio_maximizer_v45" \
-      org.opencontainers.image.documentation="https://github.com/yourusername/portfolio_maximizer_v45/README.md"
+      org.opencontainers.image.source="https://github.com/mrbestnaija/portofolio_maximizer" \
+      org.opencontainers.image.documentation="https://github.com/mrbestnaija/portofolio_maximizer/blob/master/README.md" \
+      org.opencontainers.image.authors="Bestman Ezekwu Enock" \
+      org.opencontainers.image.url="https://github.com/mrbestnaija/portofolio_maximizer" \
+      org.opencontainers.image.vendor="Portfolio Maximizer Team" \
+      org.opencontainers.image.licenses="MIT"
 
 # Exposed volumes for data persistence
 VOLUME ["/app/data", "/app/logs", "/app/config"]

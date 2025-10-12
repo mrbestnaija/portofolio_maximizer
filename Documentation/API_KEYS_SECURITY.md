@@ -280,7 +280,7 @@ API calls use loaded keys
 
 ### Example: Alpha Vantage Flow
 
-1. **`.env`**: `ALPHA_VANTAGE_API_KEY='UFJ93EBWE29IE2RR'`
+1. **`.env`**: `ALPHA_VANTAGE_API_KEY='API_KEY'`
 2. **`config/alpha_vantage_config.yml`**:
    ```yaml
    authentication:

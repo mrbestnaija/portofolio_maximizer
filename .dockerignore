@@ -1,57 +1,66 @@
-# Portfolio Maximizer - Docker Ignore File
-# Excludes unnecessary files from Docker build context for faster builds
+# Git files
+.git/
+.gitignore
+.gitmodules
 
-# =============================================================================
-# Python
-# =============================================================================
+# GitHub workflows
+.github/
+
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
 *.egg
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.hypothesis/
+MANIFEST
 
-# =============================================================================
-# Virtual Environments
-# =============================================================================
+# Virtual environments (except simpleTrader_env which is needed)
 venv/
-env/
 ENV/
-portfolio_env/
-simpleTrader_env/
+env/
 .venv/
+# simpleTrader_env/ - DO NOT IGNORE: copied into container
 
-# =============================================================================
-# IDEs and Editors
-# =============================================================================
+# IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
-*.sublime-project
-*.sublime-workspace
 
-# =============================================================================
-# Git
-# =============================================================================
-.git/
-.gitignore
-.gitattributes
-.github/
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
 
-# =============================================================================
-# Data and Cache (exclude runtime data, keep config)
-# =============================================================================
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Data files (will be mounted as volumes)
 data/raw/*
 data/processed/*
 data/training/*
@@ -59,106 +68,50 @@ data/validation/*
 data/testing/*
 data/checkpoints/*
 cache/*
-*.parquet
-*.csv
-*.hdf5
-*.h5
 
-# Keep empty directories
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/training/.gitkeep
-!data/validation/.gitkeep
-!data/testing/.gitkeep
-!data/checkpoints/.gitkeep
-!cache/.gitkeep
-
-# =============================================================================
-# Logs
-# =============================================================================
+# Log files
 logs/
 *.log
-logs/stages/*
 
-# =============================================================================
-# Documentation (exclude to reduce image size, except critical docs)
-# =============================================================================
-Documentation/*.md
-!Documentation/API_KEYS_SECURITY.md
-*.pdf
-*.docx
+# Documentation
+Documentation/
+*.md
+!README.md
 
-# =============================================================================
-# CI/CD and Testing
-# =============================================================================
-.github/
-.gitlab-ci.yml
-.travis.yml
-azure-pipelines.yml
-Jenkinsfile
-.circleci/
-
-# =============================================================================
-# Secrets and Environment Files
-# =============================================================================
+# Environment files
 .env
 .env.*
-*.pem
-*.key
-*.crt
-secrets/
-credentials/
-api_keys.txt
 
-# =============================================================================
-# OS Files
-# =============================================================================
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# OS files
 Thumbs.db
 .DS_Store
-desktop.ini
 
-# =============================================================================
-# Docker
-# =============================================================================
-Dockerfile*
-docker-compose*.yml
+# Docker files (no need to copy into context)
+Dockerfile
+docker-compose.yml
 .dockerignore
 
-# =============================================================================
-# Notebooks and Experimental Code
-# =============================================================================
-notebooks/
-*.ipynb
-experimental/
-scratch/
+# Scripts that are not needed in production
+scripts/repo_cleanup.sh
+test_*.sh
+run_cv_validation.sh
 
-# =============================================================================
-# Large Binary Files
-# =============================================================================
-*.tar
-*.tar.gz
-*.zip
-*.rar
-*.7z
+# Visualizations (can be regenerated)
+visualizations/
 
-# =============================================================================
-# Database Files
-# =============================================================================
-*.db
-*.sqlite
-*.sqlite3
+# Large data files
+*.csv
+*.parquet
+*.h5
+*.hdf5
 
-# =============================================================================
-# Temporary Files
-# =============================================================================
-tmp/
-temp/
-*.tmp
-*.bak
+# Backup files
 *.backup
-
-# =============================================================================
-# README and License (include in image)
-# =============================================================================
-!README.md
-!LICENSE
+*.old

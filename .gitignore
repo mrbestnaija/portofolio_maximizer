@@ -97,3 +97,17 @@ docs/_build/
 .claude/
 .claude/*
 settings.local.json
+
+
+# Cursor  specific (protect AI configuration and settings)
+.Cursor/
+.cursor/
+.cursor/*
+settings.local.json
+
+
+# Cursor specific (protect AI configuration and settings)
+.Cursor/
+.cursor/
+.cursor/*
+settings.local.json

@@ -18,6 +18,16 @@ pipeline:
       retry_delay: 2
       required: true
 
+    - name: "llm_market_analysis"
+      description: "LLM-powered market data interpretation (Phase 5.2)"
+      module: "ai_llm.market_analyzer"
+      class: "LLMMarketAnalyzer"
+      config_file: "config/llm_config.yml"
+      timeout_seconds: 180
+      retry_attempts: 1
+      required: true  # Pipeline fails if Ollama unavailable
+      enabled: true  # Set to false to disable LLM integration
+
     - name: "data_validation"
       description: "Validate data quality (prices, volumes, outliers)"
       module: "etl.data_validator"
@@ -36,6 +46,26 @@ pipeline:
       timeout_seconds: 120
       retry_attempts: 1
       required: true
+
+    - name: "llm_signal_generation"
+      description: "LLM-powered trading signal generation (Phase 5.2)"
+      module: "ai_llm.signal_generator"
+      class: "LLMSignalGenerator"
+      config_file: "config/llm_config.yml"
+      timeout_seconds: 180
+      retry_attempts: 1
+      required: true
+      enabled: true
+
+    - name: "llm_risk_assessment"
+      description: "LLM-powered risk analysis (Phase 5.2)"
+      module: "ai_llm.risk_assessor"
+      class: "LLMRiskAssessor"
+      config_file: "config/llm_config.yml"
+      timeout_seconds: 120
+      retry_attempts: 1
+      required: true
+      enabled: true
 
     - name: "data_storage"
       description: "Split data (simple or CV) and persist to storage"
