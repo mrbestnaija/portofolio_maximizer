@@ -86,14 +86,14 @@ analysis:
 
     # Auto-lag selection methods
     autolag:
-      method: "AIC"  # Options: AIC, BIC, t-stat
+      method: "BIC"  # Options: AIC, BIC, t-stat
       max_lag_auto: null  # If null, use 12*(nobs/100)^(1/4)
 
   # Autocorrelation analysis
   autocorrelation:
     # ACF/PACF parameters
     default_nlags: 40  # Default number of lags
-    max_nlags_proportion: 0.5  # Max lags as proportion of series length
+    max_nlags_proportion: 0.25  # Max lags as proportion of series length
 
     # Significance testing
     confidence_level: 0.95

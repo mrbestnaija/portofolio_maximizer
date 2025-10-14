@@ -25,12 +25,12 @@ class TestOllamaClientInitialization:
             # Mock successful connection
             mock_response = Mock()
             mock_response.json.return_value = {
-                'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+                'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }
             mock_get.return_value = mock_response
             
             client = OllamaClient()
-            assert client.model == 'deepseek-coder:33b-instruct-q4_K_M'
+            assert client.model == 'deepseek-coder:6.7b-instruct-q4_K_M'
             assert client.host == 'http://localhost:11434'
     
     def test_init_fails_when_server_unavailable(self):
@@ -73,7 +73,7 @@ class TestOllamaGeneration:
         """Test successful text generation"""
         # Mock init validation
         mock_get.return_value.json.return_value = {
-            'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+            'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
         
         # Mock generation response
@@ -92,7 +92,7 @@ class TestOllamaGeneration:
     def test_generate_handles_timeout(self, mock_get, mock_post):
         """Test generation timeout handling"""
         mock_get.return_value.json.return_value = {
-            'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+            'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
         
         mock_post.side_effect = requests.exceptions.Timeout()
@@ -108,7 +108,7 @@ class TestOllamaGeneration:
     def test_generate_rejects_empty_response(self, mock_get, mock_post):
         """Test that empty responses raise error"""
         mock_get.return_value.json.return_value = {
-            'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+            'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
         
         mock_post.return_value.json.return_value = {'response': ''}
@@ -124,7 +124,7 @@ class TestOllamaGeneration:
     def test_generate_with_system_prompt(self, mock_get, mock_post):
         """Test generation with system instructions"""
         mock_get.return_value.json.return_value = {
-            'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+            'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
         
         mock_post.return_value.json.return_value = {'response': 'Test response'}
@@ -147,13 +147,13 @@ class TestModelInfo:
         mock_responses = [
             # First call: init validation
             Mock(json=lambda: {
-                'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+                'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }),
             # Second call: get_model_info
             Mock(json=lambda: {
                 'models': [{
-                    'name': 'deepseek-coder:33b-instruct-q4_K_M',
-                    'size': '19GB',
+                    'name': 'deepseek-coder:6.7b-instruct-q4_K_M',
+                    'size': '4.1GB',
                     'modified_at': '2024-01-01',
                     'details': {'family': 'deepseek'}
                 }]
@@ -164,8 +164,8 @@ class TestModelInfo:
         client = OllamaClient()
         info = client.get_model_info()
         
-        assert info['name'] == 'deepseek-coder:33b-instruct-q4_K_M'
-        assert info['size'] == '19GB'
+        assert info['name'] == 'deepseek-coder:6.7b-instruct-q4_K_M'
+        assert info['size'] == '4.1GB'
         assert info['family'] == 'deepseek'
     
     @patch('requests.get')
@@ -173,7 +173,7 @@ class TestModelInfo:
         """Test graceful handling of info retrieval failure"""
         mock_responses = [
             Mock(json=lambda: {
-                'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+                'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }),
             Mock(side_effect=Exception('API error'))
         ]
@@ -193,7 +193,7 @@ class TestConnectionValidation:
         """Test that validation checks server endpoint"""
         with patch('requests.get') as mock_get:
             mock_get.return_value.json.return_value = {
-                'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+                'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }
             
             client = OllamaClient()
@@ -207,7 +207,7 @@ class TestConnectionValidation:
         """Test that validation runs each time client is created"""
         with patch('requests.get') as mock_get:
             mock_get.return_value.json.return_value = {
-                'models': [{'name': 'deepseek-coder:33b-instruct-q4_K_M'}]
+                'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }
             
             # Create multiple instances

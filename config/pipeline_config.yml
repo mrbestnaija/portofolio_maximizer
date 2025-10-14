@@ -3,8 +3,8 @@
 
 pipeline:
   name: "Portfolio Maximizer ETL Pipeline"
-  version: "4.0"
-  description: "Extract, Transform, Load pipeline with k-fold CV support"
+  version: "5.2"
+  description: "Extract, Transform, Load pipeline with k-fold CV and LLM integration"
 
   # Pipeline stages (executed in order)
   stages:
@@ -231,10 +231,56 @@ pipeline:
     separate_stage_logs: true
     stage_log_dir: "logs/stages"
 
+# LLM Integration Configuration (Phase 5.2)
+llm:
+  # Signal validation requirements (per AGENT_INSTRUCTION.md)
+  signal_validation:
+    # Minimum requirements before live trading
+    min_annual_return: 0.10  # 10% annual return minimum
+    min_validation_days: 30  # At least 30 days of backtesting
+    min_sharpe_ratio: 0.0  # Positive risk-adjusted returns
+    must_beat_baseline: true  # Must beat buy-and-hold
+    min_capital_requirement: 10000  # $10K minimum capital
+  
+  # Available models on system
+  available_models:
+    - name: "deepseek-coder:6.7b-instruct-q4_K_M"
+      size: "4.1 GB"
+      speed: "15-20 tokens/sec"
+      use_case: "Production - balanced performance"
+      priority: 1
+    
+    - name: "codellama:13b-instruct-q4_K_M"
+      size: "7.9 GB"
+      speed: "25-35 tokens/sec"
+      use_case: "Fast inference for high-frequency analysis"
+      priority: 2
+    
+    - name: "qwen:14b-chat-q4_K_M"
+      size: "9.4 GB"
+      speed: "20-25 tokens/sec"
+      use_case: "Complex reasoning and analysis"
+      priority: 3
+  
+  # Performance monitoring
+  monitoring:
+    track_latency: true
+    track_accuracy: true
+    log_predictions: true
+    alert_on_failure: true
+  
+  # Safety guardrails
+  safety:
+    advisory_only: true  # Signals are advisory, not executable
+    require_validation: true  # Must pass validation before trading
+    confidence_threshold: 0.5  # Minimum confidence for signals
+    max_position_size: 0.25  # Maximum 25% portfolio per position
+
 # Metadata
 metadata:
-  created_by: "Portfolio Maximizer v4.0"
+  created_by: "Portfolio Maximizer v5.2"
   created_date: "2025-10-04"
-  last_updated: "2025-10-04"
-  purpose: "Unified pipeline and workflow configuration"
+  last_updated: "2025-10-12"
+  purpose: "Unified pipeline and workflow configuration with LLM integration"
   standards: "MIT Statistical Learning Standards"
+  phase: "5.2 - Local LLM Integration Complete"

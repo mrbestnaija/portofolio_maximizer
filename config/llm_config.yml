@@ -11,32 +11,35 @@ llm:
 
   # Model selection (per TO_DO_LLM_local.mdc)
   models:
-    # Primary model for production analysis
+    # PRIMARY MODEL: Qwen 14B for complex quantitative analysis ⭐ UPDATED
     primary:
-      name: "deepseek-coder:33b-instruct-q4_K_M"
-      use_case: "primary_coding"
-      expected_speed: "15-20 tokens/sec"
-      memory_requirement: "20GB RAM"
-      quality: "excellent"
-
-    # Fast model for quick iterations
-    fast:
-      name: "codellama:13b-instruct-q4_K_M"
-      use_case: "fast_coding"
-      expected_speed: "25-35 tokens/sec"
-      memory_requirement: "8GB RAM"
-      quality: "very_good"
-
-    # Reasoning model for financial analysis
-    reasoning:
       name: "qwen:14b-chat-q4_K_M"
-      use_case: "reasoning"
+      use_case: "Complex financial reasoning and quantitative analysis"
       expected_speed: "20-25 tokens/sec"
-      memory_requirement: "9GB RAM"
-      quality: "great"
+      memory_requirement: "9.4GB RAM"
+      quality: "excellent"
+      priority: 1
 
-  # Active model (change as needed)
-  active_model: "deepseek-coder:33b-instruct-q4_K_M"
+    # FALLBACK 1: DeepSeek for fast inference
+    fallback_1:
+      name: "deepseek-coder:6.7b-instruct-q4_K_M"
+      use_case: "Fast inference backup"
+      expected_speed: "15-20 tokens/sec"
+      memory_requirement: "4.1GB RAM"
+      quality: "very_good"
+      priority: 2
+
+    # FALLBACK 2: CodeLlama for quick iterations
+    fallback_2:
+      name: "codellama:13b-instruct-q4_K_M"
+      use_case: "Fast coding and quick iterations"
+      expected_speed: "25-35 tokens/sec"
+      memory_requirement: "7.9GB RAM"
+      quality: "good"
+      priority: 3
+
+  # Active model (UPDATED to Qwen 14B)
+  active_model: "qwen:14b-chat-q4_K_M"
 
   # Generation parameters
   generation:

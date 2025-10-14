@@ -74,14 +74,15 @@ class LLMMarketAnalyzer:
         try:
             system = (
                 "You are a quantitative financial analyst. "
-                "Provide concise, data-driven market analysis. "
-                "Output valid JSON only."
+                "You MUST respond with ONLY valid JSON. "
+                "NO explanations, NO markdown, NO extra text. "
+                "ONLY the JSON object. This is critical."
             )
             
             llm_response = self.client.generate(
                 prompt=prompt,
                 system=system,
-                temperature=0.1  # Low temp for consistency
+                temperature=0.05  # Very low temp for strict JSON output
             )
             
             # Parse LLM response
@@ -152,59 +153,94 @@ class LLMMarketAnalyzer:
     
     def _create_analysis_prompt(self, ticker: str, stats: Dict) -> str:
         """Create structured prompt for LLM"""
-        prompt = f"""Analyze the following market data for {ticker}:
+        prompt = f"""Analyze {ticker} market data and respond with ONLY a valid JSON object.
 
-PRICE DATA:
+DATA:
 - Current Price: ${stats['current_price']}
 - Price Change: {stats['price_change_pct']}%
 - Volatility: {stats['volatility_pct']}%
 - 52-Week High: ${stats['high_52w']}
 - 52-Week Low: ${stats['low_52w']}
-
-VOLUME DATA:
 - Average Volume: {stats['avg_volume']:,}
 - Volume Trend: {stats['volume_trend_pct']}%
 
-Provide analysis in JSON format with these fields:
-- trend: "bullish", "bearish", or "neutral"
-- strength: 1-10 scale
-- regime: "trending", "ranging", "volatile", or "stable"  
-- key_levels: [support, resistance] prices
-- summary: brief 2-sentence analysis
+Return EXACTLY this JSON structure (no other text):
+{{
+  "trend": "bullish or bearish or neutral",
+  "strength": 5,
+  "regime": "trending or ranging or volatile or stable",
+  "key_levels": [100.0, 110.0],
+  "summary": "Brief analysis in 1-2 sentences"
+}}
 
-Output ONLY valid JSON."""
+IMPORTANT: Output ONLY the JSON object above. No markdown, no explanation, ONLY JSON."""
         
         return prompt
     
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        """Parse and validate LLM JSON response"""
+        """Parse and validate LLM JSON response with robust error handling"""
         try:
-            # Extract JSON from response (handle markdown code blocks)
+            # Clean up response
             json_str = response.strip()
+            
+            # Remove markdown code blocks if present
             if '```json' in json_str:
                 json_str = json_str.split('```json')[1].split('```')[0].strip()
             elif '```' in json_str:
                 json_str = json_str.split('```')[1].split('```')[0].strip()
             
+            # Try to find JSON object if response has extra text
+            if not json_str.startswith('{'):
+                start = json_str.find('{')
+                end = json_str.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_str = json_str[start:end]
+            
+            # Parse JSON
             analysis = json.loads(json_str)
             
-            # Validate required fields
-            required = ['trend', 'strength', 'regime', 'summary']
-            for field in required:
-                if field not in analysis:
-                    raise ValueError(f"Missing required field: {field}")
+            # Validate and fix required fields
+            required_defaults = {
+                'trend': 'neutral',
+                'strength': 5,
+                'regime': 'unknown',
+                'summary': 'No summary available',
+                'key_levels': []
+            }
             
+            for field, default in required_defaults.items():
+                if field not in analysis:
+                    logger.warning(f"Missing field '{field}', using default: {default}")
+                    analysis[field] = default
+            
+            # Validate field types
+            if not isinstance(analysis['strength'], (int, float)):
+                analysis['strength'] = 5
+            else:
+                analysis['strength'] = max(1, min(10, int(analysis['strength'])))
+            
+            if analysis['trend'] not in ['bullish', 'bearish', 'neutral']:
+                analysis['trend'] = 'neutral'
+            
+            if analysis['regime'] not in ['trending', 'ranging', 'volatile', 'stable']:
+                analysis['regime'] = 'unknown'
+            
+            logger.debug(f"LLM response parsed successfully: {analysis.get('trend', 'unknown')}")
             return analysis
             
-        except (json.JSONDecodeError, ValueError) as e:
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning(f"Failed to parse LLM response: {e}")
-            # Return minimal valid response
+            logger.debug(f"Raw response: {response[:200]}...")
+            
+            # Return safe fallback response
             return {
                 'trend': 'neutral',
                 'strength': 5,
                 'regime': 'unknown',
-                'summary': 'Analysis parsing failed',
-                'error': str(e)
+                'key_levels': [],
+                'summary': 'Unable to parse LLM analysis. Using neutral stance.',
+                'error': str(e),
+                'raw_response_preview': response[:100] if response else 'empty'
             }
 
 

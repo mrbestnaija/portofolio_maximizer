@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ETL Pipeline Orchestration Script - Modular Configuration-Driven Design.
+"""ETL Pipeline Orchestration Script - Modular Configuration-Driven Design with LLM Integration.
 
 This orchestrator loads configuration from modular YAML files and executes
 the ETL pipeline with proper error handling and progress tracking.
@@ -10,6 +10,16 @@ Configuration files:
 - config/validation_config.yml: Data validation rules
 - config/preprocessing_config.yml: Preprocessing parameters
 - config/storage_config.yml: Storage and splitting configuration
+- config/llm_config.yml: LLM integration settings (Phase 5.2)
+
+Pipeline Flow:
+1. Data Extraction (multi-source with failover)
+2. Data Validation (quality checks)
+3. Data Preprocessing (normalization, missing data)
+4. LLM Market Analysis (optional - if --enable-llm flag set)
+5. LLM Signal Generation (optional - if --enable-llm flag set)
+6. LLM Risk Assessment (optional - if --enable-llm flag set)
+7. Data Storage (train/val/test split with optional CV)
 """
 import sys
 import yaml
@@ -18,6 +28,7 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 import click
+import pandas as pd
 from typing import Dict, Any
 
 # Add parent directory to path for imports
@@ -29,6 +40,16 @@ from etl.preprocessor import Preprocessor
 from etl.data_storage import DataStorage
 from etl.checkpoint_manager import CheckpointManager
 from etl.pipeline_logger import PipelineLogger
+
+# LLM Integration (Phase 5.2)
+from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
+from ai_llm.market_analyzer import LLMMarketAnalyzer
+from ai_llm.signal_generator import LLMSignalGenerator
+from ai_llm.risk_assessor import LLMRiskAssessor
+
+# Database Integration (Phase 5.2+)
+from etl.database_manager import DatabaseManager
+
 import time
 
 # Configure logging
@@ -88,8 +109,13 @@ def load_config(config_path: str) -> Dict[str, Any]:
               help='Gap between train/validation periods. If not set, uses config value.')
 @click.option('--verbose', is_flag=True, default=False,
               help='Enable verbose logging (DEBUG level)')
+@click.option('--enable-llm', is_flag=True, default=False,
+              help='Enable LLM integration for market analysis and signal generation')
+@click.option('--llm-model', default=None,
+              help='LLM model to use (default: from config). Options: deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
-                use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool) -> None:
+                use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
+                enable_llm: bool, llm_model: str) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
     Data Splitting Strategy:
@@ -155,13 +181,49 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
     # Parse tickers
     ticker_list = [t.strip() for t in tickers.split(',')]
-    logger.info(f"Pipeline: Portfolio Maximizer v4.0")
+    logger.info(f"Pipeline: Portfolio Maximizer v45 (Phase 5.2)")
     logger.info(f"Data Source: {data_source if data_source else 'from config'}")
     logger.info(f"Tickers: {', '.join(ticker_list)}")
     logger.info(f"Date range: {start} to {end}")
+    logger.info(f"LLM Integration: {'ENABLED' if enable_llm else 'DISABLED'}")
+    
+    # Initialize LLM if enabled
+    llm_client = None
+    market_analyzer = None
+    signal_generator = None
+    risk_assessor = None
+    
+    if enable_llm:
+        try:
+            logger.info("Initializing LLM components...")
+            llm_client = OllamaClient(model=llm_model) if llm_model else OllamaClient()
+            
+            # Health check
+            if not llm_client.health_check():
+                raise OllamaConnectionError("Ollama health check failed")
+            
+            market_analyzer = LLMMarketAnalyzer(llm_client)
+            signal_generator = LLMSignalGenerator(llm_client)
+            risk_assessor = LLMRiskAssessor(llm_client)
+            
+            logger.info(f"✓ LLM initialized: {llm_client.model}")
+            logger.info(f"✓ Available models on system: deepseek-coder:6.7b-instruct, codellama:13b-instruct, qwen:14b-chat")
+        except OllamaConnectionError as e:
+            logger.error(f"✗ LLM initialization failed: {e}")
+            logger.error("  Fix: Ensure Ollama is running: 'ollama serve'")
+            logger.error("  Pipeline will continue WITHOUT LLM integration")
+            enable_llm = False
+        except Exception as e:
+            logger.error(f"✗ LLM initialization error: {e}")
+            logger.error("  Pipeline will continue WITHOUT LLM integration")
+            enable_llm = False
 
     # Initialize storage
     storage = DataStorage()
+
+    # Initialize database for persistent storage
+    db_manager = DatabaseManager(db_path="data/portfolio_maximizer.db")
+    logger.info("✓ Database manager initialized")
 
     # Initialize checkpoint manager and pipeline logger
     pipeline_id = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -204,7 +266,13 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         logger.info(f"  - Chronological: {simple_config.get('chronological', True)}")
 
     # Define stage names (in execution order)
-    stage_names = ['data_extraction', 'data_validation', 'data_preprocessing', 'data_storage']
+    stage_names = ['data_extraction', 'data_validation', 'data_preprocessing']
+    
+    # Add LLM stages if enabled
+    if enable_llm:
+        stage_names.extend(['llm_market_analysis', 'llm_signal_generation', 'llm_risk_assessment'])
+    
+    stage_names.append('data_storage')
 
     # Execute pipeline stages
     logger.info("=" * 70)
@@ -234,6 +302,10 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
                 logger.info(f"✓ Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
                 logger.info(f"  Source: {data_source_manager.get_active_source()}")
+                
+                # Save to database
+                rows_saved = db_manager.save_ohlcv_data(raw_data, source=data_source_manager.get_active_source())
+                logger.info(f"✓ Saved {rows_saved} rows to database")
 
                 # Log cache statistics
                 cache_stats = data_source_manager.get_cache_statistics()
@@ -283,6 +355,143 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 storage.save(processed, 'processed', f'processed_{timestamp}')
                 logger.info(f"✓ Preprocessed {len(processed)} rows")
+
+            elif stage_name == 'llm_market_analysis':
+                # Stage 4 (LLM): Market Analysis
+                logger.info("Analyzing market data with LLM...")
+                llm_analyses = {}
+                
+                for ticker in ticker_list:
+                    try:
+                        # Get ticker-specific data
+                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        
+                        # Run LLM analysis with timing
+                        import time
+                        start_time = time.time()
+                        analysis = market_analyzer.analyze_ohlcv(ticker_data, ticker)
+                        latency = time.time() - start_time
+                        
+                        llm_analyses[ticker] = analysis
+                        
+                        # Save to database
+                        db_manager.save_llm_analysis(
+                            ticker=ticker,
+                            date=datetime.now().strftime('%Y-%m-%d'),
+                            analysis=analysis,
+                            model_name=llm_client.model,
+                            latency=latency
+                        )
+                        
+                        logger.info(f"  ✓ {ticker}: Trend={analysis['trend']}, Strength={analysis['strength']}/10 ({latency:.1f}s)")
+                        if verbose:
+                            logger.debug(f"    Summary: {analysis['summary']}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠ {ticker} analysis failed: {e}")
+                        llm_analyses[ticker] = {'trend': 'neutral', 'strength': 5, 'error': str(e)}
+                
+                logger.info(f"✓ Analyzed {len(llm_analyses)} ticker(s) with LLM")
+                
+                # Save checkpoint with LLM analysis
+                checkpoint_id = checkpoint_manager.save_checkpoint(
+                    pipeline_id=pipeline_id,
+                    stage=stage_name,
+                    data=processed,
+                    metadata={'analyses': llm_analyses, 'tickers': ticker_list}
+                )
+                pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+
+            elif stage_name == 'llm_signal_generation':
+                # Stage 5 (LLM): Signal Generation
+                logger.info("Generating trading signals with LLM...")
+                llm_signals = {}
+                
+                for ticker in ticker_list:
+                    try:
+                        # Get ticker-specific data and analysis
+                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        market_analysis = llm_analyses.get(ticker, {})
+                        
+                        # Generate signal with timing
+                        start_time = time.time()
+                        signal = signal_generator.generate_signal(ticker_data, ticker, market_analysis)
+                        latency = time.time() - start_time
+                        
+                        llm_signals[ticker] = signal
+                        
+                        # Save to database
+                        db_manager.save_llm_signal(
+                            ticker=ticker,
+                            date=datetime.now().strftime('%Y-%m-%d'),
+                            signal=signal,
+                            model_name=llm_client.model,
+                            latency=latency
+                        )
+                        
+                        logger.info(f"  ✓ {ticker}: Action={signal['action']}, Confidence={signal['confidence']:.1%} ({latency:.1f}s)")
+                        if verbose:
+                            logger.debug(f"    Reasoning: {signal['reasoning']}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠ {ticker} signal generation failed: {e}")
+                        llm_signals[ticker] = {'action': 'HOLD', 'confidence': 0.5, 'error': str(e)}
+                
+                logger.info(f"✓ Generated {len(llm_signals)} signal(s) with LLM")
+                logger.warning("⚠ ADVISORY ONLY: LLM signals require 30-day validation before trading")
+                
+                # Save checkpoint with signals
+                checkpoint_id = checkpoint_manager.save_checkpoint(
+                    pipeline_id=pipeline_id,
+                    stage=stage_name,
+                    data=processed,
+                    metadata={'signals': llm_signals, 'analyses': llm_analyses}
+                )
+                pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+
+            elif stage_name == 'llm_risk_assessment':
+                # Stage 6 (LLM): Risk Assessment
+                logger.info("Assessing portfolio risk with LLM...")
+                portfolio_weight = 1.0 / len(ticker_list)  # Equal weight assumption
+                llm_risks = {}
+                
+                for ticker in ticker_list:
+                    try:
+                        # Get ticker-specific data
+                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        
+                        # Assess risk with timing
+                        start_time = time.time()
+                        risk = risk_assessor.assess_risk(ticker_data, ticker, portfolio_weight)
+                        latency = time.time() - start_time
+                        
+                        llm_risks[ticker] = risk
+                        
+                        # Save to database
+                        risk['portfolio_weight'] = portfolio_weight
+                        db_manager.save_llm_risk(
+                            ticker=ticker,
+                            date=datetime.now().strftime('%Y-%m-%d'),
+                            risk=risk,
+                            model_name=llm_client.model,
+                            latency=latency
+                        )
+                        
+                        logger.info(f"  ✓ {ticker}: Risk Level={risk['risk_level']}, Score={risk['risk_score']}/100 ({latency:.1f}s)")
+                        if verbose and risk.get('concerns'):
+                            logger.debug(f"    Concerns: {', '.join(risk['concerns'][:2])}")
+                    except Exception as e:
+                        logger.warning(f"  ⚠ {ticker} risk assessment failed: {e}")
+                        llm_risks[ticker] = {'risk_level': 'medium', 'risk_score': 50, 'error': str(e)}
+                
+                logger.info(f"✓ Assessed {len(llm_risks)} ticker(s) risk with LLM")
+                
+                # Save checkpoint with risk assessment
+                checkpoint_id = checkpoint_manager.save_checkpoint(
+                    pipeline_id=pipeline_id,
+                    stage=stage_name,
+                    data=processed,
+                    metadata={'risks': llm_risks, 'signals': llm_signals, 'analyses': llm_analyses}
+                )
+                pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
             elif stage_name == 'data_storage':
                 # Stage 4: Data Storage (Split + Save)
@@ -367,6 +576,9 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     # Cleanup old logs and checkpoints
     pipeline_log.cleanup_old_logs()
     checkpoint_manager.cleanup_old_checkpoints(retention_days=7)
+    
+    # Close database connection
+    db_manager.close()
 
 
 if __name__ == '__main__':

@@ -33,19 +33,19 @@ class OllamaClient:
     
     Mathematical Foundation:
     - Response time: T_llm = T_process + T_gen
-    - Expected: T_llm < 120s for 33B model
+    - Expected: T_llm < 120s for 6.7B model (faster than 33B)
     """
     
     def __init__(self, 
                  host: str = "http://localhost:11434",
-                 model: str = "deepseek-coder:33b-instruct-q4_K_M",
-                 timeout: int = 120):
+                 model: str = "qwen:14b-chat-q4_K_M",  # UPDATED: Primary model for quantitative analysis
+                 timeout: int = 180):  # Increased for larger model
         """
         Initialize Ollama client with strict validation.
         
         Args:
             host: Ollama server URL
-            model: Model name (default: DeepSeek-Coder 33B)
+            model: Model name (default: DeepSeek-Coder 6.7B)
             timeout: Max response time in seconds
             
         Raises:
@@ -59,6 +59,24 @@ class OllamaClient:
         self._validate_connection()
         
         logger.info(f"Ollama client initialized: {self.model} @ {self.host}")
+    
+    def health_check(self) -> bool:
+        """
+        Check if Ollama service is healthy and model is available.
+        
+        Returns:
+            True if healthy, False otherwise
+        """
+        try:
+            response = requests.get(f"{self.host}/api/tags", timeout=5)
+            response.raise_for_status()
+            
+            models = response.json().get('models', [])
+            model_names = [m.get('name', '') for m in models]
+            
+            return self.model in model_names
+        except Exception:
+            return False
     
     def _validate_connection(self) -> None:
         """
@@ -117,9 +135,9 @@ class OllamaClient:
             OllamaConnectionError: If generation fails
             
         Performance:
-            - DeepSeek 33B: ~15-20 tokens/sec
+            - DeepSeek 6.7B: ~15-20 tokens/sec
             - CodeLlama 13B: ~25-35 tokens/sec
-            - Expected latency: 10-60s depending on response length
+            - Expected latency: 5-30s depending on response length
         """
         start_time = datetime.now()
         

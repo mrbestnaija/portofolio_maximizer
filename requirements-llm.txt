@@ -1,16 +1,3 @@
-# LLM Integration Dependencies
-# Phase 5.2: Local GPU AI (Ollama)
-# Cost: $0/month (no API fees)
-
-# Ollama Python client
+# LLM Integration - Phase 5.2
 ollama>=0.1.0
-
-# Already in requirements.txt (no additional dependencies):
-# - requests>=2.31.0 (for Ollama HTTP API)
-# - pandas>=2.0.0 (for data handling)
-# - numpy>=1.24.0 (for computations)
-# - pytest>=7.4.0 (for testing)
-
-# Note: Ollama server must be installed separately
-# Installation: curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh
 

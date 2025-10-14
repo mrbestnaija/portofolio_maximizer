@@ -36,7 +36,7 @@ def sample_ohlcv_data():
 def mock_ollama_client():
     """Create mock Ollama client"""
     client = Mock()
-    client.model = 'deepseek-coder:33b-instruct-q4_K_M'
+    client.model = 'deepseek-coder:6.7b-instruct-q4_K_M'
     return client
 
 

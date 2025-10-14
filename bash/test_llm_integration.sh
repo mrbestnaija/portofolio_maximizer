@@ -198,7 +198,10 @@ test_configuration() {
     if [ -f "$PROJECT_ROOT/requirements-llm.txt" ]; then
         print_status "Checking LLM requirements..."
         while IFS= read -r package; do
+            # Skip empty lines and comments
             [ -z "$package" ] && continue
+            [[ "$package" =~ ^[[:space:]]*# ]] && continue
+            
             if python3 -c "import pkgutil; exit(0 if pkgutil.find_loader('${package%%=*}') else 1)" 2>/dev/null; then
                 print_success "Package installed: ${package%%=*}"
             else
