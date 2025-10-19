@@ -6,6 +6,34 @@
 
 ---
 
+## New Capabilities (2025-10-19)
+- Promoted the institutional-grade portfolio mathematics engine (`etl/portfolio_math.py`) with Sortino, CVaR, information ratio, Markowitz optimisation, bootstrap confidence intervals, and stress-testing utilities. Legacy implementation preserved at `etl/portfolio_math_legacy.py` for reference.
+- Signal validator now enforces the five-layer guardrail with corrected Kelly sizing, statistically significant backtesting, market-regime detection, and risk-level normalisation compatible with database constraints.
+- Pipeline execution supports live data with synthetic fallback via `bash/run_pipeline_live.sh`; stage timing and dataset artefacts are summarised automatically after each run.
+
+### How to Execute (PowerShell, Windows)
+``
+# Activate project virtual environment
+simpleTrader_env\Scripts\Activate.ps1
+
+# Run a live-first pipeline (auto synthetic fallback, LLM enabled)
+./bash/run_pipeline_live.sh
+
+# Force offline validation (deterministic synthetic data)
+python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
+``
+
+## New Capabilities (2025-10-17)
+- Dry-run mode added to scripts/run_etl_pipeline.py (--dry-run) to exercise all stages without network usage by generating synthetic OHLCV data in-process.
+- LLM stages continue to be controlled by --enable-llm; when enabled and Ollama is healthy, the pipeline runs market analysis, signal generation, and risk assessment.
+- Database writes, checkpoints, and processed parquet outputs occur in dry-run with source='synthetic' for traceability.
+
+### Validation Artifacts
+- Checkpoints: data/checkpoints/pipeline_*_data_extraction_*.parquet + *_state.pkl`n- Processed: data/processed/processed_*.parquet`n- Database: data/portfolio_maximizer.db tables: ohlcv_data, llm_* (if LLM enabled)
+
+
+
+
 ## Executive Summary
 
 **Status**: ✅ ALL PHASES COMPLETE
@@ -112,7 +140,8 @@ portfolio_maximizer_v45/
 │   │                                # Features: Atomic checkpoints, SHA256 validation, 7-day retention
 │   ├── pipeline_logger.py          # Event logging (415 lines) ⭐ NEW
 │   │                                # Features: Structured JSON logs, rotation, 7-day retention
-│   ├── portfolio_math.py           # Financial calculations (45 lines)
+│   ├── portfolio_math.py           # Enhanced risk metrics, optimisation, statistical testing ⭐ UPDATED
+│   ├── portfolio_math_legacy.py    # Legacy portfolio math engine (read-only reference)
 │   │                                # Features: Returns, volatility, Sharpe ratio
 │   ├── time_series_analyzer.py     # Time series analysis (500+ lines)
 │   │                                # Features: ADF test, ACF/PACF, stationarity
@@ -151,7 +180,8 @@ portfolio_maximizer_v45/
 │   │   ├── test_data_validator.py        # 5 tests (validation logic)
 │   │   ├── test_preprocessor.py          # 8 tests (preprocessing)
 │   │   ├── test_data_storage.py          # 6 tests (storage operations)
-│   │   ├── test_portfolio_math.py        # 5 tests (calculations)
+│   │   ├── test_portfolio_math.py        # Legacy compatibility checks
+│   │   ├── test_portfolio_math_enhanced.py # Institutional metrics & optimisation suite ⭐ UPDATED
 │   │   └── test_time_series_analyzer.py  # 17 tests (analysis framework)
 │   └── integration/                      # Integration tests
 │

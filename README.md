@@ -145,15 +145,29 @@ CACHE_VALIDITY_HOURS=24
 # Activate virtual environment
 source simpleTrader_env/bin/activate
 
-# Run the complete ETL pipeline
-python scripts/run_etl_pipeline.py
+# Recommended: live run with automatic synthetic fallback
+python scripts/run_etl_pipeline.py \
+  --tickers AAPL,MSFT \
+  --start 2020-01-01 \
+  --end 2024-01-01 \
+  --execution-mode auto \
+  --enable-llm
+
+# Force live-only execution (fails fast on network/API issues)
+python scripts/run_etl_pipeline.py --execution-mode live
+
+# Offline validation (synthetic data, no network)
+python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
 
 # Expected output:
 # ✓ Extraction complete (cache hit: <0.1s)
 # ✓ Validation complete (0.1s)
 # ✓ Preprocessing complete (0.2s)
 # ✓ Storage complete (0.1s)
-# Total time: <1s (with cache)
+# Total time: varies with mode (synthetic ≈ 1s, live depends on APIs)
+
+# Shortcut runner (auto mode with logs):
+./bash/run_pipeline_live.sh
 ```
 
 ### Analyze Dataset

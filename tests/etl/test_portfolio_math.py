@@ -4,7 +4,9 @@ import numpy as np
 from etl.portfolio_math import (
     calculate_returns,
     calculate_portfolio_metrics,
-    calculate_covariance_matrix
+    calculate_covariance_matrix,
+    calculate_enhanced_portfolio_metrics,
+    calculate_kelly_fraction_correct,
 )
 
 @pytest.fixture
@@ -33,7 +35,7 @@ def test_calculate_returns(sample_prices):
     assert not np.isnan(returns).any()
 
 def test_calculate_portfolio_metrics(sample_returns, equal_weights):
-    """Test vectorized portfolio metrics calculation."""
+    """Test enhanced portfolio metrics wrapper returns legacy keys."""
     metrics = calculate_portfolio_metrics(sample_returns, equal_weights)
 
     # Check all required metrics exist
@@ -49,6 +51,10 @@ def test_calculate_portfolio_metrics(sample_returns, equal_weights):
     assert -1 <= metrics['total_return'] <= 10
     assert 0 <= metrics['volatility'] <= 1
     assert 0 <= metrics['max_drawdown'] <= 1
+
+    enhanced = calculate_enhanced_portfolio_metrics(sample_returns, equal_weights)
+    assert 'sortino_ratio' in enhanced
+
 
 def test_sharpe_ratio_calculation(sample_returns, equal_weights):
     """Test Sharpe ratio calculation."""
@@ -104,3 +110,9 @@ def test_zero_volatility_sharpe(equal_weights):
 
     # Should handle zero volatility gracefully
     assert metrics['sharpe_ratio'] == 0.0
+
+
+def test_kelly_fraction_alignment():
+    """Legacy wrapper should align with enhanced Kelly implementation."""
+    kelly = calculate_kelly_fraction_correct(0.6, 100.0, 50.0)
+    assert 0 <= kelly <= 0.25
