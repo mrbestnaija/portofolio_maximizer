@@ -1,10 +1,16 @@
 # Implementation Checkpoint Document
-**Version**: 6.3
-**Date**: 2025-10-14 (Updated)
+**Version**: 6.4
+**Date**: 2025-10-22 (Updated)
 **Project**: Portfolio Maximizer v45
-**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing
+**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix
 
 ---
+
+## New Capabilities (2025-10-22)
+- **Ollama Health Check Fixed**: Cross-platform compatibility resolved for Linux/WSL and Windows PowerShell environments
+- **LLM Integration Operational**: 3 models available and tested (qwen:14b-chat-q4_K_M, deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M)
+- **Health Check Scripts**: Updated `bash/ollama_healthcheck.sh` and created `bash/ollama_healthcheck.ps1` for Windows compatibility
+- **Production Ready**: All LLM components operational with proper model detection and inference testing
 
 ## New Capabilities (2025-10-19)
 - Promoted the institutional-grade portfolio mathematics engine (`etl/portfolio_math.py`) with Sortino, CVaR, information ratio, Markowitz optimisation, bootstrap confidence intervals, and stress-testing utilities. Legacy implementation preserved at `etl/portfolio_math_legacy.py` for reference.
@@ -48,7 +54,8 @@ python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
 - **Phase 4.8**: Checkpointing and Event Logging COMPLETE ✓
 - **Phase 5.1**: Alpha Vantage & Finnhub API Integration COMPLETE ✓
 - **Phase 5.2**: Local LLM Integration (Ollama) COMPLETE ✓
-- **Phase 5.3**: Profit-Critical Functions & Testing COMPLETE ✓ (NEW - 2025-10-14)
+- **Phase 5.3**: Profit Calculation Fix COMPLETE ✓
+- **Phase 5.4**: Ollama Health Check Fix COMPLETE ✓
 
 This checkpoint captures the complete implementation of:
 1. ETL pipeline with intelligent caching
@@ -85,14 +92,12 @@ portfolio_maximizer_v45/
 │   ├── validation_config.yml        # Data validation rules (7.7 KB)
 │   ├── storage_config.yml           # Storage and split config (5.9 KB)
 │   ├── analysis_config.yml          # Time series analysis parameters (MIT standards)
-│   └── ucl_config.yml              # UCL database configuration
 │
 ├── data/                            # Data storage (organized by ETL stage)
 │   ├── raw/                         # Original extracted data + cache
 │   │   ├── AAPL_20251001.parquet   # Cached AAPL data (1,006 rows)
 │   │   ├── MSFT_20251001.parquet   # Cached MSFT data (1,006 rows)
 │   │   ├── extraction_*.parquet    # Historical extractions
-│   │   ├── ucl/                    # UCL data directory
 │   │   └── yfinance/               # Yahoo Finance data directory
 │   ├── processed/                   # Cleaned and transformed data
 │   ├── training/                    # Training set (70% - 704 rows)
@@ -127,7 +132,6 @@ portfolio_maximizer_v45/
 │   │                                # Features: Full API, 5 req/min rate limit, exponential retry
 │   ├── finnhub_extractor.py        # Finnhub extraction (532 lines) ⭐ PRODUCTION
 │   │                                # Features: Full API, 60 req/min rate limit, Unix timestamps
-│   ├── ucl_extractor.py            # UCL database extraction
 │   ├── data_validator.py           # Data quality validation (117 lines)
 │   │                                # Features: Statistical validation, outlier detection
 │   ├── preprocessor.py             # Data preprocessing (101 lines)
@@ -155,7 +159,6 @@ portfolio_maximizer_v45/
 │   │                                # Features: Full analysis, JSON export
 │   ├── visualize_dataset.py        # Visualization CLI (200+ lines)
 │   │                                # Features: All plots, auto-save
-│   ├── data_quality_monitor.py     # Quality monitoring (44 lines)
 │   │                                # Features: Automated checks, thresholds
 │   └── validate_environment.py     # Environment validation
 │
@@ -171,13 +174,10 @@ portfolio_maximizer_v45/
 │   │   ├── test_ollama_client.py   # 12 tests (Ollama integration)
 │   │   └── test_market_analyzer.py # 8 tests (Market analysis)
 │   ├── etl/                        # ETL module tests
-│   │   ├── test_yfinance_extractor.py    # 3 tests (network extraction)
 │   │   ├── test_yfinance_cache.py        # 10 tests (caching mechanism)
 │   │   ├── test_time_series_cv.py        # 22 tests (CV mechanism)
 │   │   ├── test_data_source_manager.py   # 18 tests (multi-source) ⭐ NEW
 │   │   ├── test_checkpoint_manager.py    # 33 tests (checkpointing) ⭐ NEW
-│   │   ├── test_ucl_extractor.py         # UCL extraction tests
-│   │   ├── test_data_validator.py        # 5 tests (validation logic)
 │   │   ├── test_preprocessor.py          # 8 tests (preprocessing)
 │   │   ├── test_data_storage.py          # 6 tests (storage operations)
 │   │   ├── test_portfolio_math.py        # Legacy compatibility checks
@@ -198,7 +198,6 @@ portfolio_maximizer_v45/
 │
 ├── workflows/                       # Pipeline orchestration (YAML)
 │   ├── etl_pipeline.yml            # Main ETL workflow (4 stages)
-│   └── data_validation.yml         # Validation workflow
 │
 ├── .claude/                         # Claude Code configuration
 │   └── CLAUDE.md                   # Project-specific instructions
@@ -239,8 +238,6 @@ portfolio_maximizer_v45/
                 │                    │
                 ▼                    ▼
     ┌──────────────────┐  ┌──────────────────┐
-    │ Yahoo Finance    │  │ UCL Database     │
-    │ (yfinance)       │  │ (ucl_extractor)  │
     │ - Cache: 24h     │  │ - Direct query   │
     │ - Retry: 3x      │  │ - Structured     │
     │ - Rate limited   │  │                  │
@@ -323,7 +320,6 @@ External Data Sources
     │
     ├─► Yahoo Finance API ──┐
     │                       │
-    └─► UCL Database ───────┤
                             │
                             ▼
                     ┌───────────────┐
@@ -2135,7 +2131,6 @@ performance:
 - **Features**: Click CLI, YAML config, progress tracking
 - **Status**: Full pipeline tested with real AAPL data, 100% cache hit rate
 
-#### **data_quality_monitor.py** (44 lines)
 - **Pattern**: Automated quality monitoring
 - **Checks**: Missing values, outliers, temporal gaps
 - **Output**: Quality report with thresholds
@@ -2148,9 +2143,7 @@ performance:
 - **Failing**: 1 (network timeout - expected)
 
 **Test Files**:
-- `test_yfinance_extractor.py` (3 tests)
 - `test_yfinance_cache.py` (10 tests) ⭐ NEW
-- `test_data_validator.py` (5 tests)
 - `test_preprocessor.py` (8 tests)
 - `test_data_storage.py` (6 tests)
 - `test_portfolio_math.py` (5 tests)

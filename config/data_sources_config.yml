@@ -24,18 +24,6 @@ data_sources:
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
-    - name: "ucl"
-      type: "database"
-      enabled: false  # Not yet implemented
-      priority: 4
-      config_file: "config/ucl_config.yml"
-
-    - name: "custom_csv"
-      type: "file"
-      enabled: false  # User-provided CSV files
-      priority: 10
-      config_file: "config/custom_csv_config.yml"
-
   # Data source selection strategy
   selection_strategy:
     mode: "priority"  # Options: priority, fallback, parallel, custom
@@ -125,8 +113,7 @@ data_sources:
       yfinance: "etl.yfinance_extractor.YFinanceExtractor"
       alpha_vantage: "etl.alpha_vantage_extractor.AlphaVantageExtractor"
       finnhub: "etl.finnhub_extractor.FinnhubExtractor"
-      ucl: "etl.ucl_extractor.UCLExtractor"
-      custom_csv: "etl.csv_extractor.CSVExtractor"
+      # Deprecated adapters removed during v4.5 cleanup
 
     # Adapter loading strategy
     lazy_loading: true  # Only load adapters when needed

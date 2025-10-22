@@ -3,7 +3,7 @@ description: Extract, Transform, Load pipeline for financial time series data
 
 stages:
   - name: data_extraction
-    description: Extract data from Yahoo Finance and UCL database
+    description: Extract data from configured market data providers (yfinance default)
     timeout: 300
     retry: 3
 

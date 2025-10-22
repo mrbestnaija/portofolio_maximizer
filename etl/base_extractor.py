@@ -2,7 +2,7 @@
 
 This module provides the abstract base class that all data extractors must implement,
 ensuring a consistent interface across different data sources (yfinance, Alpha Vantage,
-Finnhub, UCL, etc.).
+Finnhub, etc.).
 
 Design Pattern: Abstract Factory + Strategy Pattern
 - Each data source implements the BaseExtractor interface

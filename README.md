@@ -57,8 +57,8 @@ Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system
         ▼               ▼               ▼
   Layer 1:        Layer 2:         Layer 3:
   Extraction      Storage          Validation
-  (yfinance       (Parquet         (Quality
-   UCL)           Format)          Checks)
+  (yfinance &     (Parquet         (Quality
+   multi-source)  Format)          Checks)
         │               │               │
         └───────────────┼───────────────┘
                         │
@@ -125,11 +125,6 @@ Create a `.env` file in the project root:
 ```bash
 # API Keys (if needed)
 ALPHA_VANTAGE_API_KEY=your_key_here
-
-# Database Configuration (if using UCL)
-UCL_DB_HOST=localhost
-UCL_DB_PORT=5432
-UCL_DB_NAME=portfolio_db
 
 # Cache Settings
 CACHE_VALIDITY_HOURS=24
@@ -304,7 +299,6 @@ portfolio_maximizer_v45/
 ├── config/                          # Configuration files (YAML)
 │   ├── analysis_config.yml          # Time series analysis parameters
 │   ├── preprocessing_config.yml     # Preprocessing settings
-│   ├── ucl_config.yml              # UCL database config
 │   └── yfinance_config.yml         # Yahoo Finance settings
 │
 ├── data/                            # Data storage (organized by ETL stage)
@@ -323,7 +317,6 @@ portfolio_maximizer_v45/
 │
 ├── etl/                             # ETL pipeline modules
 │   ├── yfinance_extractor.py       # Yahoo Finance extraction
-│   ├── ucl_extractor.py            # UCL database extraction
 │   ├── data_validator.py           # Data quality validation
 │   ├── preprocessor.py             # Data preprocessing
 │   ├── data_storage.py             # Data persistence
@@ -335,14 +328,11 @@ portfolio_maximizer_v45/
 │   ├── run_etl_pipeline.py         # Main ETL orchestration
 │   ├── analyze_dataset.py          # Analysis CLI
 │   ├── visualize_dataset.py        # Visualization CLI
-│   ├── data_quality_monitor.py     # Quality monitoring
 │   └── validate_environment.py     # Environment validation
 │
 ├── tests/                           # Test suite (63 tests)
 │   ├── etl/                        # ETL module tests
-│   │   ├── test_yfinance_extractor.py
 │   │   ├── test_yfinance_cache.py
-│   │   ├── test_data_validator.py
 │   │   ├── test_preprocessor.py
 │   │   ├── test_data_storage.py
 │   │   ├── test_portfolio_math.py
@@ -354,7 +344,6 @@ portfolio_maximizer_v45/
 │
 ├── workflows/                       # Pipeline orchestration (YAML)
 │   ├── etl_pipeline.yml            # Main ETL workflow
-│   └── data_validation.yml         # Validation workflow
 │
 ├── .gitignore                       # Git ignore rules
 ├── pytest.ini                       # Pytest configuration
@@ -564,7 +553,6 @@ pip install -r requirements.txt --force-reinstall
 **3. Test failures**
 ```bash
 # Run specific failing test with verbose output
-pytest tests/etl/test_yfinance_extractor.py::test_name -v --tb=short
 
 # Check Python version
 python --version  # Should be 3.12+
