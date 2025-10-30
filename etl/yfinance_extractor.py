@@ -189,6 +189,7 @@ class YFinanceExtractor(BaseExtractor):
         self.rate_limit_delay = rate_limit_delay
         self.retention_years = retention_years
         self.cleanup_days = cleanup_days
+        self._cache_events: Dict[str, Dict[str, Any]] = {}
 
     def _load_cache_metadata(self, parquet_path) -> Dict[str, Any]:
         """Load metadata saved alongside cached parquet file."""
@@ -204,12 +205,16 @@ class YFinanceExtractor(BaseExtractor):
 
         return meta
 
+    def _record_cache_event(self, ticker: str, status: str, rows: int = 0) -> None:
+        """Capture cache status for diagnostics."""
+        self._cache_events[ticker] = {"status": status, "rows": rows}
+
     def _check_cache(
         self,
         ticker: str,
         start_date: datetime,
         end_date: datetime
-    ) -> Tuple[Optional[pd.DataFrame], str]:
+    ) -> Optional[pd.DataFrame]:
         """Check local cache for recent data matching date range.
 
         Mathematical Foundation:
@@ -225,7 +230,8 @@ class YFinanceExtractor(BaseExtractor):
             Cached DataFrame if valid and complete, None otherwise
         """
         if not self.storage:
-            return None, "miss"
+            self._record_cache_event(ticker, "miss", 0)
+            return None
 
         try:
             # Vectorized file lookup: most recent first
@@ -234,7 +240,8 @@ class YFinanceExtractor(BaseExtractor):
             files = sorted(stage_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
 
             if not files:
-                return None, "miss"
+                self._record_cache_event(ticker, "miss", 0)
+                return None
 
             # Check freshness (vectorized time delta)
             latest_file = files[0]
@@ -242,7 +249,8 @@ class YFinanceExtractor(BaseExtractor):
 
             if file_age.total_seconds() > self.cache_hours * 3600:
                 logger.info(f"Cache MISS for {ticker}: expired (age: {file_age.total_seconds()/3600:.1f}h)")
-                return None, "miss"
+                self._record_cache_event(ticker, "miss", 0)
+                return None
 
             # Load and validate coverage (vectorized boolean indexing)
             cached_data = pd.read_parquet(latest_file)
@@ -260,7 +268,8 @@ class YFinanceExtractor(BaseExtractor):
                 logger.info(
                     f"Cache HIT for {ticker}: {len(filtered)} rows (age: {file_age.total_seconds()/3600:.1f}h)"
                 )
-                return filtered, "full"
+                self._record_cache_event(ticker, "full", len(filtered))
+                return filtered
 
             cache_meta = self._load_cache_metadata(latest_file)
             requested_start = cache_meta.get('requested_start')
@@ -290,17 +299,20 @@ class YFinanceExtractor(BaseExtractor):
                     f"Cache HIT (partial) for {ticker}: {len(filtered)} rows available; {gap_msg}. "
                     "Returning cached range to avoid redundant downloads."
                 )
-                return filtered, "partial"
+                self._record_cache_event(ticker, "partial", len(filtered))
+                return filtered
 
             logger.info(
                 f"Cache MISS for {ticker}: incomplete coverage (need: {start_date} to {end_date}, "
                 f"have: {cache_start} to {cache_end})"
             )
-            return None, "miss"
+            self._record_cache_event(ticker, "miss", 0)
+            return None
 
         except Exception as e:
             logger.warning(f"Cache lookup failed for {ticker}: {e}")
-            return None, "miss"
+            self._record_cache_event(ticker, "miss", 0)
+            return None
 
     def extract_with_retention(self, tickers: List[str], storage) -> Tuple[Dict, Dict]:
         """Extract data with 10-year retention and auto-cleanup.
@@ -358,11 +370,14 @@ class YFinanceExtractor(BaseExtractor):
         cache_hits = 0
         cache_misses = 0
         cache_partial_hits = 0
+        self._cache_events.clear()
 
         for i, ticker in enumerate(tickers):
             try:
                 # Cache-first strategy: check local storage before network request
-                cached_data, coverage = self._check_cache(ticker, start, end)
+                cached_data = self._check_cache(ticker, start, end)
+                event = self._cache_events.get(ticker, {})
+                coverage = event.get("status")
 
                 if cached_data is not None and not cached_data.empty:
                     # Cache HIT: use local data
@@ -399,6 +414,7 @@ class YFinanceExtractor(BaseExtractor):
                             }
 
                             self.storage.save(data_to_save, 'raw', ticker, metadata=metadata)
+                            self._record_cache_event(ticker, "refreshed", len(data_to_save))
                         except Exception as e:
                             logger.warning(f"Failed to cache {ticker}: {e}")
 

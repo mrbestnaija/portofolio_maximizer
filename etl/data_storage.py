@@ -24,6 +24,21 @@ from etl.time_series_cv import TimeSeriesCrossValidator
 
 logger = logging.getLogger(__name__)
 
+class SplitResult(dict):
+    """Dictionary with backward-compatible aliases for train/test keys."""
+
+    _ALIASES = {'train': 'training', 'test': 'testing'}
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._ALIASES.get(key, key))
+
+    def __contains__(self, key):
+        return super().__contains__(self._ALIASES.get(key, key))
+
+    def get(self, key, default=None):
+        return super().get(self._ALIASES.get(key, key), default)
+
+
 class DataStorage:
     """Efficient time series data persistence."""
 
@@ -250,13 +265,11 @@ class DataStorage:
             validation_data = data.iloc[train_end:val_end]
             testing_data = data.iloc[val_end:]
 
-            splits = {
+            splits = SplitResult({
                 'training': training_data,
                 'validation': validation_data,
-                'testing': testing_data,
-                'train': training_data,
-                'test': testing_data
-            }
+                'testing': testing_data
+            })
 
             logger.info(f"Split: train={len(splits['training'])}, "
                        f"val={len(splits['validation'])}, "

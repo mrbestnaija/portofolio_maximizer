@@ -43,10 +43,12 @@ class TickerUniverseManager:
         listings = self.loader.download_listings(force=force_download, fallback_csv=fallback_csv)
         tickers = self.validator.filter_valid(listings["symbol"])
         metadata = listings.loc[listings["symbol"].isin(tickers)].copy()
+        metadata.drop_duplicates(subset="symbol", inplace=True)
         metadata.sort_values("symbol", inplace=True)
+        sorted_tickers = metadata["symbol"].tolist()
         self._write_universe(metadata)
-        logger.info("Recorded %s tickers to %s", len(tickers), self.universe_path)
-        return TickerUniverse(tickers=tickers, metadata=metadata)
+        logger.info("Recorded %s tickers to %s", len(sorted_tickers), self.universe_path)
+        return TickerUniverse(tickers=sorted_tickers, metadata=metadata)
 
     def load_universe(self) -> TickerUniverse:
         """Load the cached universe from disk."""

@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - optional dependency
     load_dotenv = None
 
 from .base_ticker_loader import BaseTickerLoader
+from .ticker_validator import TickerValidator
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,20 @@ class AlphaVantageTickerLoader(BaseTickerLoader):
         active_mask = cleaned["status"] == "active"
         equity_mask = cleaned["asset_type"].isin({"common stock", "etf"})
         filtered = cleaned.loc[active_mask & equity_mask].reset_index(drop=True)
+
+        validator = TickerValidator()
+        valid_symbols = validator.filter_valid(filtered["symbol"].tolist())
+
+        if not valid_symbols:
+            filtered = filtered.iloc[0:0]
+        else:
+            filtered = (
+                filtered
+                .drop_duplicates(subset="symbol")
+                .set_index("symbol")
+                .loc[valid_symbols]
+                .reset_index()
+            )
 
         logger.info(
             "Filtered Alpha Vantage listings from %s to %s active equities/ETFs",
