@@ -96,6 +96,7 @@ class BaseExtractor(ABC):
         # Cache statistics
         self._cache_hits = 0
         self._cache_misses = 0
+        self._cache_partials = 0
 
         logger.info(f"Initialized {self.name} extractor (cache: {cache_hours}h)")
 
@@ -183,6 +184,7 @@ class BaseExtractor(ABC):
         return {
             'cache_hits': self._cache_hits,
             'cache_misses': self._cache_misses,
+            'cache_partial_hits': self._cache_partials,
             'total_requests': total,
             'hit_rate': hit_rate
         }
@@ -190,6 +192,10 @@ class BaseExtractor(ABC):
     def _increment_cache_hit(self) -> None:
         """Increment cache hit counter."""
         self._cache_hits += 1
+
+    def _increment_cache_partial(self) -> None:
+        """Increment partial cache hit counter."""
+        self._cache_partials += 1
 
     def _increment_cache_miss(self) -> None:
         """Increment cache miss counter."""

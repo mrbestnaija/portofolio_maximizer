@@ -1,3 +1,0 @@
-# LLM Integration - Phase 5.2
-ollama>=0.1.0
-

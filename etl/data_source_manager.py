@@ -10,7 +10,7 @@ Design Pattern: Strategy + Factory + Chain of Responsibility
 - Strategy: Select appropriate data source based on configuration
 - Factory: Instantiate extractors dynamically
 - Chain: Failover through multiple sources on failure
-
+wsl
 Mathematical Foundation:
 - Failover probability: P(success) = 1 - ∏(1 - p_i) for n sources
 - Combined hit rate: η_combined = Σ(w_i × η_i) for weighted sources
@@ -18,7 +18,7 @@ Mathematical Foundation:
 
 import os
 import yaml
-import logging
+import logging 
 from typing import Dict, List, Optional, Any, Type
 from pathlib import Path
 import pandas as pd

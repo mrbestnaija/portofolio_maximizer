@@ -3,12 +3,32 @@ I'll update the `next-to-do.md` file with comprehensive ML modeling and optimiza
 ```markdown
 # UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
 
-## CURRENT PROJECT STATUS: PRODUCTION READY ✅
-**All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing
+## CURRENT PROJECT STATUS: PRODUCTION READY ✅ (UPDATED Oct 23, 2025)
+**Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
 **Recent Achievements**:
-- Phase 4.8: Checkpointing & Event Logging (2025-10-07)
-- Phase 5.1: Alpha Vantage & Finnhub APIs Complete (2025-10-07)
-- 121 tests (100% passing), 3 data sources operational
+- Phase 4.8: Checkpointing & Event Logging (Oct 7, 2025)
+- Phase 5.1: Alpha Vantage & Finnhub APIs Complete (Oct 7, 2025)
+- Phase 5.2: LLM Integration Complete (Ollama) (Oct 8, 2025)
+- Phase 5.3: Profit Calculation Fix Applied (Oct 14, 2025) ⚠️ CRITICAL
+- Monitoring deployment script validated end-to-end (Oct 23, 2025)
+
+**⚠️ STATUS ALERT**: Documentation is ahead of execution. Core Phase-A tasks (signal validation integration, enhanced portfolio math promotion, statistical tooling, paper trading) remain unshipped. Profitability metrics cannot yet be evaluated because the database holds incomplete signal records and no paper trades.
+
+### Implementation Gaps (Oct 23, 2025 snapshot)
+- LLM signal records in the database omit `signal_type`, leaving monitoring and validation dashboards with `NO_DATA`.
+- The 5-layer signal validator is not wired into the live pipeline and still uses the incorrect Kelly criterion.
+- `portfolio_math_enhanced.py` is ready but not promoted; advanced metrics (Sortino, CVaR, information ratio) remain offline.
+- Statistical rigor tasks (hypothesis tests, bootstrap CIs, Ljung–Box/Jarque–Bera) are untouched; MVS/PRS gates cannot be scored.
+- Paper trading, broker integration, stress testing, and regime detection are scheduled but have zero implementation to date.
+
+### Recommended Next Actions
+1. Backfill existing LLM signal records with valid `signal_type` values and enforce non-null inserts going forward.
+2. Integrate the 5-layer validator into the LLM pipeline, fix Kelly sizing, and add regression tests around position sizing.
+3. Promote `portfolio_math_enhanced.py`, update import sites, and run `tests/etl/test_portfolio_math_enhanced.py`.
+4. Kick off the statistical rigor phase (bootstrap, hypothesis testing, Ljung–Box/Jarque–Bera) and wire results into CI.
+5. Re-run monitoring after data corrections, then begin paper trading and broker-integration tasks per the roadmap.
+
+**📚 NEW**: A comprehensive sequenced implementation plan has been created. See **`Documentation/SEQUENCED_IMPLEMENTATION_PLAN.md`** and **`Documentation/NEXT_TO_DO_SEQUENCED.md`** for the complete 12-week implementation plan with critical fixes prioritized first, then LLM operationalization (Phase A) and ML enhancement (Phase B).
 
 ---
 

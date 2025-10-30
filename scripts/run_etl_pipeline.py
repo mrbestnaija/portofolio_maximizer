@@ -29,10 +29,19 @@ from datetime import datetime
 from tqdm import tqdm
 import click
 import pandas as pd
-from typing import Dict, Any
+import numpy as np
+from typing import Dict, Any, List, Optional, Sequence
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
 
 from etl.data_source_manager import DataSourceManager
 from etl.data_validator import DataValidator
@@ -40,6 +49,15 @@ from etl.preprocessor import Preprocessor
 from etl.data_storage import DataStorage
 from etl.checkpoint_manager import CheckpointManager
 from etl.pipeline_logger import PipelineLogger
+from etl.ticker_discovery import (
+    AlphaVantageTickerLoader,
+    TickerUniverseManager,
+    TickerValidator,
+)
+from etl.portfolio_math import (
+    calculate_enhanced_portfolio_metrics,
+    optimize_portfolio_markowitz,
+)
 
 # LLM Integration (Phase 5.2)
 from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -51,6 +69,9 @@ from ai_llm.risk_assessor import LLMRiskAssessor
 from etl.database_manager import DatabaseManager
 
 import time
+
+# Supported execution modes for data extraction
+EXECUTION_MODES = ('auto', 'live', 'synthetic')
 
 # Configure logging
 logging.basicConfig(
@@ -88,6 +109,123 @@ def load_config(config_path: str) -> Dict[str, Any]:
         raise
 
 
+def generate_synthetic_ohlcv(tickers: List[str], start_date: str,
+                             end_date: str, seed: int = 123) -> pd.DataFrame:
+    """Generate deterministic synthetic OHLCV data for offline validation."""
+    date_index = pd.date_range(start=pd.Timestamp(start_date),
+                               end=pd.Timestamp(end_date), freq='B')
+    frames = []
+    rng = np.random.default_rng(seed)
+    for ticker in tickers:
+        n = len(date_index)
+        base = 100.0 * (1 + rng.normal(0, 0.01))
+        rets = rng.normal(0.0005, 0.01, size=n)
+        prices = base * np.cumprod(1 + rets)
+        close = prices
+        open_ = close * (1 + rng.normal(0, 0.002, size=n))
+        high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.003, size=n)))
+        low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.003, size=n)))
+        volume = (1_000_000 * (1 + rng.normal(0, 0.05, size=n))).astype(int)
+        df_t = pd.DataFrame({
+            'Open': open_,
+            'High': high,
+            'Low': low,
+            'Close': close,
+            'Volume': volume,
+            'Adj Close': close,
+            'ticker': ticker,
+        }, index=date_index)
+        df_t.index.name = 'Date'
+        frames.append(df_t)
+    return pd.concat(frames).sort_index()
+
+
+def _extract_price_matrix(data: pd.DataFrame, price_field: str, tickers: Sequence[str]) -> pd.DataFrame:
+    """Return a wide price matrix (date index, ticker columns)."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    matrix = pd.DataFrame()
+    if isinstance(data.columns, pd.MultiIndex):
+        try:
+            matrix = data.xs(price_field, axis=1, level=-1)
+        except (KeyError, ValueError):
+            matrix = pd.DataFrame()
+    elif price_field in data.columns and "ticker" in data.columns:
+        matrix = (
+            data.pivot_table(index=data.index, columns="ticker", values=price_field, aggfunc="first")
+            .sort_index()
+        )
+    elif price_field in data.columns:
+        matrix = data[[price_field]].copy()
+        column_name = tickers[0] if tickers else price_field
+        matrix.columns = [column_name]
+    else:
+        candidates = [col for col in data.columns if str(col).lower().endswith(price_field.lower())]
+        if candidates:
+            matrix = data[candidates].copy()
+
+    if not matrix.empty:
+        matrix = matrix.sort_index().dropna(how="all")
+    return matrix
+
+
+def compute_portfolio_metrics(
+    raw_data: pd.DataFrame,
+    tickers: Sequence[str],
+    optimizer_cfg: Dict[str, Any],
+    pipeline_log: PipelineLogger,
+    pipeline_id: str,
+    stage_name: str,
+) -> None:
+    """Run portfolio optimisation and log metrics when enabled."""
+    if not optimizer_cfg.get("enabled", False):
+        return
+
+    price_field = optimizer_cfg.get("price_field", "Close")
+    price_matrix = _extract_price_matrix(raw_data, price_field=price_field, tickers=tickers)
+    if price_matrix.empty or price_matrix.shape[0] < 2:
+        logger.warning("Portfolio optimizer skipped; insufficient price data for '%s'.", price_field)
+        return
+
+    returns = price_matrix.pct_change().dropna(how="any")
+    if returns.empty:
+        logger.warning("Portfolio optimizer skipped; unable to compute returns.")
+        return
+
+    try:
+        weights, optimisation_meta = optimize_portfolio_markowitz(
+            returns.values,
+            risk_aversion=optimizer_cfg.get("risk_aversion", 1.0),
+            constraints=optimizer_cfg.get("constraints"),
+        )
+        if isinstance(optimisation_meta, dict) and not optimisation_meta.get("success", True):
+            logger.warning(
+                "Markowitz optimisation reported issues: %s",
+                optimisation_meta.get("message", "unknown error"),
+            )
+    except Exception as exc:
+        logger.warning("Markowitz optimisation failed (%s). Falling back to equal weights.", exc)
+        weights = np.repeat(1.0 / returns.shape[1], returns.shape[1])
+
+    metrics = calculate_enhanced_portfolio_metrics(
+        returns.values,
+        weights,
+    )
+    pipeline_log.log_event(
+        "portfolio_metrics",
+        pipeline_id,
+        stage=stage_name,
+        metadata=metrics,
+    )
+    logger.info(
+        "Portfolio metrics | Sharpe=%.2f Sortino=%.2f MaxDD=%.2f%%",
+        metrics.get("sharpe_ratio", 0.0),
+        metrics.get("sortino_ratio", 0.0),
+        metrics.get("max_drawdown", 0.0) * 100,
+    )
+
+
 @click.command()
 @click.option('--config', default='config/pipeline_config.yml',
               help='Path to pipeline configuration (default: config/pipeline_config.yml)')
@@ -111,11 +249,22 @@ def load_config(config_path: str) -> Dict[str, Any]:
               help='Enable verbose logging (DEBUG level)')
 @click.option('--enable-llm', is_flag=True, default=False,
               help='Enable LLM integration for market analysis and signal generation')
-@click.option('--llm-model', default=None,
+@click.option('--llm-model', default= 'qwen:14b-chat-q4_K_M',
               help='LLM model to use (default: from config). Options: deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
+@click.option('--dry-run', is_flag=True, default=False,
+              help='Generate synthetic OHLCV data in-process (no network) to exercise stages')
+@click.option('--execution-mode', default='auto',
+              type=click.Choice(EXECUTION_MODES, case_sensitive=False),
+              help='Data extraction mode: live (network), synthetic (offline), or auto (try live, fallback to synthetic)')
+@click.option('--use-ticker-discovery', is_flag=True, default=False,
+              help='Load tickers from the configured ticker discovery universe.')
+@click.option('--refresh-ticker-universe', is_flag=True, default=False,
+              help='Force refresh of the ticker discovery universe before running the pipeline.')
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
                 use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
-                enable_llm: bool, llm_model: str) -> None:
+                enable_llm: bool, llm_model: str, dry_run: bool,
+                execution_mode: str, use_ticker_discovery: bool,
+                refresh_ticker_universe: bool) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
     Data Splitting Strategy:
@@ -134,6 +283,12 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
         # Verbose logging
         python scripts/run_etl_pipeline.py --tickers GOOGL --use-cv --verbose
+
+        # Live run with automatic synthetic fallback
+        python scripts/run_etl_pipeline.py --tickers NVDA --execution-mode auto --enable-llm
+
+        # Dry run (no network) with synthetic data
+        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2024-01-02 --end 2024-01-19 --dry-run
     """
     # Set logging level
     if verbose:
@@ -157,6 +312,8 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     cv_config = data_split_cfg.get('cross_validation', {})
     simple_config = data_split_cfg.get('simple_split', {})
     default_strategy = data_split_cfg.get('default_strategy', 'simple')
+    discovery_cfg = pipeline_cfg.get('ticker_discovery', {})
+    portfolio_optimizer_cfg = pipeline_cfg.get('portfolio_optimizer', {})
 
     # Determine CV parameters (CLI overrides config)
     if use_cv is None:
@@ -175,17 +332,87 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         # Use config value
         gap = cv_config.get('gap', 0)
 
+    expanding_window = cv_config.get('expanding_window')
+    if expanding_window is None:
+        window_strategy_cfg = cv_config.get('window_strategy', 'expanding')
+        window_strategy = str(window_strategy_cfg).lower()
+        expanding_window = window_strategy != 'sliding'
+    else:
+        if isinstance(expanding_window, str):
+            expanding_window = expanding_window.lower() != 'false'
+        window_strategy = 'expanding' if expanding_window else 'sliding'
+    window_strategy = 'expanding' if expanding_window else 'sliding'
+
     # Get simple split ratios from config
     train_ratio = simple_config.get('train_ratio', 0.7)
     val_ratio = simple_config.get('validation_ratio', 0.15)
 
     # Parse tickers
-    ticker_list = [t.strip() for t in tickers.split(',')]
+    discovery_enabled = discovery_cfg.get('enabled', False) or use_ticker_discovery
+    ticker_list: List[str]
+    if discovery_enabled:
+        loader_type = discovery_cfg.get('loader', 'alpha_vantage').lower()
+        cache_dir = discovery_cfg.get('cache_dir')
+        universe_path = discovery_cfg.get('universe_path')
+        fallback_csv = discovery_cfg.get('fallback_csv')
+
+        if loader_type != 'alpha_vantage':
+            raise ValueError(f"Unsupported ticker discovery loader: {loader_type}")
+
+        loader = AlphaVantageTickerLoader(
+            api_key=discovery_cfg.get('api_key'),
+            cache_dir=cache_dir,
+        )
+        validator = TickerValidator()
+        universe_manager = TickerUniverseManager(
+            loader=loader,
+            validator=validator,
+            universe_path=universe_path,
+        )
+        fallback_path = Path(fallback_csv) if fallback_csv else None
+
+        try:
+            if refresh_ticker_universe or discovery_cfg.get('auto_refresh', False):
+                universe = universe_manager.refresh_universe(
+                    force_download=True,
+                    fallback_csv=fallback_path,
+                )
+            else:
+                universe = universe_manager.load_universe()
+                if not universe.tickers:
+                    universe = universe_manager.refresh_universe(
+                        force_download=False,
+                        fallback_csv=fallback_path,
+                    )
+        except Exception as exc:
+            logger.warning("Ticker discovery failed (%s); falling back to CLI tickers.", exc)
+            ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
+        else:
+            ticker_list = universe.tickers
+            if not ticker_list:
+                logger.warning("Ticker discovery produced an empty universe; using CLI tickers instead.")
+                ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
+            else:
+                logger.info("Using %s tickers from discovery universe.", len(ticker_list))
+    else:
+        ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
     logger.info(f"Pipeline: Portfolio Maximizer v45 (Phase 5.2)")
     logger.info(f"Data Source: {data_source if data_source else 'from config'}")
     logger.info(f"Tickers: {', '.join(ticker_list)}")
     logger.info(f"Date range: {start} to {end}")
     logger.info(f"LLM Integration: {'ENABLED' if enable_llm else 'DISABLED'}")
+
+    execution_mode = execution_mode.lower()
+    if dry_run:
+        execution_mode = 'synthetic'
+        logger.info("Execution mode overridden to SYNTHETIC via --dry-run flag")
+    elif execution_mode not in EXECUTION_MODES:
+        raise click.BadParameter(f"Invalid execution mode '{execution_mode}'. "
+                                 f"Choose from {', '.join(EXECUTION_MODES)}.")
+    logger.info(f"Execution mode: {execution_mode.upper()}")
+    allow_live_fallback = (execution_mode == 'auto')
+    if allow_live_fallback:
+        logger.info("Auto mode: attempting live extraction first, synthetic fallback enabled on failure")
     
     # Initialize LLM if enabled
     llm_client = None
@@ -257,7 +484,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         logger.info(f"✓ Using k-fold cross-validation (k={n_splits})")
         logger.info(f"  - Test size: {test_size*100:.0f}%")
         logger.info(f"  - Gap between train/val: {gap} periods")
-        logger.info(f"  - Window strategy: {cv_config.get('window_strategy', 'expanding')}")
+        logger.info(f"  - Window strategy: {window_strategy}")
         expected_coverage = cv_config.get('expected_coverage', 0.83)
         logger.info(f"  - Expected validation coverage: {expected_coverage*100:.0f}%")
     else:
@@ -274,6 +501,12 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     
     stage_names.append('data_storage')
 
+    # Prepare synthetic data up-front when explicitly requested
+    precomputed_raw_data: Optional[pd.DataFrame] = None
+    if execution_mode == 'synthetic':
+        logger.info("Synthetic mode: precomputing deterministic OHLCV data (offline)")
+        precomputed_raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
+
     # Execute pipeline stages
     logger.info("=" * 70)
     logger.info("Starting ETL Pipeline")
@@ -289,29 +522,74 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 # Stage 1: Data Extraction (platform-agnostic)
                 logger.info(f"Extracting OHLCV data using data source manager...")
 
-                # Use data source manager for extraction (automatic failover support)
-                raw_data = data_source_manager.extract_ohlcv(
-                    tickers=ticker_list,
-                    start_date=start,
-                    end_date=end,
-                    prefer_source=data_source if data_source != 'yfinance' else None
-                )
+                raw_data = None
+                extraction_source = None
+                synthetic_fallback = False
+
+                if precomputed_raw_data is not None:
+                    raw_data = precomputed_raw_data.copy()
+                    extraction_source = 'synthetic'
+                    logger.info("Using synthetic OHLCV data (precomputed)")
+                else:
+                    try:
+                        # Use data source manager for extraction (automatic failover support)
+                        raw_data = data_source_manager.extract_ohlcv(
+                            tickers=ticker_list,
+                            start_date=start,
+                            end_date=end,
+                            prefer_source=data_source if data_source not in (None, 'yfinance') else None
+                        )
+                        extraction_source = data_source_manager.get_active_source()
+                    except Exception as extraction_error:
+                        if allow_live_fallback:
+                            logger.warning(f"Live extraction failed: {extraction_error}")
+                            logger.warning("Falling back to synthetic OHLCV data to keep pipeline operational")
+                            raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
+                            extraction_source = 'synthetic(auto-fallback)'
+                            synthetic_fallback = True
+                        else:
+                            raise
 
                 if raw_data is None or raw_data.empty:
-                    raise RuntimeError("Data extraction failed - empty dataset")
+                    if allow_live_fallback and extraction_source and not extraction_source.lower().startswith('synthetic'):
+                        logger.warning("Live extraction returned empty dataset; generating synthetic fallback")
+                        raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
+                        extraction_source = 'synthetic(auto-fallback)'
+                        synthetic_fallback = True
+                    else:
+                        raise RuntimeError("Data extraction failed - empty dataset")
 
                 logger.info(f"✓ Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
-                logger.info(f"  Source: {data_source_manager.get_active_source()}")
-                
+                logger.info(f"  Source: {extraction_source}")
+
+                if synthetic_fallback:
+                    pipeline_log.log_event(
+                        'auto_fallback_engaged',
+                        pipeline_id,
+                        stage=stage_name,
+                        metadata={'reason': 'live_extraction_failure'}
+                    )
+
                 # Save to database
-                rows_saved = db_manager.save_ohlcv_data(raw_data, source=data_source_manager.get_active_source())
+                rows_saved = db_manager.save_ohlcv_data(
+                    raw_data,
+                    source=extraction_source
+                )
                 logger.info(f"✓ Saved {rows_saved} rows to database")
 
                 # Log cache statistics
-                cache_stats = data_source_manager.get_cache_statistics()
-                for source_name, stats in cache_stats.items():
-                    if stats['total_requests'] > 0:
-                        logger.info(f"  {source_name} cache: {stats['cache_hits']}/{stats['total_requests']} hits ({stats['hit_rate']:.1%})")
+                if extraction_source and not extraction_source.lower().startswith('synthetic'):
+                    cache_stats = data_source_manager.get_cache_statistics()
+                    for source_name, stats in cache_stats.items():
+                        if stats['total_requests'] > 0:
+                            partial_note = ""
+                            partial_hits = stats.get('cache_partial_hits', 0)
+                            if partial_hits:
+                                partial_note = f", {partial_hits} partial"
+                            logger.info(
+                                f"  {source_name} cache: {stats['cache_hits']}/{stats['total_requests']} hits "
+                                f"({stats['hit_rate']:.1%}){partial_note}"
+                            )
 
                 # Save checkpoint
                 checkpoint_id = checkpoint_manager.save_checkpoint(
@@ -367,7 +645,6 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
                         
                         # Run LLM analysis with timing
-                        import time
                         start_time = time.time()
                         analysis = market_analyzer.analyze_ohlcv(ticker_data, ticker)
                         latency = time.time() - start_time
@@ -506,7 +783,8 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         use_cv=True,
                         n_splits=n_splits,
                         test_size=test_size,
-                        gap=gap
+                        gap=gap,
+                        expanding_window=expanding_window
                     )
                 else:
                     splits = storage.train_validation_test_split(
@@ -548,6 +826,15 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                     logger.info(f"  - Training: {len(splits['training'])} rows (70%)")
                     logger.info(f"  - Validation: {len(splits['validation'])} rows (15%)")
                     logger.info(f"  - Testing: {len(splits['testing'])} rows (15%)")
+
+                compute_portfolio_metrics(
+                    raw_data=raw_data,
+                    tickers=ticker_list,
+                    optimizer_cfg=portfolio_optimizer_cfg,
+                    pipeline_log=pipeline_log,
+                    pipeline_id=pipeline_id,
+                    stage_name=stage_name,
+                )
 
             # Log stage completion
             stage_duration = time.time() - stage_start_time

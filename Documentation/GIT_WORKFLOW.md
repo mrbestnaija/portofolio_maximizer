@@ -262,6 +262,8 @@ Follow this format:
 🤖 Generated with co-companion 
 
 Authored-By: Bestman Ezekwu Enock
+Email : csgtmalice@protonmail.ch
+
 ```
 
 Types:

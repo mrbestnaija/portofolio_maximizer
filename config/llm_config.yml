@@ -38,13 +38,13 @@ llm:
       quality: "good"
       priority: 3
 
-  # Active model (UPDATED to Qwen 14B)
-  active_model: "qwen:14b-chat-q4_K_M"
+  # Active model (FIXED to use available model)
+  active_model: "deepseek-coder:6.7b-instruct-q4_K_M"
 
   # Generation parameters
   generation:
     temperature: 0.1  # Low for consistency (0.0-1.0)
-    max_tokens: 2048  # Maximum response length
+    max_tokens: 4096  # Maximum response length
     top_p: 0.9  # Nucleus sampling threshold
     top_k: 40  # Top-k sampling
     repeat_penalty: 1.1  # Penalize repetition
@@ -73,7 +73,7 @@ llm:
 
     # Signal validation rules (per AGENT_INSTRUCTION.md)
     validation:
-      min_confidence_for_action: 0.7  # Require 70% confidence for BUY/SELL
+      min_confidence_for_action: 0.75  # Require 75% confidence for BUY/SELL
       require_reasoning: true
       conservative_bias: true  # Default to HOLD unless strong signal
 
@@ -156,7 +156,7 @@ validation:
   # NO TRADING until proven profitable
   trading_enabled: false  # Set true only after validation
   paper_trading_first: true
-  live_trading_minimum_capital: 25000  # $25K minimum
+  live_trading_minimum_capital: 10000  # $10K minimum
 
 # Metadata
 metadata:

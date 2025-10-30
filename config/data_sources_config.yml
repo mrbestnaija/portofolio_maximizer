@@ -12,21 +12,21 @@ data_sources:
 
     - name: "alpha_vantage"
       type: "market_data"
-      enabled: false  # Enable when API key is configured in .env
+      enabled: true  # Enable when API key is configured in .env
       priority: 2
       config_file: "config/alpha_vantage_config.yml"
       credentials_env: "ALPHA_VANTAGE_API_KEY"
 
     - name: "finnhub"
       type: "market_data"
-      enabled: false  # Enable when API key is configured in .env
+      enabled: true  # Enable when API key is configured in .env
       priority: 3
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
   # Data source selection strategy
   selection_strategy:
-    mode: "priority"  # Options: priority, fallback, parallel, custom
+    mode: "fallback"  # Options: priority, fallback, parallel, custom
 
     # Priority mode: Use highest priority enabled source
     priority:

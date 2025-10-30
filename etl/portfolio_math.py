@@ -126,9 +126,14 @@ def calculate_enhanced_portfolio_metrics(
     var_95 = float(np.percentile(portfolio_returns, 5))
     var_99 = float(np.percentile(portfolio_returns, 1))
 
-    cvar_95 = float(portfolio_returns[portfolio_returns <= var_95].mean())
-    cvar_99 = float(portfolio_returns[portfolio_returns <= var_99].mean())
-    expected_shortfall = float(portfolio_returns[portfolio_returns < 0].mean())
+    # Handle empty slices to avoid warnings
+    negative_returns_95 = portfolio_returns[portfolio_returns <= var_95]
+    negative_returns_99 = portfolio_returns[portfolio_returns <= var_99]
+    negative_returns = portfolio_returns[portfolio_returns < 0]
+    
+    cvar_95 = float(negative_returns_95.mean()) if len(negative_returns_95) > 0 else 0.0
+    cvar_99 = float(negative_returns_99.mean()) if len(negative_returns_99) > 0 else 0.0
+    expected_shortfall = float(negative_returns.mean()) if len(negative_returns) > 0 else 0.0
 
     metrics: Dict[str, float] = {
         "total_return": float(total_return),

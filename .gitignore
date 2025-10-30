@@ -105,6 +105,10 @@ settings.local.json
 .cursor/*
 settings.local.json
 
+# References files for research and development
+Reference/
+References/
+References/*    
 
 # Cursor specific (protect AI configuration and settings)
 .Cursor/

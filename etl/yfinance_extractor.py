@@ -10,6 +10,7 @@ Success Criteria:
 - <1% missing values across all tickers
 - <5 data gaps per ticker
 """
+import json
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -189,7 +190,26 @@ class YFinanceExtractor(BaseExtractor):
         self.retention_years = retention_years
         self.cleanup_days = cleanup_days
 
-    def _check_cache(self, ticker: str, start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
+    def _load_cache_metadata(self, parquet_path) -> Dict[str, Any]:
+        """Load metadata saved alongside cached parquet file."""
+        metadata_path = parquet_path.with_suffix('.meta.json')
+        if not metadata_path.exists():
+            return {}
+
+        try:
+            with open(metadata_path, 'r') as f:
+                meta = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        return meta
+
+    def _check_cache(
+        self,
+        ticker: str,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Tuple[Optional[pd.DataFrame], str]:
         """Check local cache for recent data matching date range.
 
         Mathematical Foundation:
@@ -205,7 +225,7 @@ class YFinanceExtractor(BaseExtractor):
             Cached DataFrame if valid and complete, None otherwise
         """
         if not self.storage:
-            return None
+            return None, "miss"
 
         try:
             # Vectorized file lookup: most recent first
@@ -214,7 +234,7 @@ class YFinanceExtractor(BaseExtractor):
             files = sorted(stage_path.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
 
             if not files:
-                return None
+                return None, "miss"
 
             # Check freshness (vectorized time delta)
             latest_file = files[0]
@@ -222,7 +242,7 @@ class YFinanceExtractor(BaseExtractor):
 
             if file_age.total_seconds() > self.cache_hours * 3600:
                 logger.info(f"Cache MISS for {ticker}: expired (age: {file_age.total_seconds()/3600:.1f}h)")
-                return None
+                return None, "miss"
 
             # Load and validate coverage (vectorized boolean indexing)
             cached_data = pd.read_parquet(latest_file)
@@ -234,17 +254,53 @@ class YFinanceExtractor(BaseExtractor):
             start_ok = cache_start <= start_date + tolerance
             end_ok = cache_end >= end_date - tolerance
 
+            filtered = cached_data[(cached_data.index >= start_date) & (cached_data.index <= end_date)]
+
             if start_ok and end_ok:
-                filtered = cached_data[(cached_data.index >= start_date) & (cached_data.index <= end_date)]
-                logger.info(f"Cache HIT for {ticker}: {len(filtered)} rows (age: {file_age.total_seconds()/3600:.1f}h)")
-                return filtered
-            else:
-                logger.info(f"Cache MISS for {ticker}: incomplete coverage (need: {start_date} to {end_date}, have: {cache_start} to {cache_end})")
-                return None
+                logger.info(
+                    f"Cache HIT for {ticker}: {len(filtered)} rows (age: {file_age.total_seconds()/3600:.1f}h)"
+                )
+                return filtered, "full"
+
+            cache_meta = self._load_cache_metadata(latest_file)
+            requested_start = cache_meta.get('requested_start')
+            requested_end = cache_meta.get('requested_end')
+
+            partial_allowed = False
+            if requested_start and requested_end:
+                try:
+                    requested_start_dt = pd.to_datetime(requested_start)
+                    requested_end_dt = pd.to_datetime(requested_end)
+                except Exception:
+                    requested_start_dt = None
+                    requested_end_dt = None
+
+                if requested_start_dt and requested_end_dt:
+                    if requested_start_dt <= start_date and requested_end_dt >= end_date:
+                        partial_allowed = True
+
+            if partial_allowed:
+                gaps = []
+                if not start_ok:
+                    gaps.append(f"start gap ({cache_start.date()} vs {start_date.date()})")
+                if not end_ok:
+                    gaps.append(f"end gap ({cache_end.date()} vs {end_date.date()})")
+                gap_msg = ", ".join(gaps) if gaps else "partial coverage"
+                logger.info(
+                    f"Cache HIT (partial) for {ticker}: {len(filtered)} rows available; {gap_msg}. "
+                    "Returning cached range to avoid redundant downloads."
+                )
+                return filtered, "partial"
+
+            logger.info(
+                f"Cache MISS for {ticker}: incomplete coverage (need: {start_date} to {end_date}, "
+                f"have: {cache_start} to {cache_end})"
+            )
+            return None, "miss"
 
         except Exception as e:
             logger.warning(f"Cache lookup failed for {ticker}: {e}")
-            return None
+            return None, "miss"
 
     def extract_with_retention(self, tickers: List[str], storage) -> Tuple[Dict, Dict]:
         """Extract data with 10-year retention and auto-cleanup.
@@ -263,7 +319,17 @@ class YFinanceExtractor(BaseExtractor):
         for ticker in tickers:
             ticker_data = data[data['ticker'] == ticker] if not data.empty else pd.DataFrame()
             if not ticker_data.empty:
-                filepath = storage.save(ticker_data.drop('ticker', axis=1), 'raw', ticker)
+                ticker_df = ticker_data.drop('ticker', axis=1)
+                data_start = ticker_df.index.min().to_pydatetime() if len(ticker_df) > 0 else None
+                data_end = ticker_df.index.max().to_pydatetime() if len(ticker_df) > 0 else None
+                metadata = {
+                    'requested_start': start_date.isoformat(),
+                    'requested_end': end_date.isoformat(),
+                    'data_start': data_start.isoformat() if data_start else None,
+                    'data_end': data_end.isoformat() if data_end else None,
+                    'row_count': int(len(ticker_df)),
+                }
+                filepath = storage.save(ticker_df, 'raw', ticker, metadata=metadata)
                 saved_files[ticker] = str(filepath)
 
         # Auto-cleanup old files (vectorized in storage)
@@ -291,39 +357,54 @@ class YFinanceExtractor(BaseExtractor):
         all_data = []
         cache_hits = 0
         cache_misses = 0
+        cache_partial_hits = 0
 
         for i, ticker in enumerate(tickers):
             try:
                 # Cache-first strategy: check local storage before network request
-                cached_data = self._check_cache(ticker, start, end)
+                cached_data, coverage = self._check_cache(ticker, start, end)
 
                 if cached_data is not None and not cached_data.empty:
                     # Cache HIT: use local data
                     cached_data['ticker'] = ticker
                     all_data.append(cached_data)
                     cache_hits += 1
-                else:
-                    # Cache MISS: fetch from network
-                    data = fetch_ticker_data(ticker, start, end, timeout=self.timeout)
-                    if not data.empty:
-                        data['ticker'] = ticker
-                        all_data.append(data)
-                        cache_misses += 1
+                    if coverage == "partial":
+                        cache_partial_hits += 1
+                    continue
 
-                        # Save to cache for future use (if storage available)
-                        if self.storage:
-                            try:
-                                data_to_save = data.drop('ticker', axis=1) if 'ticker' in data.columns else data
-                                # Flatten MultiIndex columns if present (yfinance returns MultiIndex)
-                                if isinstance(data_to_save.columns, pd.MultiIndex):
-                                    data_to_save.columns = data_to_save.columns.get_level_values(0)
-                                self.storage.save(data_to_save, 'raw', ticker)
-                            except Exception as e:
-                                logger.warning(f"Failed to cache {ticker}: {e}")
+                # Cache MISS: fetch from network
+                data = fetch_ticker_data(ticker, start, end, timeout=self.timeout)
+                cache_misses += 1
+                if not data.empty:
+                    data['ticker'] = ticker
+                    all_data.append(data)
 
-                    # Rate limiting (only for network requests)
-                    if i < len(tickers) - 1 and cached_data is None:
-                        time.sleep(self.rate_limit_delay)
+                    # Save to cache for future use (if storage available)
+                    if self.storage:
+                        try:
+                            data_to_save = data.drop('ticker', axis=1) if 'ticker' in data.columns else data
+                            # Flatten MultiIndex columns if present (yfinance returns MultiIndex)
+                            if isinstance(data_to_save.columns, pd.MultiIndex):
+                                data_to_save.columns = data_to_save.columns.get_level_values(0)
+
+                            data_start = data_to_save.index.min().to_pydatetime() if len(data_to_save) > 0 else None
+                            data_end = data_to_save.index.max().to_pydatetime() if len(data_to_save) > 0 else None
+                            metadata = {
+                                'requested_start': start.isoformat(),
+                                'requested_end': end.isoformat(),
+                                'data_start': data_start.isoformat() if data_start else None,
+                                'data_end': data_end.isoformat() if data_end else None,
+                                'row_count': int(len(data_to_save)),
+                            }
+
+                            self.storage.save(data_to_save, 'raw', ticker, metadata=metadata)
+                        except Exception as e:
+                            logger.warning(f"Failed to cache {ticker}: {e}")
+
+                # Rate limiting (only for network requests)
+                if i < len(tickers) - 1:
+                    time.sleep(self.rate_limit_delay)
 
             except Exception as e:
                 logger.error(f"Skipping {ticker} after failed retries: {e}")
@@ -333,12 +414,14 @@ class YFinanceExtractor(BaseExtractor):
         # Update cache statistics (for BaseExtractor)
         self._cache_hits += cache_hits
         self._cache_misses += cache_misses
+        self._cache_partials += cache_partial_hits
 
         # Log cache performance
         total = cache_hits + cache_misses
         if total > 0:
             hit_rate = cache_hits / total
-            logger.info(f"Cache performance: {cache_hits}/{total} hits ({hit_rate:.1%} hit rate)")
+            partial_note = f" ({cache_partial_hits} partial)" if cache_partial_hits else ""
+            logger.info(f"Cache performance: {cache_hits}/{total} hits ({hit_rate:.1%} hit rate){partial_note}")
 
         if not all_data:
             return pd.DataFrame()

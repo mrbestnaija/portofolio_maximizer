@@ -3,11 +3,26 @@ Based on the comprehensive project state analysis, here's the updated step-by-st
 ```markdown
 # PRODUCTION-GRADE PORTFOLIO AUTOMATION - ML-FIRST IMPLEMENTATION PLAN
 
-## CURRENT STATUS: PRODUCTION-READY FOUNDATION ✅
-**All Core Infrastructure Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Checkpointing + LLM Integration
-**Critical Fix Applied**: Profit factor calculation corrected (50% underestimation) ⚠️
-**Test Coverage**: 148+ tests (100% passing)
-**Codebase**: ~6,780 lines of production code
+## CURRENT STATUS: PRODUCTION-READY FOUNDATION ✅ (Updated Oct 23, 2025)
+**All Core Infrastructure Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Checkpointing + LLM Integration  
+**Critical Fix Applied**: Profit factor calculation corrected (50% underestimation) ⚠️  
+**Test Coverage**: 148+ tests (100% passing)  
+**Codebase**: ~6,780 lines of production code  
+**Reality Check**: Phase-A deliverables remain outstanding—signal validator integration, enhanced portfolio math promotion, statistical test suite, and paper trading are not yet implemented. Monitoring deploys successfully but surfaces `signal_quality: NO_DATA` because database records are incomplete.
+
+### Implementation Gaps Snapshot
+- LLM signal records lack `signal_type`, which blocks validation dashboards and monitoring from recording activity.
+- The 5-layer signal validator is not connected to the live pipeline and still uses the incorrect Kelly criterion.
+- `portfolio_math_enhanced.py` is idle; advanced risk metrics (Sortino, CVaR, information ratio) are unavailable in production.
+- Statistical rigor tooling (bootstrap, hypothesis tests, Ljung–Box/Jarque–Bera) has not started, so MVS/PRS gates are “not evaluated.”
+- Paper trading, broker integration, stress testing, and regime detection remain on the roadmap with no implementation.
+
+### Immediate Action Plan
+1. Clean existing LLM signal data, enforce `signal_type`, and re-run monitoring to populate dashboards.
+2. Integrate the 5-layer validator, fix Kelly sizing, and add regression coverage for position sizing.
+3. Promote `portfolio_math_enhanced.py`, adjust imports, and execute the enhanced math test suite.
+4. Kick off the statistical test suite and wire results into CI and reporting.
+5. Once the above are green, move into paper trading, broker API work, and stress/regime tooling per the roadmap.
 
 ---
 

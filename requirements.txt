@@ -21,5 +21,8 @@ python-dotenv>=1.0.0
 click>=8.1.0
 tqdm>=4.65.0
 
+# LLM integration
+ollama>=0.1.0
+
 # Testing
 pytest>=7.4.0

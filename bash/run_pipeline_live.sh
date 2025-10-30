@@ -25,7 +25,7 @@ RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/pipeline_live_${RUN_STAMP}.log"
 
 TICKERS="${TICKERS:-AAPL,MSFT}"
-START_DATE="${START_DATE:-2020-01-01}"
+START_DATE="${START_DATE:-2015-01-01}"
 END_DATE="${END_DATE:-2024-01-01}"
 DATA_SOURCE="${DATA_SOURCE:-}"
 USE_CV="${USE_CV:-0}"
@@ -129,4 +129,4 @@ print("")
 PY
 
 echo "Log captured at: $LOG_FILE"
-echo "Live pipeline run complete."
+echo "Bestman's Portfolio Maximizer v45 Live pipeline run complete."

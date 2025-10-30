@@ -10,8 +10,10 @@ Pipeline fails immediately if Ollama is not running (per requirement 3b).
 import os
 import requests
 import logging
+import time
 from typing import Optional, Dict, Any
 from datetime import datetime
+from .performance_monitor import monitor_inference
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +40,8 @@ class OllamaClient:
     
     def __init__(self, 
                  host: str = "http://localhost:11434",
-                 model: str = "qwen:14b-chat-q4_K_M",  # UPDATED: Primary model for quantitative analysis
-                 timeout: int = 180):  # Increased for larger model
+                 model: str = "deepseek-coder:6.7b-instruct-q4_K_M",  # FIXED: Use available model
+                 timeout: int = 120):  # Reduced for smaller model
         """
         Initialize Ollama client with strict validation.
         
@@ -139,7 +141,7 @@ class OllamaClient:
             - CodeLlama 13B: ~25-35 tokens/sec
             - Expected latency: 5-30s depending on response length
         """
-        start_time = datetime.now()
+        start_time = time.time()
         
         try:
             payload = {
@@ -169,18 +171,53 @@ class OllamaClient:
             if not generated_text.strip():
                 raise OllamaConnectionError("Empty LLM response")
             
-            duration = (datetime.now() - start_time).total_seconds()
+            duration = time.time() - start_time
+            
+            # Record performance metrics
+            monitor_inference(
+                model_name=self.model,
+                prompt=prompt,
+                response=generated_text,
+                inference_time=duration,
+                success=True
+            )
+            
             logger.info(f"LLM generation: {duration:.1f}s, {len(generated_text)} chars")
             
             return generated_text
             
         except requests.exceptions.Timeout:
+            duration = time.time() - start_time
+            error_msg = f"LLM generation timeout (>{self.timeout}s)"
+            
+            # Record failed inference
+            monitor_inference(
+                model_name=self.model,
+                prompt=prompt,
+                response="",
+                inference_time=duration,
+                success=False,
+                error_message=error_msg
+            )
+            
             raise OllamaConnectionError(
-                f"LLM generation timeout (>{self.timeout}s). "
-                "Try reducing prompt length or increasing timeout."
+                f"{error_msg}. Try reducing prompt length or increasing timeout."
             )
         except Exception as e:
-            raise OllamaConnectionError(f"LLM generation failed: {e}")
+            duration = time.time() - start_time
+            error_msg = f"LLM generation failed: {e}"
+            
+            # Record failed inference
+            monitor_inference(
+                model_name=self.model,
+                prompt=prompt,
+                response="",
+                inference_time=duration,
+                success=False,
+                error_message=error_msg
+            )
+            
+            raise OllamaConnectionError(error_msg)
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information and performance stats"""

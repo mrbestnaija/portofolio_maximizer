@@ -20,30 +20,28 @@ def test_imports():
         print("   ✅ ollama_client imported successfully")
     except Exception as e:
         print(f"   ❌ Failed to import ollama_client: {e}")
-        return False
+        assert False, f"Failed to import ollama_client: {e}"
     
     try:
         from ai_llm.market_analyzer import LLMMarketAnalyzer
         print("   ✅ market_analyzer imported successfully")
     except Exception as e:
         print(f"   ❌ Failed to import market_analyzer: {e}")
-        return False
+        assert False, f"Failed to import market_analyzer: {e}"
     
     try:
         from ai_llm.signal_generator import LLMSignalGenerator
         print("   ✅ signal_generator imported successfully")
     except Exception as e:
         print(f"   ❌ Failed to import signal_generator: {e}")
-        return False
+        assert False, f"Failed to import signal_generator: {e}"
     
     try:
         from ai_llm.risk_assessor import LLMRiskAssessor
         print("   ✅ risk_assessor imported successfully")
     except Exception as e:
         print(f"   ❌ Failed to import risk_assessor: {e}")
-        return False
-    
-    return True
+        assert False, f"Failed to import risk_assessor: {e}"
 
 
 def test_ollama_client():
@@ -65,13 +63,13 @@ def test_ollama_client():
         
         if not health:
             print("   ⚠️  Warning: Health check returned False")
-            return False
+            assert False, f"OllamaClient initialization failed: {e}"
         
-        return True
+        # Test passed
     except Exception as e:
         print(f"   ❌ Error: {e}")
         traceback.print_exc()
-        return False
+        assert False, f"Test failed: {e}"
 
 
 def test_basic_generation():
@@ -93,11 +91,11 @@ def test_basic_generation():
         print(f"   ✅ Response: {response[:100]}...")
         print(f"   📊 Response length: {len(response)} characters")
         
-        return True
+        # Test passed
     except Exception as e:
         print(f"   ❌ Error: {e}")
         traceback.print_exc()
-        return False
+        assert False, f"Test failed: {e}"
 
 
 def test_market_analyzer():
@@ -132,11 +130,11 @@ def test_market_analyzer():
         print(f"   📊 Analysis type: {type(analysis)}")
         print(f"   📝 Keys: {list(analysis.keys()) if isinstance(analysis, dict) else 'Not a dict'}")
         
-        return True
+        # Test passed
     except Exception as e:
         print(f"   ❌ Error: {e}")
         traceback.print_exc()
-        return False
+        assert False, f"Test failed: {e}"
 
 
 def test_signal_generator():
@@ -179,11 +177,11 @@ def test_signal_generator():
         print(f"   📝 Action: {signal.get('action', 'unknown')}")
         print(f"   📝 Confidence: {signal.get('confidence', 'unknown')}")
         
-        return True
+        # Test passed
     except Exception as e:
         print(f"   ❌ Error: {e}")
         traceback.print_exc()
-        return False
+        assert False, f"Test failed: {e}"
 
 
 def test_risk_assessor():
@@ -218,11 +216,11 @@ def test_risk_assessor():
         print(f"   📊 Assessment type: {type(assessment)}")
         print(f"   📝 Keys: {list(assessment.keys()) if isinstance(assessment, dict) else str(assessment)[:150]}")
         
-        return True
+        # Test passed
     except Exception as e:
         print(f"   ❌ Error: {e}")
         traceback.print_exc()
-        return False
+        assert False, f"Test failed: {e}"
 
 
 def main():

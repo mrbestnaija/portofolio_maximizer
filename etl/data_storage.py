@@ -11,12 +11,16 @@ Success Criteria:
 - <50MB storage per symbol/year
 - No data corruption on concurrent access
 """
+import inspect
+import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import logging
 from datetime import datetime, timedelta
+
+from etl.time_series_cv import TimeSeriesCrossValidator
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,26 @@ class DataStorage:
         combined_metadata = {**(metadata or {}), **freq_metadata}
         data.to_parquet(temp_path, compression='snappy', index=True)
         temp_path.rename(filepath)
+
+        # Persist metadata alongside parquet for cache introspection
+        if combined_metadata:
+            safe_metadata: Dict[str, Any] = {}
+            for key, value in combined_metadata.items():
+                if isinstance(value, (datetime, pd.Timestamp)):
+                    safe_metadata[key] = pd.Timestamp(value).isoformat()
+                else:
+                    safe_metadata[key] = value
+
+            safe_metadata.setdefault('saved_at', datetime.now().isoformat())
+            safe_metadata.setdefault('rows', len(data))
+
+            metadata_path = filepath.with_suffix('.meta.json')
+            metadata_tmp = metadata_path.with_suffix('.tmp')
+            with open(metadata_tmp, 'w') as f:
+                json.dump(safe_metadata, f, indent=2)
+            if metadata_path.exists():
+                metadata_path.unlink()
+            metadata_tmp.rename(metadata_path)
 
         logger.info(f"Saved {len(data)} rows to {filepath}")
         return filepath
@@ -115,11 +139,15 @@ class DataStorage:
         if len(old_files) > 0:
             logger.info(f"Cleaned {len(old_files)} files from {stage}")
 
-    def train_validation_test_split(self, data: pd.DataFrame,
+    @staticmethod
+    def train_validation_test_split(data: pd.DataFrame,
                                     train_ratio: float = 0.7,
                                     val_ratio: float = 0.15,
                                     use_cv: bool = False,
-                                    n_splits: int = 5) -> Dict[str, pd.DataFrame]:
+                                    n_splits: int = 5,
+                                    test_size: float = 0.15,
+                                    gap: int = 0,
+                                    expanding_window: bool = True) -> Dict[str, pd.DataFrame]:
         """Data splitting with backward-compatible k-fold cross-validation.
 
         BACKWARD COMPATIBLE: Default behavior (use_cv=False) unchanged.
@@ -144,6 +172,9 @@ class DataStorage:
             val_ratio: Validation set proportion (used if use_cv=False)
             use_cv: If True, use k-fold cross-validation. Default=False (backward compatible)
             n_splits: Number of CV folds (default=5, only used if use_cv=True)
+            test_size: Proportion reserved for isolated test set when use_cv=True
+            gap: Gap between train and validation windows for CV folds
+            expanding_window: If True, use expanding window; otherwise rolling window
 
         Returns:
             Dictionary with split DataFrames.
@@ -158,13 +189,19 @@ class DataStorage:
         data = data.sort_index()
 
         if use_cv:
-            # Use k-fold cross-validation (NEW FEATURE)
-            from etl.time_series_cv import TimeSeriesCrossValidator
+            if not 0 < test_size < 1:
+                raise ValueError("test_size must be between 0 and 1 when using cross-validation")
+            if gap < 0:
+                raise ValueError("gap must be non-negative when using cross-validation")
+            if n_splits < 2:
+                raise ValueError("n_splits must be at least 2 for cross-validation")
 
+            # Use k-fold cross-validation (NEW FEATURE)
             cv_splitter = TimeSeriesCrossValidator(
                 n_splits=n_splits,
-                test_size=0.15,
-                expanding_window=True
+                test_size=test_size,
+                gap=gap,
+                expanding_window=expanding_window
             )
 
             cv_folds, test_indices = cv_splitter.split(data)
@@ -183,12 +220,25 @@ class DataStorage:
             logger.info(f"CV Split: {len(fold_splits)} folds, "
                        f"test={len(test_data)}")
 
-            return {
+            result: Dict[str, Any] = {
                 'cv_folds': fold_splits,
                 'testing': test_data,
                 'n_splits': n_splits,
                 'split_type': 'cross_validation'
             }
+
+            if fold_splits:
+                first_fold = fold_splits[0]
+                result['train'] = first_fold['train']
+                result['validation'] = first_fold['validation']
+            else:
+                result['train'] = pd.DataFrame(index=data.index, columns=data.columns)
+                result['validation'] = pd.DataFrame(index=data.index, columns=data.columns)
+
+            result['test'] = test_data
+            result['training'] = result['train']
+            result['testing'] = result['test']
+            return result
 
         else:
             # Simple chronological split (DEFAULT - BACKWARD COMPATIBLE)
@@ -196,10 +246,16 @@ class DataStorage:
             train_end = int(n * train_ratio)
             val_end = int(n * (train_ratio + val_ratio))
 
+            training_data = data.iloc[:train_end]
+            validation_data = data.iloc[train_end:val_end]
+            testing_data = data.iloc[val_end:]
+
             splits = {
-                'training': data.iloc[:train_end],
-                'validation': data.iloc[train_end:val_end],
-                'testing': data.iloc[val_end:]
+                'training': training_data,
+                'validation': validation_data,
+                'testing': testing_data,
+                'train': training_data,
+                'test': testing_data
             }
 
             logger.info(f"Split: train={len(splits['training'])}, "

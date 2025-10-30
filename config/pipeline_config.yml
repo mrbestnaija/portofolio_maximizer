@@ -3,8 +3,8 @@
 
 pipeline:
   name: "Portfolio Maximizer ETL Pipeline"
-  version: "5.2"
-  description: "Extract, Transform, Load pipeline with k-fold CV and LLM integration"
+  version: "4.0"
+  description: "Extract, Transform, Load pipeline with k-fold CV support"
 
   # Pipeline stages (executed in order)
   stages:
@@ -17,16 +17,6 @@ pipeline:
       retry_attempts: 3
       retry_delay: 2
       required: true
-
-    - name: "llm_market_analysis"
-      description: "LLM-powered market data interpretation (Phase 5.2)"
-      module: "ai_llm.market_analyzer"
-      class: "LLMMarketAnalyzer"
-      config_file: "config/llm_config.yml"
-      timeout_seconds: 180
-      retry_attempts: 1
-      required: true  # Pipeline fails if Ollama unavailable
-      enabled: true  # Set to false to disable LLM integration
 
     - name: "data_validation"
       description: "Validate data quality (prices, volumes, outliers)"
@@ -47,26 +37,6 @@ pipeline:
       retry_attempts: 1
       required: true
 
-    - name: "llm_signal_generation"
-      description: "LLM-powered trading signal generation (Phase 5.2)"
-      module: "ai_llm.signal_generator"
-      class: "LLMSignalGenerator"
-      config_file: "config/llm_config.yml"
-      timeout_seconds: 180
-      retry_attempts: 1
-      required: true
-      enabled: true
-
-    - name: "llm_risk_assessment"
-      description: "LLM-powered risk analysis (Phase 5.2)"
-      module: "ai_llm.risk_assessor"
-      class: "LLMRiskAssessor"
-      config_file: "config/llm_config.yml"
-      timeout_seconds: 120
-      retry_attempts: 1
-      required: true
-      enabled: true
-
     - name: "data_storage"
       description: "Split data (simple or CV) and persist to storage"
       module: "etl.data_storage"
@@ -76,11 +46,20 @@ pipeline:
       retry_attempts: 1
       required: true
 
+  # Optional ticker discovery integration
+  ticker_discovery:
+    enabled: false
+    loader: "alpha_vantage"  # Currently supported: alpha_vantage
+    cache_dir: "data/tickers"
+    universe_path: "data/tickers/ticker_universe.csv"
+    fallback_csv: null  # Provide to avoid live network calls
+    auto_refresh: false  # Refresh universe automatically before extraction
+
   # Data splitting configuration
   data_split:
     # Default strategy (config-driven)
     # Change to 'cv' for production-grade k-fold cross-validation
-    default_strategy: "simple"  # Options: simple, cv
+    default_strategy: "cv"  # Options: simple, cv
 
     # Simple chronological split (70/15/15)
     simple_split:
@@ -186,6 +165,12 @@ pipeline:
       - "validation_pass_rate"
       - "test_coverage"
 
+  portfolio_optimizer:
+    enabled: false
+    price_field: "Close"
+    risk_aversion: 1.0
+    constraints: null  # Optional dict e.g. {"max_weight": 0.2}
+
   # Error handling and recovery
   error_handling:
     # Global error strategy
@@ -231,56 +216,10 @@ pipeline:
     separate_stage_logs: true
     stage_log_dir: "logs/stages"
 
-# LLM Integration Configuration (Phase 5.2)
-llm:
-  # Signal validation requirements (per AGENT_INSTRUCTION.md)
-  signal_validation:
-    # Minimum requirements before live trading
-    min_annual_return: 0.10  # 10% annual return minimum
-    min_validation_days: 30  # At least 30 days of backtesting
-    min_sharpe_ratio: 0.0  # Positive risk-adjusted returns
-    must_beat_baseline: true  # Must beat buy-and-hold
-    min_capital_requirement: 10000  # $10K minimum capital
-  
-  # Available models on system
-  available_models:
-    - name: "deepseek-coder:6.7b-instruct-q4_K_M"
-      size: "4.1 GB"
-      speed: "15-20 tokens/sec"
-      use_case: "Production - balanced performance"
-      priority: 1
-    
-    - name: "codellama:13b-instruct-q4_K_M"
-      size: "7.9 GB"
-      speed: "25-35 tokens/sec"
-      use_case: "Fast inference for high-frequency analysis"
-      priority: 2
-    
-    - name: "qwen:14b-chat-q4_K_M"
-      size: "9.4 GB"
-      speed: "20-25 tokens/sec"
-      use_case: "Complex reasoning and analysis"
-      priority: 3
-  
-  # Performance monitoring
-  monitoring:
-    track_latency: true
-    track_accuracy: true
-    log_predictions: true
-    alert_on_failure: true
-  
-  # Safety guardrails
-  safety:
-    advisory_only: true  # Signals are advisory, not executable
-    require_validation: true  # Must pass validation before trading
-    confidence_threshold: 0.5  # Minimum confidence for signals
-    max_position_size: 0.25  # Maximum 25% portfolio per position
-
 # Metadata
 metadata:
-  created_by: "Portfolio Maximizer v5.2"
+  created_by: "Portfolio Maximizer v4.0"
   created_date: "2025-10-04"
-  last_updated: "2025-10-12"
-  purpose: "Unified pipeline and workflow configuration with LLM integration"
+  last_updated: "2025-10-04"
+  purpose: "Unified pipeline and workflow configuration"
   standards: "MIT Statistical Learning Standards"
-  phase: "5.2 - Local LLM Integration Complete"

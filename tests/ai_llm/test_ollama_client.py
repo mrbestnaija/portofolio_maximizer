@@ -27,6 +27,7 @@ class TestOllamaClientInitialization:
             mock_response.json.return_value = {
                 'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
             }
+            mock_response.raise_for_status.return_value = None
             mock_get.return_value = mock_response
             
             client = OllamaClient()
@@ -48,6 +49,7 @@ class TestOllamaClientInitialization:
             mock_response.json.return_value = {
                 'models': [{'name': 'different-model'}]
             }
+            mock_response.raise_for_status.return_value = None
             mock_get.return_value = mock_response
             
             with pytest.raises(OllamaConnectionError) as exc_info:
@@ -72,9 +74,12 @@ class TestOllamaGeneration:
     def test_generate_returns_text(self, mock_get, mock_post):
         """Test successful text generation"""
         # Mock init validation
-        mock_get.return_value.json.return_value = {
+        mock_response = Mock()
+        mock_response.json.return_value = {
             'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
         # Mock generation response
         mock_post.return_value.json.return_value = {
@@ -91,9 +96,12 @@ class TestOllamaGeneration:
     @patch('requests.get')
     def test_generate_handles_timeout(self, mock_get, mock_post):
         """Test generation timeout handling"""
-        mock_get.return_value.json.return_value = {
+        mock_response = Mock()
+        mock_response.json.return_value = {
             'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
         mock_post.side_effect = requests.exceptions.Timeout()
         
@@ -107,9 +115,12 @@ class TestOllamaGeneration:
     @patch('requests.get')
     def test_generate_rejects_empty_response(self, mock_get, mock_post):
         """Test that empty responses raise error"""
-        mock_get.return_value.json.return_value = {
+        mock_response = Mock()
+        mock_response.json.return_value = {
             'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
         mock_post.return_value.json.return_value = {'response': ''}
         
@@ -123,9 +134,12 @@ class TestOllamaGeneration:
     @patch('requests.get')
     def test_generate_with_system_prompt(self, mock_get, mock_post):
         """Test generation with system instructions"""
-        mock_get.return_value.json.return_value = {
+        mock_response = Mock()
+        mock_response.json.return_value = {
             'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
         mock_post.return_value.json.return_value = {'response': 'Test response'}
         

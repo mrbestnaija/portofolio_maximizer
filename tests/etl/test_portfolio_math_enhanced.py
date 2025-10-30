@@ -131,7 +131,7 @@ class TestKellyCriterion:
         
         kelly = calculate_kelly_fraction_correct(win_rate, avg_win, avg_loss)
         
-        # Expected: (2 * 0.6 - 0.4) / 2 = (1.2 - 0.4) / 2 = 0.4
+        # Expected: (2 * 0.6 - 0.4) / 2 = (1.2 - 0.4) / 2 = 0.4 (capped at 25%) to prevent over-leveraging
         expected = (2 * 0.6 - 0.4) / 2
         capped_expected = min(expected, 0.25)
         assert abs(kelly - capped_expected) < 1e-6, f"Kelly fraction wrong: {kelly} (expected {capped_expected})"
