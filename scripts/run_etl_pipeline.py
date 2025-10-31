@@ -24,13 +24,14 @@ Pipeline Flow:
 import sys
 import yaml
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 import click
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Sequence
+from typing import Dict, Any, List, Optional, Sequence, Tuple
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -64,6 +65,8 @@ from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
 from ai_llm.market_analyzer import LLMMarketAnalyzer
 from ai_llm.signal_generator import LLMSignalGenerator
 from ai_llm.risk_assessor import LLMRiskAssessor
+from ai_llm.performance_optimizer import LLMPerformanceOptimizer
+from ai_llm.signal_quality_validator import SignalQualityValidator, Signal, SignalDirection
 
 # Database Integration (Phase 5.2+)
 from etl.database_manager import DatabaseManager
@@ -170,6 +173,34 @@ def _extract_price_matrix(data: pd.DataFrame, price_field: str, tickers: Sequenc
     return matrix
 
 
+def _slice_ticker_dataframe(data: Optional[pd.DataFrame], ticker: str) -> pd.DataFrame:
+    """Return data subset for a given ticker."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    if 'ticker' in data.columns:
+        return data[data['ticker'] == ticker].copy()
+
+    if isinstance(data.index, pd.MultiIndex):
+        for level in range(data.index.nlevels):
+            try:
+                return data.xs(ticker, level=level).copy()
+            except (KeyError, ValueError):
+                continue
+
+    return data.copy()
+
+
+def _prepare_validation_frame(raw_ticker_data: pd.DataFrame) -> pd.DataFrame:
+    """Prepare market data snapshot for signal validation."""
+    if raw_ticker_data is None or raw_ticker_data.empty:
+        return pd.DataFrame()
+
+    validation_data = raw_ticker_data.copy()
+    validation_data.columns = [str(col).lower() for col in validation_data.columns]
+    return validation_data
+
+
 def compute_portfolio_metrics(
     raw_data: pd.DataFrame,
     tickers: Sequence[str],
@@ -225,6 +256,254 @@ def compute_portfolio_metrics(
         metrics.get("max_drawdown", 0.0) * 100,
     )
 
+
+@dataclass
+class CVSettings:
+    use_cv: bool
+    n_splits: int
+    test_size: float
+    gap: int
+    expanding_window: bool
+    window_strategy: str
+    train_ratio: float
+    val_ratio: float
+    default_strategy: str
+    expected_coverage: float
+    chronological_split: bool
+
+
+@dataclass
+class LLMComponents:
+    enabled: bool = False
+    client: Optional[OllamaClient] = None
+    market_analyzer: Optional[LLMMarketAnalyzer] = None
+    signal_generator: Optional[LLMSignalGenerator] = None
+    risk_assessor: Optional[LLMRiskAssessor] = None
+    signal_validator: Optional[SignalQualityValidator] = None
+    optimizer: Optional[LLMPerformanceOptimizer] = None
+    validator_version: str = "v1"
+    llm_config: Optional[Dict[str, Any]] = None
+
+
+def _load_pipeline_config_safe(config_path: str) -> Dict[str, Any]:
+    try:
+        return load_config(config_path)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("Failed to load pipeline config: %s", exc)
+        logger.info("Using fallback configuration...")
+        return {'pipeline': {'stages': []}}
+
+
+def _resolve_cv_settings(
+    use_cv_flag: Optional[bool],
+    n_splits_flag: Optional[int],
+    test_size_flag: Optional[float],
+    gap_flag: Optional[int],
+    data_split_cfg: Dict[str, Any],
+) -> CVSettings:
+    cv_config = data_split_cfg.get('cross_validation', {})
+    simple_config = data_split_cfg.get('simple_split', {})
+    default_strategy = data_split_cfg.get('default_strategy', 'simple')
+
+    use_cv = use_cv_flag if use_cv_flag is not None else (default_strategy == 'cv')
+    n_splits = n_splits_flag or cv_config.get('n_splits', 5)
+    test_size = test_size_flag or cv_config.get('test_size', 0.15)
+    gap = gap_flag or cv_config.get('gap', 0)
+
+    expanding_window = cv_config.get('expanding_window')
+    if expanding_window is None:
+        window_strategy_cfg = str(cv_config.get('window_strategy', 'expanding')).lower()
+        expanding_window = window_strategy_cfg != 'sliding'
+    elif isinstance(expanding_window, str):
+        expanding_window = expanding_window.lower() != 'false'
+    window_strategy = 'expanding' if expanding_window else 'sliding'
+
+    train_ratio = simple_config.get('train_ratio', 0.7)
+    val_ratio = simple_config.get('validation_ratio', 0.15)
+    expected_coverage = cv_config.get('expected_coverage', 0.83)
+    chronological = simple_config.get('chronological', True)
+
+    return CVSettings(
+        use_cv=use_cv,
+        n_splits=n_splits,
+        test_size=test_size,
+        gap=gap,
+        expanding_window=expanding_window,
+        window_strategy=window_strategy,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        default_strategy=default_strategy,
+        expected_coverage=expected_coverage,
+        chronological_split=bool(chronological),
+    )
+
+
+def _load_llm_config_data() -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], str]:
+    try:
+        llm_config_data = load_config('config/llm_config.yml')
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("Failed to load LLM config: %s", exc)
+        return {}, {}, {}, 'v1'
+
+    llm_cfg = llm_config_data.get('llm', {})
+    signal_validation_cfg = llm_cfg.get('signal_generator', {}).get('validation', {}) or {}
+    validator_version = signal_validation_cfg.get('version', 'v1')
+    return llm_config_data, llm_cfg, signal_validation_cfg, validator_version
+
+
+def _initialize_llm_components(
+    enable_llm: bool,
+    llm_model: str,
+    llm_cfg: Dict[str, Any],
+    signal_validation_cfg: Dict[str, Any],
+) -> LLMComponents:
+    components = LLMComponents(
+        enabled=False,
+        validator_version=signal_validation_cfg.get('version', 'v1'),
+        llm_config=llm_cfg,
+    )
+
+    if not enable_llm:
+        return components
+
+    try:
+        server_cfg = llm_cfg.get('server', {})
+        performance_cfg = llm_cfg.get('performance', {})
+        generation_cfg = llm_cfg.get('generation', {})
+        signal_cfg = llm_cfg.get('signal_generator', {})
+        risk_cfg = llm_cfg.get('risk_assessor', {})
+
+        host = server_cfg.get('host', "http://localhost:11434")
+        timeout_seconds = int(server_cfg.get('timeout_seconds', 120))
+
+        cache_enabled = bool(performance_cfg.get('track_cache_usage', True))
+        cache_max_size_cfg = performance_cfg.get('cache_max_size', 32)
+        try:
+            cache_max_size = int(cache_max_size_cfg) if cache_max_size_cfg is not None else 32
+        except (TypeError, ValueError):
+            cache_max_size = 32
+
+        optimizer = LLMPerformanceOptimizer()
+        model_to_use = llm_model or llm_cfg.get('active_model')
+
+        llm_client = OllamaClient(
+            host=host,
+            model=model_to_use,
+            timeout=timeout_seconds,
+            optimizer=optimizer,
+            optimize_use_case=performance_cfg.get('default_use_case', 'balanced'),
+            enable_cache=cache_enabled,
+            cache_max_size=cache_max_size,
+            generation_options=generation_cfg,
+        )
+
+        if not llm_client.health_check():
+            raise OllamaConnectionError("Ollama health check failed")
+
+        signal_validator = SignalQualityValidator(
+            min_confidence_threshold=float(signal_validation_cfg.get('min_confidence_for_action', 0.6)),
+            max_risk_threshold=float(signal_validation_cfg.get('max_risk_threshold', 0.15)),
+            min_expected_return=float(signal_validation_cfg.get('min_expected_return', 0.02)),
+        )
+
+        components.enabled = True
+        components.client = llm_client
+        components.market_analyzer = LLMMarketAnalyzer(llm_client)
+        components.signal_generator = LLMSignalGenerator(
+            llm_client,
+            system_prompt=signal_cfg.get('system_prompt'),
+            temperature=signal_cfg.get('temperature', 0.05),
+            validation_rules=signal_validation_cfg,
+        )
+        components.risk_assessor = LLMRiskAssessor(
+            llm_client,
+            system_prompt=risk_cfg.get('system_prompt'),
+            temperature=risk_cfg.get('temperature', 0.1),
+        )
+        components.signal_validator = signal_validator
+        components.optimizer = optimizer
+
+        logger.info("✓ LLM initialized: %s", llm_client.model)
+    except OllamaConnectionError as exc:
+        logger.error("✗ LLM initialization failed: %s", exc)
+        logger.error("  Fix: Ensure Ollama is running: 'ollama serve'")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error("✗ LLM initialization error: %s", exc)
+
+    return components
+
+
+def _prepare_ticker_list(
+    tickers_argument: str,
+    discovery_cfg: Dict[str, Any],
+    use_ticker_discovery: bool,
+    refresh_ticker_universe: bool,
+) -> List[str]:
+    manual_tickers = [t.strip() for t in tickers_argument.split(',') if t.strip()]
+    discovery_enabled = discovery_cfg.get('enabled', False) or use_ticker_discovery
+
+    if not discovery_enabled:
+        return manual_tickers
+
+    loader_type = discovery_cfg.get('loader', 'alpha_vantage').lower()
+    if loader_type != 'alpha_vantage':
+        raise ValueError(f"Unsupported ticker discovery loader: {loader_type}")
+
+    loader = AlphaVantageTickerLoader(
+        api_key=discovery_cfg.get('api_key'),
+        cache_dir=discovery_cfg.get('cache_dir'),
+    )
+    validator = TickerValidator()
+    universe_manager = TickerUniverseManager(
+        loader=loader,
+        validator=validator,
+        universe_path=discovery_cfg.get('universe_path'),
+    )
+    fallback_csv = discovery_cfg.get('fallback_csv')
+    fallback_path = Path(fallback_csv) if fallback_csv else None
+
+    try:
+        if refresh_ticker_universe or discovery_cfg.get('auto_refresh', False):
+            universe = universe_manager.refresh_universe(
+                force_download=True,
+                fallback_csv=fallback_path,
+            )
+        else:
+            universe = universe_manager.load_universe()
+            if not universe.tickers:
+                universe = universe_manager.refresh_universe(
+                    force_download=False,
+                    fallback_csv=fallback_path,
+                )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("Ticker discovery failed (%s); falling back to CLI tickers.", exc)
+        return manual_tickers
+
+    if not universe.tickers:
+        logger.warning("Ticker discovery produced an empty universe; using CLI tickers instead.")
+        return manual_tickers
+
+    logger.info("Using %s tickers from discovery universe.", len(universe.tickers))
+    return universe.tickers
+
+
+def _log_split_strategy(settings: CVSettings) -> None:
+    if settings.use_cv:
+        logger.info("✓ Using k-fold cross-validation (k=%d)", settings.n_splits)
+        logger.info("  - Test size: %d%%", int(settings.test_size * 100))
+        logger.info("  - Gap between train/val: %d periods", settings.gap)
+        logger.info("  - Window strategy: %s", settings.window_strategy)
+        logger.info("  - Expected validation coverage: %d%%", int(settings.expected_coverage * 100))
+    else:
+        test_ratio = max(0.0, 1 - settings.train_ratio - settings.val_ratio)
+        logger.info(
+            "Using simple chronological split (%d/%d/%d)",
+            int(settings.train_ratio * 100),
+            int(settings.val_ratio * 100),
+            int(test_ratio * 100),
+        )
+        logger.info("  - Strategy: %s", settings.default_strategy)
+        logger.info("  - Chronological: %s", 'yes' if settings.chronological_split else 'no')
 
 @click.command()
 @click.option('--config', default='config/pipeline_config.yml',
@@ -295,112 +574,53 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose logging enabled")
 
-    # Load pipeline configuration
-    try:
-        pipeline_config = load_config(config)
-    except Exception as e:
-        logger.error(f"Failed to load pipeline config: {e}")
-        logger.info("Using fallback configuration...")
-        pipeline_config = {'pipeline': {'stages': []}}  # Fallback
-
-    # Extract configuration sections
+    # Load pipeline configuration and derived settings
+    pipeline_config = _load_pipeline_config_safe(config)
     pipeline_cfg = pipeline_config.get('pipeline', {})
     stages_cfg = pipeline_cfg.get('stages', [])
     data_split_cfg = pipeline_cfg.get('data_split', {})
-
-    # Get CV configuration from config file
-    cv_config = data_split_cfg.get('cross_validation', {})
-    simple_config = data_split_cfg.get('simple_split', {})
-    default_strategy = data_split_cfg.get('default_strategy', 'simple')
     discovery_cfg = pipeline_cfg.get('ticker_discovery', {})
     portfolio_optimizer_cfg = pipeline_cfg.get('portfolio_optimizer', {})
 
-    # Determine CV parameters (CLI overrides config)
-    if use_cv is None:
-        # Use config default strategy
-        use_cv = (default_strategy == 'cv')
+    cv_settings = _resolve_cv_settings(use_cv, n_splits, test_size, gap, data_split_cfg)
+    use_cv = cv_settings.use_cv
+    n_splits = cv_settings.n_splits
+    test_size = cv_settings.test_size
+    gap = cv_settings.gap
+    expanding_window = cv_settings.expanding_window
+    train_ratio = cv_settings.train_ratio
+    val_ratio = cv_settings.val_ratio
 
-    if n_splits is None:
-        # Use config value
-        n_splits = cv_config.get('n_splits', 5)
+    ticker_list = _prepare_ticker_list(
+        tickers_argument=tickers,
+        discovery_cfg=discovery_cfg,
+        use_ticker_discovery=use_ticker_discovery,
+        refresh_ticker_universe=refresh_ticker_universe,
+    )
 
-    if test_size is None:
-        # Use config value
-        test_size = cv_config.get('test_size', 0.15)
-
-    if gap is None:
-        # Use config value
-        gap = cv_config.get('gap', 0)
-
-    expanding_window = cv_config.get('expanding_window')
-    if expanding_window is None:
-        window_strategy_cfg = cv_config.get('window_strategy', 'expanding')
-        window_strategy = str(window_strategy_cfg).lower()
-        expanding_window = window_strategy != 'sliding'
+    llm_config_data: Dict[str, Any] = {}
+    llm_cfg: Dict[str, Any] = {}
+    signal_validation_cfg: Dict[str, Any] = {}
+    if enable_llm:
+        logger.info("Initializing LLM components...")
+        llm_config_data, llm_cfg, signal_validation_cfg, validator_version = _load_llm_config_data()
     else:
-        if isinstance(expanding_window, str):
-            expanding_window = expanding_window.lower() != 'false'
-        window_strategy = 'expanding' if expanding_window else 'sliding'
-    window_strategy = 'expanding' if expanding_window else 'sliding'
+        validator_version = 'v1'
 
-    # Get simple split ratios from config
-    train_ratio = simple_config.get('train_ratio', 0.7)
-    val_ratio = simple_config.get('validation_ratio', 0.15)
+    llm_components = _initialize_llm_components(
+        enable_llm=enable_llm,
+        llm_model=llm_model,
+        llm_cfg=llm_cfg,
+        signal_validation_cfg=signal_validation_cfg,
+    )
+    enable_llm = llm_components.enabled
+    validator_version = llm_components.validator_version
 
-    # Parse tickers
-    discovery_enabled = discovery_cfg.get('enabled', False) or use_ticker_discovery
-    ticker_list: List[str]
-    if discovery_enabled:
-        loader_type = discovery_cfg.get('loader', 'alpha_vantage').lower()
-        cache_dir = discovery_cfg.get('cache_dir')
-        universe_path = discovery_cfg.get('universe_path')
-        fallback_csv = discovery_cfg.get('fallback_csv')
-
-        if loader_type != 'alpha_vantage':
-            raise ValueError(f"Unsupported ticker discovery loader: {loader_type}")
-
-        loader = AlphaVantageTickerLoader(
-            api_key=discovery_cfg.get('api_key'),
-            cache_dir=cache_dir,
-        )
-        validator = TickerValidator()
-        universe_manager = TickerUniverseManager(
-            loader=loader,
-            validator=validator,
-            universe_path=universe_path,
-        )
-        fallback_path = Path(fallback_csv) if fallback_csv else None
-
-        try:
-            if refresh_ticker_universe or discovery_cfg.get('auto_refresh', False):
-                universe = universe_manager.refresh_universe(
-                    force_download=True,
-                    fallback_csv=fallback_path,
-                )
-            else:
-                universe = universe_manager.load_universe()
-                if not universe.tickers:
-                    universe = universe_manager.refresh_universe(
-                        force_download=False,
-                        fallback_csv=fallback_path,
-                    )
-        except Exception as exc:
-            logger.warning("Ticker discovery failed (%s); falling back to CLI tickers.", exc)
-            ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
-        else:
-            ticker_list = universe.tickers
-            if not ticker_list:
-                logger.warning("Ticker discovery produced an empty universe; using CLI tickers instead.")
-                ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
-            else:
-                logger.info("Using %s tickers from discovery universe.", len(ticker_list))
-    else:
-        ticker_list = [t.strip() for t in tickers.split(',') if t.strip()]
-    logger.info(f"Pipeline: Portfolio Maximizer v45 (Phase 5.2)")
-    logger.info(f"Data Source: {data_source if data_source else 'from config'}")
-    logger.info(f"Tickers: {', '.join(ticker_list)}")
-    logger.info(f"Date range: {start} to {end}")
-    logger.info(f"LLM Integration: {'ENABLED' if enable_llm else 'DISABLED'}")
+    logger.info("Pipeline: Portfolio Maximizer v45 (Phase 5.2)")
+    logger.info("Data Source: %s", data_source if data_source else 'from config')
+    logger.info("Tickers: %s", ', '.join(ticker_list) if ticker_list else '(none)')
+    logger.info("Date range: %s to %s", start, end)
+    logger.info("LLM Integration: %s", 'ENABLED' if enable_llm else 'DISABLED')
 
     execution_mode = execution_mode.lower()
     if dry_run:
@@ -414,36 +634,12 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     if allow_live_fallback:
         logger.info("Auto mode: attempting live extraction first, synthetic fallback enabled on failure")
     
-    # Initialize LLM if enabled
-    llm_client = None
-    market_analyzer = None
-    signal_generator = None
-    risk_assessor = None
-    
-    if enable_llm:
-        try:
-            logger.info("Initializing LLM components...")
-            llm_client = OllamaClient(model=llm_model) if llm_model else OllamaClient()
-            
-            # Health check
-            if not llm_client.health_check():
-                raise OllamaConnectionError("Ollama health check failed")
-            
-            market_analyzer = LLMMarketAnalyzer(llm_client)
-            signal_generator = LLMSignalGenerator(llm_client)
-            risk_assessor = LLMRiskAssessor(llm_client)
-            
-            logger.info(f"✓ LLM initialized: {llm_client.model}")
-            logger.info(f"✓ Available models on system: deepseek-coder:6.7b-instruct, codellama:13b-instruct, qwen:14b-chat")
-        except OllamaConnectionError as e:
-            logger.error(f"✗ LLM initialization failed: {e}")
-            logger.error("  Fix: Ensure Ollama is running: 'ollama serve'")
-            logger.error("  Pipeline will continue WITHOUT LLM integration")
-            enable_llm = False
-        except Exception as e:
-            logger.error(f"✗ LLM initialization error: {e}")
-            logger.error("  Pipeline will continue WITHOUT LLM integration")
-            enable_llm = False
+    # Initialize LLM component handles
+    llm_client = llm_components.client
+    market_analyzer = llm_components.market_analyzer
+    signal_generator = llm_components.signal_generator
+    risk_assessor = llm_components.risk_assessor
+    signal_validator = llm_components.signal_validator
 
     # Initialize storage
     storage = DataStorage()
@@ -480,17 +676,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         raise
 
     # Determine split strategy and log configuration
-    if use_cv:
-        logger.info(f"✓ Using k-fold cross-validation (k={n_splits})")
-        logger.info(f"  - Test size: {test_size*100:.0f}%")
-        logger.info(f"  - Gap between train/val: {gap} periods")
-        logger.info(f"  - Window strategy: {window_strategy}")
-        expected_coverage = cv_config.get('expected_coverage', 0.83)
-        logger.info(f"  - Expected validation coverage: {expected_coverage*100:.0f}%")
-    else:
-        logger.info(f"Using simple chronological split ({train_ratio*100:.0f}/{val_ratio*100:.0f}/{(1-train_ratio-val_ratio)*100:.0f})")
-        logger.info(f"  - Strategy: {default_strategy}")
-        logger.info(f"  - Chronological: {simple_config.get('chronological', True)}")
+    _log_split_strategy(cv_settings)
 
     # Define stage names (in execution order)
     stage_names = ['data_extraction', 'data_validation', 'data_preprocessing']
@@ -682,6 +868,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 # Stage 5 (LLM): Signal Generation
                 logger.info("Generating trading signals with LLM...")
                 llm_signals = {}
+                llm_signal_validations = {}
                 
                 for ticker in ticker_list:
                     try:
@@ -693,19 +880,104 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         start_time = time.time()
                         signal = signal_generator.generate_signal(ticker_data, ticker, market_analysis)
                         latency = time.time() - start_time
+                        validation_status = 'pending'
+                        validation_entry: Dict[str, Any] = {}
+
+                        ticker_raw = _slice_ticker_dataframe(raw_data, ticker)
+                        validation_data = _prepare_validation_frame(ticker_raw)
+                        if not validation_data.empty and 'close' in validation_data.columns:
+                            try:
+                                price_at_signal = float(validation_data['close'].iloc[-1])
+                            except Exception:
+                                price_at_signal = 0.0
+                        else:
+                            price_at_signal = 0.0
+
+                        signal['entry_price'] = price_at_signal
+
+                        if signal_validator is not None:
+                            try:
+                                direction_value = str(signal.get('action', 'HOLD')).upper()
+                                try:
+                                    direction_enum = SignalDirection(direction_value)
+                                except ValueError:
+                                    direction_enum = SignalDirection.HOLD
+
+                                validator_signal = Signal(
+                                    ticker=ticker,
+                                    direction=direction_enum,
+                                    confidence=float(signal.get('confidence', 0.0)),
+                                    reasoning=signal.get('reasoning', ''),
+                                    timestamp=datetime.now(),
+                                    price_at_signal=price_at_signal or 0.0,
+                                    expected_return=signal.get('expected_return'),
+                                    risk_estimate=signal.get('risk_estimate'),
+                                )
+
+                                if validation_data.empty or 'close' not in validation_data.columns:
+                                    raise ValueError("insufficient market data for validation")
+
+                                validation_result = signal_validator.validate_signal(validator_signal, validation_data)
+                                validation_status = 'validated' if validation_result.is_valid else 'failed'
+                                validation_entry = {
+                                    'validator_version': validator_version,
+                                    'confidence_score': float(validation_result.confidence_score),
+                                    'recommendation': validation_result.recommendation,
+                                    'warnings': validation_result.warnings,
+                                    'quality_metrics': validation_result.quality_metrics,
+                                }
+
+                                if not validation_result.is_valid or validation_result.recommendation == 'HOLD':
+                                    if signal.get('action') != 'HOLD':
+                                        logger.debug("Validator adjusted %s signal to HOLD", ticker)
+                                        signal['action'] = 'HOLD'
+                                    if validation_result.warnings:
+                                        signal['reasoning'] = (
+                                            f"{signal.get('reasoning', '')} "
+                                            f"[Validator: {validation_result.warnings[0]}]"
+                                        ).strip()
+                            except Exception as validation_error:
+                                validation_status = 'failed'
+                                validation_entry = {
+                                    'validator_version': validator_version,
+                                    'confidence_score': 0.0,
+                                    'recommendation': 'HOLD',
+                                    'warnings': [f'validator_error: {validation_error}'],
+                                    'quality_metrics': {},
+                                }
+                                if signal.get('action') != 'HOLD':
+                                    signal['action'] = 'HOLD'
+                                    signal['reasoning'] = (
+                                        f"{signal.get('reasoning', '')} [Validator error: {validation_error}]"
+                                    ).strip()
+
+                        signal['validation'] = validation_entry
                         
                         llm_signals[ticker] = signal
+                        if validation_entry:
+                            llm_signal_validations[ticker] = validation_entry
                         
                         # Save to database
-                        db_manager.save_llm_signal(
+                        signal_id = db_manager.save_llm_signal(
                             ticker=ticker,
                             date=datetime.now().strftime('%Y-%m-%d'),
                             signal=signal,
                             model_name=llm_client.model,
-                            latency=latency
+                            latency=latency,
+                            validation_status=validation_status
                         )
+                        if signal_id != -1 and validation_entry:
+                            db_manager.save_signal_validation(signal_id, validation_entry)
                         
-                        logger.info(f"  ✓ {ticker}: Action={signal['action']}, Confidence={signal['confidence']:.1%} ({latency:.1f}s)")
+                        confidence_pct = float(signal.get('confidence', 0.0)) * 100
+                        logger.info(
+                            "  ✓ %s: Action=%s, Confidence=%.1f%% (%0.1fs) Validation=%s",
+                            ticker,
+                            signal['action'],
+                            confidence_pct,
+                            latency,
+                            validation_status.upper(),
+                        )
                         if verbose:
                             logger.debug(f"    Reasoning: {signal['reasoning']}")
                     except Exception as e:
@@ -720,7 +992,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                     pipeline_id=pipeline_id,
                     stage=stage_name,
                     data=processed,
-                    metadata={'signals': llm_signals, 'analyses': llm_analyses}
+                    metadata={'signals': llm_signals, 'analyses': llm_analyses, 'validations': llm_signal_validations}
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 

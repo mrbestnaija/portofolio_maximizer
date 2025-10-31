@@ -45,13 +45,21 @@ class ValidationResult:
 
 class SignalQualityValidator:
     """
-    Validates LLM-generated signals using multiple quality checks
+    Validates LLM-generated signals using multiple quality checks.
+
+    Thresholds are configurable to align with guardrails documented in
+    AGENT_DEV_CHECKLIST.md and AGENT_INSTRUCTION.md.
     """
     
-    def __init__(self):
-        self.min_confidence_threshold = 0.6
-        self.max_risk_threshold = 0.15
-        self.min_expected_return = 0.02
+    def __init__(
+        self,
+        min_confidence_threshold: float = 0.6,
+        max_risk_threshold: float = 0.15,
+        min_expected_return: float = 0.02,
+    ):
+        self.min_confidence_threshold = min_confidence_threshold
+        self.max_risk_threshold = max_risk_threshold
+        self.min_expected_return = min_expected_return
         
     def validate_signal(self, signal: Signal, market_data: pd.DataFrame) -> ValidationResult:
         """

@@ -33,7 +33,6 @@ from etl.base_extractor import BaseExtractor, ExtractorMetadata
 # Load environment variables
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

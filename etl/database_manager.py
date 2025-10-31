@@ -138,7 +138,7 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT NOT NULL,
                 assessment_date DATE NOT NULL,
-                risk_level TEXT CHECK(risk_level IN ('low', 'medium', 'high')),
+                risk_level TEXT CHECK(risk_level IN ('low', 'medium', 'high', 'extreme')),
                 risk_score INTEGER CHECK(risk_score BETWEEN 0 AND 100),
                 portfolio_weight REAL,
                 concerns TEXT,  -- JSON array
@@ -221,6 +221,96 @@ class DatabaseManager:
                 UNIQUE(metric_date, period)
             )
         """)
+
+        # Signal validation audit trail
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS llm_signal_validations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL,
+                validator_version TEXT,
+                confidence_score REAL,
+                recommendation TEXT,
+                warnings TEXT,
+                quality_metrics TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (signal_id) REFERENCES llm_signals (id) ON DELETE CASCADE
+            )
+        """)
+
+        self._migrate_llm_risks_table()
+
+    def _migrate_llm_risks_table(self):
+        """Ensure llm_risks table supports 'extreme' risk level."""
+        try:
+            self.cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_risks'"
+            )
+            row = self.cursor.fetchone()
+            if not row or row[0] is None:
+                return
+
+            schema_sql = row[0]
+            if "risk_level IN ('low', 'medium', 'high', 'extreme')" in schema_sql:
+                return  # Already up to date
+
+            if "risk_level IN ('low', 'medium', 'high')" not in schema_sql:
+                return  # Unexpected schema; skip migration
+
+            logger.info("Upgrading llm_risks table to allow 'extreme' risk level")
+
+            with self.conn:
+                self.cursor.execute("ALTER TABLE llm_risks RENAME TO llm_risks_old")
+                self.cursor.execute("""
+                    CREATE TABLE llm_risks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker TEXT NOT NULL,
+                        assessment_date DATE NOT NULL,
+                        risk_level TEXT CHECK(risk_level IN ('low', 'medium', 'high', 'extreme')),
+                        risk_score INTEGER CHECK(risk_score BETWEEN 0 AND 100),
+                        portfolio_weight REAL,
+                        concerns TEXT,
+                        recommendation TEXT,
+                        model_name TEXT NOT NULL,
+                        var_95 REAL,
+                        max_drawdown REAL,
+                        volatility REAL,
+                        latency_seconds REAL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(ticker, assessment_date, model_name)
+                    )
+                """)
+
+                self.cursor.execute("PRAGMA table_info('llm_risks_old')")
+                old_columns = [row[1] for row in self.cursor.fetchall()]
+
+                desired_columns = [
+                    "id",
+                    "ticker",
+                    "assessment_date",
+                    "risk_level",
+                    "risk_score",
+                    "portfolio_weight",
+                    "concerns",
+                    "recommendation",
+                    "model_name",
+                    "var_95",
+                    "max_drawdown",
+                    "volatility",
+                    "latency_seconds",
+                    "created_at",
+                ]
+
+                common_columns = [col for col in desired_columns if col in old_columns]
+                columns_sql = ", ".join(common_columns)
+                self.cursor.execute(
+                    f"INSERT INTO llm_risks ({columns_sql}) "
+                    f"SELECT {columns_sql} FROM llm_risks_old"
+                )
+                self.cursor.execute("DROP TABLE llm_risks_old")
+
+            logger.info("llm_risks table migration complete")
+        except Exception as migration_error:  # pragma: no cover - defensive
+            logger.warning(f"llm_risks migration skipped due to error: {migration_error}")
         
         # Create indices for performance
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_ticker_date ON ohlcv_data(ticker, date)")
@@ -333,31 +423,89 @@ class DatabaseManager:
     
     def save_llm_signal(self, ticker: str, date: str, signal: Dict,
                        model_name: str = 'qwen:14b-chat-q4_K_M',
-                       latency: float = 0.0) -> int:
+                       latency: float = 0.0,
+                       validation_status: str = 'pending') -> int:
         """Save LLM trading signal to database"""
+        allowed_statuses = {'pending', 'validated', 'failed', 'executed'}
+        status = validation_status.lower() if validation_status else 'pending'
+        if status not in allowed_statuses:
+            status = 'pending'
+
         try:
-            self.cursor.execute("""
-                INSERT OR REPLACE INTO llm_signals
-                (ticker, signal_date, action, confidence, reasoning, model_name,
-                 entry_price, latency_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ticker, date,
-                signal.get('action', 'HOLD'),
-                float(signal.get('confidence', 0.5)),
-                signal.get('reasoning', ''),
-                model_name,
-                float(signal.get('entry_price', 0.0)),
-                latency
-            ))
-            
-            self.conn.commit()
-            row_id = self.cursor.lastrowid
+            with self.conn:
+                self.cursor.execute("""
+                    INSERT INTO llm_signals
+                    (ticker, signal_date, action, confidence, reasoning, model_name,
+                     entry_price, validation_status, latency_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, signal_date, model_name)
+                    DO UPDATE SET
+                        action=excluded.action,
+                        confidence=excluded.confidence,
+                        reasoning=excluded.reasoning,
+                        entry_price=excluded.entry_price,
+                        validation_status=excluded.validation_status,
+                        latency_seconds=excluded.latency_seconds
+                """, (
+                    ticker, date,
+                    signal.get('action', 'HOLD'),
+                    float(signal.get('confidence', 0.5)),
+                    signal.get('reasoning', ''),
+                    model_name,
+                    float(signal.get('entry_price', 0.0)),
+                    status,
+                    latency
+                ))
+
+            self.cursor.execute(
+                """
+                SELECT id FROM llm_signals
+                WHERE ticker = ? AND signal_date = ? AND model_name = ?
+                """,
+                (ticker, date, model_name),
+            )
+            row = self.cursor.fetchone()
+            row_id = row['id'] if row else -1
             logger.info(f"Saved LLM signal for {ticker} on {date} (ID: {row_id})")
             return row_id
         
         except Exception as e:
             logger.error(f"Failed to save LLM signal: {e}")
+            return -1
+
+    def save_signal_validation(self, signal_id: int, validation: Dict[str, Any]) -> int:
+        """Persist signal validation results for auditability."""
+        if signal_id <= 0:
+            logger.warning("Skipping validation save; invalid signal_id=%s", signal_id)
+            return -1
+
+        warnings_text = json.dumps(validation.get('warnings', []))
+        quality_metrics = json.dumps(validation.get('quality_metrics', {}))
+
+        try:
+            with self.conn:
+                self.cursor.execute("""
+                    INSERT INTO llm_signal_validations
+                    (signal_id, validator_version, confidence_score,
+                     recommendation, warnings, quality_metrics)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    signal_id,
+                    validation.get('validator_version', 'v1'),
+                    float(validation.get('confidence_score', 0.0)),
+                    validation.get('recommendation', 'HOLD'),
+                    warnings_text,
+                    quality_metrics
+                ))
+            validation_id = self.cursor.lastrowid
+            logger.info(
+                "Recorded signal validation for signal_id=%s (ID: %s)",
+                signal_id,
+                validation_id,
+            )
+            return validation_id
+        except Exception as e:
+            logger.error(f"Failed to save signal validation: {e}")
             return -1
     
     def save_llm_risk(self, ticker: str, date: str, risk: Dict,

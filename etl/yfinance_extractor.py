@@ -22,7 +22,6 @@ from functools import wraps
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 30.0):
@@ -58,15 +57,13 @@ def fetch_ticker_data(ticker: str, start_date: datetime, end_date: datetime,
         DataFrame with OHLCV data or empty DataFrame on failure
     """
     try:
-        # Configure yfinance session with timeout
-        ticker_obj = yf.Ticker(ticker)
-        ticker_obj.session.request = lambda *args, **kwargs: (
-            kwargs.update({'timeout': timeout}),
-            ticker_obj.session.request(*args, **kwargs)
-        )[1]
-
-        data = yf.download(ticker, start=start_date, end=end_date,
-                          progress=False, timeout=timeout)
+        data = yf.download(
+            ticker,
+            start=start_date,
+            end=end_date,
+            progress=False,
+            timeout=timeout,
+        )
 
         if data.empty:
             logger.warning(f"No data returned for {ticker}")
@@ -90,15 +87,22 @@ def vectorized_quality_check(data: pd.DataFrame) -> Dict[str, float]:
     """Vectorized data quality metrics calculation."""
     total_rows = len(data)
     missing_rate = data.isnull().sum().sum() / (total_rows * len(data.columns)) if total_rows > 0 else 1.0
+    gaps = 0
+    return_std = 0.0
 
-    # Vectorized log returns for gap detection
-    close_prices = data['Close'].values
-    log_returns = np.diff(np.log(close_prices))
-    return_std = np.std(log_returns)
-    gaps = np.sum(np.abs(log_returns) > 3 * return_std)
+    # Vectorized log returns for gap detection (guard for non-positive/short series)
+    close_series = data['Close'] if 'Close' in data.columns else pd.Series(dtype=float)
+    close_series = close_series.dropna()
+    positive_close = close_series[close_series > 0]
+    if len(positive_close) >= 2:
+        log_returns = np.diff(np.log(positive_close.to_numpy(dtype=float, copy=False)))
+        if log_returns.size:
+            return_std = float(np.std(log_returns))
+            if return_std > 0:
+                gaps = int(np.sum(np.abs(log_returns) > 3 * return_std))
 
     # Zero volume detection (vectorized)
-    zero_volume_days = np.sum(data['Volume'].values == 0)
+    zero_volume_days = int(np.sum(data['Volume'].values == 0)) if 'Volume' in data.columns else 0
 
     return {
         'total_rows': total_rows,

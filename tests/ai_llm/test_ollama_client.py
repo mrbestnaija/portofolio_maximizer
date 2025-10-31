@@ -151,6 +151,31 @@ class TestOllamaGeneration:
         assert 'system' in call_args
         assert call_args['system'] == 'You are a helpful assistant'
 
+    @patch('requests.post')
+    @patch('requests.get')
+    def test_generate_uses_cache_for_repeat_prompts(self, mock_get, mock_post):
+        """Repeated prompts should return cached response without new HTTP call."""
+        init_response = Mock()
+        init_response.json.return_value = {
+            'models': [{'name': 'deepseek-coder:6.7b-instruct-q4_K_M'}]
+        }
+        init_response.raise_for_status.return_value = None
+        mock_get.return_value = init_response
+
+        generation_response = Mock()
+        generation_response.json.return_value = {'response': 'Cached output'}
+        generation_response.raise_for_status.return_value = None
+        mock_post.return_value = generation_response
+
+        client = OllamaClient()
+        first = client.generate('Repeatable prompt', system='system')
+        assert first == 'Cached output'
+
+        mock_post.reset_mock()
+        second = client.generate('Repeatable prompt', system='system')
+        assert second == 'Cached output'
+        mock_post.assert_not_called()
+
 
 class TestModelInfo:
     """Test model information retrieval"""
@@ -242,4 +267,3 @@ def test_ollama_client_has_docstrings():
 
 
 # Line count: ~190 lines (within 500-line budget)
-

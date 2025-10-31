@@ -20,7 +20,6 @@ from datetime import datetime
 import pandas as pd
 import logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

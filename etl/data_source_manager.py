@@ -10,7 +10,6 @@ Design Pattern: Strategy + Factory + Chain of Responsibility
 - Strategy: Select appropriate data source based on configuration
 - Factory: Instantiate extractors dynamically
 - Chain: Failover through multiple sources on failure
-wsl
 Mathematical Foundation:
 - Failover probability: P(success) = 1 - ∏(1 - p_i) for n sources
 - Combined hit rate: η_combined = Σ(w_i × η_i) for weighted sources
@@ -26,7 +25,6 @@ from importlib import import_module
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

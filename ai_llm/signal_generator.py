@@ -9,7 +9,7 @@ CRITICAL: Signals must be validated against data-driven rules.
 
 import pandas as pd
 import logging
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, Optional
 from datetime import datetime
 import json
 
@@ -33,9 +33,23 @@ class LLMSignalGenerator:
     - Must beat buy-and-hold baseline
     """
     
-    def __init__(self, ollama_client: OllamaClient):
+    def __init__(
+        self,
+        ollama_client: OllamaClient,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.05,
+        validation_rules: Optional[Dict[str, Any]] = None,
+    ):
         """Initialize with validated Ollama client"""
         self.client = ollama_client
+        self.system_prompt = system_prompt or (
+            "You are a quantitative trading strategist. "
+            "Generate trading signals based on data analysis. "
+            "Be conservative - only strong signals justified by data. "
+            "Output valid JSON only."
+        )
+        self.temperature = temperature
+        self.validation_rules = validation_rules or {}
         logger.info("LLM Signal Generator initialized")
     
     def generate_signal(self,
@@ -63,17 +77,10 @@ class LLMSignalGenerator:
         prompt = self._create_signal_prompt(ticker, market_analysis, indicators)
         
         try:
-            system = (
-                "You are a quantitative trading strategist. "
-                "Generate trading signals based on data analysis. "
-                "Be conservative - only strong signals justified by data. "
-                "Output valid JSON only."
-            )
-            
             llm_response = self.client.generate(
                 prompt=prompt,
-                system=system,
-                temperature=0.05  # Very low for consistency
+                system=self.system_prompt,
+                temperature=self.temperature  # Very low for consistency
             )
             
             # Parse LLM signal
@@ -90,6 +97,8 @@ class LLMSignalGenerator:
                 'indicators': indicators,
                 'llm_model': self.client.model
             })
+            
+            signal = self._apply_generation_rules(signal)
             
             logger.info(f"Signal generated for {ticker}: {signal['action']}")
             return signal
@@ -188,6 +197,53 @@ Output ONLY valid JSON."""
                 'risk_level': 'high',
                 'error': str(e)
             }
+
+    def _apply_generation_rules(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply conservative generation rules before validation."""
+        min_conf_for_action = float(self.validation_rules.get('min_confidence_for_action', 0.0))
+        conservative_bias = bool(self.validation_rules.get('conservative_bias', False))
+        require_reasoning = bool(self.validation_rules.get('require_reasoning', False))
+
+        action = signal.get('action', 'HOLD').upper()
+        confidence = float(signal.get('confidence', 0.0))
+        reasoning = signal.get('reasoning', '')
+
+        # Enforce reasoning requirement
+        if require_reasoning and len(reasoning.strip()) < 30:
+            logger.debug("Signal reasoning too short; defaulting to HOLD.")
+            signal['action'] = 'HOLD'
+            signal['reasoning'] = f"{reasoning} [Adjusted: reasoning below minimum length]"
+            return signal
+
+        # Enforce minimum confidence for buy/sell
+        if action in ('BUY', 'SELL') and min_conf_for_action > 0:
+            if confidence < min_conf_for_action:
+                logger.debug(
+                    "Signal confidence %.2f below threshold %.2f; demoting to HOLD.",
+                    confidence,
+                    min_conf_for_action,
+                )
+                signal['action'] = 'HOLD'
+                signal['reasoning'] = (
+                    f"{reasoning} [Adjusted: confidence {confidence:.2f} < {min_conf_for_action:.2f}]"
+                )
+                return signal
+
+        # Enforce conservative bias (default to HOLD unless strong evidence)
+        if conservative_bias and action in ('BUY', 'SELL'):
+            confidence_threshold = max(min_conf_for_action, 0.75)
+            if confidence < confidence_threshold:
+                logger.debug(
+                    "Conservative bias active; confidence %.2f below %.2f. Holding.",
+                    confidence,
+                    confidence_threshold,
+                )
+                signal['action'] = 'HOLD'
+                signal['reasoning'] = (
+                    f"{reasoning} [Adjusted: conservative bias enforced at {confidence_threshold:.2f}]"
+                )
+
+        return signal
 
 
 # Validation

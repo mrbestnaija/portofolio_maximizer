@@ -8,7 +8,7 @@ Provides risk assessment after data validation stage.
 
 import pandas as pd
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 import json
 
@@ -28,9 +28,20 @@ class LLMRiskAssessor:
     - Market regime risk
     """
     
-    def __init__(self, ollama_client: OllamaClient):
+    def __init__(
+        self,
+        ollama_client: OllamaClient,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.1,
+    ):
         """Initialize with validated Ollama client"""
         self.client = ollama_client
+        self.system_prompt = system_prompt or (
+            "You are a quantitative risk analyst. "
+            "Assess portfolio risk based on statistical metrics. "
+            "Output valid JSON only."
+        )
+        self.temperature = temperature
         logger.info("LLM Risk Assessor initialized")
     
     def assess_risk(self,
@@ -58,16 +69,10 @@ class LLMRiskAssessor:
         prompt = self._create_risk_prompt(ticker, metrics, portfolio_weight)
         
         try:
-            system = (
-                "You are a quantitative risk analyst. "
-                "Assess portfolio risk based on statistical metrics. "
-                "Output valid JSON only."
-            )
-            
             llm_response = self.client.generate(
                 prompt=prompt,
-                system=system,
-                temperature=0.1
+                system=self.system_prompt,
+                temperature=self.temperature
             )
             
             # Parse response

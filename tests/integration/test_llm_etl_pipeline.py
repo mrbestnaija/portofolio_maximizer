@@ -159,6 +159,21 @@ class TestLLMPipelineIntegration:
         for ticker in tickers:
             assert results[ticker]['ticker'] == ticker
             assert 'trend' in results[ticker]
+
+    def test_signal_generator_applies_validation_rules(self, sample_ohlcv_data, mock_ollama_client):
+        """Signal generator should demote low-confidence actions when rules demand it."""
+        mock_ollama_client.generate.return_value = (
+            '{"action": "BUY", "confidence": 0.5, "reasoning": "Insufficient evidence"}'
+        )
+        signal_gen = LLMSignalGenerator(
+            mock_ollama_client,
+            validation_rules={'min_confidence_for_action': 0.75, 'conservative_bias': True}
+        )
+
+        signal = signal_gen.generate_signal(sample_ohlcv_data, 'TEST', {})
+
+        assert signal['action'] == 'HOLD'
+        assert 'Adjusted' in signal['reasoning']
     
     def test_pipeline_preserves_data_integrity(self, sample_ohlcv_data, mock_ollama_client):
         """Test LLM pipeline doesn't modify input data"""
