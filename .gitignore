@@ -92,10 +92,9 @@ dist/
 docs/_build/
 
 
-# Claude specific (protect AI configuration and settings)
-.Claude/
-.claude/
-.claude/*
+# Local automation configuration (keep private)
+.local_automation/
+.local_automation/*
 settings.local.json
 
 

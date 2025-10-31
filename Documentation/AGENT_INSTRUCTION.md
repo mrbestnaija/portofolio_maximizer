@@ -79,6 +79,17 @@ REQUIRED FOR EVERY CODE SUGGESTION:
 - [ ] **Error handling included?** Network failures, missing data, calculation errors
 - [ ] **Performance metrics tracked?** Execution time, memory usage, accuracy
 - [ ] **Documentation minimal but complete?** What it does, why it exists, how to test
+- [ ] **Entry points compile?** Run targeted `python -m compileall` / smoke CLI to catch indentation or syntax regressions
+- [ ] **Orchestrators decomposed?** Break pipelines >200 lines into helpers; keep CLI functions as thin coordinators
+
+### Extractor Safety Requirements
+- Never monkey-patch third-party clients (e.g., `requests.Session.request`); pass configuration via documented parameters
+- Guard vectorised math (log returns, diff) against empty, single-row, or non-positive data before computing ratios
+- Treat cache refreshes as optional: fall back gracefully when cache metadata is missing or stale
+
+### Logging Discipline
+- Library modules must avoid `logging.basicConfig`; configure logging in entry points or dedicated bootstrap modules only
+- Use module-level `getLogger` consistently and honour the project-wide logging level
 
 ## Data Science Validation Protocol
 

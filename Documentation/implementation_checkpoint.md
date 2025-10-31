@@ -1,10 +1,16 @@
 # Implementation Checkpoint Document
 **Version**: 6.5
-**Date**: 2025-10-22 (Updated)
+**Date**: 2025-10-24 (Updated)
 **Project**: Portfolio Maximizer v45
 **Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization
 
 ---
+## New Capabilities (2025-10-24)
+- **Modular Pipeline Orchestrator**: `scripts/run_etl_pipeline.py` now composes dedicated `CVSettings` and `LLMComponents` dataclasses for configuration merging, split strategy logging, and LLM bootstrap, reducing duplicated logic and making stage execution auditable.
+- **Centralised Logging Discipline**: Core extractors (`etl/base_extractor.py`, `etl/data_source_manager.py`, `etl/alpha_vantage_extractor.py`, `etl/finnhub_extractor.py`) now rely on module-level loggers so entry points own logging configuration without module side effects.
+- **Resilient Yahoo Finance Extraction**: `etl/yfinance_extractor.py` removed recursive session patching, added guards for short/zero-price series, and tightened cache metrics to prevent runtime regressions during backoff retries.
+- **Pooled Ollama Connectivity**: `ai_llm/ollama_client.py` reuses a persistent `requests.Session`, exposes a `close()` helper, and shares the session across health checks and generation calls to cut handshake latency during LLM-heavy runs.
+- **Guardrail Documentation Refresh**: AGENT instruction and developer checklists record the new compile-time entry point checks, orchestrator sizing rules, and extractor safety requirements introduced in this iteration.
 
 ## New Capabilities (2025-10-22)
 - **Error Monitoring System**: Comprehensive error monitoring with automated alerting, threshold-based notifications, and real-time dashboard
@@ -231,8 +237,9 @@ portfolio_maximizer_v45/
 ├── workflows/                       # Pipeline orchestration (YAML)
 │   ├── etl_pipeline.yml            # Main ETL workflow (4 stages)
 │
-├── .claude/                         # Claude Code configuration
-│   └── CLAUDE.md                   # Project-specific instructions
+├── .local_automation/              # Local automation configuration (developer only)
+│   ├── developer_notes.md          # Project-specific automation checklist
+│   └── settings.local.json        # Tooling configuration (ignored in VCS)
 │
 ├── Documentation/                   # Project documentation (20+ files) ⭐ UPDATED
 │   ├── implementation_checkpoint.md  # This file (Version 6.5) ⭐ UPDATED
@@ -248,7 +255,6 @@ portfolio_maximizer_v45/
 │   ├── RECOMMENDED_ACTIONS_IMPLEMENTATION_SUMMARY_2025-10-22.md # Actions summary (10+ KB) ⭐ NEW
 │   ├── GIT_WORKFLOW.md             # Git workflow (local-first)
 │   ├── arch_tree.md                # Architecture tree ⭐ UPDATED
-│   ├── CLAUDE.md                   # Development guide
 │   ├── AGENT_INSTRUCTION.md        # Agent guidelines
 │   └── AGENT_DEV_CHECKLIST.md     # Development checklist
 │

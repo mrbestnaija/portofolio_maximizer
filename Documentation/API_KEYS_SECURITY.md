@@ -74,15 +74,22 @@ api_key = os.getenv('FINNHUB_API_KEY')
 
 ---
 
-### 3. Anthropic API Key (Claude)
+### 3. GitHub Projects Token (CI Automation)
 
-**Environment Variable**: `ANTHROPIC_API_KEY`
+**Environment Variable**: `PROJECTS_TOKEN`
 
-**Location**: `.env` (line 2)
+**Location**: `.env` (local), Repository Secret (CI): `PROJECTS_TOKEN`
 
-**Usage**: Claude Code CLI integration
+**Usage**: Used by the GitHub Actions workflow to add issues/PRs to Project 7.
 
-**Get Your Key**: https://console.anthropic.com/
+**Setup**:
+- Create a classic PAT with `repo` and `project` scopes
+- Add it to repo secrets as `PROJECTS_TOKEN`
+- For local testing, add the same value to your `.env`
+
+**Security Notes**:
+- Keep local `.env` out of git
+- Rotate PAT regularly and update both repo secret and local `.env`
 
 ---
 
@@ -123,10 +130,10 @@ api_key = os.getenv('FINNHUB_API_KEY')
 1. **Never Hardcode Keys**
    ```python
    # ❌ BAD - Never do this
-   API_KEY = 'sk-ant-api03-...'
+   API_KEY = 'sk-demo-...'
 
    # ✅ GOOD - Use environment variables
-   API_KEY = os.getenv('ANTHROPIC_API_KEY')
+   API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
    ```
 
 2. **Never Commit .env**
@@ -161,7 +168,7 @@ api_key = os.getenv('FINNHUB_API_KEY')
 
 1. **Copy Template**
    ```bash
-   cp .env.template .env
+cp .env.template .env
    ```
 
 2. **Add Your Keys**
@@ -188,6 +195,19 @@ api_key = os.getenv('FINNHUB_API_KEY')
    # Run a simple test
    python -c "from dotenv import load_dotenv; import os; load_dotenv(); print('✓ Loaded' if os.getenv('ALPHA_VANTAGE_API_KEY') else '✗ Failed')"
    ```
+
+### Template Variables
+
+Ensure `.env.template` contains the following keys (without real values):
+
+```
+ALPHA_VANTAGE_API_KEY=
+FINNHUB_API_KEY=
+FINNHUB_EMAIL=
+FINNHUB_WEBHOOK_SECRET=
+PROJECTS_TOKEN=
+CI=false
+```
 
 ---
 
@@ -248,7 +268,6 @@ git push --force-with-lease origin master
 1. **Immediate Action**: Revoke/rotate key at provider
 2. **Alpha Vantage**: Login → https://www.alphavantage.co/support/#api-key → Regenerate
 3. **Finnhub**: Login → https://finnhub.io/dashboard → Regenerate API Key
-4. **Anthropic**: Login → https://console.anthropic.com/ → Manage Keys → Revoke & Create New
 
 ### Scenario 3: Lost .env File
 
@@ -349,7 +368,6 @@ git log --all -p | grep -i "api.*key"
 ✅ **Active Keys**:
 - Alpha Vantage API Key (configured)
 - Finnhub API Key (configured)
-- Anthropic API Key (configured)
 
 ✅ **Security Verified**:
 - `git check-ignore .env` → Confirmed ignored

@@ -115,7 +115,7 @@ Documentation/
 │   └── TO_DO_LIST.md               # Task tracking
 │
 └── Other - 1 file
-    └── CLAUDE.md                   # Claude integration notes
+    └── .local_automation/developer_notes.md  # Local automation notes
 ```
 
 ---

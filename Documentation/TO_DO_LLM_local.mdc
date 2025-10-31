@@ -211,9 +211,8 @@ MODEL_SAFETY = {
 
 | Platform | Cost | Privacy | Speed | Usage |
 |----------|------|---------|--------|-------|
-| **Local AI** | $0 after setup | ✅ Full | Very Fast | Unlimited |
-| Claude Team | $30-60/month | ❌ Cloud | Fast | Quota limited |
-| OpenAI GPT-4 | $10-50/day | ❌ Cloud | Fast | Token limited |
+| **Local LLM (Ollama)** | $0 after setup | ✅ Full | Very Fast | Unlimited |
+| **Local Docker GPU** | Hardware only | ✅ Full | Fast | Model-dependent |
 
 ## 🎯 Immediate Actions
 

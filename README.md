@@ -24,6 +24,17 @@ Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
 - **✅ Comprehensive Testing**: 63 tests with 98.4% pass rate
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
+- **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
+- **🔐 Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
+
+---
+
+### ♻️ Latest Enhancements (Oct 2025)
+
+- Refactored `scripts/run_etl_pipeline.py` around `CVSettings` and `LLMComponents` helpers so cross-validation, LLM bootstrapping, and discovery fallbacks reuse a single orchestration path with consistent telemetry.
+- Centralised logging configuration by removing `logging.basicConfig` calls from extractor modules; entry points now own verbosity without side effects.
+- Improved `etl/yfinance_extractor.py` error handling by dropping recursive session patches and guarding log-return metrics against short or zero-valued series.
+- Reused a persistent `requests.Session` inside `ai_llm/ollama_client.py`, exposing a `close()` helper to trim LLM handshake latency and release sockets cleanly.
 
 ---
 
@@ -312,8 +323,11 @@ portfolio_maximizer_v45/
 │   ├── arch_tree.md                # Architecture documentation
 │   ├── CACHING_IMPLEMENTATION.md   # Caching mechanism guide
 │   ├── GIT_WORKFLOW.md             # Git workflow (local-first)
-│   ├── implementation_checkpoint.md # Implementation status
-│   └── CLAUDE.md                   # Development guide
+│   └── implementation_checkpoint.md # Implementation status
+│
+├── .local_automation/              # Local automation helpers (kept private)
+│   ├── developer_notes.md          # Automation & tooling playbook
+│   └── settings.local.json         # Local agent settings
 │
 ├── etl/                             # ETL pipeline modules
 │   ├── yfinance_extractor.py       # Yahoo Finance extraction
@@ -420,7 +434,6 @@ Comprehensive documentation is available in the `Documentation/` directory:
 - **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
 - **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status
-- **[Development Guide](Documentation/CLAUDE.md)**: Development standards and practices
 
 ---
 
@@ -510,7 +523,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **MIT OpenCourseWare**: Statistical learning standards
 - **Tufte Principles**: Visualization design guidelines
 - **Yahoo Finance**: Market data API
-- **Claude Code**: AI-assisted development
 
 ---
 

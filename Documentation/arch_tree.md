@@ -118,7 +118,7 @@ class TickerValidator:
 
 #### **TASK 5.3.1: Create Optimizer-Ready Pipeline**
 ```python
-# ENHANCE: scripts/run_etl_pipeline.py (current 292 lines)
+# ✅ ENHANCED: scripts/run_etl_pipeline.py (modular CVSettings + LLMComponents orchestrator)
 # Add ticker discovery integration to existing pipeline
 
 def run_optimizer_pipeline(ticker_source="manual", portfolio_size=50):
@@ -180,7 +180,7 @@ portfolio_maximizer_v45/
 │       └── ticker_universe.py      # ⬜ Master list management
 │
 ├── ai_llm/                          # ✅ PHASE 5.2-5.5 COMPLETE - 1,500+ lines ⭐ UPDATED
-│   ├── ollama_client.py            # ✅ 251 lines - Local LLM integration (Phase 5.2) + Performance monitoring (Phase 5.5)
+│   ├── ollama_client.py            # ✅ 440+ lines - Local LLM integration w/ pooled session (Phase 5.5 refinement)
 │   ├── market_analyzer.py          # ✅ 180 lines - Market analysis (Phase 5.2)
 │   ├── signal_generator.py         # ✅ 198 lines - Signal generation (Phase 5.2)
 │   ├── signal_validator.py         # ✅ 150 lines - Signal validation (Phase 5.2)
@@ -190,8 +190,12 @@ portfolio_maximizer_v45/
 │   ├── llm_database_integration.py # ✅ 421 lines - LLM data persistence (Phase 5.5) ⭐ NEW
 │   └── performance_optimizer.py    # ✅ 359 lines - Model selection optimization (Phase 5.5) ⭐ NEW
 │
+├── .local_automation/              # ✅ Local automation assets (developer-only)
+│   ├── developer_notes.md          # Automation playbook
+│   └── settings.local.json         # Tooling configuration
+│
 ├── scripts/                         # ✅ PHASE 4.7-5.5 COMPLETE - 1,200+ lines ⭐ UPDATED
-│   ├── run_etl_pipeline.py         # ✅ 131 lines - Config-driven (Phase 4.7)
+│   ├── run_etl_pipeline.py         # ✅ 1,100+ lines - Modular orchestrator (CV/LLM helpers, Phase 5.5 refinement)
 │   ├── analyze_dataset.py          # ✅ 270+ lines - Production ready
 │   ├── visualize_dataset.py        # ✅ 200+ lines - Production ready
 │   ├── validate_environment.py     # ✅ Environment checks
