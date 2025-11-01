@@ -323,7 +323,7 @@ portfolio_maximizer_v45/
     ┌──────────────────┐  ┌──────────────────┐
     │ Missing Data     │  │ Normalization    │
     │ - Forward fill   │  │ - Z-score        │
-    │ - Backward fill  │  │ - μ=0, σ²=1     │
+    │ - Backward fill  │  │ - μ=0, σ²=1      │
     └──────────────────┘  └──────────────────┘
                            │
                            ▼
