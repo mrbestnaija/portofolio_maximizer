@@ -8,11 +8,14 @@ Provides risk assessment after data validation stage.
 
 import pandas as pd
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 import json
 
+import os
+
 from .ollama_client import OllamaClient, OllamaConnectionError
+from .performance_monitor import record_latency_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,9 @@ class LLMRiskAssessor:
     ):
         """Initialize with validated Ollama client"""
         self.client = ollama_client
+        self.force_fallback = os.getenv("LLM_FORCE_FALLBACK", "0") == "1"
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK enabled for risk assessor")
         self.system_prompt = system_prompt or (
             "You are a quantitative risk analyst. "
             "Assess portfolio risk based on statistical metrics. "
@@ -68,6 +74,16 @@ class LLMRiskAssessor:
         # Create risk assessment prompt
         prompt = self._create_risk_prompt(ticker, metrics, portfolio_weight)
         
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK=1 - skipping LLM risk assessment for %s", ticker)
+            record_latency_fallback(
+                stage="risk_assessment",
+                ticker=ticker,
+                reason="forced_fallback_env",
+                inference_stats=None,
+            )
+            return self._fallback_assessment(ticker, metrics, portfolio_weight)
+
         try:
             llm_response = self.client.generate(
                 prompt=prompt,
@@ -83,13 +99,34 @@ class LLMRiskAssessor:
                 'ticker': ticker,
                 'assessment_timestamp': datetime.now().isoformat(),
                 'portfolio_weight': portfolio_weight,
-                'metrics': metrics
+                'metrics': metrics,
+                'fallback': False,
             })
+
+            should_fallback, reason = self._latency_guard()
+            if should_fallback:
+                logger.warning(
+                    "LLM risk assessment exceeded performance guard (%s); using deterministic fallback.",
+                    reason,
+                )
+                record_latency_fallback(
+                    stage="risk_assessment",
+                    ticker=ticker,
+                    reason=reason or "latency_guard_triggered",
+                    inference_stats=self.client.get_last_inference_stats(),
+                )
+                self.force_fallback = True
+                return self._fallback_assessment(ticker, metrics, portfolio_weight)
             
             logger.info(f"Risk assessed for {ticker}: {assessment['risk_level']}")
             return assessment
             
-        except OllamaConnectionError:
+        except OllamaConnectionError as exc:
+            logger.warning(
+                "LLM risk assessor unavailable for %s; raising to fail fast (%s)",
+                ticker,
+                exc,
+            )
             raise
         except Exception as e:
             logger.error(f"Risk assessment failed: {e}")
@@ -171,6 +208,71 @@ Output ONLY valid JSON."""
                 'recommendation': 'Reduce position size due to parsing error',
                 'error': str(e)
             }
+
+    def _fallback_assessment(
+        self,
+        ticker: str,
+        metrics: Dict[str, float],
+        weight: float,
+    ) -> Dict[str, Any]:
+        volatility = metrics.get('volatility_annual_pct', 0.0)
+        drawdown = metrics.get('max_drawdown_pct', 0.0)
+        sharpe = metrics.get('sharpe_ratio', 0.0)
+
+        risk_level = 'medium'
+        risk_score = 60
+        concerns = []
+
+        if volatility > 40 or drawdown < -35:
+            risk_level = 'high'
+            risk_score = 80
+            concerns.append('Elevated volatility/drawdown conditions')
+        elif volatility < 20 and drawdown > -15 and sharpe > 0.5:
+            risk_level = 'low'
+            risk_score = 40
+        else:
+            concerns.append('Moderate volatility regime')
+
+        recommendation = 'Maintain position with existing limits'
+        if risk_level == 'high':
+            recommendation = 'Reduce exposure until volatility normalises'
+        elif risk_level == 'low':
+            recommendation = 'Position size acceptable within risk budget'
+
+        return {
+            'risk_level': risk_level,
+            'risk_score': int(risk_score),
+            'concerns': concerns,
+            'recommendation': recommendation,
+            'ticker': ticker,
+            'assessment_timestamp': datetime.now().isoformat(),
+            'portfolio_weight': weight,
+            'metrics': metrics,
+            'fallback': True,
+        }
+
+    def _latency_guard(self) -> Tuple[bool, Optional[str]]:
+        """Return whether to fall back due to latency constraints."""
+        max_latency_env = os.getenv("LLM_MAX_LATENCY_SECONDS", "5.0")
+        min_tokens_env = os.getenv("LLM_MIN_TOKENS_PER_SEC", "5.0")
+        try:
+            max_latency_override = float(max_latency_env)
+        except ValueError:
+            max_latency_override = 5.0
+        try:
+            min_tokens = float(min_tokens_env)
+        except ValueError:
+            min_tokens = 5.0
+
+        guard_fn = getattr(self.client, "should_use_latency_fallback", None)
+        if not callable(guard_fn):
+            return False, None
+
+        should_fallback, reason = guard_fn(
+            max_latency_override=max_latency_override,
+            min_token_rate=min_tokens,
+        )
+        return bool(should_fallback), reason
 
 
 # Line count: ~140 lines (within budget)

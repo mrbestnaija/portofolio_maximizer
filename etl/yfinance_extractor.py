@@ -63,6 +63,7 @@ def fetch_ticker_data(ticker: str, start_date: datetime, end_date: datetime,
             end=end_date,
             progress=False,
             timeout=timeout,
+            auto_adjust=False,
         )
 
         if data.empty:

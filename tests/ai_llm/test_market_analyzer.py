@@ -37,6 +37,7 @@ def mock_ollama_client():
     """Create mock Ollama client"""
     client = Mock()
     client.model = 'deepseek-coder:6.7b-instruct-q4_K_M'
+    client.should_use_latency_fallback.return_value = (False, None)
     return client
 
 
@@ -135,6 +136,20 @@ class TestLLMAnalysis:
         assert 'trend' in result
         assert result['trend'] == 'neutral'  # Default fallback
         assert 'error' in result
+    
+    def test_analyze_uses_latency_fallback(self, mock_ollama_client, sample_ohlcv_data):
+        """Latency guard should trigger deterministic fallback when performance drops."""
+        mock_ollama_client.generate.return_value = '{"trend": "bullish", "strength": 8, "regime": "trending", "summary": "LLM"}'
+        mock_ollama_client.should_use_latency_fallback.return_value = (True, "latency 12.0s > 5.0s")
+
+        with patch("ai_llm.market_analyzer.record_latency_fallback") as mock_latency_record:
+            analyzer = LLMMarketAnalyzer(mock_ollama_client)
+            result = analyzer.analyze_ohlcv(sample_ohlcv_data, 'AAPL')
+
+        assert result['fallback'] is True
+        assert analyzer.force_fallback is True
+        assert result['trend'] in {'bullish', 'bearish', 'neutral'}
+        mock_latency_record.assert_called_once()
     
     def test_analyze_propagates_ollama_errors(self, mock_ollama_client, sample_ohlcv_data):
         """Test that Ollama errors stop the pipeline"""

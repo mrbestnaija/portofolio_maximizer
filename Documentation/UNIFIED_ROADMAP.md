@@ -37,7 +37,7 @@
 - ✅ Risk assessment & signal generation - Production ready
 - ✅ Time series analysis (SARIMAX, GARCH, seasonality)
 - ✅ k-fold walk-forward validation
-- ✅ Portfolio math (Sharpe, drawdown, profit factor) - Fixed calculation errors
+- ✅ Portfolio math (Sharpe, drawdown, profit factor, CVaR, Sortino) - Enhanced engine promoted as default (`etl.portfolio_math`) per AGENT_INSTRUCTION.md guardrails
 
 **Testing**:
 - ✅ 196 test functions across 20 test files
@@ -48,14 +48,13 @@
 ### ⚠️ CURRENT GAPS & BLOCKERS
 - Signal pipeline emits rows without `signal_type`, leaving monitoring and validation dashboards with `NO_DATA`.
 - The 5-layer signal validator is not wired into the live LLM pipeline and still uses an incorrect Kelly criterion.
-- `portfolio_math_enhanced.py` is ready but not promoted; advanced risk metrics remain offline.
 - Statistical rigor (hypothesis tests, bootstrap confidence intervals, Ljung–Box/Jarque–Bera) has not started, so MVS/PRS gates cannot be measured.
 - Paper trading engine, broker integration, stress testing, and regime detection remain unimplemented.
 
 ### 🔧 Immediate Next Actions
 1. Backfill historical LLM signals with valid `signal_type` values and enforce the constraint for new inserts.
 2. Integrate the 5-layer signal validator, correct Kelly sizing logic, and add regression coverage around position sizing.
-3. Promote `portfolio_math_enhanced.py`, update import sites, and run the enhanced math test suite prior to enabling in production.
+3. Enforce health checks and statistical backtesting (`tests/etl/test_statistical_tests.py`) for the promoted portfolio math defaults.
 4. Launch the statistical rigor toolkit (bootstrap, hypothesis tests, Ljung–Box/Jarque–Bera) and wire metrics into CI and reporting.
 5. Once the above items are stable, proceed with paper trading, broker API integration, and planned stress/regime tooling per Phase A/B.
 

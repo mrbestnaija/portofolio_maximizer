@@ -8,11 +8,14 @@ Provides LLM-based analysis of market data at ETL extraction stage.
 
 import pandas as pd
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import json
 
+import os
+
 from .ollama_client import OllamaClient, OllamaConnectionError
+from .performance_monitor import record_latency_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,9 @@ class LLMMarketAnalyzer:
             ollama_client: Pre-validated OllamaClient instance
         """
         self.client = ollama_client
+        self.force_fallback = os.getenv("LLM_FORCE_FALLBACK", "0") == "1"
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK enabled for market analyzer")
         logger.info("LLM Market Analyzer initialized")
     
     def analyze_ohlcv(self, 
@@ -66,11 +72,26 @@ class LLMMarketAnalyzer:
         
         # Extract statistical summary
         stats = self._compute_statistics(data)
-        
+        period_info = {
+            "start": data.index.min().isoformat(),
+            "end": data.index.max().isoformat(),
+            "days": len(data),
+        }
+
         # Generate LLM analysis prompt
         prompt = self._create_analysis_prompt(ticker, stats)
-        
+
         # Get LLM response
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK=1 - skipping LLM call for %s", ticker)
+            record_latency_fallback(
+                stage="market_analysis",
+                ticker=ticker,
+                reason="forced_fallback_env",
+                inference_stats=None,
+            )
+            return self._fallback_analysis(ticker, stats, period_info)
+
         try:
             system = (
                 "You are a quantitative financial analyst. "
@@ -78,13 +99,13 @@ class LLMMarketAnalyzer:
                 "NO explanations, NO markdown, NO extra text. "
                 "ONLY the JSON object. This is critical."
             )
-            
+
             llm_response = self.client.generate(
                 prompt=prompt,
                 system=system,
                 temperature=0.05  # Very low temp for strict JSON output
             )
-            
+
             # Parse LLM response
             analysis = self._parse_llm_response(llm_response)
             
@@ -92,23 +113,106 @@ class LLMMarketAnalyzer:
             analysis.update({
                 'ticker': ticker,
                 'analysis_timestamp': datetime.now().isoformat(),
-                'data_period': {
-                    'start': data.index.min().isoformat(),
-                    'end': data.index.max().isoformat(),
-                    'days': len(data)
-                },
-                'statistics': stats
+                'data_period': period_info,
+                'statistics': stats,
+                'fallback': False,
             })
+
+            should_fallback, reason = self._latency_guard()
+            if should_fallback:
+                logger.warning(
+                    "LLM market analysis exceeded performance guard (%s); using deterministic fallback.",
+                    reason,
+                )
+                record_latency_fallback(
+                    stage="market_analysis",
+                    ticker=ticker,
+                    reason=reason or "latency_guard_triggered",
+                    inference_stats=self.client.get_last_inference_stats(),
+                )
+                self.force_fallback = True
+                return self._fallback_analysis(ticker, stats, period_info)
             
             logger.info(f"LLM analysis complete for {ticker}")
             return analysis
             
-        except OllamaConnectionError:
-            # Re-raise to stop pipeline (per requirement 3b)
+        except OllamaConnectionError as exc:
+            logger.warning(
+                "LLM analysis unavailable for %s; raising to fail fast (%s)",
+                ticker,
+                exc,
+            )
             raise
         except Exception as e:
             logger.error(f"LLM analysis failed: {e}")
             raise OllamaConnectionError(f"Market analysis failed: {e}")
+
+    def _fallback_analysis(
+        self,
+        ticker: str,
+        stats: Dict[str, Any],
+        period_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Deterministic analysis used when LLM is unavailable."""
+        price_change = stats.get("price_change_pct", 0.0)
+        volatility = stats.get("volatility_pct", 0.0)
+        volume_trend = stats.get("volume_trend_pct", 0.0)
+
+        if price_change > 1.5:
+            trend = "bullish"
+        elif price_change < -1.5:
+            trend = "bearish"
+        else:
+            trend = "neutral"
+
+        strength = int(min(10, max(1, abs(price_change) // 1 + 4)))
+        if volatility > 2.5:
+            regime = "volatile"
+        elif abs(volume_trend) > 20:
+            regime = "trending"
+        else:
+            regime = "stable"
+
+        summary = (
+            f"Fallback analysis for {ticker}: price change {price_change:+.2f}%, "
+            f"volatility {volatility:.2f}% annualised, volume trend {volume_trend:+.2f}%."
+        )
+
+        return {
+            "trend": trend,
+            "strength": int(strength),
+            "regime": regime,
+            "key_levels": [stats.get("low_52w", 0.0), stats.get("high_52w", 0.0)],
+            "summary": summary,
+            "ticker": ticker,
+            "analysis_timestamp": datetime.now().isoformat(),
+            "data_period": period_info,
+            "statistics": stats,
+            "fallback": True,
+        }
+
+    def _latency_guard(self) -> Tuple[bool, Optional[str]]:
+        """Return whether a latency-based fallback should trigger."""
+        max_latency_env = os.getenv("LLM_MAX_LATENCY_SECONDS", "5.0")
+        min_tokens_env = os.getenv("LLM_MIN_TOKENS_PER_SEC", "5.0")
+        try:
+            max_latency_override = float(max_latency_env)
+        except ValueError:
+            max_latency_override = 5.0
+        try:
+            min_tokens = float(min_tokens_env)
+        except ValueError:
+            min_tokens = 5.0
+
+        guard_fn = getattr(self.client, "should_use_latency_fallback", None)
+        if not callable(guard_fn):
+            return False, None
+
+        should_fallback, reason = guard_fn(
+            max_latency_override=max_latency_override,
+            min_token_rate=min_tokens,
+        )
+        return bool(should_fallback), reason
     
     def _validate_data(self, data: pd.DataFrame) -> None:
         """Validate OHLCV data structure"""

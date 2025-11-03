@@ -114,3 +114,9 @@ References/*
 .cursor/
 .cursor/*
 settings.local.json
+
+
+# Logs and logging
+logs/*.log
+logging/
+logs/   

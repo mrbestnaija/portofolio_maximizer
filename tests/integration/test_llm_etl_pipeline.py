@@ -55,6 +55,7 @@ def mock_ollama_client():
     client.model = 'deepseek-coder:6.7b-instruct-q4_K_M'
     client.health_check = Mock(return_value=True)
     client.generate = Mock(return_value='{"trend": "bullish", "strength": 7, "regime": "trending", "key_levels": [100, 110], "summary": "Test analysis"}')
+    client.should_use_latency_fallback.return_value = (False, None)
     return client
 
 
@@ -144,6 +145,22 @@ class TestLLMPipelineIntegration:
         # Should default to HOLD when analysis is missing
         assert signal['action'] in ['BUY', 'SELL', 'HOLD']
     
+    def test_signal_generator_latency_fallback(self, sample_ohlcv_data, mock_ollama_client):
+        """Signal generator should fall back when latency guard triggers."""
+        signal_gen = LLMSignalGenerator(mock_ollama_client)
+        mock_ollama_client.generate.return_value = '{"action": "BUY", "confidence": 0.9, "reasoning": "LLM output", "risk_level": "medium"}'
+        mock_ollama_client.should_use_latency_fallback.return_value = (True, "latency 9.0s > 5.0s")
+
+        with patch("ai_llm.signal_generator.record_latency_fallback") as mock_latency_record:
+            fallback_signal = signal_gen.generate_signal(sample_ohlcv_data, 'TEST', {'trend': 'bullish'})
+
+        assert fallback_signal['fallback'] is True
+        assert fallback_signal['llm_model'].startswith('fallback:')
+        assert signal_gen.force_fallback is True
+        mock_latency_record.assert_called_once()
+
+        mock_ollama_client.should_use_latency_fallback.return_value = (False, None)
+    
     def test_pipeline_handles_multiple_tickers(self, sample_ohlcv_data, mock_ollama_client):
         """Test pipeline can process multiple tickers"""
         analyzer = LLMMarketAnalyzer(mock_ollama_client)
@@ -193,6 +210,7 @@ class TestLLMPipelineIntegration:
         # Create client that fails health check
         failing_client = Mock(spec=OllamaClient)
         failing_client.health_check = Mock(return_value=False)
+        failing_client.should_use_latency_fallback.return_value = (False, None)
         
         # Should not raise exception during initialization
         analyzer = LLMMarketAnalyzer(failing_client)
@@ -274,6 +292,22 @@ class TestLLMPipelineValidation:
         assert 'concerns' in result
         # Should always provide concerns for high-risk situations
         assert isinstance(result['concerns'], list)
+    
+    def test_risk_assessor_latency_fallback(self, sample_ohlcv_data, mock_ollama_client):
+        """Risk assessor should fall back when latency guard triggers."""
+        risk_assessor = LLMRiskAssessor(mock_ollama_client)
+        mock_ollama_client.generate.return_value = '{"risk_level": "medium", "risk_score": 50, "concerns": ["LLM"], "recommendation": "Hold"}'
+        mock_ollama_client.should_use_latency_fallback.return_value = (True, "latency 8.5s > 5.0s")
+
+        with patch("ai_llm.risk_assessor.record_latency_fallback") as mock_latency_record:
+            fallback_risk = risk_assessor.assess_risk(sample_ohlcv_data, 'TEST', 0.2)
+
+        assert fallback_risk['fallback'] is True
+        assert fallback_risk['risk_level'] in {'low', 'medium', 'high', 'extreme'}
+        assert risk_assessor.force_fallback is True
+        mock_latency_record.assert_called_once()
+
+        mock_ollama_client.should_use_latency_fallback.return_value = (False, None)
 
 
 class TestLLMPipelineConfiguration:

@@ -214,6 +214,9 @@ class TestSignalValidator:
         assert isinstance(report.statistically_significant, bool)
         assert isinstance(report.information_ratio, float)
         assert isinstance(report.information_coefficient, float)
+        assert isinstance(report.statistical_summary, dict)
+        assert isinstance(report.autocorrelation, dict)
+        assert isinstance(report.bootstrap_intervals, dict)
     
     def test_backtest_empty_signals(self, validator):
         """Test backtesting with no signals"""
@@ -228,6 +231,9 @@ class TestSignalValidator:
         assert report.recommendation == 'INSUFFICIENT_DATA'
         assert report.p_value == 1.0
         assert report.statistically_significant is False
+        assert report.statistical_summary == {}
+        assert report.autocorrelation == {}
+        assert report.bootstrap_intervals == {}
     
     def test_confidence_adjustment(self, validator, sample_market_data):
         """Test confidence adjustment based on validation failures"""

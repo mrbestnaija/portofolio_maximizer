@@ -34,10 +34,19 @@ from ai_llm.performance_optimizer import performance_optimizer, optimize_model_s
 from ai_llm.ollama_client import OllamaClient
 
 # Configure logging
+logs_dir = Path("logs")
+logs_dir.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename=str(logs_dir / "monitor_llm_system.log"),
+    filemode="a",
 )
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
 
 
@@ -71,6 +80,8 @@ class LLMSystemMonitor:
         try:
             # Get current performance status
             performance_status = get_performance_status()
+            fallback_info = performance_status.get("fallback_events", {}) if isinstance(performance_status, dict) else {}
+            fallback_count = fallback_info.get("count", 0) if isinstance(fallback_info, dict) else 0
             
             # Test inference with a simple prompt
             if self.ollama_client:
@@ -93,30 +104,37 @@ class LLMSystemMonitor:
                     logger.info(f"✅ LLM inference successful: {inference_time:.2f}s")
                     
                     self.monitoring_results['llm_performance'] = {
-                        'status': 'HEALTHY',
+                        'status': 'DEGRADED_FALLBACK' if fallback_count else 'HEALTHY',
                         'inference_time': inference_time,
                         'response_length': len(response),
-                        'model_used': self.ollama_client.model
+                        'model_used': self.ollama_client.model,
+                        'fallback_events': fallback_info,
+                        'performance_summary': performance_status,
                     }
+                    if fallback_count:
+                        logger.warning("⚠️ Latency guard fallback engaged %d time(s) within summary window", fallback_count)
                     
                 except Exception as e:
                     logger.error(f"❌ LLM inference failed: {e}")
                     self.monitoring_results['llm_performance'] = {
                         'status': 'FAILED',
-                        'error': str(e)
+                        'error': str(e),
+                        'performance_summary': performance_status,
                     }
             else:
                 logger.warning("⚠️ Ollama client not available for performance testing")
                 self.monitoring_results['llm_performance'] = {
                     'status': 'UNAVAILABLE',
-                    'reason': 'Ollama client not initialized'
+                    'reason': 'Ollama client not initialized',
+                    'performance_summary': performance_status,
                 }
                 
         except Exception as e:
             logger.error(f"❌ Performance monitoring failed: {e}")
             self.monitoring_results['llm_performance'] = {
                 'status': 'ERROR',
-                'error': str(e)
+                'error': str(e),
+                'performance_summary': performance_status if 'performance_status' in locals() else None,
             }
     
     def validate_signal_quality(self):

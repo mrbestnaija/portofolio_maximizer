@@ -22,10 +22,19 @@ from etl.visualizer import TimeSeriesVisualizer
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+logs_dir = Path("logs")
+logs_dir.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename=str(logs_dir / "analyze_dataset.log"),
+    filemode="a",
 )
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
 
 

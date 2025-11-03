@@ -1,10 +1,24 @@
 # Implementation Checkpoint Document
-**Version**: 6.5
-**Date**: 2025-10-24 (Updated)
+**Version**: 6.6
+**Date**: 2025-11-02 (Updated)
 **Project**: Portfolio Maximizer v45
-**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization
+**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine
 
 ---
+## New Capabilities (2025-11-02)
+- **Statistical Validation Toolkit**: Introduced `etl/statistical_tests.py` with the `StatisticalTestSuite` covering benchmark significance tests, Ljung–Box / Durbin–Watson diagnostics, and bootstrap confidence intervals for Sharpe ratio and max drawdown.
+- **Signal Validation Telemetry**: `ai_llm/signal_validator.py` now packages statistical backtest outputs (`statistical_summary`, `autocorrelation`, `bootstrap_intervals`) and `scripts/backfill_signal_validation.py` forwards the enriched metrics so dashboards and reports can inspect significance, autocorrelation, and confidence bands per ticker.
+- **SQLite Disk I/O Resilience**: `DatabaseManager.save_ohlcv_data` mirrors the validation retry logic—gracefully resetting the connection and reattempting writes when SQLite reports transient “disk I/O” faults during bulk OHLCV imports.
+- **Config Alias Convenience**: `scripts/run_etl_pipeline.py` now treats `--config config.yml` as a shorthand for `config/pipeline_config.yml` (and other config/… fallbacks), eliminating the previous hard failure when the root-level alias was used.
+- **Paper Trading Engine Promotion**: `execution/paper_trading_engine.py` now supports dependency injection, executes signals only after five-layer validation, simulates slippage and transaction costs, and persists executions via `DatabaseManager.save_trade_execution` while maintaining portfolio state.
+- **Trade Persistence API**: Added `DatabaseManager.save_trade_execution`, normalising trade metadata (dates, commissions, realised P&L) for paper and future live execution flows.
+- **LLM Performance Controls**: Updated `config/llm_config.yml` and `scripts/run_etl_pipeline.py` to surface cache toggles, tighter token budgets, and a latency-focused `default_use_case` to keep Ollama responses under the <5 s SLA.
+- **Regression Coverage Expansion**: Added `tests/etl/test_statistical_tests.py` and `tests/execution/test_paper_trading_engine.py` to protect the new quantitative toolkit and trade execution paths.
+- **Documentation Refresh**: Synchronised `Documentation/arch_tree.md` and this checkpoint with Week 1 deliverables, noting the statistical suite, paper trading engine enhancements, and new automated tests.
+- **Visualization Dashboard Upgrade**: `etl/visualizer.py` and `scripts/visualize_dataset.py` now surface market context (volume, returns, commodity/index overlays) via `--context-columns`, and `tests/etl/test_visualizer_dashboard.py` locks in the enhanced layout.
+- **Latency Guard Monitoring**: The LLM stages (`ai_llm/market_analyzer.py`, `ai_llm/signal_generator.py`, `ai_llm/risk_assessor.py`) publish deterministic fallback events through `ai_llm/performance_monitor.record_latency_fallback`, and `scripts/monitor_llm_system.py` promotes the metrics so operators see when heuristic mode activates.
+- **Centralized Log Routing**: CLI utilities (`scripts/run_etl_pipeline.py`, `scripts/monitor_llm_system.py`, `scripts/analyze_dataset.py`, `scripts/cache_manager.py`, `scripts/backfill_signal_validation.py`) now emit rolling logs under `logs/`, keeping the repo root uncluttered while retaining console output.
+
 ## New Capabilities (2025-10-24)
 - **Modular Pipeline Orchestrator**: `scripts/run_etl_pipeline.py` now composes dedicated `CVSettings` and `LLMComponents` dataclasses for configuration merging, split strategy logging, and LLM bootstrap, reducing duplicated logic and making stage execution auditable.
 - **Centralised Logging Discipline**: Core extractors (`etl/base_extractor.py`, `etl/data_source_manager.py`, `etl/alpha_vantage_extractor.py`, `etl/finnhub_extractor.py`) now rely on module-level loggers so entry points own logging configuration without module side effects.

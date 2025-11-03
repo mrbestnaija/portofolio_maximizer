@@ -36,6 +36,7 @@ Read this once. If you go off-script, you will waste everyone’s time.
 3. **No live trading**: every “execute” suggestion must stop at paper trading unless the docs explicitly say otherwise.
 4. **Phase discipline**: confirm current phase in `Documentation/implementation_checkpoint.md`. If your idea isn’t in scope, park it in TODO form, not code.
 5. **Cost ceiling**: keep solutions within $0/month budget. No cloud LLMs, no SaaS “shortcuts”.
+6. **Virtual environment**: Always use '.simpleTrader_env' virtual environment.
 
 ### 5. Day-to-Day Workflow (No Surprises)
 ```powershell

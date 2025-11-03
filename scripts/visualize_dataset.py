@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 @click.option('--rolling', is_flag=True, help='Plot rolling statistics')
 @click.option('--spectral', is_flag=True, help='Plot spectral density')
 @click.option('--dashboard', is_flag=True, help='Create comprehensive dashboard')
+@click.option('--context-columns', default='', help='Comma-separated context columns (market/commodity indices)')
 @click.option('--all-plots', is_flag=True, help='Generate all visualization types')
 @click.option('--output-dir', default='visualizations', help='Output directory for plots')
 @click.option('--save', is_flag=True, help='Save plots to files')
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 @click.option('--nlags', default=40, help='Number of lags for ACF/PACF (default: 40)')
 def visualize_dataset(data: str, column: str, overview: bool, distribution: bool,
                      acf: bool, decomposition: bool, rolling: bool, spectral: bool,
-                     dashboard: bool, all_plots: bool, output_dir: str,
+                     dashboard: bool, context_columns: str, all_plots: bool, output_dir: str,
                      save: bool, show: bool, window: int, nlags: int):
     """Comprehensive time series visualization following MIT standards."""
 
@@ -164,10 +165,17 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
             logger.info(f"  ✓ Saved to {save_path}")
 
     # 7. Comprehensive Dashboard
+    context_cols = [c.strip() for c in context_columns.split(",") if c.strip()]
+
     if dashboard:
         logger.info("Creating comprehensive dashboard...")
         save_path = Path(output_dir) / f"{column}_dashboard.png" if save else None
-        fig = visualizer.plot_comprehensive_dashboard(df, column, save_path=str(save_path) if save_path else None)
+        fig = visualizer.plot_comprehensive_dashboard(
+            df,
+            column,
+            save_path=str(save_path) if save_path else None,
+            market_columns=context_cols or None,
+        )
         plots_created.append(('dashboard', fig))
         if save:
             logger.info(f"  ✓ Saved to {save_path}")

@@ -10,6 +10,13 @@
 - Phase 5.3: Profit Calculation Fix Applied (Oct 14, 2025) ⭐ CRITICAL
 - Phase 5.4: Ollama Health Check Fixed (Oct 22, 2025) ⭐ COMPLETE
 - Phase 5.5: Error Monitoring & Performance Optimization (Oct 22, 2025) ⭐ NEW
+- Week 5.6: Statistical validation suite + paper trading integration (Nov 02, 2025) ⭐ NEW
+- Week 5.6: Visual analytics dashboard with market/commodity context overlays (Nov 02, 2025) ⭐ NEW
+- Week 5.6: Signal validator backtests publish statistical/bootstrapped metrics to monitoring (Nov 02, 2025) ⭐ NEW
+- Week 5.6: LLM latency guard telemetry now visible in system monitor dashboards (Nov 02, 2025) ⭐ NEW
+- Week 5.6: SQLite “disk I/O” auto-retry added for OHLCV ingestion (Nov 02, 2025) ⭐ NEW
+- Week 5.6: `--config config.yml` alias resolves to `config/pipeline_config.yml` (Nov 02, 2025) ⭐ NEW
+- Week 5.6: All pipeline/utility logs streamed to `logs/` directory (Nov 02, 2025) ⭐ NEW
 - Portfolio mathematics engine upgraded to institutional-grade metrics and optimisation (`etl/portfolio_math.py`)
 - Signal validator aligned with 5-layer quantitative guardrails (statistical significance, Kelly sizing)
 - Comprehensive error monitoring system with automated alerting ⭐ NEW
@@ -170,6 +177,7 @@ portfolio_maximizer_v45/
 │   ├── checkpoint_manager.py       # ✅ 362 lines - State persistence (Phase 4.8) ⭐ NEW
 │   ├── pipeline_logger.py          # ✅ 415 lines - Event logging (Phase 4.8) ⭐ NEW
 │   ├── portfolio_math.py           # ✅ 45 lines - Production ready
+│   ├── statistical_tests.py        # ✅ Statistical validation suite (Phase 5.6) ⭐ NEW
 │   ├── time_series_analyzer.py     # ✅ 500+ lines - Production ready
 │   ├── visualizer.py               # ✅ 600+ lines - Production ready
 │   │
@@ -180,7 +188,7 @@ portfolio_maximizer_v45/
 │       └── ticker_universe.py      # ⬜ Master list management
 │
 ├── ai_llm/                          # ✅ PHASE 5.2-5.5 COMPLETE - 1,500+ lines ⭐ UPDATED
-│   ├── ollama_client.py            # ✅ 440+ lines - Local LLM integration w/ pooled session (Phase 5.5 refinement)
+│   ├── ollama_client.py            # ✅ 440+ lines - Local LLM integration (Phase 5.5) + fast-mode latency tuning (Phase 5.6)
 │   ├── market_analyzer.py          # ✅ 180 lines - Market analysis (Phase 5.2)
 │   ├── signal_generator.py         # ✅ 198 lines - Signal generation (Phase 5.2)
 │   ├── signal_validator.py         # ✅ 150 lines - Signal validation (Phase 5.2)
@@ -190,12 +198,17 @@ portfolio_maximizer_v45/
 │   ├── llm_database_integration.py # ✅ 421 lines - LLM data persistence (Phase 5.5) ⭐ NEW
 │   └── performance_optimizer.py    # ✅ 359 lines - Model selection optimization (Phase 5.5) ⭐ NEW
 │
+├── execution/                      # ✅ PHASE 5.6 - Paper trading stack ⭐ UPDATED
+│   ├── __init__.py                # ✅ Module marker
+│   └── paper_trading_engine.py    # ✅ Realistic simulation & persistence (Phase 5.6)
+│
 ├── .local_automation/              # ✅ Local automation assets (developer-only)
 │   ├── developer_notes.md          # Automation playbook
 │   └── settings.local.json         # Tooling configuration
 │
 ├── scripts/                         # ✅ PHASE 4.7-5.5 COMPLETE - 1,200+ lines ⭐ UPDATED
-│   ├── run_etl_pipeline.py         # ✅ 1,100+ lines - Modular orchestrator (CV/LLM helpers, Phase 5.5 refinement)
+│   ├── run_etl_pipeline.py         # ✅ 1,100+ lines - Modular orchestrator (CV/LLM helpers + Phase 5.6 latency controls)
+│   ├── backfill_signal_validation.py # ✅ Backfills pending signals & recomputes accuracy (Phase 5.6) ⭐ NEW
 │   ├── analyze_dataset.py          # ✅ 270+ lines - Production ready
 │   ├── visualize_dataset.py        # ✅ 200+ lines - Production ready
 │   ├── validate_environment.py     # ✅ Environment checks
@@ -205,6 +218,11 @@ portfolio_maximizer_v45/
 │   ├── test_llm_implementations.py # ✅ 150 lines - LLM implementation testing (Phase 5.5) ⭐ NEW
 │   ├── deploy_monitoring.sh        # ✅ 213 lines - Monitoring deployment script (Phase 5.5) ⭐ NEW
 │   └── refresh_ticker_universe.py  # ⬜ NEW - Weekly ticker updates
+│
+├── visualizations/                  # ✅ Context-rich dashboards (Phase 5.6) ⭐ UPDATED
+│   ├── Close_dashboard.png         # ✅ Legacy price dashboard
+│   ├── Volume_dashboard.png        # ✅ Market conditions + commodities overlays (Phase 5.6)
+│   └── training/                   # ✅ Sample training-set plots
 │
 ├── bash/                            # ✅ PHASE 4.7 COMPLETE - Validation scripts ⭐ UPDATED
 │   ├── run_cv_validation.sh        # ✅ CV validation suite (5 tests + 88 unit tests)
@@ -237,6 +255,8 @@ portfolio_maximizer_v45/
     │   ├── test_data_source_manager.py  # ✅ 18 tests (Phase 4.6)
     │   ├── test_time_series_cv.py       # ✅ 22 tests (Phase 4.5)
     │   ├── test_method_signature_validation.py # ✅ 15 tests (Phase 5.5) ⭐ NEW
+    │   ├── test_statistical_tests.py    # ✅ 3 tests (Phase 5.6) ⭐ NEW
+    │   ├── test_visualizer_dashboard.py # ✅ Validates market-context dashboard (Phase 5.6) ⭐ NEW
     │   └── [other test files...]        # ✅ 33 tests (existing)
     ├── ai_llm/                     # ✅ 50+ tests - 100% passing (Phase 5.2-5.5) ⭐ UPDATED
     │   ├── test_ollama_client.py        # ✅ 15 tests (Phase 5.2)
@@ -244,11 +264,13 @@ portfolio_maximizer_v45/
     │   ├── test_signal_generator.py     # ✅ 6 tests (Phase 5.2)
     │   ├── test_signal_validator.py     # ✅ 3 tests (Phase 5.2)
     │   └── test_llm_enhancements.py     # ✅ 20+ tests (Phase 5.5) ⭐ NEW
+    ├── execution/                # ✅ 2 tests - Paper trading engine regression (Phase 5.6) ⭐ NEW
+    │   └── test_paper_trading_engine.py # ✅ Validates execution + persistence path
     ├── data_sources/               # ✅ Ready for expansion
     └── ticker_discovery/           # ⬜ NEW - Test ticker discovery
 │
-└── Documentation/                   # ✅ PHASE 4.8-5.5 - 20+ files ⭐ UPDATED
-    ├── implementation_checkpoint.md # ✅ Version 6.4 (Phase 4.6-5.5) ⭐ UPDATED
+└── Documentation/                   # ✅ PHASE 4.8-5.6 - 20+ files ⭐ UPDATED
+    ├── implementation_checkpoint.md # ✅ Version 6.6 (Phase 4.6-5.6) ⭐ UPDATED
     ├── CHECKPOINTING_AND_LOGGING.md # ✅ 30+ KB - Comprehensive guide (Phase 4.8)
     ├── IMPLEMENTATION_SUMMARY_CHECKPOINTING.md # ✅ 12 KB - Summary (Phase 4.8)
     ├── CV_CONFIGURATION_GUIDE.md   # ✅ 3.3 KB (Phase 4.7)

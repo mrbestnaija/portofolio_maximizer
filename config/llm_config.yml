@@ -6,7 +6,7 @@ llm:
   # Ollama server configuration
   server:
     host: "http://localhost:11434"
-    timeout_seconds: 120  # Max wait for LLM response
+    timeout_seconds: 30  # Max wait for LLM response (fast-fail)
     health_check_on_init: true  # Validate on startup (fail-fast)
 
   # Model selection (per TO_DO_LLM_local.mdc)
@@ -44,7 +44,8 @@ llm:
   # Generation parameters
   generation:
     temperature: 0.1  # Low for consistency (0.0-1.0)
-    max_tokens: 4096  # Maximum response length
+    max_tokens: 768  # Limit output length for latency control
+    max_prompt_chars: 2800  # Trim prompts to reduce latency
     top_p: 0.9  # Nucleus sampling threshold
     top_k: 40  # Top-k sampling
     repeat_penalty: 1.1  # Penalize repetition
@@ -73,9 +74,14 @@ llm:
 
     # Signal validation rules (per AGENT_INSTRUCTION.md)
     validation:
+      version: v2  # Activate advanced SignalValidator integration
       min_confidence_for_action: 0.75  # Require 75% confidence for BUY/SELL
       require_reasoning: true
       conservative_bias: true  # Default to HOLD unless strong signal
+      max_volatility_percentile: 0.95  # Reject signals in top 5% volatility regimes
+      max_position_size: 0.02  # Cap at 2% of portfolio
+      transaction_cost: 0.001  # 10 bps transaction cost assumption
+      portfolio_notional: 10000  # Default portfolio size for sizing checks
 
   # Risk assessor settings
   risk_assessor:
@@ -93,7 +99,12 @@ llm:
     log_latency: true
     log_token_count: true
     log_model_used: true
-    track_cache_usage: false  # Ollama handles caching internally
+    enable_cache: true  # Keep in-memory response cache active
+    track_cache_usage: true  # Log cache utilisation metrics
+    cache_max_size: 64
+    cache_ttl_seconds: 300  # Expire cached generations after 5 minutes
+    default_use_case: fast  # Optimizer biases towards latency
+    latency_failover_threshold: 6.0  # Seconds before switching to faster model
 
   # Error handling
   error_handling:

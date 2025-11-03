@@ -9,11 +9,14 @@ CRITICAL: Signals must be validated against data-driven rules.
 
 import pandas as pd
 import logging
-from typing import Dict, Any, Literal, Optional
+from typing import Dict, Any, Literal, Optional, Tuple
 from datetime import datetime
 import json
 
+import os
+
 from .ollama_client import OllamaClient, OllamaConnectionError
+from .performance_monitor import record_latency_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,9 @@ class LLMSignalGenerator:
     ):
         """Initialize with validated Ollama client"""
         self.client = ollama_client
+        self.force_fallback = os.getenv("LLM_FORCE_FALLBACK", "0") == "1"
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK enabled for signal generator")
         self.system_prompt = system_prompt or (
             "You are a quantitative trading strategist. "
             "Generate trading signals based on data analysis. "
@@ -72,10 +78,25 @@ class LLMSignalGenerator:
         """
         # Compute technical indicators for context
         indicators = self._compute_indicators(data)
+        period_info = {
+            "start": data.index.min().isoformat(),
+            "end": data.index.max().isoformat(),
+            "days": len(data),
+        }
         
         # Create signal generation prompt
         prompt = self._create_signal_prompt(ticker, market_analysis, indicators)
         
+        if self.force_fallback:
+            logger.info("LLM_FORCE_FALLBACK=1 - skipping LLM signal for %s", ticker)
+            record_latency_fallback(
+                stage="signal_generation",
+                ticker=ticker,
+                reason="forced_fallback_env",
+                inference_stats=None,
+            )
+            return self._fallback_signal(ticker, indicators, market_analysis, period_info)
+
         try:
             llm_response = self.client.generate(
                 prompt=prompt,
@@ -90,20 +111,38 @@ class LLMSignalGenerator:
             signal.update({
                 'ticker': ticker,
                 'signal_timestamp': datetime.now().isoformat(),
-                'data_period': {
-                    'start': data.index.min().isoformat(),
-                    'end': data.index.max().isoformat()
-                },
+                'data_period': period_info,
                 'indicators': indicators,
-                'llm_model': self.client.model
+                'llm_model': self.client.model,
+                'fallback': False,
             })
+
+            should_fallback, reason = self._latency_guard()
+            if should_fallback:
+                logger.warning(
+                    "LLM signal generation exceeded performance guard (%s); using deterministic fallback.",
+                    reason,
+                )
+                record_latency_fallback(
+                    stage="signal_generation",
+                    ticker=ticker,
+                    reason=reason or "latency_guard_triggered",
+                    inference_stats=self.client.get_last_inference_stats(),
+                )
+                self.force_fallback = True
+                return self._fallback_signal(ticker, indicators, market_analysis, period_info)
             
             signal = self._apply_generation_rules(signal)
             
             logger.info(f"Signal generated for {ticker}: {signal['action']}")
             return signal
             
-        except OllamaConnectionError:
+        except OllamaConnectionError as exc:
+            logger.warning(
+                "LLM signal unavailable for %s; raising to fail fast (%s)",
+                ticker,
+                exc,
+            )
             raise
         except Exception as e:
             logger.error(f"Signal generation failed: {e}")
@@ -198,6 +237,62 @@ Output ONLY valid JSON."""
                 'error': str(e)
             }
 
+    def _fallback_signal(
+        self,
+        ticker: str,
+        indicators: Dict[str, float],
+        analysis: Dict[str, Any],
+        period_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Conservative heuristic signal when LLM is unavailable."""
+        action = 'HOLD'
+        confidence = 0.35
+        risk_level = 'medium'
+        reasoning_parts = []
+
+        sma20 = indicators.get('sma_20')
+        sma50 = indicators.get('sma_50')
+        rsi = indicators.get('rsi_14')
+        trend = (analysis or {}).get('trend', 'neutral')
+
+        if sma20 is not None and sma50 is not None:
+            if sma20 > sma50 and trend == 'bullish' and rsi is not None and rsi < 70:
+                action = 'BUY'
+                confidence = 0.55
+                reasoning_parts.append('SMA20 above SMA50 with supportive bullish trend')
+            elif sma20 < sma50 and trend == 'bearish' and rsi is not None and rsi > 30:
+                action = 'SELL'
+                confidence = 0.55
+                reasoning_parts.append('SMA20 below SMA50 with bearish regime')
+
+        if rsi is not None:
+            if rsi > 75:
+                action = 'SELL'
+                confidence = max(confidence, 0.5)
+                reasoning_parts.append('RSI overbought signal')
+            elif rsi < 25:
+                action = 'BUY'
+                confidence = max(confidence, 0.5)
+                reasoning_parts.append('RSI oversold signal')
+
+        if action == 'HOLD' and not reasoning_parts:
+            reasoning_parts.append('No high-conviction setup detected; defaulting to HOLD')
+
+        reasoning = '; '.join(reasoning_parts)
+
+        return {
+            'action': action,
+            'confidence': round(confidence, 2),
+            'reasoning': reasoning,
+            'risk_level': risk_level,
+            'fallback': True,
+            'ticker': ticker,
+            'signal_timestamp': datetime.now().isoformat(),
+            'data_period': period_info,
+            'indicators': indicators,
+            'llm_model': f"fallback:{self.client.model}",
+        }
+
     def _apply_generation_rules(self, signal: Dict[str, Any]) -> Dict[str, Any]:
         """Apply conservative generation rules before validation."""
         min_conf_for_action = float(self.validation_rules.get('min_confidence_for_action', 0.0))
@@ -244,6 +339,29 @@ Output ONLY valid JSON."""
                 )
 
         return signal
+
+    def _latency_guard(self) -> Tuple[bool, Optional[str]]:
+        """Return whether a latency-based fallback should trigger for signal generation."""
+        max_latency_env = os.getenv("LLM_MAX_LATENCY_SECONDS", "5.0")
+        min_tokens_env = os.getenv("LLM_MIN_TOKENS_PER_SEC", "5.0")
+        try:
+            max_latency_override = float(max_latency_env)
+        except ValueError:
+            max_latency_override = 5.0
+        try:
+            min_tokens = float(min_tokens_env)
+        except ValueError:
+            min_tokens = 5.0
+
+        guard_fn = getattr(self.client, "should_use_latency_fallback", None)
+        if not callable(guard_fn):
+            return False, None
+
+        should_fallback, reason = guard_fn(
+            max_latency_override=max_latency_override,
+            min_token_rate=min_tokens,
+        )
+        return bool(should_fallback), reason
 
 
 # Validation

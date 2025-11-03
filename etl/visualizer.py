@@ -38,6 +38,7 @@ from scipy import signal, stats
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.tsa.seasonal import seasonal_decompose
 import logging
+import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +167,11 @@ class TimeSeriesVisualizer:
 
         # 3. Box Plot (Outlier Detection)
         ax3 = fig.add_subplot(gs[2, 0])
-        bp = ax3.boxplot(series, vert=False, patch_artist=True,
-                        boxprops=dict(facecolor=self.colors[1], alpha=0.7),
-                        medianprops=dict(color='red', linewidth=2))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+            bp = ax3.boxplot(series, vert=False, patch_artist=True,
+                            boxprops=dict(facecolor=self.colors[1], alpha=0.7),
+                            medianprops=dict(color='red', linewidth=2))
         ax3.set_xlabel(column, fontsize=10)
         ax3.set_title('Box Plot (Outliers)', fontsize=11, fontweight='bold')
         ax3.grid(True, alpha=0.3, axis='x')
@@ -444,8 +447,13 @@ class TimeSeriesVisualizer:
         logger.info(f"Created spectral density plot for {column}")
         return fig
 
-    def plot_comprehensive_dashboard(self, data: pd.DataFrame, column: str,
-                                    save_path: Optional[str] = None) -> plt.Figure:
+    def plot_comprehensive_dashboard(
+        self,
+        data: pd.DataFrame,
+        column: str,
+        save_path: Optional[str] = None,
+        market_columns: Optional[List[str]] = None,
+    ) -> plt.Figure:
         """Create comprehensive dashboard with all analyses.
 
         Includes:
@@ -454,19 +462,49 @@ class TimeSeriesVisualizer:
         - ACF/PACF
         - Spectral density
         - Decomposition
+        - Market context panels (volume, returns, commodities/indices)
 
         Args:
             data: DataFrame with time series
             column: Column to analyze
             save_path: Path to save figure (optional)
+            market_columns: Additional columns to visualise for market context
 
         Returns:
             Matplotlib figure
         """
-        fig = plt.figure(figsize=(20, 16))
-        gs = fig.add_gridspec(4, 3, hspace=0.3, wspace=0.3)
+        fig = plt.figure(figsize=(22, 18))
+        gs = fig.add_gridspec(5, 3, hspace=0.35, wspace=0.3)
 
         series = data[column].dropna()
+        if market_columns:
+            market_columns = [col for col in market_columns if col in data.columns]
+
+        # Auto-detect context columns if none provided
+        if not market_columns:
+            keywords = [
+                "oil",
+                "gold",
+                "gas",
+                "commodity",
+                "vix",
+                "usd",
+                "dxy",
+                "sp500",
+                "nasdaq",
+                "inflation",
+                "yield",
+            ]
+            auto_cols = []
+            for col in data.columns:
+                if col == column:
+                    continue
+                lowered = col.lower()
+                if any(token in lowered for token in keywords):
+                    auto_cols.append(col)
+                if len(auto_cols) >= 3:
+                    break
+            market_columns = auto_cols
 
         # 1. Time series with rolling mean
         ax1 = fig.add_subplot(gs[0, :])
@@ -498,7 +536,9 @@ class TimeSeriesVisualizer:
 
         # 4. Box plot
         ax4 = fig.add_subplot(gs[1, 2])
-        ax4.boxplot(series, vert=True, patch_artist=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+            ax4.boxplot(series, vert=True, patch_artist=True)
         ax4.set_title('Box Plot', fontsize=11, fontweight='bold')
         ax4.grid(True, alpha=0.3, axis='y')
 
@@ -531,6 +571,119 @@ class TimeSeriesVisualizer:
         ax8.set_title('Power Spectral Density', fontsize=11, fontweight='bold')
         ax8.set_xlabel('Frequency', fontsize=9)
         ax8.grid(True, alpha=0.3)
+
+        # 9. Volume (if available)
+        volume_col = next(
+            (col for col in data.columns if col.lower() in {"volume", "vol"}),
+            None,
+        )
+        ax_vol = fig.add_subplot(gs[4, 0])
+        if volume_col is not None:
+            volume_series = data[volume_col].dropna()
+            ax_vol.bar(volume_series.index, volume_series.values, color="#4C72B0", alpha=0.6)
+            ax_vol.set_title(f"{volume_col} (Liquidity Proxy)", fontsize=11, fontweight='bold')
+            ax_vol.set_xlabel('Time', fontsize=9)
+            ax_vol.set_ylabel('Volume', fontsize=9)
+            ax_vol.grid(True, alpha=0.3)
+        else:
+            ax_vol.axis("off")
+            ax_vol.text(
+                0.5,
+                0.5,
+                "No volume column available",
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+            )
+
+        # 10. Returns & regime proxy
+        ax_returns = fig.add_subplot(gs[4, 1])
+        returns = series.pct_change().dropna() * 100.0
+        if not returns.empty:
+            ax_returns.plot(returns.index, returns.values, color="#55A868", linewidth=1.2)
+            ax_returns.axhline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.7)
+            ax_returns.set_title("Percent Returns (%)", fontsize=11, fontweight='bold')
+            ax_returns.set_xlabel('Time', fontsize=9)
+            ax_returns.set_ylabel('% Δ', fontsize=9)
+            ax_returns.grid(True, alpha=0.3)
+            r_mean = returns.mean()
+            r_vol = returns.std()
+            ax_returns.text(
+                0.02,
+                0.9,
+                f"μ={r_mean:.2f}%  σ={r_vol:.2f}%",
+                transform=ax_returns.transAxes,
+                fontsize=9,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.6),
+            )
+        else:
+            ax_returns.axis("off")
+            ax_returns.text(
+                0.5,
+                0.5,
+                "Insufficient data for returns",
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+            )
+
+        # 11. Market/commodity context
+        ax_context = fig.add_subplot(gs[4, 2])
+        if market_columns:
+            for idx, ctx_col in enumerate(market_columns):
+                ctx_series = data[ctx_col].dropna()
+                if ctx_series.empty:
+                    continue
+                ax_context.plot(
+                    ctx_series.index,
+                    ctx_series.values,
+                    label=ctx_col,
+                    linewidth=1.4,
+                    alpha=0.85,
+                    color=self.colors[idx % len(self.colors)],
+                )
+            if ax_context.lines:
+                ax_context.set_title("Market Context (Commodities/Indices)", fontsize=11, fontweight='bold')
+                ax_context.set_xlabel("Time", fontsize=9)
+                ax_context.legend(fontsize=8, loc="upper left")
+                ax_context.grid(True, alpha=0.3)
+            else:
+                ax_context.axis("off")
+                ax_context.text(
+                    0.5,
+                    0.5,
+                    "Context columns empty",
+                    ha="center",
+                    va="center",
+                    fontsize=10,
+                    fontweight="bold",
+                )
+        else:
+            ax_context.axis("off")
+            regime_metrics = {
+                "Total Obs": len(series),
+                "Annualised Vol (%)": returns.std() * np.sqrt(252) if not returns.empty else np.nan,
+                "Max Drawdown (%)": (series / series.cummax() - 1).min() * 100.0 if len(series) > 0 else np.nan,
+                "Skewness": returns.skew() if not returns.empty else np.nan,
+                "Kurtosis": returns.kurtosis() if not returns.empty else np.nan,
+            }
+            text = "Market Regime Snapshot\n" + "-" * 26 + "\n"
+            for key, value in regime_metrics.items():
+                if isinstance(value, float):
+                    text += f"{key:20s}: {value: .2f}\n"
+                else:
+                    text += f"{key:20s}: {value}\n"
+            ax_context.text(
+                0.0,
+                1.0,
+                text,
+                ha="left",
+                va="top",
+                fontsize=9,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+            )
 
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')

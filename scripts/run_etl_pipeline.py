@@ -24,6 +24,7 @@ Pipeline Flow:
 import sys
 import yaml
 import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -67,6 +68,7 @@ from ai_llm.signal_generator import LLMSignalGenerator
 from ai_llm.risk_assessor import LLMRiskAssessor
 from ai_llm.performance_optimizer import LLMPerformanceOptimizer
 from ai_llm.signal_quality_validator import SignalQualityValidator, Signal, SignalDirection
+from ai_llm.signal_validator import SignalValidator as AdvancedSignalValidator
 
 # Database Integration (Phase 5.2+)
 from etl.database_manager import DatabaseManager
@@ -77,11 +79,21 @@ import time
 EXECUTION_MODES = ('auto', 'live', 'synthetic')
 
 # Configure logging
+logs_dir = Path("logs")
+logs_dir.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename=str(logs_dir / "pipeline_run.log"),
+    filemode="a",
 )
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(console_handler)
+
 logger = logging.getLogger(__name__)
+logging.captureWarnings(True)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -99,8 +111,24 @@ def load_config(config_path: str) -> Dict[str, Any]:
     """
     config_file = Path(config_path)
     if not config_file.exists():
-        logger.error(f"Configuration file not found: {config_path}")
-        raise FileNotFoundError(f"Config not found: {config_path}")
+        alternatives = []
+        if not config_file.is_absolute():
+            alternatives.append(Path("config") / config_file.name)
+        if config_file.name in {"config.yml", "config.yaml"}:
+            alternatives.append(Path("config") / "pipeline_config.yml")
+
+        for candidate in alternatives:
+            if candidate.exists():
+                logger.warning(
+                    "Configuration file %s not found; using %s instead",
+                    config_path,
+                    candidate,
+                )
+                config_file = candidate
+                break
+        else:
+            logger.error(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError(f"Config not found: {config_path}")
 
     try:
         with open(config_file, 'r') as f:
@@ -197,7 +225,22 @@ def _prepare_validation_frame(raw_ticker_data: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     validation_data = raw_ticker_data.copy()
-    validation_data.columns = [str(col).lower() for col in validation_data.columns]
+    normalised_columns = [str(col).lower() for col in validation_data.columns]
+    validation_data.columns = normalised_columns
+
+    # Provide canonical title-case aliases for validators expecting original names
+    alias_map = {
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'close': 'Close',
+        'volume': 'Volume',
+        'adj close': 'Adj Close',
+    }
+    for lower_name, alias_name in alias_map.items():
+        if lower_name in validation_data.columns and alias_name not in validation_data.columns:
+            validation_data[alias_name] = validation_data[lower_name]
+
     return validation_data
 
 
@@ -279,7 +322,7 @@ class LLMComponents:
     market_analyzer: Optional[LLMMarketAnalyzer] = None
     signal_generator: Optional[LLMSignalGenerator] = None
     risk_assessor: Optional[LLMRiskAssessor] = None
-    signal_validator: Optional[SignalQualityValidator] = None
+    signal_validator: Optional[Any] = None
     optimizer: Optional[LLMPerformanceOptimizer] = None
     validator_version: str = "v1"
     llm_config: Optional[Dict[str, Any]] = None
@@ -357,9 +400,10 @@ def _initialize_llm_components(
     llm_cfg: Dict[str, Any],
     signal_validation_cfg: Dict[str, Any],
 ) -> LLMComponents:
+    validator_version_cfg = str(signal_validation_cfg.get('version', 'v1')).lower()
     components = LLMComponents(
         enabled=False,
-        validator_version=signal_validation_cfg.get('version', 'v1'),
+        validator_version=validator_version_cfg,
         llm_config=llm_cfg,
     )
 
@@ -376,12 +420,28 @@ def _initialize_llm_components(
         host = server_cfg.get('host', "http://localhost:11434")
         timeout_seconds = int(server_cfg.get('timeout_seconds', 120))
 
-        cache_enabled = bool(performance_cfg.get('track_cache_usage', True))
+        cache_enabled_cfg = performance_cfg.get('enable_cache', None)
+        if cache_enabled_cfg is None:
+            cache_enabled = bool(performance_cfg.get('track_cache_usage', True))
+        else:
+            cache_enabled = bool(cache_enabled_cfg)
         cache_max_size_cfg = performance_cfg.get('cache_max_size', 32)
         try:
             cache_max_size = int(cache_max_size_cfg) if cache_max_size_cfg is not None else 32
         except (TypeError, ValueError):
             cache_max_size = 32
+
+        cache_ttl_cfg = performance_cfg.get('cache_ttl_seconds', 600)
+        try:
+            cache_ttl_seconds = None if cache_ttl_cfg in (None, "disabled") else int(cache_ttl_cfg)
+        except (TypeError, ValueError):
+            cache_ttl_seconds = 600
+
+        latency_failover_cfg = performance_cfg.get('latency_failover_threshold', 12.0)
+        try:
+            latency_failover_threshold = float(latency_failover_cfg)
+        except (TypeError, ValueError):
+            latency_failover_threshold = 12.0
 
         optimizer = LLMPerformanceOptimizer()
         model_to_use = llm_model or llm_cfg.get('active_model')
@@ -395,16 +455,26 @@ def _initialize_llm_components(
             enable_cache=cache_enabled,
             cache_max_size=cache_max_size,
             generation_options=generation_cfg,
+            cache_ttl_seconds=cache_ttl_seconds,
+            latency_failover_threshold=latency_failover_threshold,
         )
 
         if not llm_client.health_check():
             raise OllamaConnectionError("Ollama health check failed")
 
-        signal_validator = SignalQualityValidator(
-            min_confidence_threshold=float(signal_validation_cfg.get('min_confidence_for_action', 0.6)),
-            max_risk_threshold=float(signal_validation_cfg.get('max_risk_threshold', 0.15)),
-            min_expected_return=float(signal_validation_cfg.get('min_expected_return', 0.02)),
-        )
+        if validator_version_cfg == 'v2':
+            signal_validator = AdvancedSignalValidator(
+                min_confidence=float(signal_validation_cfg.get('min_confidence_for_action', 0.55)),
+                max_volatility_percentile=float(signal_validation_cfg.get('max_volatility_percentile', 0.95)),
+                max_position_size=float(signal_validation_cfg.get('max_position_size', 0.02)),
+                transaction_cost=float(signal_validation_cfg.get('transaction_cost', 0.001)),
+            )
+        else:
+            signal_validator = SignalQualityValidator(
+                min_confidence_threshold=float(signal_validation_cfg.get('min_confidence_for_action', 0.6)),
+                max_risk_threshold=float(signal_validation_cfg.get('max_risk_threshold', 0.15)),
+                min_expected_return=float(signal_validation_cfg.get('min_expected_return', 0.02)),
+            )
 
         components.enabled = True
         components.client = llm_client
@@ -528,8 +598,8 @@ def _log_split_strategy(settings: CVSettings) -> None:
               help='Enable verbose logging (DEBUG level)')
 @click.option('--enable-llm', is_flag=True, default=False,
               help='Enable LLM integration for market analysis and signal generation')
-@click.option('--llm-model', default= 'qwen:14b-chat-q4_K_M',
-              help='LLM model to use (default: from config). Options: deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
+@click.option('--llm-model', default='',
+              help='LLM model override. Leave blank to use config active_model (recommended). Options include deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
 @click.option('--dry-run', is_flag=True, default=False,
               help='Generate synthetic OHLCV data in-process (no network) to exercise stages')
 @click.option('--execution-mode', default='auto',
@@ -869,6 +939,13 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 logger.info("Generating trading signals with LLM...")
                 llm_signals = {}
                 llm_signal_validations = {}
+                portfolio_notional = 10000.0
+                if signal_validation_cfg:
+                    notional_cfg = signal_validation_cfg.get('portfolio_notional', signal_validation_cfg.get('portfolio_value', 10000.0))
+                    try:
+                        portfolio_notional = float(notional_cfg)
+                    except (TypeError, ValueError):
+                        portfolio_notional = 10000.0
                 
                 for ticker in ticker_list:
                     try:
@@ -897,45 +974,74 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
                         if signal_validator is not None:
                             try:
-                                direction_value = str(signal.get('action', 'HOLD')).upper()
-                                try:
-                                    direction_enum = SignalDirection(direction_value)
-                                except ValueError:
-                                    direction_enum = SignalDirection.HOLD
+                                if validator_version == 'v2' and hasattr(signal_validator, 'validate_llm_signal'):
+                                    if validation_data.empty or 'Close' not in validation_data.columns:
+                                        raise ValueError("insufficient market data for advanced validation")
 
-                                validator_signal = Signal(
-                                    ticker=ticker,
-                                    direction=direction_enum,
-                                    confidence=float(signal.get('confidence', 0.0)),
-                                    reasoning=signal.get('reasoning', ''),
-                                    timestamp=datetime.now(),
-                                    price_at_signal=price_at_signal or 0.0,
-                                    expected_return=signal.get('expected_return'),
-                                    risk_estimate=signal.get('risk_estimate'),
-                                )
+                                    validation_result = signal_validator.validate_llm_signal(
+                                        signal,
+                                        validation_data,
+                                        portfolio_value=portfolio_notional,
+                                    )
+                                    validation_status = 'validated' if validation_result.is_valid else 'failed'
+                                    validation_entry = {
+                                        'validator_version': validator_version,
+                                        'confidence_score': float(validation_result.confidence_score),
+                                        'recommendation': validation_result.recommendation,
+                                        'warnings': validation_result.warnings,
+                                        'quality_metrics': getattr(validation_result, 'layer_results', {}),
+                                    }
 
-                                if validation_data.empty or 'close' not in validation_data.columns:
-                                    raise ValueError("insufficient market data for validation")
+                                    if (not validation_result.is_valid
+                                            or validation_result.recommendation.upper() in {'HOLD', 'REJECT'}):
+                                        if signal.get('action') != 'HOLD':
+                                            logger.debug("Advanced validator adjusted %s signal to HOLD", ticker)
+                                            signal['action'] = 'HOLD'
+                                        if validation_result.warnings:
+                                            existing_reasoning = signal.get('reasoning') or ''
+                                            signal['reasoning'] = (
+                                                f"{existing_reasoning} [Validator: {validation_result.warnings[0]}]"
+                                            ).strip()
+                                else:
+                                    direction_value = str(signal.get('action', 'HOLD')).upper()
+                                    try:
+                                        direction_enum = SignalDirection(direction_value)
+                                    except ValueError:
+                                        direction_enum = SignalDirection.HOLD
 
-                                validation_result = signal_validator.validate_signal(validator_signal, validation_data)
-                                validation_status = 'validated' if validation_result.is_valid else 'failed'
-                                validation_entry = {
-                                    'validator_version': validator_version,
-                                    'confidence_score': float(validation_result.confidence_score),
-                                    'recommendation': validation_result.recommendation,
-                                    'warnings': validation_result.warnings,
-                                    'quality_metrics': validation_result.quality_metrics,
-                                }
+                                    validator_signal = Signal(
+                                        ticker=ticker,
+                                        direction=direction_enum,
+                                        confidence=float(signal.get('confidence', 0.0)),
+                                        reasoning=signal.get('reasoning', ''),
+                                        timestamp=datetime.now(),
+                                        price_at_signal=price_at_signal or 0.0,
+                                        expected_return=signal.get('expected_return'),
+                                        risk_estimate=signal.get('risk_estimate'),
+                                    )
 
-                                if not validation_result.is_valid or validation_result.recommendation == 'HOLD':
-                                    if signal.get('action') != 'HOLD':
-                                        logger.debug("Validator adjusted %s signal to HOLD", ticker)
-                                        signal['action'] = 'HOLD'
-                                    if validation_result.warnings:
-                                        signal['reasoning'] = (
-                                            f"{signal.get('reasoning', '')} "
-                                            f"[Validator: {validation_result.warnings[0]}]"
-                                        ).strip()
+                                    if validation_data.empty or 'close' not in validation_data.columns:
+                                        raise ValueError("insufficient market data for validation")
+
+                                    validation_result = signal_validator.validate_signal(validator_signal, validation_data)
+                                    validation_status = 'validated' if validation_result.is_valid else 'failed'
+                                    validation_entry = {
+                                        'validator_version': validator_version,
+                                        'confidence_score': float(validation_result.confidence_score),
+                                        'recommendation': validation_result.recommendation,
+                                        'warnings': validation_result.warnings,
+                                        'quality_metrics': validation_result.quality_metrics,
+                                    }
+
+                                    if not validation_result.is_valid or validation_result.recommendation == 'HOLD':
+                                        if signal.get('action') != 'HOLD':
+                                            logger.debug("Validator adjusted %s signal to HOLD", ticker)
+                                            signal['action'] = 'HOLD'
+                                        if validation_result.warnings:
+                                            signal['reasoning'] = (
+                                                f"{signal.get('reasoning', '')} "
+                                                f"[Validator: {validation_result.warnings[0]}]"
+                                            ).strip()
                             except Exception as validation_error:
                                 validation_status = 'failed'
                                 validation_entry = {

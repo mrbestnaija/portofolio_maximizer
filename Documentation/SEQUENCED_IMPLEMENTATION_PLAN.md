@@ -111,9 +111,9 @@ backtest_results = validator.backtest_signal_quality(
 
 #### **Day 3-4: Enhanced Portfolio Mathematics**
 ```python
-# TASK A1.4: Deploy Enhanced Portfolio Math (1 hour)
-# File: etl/portfolio_math_enhanced.py (already exists - deploy)
-# Replace legacy portfolio_math.py with enhanced version
+# TASK A1.4: Deploy Enhanced Portfolio Math (1 hour) ✅ COMPLETE
+# Files: etl/portfolio_math.py (promoted), scripts/run_etl_pipeline.py
+# Status: Pipeline-wide imports now point to the enhanced implementation in alignment with AGENT_DEV_CHECKLIST.md and QUANTIFIABLE_SUCCESS_CRITERIA.md guidance.
 
 # TASK A1.5: Statistical Testing Framework (3 hours)
 # File: etl/statistical_tests.py (NEW - 300 lines)
@@ -162,8 +162,14 @@ class PaperTradingEngine:
 - [ ] Database constraint error fixed
 - [ ] LLM inference <5 seconds per signal
 - [ ] Signal validation operational
-- [ ] Enhanced portfolio math deployed
+- [x] Enhanced portfolio math deployed (pipeline imports `etl.portfolio_math`; regression: `tests/etl/test_statistical_tests.py`, `tests/execution/test_paper_trading_engine.py`)
 - [ ] Paper trading engine complete
+
+> **Detailed Specs (Updated)**  
+> • `etl/statistical_tests.py` implements `StatisticalTestSuite` with benchmark significance testing, Ljung–Box / Durbin–Watson diagnostics, and Sharpe / max drawdown bootstrap intervals to quantify strategy robustness.  
+> • `execution/paper_trading_engine.py` now supports dependency injection, realistic slippage + transaction costs, portfolio bookkeeping, and persists executions through `DatabaseManager.save_trade_execution`.  
+> • `config/llm_config.yml` together with `scripts/run_etl_pipeline.py` exposes performance knobs (`default_use_case`, cache settings, tighter token limits) so Ollama inference can stay below the 5 s SLA.  
+> • Promoted portfolio math defaults (`etl/portfolio_math`) align with AGENT_INSTRUCTION.md, AGENT_DEV_CHECKLIST.md, CHECKPOINTING_AND_LOGGING.md, QUANTIFIABLE_SUCCESS_CRITERIA.md, API_KEYS_SECURITY.md, and TESTING_GUIDE.md by preserving deterministic checkpointing, avoiding new secrets, and validating via `tests/etl/test_statistical_tests.py` and `tests/execution/test_paper_trading_engine.py`.
 
 ### **WEEK 2: Risk Management & Real-Time Data**
 

@@ -22,16 +22,14 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from etl.portfolio_math import (
-    calculate_kelly_fraction_correct,
-    test_strategy_significance,
-)
+from etl.portfolio_math import calculate_kelly_fraction_correct
+from etl.statistical_tests import StatisticalTestSuite
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_RISK_LEVELS = ("low", "medium", "high")
+ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
 
 
 def _normalise_risk_level(level: Any) -> Tuple[str, Optional[str]]:
@@ -123,6 +121,9 @@ class BacktestReport:
     information_ratio: float = 0.0
     information_coefficient: float = 0.0
     timestamp: datetime = None
+    statistical_summary: Dict[str, float] = field(default_factory=dict)
+    autocorrelation: Dict[str, float] = field(default_factory=dict)
+    bootstrap_intervals: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
         if self.timestamp is None:
@@ -155,6 +156,7 @@ class SignalValidator:
         self.max_volatility_percentile = max_volatility_percentile
         self.max_position_size = max_position_size
         self.transaction_cost = transaction_cost
+        self._stat_suite = StatisticalTestSuite()
         
         logger.info(f"Signal Validator initialized with min_confidence={min_confidence}")
     
@@ -516,24 +518,58 @@ class SignalValidator:
         
         avg_confidence = np.mean([_clamp_confidence(s.get('confidence', 0.5)) for s in signals]) if signals else 0.0
 
+        stat_summary: Dict[str, float] = {}
+        autocorr_summary: Dict[str, float] = {}
+        bootstrap_summary: Dict[str, Any] = {}
+        information_coefficient = 0.0
+        p_value = 1.0
+        statistically_significant = False
+        information_ratio = 0.0
+        
         if strategy_returns and benchmark_returns:
-            significance = test_strategy_significance(
-                np.array(strategy_returns),
-                np.array(benchmark_returns)
-            )
+            try:
+                stat_summary = self._stat_suite.test_strategy_significance(
+                    strategy_returns, benchmark_returns
+                )
+            except ValueError as exc:
+                logger.debug("Statistical significance test skipped: %s", exc)
+                stat_summary = {}
+
+            try:
+                lags = min(10, len(strategy_returns) - 1)
+                if lags >= 1:
+                    autocorr_summary = self._stat_suite.test_autocorrelation(
+                        strategy_returns, lags=lags
+                    )
+            except ValueError as exc:
+                logger.debug("Autocorrelation diagnostic skipped: %s", exc)
+                autocorr_summary = {}
+
+            try:
+                if len(strategy_returns) >= 5:
+                    bootstrap = self._stat_suite.bootstrap_validation(
+                        strategy_returns,
+                        n_bootstrap=min(500, len(strategy_returns) * 10),
+                    )
+                    bootstrap_summary = {
+                        "sharpe_ratio_ci": bootstrap.sharpe_ratio,
+                        "max_drawdown_ci": bootstrap.max_drawdown,
+                        "samples": bootstrap.samples,
+                        "confidence_level": bootstrap.confidence_level,
+                    }
+            except ValueError as exc:
+                logger.debug("Bootstrap validation skipped: %s", exc)
+                bootstrap_summary = {}
+
             correlation_matrix = np.corrcoef(predicted_directions, actual_directions)
             if correlation_matrix.shape == (2, 2) and not np.isnan(correlation_matrix[0, 1]):
                 information_coefficient = float(correlation_matrix[0, 1])
             else:
                 information_coefficient = 0.0
-            p_value = significance['p_value']
-            statistically_significant = significance['significant']
-            information_ratio = significance['information_ratio']
-        else:
-            p_value = 1.0
-            statistically_significant = False
-            information_ratio = 0.0
-            information_coefficient = 0.0
+
+            p_value = float(stat_summary.get("p_value", 1.0))
+            statistically_significant = bool(stat_summary.get("significant", False))
+            information_ratio = float(stat_summary.get("information_ratio", 0.0))
         
         # Generate recommendation
         if hit_rate >= 0.55 and profit_factor >= 1.5:
@@ -554,7 +590,10 @@ class SignalValidator:
             p_value=p_value,
             statistically_significant=statistically_significant,
             information_ratio=information_ratio,
-            information_coefficient=information_coefficient
+            information_coefficient=information_coefficient,
+            statistical_summary=stat_summary,
+            autocorrelation=autocorr_summary,
+            bootstrap_intervals=bootstrap_summary,
         )
 
 

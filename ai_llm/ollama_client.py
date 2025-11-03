@@ -8,6 +8,7 @@ Pipeline fails immediately if Ollama is not running (per requirement 3b).
 """
 
 import os
+import re
 import requests
 import logging
 import time
@@ -52,7 +53,10 @@ class OllamaClient:
                  optimize_use_case: str = "balanced",
                  enable_cache: bool = True,
                  cache_max_size: int = 32,
-                 generation_options: Optional[Dict[str, Any]] = None):
+                 generation_options: Optional[Dict[str, Any]] = None,
+                 http_client: Optional[Any] = None,
+                 cache_ttl_seconds: Optional[int] = 600,
+                 latency_failover_threshold: float = 12.0):
         """
         Initialize Ollama client with strict validation.
         
@@ -65,6 +69,9 @@ class OllamaClient:
             enable_cache: Whether to reuse identical prompt responses
             cache_max_size: Maximum number of cached responses retained in memory
             generation_options: Additional generation options (top_p, top_k, etc.)
+            http_client: Optional requests-compatible client (for testing/mocking)
+            cache_ttl_seconds: Optional cache expiry in seconds (None disables TTL)
+            latency_failover_threshold: Seconds before switching to faster fallback model on retry
         
         Raises:
             OllamaConnectionError: If Ollama is unavailable (REQUIRED per 3b)
@@ -77,9 +84,13 @@ class OllamaClient:
         self._response_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self.generation_options = generation_options or {}
         self.timeout = timeout
-        self._session = requests.Session()
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.latency_failover_threshold = max(1.0, float(latency_failover_threshold))
+        self._session = http_client if http_client is not None else requests.Session()
+        self._owns_session = http_client is None and hasattr(self._session, "close")
         self._explicit_model = model is not None
         resolved_model = model or "deepseek-coder:6.7b-instruct-q4_K_M"
+        self._last_inference_stats: Optional[Dict[str, Any]] = None
 
         if self.optimizer and not self._explicit_model:
             try:
@@ -103,6 +114,7 @@ class OllamaClient:
             self._optimizer_alternatives = []
 
         self.model = resolved_model
+        self._tried_models = {self.model}
         
         # CRITICAL: Validate Ollama availability immediately
         self._validate_connection()
@@ -135,8 +147,13 @@ class OllamaClient:
             OllamaConnectionError: If validation fails - pipeline stops
         """
         try:
+            if self._owns_session or not hasattr(self._session, "get"):
+                get_callable = requests.get
+            else:
+                get_callable = self._session.get
+
             # Check server health
-            response = self._session.get(f"{self.host}/api/tags", timeout=5)
+            response = get_callable(f"{self.host}/api/tags", timeout=5)
             response.raise_for_status()
             
             # Check model availability
@@ -166,7 +183,7 @@ class OllamaClient:
                         f"Run: ollama pull {self.model}"
                     )
             
-            logger.info(f"✓ Ollama validated: {self.model} ready")
+            logger.info("Ollama validated: %s ready", self.model)
             
         except requests.exceptions.ConnectionError:
             raise OllamaConnectionError(
@@ -222,18 +239,115 @@ class OllamaClient:
         if not self.enable_cache:
             return None
         cached = self._response_cache.get(cache_key)
-        if cached is not None:
-            self._response_cache.move_to_end(cache_key)
+        if cached is None:
+            return None
+
+        if self.cache_ttl_seconds is not None:
+            if time.time() - cached["timestamp"] > self.cache_ttl_seconds:
+                # Expired cache entry
+                self._response_cache.pop(cache_key, None)
+                return None
+
+        self._response_cache.move_to_end(cache_key)
         return cached
 
     def _cache_set(self, cache_key: str, payload: Dict[str, Any]) -> None:
         """Store inference result in cache."""
         if not self.enable_cache:
             return
-        self._response_cache[cache_key] = payload
+        payload_with_timestamp = dict(payload)
+        payload_with_timestamp["timestamp"] = time.time()
+        self._response_cache[cache_key] = payload_with_timestamp
         self._response_cache.move_to_end(cache_key)
         if len(self._response_cache) > self.cache_max_size:
             self._response_cache.popitem(last=False)
+
+    def clear_cache(self) -> None:
+        """Clear cached responses (useful for testing and memory control)."""
+        self._response_cache.clear()
+        logger.debug("Ollama response cache cleared")
+
+    def _optimise_prompt(self, prompt: str) -> str:
+        """
+        Reduce prompt token count by trimming whitespace and removing redundancy.
+
+        This is a lightweight heuristic that preserves semantic content while
+        keeping prompts compact to improve inference latency.
+        """
+        if not isinstance(prompt, str):
+            return prompt
+
+        cleaned_lines: list[str] = []
+        cleaned_lines_lower: list[str] = []
+        for raw_line in prompt.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            normalised = re.sub(r"\s+", " ", line)
+            lower = normalised.lower()
+
+            # Skip duplicates
+            if lower in cleaned_lines_lower:
+                continue
+
+            # Prefer richer instructions: remove existing lines that are substrings
+            indices_to_remove = [
+                idx for idx, existing_lower in enumerate(cleaned_lines_lower)
+                if existing_lower != lower and existing_lower in lower
+            ]
+            if indices_to_remove:
+                for idx in reversed(indices_to_remove):
+                    cleaned_lines.pop(idx)
+                    cleaned_lines_lower.pop(idx)
+
+            # Skip if current line is a substring of an existing richer instruction
+            if any(lower in existing_lower for existing_lower in cleaned_lines_lower):
+                continue
+
+            cleaned_lines.append(normalised)
+            cleaned_lines_lower.append(lower)
+
+        optimised = "\n".join(cleaned_lines)
+
+        max_chars = int(self.generation_options.get("max_prompt_chars", 4096))
+        if len(optimised) > max_chars:
+            optimised = optimised[:max_chars]
+
+        return optimised
+
+    def _should_switch_model(self, last_latency: float) -> bool:
+        """Decide if the client should attempt a faster model."""
+        if not getattr(self, "_optimizer_alternatives", []):
+            return False
+        if last_latency < self.latency_failover_threshold:
+            return False
+        return True
+
+    def _switch_to_alternative_model(self, reason: str) -> bool:
+        """Switch to the next available alternative model if present."""
+        alternatives = getattr(self, "_optimizer_alternatives", [])
+        for candidate in alternatives:
+            if candidate in self._tried_models:
+                continue
+            logger.warning(
+                "Switching Ollama model from '%s' to '%s' due to %s",
+                self.model,
+                candidate,
+                reason,
+            )
+            self.model = candidate
+            self._tried_models.add(candidate)
+            try:
+                self._validate_connection()
+                return True
+            except OllamaConnectionError as validation_error:
+                logger.error(
+                    "Fallback model '%s' validation failed: %s",
+                    candidate,
+                    validation_error,
+                )
+                continue
+        return False
     
     def _build_generation_options(self, temperature: float) -> Dict[str, Any]:
         """Merge generation options with runtime temperature."""
@@ -243,9 +357,11 @@ class OllamaClient:
         except (TypeError, ValueError):
             max_tokens = 1024
 
+        max_tokens = max(16, min(max_tokens, 1024))
+
         options: Dict[str, Any] = {
             "temperature": temperature,
-            "num_predict": min(max(1, max_tokens), 2048),
+            "num_predict": max_tokens,
         }
         for key in ("top_p", "top_k", "repeat_penalty"):
             value = self.generation_options.get(key)
@@ -276,143 +392,206 @@ class OllamaClient:
             - CodeLlama 13B: ~25-35 tokens/sec
             - Expected latency: 5-30s depending on response length
         """
-        cache_key = self._build_cache_key(prompt, system, temperature)
+        optimised_prompt = self._optimise_prompt(prompt)
+        if optimised_prompt != prompt:
+            logger.debug(
+                "Optimised prompt length from %d to %d characters",
+                len(prompt),
+                len(optimised_prompt),
+            )
+
+        cache_key = self._build_cache_key(optimised_prompt, system, temperature)
         cached = self._cache_get(cache_key)
         if cached:
             logger.debug("Returning cached response for model '%s'", self.model)
             monitor_inference(
                 model_name=self.model,
-                prompt=prompt,
+                prompt=optimised_prompt,
                 response=cached["response"],
                 inference_time=0.0,
                 success=True,
             )
             return cached["response"]
 
-        start_time = time.time()
+        attempts = 0
+        max_attempts = 1 + len(getattr(self, "_optimizer_alternatives", []))
+        self._last_inference_stats = None
         
-        try:
-            options = self._build_generation_options(temperature)
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": options
-            }
-            
-            if system:
-                payload["system"] = system
-            
-            response = self._session.post(
-                f"{self.host}/api/generate",
-                json=payload,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            
-            result = response.json()
-            generated_text = result.get('response', '')
-            
-            # Validate non-empty response
-            if not generated_text.strip():
-                raise OllamaConnectionError("Empty LLM response")
-            
-            duration = time.time() - start_time
-            duration = max(duration, 1e-6)
-            tokens_per_second = len(generated_text.split()) / duration
+        while attempts < max_attempts:
+            attempts += 1
+            start_time = time.time()
+            try:
+                options = self._build_generation_options(temperature)
+                payload = {
+                    "model": self.model,
+                    "prompt": optimised_prompt,
+                    "stream": False,
+                    "options": options
+                }
+                
+                if system:
+                    payload["system"] = system
+                
+                response = self._session.post(
+                    f"{self.host}/api/generate",
+                    json=payload,
+                    timeout=self.timeout
+                )
+                response.raise_for_status()
+                
+                result = response.json()
+                generated_text = result.get('response', '')
+                
+                # Validate non-empty response
+                if not generated_text.strip():
+                    raise OllamaConnectionError("Empty LLM response")
+                
+                duration = time.time() - start_time
+                duration = max(duration, 1e-6)
+                tokens_per_second = len(generated_text.split()) / duration
 
-            self._cache_set(
-                cache_key,
-                {
-                    "response": generated_text,
+                self._last_inference_stats = {
+                    "success": True,
                     "inference_time": duration,
                     "tokens_per_second": tokens_per_second,
-                },
-            )
+                    "model_name": self.model,
+                    "timestamp": datetime.now(),
+                    "prompt_length": len(optimised_prompt),
+                    "response_length": len(generated_text),
+                }
 
-            if self.optimizer:
-                try:
-                    self.optimizer.update_model_performance(
-                        model_name=self.model,
-                        inference_time=duration,
-                        tokens_per_second=tokens_per_second,
-                        success=True,
-                    )
-                except Exception as opt_err:  # pragma: no cover - defensive
-                    logger.debug(f"Performance optimizer update failed: {opt_err}")
-            
-            # Record performance metrics
-            monitor_inference(
-                model_name=self.model,
-                prompt=prompt,
-                response=generated_text,
-                inference_time=duration,
-                success=True
-            )
-            
-            logger.info(f"LLM generation: {duration:.1f}s, {len(generated_text)} chars")
-            
-            return generated_text
-            
-        except requests.exceptions.Timeout:
-            duration = time.time() - start_time
-            error_msg = f"LLM generation timeout (>{self.timeout}s)"
-            
-            # Record failed inference
-            monitor_inference(
-                model_name=self.model,
-                prompt=prompt,
-                response="",
-                inference_time=duration,
-                success=False,
-                error_message=error_msg
-            )
-            if self.optimizer:
-                try:
-                    self.optimizer.update_model_performance(
-                        model_name=self.model,
-                        inference_time=duration,
-                        tokens_per_second=0.0,
-                        success=False,
-                    )
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            
-            raise OllamaConnectionError(
-                f"{error_msg}. Try reducing prompt length or increasing timeout."
-            )
-        except Exception as e:
-            duration = time.time() - start_time
-            error_msg = f"LLM generation failed: {e}"
-            
-            # Record failed inference
-            monitor_inference(
-                model_name=self.model,
-                prompt=prompt,
-                response="",
-                inference_time=duration,
-                success=False,
-                error_message=error_msg
-            )
-            if self.optimizer:
-                try:
-                    self.optimizer.update_model_performance(
-                        model_name=self.model,
-                        inference_time=duration,
-                        tokens_per_second=0.0,
-                        success=False,
-                    )
-                except Exception:  # pragma: no cover - defensive
-                    pass
-            
-            raise OllamaConnectionError(error_msg)
+                self._cache_set(
+                    cache_key,
+                    {
+                        "response": generated_text,
+                        "inference_time": duration,
+                        "tokens_per_second": tokens_per_second,
+                    },
+                )
+
+                if self.optimizer:
+                    try:
+                        self.optimizer.update_model_performance(
+                            model_name=self.model,
+                            inference_time=duration,
+                            tokens_per_second=tokens_per_second,
+                            success=True,
+                        )
+                    except Exception as opt_err:  # pragma: no cover - defensive
+                        logger.debug(f"Performance optimizer update failed: {opt_err}")
+                
+                # Record performance metrics
+                monitor_inference(
+                    model_name=self.model,
+                    prompt=optimised_prompt,
+                    response=generated_text,
+                    inference_time=duration,
+                    success=True
+                )
+                
+                logger.info(
+                    "LLM generation: %.1fs, %d chars (model=%s)",
+                    duration,
+                    len(generated_text),
+                    self.model,
+                )
+
+                if self._should_switch_model(duration):
+                    self._switch_to_alternative_model("latency threshold exceeded")
+                
+                return generated_text
+                
+            except requests.exceptions.Timeout:
+                duration = time.time() - start_time
+                error_msg = f"LLM generation timeout (>{self.timeout}s)"
+                
+                monitor_inference(
+                    model_name=self.model,
+                    prompt=optimised_prompt,
+                    response="",
+                    inference_time=duration,
+                    success=False,
+                    error_message=error_msg
+                )
+                self._last_inference_stats = {
+                    "success": False,
+                    "inference_time": duration,
+                    "tokens_per_second": 0.0,
+                    "model_name": self.model,
+                    "timestamp": datetime.now(),
+                    "prompt_length": len(optimised_prompt),
+                    "response_length": 0,
+                    "error": error_msg,
+                }
+                if self.optimizer:
+                    try:
+                        self.optimizer.update_model_performance(
+                            model_name=self.model,
+                            inference_time=duration,
+                            tokens_per_second=0.0,
+                            success=False,
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+                if self._switch_to_alternative_model("timeout"):
+                    cache_key = self._build_cache_key(optimised_prompt, system, temperature)
+                    continue
+                
+                raise OllamaConnectionError(
+                    f"{error_msg}. Try reducing prompt length or increasing timeout."
+                ) from None
+            except Exception as e:
+                duration = time.time() - start_time
+                error_msg = f"LLM generation failed: {e}"
+                
+                monitor_inference(
+                    model_name=self.model,
+                    prompt=optimised_prompt,
+                    response="",
+                    inference_time=duration,
+                    success=False,
+                    error_message=error_msg
+                )
+                if self.optimizer:
+                    try:
+                        self.optimizer.update_model_performance(
+                            model_name=self.model,
+                            inference_time=duration,
+                            tokens_per_second=0.0,
+                            success=False,
+                        )
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+                if self._switch_to_alternative_model("error"):
+                    cache_key = self._build_cache_key(optimised_prompt, system, temperature)
+                    continue
+                
+                raise OllamaConnectionError(error_msg) from None
+            finally:
+                if self._last_inference_stats is None:
+                    self._last_inference_stats = {
+                        "success": False,
+                        "inference_time": time.time() - start_time,
+                        "tokens_per_second": 0.0,
+                        "model_name": self.model,
+                        "timestamp": datetime.now(),
+                        "prompt_length": len(optimised_prompt),
+                        "response_length": 0,
+                    }
     
     def close(self) -> None:
         """Release underlying HTTP session resources."""
-        try:
-            self._session.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
+        if not self._owns_session:
+            return
+
+        close_method = getattr(self._session, "close", None)
+        if callable(close_method):
+            try:
+                close_method()
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information and performance stats"""
@@ -435,6 +614,47 @@ class OllamaClient:
         except Exception as e:
             logger.warning(f"Failed to get model info: {e}")
             return {}
+
+    def get_last_inference_stats(self) -> Optional[Dict[str, Any]]:
+        """Return metrics captured during the most recent inference attempt."""
+        return self._last_inference_stats
+
+    def should_use_latency_fallback(
+        self,
+        max_latency_override: Optional[float] = None,
+        min_token_rate: Optional[float] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if the caller should fall back to deterministic output due to performance.
+
+        Args:
+            max_latency_override: Optional hard cap on acceptable latency (seconds).
+            min_token_rate: Optional minimum acceptable tokens per second.
+
+        Returns:
+            Tuple of (should_fallback, reason). Reason is a human-readable description.
+        """
+        stats = self._last_inference_stats
+        if not stats or not stats.get("success", False):
+            return False, None
+
+        latency_threshold = self.latency_failover_threshold
+        if max_latency_override is not None:
+            latency_threshold = min(
+                latency_threshold,
+                max(0.5, float(max_latency_override)),
+            )
+
+        latency = float(stats.get("inference_time", 0.0))
+        if latency > latency_threshold:
+            return True, f"latency {latency:.2f}s > {latency_threshold:.2f}s"
+
+        token_threshold = 5.0 if min_token_rate is None else max(0.1, float(min_token_rate))
+        tokens_per_second = float(stats.get("tokens_per_second", 0.0))
+        if tokens_per_second < token_threshold:
+            return True, f"token rate {tokens_per_second:.2f} < {token_threshold:.2f}"
+
+        return False, None
 
 # Performance validation
 assert OllamaClient.__init__.__doc__ is not None, "Missing docstring"
