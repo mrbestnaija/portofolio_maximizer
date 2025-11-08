@@ -72,28 +72,62 @@ from ai_llm.signal_validator import SignalValidator as AdvancedSignalValidator
 
 # Database Integration (Phase 5.2+)
 from etl.database_manager import DatabaseManager
+from scripts.track_llm_signals import LLMSignalTracker
 
 import time
 
 # Supported execution modes for data extraction
 EXECUTION_MODES = ('auto', 'live', 'synthetic')
 
-# Configure logging
-logs_dir = Path("logs")
-logs_dir.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename=str(logs_dir / "pipeline_run.log"),
-    filemode="a",
-)
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logging.getLogger().addHandler(console_handler)
+
+def _setup_logging(verbose: bool = False) -> logging.Logger:
+    """Configure logging for pipeline execution.
+    
+    This function is called only when the script is run as main,
+    preventing logging side effects when importing the module.
+    
+    Args:
+        verbose: If True, set logging level to DEBUG
+        
+    Returns:
+        Configured logger instance
+    """
+    logs_dir = Path("logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Remove existing handlers to avoid duplicates
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Configure file handler
+    file_handler = logging.FileHandler(
+        str(logs_dir / "pipeline_run.log"),
+        mode="a"
+    )
+    file_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+    
+    # Configure console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    )
+    
+    # Set root logger level
+    root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    logging.captureWarnings(True)
+    
+    return logging.getLogger(__name__)
+
 
 logger = logging.getLogger(__name__)
-logging.captureWarnings(True)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -138,6 +172,79 @@ def load_config(config_path: str) -> Dict[str, Any]:
     except yaml.YAMLError as e:
         logger.error(f"Invalid YAML in configuration: {e}")
         raise
+
+
+def _generate_visual_dashboards(
+    pipeline_cfg: Dict[str, Any],
+    db_manager: DatabaseManager,
+    tickers: Sequence[str],
+) -> None:
+    """Automatically generate visualization dashboards from persisted outputs."""
+    visualization_cfg = pipeline_cfg.get('visualization', {})
+    if not visualization_cfg.get('auto_dashboard'):
+        return
+
+    try:
+        from etl.dashboard_loader import DashboardDataLoader
+        from etl.visualizer import TimeSeriesVisualizer
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.warning("Visualization modules unavailable: %s", exc)
+        return
+
+    output_dir = Path(visualization_cfg.get('output_dir', 'visualizations'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lookback_days = visualization_cfg.get('lookback_days', 180)
+    generate_forecast = visualization_cfg.get('generate_forecast_dashboard', True)
+    generate_signal = visualization_cfg.get('generate_signal_dashboard', True)
+
+    loader = DashboardDataLoader(db_manager=db_manager)
+    visualizer = TimeSeriesVisualizer()
+    generated = 0
+
+    for ticker in tickers:
+        price_df = loader.get_price_history(ticker, lookback_days=lookback_days)
+        if price_df is None or price_df.empty:
+            continue
+
+        if generate_forecast:
+            forecast_bundle = loader.get_forecast_bundle(ticker)
+            forecasts_available = {
+                model: payload
+                for model, payload in forecast_bundle.items()
+                if isinstance(payload, dict) and payload.get("forecast") is not None
+            }
+            if forecasts_available:
+                ensemble_payload = forecasts_available.get("COMBINED") or forecasts_available.get("ENSEMBLE")
+                weights = None
+                if isinstance(ensemble_payload, dict):
+                    weights = ensemble_payload.get("weights")
+                fig = visualizer.plot_forecast_dashboard(
+                    price_df.iloc[:, 0],
+                    forecasts_available,
+                    title=f"{ticker} Forecast Dashboard",
+                    weights=weights,
+                )
+                save_path = output_dir / f"{ticker}_forecast_dashboard.png"
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                generated += 1
+                logger.info("Forecast dashboard saved for %s -> %s", ticker, save_path)
+
+        if generate_signal:
+            signal_df = loader.get_signal_backtests(ticker)
+            if not signal_df.empty:
+                fig = visualizer.plot_signal_performance(signal_df, ticker=ticker)
+                save_path = output_dir / f"{ticker}_signal_dashboard.png"
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                generated += 1
+                logger.info("Signal dashboard saved for %s -> %s", ticker, save_path)
+
+    if generated:
+        logger.info("Visualization dashboards generated: %s", generated)
+    else:
+        logger.info("Visualization dashboard generation skipped (no data available).")
 
 
 def generate_synthetic_ohlcv(tickers: List[str], start_date: str,
@@ -244,6 +351,66 @@ def _prepare_validation_frame(raw_ticker_data: pd.DataFrame) -> pd.DataFrame:
     return validation_data
 
 
+def _compute_forward_return(
+    price_series: pd.Series,
+    signal_timestamp: datetime,
+    horizon_days: int = 5,
+) -> Optional[float]:
+    """Compute forward return over a given horizon if price data permits."""
+    if price_series.empty:
+        return None
+
+    try:
+        indexed_prices = price_series.copy()
+        if not isinstance(indexed_prices.index, pd.DatetimeIndex):
+            indexed_prices.index = pd.to_datetime(indexed_prices.index)
+    except Exception:
+        return None
+
+    signal_ts = pd.to_datetime(signal_timestamp)
+
+    if signal_ts in indexed_prices.index:
+        entry_price = float(indexed_prices.loc[signal_ts])
+    else:
+        prior = indexed_prices.loc[:signal_ts]
+        if prior.empty:
+            return None
+        entry_price = float(prior.iloc[-1])
+
+    if entry_price == 0:
+        return None
+
+    future_window = indexed_prices.loc[
+        signal_ts + pd.Timedelta(days=1): signal_ts + pd.Timedelta(days=horizon_days)
+    ]
+    if future_window.empty:
+        return None
+
+    horizon_index = min(len(future_window) - 1, horizon_days - 1)
+    exit_price = float(future_window.iloc[horizon_index])
+    return (exit_price / entry_price) - 1
+
+
+def _format_signals_for_backtest(signal_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert persisted signal rows into the schema expected by the validator backtest."""
+    formatted: List[Dict[str, Any]] = []
+    for row in signal_rows:
+        timestamp_raw = row.get("signal_timestamp") or f"{row.get('signal_date')}T00:00:00"
+        try:
+            ts = pd.to_datetime(timestamp_raw)
+        except Exception:
+            continue
+        formatted.append(
+            {
+                "ticker": row.get("ticker"),
+                "action": row.get("action", "HOLD"),
+                "confidence": row.get("confidence", 0.5),
+                "signal_timestamp": ts.isoformat(),
+            }
+        )
+    return formatted
+
+
 def compute_portfolio_metrics(
     raw_data: pd.DataFrame,
     tickers: Sequence[str],
@@ -279,7 +446,9 @@ def compute_portfolio_metrics(
                 optimisation_meta.get("message", "unknown error"),
             )
     except Exception as exc:
-        logger.warning("Markowitz optimisation failed (%s). Falling back to equal weights.", exc)
+        from etl.security_utils import sanitize_error
+        safe_error = sanitize_error(exc)
+        logger.warning("Markowitz optimisation failed (%s). Falling back to equal weights.", safe_error)
         weights = np.repeat(1.0 / returns.shape[1], returns.shape[1])
 
     metrics = calculate_enhanced_portfolio_metrics(
@@ -332,7 +501,9 @@ def _load_pipeline_config_safe(config_path: str) -> Dict[str, Any]:
     try:
         return load_config(config_path)
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.error("Failed to load pipeline config: %s", exc)
+        from etl.security_utils import sanitize_error
+        safe_error = sanitize_error(exc)
+        logger.error("Failed to load pipeline config: %s", safe_error)
         logger.info("Using fallback configuration...")
         return {'pipeline': {'stages': []}}
 
@@ -443,6 +614,31 @@ def _initialize_llm_components(
         except (TypeError, ValueError):
             latency_failover_threshold = 12.0
 
+        token_rate_cfg = performance_cfg.get('token_rate_failover_threshold', 10.0)
+        try:
+            token_rate_failover_threshold = float(token_rate_cfg)
+        except (TypeError, ValueError):
+            token_rate_failover_threshold = 10.0
+
+        model_catalog = llm_cfg.get('models', {})
+        fallback_models: list[str] = []
+        try:
+            ranked_models = []
+            for entry in model_catalog.values():
+                if isinstance(entry, dict) and entry.get('name'):
+                    ranked_models.append(
+                        (
+                            int(entry.get('priority', 999)),
+                            str(entry.get('name')),
+                        )
+                    )
+            ranked_models.sort(key=lambda x: x[0])
+            fallback_models = [
+                name for _, name in ranked_models if name and name != (model_to_use or llm_cfg.get('active_model'))
+            ]
+        except Exception:  # pragma: no cover - defensive fallback
+            fallback_models = []
+
         optimizer = LLMPerformanceOptimizer()
         model_to_use = llm_model or llm_cfg.get('active_model')
 
@@ -457,9 +653,13 @@ def _initialize_llm_components(
             generation_options=generation_cfg,
             cache_ttl_seconds=cache_ttl_seconds,
             latency_failover_threshold=latency_failover_threshold,
+            token_rate_failover_threshold=token_rate_failover_threshold,
+            fallback_models=fallback_models,
         )
 
         if not llm_client.health_check():
+            logger.warning("Ollama health check failed - LLM features will be disabled")
+            logger.warning("  To enable LLM features, ensure Ollama is running: 'ollama serve'")
             raise OllamaConnectionError("Ollama health check failed")
 
         if validator_version_cfg == 'v2':
@@ -495,10 +695,17 @@ def _initialize_llm_components(
 
         logger.info("✓ LLM initialized: %s", llm_client.model)
     except OllamaConnectionError as exc:
-        logger.error("✗ LLM initialization failed: %s", exc)
-        logger.error("  Fix: Ensure Ollama is running: 'ollama serve'")
+        logger.warning("⚠ LLM initialization failed: %s", exc)
+        logger.warning("  LLM features will be disabled. Pipeline will continue without LLM.")
+        logger.warning("  To enable LLM features, ensure Ollama is running: 'ollama serve'")
+        # Return components with enabled=False (graceful degradation)
+        components.enabled = False
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.error("✗ LLM initialization error: %s", exc)
+        from etl.security_utils import sanitize_error
+        safe_error = sanitize_error(exc)
+        logger.warning("⚠ LLM initialization error: %s", safe_error)
+        logger.warning("  LLM features will be disabled. Pipeline will continue without LLM.")
+        components.enabled = False
 
     return components
 
@@ -575,73 +782,56 @@ def _log_split_strategy(settings: CVSettings) -> None:
         logger.info("  - Strategy: %s", settings.default_strategy)
         logger.info("  - Chronological: %s", 'yes' if settings.chronological_split else 'no')
 
-@click.command()
-@click.option('--config', default='config/pipeline_config.yml',
-              help='Path to pipeline configuration (default: config/pipeline_config.yml)')
-@click.option('--data-source', default=None,
-              help='Data source to use (options: yfinance, alpha_vantage, finnhub). Defaults to config value.')
-@click.option('--tickers', default='AAPL,MSFT',
-              help='Comma-separated ticker symbols (default: AAPL,MSFT)')
-@click.option('--start', default='2020-01-01',
-              help='Start date YYYY-MM-DD (default: 2020-01-01)')
-@click.option('--end', default='2024-01-01',
-              help='End date YYYY-MM-DD (default: 2024-01-01)')
-@click.option('--use-cv', is_flag=True, default=None,
-              help='Use k-fold cross-validation. If not set, uses config default_strategy.')
-@click.option('--n-splits', default=None, type=int,
-              help='Number of CV folds. If not set, uses config value.')
-@click.option('--test-size', default=None, type=float,
-              help='Test set size (0.0-1.0). If not set, uses config value.')
-@click.option('--gap', default=None, type=int,
-              help='Gap between train/validation periods. If not set, uses config value.')
-@click.option('--verbose', is_flag=True, default=False,
-              help='Enable verbose logging (DEBUG level)')
-@click.option('--enable-llm', is_flag=True, default=False,
-              help='Enable LLM integration for market analysis and signal generation')
-@click.option('--llm-model', default='',
-              help='LLM model override. Leave blank to use config active_model (recommended). Options include deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
-@click.option('--dry-run', is_flag=True, default=False,
-              help='Generate synthetic OHLCV data in-process (no network) to exercise stages')
-@click.option('--execution-mode', default='auto',
-              type=click.Choice(EXECUTION_MODES, case_sensitive=False),
-              help='Data extraction mode: live (network), synthetic (offline), or auto (try live, fallback to synthetic)')
-@click.option('--use-ticker-discovery', is_flag=True, default=False,
-              help='Load tickers from the configured ticker discovery universe.')
-@click.option('--refresh-ticker-universe', is_flag=True, default=False,
-              help='Force refresh of the ticker discovery universe before running the pipeline.')
-def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
-                use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
-                enable_llm: bool, llm_model: str, dry_run: bool,
-                execution_mode: str, use_ticker_discovery: bool,
-                refresh_ticker_universe: bool) -> None:
+def execute_pipeline(
+    config: str = 'config/pipeline_config.yml',
+    data_source: Optional[str] = None,
+    tickers: str = 'AAPL,MSFT',
+    start: str = '2020-01-01',
+    end: str = '2024-01-01',
+    use_cv: Optional[bool] = None,
+    n_splits: Optional[int] = None,
+    test_size: Optional[float] = None,
+    gap: Optional[int] = None,
+    verbose: bool = False,
+    enable_llm: bool = False,
+    llm_model: str = '',
+    dry_run: bool = False,
+    execution_mode: str = 'auto',
+    use_ticker_discovery: bool = False,
+    refresh_ticker_universe: bool = False,
+    logger_instance: Optional[logging.Logger] = None
+) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
-
-    Data Splitting Strategy:
-    - Default (--use-cv=False): Simple 70/15/15 chronological split (backward compatible)
-    - Recommended (--use-cv): k-fold cross-validation with expanding window
-      * 5.5x better temporal coverage (15% → 83%)
-      * Eliminates temporal gap (0 years vs 2.5 years)
-      * Strict test isolation (15% never exposed during CV)
-
-    Examples:
-        # Simple split (backward compatible)
-        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01
-
-        # k-fold CV (recommended for production)
-        python scripts/run_etl_pipeline.py --tickers AAPL --use-cv --n-splits 5
-
-        # Verbose logging
-        python scripts/run_etl_pipeline.py --tickers GOOGL --use-cv --verbose
-
-        # Live run with automatic synthetic fallback
-        python scripts/run_etl_pipeline.py --tickers NVDA --execution-mode auto --enable-llm
-
-        # Dry run (no network) with synthetic data
-        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2024-01-02 --end 2024-01-19 --dry-run
+    
+    This is the core pipeline execution function that can be called directly
+    from tests or other Python code. The Click command wrapper converts CLI
+    arguments and calls this function.
+    
+    Args:
+        config: Path to pipeline configuration file
+        data_source: Data source to use (yfinance, alpha_vantage, finnhub)
+        tickers: Comma-separated ticker symbols
+        start: Start date YYYY-MM-DD
+        end: End date YYYY-MM-DD
+        use_cv: Use k-fold cross-validation (None = use config default)
+        n_splits: Number of CV folds (None = use config value)
+        test_size: Test set size 0.0-1.0 (None = use config value)
+        gap: Gap between train/validation periods (None = use config value)
+        verbose: Enable verbose logging (DEBUG level)
+        enable_llm: Enable LLM integration
+        llm_model: LLM model override (empty = use config active_model)
+        dry_run: Generate synthetic data (no network)
+        execution_mode: Data extraction mode (auto, live, synthetic)
+        use_ticker_discovery: Load tickers from discovery universe
+        refresh_ticker_universe: Force refresh of ticker universe
+        logger_instance: Optional logger instance (for testing)
     """
-    # Set logging level
+    # Use provided logger or setup new one (only when run as main)
+    if logger_instance is None:
+        logger = _setup_logging(verbose=verbose)
+    else:
+        logger = logger_instance
     if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Verbose logging enabled")
 
     # Load pipeline configuration and derived settings
@@ -716,6 +906,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
     # Initialize database for persistent storage
     db_manager = DatabaseManager(db_path="data/portfolio_maximizer.db")
+    signal_tracker = LLMSignalTracker()
     logger.info("✓ Database manager initialized")
 
     # Initialize checkpoint manager and pipeline logger
@@ -885,9 +1076,19 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 processed = normalized
                 logger.debug(f"  Normalization complete (μ=0, σ²=1)")
 
-                # Save processed data
+                # Save processed data with run metadata
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                storage.save(processed, 'processed', f'processed_{timestamp}')
+                storage.save(
+                    processed, 
+                    'processed', 
+                    f'processed_{timestamp}',
+                    metadata={
+                        'data_source': extraction_source,
+                        'execution_mode': execution_mode,
+                        'pipeline_id': pipeline_id,
+                    },
+                    run_id=pipeline_id
+                )
                 logger.info(f"✓ Preprocessed {len(processed)} rows")
 
             elif stage_name == 'llm_market_analysis':
@@ -940,6 +1141,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 llm_signals = {}
                 llm_signal_validations = {}
                 portfolio_notional = 10000.0
+                signal_log_date = datetime.now().strftime('%Y-%m-%d')
                 if signal_validation_cfg:
                     notional_cfg = signal_validation_cfg.get('portfolio_notional', signal_validation_cfg.get('portfolio_value', 10000.0))
                     try:
@@ -960,17 +1162,42 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         validation_status = 'pending'
                         validation_entry: Dict[str, Any] = {}
 
+                        signal_timestamp_raw = signal.get('signal_timestamp')
+                        try:
+                            if signal_timestamp_raw:
+                                signal_timestamp_dt = datetime.fromisoformat(
+                                    str(signal_timestamp_raw).replace('Z', '+00:00')
+                                )
+                            else:
+                                signal_timestamp_dt = datetime.utcnow()
+                        except ValueError:
+                            signal_timestamp_dt = datetime.utcnow()
+
                         ticker_raw = _slice_ticker_dataframe(raw_data, ticker)
                         validation_data = _prepare_validation_frame(ticker_raw)
-                        if not validation_data.empty and 'close' in validation_data.columns:
-                            try:
-                                price_at_signal = float(validation_data['close'].iloc[-1])
-                            except Exception:
-                                price_at_signal = 0.0
-                        else:
-                            price_at_signal = 0.0
+                        price_at_signal = 0.0
+                        if not validation_data.empty:
+                            price_column = 'Close' if 'Close' in validation_data.columns else 'close'
+                            if price_column in validation_data.columns:
+                                try:
+                                    price_at_signal = float(validation_data[price_column].iloc[-1])
+                                except Exception:
+                                    price_at_signal = 0.0
 
                         signal['entry_price'] = price_at_signal
+                        forward_horizon = int(signal_validation_cfg.get('forward_return_days', 5))
+                        actual_return = None
+                        if (
+                            forward_horizon > 0
+                            and not validation_data.empty
+                            and 'Close' in validation_data.columns
+                        ):
+                            actual_return = _compute_forward_return(
+                                validation_data['Close'],
+                                signal_timestamp_dt,
+                                horizon_days=forward_horizon,
+                            )
+                        signal['actual_return'] = actual_return
 
                         if signal_validator is not None:
                             try:
@@ -1058,6 +1285,18 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                                     ).strip()
 
                         signal['validation'] = validation_entry
+
+                        tracker_signal_id = None
+                        if signal_tracker:
+                            tracker_signal_id = signal_tracker.register_signal(
+                                ticker,
+                                signal_log_date,
+                                {
+                                    'action': signal.get('action', 'HOLD'),
+                                    'confidence': float(signal.get('confidence', 0.0)),
+                                    'reasoning': signal.get('reasoning', '')
+                                }
+                            )
                         
                         llm_signals[ticker] = signal
                         if validation_entry:
@@ -1066,7 +1305,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         # Save to database
                         signal_id = db_manager.save_llm_signal(
                             ticker=ticker,
-                            date=datetime.now().strftime('%Y-%m-%d'),
+                            date=signal_log_date,
                             signal=signal,
                             model_name=llm_client.model,
                             latency=latency,
@@ -1074,6 +1313,76 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                         )
                         if signal_id != -1 and validation_entry:
                             db_manager.save_signal_validation(signal_id, validation_entry)
+
+                        lookback_days = int(signal_validation_cfg.get('backtest_lookback_days', 30))
+                        history_limit = int(signal_validation_cfg.get('backtest_signal_limit', 250))
+                        if (
+                            signal_id > 0
+                            and signal_validator is not None
+                            and hasattr(signal_validator, 'backtest_signal_quality')
+                        ):
+                            try:
+                                recent_rows = db_manager.fetch_recent_signals(
+                                    ticker,
+                                    reference_timestamp=signal_timestamp_dt,
+                                    lookback_days=lookback_days,
+                                    limit=history_limit,
+                                )
+                                recent_signals = _format_signals_for_backtest(recent_rows)
+                                if recent_signals:
+                                    report = signal_validator.backtest_signal_quality(
+                                        signals=recent_signals,
+                                        actual_prices=validation_data[['Close']],
+                                        lookback_days=lookback_days,
+                                    )
+                                    db_manager.update_signal_performance(
+                                        signal_id,
+                                        {
+                                            'actual_return': actual_return,
+                                            'annual_return': getattr(report, 'annual_return', None),
+                                            'sharpe_ratio': report.sharpe_ratio,
+                                            'information_ratio': report.information_ratio,
+                                            'hit_rate': report.hit_rate,
+                                            'profit_factor': report.profit_factor,
+                                        },
+                                    )
+                                    db_manager.save_signal_backtest_summary(ticker, lookback_days, report)
+                                    if verbose:
+                                        logger.debug(
+                                            "    Backtest metrics | hit_rate=%.2f profit_factor=%.2f sharpe=%.2f",
+                                            report.hit_rate,
+                                            report.profit_factor,
+                                            report.sharpe_ratio,
+                                        )
+                                elif actual_return is not None:
+                                    db_manager.update_signal_performance(
+                                        signal_id, {'actual_return': actual_return}
+                                    )
+                            except Exception as metrics_exc:
+                                logger.warning(
+                                    "  ⚠ %s: Unable to compute signal backtest metrics (%s)",
+                                    ticker,
+                                    metrics_exc,
+                                )
+                        elif signal_id > 0 and actual_return is not None:
+                            db_manager.update_signal_performance(
+                                signal_id, {'actual_return': actual_return}
+                            )
+
+                        if signal_tracker and tracker_signal_id:
+                            tracker_payload = validation_entry or {
+                                'validator_version': validator_version,
+                                'confidence_score': float(signal.get('confidence', 0.0)),
+                                'recommendation': validation_status,
+                                'warnings': [],
+                                'quality_metrics': {},
+                            }
+                            tracker_payload['latency_seconds'] = latency
+                            signal_tracker.record_validator_result(
+                                tracker_signal_id,
+                                tracker_payload,
+                                validation_status
+                            )
                         
                         confidence_pct = float(signal.get('confidence', 0.0)) * 100
                         logger.info(
@@ -1101,6 +1410,8 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                     metadata={'signals': llm_signals, 'analyses': llm_analyses, 'validations': llm_signal_validations}
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+                if signal_tracker:
+                    signal_tracker.flush()
 
             elif stage_name == 'llm_risk_assessment':
                 # Stage 6 (LLM): Risk Assessment
@@ -1148,6 +1459,228 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
+            elif stage_name == 'time_series_forecasting':
+                # Stage 7: Time Series Forecasting (SARIMAX/GARCH)
+                logger.info("Generating time series forecasts...")
+                
+                try:
+                    from etl.time_series_forecaster import TimeSeriesForecaster
+                    import pandas as pd
+                    
+                    # Load forecasting config
+                    forecasting_cfg = pipeline_cfg.get('forecasting', {})
+                    if not forecasting_cfg.get('enabled', True):
+                        logger.info("Forecasting disabled in config, skipping...")
+                        continue
+                    
+                    forecast_horizon = forecasting_cfg.get('default_forecast_horizon', 30)
+                    sarimax_cfg = forecasting_cfg.get('sarimax', {})
+                    garch_cfg = forecasting_cfg.get('garch', {})
+                    samossa_cfg = forecasting_cfg.get('samossa', {})
+                    ensemble_cfg = forecasting_cfg.get('ensemble', {})
+                    
+                    forecasts = {}
+                    
+                    for ticker in ticker_list:
+                        try:
+                            # Get ticker-specific data
+                            if isinstance(processed.index, pd.MultiIndex):
+                                ticker_data = processed.xs(ticker, level=0)
+                            else:
+                                ticker_data = processed
+                            
+                            # Extract Close price series
+                            if 'Close' in ticker_data.columns:
+                                price_series = ticker_data['Close'].dropna()
+                            elif 'close' in ticker_data.columns:
+                                price_series = ticker_data['close'].dropna()
+                            else:
+                                logger.warning(f"  ⚠ {ticker}: No Close price data available")
+                                continue
+                            
+                            if len(price_series) < 50:
+                                logger.warning(f"  ⚠ {ticker}: Insufficient data for forecasting (need >= 50, have {len(price_series)})")
+                                continue
+                            
+                            # Initialize forecaster
+                            forecaster = TimeSeriesForecaster(
+                                sarimax_config=sarimax_cfg if sarimax_cfg.get('enabled', True) else None,
+                                garch_config=garch_cfg if garch_cfg.get('enabled', True) else None,
+                                samossa_config=samossa_cfg if samossa_cfg.get('enabled', False) else None,
+                                ensemble_config=ensemble_cfg,
+                            )
+                            
+                            # Fit models
+                            returns = price_series.pct_change().dropna()
+                            forecaster.fit(price_series, returns=returns)
+                            
+                            # Generate forecasts
+                            forecast_result = forecaster.forecast(
+                                steps=forecast_horizon,
+                                alpha=0.05,  # 95% confidence intervals
+                            )
+                            
+                            forecasts[ticker] = forecast_result
+                            
+                            # Save forecasts to database
+                            forecast_date = datetime.now().strftime('%Y-%m-%d')
+                            
+                            # Save SARIMAX forecast if available
+                            if forecast_result.get('sarimax_forecast'):
+                                sarimax_result = forecast_result['sarimax_forecast']
+                                forecast_series = sarimax_result.get('forecast', pd.Series())
+                                for step in range(min(forecast_horizon, len(forecast_series))):
+                                    if step < len(forecast_series):
+                                        forecast_data = {
+                                            'model_type': 'SARIMAX',
+                                            'forecast_horizon': step + 1,
+                                            'forecast_value': float(forecast_series.iloc[step]),
+                                            'lower_ci': float(sarimax_result['lower_ci'].iloc[step]) if 'lower_ci' in sarimax_result and step < len(sarimax_result['lower_ci']) else None,
+                                            'upper_ci': float(sarimax_result['upper_ci'].iloc[step]) if 'upper_ci' in sarimax_result and step < len(sarimax_result['upper_ci']) else None,
+                                            'model_order': sarimax_result.get('model_order'),
+                                            'aic': sarimax_result.get('aic'),
+                                            'bic': sarimax_result.get('bic'),
+                                            'diagnostics': sarimax_result.get('diagnostics'),
+                                        }
+                                        db_manager.save_forecast(
+                                            ticker=ticker,
+                                            forecast_date=forecast_date,
+                                            forecast_data=forecast_data,
+                                        )
+                            
+                            # Save GARCH forecast if available
+                            if forecast_result.get('volatility_forecast'):
+                                garch_result = forecast_result['volatility_forecast']
+                                vol_series = garch_result.get('volatility', pd.Series())
+                                for step in range(min(forecast_horizon, len(vol_series))):
+                                    if step < len(vol_series):
+                                        forecast_data = {
+                                            'model_type': 'GARCH',
+                                            'forecast_horizon': step + 1,
+                                            'forecast_value': float(vol_series.iloc[step]),
+                                            'volatility': float(vol_series.iloc[step]),
+                                            'model_order': garch_result.get('model_order'),
+                                            'aic': garch_result.get('aic'),
+                                            'bic': garch_result.get('bic'),
+                                        }
+                                        db_manager.save_forecast(
+                                            ticker=ticker,
+                                            forecast_date=forecast_date,
+                                            forecast_data=forecast_data,
+                                        )
+                            
+                            # Save SAMOSSA forecast if available
+                            if forecast_result.get('samossa_forecast'):
+                                samossa_result = forecast_result['samossa_forecast']
+                                samossa_series = samossa_result.get('forecast', pd.Series())
+                                lower_ci = samossa_result.get('lower_ci')
+                                upper_ci = samossa_result.get('upper_ci')
+                                for step in range(min(forecast_horizon, len(samossa_series))):
+                                    if step < len(samossa_series):
+                                        forecast_data = {
+                                            'model_type': 'SAMOSSA',
+                                            'forecast_horizon': step + 1,
+                                            'forecast_value': float(samossa_series.iloc[step]),
+                                            'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
+                                            'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
+                                            'model_order': {
+                                                'window_length': samossa_result.get('window_length'),
+                                                'n_components': samossa_result.get('n_components'),
+                                            },
+                                            'diagnostics': {
+                                                'explained_variance_ratio': samossa_result.get('explained_variance_ratio'),
+                                            },
+                                        }
+                                        db_manager.save_forecast(
+                                            ticker=ticker,
+                                            forecast_date=forecast_date,
+                                            forecast_data=forecast_data,
+                                        )
+
+                            if forecast_result.get('mssa_rl_forecast'):
+                                mssa_result = forecast_result['mssa_rl_forecast']
+                                mssa_series = mssa_result.get('forecast', pd.Series())
+                                lower_ci = mssa_result.get('lower_ci')
+                                upper_ci = mssa_result.get('upper_ci')
+                                change_points = mssa_result.get('change_points') or []
+                                change_points = [
+                                    cp.isoformat() if hasattr(cp, 'isoformat') else str(cp)
+                                    for cp in change_points
+                                ]
+                                diagnostics = {
+                                    'baseline_variance': mssa_result.get('baseline_variance'),
+                                    'q_table_size': mssa_result.get('q_table_size'),
+                                    'change_points': change_points,
+                                }
+                                for step in range(min(forecast_horizon, len(mssa_series))):
+                                    if step < len(mssa_series):
+                                        forecast_data = {
+                                            'model_type': 'MSSA_RL',
+                                            'forecast_horizon': step + 1,
+                                            'forecast_value': float(mssa_series.iloc[step]),
+                                            'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
+                                            'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
+                                            'diagnostics': diagnostics,
+                                        }
+                                        db_manager.save_forecast(
+                                            ticker=ticker,
+                                            forecast_date=forecast_date,
+                                            forecast_data=forecast_data,
+                                        )
+
+                            if forecast_result.get('ensemble_forecast'):
+                                ensemble_result = forecast_result['ensemble_forecast']
+                                ensemble_series = ensemble_result.get('forecast', pd.Series())
+                                lower_ci = ensemble_result.get('lower_ci')
+                                upper_ci = ensemble_result.get('upper_ci')
+                                diagnostics = {
+                                    'weights': ensemble_result.get('weights'),
+                                    'confidence': ensemble_result.get('confidence'),
+                                    'selection_score': ensemble_result.get('selection_score'),
+                                }
+                                for step in range(min(forecast_horizon, len(ensemble_series))):
+                                    if step < len(ensemble_series):
+                                        forecast_data = {
+                                            'model_type': 'COMBINED',
+                                            'forecast_horizon': step + 1,
+                                            'forecast_value': float(ensemble_series.iloc[step]),
+                                            'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
+                                            'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
+                                            'diagnostics': diagnostics,
+                                        }
+                                        db_manager.save_forecast(
+                                            ticker=ticker,
+                                            forecast_date=forecast_date,
+                                            forecast_data=forecast_data,
+                                        )
+                            
+                            logger.info(f"  ✓ {ticker}: Generated {forecast_horizon}-step forecast")
+                            
+                        except Exception as e:
+                            logger.warning(f"  ⚠ {ticker} forecasting failed: {e}")
+                            forecasts[ticker] = {'error': str(e)}
+                    
+                    logger.info(f"✓ Generated forecasts for {len([f for f in forecasts.values() if 'error' not in f])} ticker(s)")
+
+                    _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
+                    
+                    # Save checkpoint
+                    checkpoint_id = checkpoint_manager.save_checkpoint(
+                        pipeline_id=pipeline_id,
+                        stage=stage_name,
+                        data=processed,
+                        metadata={'forecasts': forecasts}
+                    )
+                    pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+                    
+                except ImportError as e:
+                    logger.warning(f"Forecasting modules not available: {e}")
+                    logger.warning("Install required packages: pip install statsmodels arch")
+                except Exception as e:
+                    from etl.security_utils import sanitize_error
+                    safe_error = sanitize_error(e)
+                    logger.error(f"Forecasting stage failed: {safe_error}")
+
             elif stage_name == 'data_storage':
                 # Stage 4: Data Storage (Split + Save)
                 logger.info("Splitting and saving datasets...")
@@ -1175,16 +1708,44 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 if use_cv:
-                    # Save CV folds
+                    # Save CV folds with run metadata
                     for fold in splits['cv_folds']:
                         fold_id = fold['fold_id']
-                        storage.save(fold['train'], 'training',
-                                   f'fold{fold_id}_train_{timestamp}')
-                        storage.save(fold['validation'], 'validation',
-                                   f'fold{fold_id}_val_{timestamp}')
+                        fold_metadata = {
+                            'data_source': extraction_source,
+                            'execution_mode': execution_mode,
+                            'pipeline_id': pipeline_id,
+                            'fold_id': fold_id,
+                            'split_strategy': 'cross_validation',
+                        }
+                        storage.save(
+                            fold['train'], 
+                            'training',
+                            f'fold{fold_id}_train_{timestamp}',
+                            metadata=fold_metadata,
+                            run_id=pipeline_id
+                        )
+                        storage.save(
+                            fold['validation'], 
+                            'validation',
+                            f'fold{fold_id}_val_{timestamp}',
+                            metadata=fold_metadata,
+                            run_id=pipeline_id
+                        )
 
                     # Save isolated test set
-                    storage.save(splits['testing'], 'testing', f'test_{timestamp}')
+                    storage.save(
+                        splits['testing'], 
+                        'testing', 
+                        f'test_{timestamp}',
+                        metadata={
+                            'data_source': extraction_source,
+                            'execution_mode': execution_mode,
+                            'pipeline_id': pipeline_id,
+                            'split_strategy': 'cross_validation',
+                        },
+                        run_id=pipeline_id
+                    )
 
                     # Calculate summary statistics
                     avg_train_size = sum(len(f['train']) for f in splits['cv_folds']) / len(splits['cv_folds'])
@@ -1195,10 +1756,20 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
                     logger.info(f"  - Val size (avg): {avg_val_size:.0f} rows")
                     logger.info(f"  - Test size: {len(splits['testing'])} rows")
                 else:
-                    # Simple split (backward compatible)
+                    # Simple split (backward compatible) with run metadata
                     for split_name, split_data in splits.items():
-                        storage.save(split_data, split_name,
-                                   f'{split_name}_{timestamp}')
+                        storage.save(
+                            split_data, 
+                            split_name,
+                            f'{split_name}_{timestamp}',
+                            metadata={
+                                'data_source': extraction_source,
+                                'execution_mode': execution_mode,
+                                'pipeline_id': pipeline_id,
+                                'split_strategy': 'simple',
+                            },
+                            run_id=pipeline_id
+                        )
 
                     logger.info(f"✓ Saved simple split:")
                     logger.info(f"  - Training: {len(splits['training'])} rows (70%)")
@@ -1222,7 +1793,10 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
             pipeline_log.log_performance(pipeline_id, stage_name, stage_duration)
 
         except Exception as e:
-            logger.error(f"✗ Stage '{stage_name}' failed: {e}")
+            from etl.security_utils import sanitize_error
+            safe_error = sanitize_error(e)
+            logger.error(f"✗ Stage '{stage_name}' failed: {safe_error}")
+            # Log original error internally for debugging
             pipeline_log.log_stage_error(pipeline_id, stage_name, e)
 
             if verbose:
@@ -1244,6 +1818,91 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     
     # Close database connection
     db_manager.close()
+
+
+@click.command()
+@click.option('--config', default='config/pipeline_config.yml',
+              help='Path to pipeline configuration (default: config/pipeline_config.yml)')
+@click.option('--data-source', default=None,
+              help='Data source to use (options: yfinance, alpha_vantage, finnhub). Defaults to config value.')
+@click.option('--tickers', default='AAPL,MSFT',
+              help='Comma-separated ticker symbols (default: AAPL,MSFT)')
+@click.option('--start', default='2020-01-01',
+              help='Start date YYYY-MM-DD (default: 2020-01-01)')
+@click.option('--end', default='2024-01-01',
+              help='End date YYYY-MM-DD (default: 2024-01-01)')
+@click.option('--use-cv', is_flag=True, default=None,
+              help='Use k-fold cross-validation. If not set, uses config default_strategy.')
+@click.option('--n-splits', default=None, type=int,
+              help='Number of CV folds. If not set, uses config value.')
+@click.option('--test-size', default=None, type=float,
+              help='Test set size (0.0-1.0). If not set, uses config value.')
+@click.option('--gap', default=None, type=int,
+              help='Gap between train/validation periods. If not set, uses config value.')
+@click.option('--verbose', is_flag=True, default=False,
+              help='Enable verbose logging (DEBUG level)')
+@click.option('--enable-llm', is_flag=True, default=False,
+              help='Enable LLM integration for market analysis and signal generation')
+@click.option('--llm-model', default='',
+              help='LLM model override. Leave blank to use config active_model (recommended). Options include deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
+@click.option('--dry-run', is_flag=True, default=False,
+              help='Generate synthetic OHLCV data in-process (no network) to exercise stages')
+@click.option('--execution-mode', default='auto',
+              type=click.Choice(EXECUTION_MODES, case_sensitive=False),
+              help='Data extraction mode: live (network), synthetic (offline), or auto (try live, fallback to synthetic)')
+@click.option('--use-ticker-discovery', is_flag=True, default=False,
+              help='Load tickers from the configured ticker discovery universe.')
+@click.option('--refresh-ticker-universe', is_flag=True, default=False,
+              help='Force refresh of the ticker discovery universe before running the pipeline.')
+def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
+                use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
+                enable_llm: bool, llm_model: str, dry_run: bool,
+                execution_mode: str, use_ticker_discovery: bool,
+                refresh_ticker_universe: bool) -> None:
+    """Execute ETL pipeline with modular configuration-driven orchestration.
+
+    Data Splitting Strategy:
+    - Default (--use-cv=False): Simple 70/15/15 chronological split (backward compatible)
+    - Recommended (--use-cv): k-fold cross-validation with expanding window
+      * 5.5x better temporal coverage (15% → 83%)
+      * Eliminates temporal gap (0 years vs 2.5 years)
+      * Strict test isolation (15% never exposed during CV)
+
+    Examples:
+        # Simple split (backward compatible)
+        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01
+
+        # k-fold CV (recommended for production)
+        python scripts/run_etl_pipeline.py --tickers AAPL --use-cv --n-splits 5
+
+        # Verbose logging
+        python scripts/run_etl_pipeline.py --tickers GOOGL --use-cv --verbose
+
+        # Live run with automatic synthetic fallback
+        python scripts/run_etl_pipeline.py --tickers NVDA --execution-mode auto --enable-llm
+
+        # Dry run (no network) with synthetic data
+        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2024-01-02 --end 2024-01-19 --dry-run
+    """
+    # Convert Click arguments to execute_pipeline call
+    execute_pipeline(
+        config=config,
+        data_source=data_source,
+        tickers=tickers,
+        start=start,
+        end=end,
+        use_cv=use_cv,
+        n_splits=n_splits,
+        test_size=test_size,
+        gap=gap,
+        verbose=verbose,
+        enable_llm=enable_llm,
+        llm_model=llm_model,
+        dry_run=dry_run,
+        execution_mode=execution_mode,
+        use_ticker_discovery=use_ticker_discovery,
+        refresh_ticker_universe=refresh_ticker_universe
+    )
 
 
 if __name__ == '__main__':

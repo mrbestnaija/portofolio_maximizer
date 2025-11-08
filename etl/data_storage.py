@@ -53,8 +53,19 @@ class DataStorage:
             (self.base_path / stage).mkdir(parents=True, exist_ok=True)
 
     def save(self, data: pd.DataFrame, stage: str, symbol: str,
-             metadata: Optional[Dict] = None) -> Path:
-        """Save time series data with timestamp indexing."""
+             metadata: Optional[Dict] = None, run_id: Optional[str] = None) -> Path:
+        """Save time series data with timestamp indexing.
+        
+        Args:
+            data: DataFrame with DatetimeIndex
+            stage: Data stage (raw, processed, training, etc.)
+            symbol: Symbol identifier (ticker, dataset name, etc.)
+            metadata: Optional metadata dictionary to persist alongside data
+            run_id: Optional run identifier to prevent overwrites (defaults to timestamp)
+            
+        Returns:
+            Path to saved parquet file
+        """
         # Validate timestamp index
         if not isinstance(data.index, pd.DatetimeIndex):
             raise ValueError("Data must have DatetimeIndex")
@@ -62,9 +73,13 @@ class DataStorage:
         # Sort by timestamp (vectorized)
         data = data.sort_index()
 
-        # Generate path: stage/symbol_YYYYMMDD.parquet
-        date_str = datetime.now().strftime("%Y%m%d")
-        filename = f"{symbol}_{date_str}.parquet"
+        # Generate path: stage/symbol_YYYYMMDD_HHMMSS[_runid].parquet
+        # Include timestamp to prevent silent overwrites during multiple runs
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if run_id:
+            filename = f"{symbol}_{timestamp_str}_{run_id}.parquet"
+        else:
+            filename = f"{symbol}_{timestamp_str}.parquet"
         filepath = self.base_path / stage / filename
 
         # Atomic write: temp -> rename (preserve frequency)
@@ -86,6 +101,12 @@ class DataStorage:
 
             safe_metadata.setdefault('saved_at', datetime.now().isoformat())
             safe_metadata.setdefault('rows', len(data))
+            safe_metadata.setdefault('run_id', run_id)
+            safe_metadata.setdefault('data_source', metadata.get('data_source') if metadata else None)
+            safe_metadata.setdefault('execution_mode', metadata.get('execution_mode') if metadata else None)
+            # Store config hash if provided for troubleshooting
+            if metadata and 'config_hash' in metadata:
+                safe_metadata['config_hash'] = metadata['config_hash']
 
             metadata_path = filepath.with_suffix('.meta.json')
             metadata_tmp = metadata_path.with_suffix('.tmp')

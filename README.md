@@ -1,4 +1,4 @@
-# Portfolio Maximizer v45
+# Portfolio Maximizer
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -8,13 +8,13 @@
 
 **Version**: 3.0
 **Status**: Production Ready ✅
-**Last Updated**: 2025-10-04
+**Last Updated**: 2025-11-06
 
 ---
 
 ## 🎯 Overview
 
-Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system built with academic rigor and production-grade performance. It provides a complete pipeline for extracting, validating, preprocessing, and analyzing financial time series data with intelligent caching and vectorized operations.
+Portfolio Maximizer is a sophisticated ETL-based portfolio management system built with academic rigor and production-grade performance. It provides a complete pipeline for extracting, validating, preprocessing, and analyzing financial time series data with intelligent caching and vectorized operations.
 
 ### Key Features
 
@@ -22,7 +22,7 @@ Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system
 - **📊 Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
 - **📈 Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
-- **✅ Comprehensive Testing**: 63 tests with 98.4% pass rate
+- **✅ Comprehensive Testing**: 141+ tests with high coverage across ETL, LLM, and integration modules
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
 - **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
 - **🔐 Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
@@ -59,7 +59,7 @@ Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│              Portfolio Maximizer v45                     │
+│              Portfolio Maximizer                          │
 │              Production-Ready System                     │
 └─────────────────────────────────────────────────────────┘
                         │
@@ -108,13 +108,18 @@ Portfolio Maximizer v45 is a sophisticated ETL-based portfolio management system
 - Python 3.12+
 - pip package manager
 - Virtual environment (recommended)
+- **Ollama** (optional, for LLM features): Local LLM server for market analysis and signal generation
+  - Installation: `curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh`
+  - Start server: `ollama serve`
+  - Pull models: `ollama pull deepseek-coder:6.7b-instruct-q4_K_M`
+  - See [LLM Configuration](#llm-integration) for details
 
 ### Setup
 
 ```bash
 # Clone the repository
 git clone https://github.com/mrbestnaija/portofolio_maximizer.git
-cd portfolio_maximizer_v45
+cd portofolio_maximizer
 
 # Create virtual environment
 python -m venv simpleTrader_env
@@ -140,6 +145,42 @@ ALPHA_VANTAGE_API_KEY=your_key_here
 # Cache Settings
 CACHE_VALIDITY_HOURS=24
 ```
+
+### LLM Integration Setup (Optional)
+
+To enable LLM-powered market analysis and signal generation:
+
+1. **Install Ollama**:
+   ```bash
+   # Linux/Mac
+   curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh
+   
+   # Windows: Download from https://ollama.ai/download
+   ```
+
+2. **Start Ollama Server**:
+   ```bash
+   ollama serve
+   # Server runs on http://localhost:11434
+   ```
+
+3. **Download Required Models**:
+   ```bash
+   # Primary model (recommended)
+   ollama pull deepseek-coder:6.7b-instruct-q4_K_M
+   
+   # Alternative models (optional)
+   ollama pull qwen:14b-chat-q4_K_M
+   ollama pull codellama:13b-instruct-q4_K_M
+   ```
+
+4. **Verify Installation**:
+   ```bash
+   # Test Ollama connection
+   curl http://localhost:11434/api/tags
+   ```
+
+**Note**: The pipeline will gracefully handle missing Ollama server when `--enable-llm` is used. LLM features are optional and the pipeline runs successfully without them.
 
 ---
 
@@ -305,7 +346,7 @@ viz.plot_comprehensive_dashboard(
 ## 📁 Project Structure
 
 ```
-portfolio_maximizer_v45/
+portfolio_maximizer/
 │
 ├── config/                          # Configuration files (YAML)
 │   ├── analysis_config.yml          # Time series analysis parameters
@@ -344,7 +385,7 @@ portfolio_maximizer_v45/
 │   ├── visualize_dataset.py        # Visualization CLI
 │   └── validate_environment.py     # Environment validation
 │
-├── tests/                           # Test suite (63 tests)
+├── tests/                           # Test suite (141+ tests)
 │   ├── etl/                        # ETL module tests
 │   │   ├── test_yfinance_cache.py
 │   │   ├── test_preprocessor.py
@@ -414,15 +455,14 @@ pytest tests/ -v --tb=short
 
 ### Test Coverage Summary
 
-| Test Suite | Tests | Passing | Coverage |
-|------------|-------|---------|----------|
-| **Cache Tests** | 10 | 10 (100%) | Comprehensive |
-| **ETL Tests** | 27 | 26 (96.3%) | 1 network timeout |
-| **Analysis Tests** | 17 | 17 (100%) | Full coverage |
-| **Math Tests** | 5 | 5 (100%) | All scenarios |
-| **Storage Tests** | 6 | 6 (100%) | I/O operations |
-| **Preprocessing Tests** | 8 | 8 (100%) | Edge cases |
-| **Total** | 63 | 62 (98.4%) | Production ready |
+| Test Suite | Tests | Status | Coverage |
+|------------|-------|--------|----------|
+| **ETL Tests** | 73+ | Passing | Core pipeline functions |
+| **LLM Integration Tests** | 20+ | Passing | Market analysis, signals, risk |
+| **Integration Tests** | 19+ | Passing | End-to-end workflows |
+| **Profit-Critical Tests** | 12+ | Passing | Financial calculations |
+| **Security Tests** | 10+ | Passing | Data protection |
+| **Total** | 141+ | Production ready | Comprehensive coverage |
 
 ---
 
@@ -589,4 +629,4 @@ For questions or issues:
 
 **Status**: Production Ready ✅
 **Version**: 3.0
-**Last Updated**: 2025-10-04
+**Last Updated**: 2025-11-06

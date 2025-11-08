@@ -1,10 +1,27 @@
 # Implementation Checkpoint Document
-**Version**: 6.6
-**Date**: 2025-11-02 (Updated)
-**Project**: Portfolio Maximizer v45
-**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine
+**Version**: 6.7
+**Date**: 2025-11-06 (Updated)
+**Project**: Portfolio Maximizer
+**Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine + Remote Synchronization Enhancements
 
 ---
+## New Capabilities (2025-11-06)
+- **Remote Synchronization Enhancements**: Implemented comprehensive improvements for remote collaboration and production readiness:
+  - **Documentation & Onboarding**: Updated `README.md` to remove v45 branding, reflect actual project name (portfolio_maximizer), update maturity status, and current test suite coverage (141+ tests). Added comprehensive Ollama prerequisite documentation with installation steps and graceful failure handling.
+  - **Pipeline Entry Point Refactoring**: Moved logging setup in `scripts/run_etl_pipeline.py` behind `_setup_logging()` function to prevent side effects when importing the module. Extracted reusable `execute_pipeline()` function that can be called directly from tests or other Python code, with Click command wrapper for CLI compatibility.
+  - **Data Persistence & Auditing**: Enhanced `etl/data_storage.py` to include timestamp and run identifier in parquet file names (format: `{symbol}_{YYYYMMDD_HHMMSS}[_{run_id}].parquet`) preventing silent overwrites during multiple runs. Added comprehensive run metadata persistence alongside artifacts including data_source, execution_mode, pipeline_id, split_strategy, and config_hash for troubleshooting and historical comparisons.
+  - **LLM Integration Ergonomics**: Expanded Ollama prerequisite documentation in README with installation steps, model download commands, and verification procedures. Implemented graceful failure mode for `--enable-llm` flag - pipeline continues without LLM features when Ollama server is unavailable, with clear warning messages. Added dependency inversion support via optional `logger_instance` parameter in `execute_pipeline()` for easier testing and mocking.
+
+## New Capabilities (2025-11-05)
+- **SAMOSSA Forecasting Integration**: `etl/time_series_forecaster.py` now includes a production-ready `SAMOSSAForecaster`, `config/forecasting_config.yml` exposes tunable SAMOSSA parameters, and `scripts/run_etl_pipeline.py` persists SAMOSSA forecasts via `DatabaseManager.save_forecast` (model_type=`'SAMOSSA'`).
+- **LLM Signal Metrics Pipeline**: LLM stages persist signal timestamps, realised returns, and backtest diagnostics; `llm_signal_backtests` aggregates reports while per-signal metrics update via `DatabaseManager.update_signal_performance`. Validated by `tests/etl/test_database_manager_schema.py` and surfaced via `scripts/monitor_llm_system.py`.
+- **Nightly Validation Automation**: Added `schedule_backfill.bat` wrapper for Windows Task Scheduler (sample command in `NEXT_TO_DO.md`) to run `scripts/backfill_signal_validation.py` nightly with portfolio/backtest defaults.
+- **Risk-Level Schema Migration**: `ai_llm/llm_database_integration.py` auto-migrates `llm_risk_assessments` to include `risk_level` with `'extreme'` support, normalises legacy rows, and persists canonical values through `LLMRiskAssessment` helpers.
+- **Signal Tracker Integration**: `scripts/run_etl_pipeline.py` now registers every LLM decision with `LLMSignalTracker` and records validator outputs via the new `record_validator_result`/`flush` APIs, ensuring dashboards see live counts and statuses.
+- **Regression Guardrails**: `tests/ai_llm/test_llm_enhancements.py::test_risk_assessment_extreme_persisted` and `tests/scripts/test_track_llm_signals.py` run under `python -m pytest tests/ai_llm/test_llm_enhancements.py tests/scripts/test_track_llm_signals.py`, locking the database migration and tracker wiring in CI.
+- **Automated Visualization Dashboards**: `etl/dashboard_loader.py` and the enhanced `TimeSeriesVisualizer` stream database outputs (forecasts, ensemble weights, LLM backtests) into forecast/signal dashboards. `scripts/run_etl_pipeline.py` can emit production-ready PNG dashboards post-run, and `scripts/visualize_dataset.py` offers `--from-db` options for ad-hoc analysis.
+- **Modular Time-Series Engine**: SARIMAX, GARCH, SAMOSSA, and the new MSSA-RL forecaster now live under `forcester_ts/`, with `TimeSeriesForecaster` orchestrating parallel model runs and exports re-exposed via `etl/time_series_forecaster.py` for backward compatibility.
+
 ## New Capabilities (2025-11-02)
 - **Statistical Validation Toolkit**: Introduced `etl/statistical_tests.py` with the `StatisticalTestSuite` covering benchmark significance tests, Ljung–Box / Durbin–Watson diagnostics, and bootstrap confidence intervals for Sharpe ratio and max drawdown.
 - **Signal Validation Telemetry**: `ai_llm/signal_validator.py` now packages statistical backtest outputs (`statistical_summary`, `autocorrelation`, `bootstrap_intervals`) and `scripts/backfill_signal_validation.py` forwards the enriched metrics so dashboards and reports can inspect significance, autocorrelation, and confidence bands per ticker.
@@ -17,6 +34,7 @@
 - **Documentation Refresh**: Synchronised `Documentation/arch_tree.md` and this checkpoint with Week 1 deliverables, noting the statistical suite, paper trading engine enhancements, and new automated tests.
 - **Visualization Dashboard Upgrade**: `etl/visualizer.py` and `scripts/visualize_dataset.py` now surface market context (volume, returns, commodity/index overlays) via `--context-columns`, and `tests/etl/test_visualizer_dashboard.py` locks in the enhanced layout.
 - **Latency Guard Monitoring**: The LLM stages (`ai_llm/market_analyzer.py`, `ai_llm/signal_generator.py`, `ai_llm/risk_assessor.py`) publish deterministic fallback events through `ai_llm/performance_monitor.record_latency_fallback`, and `scripts/monitor_llm_system.py` promotes the metrics so operators see when heuristic mode activates.
+- **Token-Throughput Failover**: `ai_llm/ollama_client.py` now enforces a `token_rate_failover_threshold`, swapping to faster alternative models when tokens/sec degrade and logging the event into the monitoring pipeline.
 - **Centralized Log Routing**: CLI utilities (`scripts/run_etl_pipeline.py`, `scripts/monitor_llm_system.py`, `scripts/analyze_dataset.py`, `scripts/cache_manager.py`, `scripts/backfill_signal_validation.py`) now emit rolling logs under `logs/`, keeping the repo root uncluttered while retaining console output.
 
 ## New Capabilities (2025-10-24)
@@ -175,8 +193,8 @@ portfolio_maximizer_v45/
 │   │                                # Features: Statistical validation, outlier detection
 │   ├── preprocessor.py             # Data preprocessing (101 lines)
 │   │                                # Features: Missing data handling, normalization
-│   ├── data_storage.py             # Data persistence (210 lines)
-│   │                                # Features: Parquet storage, CV splits, backward compatible
+│   ├── data_storage.py             # Data persistence (210+ lines)
+│   │                                # Features: Parquet storage, CV splits, timestamped filenames, run metadata persistence, backward compatible (Remote Sync 2025-11-06) ⭐ UPDATED
 │   ├── time_series_cv.py           # Cross-validation (336 lines)
 │   │                                # Features: k-fold CV, expanding window, test isolation
 │   ├── checkpoint_manager.py       # State persistence (362 lines) ⭐ NEW
@@ -192,8 +210,8 @@ portfolio_maximizer_v45/
 │                                    # Features: 7 plot types, publication quality
 │
 ├── scripts/                         # Executable scripts (1,200+ lines) ⭐ UPDATED
-│   ├── run_etl_pipeline.py         # Main ETL orchestration (131 lines) ⭐ UPDATED
-│   │                                # Features: Config-driven, multi-source, CV params
+│   ├── run_etl_pipeline.py         # Main ETL orchestration (1,900+ lines) ⭐ UPDATED
+│   │                                # Features: Config-driven, multi-source, CV params, testable execute_pipeline(), logging isolation, graceful LLM failure (Remote Sync 2025-11-06)
 │   ├── analyze_dataset.py          # Dataset analysis CLI (270+ lines)
 │   │                                # Features: Full analysis, JSON export
 │   ├── visualize_dataset.py        # Visualization CLI (200+ lines)
@@ -2700,12 +2718,12 @@ The system is fully operational with:
 
 ---
 
-**Document Version**: 6.5
-**Last Updated**: 2025-10-22 (Phase 5.5: Error Monitoring & Performance Optimization Complete) ⭐
+**Document Version**: 6.7
+**Last Updated**: 2025-11-06 (Remote Synchronization Enhancements Complete) ⭐
 **Next Review**: Before Phase 6.0 (Advanced Portfolio Optimization)
 **Status**: READY FOR PRODUCTION ✅
 **Critical Fix Applied**: Profit factor calculation (50% underestimation corrected) ⚠️
-**New Capabilities**: Comprehensive error monitoring, LLM optimization, signal validation ⭐
+**New Capabilities**: Comprehensive error monitoring, LLM optimization, signal validation, remote sync enhancements (pipeline refactoring, data auditing, graceful LLM failure) ⭐
 
 ---
 

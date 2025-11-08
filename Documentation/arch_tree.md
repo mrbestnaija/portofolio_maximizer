@@ -1,8 +1,9 @@
-# UPDATED TO-DO LIST: Portfolio Maximizer v45 - Current Implementation Status
+# UPDATED TO-DO LIST: Portfolio Maximizer - Current Implementation Status
 
 ## CURRENT PROJECT STATUS: PRODUCTION READY ✅
-**All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + LLM Integration + Error Monitoring + Performance Optimization
+**All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + LLM Integration + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements
 **Recent Achievements**:
+- Remote Sync (2025-11-06): Pipeline entry point refactoring, data persistence auditing, LLM graceful failure, comprehensive documentation updates ⭐ NEW
 - Phase 4.6: Platform-agnostic architecture
 - Phase 4.7: Configuration-driven CV
 - Phase 4.8: Checkpointing and event logging with 7-day retention
@@ -17,6 +18,9 @@
 - Week 5.6: SQLite “disk I/O” auto-retry added for OHLCV ingestion (Nov 02, 2025) ⭐ NEW
 - Week 5.6: `--config config.yml` alias resolves to `config/pipeline_config.yml` (Nov 02, 2025) ⭐ NEW
 - Week 5.6: All pipeline/utility logs streamed to `logs/` directory (Nov 02, 2025) ⭐ NEW
+- Week 5.7: Time-series models extracted into `forcester_ts/` (SARIMAX, GARCH, SAMOSSA, MSSA-RL) with shared orchestration (Nov 06, 2025) ⭐ NEW
+- Week 5.7: Dashboard pipeline emits forecast/signal PNGs via `etl/dashboard_loader.py` + `TimeSeriesVisualizer.plot_forecast_dashboard` (Nov 06, 2025) ⭐ NEW
+- Week 5.7: Token-throughput failover auto-selects faster Ollama models when tokens/sec degrade (`ai_llm/ollama_client.py`, Nov 12, 2025) ⭐ NEW
 - Portfolio mathematics engine upgraded to institutional-grade metrics and optimisation (`etl/portfolio_math.py`)
 - Signal validator aligned with 5-layer quantitative guardrails (statistical significance, Kelly sizing)
 - Comprehensive error monitoring system with automated alerting ⭐ NEW
@@ -172,7 +176,7 @@ portfolio_maximizer_v45/
 │   ├── finnhub_extractor.py        # ✅ 145-line stub - Ready for API impl
 │   ├── data_validator.py           # ✅ 117 lines - Production ready
 │   ├── preprocessor.py             # ✅ 101 lines - Production ready
-│   ├── data_storage.py             # ✅ 210 lines - Production ready (+CV)
+│   ├── data_storage.py             # ✅ 210+ lines - Production ready (+CV + run metadata persistence + timestamped filenames, Remote Sync 2025-11-06) ⭐ UPDATED
 │   ├── time_series_cv.py           # ✅ 336 lines - Production ready (5.5x coverage)
 │   ├── checkpoint_manager.py       # ✅ 362 lines - State persistence (Phase 4.8) ⭐ NEW
 │   ├── pipeline_logger.py          # ✅ 415 lines - Event logging (Phase 4.8) ⭐ NEW
@@ -190,8 +194,8 @@ portfolio_maximizer_v45/
 ├── ai_llm/                          # ✅ PHASE 5.2-5.5 COMPLETE - 1,500+ lines ⭐ UPDATED
 │   ├── ollama_client.py            # ✅ 440+ lines - Local LLM integration (Phase 5.5) + fast-mode latency tuning (Phase 5.6)
 │   ├── market_analyzer.py          # ✅ 180 lines - Market analysis (Phase 5.2)
-│   ├── signal_generator.py         # ✅ 198 lines - Signal generation (Phase 5.2)
-│   ├── signal_validator.py         # ✅ 150 lines - Signal validation (Phase 5.2)
+│   ├── signal_generator.py         # ✅ 198 lines - Signal generation (Phase 5.2) + timestamp/backtest metadata (Phase 5.6)
+│   ├── signal_validator.py         # ✅ 150 lines - Signal validation (Phase 5.2) + statistical diagnostics/SSA backtests (Phase 5.6)
 │   ├── risk_assessor.py            # ✅ 120 lines - Risk assessment (Phase 5.2)
 │   ├── performance_monitor.py      # ✅ 208 lines - LLM performance monitoring (Phase 5.5) ⭐ NEW
 │   ├── signal_quality_validator.py # ✅ 378 lines - 5-layer signal validation (Phase 5.5) ⭐ NEW
@@ -207,17 +211,19 @@ portfolio_maximizer_v45/
 │   └── settings.local.json         # Tooling configuration
 │
 ├── scripts/                         # ✅ PHASE 4.7-5.5 COMPLETE - 1,200+ lines ⭐ UPDATED
-│   ├── run_etl_pipeline.py         # ✅ 1,100+ lines - Modular orchestrator (CV/LLM helpers + Phase 5.6 latency controls)
+│   ├── run_etl_pipeline.py         # ✅ 1,900+ lines - Modular orchestrator with testable execute_pipeline() function, logging isolation, graceful LLM failure (Remote Sync 2025-11-06) ⭐ UPDATED
 │   ├── backfill_signal_validation.py # ✅ Backfills pending signals & recomputes accuracy (Phase 5.6) ⭐ NEW
 │   ├── analyze_dataset.py          # ✅ 270+ lines - Production ready
 │   ├── visualize_dataset.py        # ✅ 200+ lines - Production ready
 │   ├── validate_environment.py     # ✅ Environment checks
 │   ├── error_monitor.py            # ✅ 286 lines - Error monitoring system (Phase 5.5) ⭐ NEW
 │   ├── cache_manager.py            # ✅ 359 lines - Cache management system (Phase 5.5) ⭐ NEW
-│   ├── monitor_llm_system.py       # ✅ 418 lines - LLM system monitoring (Phase 5.5) ⭐ NEW
+│   ├── monitor_llm_system.py       # ✅ 418 lines - LLM system monitoring + latency/backtest reporting (Phase 5.6 update) ⭐ NEW
 │   ├── test_llm_implementations.py # ✅ 150 lines - LLM implementation testing (Phase 5.5) ⭐ NEW
 │   ├── deploy_monitoring.sh        # ✅ 213 lines - Monitoring deployment script (Phase 5.5) ⭐ NEW
 │   └── refresh_ticker_universe.py  # ⬜ NEW - Weekly ticker updates
+│
+├── schedule_backfill.bat           # ✅ Task Scheduler wrapper for nightly signal backfills (Phase 5.6)
 │
 ├── visualizations/                  # ✅ Context-rich dashboards (Phase 5.6) ⭐ UPDATED
 │   ├── Close_dashboard.png         # ✅ Legacy price dashboard
