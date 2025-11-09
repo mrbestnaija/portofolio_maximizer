@@ -1477,6 +1477,7 @@ def execute_pipeline(
                     sarimax_cfg = forecasting_cfg.get('sarimax', {})
                     garch_cfg = forecasting_cfg.get('garch', {})
                     samossa_cfg = forecasting_cfg.get('samossa', {})
+                    mssa_rl_cfg = forecasting_cfg.get('mssa_rl', {})
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     
                     forecasts = {}
@@ -1498,33 +1499,51 @@ def execute_pipeline(
                                 logger.warning(f"  ⚠ {ticker}: No Close price data available")
                                 continue
                             
-                            if len(price_series) < 50:
-                                logger.warning(f"  ⚠ {ticker}: Insufficient data for forecasting (need >= 50, have {len(price_series)})")
+                            if len(price_series) < 60:
+                                logger.warning(f"  ⚠ {ticker}: Insufficient data for forecasting (need >= 60, have {len(price_series)})")
                                 continue
-                            
-                            # Initialize forecaster
+
+                            train_series = price_series
+                            holdout_series = None
+                            if len(price_series) >= forecast_horizon * 2:
+                                train_series = price_series.iloc[:-forecast_horizon]
+                                holdout_series = price_series.iloc[-forecast_horizon:]
+                            else:
+                                logger.warning(
+                                    "  ⚠ %s: Not enough history for walk-forward validation (required ≥ %s observations). "
+                                    "Using entire series for training; metrics will be skipped.",
+                                    ticker,
+                                    forecast_horizon * 2,
+                                )
+
                             forecaster = TimeSeriesForecaster(
                                 sarimax_config=sarimax_cfg if sarimax_cfg.get('enabled', True) else None,
                                 garch_config=garch_cfg if garch_cfg.get('enabled', True) else None,
                                 samossa_config=samossa_cfg if samossa_cfg.get('enabled', False) else None,
+                                mssa_rl_config=mssa_rl_cfg if mssa_rl_cfg.get('enabled', True) else None,
                                 ensemble_config=ensemble_cfg,
                             )
-                            
-                            # Fit models
-                            returns = price_series.pct_change().dropna()
-                            forecaster.fit(price_series, returns=returns)
-                            
-                            # Generate forecasts
+
+                            train_returns = train_series.pct_change().dropna()
+                            forecaster.fit(train_series, returns_series=train_returns)
+
                             forecast_result = forecaster.forecast(
                                 steps=forecast_horizon,
-                                alpha=0.05,  # 95% confidence intervals
+                                alpha=0.05,
                             )
-                            
+
+                            metrics_map: Dict[str, Dict[str, float]] = {}
+                            if holdout_series is not None and len(holdout_series.dropna()) >= 2:
+                                try:
+                                    metrics_map = forecaster.evaluate(holdout_series)
+                                except Exception as exc:  # pragma: no cover - metrics optional
+                                    logger.warning("  ⚠ %s: Unable to compute regression metrics: %s", ticker, exc)
+                            forecast_result["regression_metrics"] = metrics_map
                             forecasts[ticker] = forecast_result
-                            
+
                             # Save forecasts to database
                             forecast_date = datetime.now().strftime('%Y-%m-%d')
-                            
+
                             # Save SARIMAX forecast if available
                             if forecast_result.get('sarimax_forecast'):
                                 sarimax_result = forecast_result['sarimax_forecast']
@@ -1541,6 +1560,7 @@ def execute_pipeline(
                                             'aic': sarimax_result.get('aic'),
                                             'bic': sarimax_result.get('bic'),
                                             'diagnostics': sarimax_result.get('diagnostics'),
+                                            'regression_metrics': metrics_map.get('sarimax'),
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -1562,6 +1582,7 @@ def execute_pipeline(
                                             'model_order': garch_result.get('model_order'),
                                             'aic': garch_result.get('aic'),
                                             'bic': garch_result.get('bic'),
+                                            'regression_metrics': metrics_map.get('garch'),
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -1590,6 +1611,7 @@ def execute_pipeline(
                                             'diagnostics': {
                                                 'explained_variance_ratio': samossa_result.get('explained_variance_ratio'),
                                             },
+                                            'regression_metrics': metrics_map.get('samossa'),
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -1621,6 +1643,7 @@ def execute_pipeline(
                                             'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
                                             'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
                                             'diagnostics': diagnostics,
+                                            'regression_metrics': metrics_map.get('mssa_rl'),
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -1637,6 +1660,7 @@ def execute_pipeline(
                                     'weights': ensemble_result.get('weights'),
                                     'confidence': ensemble_result.get('confidence'),
                                     'selection_score': ensemble_result.get('selection_score'),
+                                    'regression_metrics': metrics_map.get('ensemble'),
                                 }
                                 for step in range(min(forecast_horizon, len(ensemble_series))):
                                     if step < len(ensemble_series):
@@ -1647,6 +1671,7 @@ def execute_pipeline(
                                             'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
                                             'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
                                             'diagnostics': diagnostics,
+                                            'regression_metrics': metrics_map.get('ensemble'),
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,

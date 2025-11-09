@@ -1,10 +1,12 @@
 # 🎯 SEQUENCED IMPLEMENTATION PLAN - Portfolio Maximizer v45
 **Production-Ready ML Trading System - Feasible Implementation Roadmap**
 
-**Date**: October 19, 2025  
+**Date**: October 19, 2025 (Updated November 6, 2025)  
 **Status**: Ready for Implementation  
 **Priority**: **CRITICAL** - Based on log analysis and system requirements  
 **Timeline**: 12 weeks to production deployment
+
+**📋 NEW**: Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for complete list of 12+ missing/incomplete implementations that must be completed, including IBKR client, order manager, performance dashboard, and disaster recovery systems.
 
 ---
 
@@ -15,60 +17,29 @@
 - **Critical Issues**: ❌ Database constraints, LLM performance, signal validation
 - **Test Coverage**: ✅ 196 tests (100% passing)
 - **Codebase**: ~6,780 lines of production code
+- **Forecasting Updates**: ✅ `TimeSeriesForecaster.evaluate()` captures RMSE / sMAPE / tracking error for every model and writes them to SQLite; ensemble weighting incorporates variance-ratio testing plus MSSA-RL change-point density with optional CuPy acceleration.
 
 ### Implementation Strategy
 **Two-Phase Approach**: Fix critical issues first, then enhance with advanced features
 1. **Phase A (Weeks 1-6)**: Critical fixes + LLM operationalization
-2. **Phase B (Weeks 7-12)**: Advanced ML + production scaling
+2. **Phase B (Weeks 7-10)**: Time-series model upgrade & promotion
 
 ---
 
 ## 🚨 CRITICAL ISSUES (IMMEDIATE - WEEK 1)
 
-### Issue 1: Database Constraint Error ⚠️ **CRITICAL**
-**Problem**: LLM risk assessment returning "extreme" but DB only accepts "low", "medium", "high"
-```
-ERROR:etl.database_manager:Failed to save LLM risk: CHECK constraint failed: risk_level IN ('low', 'medium', 'high')
-```
+### Issue 1: Database Constraint Error ✅ RESOLVED (Nov 5, 2025)
+**Resolution**: `ai_llm/llm_database_integration.py` now auto-migrates `llm_risk_assessments` to include a `risk_level` column with `'extreme'` support, normalises legacy rows, and routes canonical values through `LLMRiskAssessment`.
 
-**Impact**: Risk assessments not being saved to database
-**Fix Time**: 30 minutes
-**Implementation**:
-```sql
--- Update database schema
-ALTER TABLE llm_risk_assessments 
-DROP CONSTRAINT check_risk_level;
+**Verification**: `python -m pytest tests/ai_llm/test_llm_enhancements.py::TestLLMDatabaseIntegration::test_risk_assessment_extreme_persisted`
 
-ALTER TABLE llm_risk_assessments 
-ADD CONSTRAINT check_risk_level 
-CHECK (risk_level IN ('low', 'medium', 'high', 'extreme'));
-```
+### Issue 2: LLM Performance Bottleneck 🚧 **DEFERRED**
+**Status**: Deferred while signal generation migrates toward SARIMAX/SAMOSSA/DQN models; no further LLM latency work planned before the model swap.
 
-### Issue 2: LLM Performance Bottleneck ⚠️ **CRITICAL**
-**Problem**: LLM inference taking 15-45 seconds per signal (unacceptable for production)
-- Market analysis: 42.2s total
-- Signal generation: 41.4s total  
-- Risk assessment: 31.1s total
+### Issue 3: Zero Signal Validation ✅ RESOLVED (Nov 5, 2025)
+**Resolution**: `scripts/run_etl_pipeline.py` now registers every LLM decision with `LLMSignalTracker` and records validator outputs via the new `record_validator_result`/`flush` APIs, producing live counts for reports and dashboards.
 
-**Target**: <5 seconds per signal
-**Fix Time**: 4 hours
-**Optimization Strategies**:
-1. **Model Optimization**: Use qwen:7b instead of 14b
-2. **Prompt Engineering**: Reduce token count by 50%
-3. **Caching**: Cache similar market conditions
-4. **Parallel Processing**: Process multiple tickers simultaneously
-
-### Issue 3: Zero Signal Validation ⚠️ **CRITICAL**
-**Problem**: No signals being tracked or validated
-```
-Total Signals Tracked: 0
-Validated Signals: 0
-Validation Rate: 0.0%
-```
-
-**Requirement**: 30-day backtest with >55% accuracy
-**Fix Time**: 2 hours
-**Implementation**: Deploy existing signal validator from Phase 5.4
+**Verification**: `python -m pytest tests/scripts/test_track_llm_signals.py`
 
 ---
 
@@ -309,115 +280,142 @@ class DisasterRecovery:
 
 ---
 
-## 📅 PHASE B: ADVANCED ML & PRODUCTION SCALING (WEEKS 7-12)
+## ?? PHASE B: TIME-SERIES MODEL UPGRADE (WEEKS 7-10)
 
-### **WEEK 7-8: ML Forecasting Foundation**
+### **Time-Series Model Upgrade Overview**
+- Execute SAMOSSA, SARIMAX, and GARCH forecasts alongside the current LLM pipeline.
+- Preserve backward compatibility through feature-flagged routing in signal_router.py.
+- Use rolling cross-validation and walk-forward evaluation to compare models on profit factor, drawdown, and loss metrics.
+- Promote the most consistent, low-loss model to default only after statistically significant outperformance; retain LLM as fallback.
+- Expand monitoring so regressions trigger automatic reversion to the existing production configuration.
 
-#### **Day 43-49: Multi-Model Ensemble**
-```python
-# TASK B1.1: Ensemble Model Development (6 hours)
-# File: models/multi_timeframe_ensemble.py (NEW - 500 lines)
-class MultiTimeframeEnsemble:
-    def __init__(self):
-        # Use existing LLM infrastructure
-        # GPU acceleration (RTX 4060 Ti 16GB)
-        # Reuse feature engineering from existing ETL
-        
-    def generate_ensemble_signals(self, market_data):
-        """Combine signals from multiple timeframes and models"""
-        # Daily, hourly, 15-minute timeframes
-        # SARIMAX, LSTM, Gradient Boosting models
-        # Confidence-weighted combination
-```
+### **Week 7: SAMOSSA + SARIMAX Foundations**
+`python
+# TASK B7.1: Time-Series Feature Engineering Upgrade (Days 43-45)
+# File: etl/time_series_feature_builder.py (NEW - 250 lines)
+class TimeSeriesFeatureBuilder:
+    def build_features(self, price_history: pd.DataFrame) -> pd.DataFrame:
+        """Create lag, seasonal, and volatility features for SAMOSSA/SARIMAX"""
+        # Seasonal decomposition, holiday effects
+        # Rolling statistics and differencing
+        # Persist outputs via database_manager.py feature store helpers
 
-#### **Day 50-56: Regime-Adaptive Models**
-```python
-# TASK B1.2: Regime Detection (4 hours)
-# File: models/regime_adaptive.py (NEW - 450 lines)
-class RegimeAdaptiveModel:
-    def detect_market_regime(self, market_data):
-        """Detect bull/bear/sideways markets"""
-        # Reuse statistical tests from time_series_analyzer.py
-        # Volatility clustering detection
-        # Trend strength analysis
-```
+# TASK B7.2: SAMOSSA Forecaster (Days 46-47)  # ? Delivered 2025-11-05 (etl/time_series_forecaster.py::SAMOSSAForecaster)
+# File: models/samossa_model.py (NEW - 300 lines)
+class SAMOSSAForecaster:
+    def fit(self, features: pd.DataFrame) -> None:
+        """Train Seasonal Adaptive Multi-Order Smoothing model"""
+        # Extend model registry for checkpoint storage
+        # Configurable seasonality plus adaptive smoothing parameters
 
-**Week 7-8 Success Criteria**:
-- [ ] Multi-timeframe ensemble operational
-- [ ] Regime-adaptive models switching correctly
-- [ ] Ensemble model beating single models by 2%+ in backtesting
+    def forecast(self, horizon: int) -> ForecastResult:
+        """Return price forecasts with confidence intervals"""
+        # Output matches existing signal schema for parity with LLM signals
 
-### **WEEK 9-10: Alternative Data Integration**
+# TASK B7.3: SARIMAX Pipeline Refresh (Days 48-49)  # ? Delivered (see signal pipeline backtests)
+# File: models/sarimax_model.py (REFRESH - 280 lines)
+class SARIMAXForecaster:
+    def fit_and_forecast(self, market_data: pd.DataFrame) -> ForecastResult:
+        """Production-ready SARIMAX with automated tuning"""
+        # Use pmdarima auto_arima with guardrails
+        # Consume cached exogenous features from ETL pipeline
+        # Persist diagnostics for regime-aware switching
+`
 
-#### **Day 57-63: Economic Indicators**
-```python
-# TASK B2.1: Economic Data ML (4 hours)
-# File: data/economic_indicators.py (NEW - 400 lines)
-class EconomicIndicatorML:
-    def __init__(self):
-        # Use existing Alpha Vantage API (economic data endpoints)
-        # Reuse caching and validation infrastructure
-        
-    def generate_economic_signals(self):
-        """ML signals from economic indicators"""
-        # Yield curve analysis
-        # VIX term structure
-        # Employment data trends
-```
+### **Week 8: GARCH + Parallel Inference Integration**
+`python
+# TASK B8.1: GARCH Volatility Engine (Days 50-52)  # ? Delivered (etl/time_series_forecaster.py::GARCHForecaster)
+# File: models/garch_model.py (NEW - 320 lines)
+class GARCHVolatilityEngine:
+    def fit(self, returns: pd.Series) -> None:
+        """Estimate volatility clusters via GARCH(p, q)"""
+        # Use arch package for variance forecasts
+        # Emit risk-adjusted metrics for signal fusion
 
-#### **Day 64-70: Sentiment Analysis**
-```python
-# TASK B2.2: Sentiment Integration (3 hours)
-# File: data/sentiment_analyzer.py (NEW - 350 lines)
-class SentimentAnalyzer:
-    def analyze_market_sentiment(self, news_data):
-        """NLP sentiment analysis using existing LLM infrastructure"""
-        # Use existing Ollama integration
-        # News article analysis
-        # Social media sentiment
-```
+    def forecast_volatility(self, steps: int = 1) -> VolatilityResult:
+        """Expose volatility forecast to risk sizing logic"""
+        # Integrate with portfolio_math_enhanced.py metrics
 
-**Week 9-10 Success Criteria**:
-- [ ] Economic indicator signals integrated
-- [ ] Sentiment analysis improving signal accuracy
-- [ ] Alternative data sources operational
+# TASK B8.2: Parallel Model Runner (Days 53-54)
+# File: models/time_series_runner.py (NEW - 260 lines)
+class TimeSeriesRunner:
+    def run_all(self, context: MarketContext) -> List[Signal]:
+        """Execute SAMOSSA, SARIMAX, GARCH, and LLM pipelines in parallel"""
+        # Async execution via existing task orchestrator
+        # Normalize outputs into unified signal schema
+        # Attach provenance metadata for performance dashboards
 
-### **WEEK 11-12: Production Optimization**
+# TASK B8.3: Backward-Compatible Signal Routing (Days 55-56)
+# File: signal_router.py (UPDATE - 180 lines)
+class SignalRouter:
+    def route(self, signals: List[Signal]) -> SignalBundle:
+        """Merge legacy LLM signals with new time-series models"""
+        # Feature flag toggles for gradual rollout
+        # Priority ordering based on confidence and risk score
+        # Downstream consumers see unchanged interface
+`
 
-#### **Day 71-77: Performance Optimization**
-```python
-# TASK B3.1: GPU Acceleration (3 hours)
-# File: optimization/gpu_optimizer.py (NEW - 300 lines)
-class GPUOptimizer:
-    def optimize_inference_speed(self):
-        """Optimize ML inference for real-time trading"""
-        # Use existing RTX 4060 Ti 16GB
-        # Batch processing for multiple assets
-        # Model quantization for speed
-```
+### **Week 9: Cross-Validation + Evaluation Framework**
+`python
+# TASK B9.1: Rolling Cross-Validation Harness (Days 57-59)
+# File: analysis/time_series_validation.py (NEW - 300 lines)
+class TimeSeriesValidation:
+    def evaluate(self, models: List[BaseModel]) -> ValidationReport:
+        """Blocked CV and walk-forward evaluation across horizons"""
+        # Profit factor, max drawdown, hit rate, volatility-adjusted return
+        # Statistical tests (Diebold-Mariano, paired t-tests)
+        # Persist results for dashboards and CI
 
-#### **Day 78-84: Advanced Monitoring**
-```python
-# TASK B3.2: Real-time Alert System (4 hours)
-# File: monitoring/alert_system.py (NEW - 400 lines)
-class AlertSystem:
-    def monitor_critical_metrics(self):
-        """Real-time monitoring of system health"""
-        # Model performance decay
-        # Data quality issues
-        # Risk limit breaches
-        # System resource usage
-```
+# TASK B9.2: Performance Dashboard Extension (Days 60-61)
+# File: monitoring/performance_dashboard.py (UPDATE - 200 lines)
+class PerformanceDashboard:
+    def render_time_series_tab(self, reports: List[ValidationReport]) -> Dashboard:
+        """Compare LLM vs SAMOSSA/SARIMAX/GARCH performance"""
+        # Rolling metrics, drawdown curves, loss distribution
+        # Highlight leading model per asset and regime
 
-**Week 11-12 Success Criteria**:
-- [ ] GPU optimization achieving <100ms inference times
-- [ ] Real-time alert system operational
-- [ ] System stability >99.9% uptime
-- [ ] Production scaling complete
+# TASK B9.3: Risk & Compliance Review (Days 62-63)
+# File: risk/model_governance.py (NEW - 150 lines)
+class ModelGovernance:
+    def certify(self, report: ValidationReport) -> GovernanceDecision:
+        """Ensure new models satisfy risk limits before promotion"""
+        # Enforce drawdown, VaR/ES thresholds, and audit logs
+        # Document fallback procedures and approvals
+`
 
----
+### **Week 10: Promotion, Fallback, and Automation**
+`python
+# TASK B10.1: Dynamic Model Selection Logic (Days 64-66)
+# File: models/model_selector.py (NEW - 220 lines)
+class ModelSelector:
+    def choose_primary_model(self, reports: List[ValidationReport]) -> ModelDecision:
+        """Promote the most consistent, low-loss model"""
+        # Weighted scoring (profit factor, drawdown, Sharpe, stability)
+        # Minimum uplift thresholds relative to LLM baseline
+        # Automatic reversion when performance degrades
 
-## 🎯 SUCCESS METRICS & VALIDATION
+# TASK B10.2: Integration Tests and Regression Suite (Days 67-68)
+# File: tests/test_time_series_models.py (NEW - 280 lines)
+class TestTimeSeriesModels(unittest.TestCase):
+    def test_parallel_pipeline_integrity(self) -> None:
+        """Validate routing, fallback, and metrics instrumentation"""
+        # Simulate feature-flag toggles and failure scenarios
+
+# TASK B10.3: Deployment Playbook Update (Days 69-70)
+# File: docs/deployment_playbook.mdc (UPDATE - 120 lines)
+def document_time_series_rollout():
+    """Update runbooks for rolling out the new default model"""
+    # Include rollback checklist, monitoring KPIs, approval steps
+`
+
+### **Phase B Success Criteria**
+- [ ] SAMOSSA, SARIMAX, and GARCH pipelines deliver signals alongside LLM output
+- [ ] Feature flags enable immediate fallback to the current LLM-only routing
+- [ ] Rolling CV shows >= 3% profit-factor uplift with <= 50% drawdown increase versus baseline
+- [ ] Governance sign-off documented with a tested fallback plan
+- [ ] Dynamic selector promotes the top model automatically and regression suite passes
+
+---## 🎯 SUCCESS METRICS & VALIDATION
 
 ### **Phase A Success Criteria (Week 6)**
 ```python
@@ -444,18 +442,17 @@ PHASE_A_CRITERIA = {
 ### **Phase B Success Criteria (Week 12)**
 ```python
 PHASE_B_CRITERIA = {
-    # ML Performance
-    'ml_accuracy': '>55% directional accuracy',
-    'ml_sharpe': '>1.0 risk-adjusted returns',
-    
-    # Ensemble Performance
-    'ensemble_accuracy': '>60% (2%+ improvement over LLM-only)',
-    'ensemble_sharpe': '>1.2 risk-adjusted returns',
-    
-    # Production Readiness
-    'inference_latency': '<100ms',
-    'model_stability': '<5% variance across regimes',
-    'gpu_utilization': '>70%',
+    # Parallel Model Delivery
+    'time_series_parallel': 'SAMOSSA, SARIMAX, GARCH, and LLM signals available concurrently',
+    'feature_flag_fallback': 'Toggle restores LLM-only routing within 1 minute',
+
+    # Performance Uplift
+    'profit_factor_delta': '>= 3% improvement vs LLM baseline',
+    'drawdown_delta': '<= 50% increase vs LLM baseline',
+
+    # Governance & Quality
+    'governance_signoff': 'ModelGovernance certify() approved with fallback plan',
+    'regression_suite': 'tests/test_time_series_models.py passing in CI',
 }
 ```
 
@@ -516,23 +513,25 @@ CAPITAL_SCHEDULE = {
 
 ## 🚀 IMMEDIATE NEXT STEPS
 
-### **Day 1 (Today - October 19, 2025)**:
-1. ✅ **Fix database constraint error** (30 minutes)
-2. ⏳ **Optimize LLM performance** (4 hours)
-3. ⏳ **Deploy signal validation** (2 hours)
-4. ⏳ **Deploy enhanced portfolio math** (1 hour)
+### Critical Gap Closure — Block All Other Work Until These Are Verified
+1. 🔴 **Confirm portfolio math promotion is real**  
+   - Inspect `scripts/run_etl_pipeline.py` and dependent modules to ensure `etl/portfolio_math_enhanced.py` is the active import everywhere.  
+   - Run the guard checks from `Documentation/AGENT_DEV_CHECKLIST.md` (Section “Quant Math Promotion”) and record the outcome in `Documentation/implementation_checkpoint.md` before moving on.
+2. 🔴 **Repair signal and risk persistence**  
+   - Expand the `risk_level` constraint (see `Documentation/NEXT_TO_DO_SEQUENCED.md` Issue 1) and backfill existing rows so the LLM pipeline stops emitting `NO_DATA`.  
+   - Enforce non-null `signal_type` on inserts and validate the fix via the monitoring checklist in `Documentation/AGENT_INSTRUCTION.md`.
+3. 🔴 **Wire the 5-layer signal validator with correct Kelly sizing**  
+   - Integrate the validator into the live LLM stages, apply the canonical Kelly formula, and add regression coverage as mandated by `Documentation/AGENT_DEV_CHECKLIST.md` Step 7.  
+   - Do not advance until `implementation_checkpoint.md` shows “Validator wired + tests passing” with a linked test run.
+4. 🔴 **Restore statistical scoring and CI gates**  
+   - Stand up the bootstrap/hypothesis/Ljung–Box/Jarque–Bera suite, surface results in CI, and confirm MVS/PRS gates are measurable again.  
+   - Reference the procedures in `Documentation/AGENT_INSTRUCTION.md` (“Quant Validation Loop”) during this autonomous run.
+5. 🔴 **Stabilize LLM execution path**  
+   - Reduce inference latency to <5 s, implement caching/fast-model routing, and document benchmarks per the performance section in `Documentation/implementation_checkpoint.md`.
 
-### **Day 2**:
-1. Complete LLM optimization testing
-2. Run 30-day backtest on historical signals
-3. Deploy statistical testing framework
-4. Document results
-
-### **Day 3-7**:
-1. Complete paper trading engine
-2. Implement risk management system
-3. Create performance dashboard
-4. Integration testing
+### Execution Guardrail
+- Treat this as an autonomous blocking run guided by `Documentation/AGENT_DEV_CHECKLIST.md` and `Documentation/AGENT_INSTRUCTION.md`.  
+- **Do not** begin any downstream implementation (paper trading, dashboards, broker integration, Phase B ML work, etc.) until each critical gap above is marked “Verified Complete” in `Documentation/implementation_checkpoint.md`.
 
 ---
 
@@ -590,3 +589,4 @@ CAPITAL_SCHEDULE = {
 **Date**: October 19, 2025  
 **Status**: Ready for immediate implementation  
 **Priority**: Critical system fixes first, then enhancement
+

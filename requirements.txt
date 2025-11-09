@@ -26,3 +26,15 @@ ollama>=0.1.0
 
 # Testing
 pytest>=7.4.0
+
+# Time Series Forecasting Dependencies
+# Install with: pip install -r requirements_forecasting.txt
+
+# SARIMAX model
+statsmodels>=0.14.0
+
+# GARCH volatility modeling
+arch>=6.0.0
+
+# Optional GPU acceleration for MSSA-RL (requires CUDA 12.x runtime)
+cupy-cuda12x>=13.0.0; platform_system == "Linux"

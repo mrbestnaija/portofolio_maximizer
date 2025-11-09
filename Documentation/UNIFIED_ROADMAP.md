@@ -1,11 +1,13 @@
 # UNIFIED ROADMAP: Portfolio Maximizer v45
 **Production-Ready ML Trading System**
 
-**Last Updated**: October 22, 2025  
+**Last Updated**: November 6, 2025  
 **Status**: Phase 5.4 Complete → Production Ready  
 **Test Coverage**: 196 tests (100% passing)  
 **Codebase**: ~7,580 lines of production code  
 **LLM Integration**: ✅ Complete (3 models operational)
+
+**📋 NEW**: Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for complete list of missing/incomplete implementations that must be completed before production deployment.
 
 ---
 
@@ -35,7 +37,8 @@
 **Analysis**:
 - ✅ LLM-driven market analysis (Ollama integration) - 3 models operational
 - ✅ Risk assessment & signal generation - Production ready
-- ✅ Time series analysis (SARIMAX, GARCH, seasonality)
+- ✅ Time series analysis (SARIMAX, GARCH, **SAMOSSA SSA with residual ARIMA + CUSUM hooks**)
+- ✅ Regression metrics + ensemble governance: `TimeSeriesForecaster.evaluate()` now records RMSE / sMAPE / tracking error per model and writes them to SQLite; ensemble weights blend AIC/EVR with variance-ratio tests and change-point boosts, and MSSA-RL can optionally leverage CuPy for GPU-accelerated SSA.
 - ✅ k-fold walk-forward validation
 - ✅ Portfolio math (Sharpe, drawdown, profit factor, CVaR, Sortino) - Enhanced engine promoted as default (`etl.portfolio_math`) per AGENT_INSTRUCTION.md guardrails
 
@@ -46,27 +49,41 @@
 - ✅ Profit calculation accuracy validated (< $0.01 tolerance)
 
 ### ⚠️ CURRENT GAPS & BLOCKERS
-- Signal pipeline emits rows without `signal_type`, leaving monitoring and validation dashboards with `NO_DATA`.
-- The 5-layer signal validator is not wired into the live LLM pipeline and still uses an incorrect Kelly criterion.
-- Statistical rigor (hypothesis tests, bootstrap confidence intervals, Ljung–Box/Jarque–Bera) has not started, so MVS/PRS gates cannot be measured.
+- ✅ Signal pipeline now records `signal_type`, timestamps, and realised/backtest metrics so dashboards read live data.
+- ✅ The 5-layer signal validator (Kelly sizing + statistical diagnostics) is fully wired into the LLM pipeline.
+- ✅ Statistical rigor (hypothesis tests, bootstrap confidence intervals, Ljung–Box/Jarque–Bera) publishes into SQLite summaries for MVS/PRS gating.
 - Paper trading engine, broker integration, stress testing, and regime detection remain unimplemented.
 
 ### 🔧 Immediate Next Actions
-1. Backfill historical LLM signals with valid `signal_type` values and enforce the constraint for new inserts.
-2. Integrate the 5-layer signal validator, correct Kelly sizing logic, and add regression coverage around position sizing.
-3. Enforce health checks and statistical backtesting (`tests/etl/test_statistical_tests.py`) for the promoted portfolio math defaults.
-4. Launch the statistical rigor toolkit (bootstrap, hypothesis tests, Ljung–Box/Jarque–Bera) and wire metrics into CI and reporting.
-5. Once the above items are stable, proceed with paper trading, broker API integration, and planned stress/regime tooling per Phase A/B.
+1. ✅ Surface `llm_signal_backtests` metrics in monitoring dashboards — `scripts/monitor_llm_system.py` now emits summaries and writes `logs/latency_benchmark.json`.
+2. ✅ Automate nightly validation backfills via `schedule_backfill.bat`; register with Windows Task Scheduler (e.g. `schtasks /Create /TN PortfolioMaximizer_BackfillSignals /TR "\"C:\path\to\schedule_backfill.bat\"" /SC DAILY /ST 02:00 /F`).
+3. 🚧 Promote the paper trading engine and associated reporting ahead of broker integration.
+4. 🚧 Prepare stress/regime detection modules to consume the unified signal metrics pipeline before Phase B automation.
+5. ✅ Token-throughput guard now enforces the sub-5 s LLM target (`ai_llm/ollama_client.py` auto-swaps models when tokens/sec dip below `token_rate_failover_threshold`); continue recording benchmarks in `implementation_checkpoint.md`.
+6. ✅ Time-series stage now executes rolling hold-outs per ticker, calls `forecaster.evaluate(...)`, and persists RMSE / sMAPE / tracking error to `time_series_forecasts.regression_metrics`; dashboards and ensemble weighting consume those values alongside AIC/EVR and the new variance-ratio / change-point heuristics.
+7. 🚧 Once the above items are stable, proceed with broker API integration and planned stress/regime tooling per Phase A/B.
 
-### ⚠️ **NOT YET IMPLEMENTED**
+### ⚠️ **NOT YET IMPLEMENTED** (See STUB_IMPLEMENTATION_PLAN.md for details)
 
-- ❌ Signal validation framework
-- ❌ Real-time market data streaming
-- ❌ Paper trading engine
-- ❌ Live trading execution
+**CRITICAL (Blocking Production)**:
+- ❌ Broker integration (IBKR Client) - `execution/ibkr_client.py` MISSING
+- ❌ Order Management System - `execution/order_manager.py` MISSING
+- ❌ Production Performance Dashboard - `monitoring/performance_dashboard.py` MISSING
+- ❌ Production Deployment Pipeline - `deployment/production_deploy.py` MISSING
+- ❌ Disaster Recovery System - `recovery/disaster_recovery.py` MISSING
+
+**HIGH PRIORITY**:
+- ❌ Real-time market data streaming (partial - needs completion)
+- ❌ Paper trading engine (exists but needs broker integration)
+- ❌ Live trading execution (blocked by missing broker client)
+
+**MEDIUM PRIORITY**:
 - ❌ Advanced ML forecasting (LSTM, XGBoost, ensemble)
-- ❌ Broker integration (IBKR)
-- ❌ Production monitoring dashboard
+- ❌ SAMOSSA RL intervention loop (Q-learning policy, CUSUM monitoring promotion)
+- ❌ Time-Series Feature Builder - `etl/time_series_feature_builder.py` MISSING
+- ❌ Parallel Model Runner - `models/time_series_runner.py` MISSING
+- ❌ Signal Router - `signal_router.py` MISSING
+- ❌ Time-Series Validation - `analysis/time_series_validation.py` MISSING
 
 ---
 
@@ -80,10 +97,10 @@ PHASE A: DEPLOY EXISTING LLM (Weeks 1-6)
   → Get to paper trading with LLM signals
   → Generate real-world performance baseline
   
-PHASE B: ENHANCE WITH ML (Weeks 7-12)
-  → Build ml/ forecasting infrastructure
-  → Train models on paper trading data
-  → Ensemble LLM + ML for superior performance
+PHASE B: UPGRADE TIME-SERIES MODELS (Weeks 7-10)
+  → Deploy SAMOSSA, SARIMAX, and GARCH alongside LLM signals
+  → Validate with rolling cross-validation and loss metrics
+  → Promote best performer with automated fallback controls
 ```
 
 **Why This Order:**
@@ -660,271 +677,149 @@ class DisasterRecovery:
 
 ---
 
-## 📅 PHASE B: ML ENHANCEMENT (WEEKS 7-12)
+## ?? PHASE B: TIME-SERIES MODEL UPGRADE (WEEKS 7-10)
 
-### **WEEK 7-8: ML Forecasting Foundation**
+### **Time-Series Model Upgrade Overview**
+- Execute SAMOSSA, SARIMAX, and GARCH forecasts alongside the current LLM pipeline.
+- Preserve backward compatibility through feature-flagged routing in signal_router.py.
+- Use rolling cross-validation and walk-forward evaluation to compare models on profit factor, drawdown, and loss metrics.
+- Promote the most consistent, low-loss model to default only after statistically significant outperformance; retain LLM as fallback.
+- Expand monitoring so regressions trigger automatic reversion to the existing production configuration.
 
-#### **Task B1: Feature Engineering Pipeline** (Days 43-49)
-```python
-# NEW: ml/features/quantitative_feature_engine.py (400 lines)
-class QuantitativeFeatureEngine:
-    """ML-specific feature engineering"""
-    
-    def create_forecasting_features(self, ohlcv: pd.DataFrame) -> pd.DataFrame:
-        """Technical, statistical, and regime features"""
-        
-        features = {}
-        
-        # Price-based features
-        features['momentum_5'] = ohlcv['close'].pct_change(5)
-        features['momentum_20'] = ohlcv['close'].pct_change(20)
-        features['momentum_60'] = ohlcv['close'].pct_change(60)
-        
-        # Technical indicators
-        features['rsi_14'] = self._calculate_rsi(ohlcv['close'], 14)
-        features['macd'] = self._calculate_macd(ohlcv['close'])
-        features['bollinger_position'] = self._bollinger_position(ohlcv['close'])
-        
-        # Volatility features
-        features['volatility_10'] = ohlcv['close'].rolling(10).std()
-        features['volatility_ratio'] = (
-            ohlcv['close'].rolling(10).std() / 
-            ohlcv['close'].rolling(63).std()
-        )
-        
-        # Statistical features
-        features['hurst'] = self._rolling_hurst(ohlcv['close'], 100)
-        features['autocorr_1'] = ohlcv['close'].rolling(20).apply(
-            lambda x: x.autocorr(1)
-        )
-        
-        # Volume features
-        features['volume_ratio'] = (
-            ohlcv['volume'] / ohlcv['volume'].rolling(20).mean()
-        )
-        
-        return pd.DataFrame(features).dropna()
-```
+### **Week 7: SAMOSSA + SARIMAX Foundations**
+`python
+# TASK B7.1: Time-Series Feature Engineering Upgrade (Days 43-45) — ⏳ Pending
+# File: etl/time_series_feature_builder.py (NEW - 250 lines)
+class TimeSeriesFeatureBuilder:
+    def build_features(self, price_history: pd.DataFrame) -> pd.DataFrame:
+        """Create lag, seasonal, and volatility features for SAMOSSA/SARIMAX"""
+        # Seasonal decomposition, holiday effects
+        # Rolling statistics and differencing
+        # Persist outputs via database_manager.py feature store helpers
 
-**Success Criteria**:
-- [ ] Feature engine operational
-- [ ] 30+ predictive features generated
-- [ ] Feature importance analysis implemented
-- [ ] Integration with existing time_series_analyzer.py
+# TASK B7.2: SAMOSSA Forecaster (Days 46-47) — ✅ Delivered 2025-11-05
+# Implementation: etl/time_series_forecaster.py::SAMOSSAForecaster
+# Notes: SSA Page matrix, truncated SVD ≥90% energy, residual ARIMA, CUSUM hooks per SAMOSSA_algorithm_description.md
+class SAMOSSAForecaster:
+    def fit(self, features: pd.DataFrame) -> None:
+        """Train Seasonal Adaptive Multi-Order Smoothing model"""
+        # Extend model registry for checkpoint storage
+        # Configurable seasonality plus adaptive smoothing parameters
 
----
+    def forecast(self, horizon: int) -> ForecastResult:
+        """Return price forecasts with confidence intervals"""
+        # Output matches existing signal schema for parity with LLM signals
 
-#### **Task B2: Multi-Model Ensemble** (Days 50-56)
-```python
-# NEW: ml/models/ensemble_trainer.py (500 lines)
-class EnsembleForecaster:
-    """Multi-model ensemble for robust forecasting"""
-    
-    def __init__(self):
-        self.models = {
-            'linear': BayesianRidge(),
-            'xgboost': XGBRegressor(n_estimators=500, max_depth=6),
-            'random_forest': RandomForestRegressor(n_estimators=300),
-            'gradient_boosting': GradientBoostingRegressor(n_estimators=300)
-        }
-        
-    def train_ensemble(self, features: pd.DataFrame, 
-                      targets: pd.Series,
-                      validation_split: float = 0.2):
-        """Train ensemble with walk-forward validation"""
-        
-        # Split data chronologically
-        split_idx = int(len(features) * (1 - validation_split))
-        X_train, X_val = features[:split_idx], features[split_idx:]
-        y_train, y_val = targets[:split_idx], targets[split_idx:]
-        
-        # Train each model
-        model_scores = {}
-        for name, model in self.models.items():
-            model.fit(X_train, y_train)
-            score = self._evaluate_model(model, X_val, y_val)
-            model_scores[name] = score
-        
-        # Performance-based weighting
-        self.weights = self._calculate_weights(model_scores)
-        
-        return EnsembleResult(
-            models=self.models,
-            weights=self.weights,
-            validation_scores=model_scores
-        )
-    
-    def predict(self, features: pd.DataFrame) -> Prediction:
-        """Ensemble prediction with confidence intervals"""
-        
-        # Get predictions from each model
-        predictions = {}
-        for name, model in self.models.items():
-            predictions[name] = model.predict(features)
-        
-        # Weighted average
-        ensemble_pred = sum(
-            predictions[name] * self.weights[name] 
-            for name in self.models.keys()
-        )
-        
-        # Confidence from prediction variance
-        confidence = 1 - np.std(list(predictions.values()), axis=0)
-        
-        return Prediction(
-            forecast=ensemble_pred,
-            confidence=confidence,
-            model_predictions=predictions
-        )
-```
+# TASK B7.3: SARIMAX Pipeline Refresh (Days 48-49) — ✅ Delivered (See SARIMAXForecaster in etl/time_series_forecaster.py)
+# Notes: Auto-order selection, seasonal detection, Ljung–Box/Jarque–Bera diagnostics
+class SARIMAXForecaster:
+    def fit_and_forecast(self, market_data: pd.DataFrame) -> ForecastResult:
+        """Production-ready SARIMAX with automated tuning"""
+        # Use pmdarima auto_arima with guardrails
+        # Consume cached exogenous features from ETL pipeline
+        # Persist diagnostics for regime-aware switching
+`
 
-**Success Criteria**:
-- [ ] Ensemble model operational
-- [ ] 4+ base models trained
-- [ ] Performance-based weighting working
-- [ ] >55% directional accuracy on validation
-- [ ] Confidence intervals calibrated
+### **Week 8: GARCH + Parallel Inference Integration**
+`python
+# TASK B8.1: GARCH Volatility Engine (Days 50-52) — ✅ Delivered (etl/time_series_forecaster.py::GARCHForecaster)
+# Notes: Supports GARCH/EGARCH/GJR-GARCH, exposes AIC/BIC, volatility horizon forecasts
+class GARCHVolatilityEngine:
+    def fit(self, returns: pd.Series) -> None:
+        """Estimate volatility clusters via GARCH(p, q)"""
+        # Use arch package for variance forecasts
+        # Emit risk-adjusted metrics for signal fusion
 
----
+    def forecast_volatility(self, steps: int = 1) -> VolatilityResult:
+        """Expose volatility forecast to risk sizing logic"""
+        # Integrate with portfolio_math_enhanced.py metrics
 
-### **WEEK 9-10: ML-LLM Ensemble**
+# TASK B8.2: Parallel Model Runner (Days 53-54)
+# File: models/time_series_runner.py (NEW - 260 lines)
+# TASK B8.2: Parallel Model Runner (Days 53-54) — ⏳ Pending (extend to multi-model async orchestration)
+class TimeSeriesRunner:
+    def run_all(self, context: MarketContext) -> List[Signal]:
+        """Execute SAMOSSA, SARIMAX, GARCH, and LLM pipelines in parallel"""
+        # Async execution via existing task orchestrator
+        # Normalize outputs into unified signal schema
+        # Attach provenance metadata for performance dashboards
 
-#### **Task B3: LLM-ML Signal Fusion** (Days 57-63)
-```python
-# NEW: strategies/ml_llm_ensemble.py (450 lines)
-class MLLLMEnsemble:
-    """Combine LLM and ML signals for superior performance"""
-    
-    def __init__(self):
-        # Existing LLM infrastructure
-        self.llm_signal_gen = SignalGenerator()
-        
-        # New ML infrastructure
-        self.ml_forecaster = EnsembleForecaster()
-        
-    def generate_ensemble_signal(self, ticker: str, 
-                                 market_data: pd.DataFrame) -> EnsembleSignal:
-        """Combine LLM qualitative + ML quantitative"""
-        
-        # LLM analysis (existing)
-        llm_signal = self.llm_signal_gen.generate_signal(ticker, market_data)
-        
-        # ML forecast (new)
-        ml_features = self.feature_engine.create_forecasting_features(market_data)
-        ml_prediction = self.ml_forecaster.predict(ml_features)
-        
-        # Combine signals
-        if llm_signal.direction == ml_prediction.direction:
-            # Agreement → high confidence
-            confidence = min(llm_signal.confidence * ml_prediction.confidence * 1.2, 1.0)
-            position_size = self._calculate_position_size(confidence)
-            
-        else:
-            # Disagreement → reduce confidence
-            confidence = max(llm_signal.confidence, ml_prediction.confidence) * 0.5
-            position_size = self._calculate_position_size(confidence) * 0.5
-        
-        return EnsembleSignal(
-            ticker=ticker,
-            direction=self._resolve_direction(llm_signal, ml_prediction),
-            confidence=confidence,
-            position_size=position_size,
-            llm_component=llm_signal,
-            ml_component=ml_prediction,
-            reasoning=self._generate_reasoning(llm_signal, ml_prediction)
-        )
-```
+# TASK B8.3: Backward-Compatible Signal Routing (Days 55-56) — ⏳ Pending
+# File: signal_router.py (UPDATE - 180 lines)
+class SignalRouter:
+    def route(self, signals: List[Signal]) -> SignalBundle:
+        """Merge legacy LLM signals with new time-series models"""
+        # Feature flag toggles for gradual rollout
+        # Priority ordering based on confidence and risk score
+        # Downstream consumers see unchanged interface
+`
 
-**Success Criteria**:
-- [ ] LLM-ML ensemble operational
-- [ ] Signal combination logic working
-- [ ] Confidence calibration accurate
-- [ ] Ensemble beats LLM-only by 2%+
-- [ ] Ensemble beats ML-only by 2%+
+> **Implementation Notes (Nov 05, 2025)**  
+> • SAMOSSA SSA + residual ARIMA is live inside `etl/time_series_forecaster.py`, emitting explained-variance diagnostics and residual forecasts.  
+> • CUSUM change-point scoring and Q-learning intervention loops remain gated until paper-trading metrics meet `QUANTIFIABLE_SUCCESS_CRITERIA.md` thresholds.  
+> • GPU acceleration (CuPy/Numba) is documented in `mSSA_with_RL_changPoint_detection.json`; profiling will determine when to prioritise the optimisation backlog.  
 
----
+### **Week 9: Cross-Validation + Evaluation Framework**
+`python
+# TASK B9.1: Rolling Cross-Validation Harness (Days 57-59)
+# File: analysis/time_series_validation.py (NEW - 300 lines)
+class TimeSeriesValidation:
+    def evaluate(self, models: List[BaseModel]) -> ValidationReport:
+        """Blocked CV and walk-forward evaluation across horizons"""
+        # Profit factor, max drawdown, hit rate, volatility-adjusted return
+        # Statistical tests (Diebold-Mariano, paired t-tests)
+        # Persist results for dashboards and CI
 
-### **WEEK 11-12: Production Optimization**
+# TASK B9.2: Performance Dashboard Extension (Days 60-61)
+# File: monitoring/performance_dashboard.py (UPDATE - 200 lines)
+class PerformanceDashboard:
+    def render_time_series_tab(self, reports: List[ValidationReport]) -> Dashboard:
+        """Compare LLM vs SAMOSSA/SARIMAX/GARCH performance"""
+        # Rolling metrics, drawdown curves, loss distribution
+        # Highlight leading model per asset and regime
 
-#### **Task B4: Performance Optimization** (Days 64-70)
-```python
-# NEW: optimization/gpu_optimizer.py (300 lines)
-class GPUOptimizer:
-    """Optimize ML inference for real-time trading"""
-    
-    def optimize_inference_speed(self) -> OptimizationResult:
-        """Use RTX 4060 Ti for fast inference"""
-        
-        # Batch processing
-        batch_size = self._optimal_batch_size()
-        
-        # Model quantization
-        quantized_models = self._quantize_models()
-        
-        # GPU memory optimization
-        self._optimize_gpu_memory()
-        
-        # Latency benchmarking
-        latency = self._benchmark_latency()
-        
-        return OptimizationResult(
-            batch_size=batch_size,
-            avg_latency_ms=latency,
-            throughput_per_sec=1000 / latency,
-            gpu_utilization=self._measure_gpu_utilization()
-        )
-```
+# TASK B9.3: Risk & Compliance Review (Days 62-63)
+# File: risk/model_governance.py (NEW - 150 lines)
+class ModelGovernance:
+    def certify(self, report: ValidationReport) -> GovernanceDecision:
+        """Ensure new models satisfy risk limits before promotion"""
+        # Enforce drawdown, VaR/ES thresholds, and audit logs
+        # Document fallback procedures and approvals
+`
 
-**Success Criteria**:
-- [ ] GPU optimization complete
-- [ ] <100ms inference latency
-- [ ] Batch processing 10+ tickers
-- [ ] Memory usage optimized
+### **Week 10: Promotion, Fallback, and Automation**
+`python
+# TASK B10.1: Dynamic Model Selection Logic (Days 64-66)
+# File: models/model_selector.py (NEW - 220 lines)
+class ModelSelector:
+    def choose_primary_model(self, reports: List[ValidationReport]) -> ModelDecision:
+        """Promote the most consistent, low-loss model"""
+        # Weighted scoring (profit factor, drawdown, Sharpe, stability)
+        # Minimum uplift thresholds relative to LLM baseline
+        # Automatic reversion when performance degrades
 
----
+# TASK B10.2: Integration Tests and Regression Suite (Days 67-68)
+# File: tests/test_time_series_models.py (NEW - 280 lines)
+class TestTimeSeriesModels(unittest.TestCase):
+    def test_parallel_pipeline_integrity(self) -> None:
+        """Validate routing, fallback, and metrics instrumentation"""
+        # Simulate feature-flag toggles and failure scenarios
 
-#### **Task B5: Advanced Monitoring** (Days 71-77)
-```python
-# NEW: monitoring/ml_performance_tracker.py (350 lines)
-class MLPerformanceTracker:
-    """Track ML model performance in production"""
-    
-    def track_model_performance(self) -> PerformanceReport:
-        """Monitor model decay and accuracy"""
-        
-        # Calculate rolling metrics
-        accuracy_30d = self._calculate_rolling_accuracy(days=30)
-        accuracy_90d = self._calculate_rolling_accuracy(days=90)
-        
-        # Detect model decay
-        if accuracy_30d < 0.50:  # Below random
-            self._trigger_retraining()
-            
-        # Feature importance tracking
-        feature_importance = self._track_feature_importance()
-        
-        # Prediction calibration
-        calibration = self._assess_calibration()
-        
-        return PerformanceReport(
-            accuracy_30d=accuracy_30d,
-            accuracy_90d=accuracy_90d,
-            feature_importance=feature_importance,
-            calibration_score=calibration,
-            recommendation=self._generate_recommendation()
-        )
-```
+# TASK B10.3: Deployment Playbook Update (Days 69-70)
+# File: docs/deployment_playbook.mdc (UPDATE - 120 lines)
+def document_time_series_rollout():
+    """Update runbooks for rolling out the new default model"""
+    # Include rollback checklist, monitoring KPIs, approval steps
+`
 
-**Success Criteria**:
-- [ ] ML performance tracking operational
-- [ ] Model decay detection working
-- [ ] Automatic retraining triggered when accuracy <50%
-- [ ] Feature importance tracked
-- [ ] Prediction calibration monitored
+### **Phase B Success Criteria**
+- [ ] SAMOSSA, SARIMAX, and GARCH pipelines deliver signals alongside LLM output
+- [ ] Feature flags enable immediate fallback to the current LLM-only routing
+- [ ] Rolling CV shows >= 3% profit-factor uplift with <= 50% drawdown increase versus baseline
+- [ ] Governance sign-off documented with a tested fallback plan
+- [ ] Dynamic selector promotes the top model automatically and regression suite passes
 
----
-
-## 🎯 SUCCESS CRITERIA BY PHASE
+---## 🎯 SUCCESS CRITERIA BY PHASE
 
 ### **Phase A Success (Week 6)**
 ```python
@@ -948,21 +843,20 @@ PHASE_A_CRITERIA = {
 }
 ```
 
-### **Phase B Success (Week 12)**
+### **Phase B Success (Week 10)**
 ```python
 PHASE_B_CRITERIA = {
-    # ML Performance
-    'ml_accuracy': '>55% directional accuracy',
-    'ml_sharpe': '>1.0 risk-adjusted returns',
-    
-    # Ensemble Performance
-    'ensemble_accuracy': '>60% (2%+ improvement over LLM-only)',
-    'ensemble_sharpe': '>1.2 risk-adjusted returns',
-    
-    # Production Readiness
-    'inference_latency': '<100ms',
-    'model_stability': '<5% variance across regimes',
-    'gpu_utilization': '>70%',
+    # Parallel Model Delivery
+    'time_series_parallel': 'SAMOSSA, SARIMAX, GARCH, and LLM signals available concurrently',
+    'feature_flag_fallback': 'Toggle restores LLM-only routing within 1 minute',
+
+    # Performance Uplift
+    'profit_factor_delta': '>= 3% improvement vs LLM baseline',
+    'drawdown_delta': '<= 50% increase vs LLM baseline',
+
+    # Governance & Quality
+    'governance_signoff': 'ModelGovernance certify() approved with fallback plan',
+    'regression_suite': 'tests/test_time_series_models.py passing in CI',
 }
 ```
 
@@ -1082,5 +976,7 @@ CAPITAL_SCHEDULE = {
 **Next Action**: Implement signal validator (`ai_llm/signal_validator.py`)  
 **Timeline**: 12 weeks to production ML trading system  
 **Success Probability**: 60% (conservative estimate)
+
+
 
 

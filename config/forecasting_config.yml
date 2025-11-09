@@ -1,0 +1,59 @@
+# Time Series Forecasting Configuration
+# SARIMAX and GARCH models
+
+forecasting:
+  enabled: true
+  default_forecast_horizon: 30  # Days ahead
+  
+  # SARIMAX configuration
+  sarimax:
+    enabled: true
+    auto_select_order: true
+    max_p: 3
+    max_d: 2
+    max_q: 3
+    seasonal_periods: null  # Auto-detect (null) or specify (12=monthly, 4=quarterly)
+    max_P: 2
+    max_D: 1
+    max_Q: 2
+    trend: "c"  # Options: 'c' (constant), 't' (trend), 'ct' (both), 'n' (none)
+    enforce_stationarity: true
+    enforce_invertibility: true
+  
+  # GARCH configuration
+  garch:
+    enabled: true
+    p: 1  # ARCH order
+    q: 1  # GARCH order
+    vol: "GARCH"  # Options: 'GARCH', 'EGARCH', 'GJR-GARCH'
+    dist: "normal"  # Options: 'normal', 't', 'skewt'
+
+  # SAMOSSA configuration
+  samossa:
+    enabled: true
+    window_length: 40        # Hankel window length for SSA embedding
+    n_components: 6          # Number of leading components to retain
+    use_residual_arima: true # Fit ARIMA on residual component
+    arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
+    seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
+    min_series_length: 120   # Minimum observations required before fit
+    max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
+    reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
+  
+  # Combined forecasting
+  combined:
+    enabled: true
+    use_sarimax_mean: true
+    use_garch_volatility: true
+    combine_confidence_intervals: true
+
+  # Ensemble orchestration
+  ensemble:
+    enabled: true
+    confidence_scaling: true
+    candidate_weights:
+      - {sarimax: 0.6, samossa: 0.4}
+      - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
+      - {sarimax: 0.5, mssa_rl: 0.5}
+    minimum_component_weight: 0.1
+
