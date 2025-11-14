@@ -3,6 +3,8 @@ Test LLM Enhancements
 Tests for performance monitoring, signal validation, database integration, and optimization
 """
 
+import sqlite3
+
 import pytest
 import pandas as pd
 import numpy as np
@@ -201,6 +203,7 @@ class TestLLMDatabaseIntegration:
         assessment = LLMRiskAssessment(
             id=None,
             portfolio_id="portfolio_001",
+            risk_level="medium",
             risk_score=0.3,
             risk_factors=["High volatility", "Market uncertainty"],
             recommendations=["Reduce position size", "Add hedging"],
@@ -209,11 +212,40 @@ class TestLLMDatabaseIntegration:
             market_conditions={"volatility": 0.25, "trend": "bearish"},
             confidence=0.85
         )
-        
+
         assert assessment.portfolio_id == "portfolio_001"
+        assert assessment.risk_level == "medium"
         assert assessment.risk_score == 0.3
         assert len(assessment.risk_factors) == 2
         assert len(assessment.recommendations) == 2
+
+    def test_risk_assessment_extreme_persisted(self, tmp_path):
+        """Risk assessments should persist the full risk taxonomy."""
+        db_path = tmp_path / "risk.db"
+        manager = LLMDatabaseManager(str(db_path))
+
+        assessment = LLMRiskAssessment(
+            id=None,
+            portfolio_id="portfolio_002",
+            risk_level="extreme",
+            risk_score=0.75,
+            risk_factors=["Earnings miss", "Credit spread widening"],
+            recommendations=["Close position", "Increase cash"],
+            model_used="deepseek-coder:6.7b-instruct-q4_K_M",
+            timestamp=datetime.now(),
+            market_conditions={"volatility": 0.45, "trend": "bear"},
+            confidence=0.92
+        )
+
+        record_id = manager.save_risk_assessment(assessment)
+        assert record_id > 0
+
+        with sqlite3.connect(str(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT risk_level FROM llm_risk_assessments WHERE id = ?", (record_id,))
+            stored_level = cur.fetchone()[0]
+
+        assert stored_level == "extreme"
 
 
 class TestPerformanceOptimizer:

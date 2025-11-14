@@ -72,8 +72,10 @@ class AlphaVantageExtractor(BaseExtractor):
             self.config = yaml.safe_load(f)
 
         # Get API key from environment or parameter
+        # SECURITY: Use secret_loader for secure secret management
+        from etl.secret_loader import load_secret
         api_key_env = self.config['extraction']['authentication']['api_key_env']
-        self.api_key = api_key or os.getenv(api_key_env)
+        self.api_key = api_key or load_secret(api_key_env)
 
         if not self.api_key:
             raise ValueError(

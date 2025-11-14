@@ -31,6 +31,7 @@ References:
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import seaborn as sns
 from typing import Optional, List, Tuple, Dict
 from pathlib import Path
@@ -58,6 +59,15 @@ class TimeSeriesVisualizer:
         plt.style.use('default')  # Reset to default first
         sns.set_palette("husl")
         self.colors = sns.color_palette("husl", 10)
+
+    @staticmethod
+    def _rotate_date_labels(ax: plt.Axes, rotation: int = 45) -> None:
+        """Rotate datetime tick labels without relying on deprecated fig.autofmt_xdate arguments."""
+        if ax is None:
+            return
+        for label in ax.get_xticklabels():
+            label.set_rotation(rotation)
+            label.set_horizontalalignment("right")
 
     def plot_time_series_overview(self, data: pd.DataFrame, columns: Optional[List[str]] = None,
                                    title: str = "Time Series Overview") -> plt.Figure:
@@ -760,3 +770,148 @@ class TimeSeriesVisualizer:
 
         logger.info(f"Saved {len(saved_files)} visualizations to {output_dir}")
         return saved_files
+
+    def plot_forecast_dashboard(
+        self,
+        actual_series: pd.Series,
+        forecasts: Dict[str, Dict[str, Optional[pd.Series]]],
+        title: str,
+        weights: Optional[Dict[str, float]] = None,
+    ) -> plt.Figure:
+        """Visualise realised prices alongside multiple model forecasts."""
+        fig, (ax_main, ax_resid) = plt.subplots(
+            2, 1, figsize=(self.figsize[0], self.figsize[1]), height_ratios=[3, 1]
+        )
+
+        actual_series = actual_series.sort_index()
+        ax_main.plot(actual_series.index, actual_series.values, label="Actual", color="black", linewidth=2)
+
+        ensemble_series = None
+        colour_idx = 0
+        for model_name, payload in forecasts.items():
+            series = payload.get("forecast") if isinstance(payload, dict) else None
+            if not isinstance(series, pd.Series) or series.empty:
+                continue
+            series = series.sort_index()
+            colour = self.colors[colour_idx % len(self.colors)]
+            colour_idx += 1
+            is_ensemble = model_name.upper() in {"ENSEMBLE", "COMBINED"}
+            ax_main.plot(
+                series.index,
+                series.values,
+                label=model_name,
+                color=colour,
+                linewidth=2.5 if is_ensemble else 1.5,
+                linestyle="--" if is_ensemble else "-",
+            )
+
+            lower = payload.get("lower_ci") if isinstance(payload, dict) else None
+            upper = payload.get("upper_ci") if isinstance(payload, dict) else None
+            if isinstance(lower, pd.Series) and isinstance(upper, pd.Series):
+                lower = lower.sort_index()
+                upper = upper.sort_index()
+                if not lower.empty and not upper.empty:
+                    ax_main.fill_between(lower.index, lower.values, upper.values, color=colour, alpha=0.12)
+
+            if is_ensemble:
+                ensemble_series = series
+
+        ax_main.set_title(title, fontsize=13, fontweight="bold")
+        ax_main.set_ylabel("Price", fontsize=11, fontweight="bold")
+        ax_main.legend(loc="upper left", fontsize=9)
+        ax_main.grid(True, alpha=0.3)
+        ax_main.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        self._rotate_date_labels(ax_main)
+
+        residual_series = None
+        if ensemble_series is not None:
+            overlapping = actual_series.reindex(ensemble_series.index)
+            residual_series = (overlapping - ensemble_series).dropna()
+
+        if residual_series is not None and not residual_series.empty:
+            ax_resid.bar(residual_series.index, residual_series.values, color="steelblue", alpha=0.75)
+            ax_resid.axhline(0.0, color="black", linewidth=1)
+            ax_resid.set_ylabel("Residual", fontsize=10, fontweight="bold")
+            ax_resid.set_title("Ensemble Residual (Actual - Ensemble)", fontsize=11, fontweight="bold")
+            ax_resid.grid(True, alpha=0.25)
+            ax_resid.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            self._rotate_date_labels(ax_resid)
+        else:
+            ax_resid.axis("off")
+
+        if weights:
+            table_data = [[model, f"{weight:.2f}"] for model, weight in weights.items()]
+            table = ax_main.table(
+                cellText=table_data,
+                colLabels=["Model", "Weight"],
+                colLoc="center",
+                cellLoc="center",
+                loc="upper right",
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            table.scale(1, 1.1)
+
+        plt.tight_layout()
+        logger.info("Created forecast dashboard figure")
+        return fig
+
+    def plot_signal_performance(
+        self,
+        metrics: pd.DataFrame,
+        title: str = "LLM Signal Backtest Summary",
+        ticker: Optional[str] = None,
+    ) -> plt.Figure:
+        """Plot hit rate, profit factor, and sample sizes for LLM signal validation."""
+        if metrics.empty:
+            raise ValueError("No signal metrics available for dashboard")
+
+        metrics = metrics.sort_values("generated_at")
+        fig, axes = plt.subplots(1, 2, figsize=(self.figsize[0], self.figsize[1] / 2))
+
+        ax_left, ax_right = axes
+        ax_left.plot(
+            metrics["generated_at"],
+            metrics["hit_rate"],
+            marker="o",
+            linewidth=1.5,
+            color=self.colors[0],
+            label="Hit Rate",
+        )
+        ax_left.plot(
+            metrics["generated_at"],
+            metrics["profit_factor"],
+            marker="s",
+            linewidth=1.5,
+            color=self.colors[1],
+            label="Profit Factor",
+        )
+        ax_left.set_title("Performance Ratios", fontsize=11, fontweight="bold")
+        ax_left.set_ylabel("Ratio", fontsize=10, fontweight="bold")
+        ax_left.set_xlabel("Generated At", fontsize=10, fontweight="bold")
+        ax_left.legend(loc="best", fontsize=9)
+        ax_left.grid(True, alpha=0.3)
+        ax_left.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        self._rotate_date_labels(ax_left)
+
+        bars = ax_right.bar(
+            metrics["generated_at"].dt.strftime("%Y-%m-%d"),
+            metrics["signals_analyzed"],
+            color=self.colors[2],
+            alpha=0.75,
+        )
+        for bar, significant in zip(bars, metrics["statistically_significant"]):
+            if significant:
+                bar.set_edgecolor("gold")
+                bar.set_linewidth(2.0)
+
+        ax_right.set_title("Signals Analyzed per Backtest", fontsize=11, fontweight="bold")
+        ax_right.set_ylabel("Count", fontsize=10, fontweight="bold")
+        ax_right.set_xlabel("Generated At", fontsize=10, fontweight="bold")
+        ax_right.grid(True, alpha=0.25)
+
+        subtitle = title if ticker is None else f"{title} — {ticker}"
+        fig.suptitle(subtitle, fontsize=13, fontweight="bold")
+        plt.tight_layout()
+        logger.info("Created signal performance dashboard")
+        return fig

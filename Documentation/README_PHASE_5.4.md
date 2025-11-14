@@ -146,7 +146,7 @@ Supporting:
 - Documentation finalization
 
 ### Weeks 2-6 (Phase A)
-- Broker integration (IBKR)
+- Broker integration (cTrader demo-first)
 - Order management system
 - Production deployment
 - Live trading preparation

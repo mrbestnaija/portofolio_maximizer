@@ -1,0 +1,10 @@
+{
+  "data_source": "yfinance",
+  "execution_mode": "auto",
+  "pipeline_id": "pipeline_20251112_060103",
+  "fold_id": 2,
+  "split_strategy": "cross_validation",
+  "saved_at": "2025-11-12T06:01:08.315443",
+  "rows": 1281,
+  "run_id": "pipeline_20251112_060103"
+}

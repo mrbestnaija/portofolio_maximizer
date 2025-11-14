@@ -1,0 +1,111 @@
+{
+    "project_metadata": {
+        "author": "Mrbestnaija",
+        "framework_type": "Reinforcement Learning with Time Series Interventions",
+        "mathematical_convention": {
+            "indexing": "MIT standard (1 to N)",
+            "precision": "np.float64 throughout",
+            "random_seed": "Fixed for reproducibility"
+        },
+        "performance_requirements": {
+            "code_efficiency": "Vectorized operations with numpy/pandas, GPU-accelerated with CuPy",
+            "runtime_logging": "Use loguru for detailed execution logs",
+            "memory_optimization": "Numba for JIT compilation, CuPy for GPU operations",
+            "visualization": "Use Matplotlib, Plotly, and Seaborn for diagnostics"
+        }
+    },
+    "core_algorithms": {
+        "mssa_framework": {
+            "algorithm_name": "Multi-Singular Spectrum Analysis",
+            "mathematical_foundation": {
+                "decomposition_model": "Y(t) = Y_stationary + f_non-stationary(t) + \u03b5(t)",
+                "matrix_formulation": "Y = F + E where Y,F,E \u2208 R^(N\u00d7T)",
+                "low_rank_assumption": "rank(F) = r << min(N,T)",
+                "separable_structure": "f_i(t) = u_i^T \u03c1(t) = \u03a3_{k=1}^r u_{ik} \u03c1_k(t)"
+            },
+            "implementation_stages": {
+                "stage_1": {
+                    "name": "SSA Decomposition",
+                    "description": "Use Page matrix for trend/seasonal decomposition, block-based reshaping with Dask",
+                    "key_correction": "Block-based reshaping via Dask for scalability"
+                },
+                "stage_2": {
+                    "name": "Residual Modeling",
+                    "description": "Model residuals with AR(p) using statsmodels, optimized with numba",
+                    "objective": "min_{\u03b1_1,...,\u03b1_p} \u03a3_{t=1}^{T/L} (\u1e91(t) - \u03a3_{k=1}^p \u03b1_k \u1e91(t-k))^2"
+                },
+                "stage_3": {
+                    "name": "Forecasting Combination",
+                    "description": "Recombine deterministic and stochastic components using Prophet or CuPy",
+                    "forecast_equation": "f\u0302(T + k) = \u03a3_{j=1}^{L-1} \u03b2\u0302_j Y(T + k - j)"
+                }
+            }
+        },
+        "q_learning": {
+            "algorithm_name": "Q-Learning for Time Series Forecasting",
+            "q_update_rule": {
+                "formula": "Q(s,a) \u2190 Q(s,a) + \u03b1[r + \u03b3 max_a' Q(s',a') - Q(s,a)]",
+                "description": "Q-values are updated using the Bellman equation to optimize the policy."
+            },
+            "parameters": {
+                "alpha": "Learning rate",
+                "gamma": "Discount factor",
+                "epsilon": "Exploration rate"
+            }
+        },
+        "change_point_detection": {
+            "algorithm_name": "CUSUM-based Change Point Detection",
+            "mathematical_foundation": {
+                "detection_score": "D(t) = ||(\u00db\u2080\u22a5)\u1d40v_t||\u2082 - C",
+                "cusum_framework": "y(t+1) = max(y(t) + D(t), 0)",
+                "change_point_estimation": "\u03c4 = inf{t : y(t) \u2265 h}"
+            },
+            "implementation_steps": {
+                "step_1": {
+                    "name": "Input Analysis",
+                    "action": "Compute series length T and sum S"
+                },
+                "step_2": {
+                    "name": "Page Matrix Construction",
+                    "action": "Build L\u00d7(T\u2080/L) matrix using block method"
+                },
+                "step_3": {
+                    "name": "SVD Decomposition",
+                    "action": "P = U\u03a3V\u1d40 with 90% energy criterion"
+                }
+            }
+        }
+    },
+    "optimization_framework": {
+        "window_length_selection": {
+            "optimal_formula": "L \u2248 min(\u221a(NT), T)",
+            "error_bound": "ImpErr \u2248 1/(\u221aT\u221amin(N, T))"
+        },
+        "rank_selection": {
+            "implementation": "Use TruncatedSVD for optimal rank selection"
+        },
+        "missing_data_handling": {
+            "imputation_method": "Use KNNImputer from sklearn for missing data"
+        }
+    },
+    "validation_protocols": {
+        "mathematical_verification": {
+            "svd_reconstruction": "Pseudo-inverse via SVD",
+            "rank_validation": "Ensure 90% energy capture"
+        },
+        "performance_metrics": {
+            "reconstruction_error": "||\u0176 - Y||_F",
+            "forecasting_accuracy": "MAPE, RMSE, MAE"
+        }
+    },
+    "implementation_specifications": {
+        "data_structures": {
+            "page_matrix": "L\u00d7K block-based construction",
+            "tensor_format": "N\u00d7L\u00d7(T-L+1) for multi-series"
+        },
+        "computational_requirements": {
+            "svd_library": "Use CuPy for GPU-accelerated SVD",
+            "memory_efficiency": "Use CuPy and Numba for parallel processing"
+        }
+    }
+}

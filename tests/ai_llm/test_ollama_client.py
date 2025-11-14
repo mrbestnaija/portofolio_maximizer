@@ -166,6 +166,40 @@ class TestOllamaGeneration:
         assert 'extra   spaces' not in sent_prompt
         assert sent_prompt.count('BUY signal') == 1
 
+    def test_generate_switches_model_when_token_rate_low(self, monkeypatch):
+        http_client = _http_client()
+
+        def _models_response(*args, **kwargs):
+            return _mock_response({
+                'models': [
+                    {'name': 'deepseek-coder:6.7b-instruct-q4_K_M'},
+                    {'name': 'codellama:13b-instruct-q4_K_M'}
+                ]
+            })
+
+        http_client.get.side_effect = _models_response
+        http_client.post.side_effect = [
+            _mock_response({'response': 'slow output'}),
+            _mock_response({'response': 'fast output tokens for test'})
+        ]
+
+        time_values = iter([0.0, 10.0, 10.0, 10.2, 10.3, 10.4, 10.5, 10.6])
+        monkeypatch.setattr('ai_llm.ollama_client.time.time', lambda: next(time_values))
+
+        client = OllamaClient(
+            http_client=http_client,
+            latency_failover_threshold=999.0,
+            token_rate_failover_threshold=5.0,
+            fallback_models=['codellama:13b-instruct-q4_K_M'],
+        )
+        client._tried_models = {client.model}
+
+        result = client.generate('Test prompt')
+
+        assert result == 'fast output tokens for test'
+        assert client.model == 'codellama:13b-instruct-q4_K_M'
+        assert http_client.post.call_count == 2
+
 
 class TestModelInfo:
     """Test model information retrieval"""

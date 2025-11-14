@@ -168,7 +168,21 @@ class LLMPerformanceMonitor:
         recent_metrics = [m for m in self.metrics_history if m.timestamp >= cutoff_time]
         
         if not recent_metrics:
-            return {"error": "No recent metrics available"}
+            return {
+                "time_period_hours": hours,
+                "total_inferences": 0,
+                "successful_inferences": 0,
+                "failed_inferences": 0,
+                "fallback_events": {"count": 0, "by_stage": {}},
+                "success_rate": 0.0,
+                "avg_inference_time": 0.0,
+                "median_inference_time": 0.0,
+                "max_inference_time": 0.0,
+                "avg_tokens_per_second": 0.0,
+                "median_tokens_per_second": 0.0,
+                "model_breakdown": {},
+                "performance_status": "NO_DATA",
+            }
         
         successful_metrics = [m for m in recent_metrics if m.success]
         failed_metrics = [m for m in recent_metrics if not m.success]

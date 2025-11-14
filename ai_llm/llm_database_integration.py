@@ -13,6 +13,18 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
+DEFAULT_RISK_LEVEL = "high"
+
+
+def _normalise_risk_level(level: Any) -> str:
+    """Coerce arbitrary risk level into the allowed taxonomy."""
+    if isinstance(level, str):
+        normalised = level.strip().lower()
+        if normalised in ALLOWED_RISK_LEVELS:
+            return normalised
+    return DEFAULT_RISK_LEVEL
+
 
 @dataclass
 class LLMSignal:
@@ -35,6 +47,7 @@ class LLMRiskAssessment:
     """LLM risk assessment for database storage"""
     id: Optional[int]
     portfolio_id: str
+    risk_level: str
     risk_score: float
     risk_factors: List[str]
     recommendations: List[str]
@@ -128,6 +141,7 @@ class LLMDatabaseManager:
                 CREATE TABLE IF NOT EXISTS llm_risk_assessments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     portfolio_id TEXT NOT NULL,
+                    risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'extreme')),
                     risk_score REAL NOT NULL,
                     risk_factors TEXT NOT NULL,
                     recommendations TEXT NOT NULL,
@@ -138,6 +152,7 @@ class LLMDatabaseManager:
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            self._migrate_risk_assessments_table(cursor)
             
             # LLM Performance Metrics table
             cursor.execute("""
@@ -155,7 +170,99 @@ class LLMDatabaseManager:
             
             conn.commit()
             logger.info("LLM database tables ensured")
-    
+
+    def _migrate_risk_assessments_table(self, cursor: sqlite3.Cursor) -> None:
+        """Upgrade llm_risk_assessments schema to support extreme risk levels."""
+        try:
+            cursor.execute("PRAGMA table_info(llm_risk_assessments)")
+            rows = cursor.fetchall()
+            if not rows:
+                return
+
+            columns = [row[1] for row in rows]
+            has_risk_level = "risk_level" in columns
+
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='llm_risk_assessments'"
+            )
+            schema_row = cursor.fetchone()
+            schema_sql = schema_row[0] if schema_row else ""
+            constraint_missing_extreme = has_risk_level and "'extreme'" not in schema_sql
+
+            if has_risk_level and not constraint_missing_extreme:
+                return
+
+            logger.info("Upgrading llm_risk_assessments table to support extreme risk levels")
+            cursor.execute("ALTER TABLE llm_risk_assessments RENAME TO llm_risk_assessments_old")
+            cursor.execute("""
+                CREATE TABLE llm_risk_assessments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    portfolio_id TEXT NOT NULL,
+                    risk_level TEXT NOT NULL CHECK(risk_level IN ('low', 'medium', 'high', 'extreme')),
+                    risk_score REAL NOT NULL,
+                    risk_factors TEXT NOT NULL,
+                    recommendations TEXT NOT NULL,
+                    model_used TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    market_conditions TEXT,
+                    confidence REAL NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            if has_risk_level:
+                cursor.execute("""
+                    INSERT INTO llm_risk_assessments (
+                        id, portfolio_id, risk_level, risk_score, risk_factors,
+                        recommendations, model_used, timestamp,
+                        market_conditions, confidence, created_at
+                    )
+                    SELECT
+                        id,
+                        portfolio_id,
+                        LOWER(
+                            CASE
+                                WHEN risk_level IN ('low', 'medium', 'high', 'extreme') THEN risk_level
+                                WHEN LOWER(risk_level) IN ('low', 'medium', 'high', 'extreme') THEN LOWER(risk_level)
+                                ELSE 'high'
+                            END
+                        ) AS risk_level,
+                        risk_score,
+                        risk_factors,
+                        recommendations,
+                        model_used,
+                        timestamp,
+                        market_conditions,
+                        confidence,
+                        created_at
+                    FROM llm_risk_assessments_old
+                """)
+            else:
+                cursor.execute("""
+                    INSERT INTO llm_risk_assessments (
+                        id, portfolio_id, risk_level, risk_score, risk_factors,
+                        recommendations, model_used, timestamp,
+                        market_conditions, confidence, created_at
+                    )
+                    SELECT
+                        id,
+                        portfolio_id,
+                        'high' AS risk_level,
+                        risk_score,
+                        risk_factors,
+                        recommendations,
+                        model_used,
+                        timestamp,
+                        market_conditions,
+                        confidence,
+                        created_at
+                    FROM llm_risk_assessments_old
+                """)
+
+            cursor.execute("DROP TABLE llm_risk_assessments_old")
+        except sqlite3.Error as exc:  # pragma: no cover - defensive
+            logger.warning("Skipped llm_risk_assessments migration: %s", exc)
+
     def save_llm_signal(self, signal: LLMSignal) -> int:
         """Save LLM signal to database"""
         try:
@@ -196,14 +303,16 @@ class LLMDatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                risk_level = _normalise_risk_level(assessment.risk_level)
                 
                 cursor.execute("""
                     INSERT INTO llm_risk_assessments (
-                        portfolio_id, risk_score, risk_factors, recommendations,
+                        portfolio_id, risk_level, risk_score, risk_factors, recommendations,
                         model_used, timestamp, market_conditions, confidence
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     assessment.portfolio_id,
+                    risk_level,
                     assessment.risk_score,
                     json.dumps(assessment.risk_factors),
                     json.dumps(assessment.recommendations),
@@ -328,6 +437,7 @@ class LLMDatabaseManager:
                     assessment = LLMRiskAssessment(
                         id=record.get('id'),
                         portfolio_id=record.get('portfolio_id', ''),
+                        risk_level=_normalise_risk_level(record.get('risk_level')),
                         risk_score=record.get('risk_score', 0.0),
                         risk_factors=self._safe_json_load(record.get('risk_factors'), []),
                         recommendations=self._safe_json_load(record.get('recommendations'), []),
@@ -465,11 +575,13 @@ def save_llm_signal(ticker: str, signal_type: str, confidence: float,
 def save_risk_assessment(portfolio_id: str, risk_score: float,
                         risk_factors: List[str], recommendations: List[str],
                         model_used: str, confidence: float,
-                        market_conditions: Optional[Dict] = None) -> int:
+                        market_conditions: Optional[Dict] = None,
+                        risk_level: str = DEFAULT_RISK_LEVEL) -> int:
     """Convenience function to save risk assessment"""
     assessment = LLMRiskAssessment(
         id=None,
         portfolio_id=portfolio_id,
+        risk_level=risk_level,
         risk_score=risk_score,
         risk_factors=risk_factors,
         recommendations=recommendations,

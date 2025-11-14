@@ -39,7 +39,7 @@
   - Added Forex, Indices, Commodities support
 
 #### **NEXT_TO_DO_SEQUENCED.md**
-- **Before**: IBKR API integration tasks
+- **Before**: IBKR API integration tasks (legacy plan)
 - **After**: XTB API integration tasks
 - **Changes**:
   - Updated task descriptions and code examples

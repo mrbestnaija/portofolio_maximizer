@@ -46,6 +46,39 @@ pipeline:
       retry_attempts: 1
       required: true
 
+    - name: "time_series_forecasting"
+      description: "SARIMAX, GARCH, SAMOSSA, and MSSA-RL forecasting models"
+      module: "etl.time_series_forecaster"
+      class: "TimeSeriesForecaster"
+      config_file: "config/forecasting_config.yml"
+      timeout_seconds: 300
+      retry_attempts: 1
+      required: false
+      enabled: true
+      depends_on: ["data_storage"]  # Needs processed data
+
+    - name: "time_series_signal_generation"
+      description: "Generate trading signals from Time Series forecasts (DEFAULT signal source)"
+      module: "models.time_series_signal_generator"
+      class: "TimeSeriesSignalGenerator"
+      config_file: "config/signal_routing_config.yml"
+      timeout_seconds: 120
+      retry_attempts: 1
+      required: false
+      enabled: true
+      depends_on: ["time_series_forecasting"]  # Requires forecasts from previous stage
+
+    - name: "signal_router"
+      description: "Route signals with Time Series primary, LLM fallback"
+      module: "models.signal_router"
+      class: "SignalRouter"
+      config_file: "config/signal_routing_config.yml"
+      timeout_seconds: 60
+      retry_attempts: 1
+      required: false
+      enabled: true
+      depends_on: ["time_series_signal_generation"]  # Requires TS signals, optionally LLM signals
+
   # Optional ticker discovery integration
   ticker_discovery:
     enabled: false
@@ -148,6 +181,13 @@ pipeline:
     # Automated tests
     run_tests: true
     test_after_stage: ["data_extraction", "data_preprocessing", "data_storage"]
+
+  visualization:
+    auto_dashboard: true # could reverse to false to disable auto-generation of dashboards
+    output_dir: "visualizations"
+    lookback_days: 180
+    generate_forecast_dashboard: true
+    generate_signal_dashboard: true
 
     # Assertions
     assertions:

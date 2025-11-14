@@ -6,7 +6,16 @@
 **Priority**: **CRITICAL** - Based on log analysis and system requirements  
 **Timeline**: 12 weeks to production deployment
 
-**📋 NEW**: Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for complete list of 12+ missing/incomplete implementations that must be completed, including IBKR client, order manager, performance dashboard, and disaster recovery systems.
+**📋 NEW**: 
+- Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for the remaining items (performance dashboard, disaster recovery, etc.) now that the cTrader client + order manager replacements have landed.
+- **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.
+- **🆕 2025-11-09 Update**: `scripts/monitor_llm_system.py` now logs latency benchmarks + `llm_signal_backtests`, `schedule_backfill.bat` automates nightly validation (Task Scheduler registration pending), and `models/time_series_signal_generator.py` was hardened (volatility scalar conversion + provenance timestamps) with targeted pytest coverage. LLM latency remains above the <5 s goal (15–38 s); tuning required before broker/paper trading workstreams resume.
+
+### Nov 12, 2025 Status Notes
+- Time Series signal generation is no longer blocked by pandas truth-value errors; provenance now includes the decision context needed by the router and dashboards.
+- Checkpoint metadata writes are atomic on Windows, clearing the [WinError 183] escalation noted during dry-run pipelines.
+- Nightly backfill scripts (schedule_backfill.bat + scripts/backfill_signal_validation.py) can now be invoked from Task Scheduler without ModuleNotFoundError; only registration remains.
+
 
 ---
 
@@ -33,8 +42,8 @@
 
 **Verification**: `python -m pytest tests/ai_llm/test_llm_enhancements.py::TestLLMDatabaseIntegration::test_risk_assessment_extreme_persisted`
 
-### Issue 2: LLM Performance Bottleneck 🚧 **DEFERRED**
-**Status**: Deferred while signal generation migrates toward SARIMAX/SAMOSSA/DQN models; no further LLM latency work planned before the model swap.
+### Issue 2: LLM Performance Bottleneck ⚠️ **ACTIVE**
+**Status**: Monitoring runs (Nov 6, 2025) reported `DEGRADED_LATENCY` with deepseek-coder:6.7b taking 15–38 s (1.6–3.1 tok/s). Prompt slimming, smaller models, or async fallback must be investigated before broker/paper trading milestones proceed.
 
 ### Issue 3: Zero Signal Validation ✅ RESOLVED (Nov 5, 2025)
 **Resolution**: `scripts/run_etl_pipeline.py` now registers every LLM decision with `LLMSignalTracker` and records validator outputs via the new `record_validator_result`/`flush` APIs, producing live counts for reports and dashboards.

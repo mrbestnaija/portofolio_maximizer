@@ -112,6 +112,7 @@ class BacktestReport:
     hit_rate: float
     profit_factor: float
     sharpe_ratio: float
+    annual_return: float
     trades_analyzed: int
     avg_confidence: float
     recommendation: str
@@ -441,6 +442,7 @@ class SignalValidator:
                 hit_rate=0.0,
                 profit_factor=0.0,
                 sharpe_ratio=0.0,
+                annual_return=0.0,
                 trades_analyzed=0,
                 avg_confidence=0.0,
                 recommendation='INSUFFICIENT_DATA',
@@ -511,10 +513,18 @@ class SignalValidator:
         hit_rate = correct_predictions / total_predictions if total_predictions > 0 else 0.0
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
         
-        if len(returns) > 0:
-            sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0.0
+        returns_array = np.asarray(returns, dtype=float) if returns else np.asarray([], dtype=float)
+        if returns_array.size > 0:
+            std_returns = np.std(returns_array)
+            sharpe_ratio = (np.mean(returns_array) / std_returns * np.sqrt(252)) if std_returns > 0 else 0.0
+            cumulative_return = float(np.prod(1 + returns_array) - 1)
+            if lookback_days > 0:
+                annual_return = (1 + cumulative_return) ** (252 / lookback_days) - 1
+            else:
+                annual_return = cumulative_return
         else:
             sharpe_ratio = 0.0
+            annual_return = 0.0
         
         avg_confidence = np.mean([_clamp_confidence(s.get('confidence', 0.5)) for s in signals]) if signals else 0.0
 
@@ -583,6 +593,7 @@ class SignalValidator:
             hit_rate=hit_rate,
             profit_factor=profit_factor,
             sharpe_ratio=sharpe_ratio,
+            annual_return=annual_return,
             trades_analyzed=total_predictions,
             avg_confidence=avg_confidence,
             recommendation=recommendation,

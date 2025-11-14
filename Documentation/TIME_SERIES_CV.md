@@ -4,11 +4,21 @@
 **Date**: 2025-10-04
 **Status**: Production Ready ✅
 
+### Nov 12, 2025 Notes
+- TimeSeriesForecaster.evaluate() metrics (RMSE, sMAPE, tracking error) are now persisted and referenced by the signal generator, so CV outputs directly influence routing decisions.
+- scripts/run_etl_pipeline.py stores _ts_forecasts and _ts_signals globals after each CV-driven forecasting stage, enabling the router to reuse those bundles without recomputation.
+- CV-derived checkpoints no longer collide on Windows because checkpoint metadata writes use Path.replace.
+
+
 ---
 
 ## Overview
 
 This document describes the k-fold time series cross-validation implementation that prevents training/validation disparity across the temporal index. The implementation is **fully backward compatible** with existing code.
+
+> **Production tie-in**: These splits now feed directly into `forcester_ts/forecaster.py` (default signal generator per `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`). Every walk-forward fold runs `forecaster.evaluate(...)` so RMSE / sMAPE / tracking error metrics recorded in SQLite match the routing guarantees (Time Series primary, LLM fallback).
+
+> **2025-11-09 Update**: `scripts/monitor_llm_system.py` and `schedule_backfill.bat` both depend on these persisted CV metrics. Nightly backfills refill `time_series_forecasts.regression_metrics`, while monitoring reads the same rows to populate the new `llm_signal_backtests` dashboard panel and latency benchmark file. Keep CV splits healthy before enabling paper trading.
 
 ---
 

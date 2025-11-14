@@ -4,6 +4,8 @@
 forecasting:
   enabled: true
   default_forecast_horizon: 30  # Days ahead
+  minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
+  minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
   
   # SARIMAX configuration
   sarimax:

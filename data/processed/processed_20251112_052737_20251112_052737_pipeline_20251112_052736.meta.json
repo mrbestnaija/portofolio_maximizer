@@ -1,0 +1,9 @@
+{
+  "data_source": "synthetic",
+  "execution_mode": "synthetic",
+  "pipeline_id": "pipeline_20251112_052736",
+  "freq": "<BusinessDay>",
+  "saved_at": "2025-11-12T05:27:37.378090",
+  "rows": 1044,
+  "run_id": "pipeline_20251112_052736"
+}

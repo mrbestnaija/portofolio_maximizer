@@ -1,9 +1,15 @@
 # Stub & Incomplete Implementation Plan
 **Comprehensive Review and Replacement Strategy**
 
-**Date**: 2025-11-06  
+**Date**: 2025-11-12  
 **Status**: ACTIVE  
 **Priority**: HIGH - Complete all stubs before production deployment
+
+### Nov 12, 2025 Update
+- Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
+- Checkpoint/metadata utilities are stable on Windows thanks to Path.replace, unblocking future stub work that writes checkpoints repeatedly.
+- Validator/backfill stubs can assume scripts/backfill_signal_validation.py is callable from scheduled jobs; only the scheduler glue remains.
+
 
 ---
 
@@ -17,6 +23,9 @@ This document identifies all stub implementations, incomplete code, and placehol
 - TODO/FIXME comments indicating incomplete work
 - Missing critical functionality
 - ✅ UPDATE (Nov 8, 2025): The forecasting stubs around regression metrics, ensemble heuristics, and MSSA-RL GPU acceleration have been fully implemented (`forcester_ts/metrics.py`, `forcester_ts/ensemble.py`, `forcester_ts/mssa_rl.py`). No further action is required for those items; they now serve as references for future Phase B enhancements.
+- ✅ UPDATE (Nov 9, 2025): `models/time_series_signal_generator.py` is no longer a stub—volatility handling, provenance metadata, and regression coverage have been completed and verified via `pytest tests/models/test_time_series_signal_generator.py -q` plus the targeted integration smoke test. Remove it from the open-stub list; remaining signal-related stubs now focus on broker/paper-trading glue.
+- ✅ UPDATE (Nov 12, 2025): `models/signal_router.py` and the TS-first pipeline reordering are production code (see `Documentation/UNIFIED_ROADMAP.md`). Remove Signal Router from the open-stub list.
+- ⚠️ UPDATE (Nov 12, 2025): `bash/comprehensive_brutal_test.sh` highlighted new gaps—`tests/etl/test_data_validator.py` is missing, and the Time Series forecasting tests timed out with a `Broken pipe`. Section 13 documents these testing placeholders.
 
 ---
 
@@ -30,132 +39,57 @@ This document identifies all stub implementations, incomplete code, and placehol
 
 ## 🚨 CRITICAL STUBS (Must Complete Before Production)
 
-### 1. **Broker Integration - IBKR Client** ❌ NOT IMPLEMENTED
-**Location**: `execution/ibkr_client.py` (MISSING)  
-**Status**: Referenced in documentation but file does not exist  
-**Priority**: CRITICAL - Required for live trading
+### 1. **Broker Integration - cTrader Client** ✅ IMPLEMENTED
+**Location**: `execution/ctrader_client.py`  
+**Status**: Replaces the missing IBKR stub with a demo-first cTrader Open API
+client that reads credentials from `.env`, handles OAuth token refresh, and
+exposes order/account helpers for the order manager.  
+**Priority**: CRITICAL - Required for live trading (demo first per roadmap)
 
-**Required Implementation**:
-```python
-# NEW: execution/ibkr_client.py (600 lines)
-class IBKRClient:
-    """Interactive Brokers API integration"""
-    
-    def __init__(self, mode: str = 'paper'):
-        self.mode = mode  # 'paper' or 'live'
-        self.connection = self._establish_connection()
-        self.checkpoint_manager = CheckpointManager()
-        
-    def place_order(self, signal: Signal) -> OrderResult:
-        """Place order with confidence-weighted sizing"""
-        # Maximum 2% per signal (risk management)
-        max_position_value = self.get_portfolio_value() * 0.02
-        
-        # Adjust by ML confidence
-        position_value = max_position_value * signal.confidence_score
-        
-        # Create order
-        order = Order(
-            ticker=signal.ticker,
-            action=signal.action,
-            quantity=int(position_value / signal.current_price),
-            order_type='LIMIT',
-            limit_price=signal.current_price * 1.001,  # 0.1% slippage protection
-            tif='DAY'
-        )
-        
-        # Place order
-        order_id = self.connection.place_order(order)
-        
-        # Monitor execution
-        execution_result = self._monitor_execution(order_id, timeout=300)
-        
-        # Checkpoint for disaster recovery
-        self.checkpoint_manager.save_checkpoint(
-            'order_execution',
-            {'order': order, 'result': execution_result}
-        )
-        
-        return execution_result
-```
-
-**Dependencies**:
-- `ib_insync` library for IBKR API
-- Environment variables for credentials
-- Integration with `execution/order_manager.py`
+**Key Features**:
+- Demo + live endpoints configurable via environment variables (`USERNAME_CTRADER`,
+  `PASSWORD_CTRADER`, `APPLICATION_NAME_CTRADER`, optional
+  `CTRADER_ACCOUNT_ID`/`CTRADER_APPLICATION_SECRET`).
+- OAuth password + refresh-token workflows with automatic retries and
+  configurable timeouts.
+- Dataclass-wrapped orders, account snapshots, and placement responses so
+  downstream code remains testable.
+- Credential loader accepts both `KEY=value` and `KEY:'value'` syntaxes to match
+  the regenerated `.env` file noted in `RECOVER_ENV_FILE.md`.
 
 **Success Criteria**:
-- [ ] IBKR paper trading account connected
-- [ ] Order placement working
-- [ ] Order monitoring operational
-- [ ] Error handling for API failures
-- [ ] 50+ successful paper trade orders
-- [ ] Integration tests passing
+- [x] Demo authentication flow coded (`execution/ctrader_client.py`).
+- [x] Order placement + cancellation helpers exposed for `OrderManager`.
+- [x] Error handling/logging + token refresh implemented.
+- [ ] 50+ successful demo trades recorded (requires manual run against broker).
+- [ ] Live credentials smoke-tested once demo KPIs clear guardrails.
+- [x] Unit tests cover configuration + payload generation (added in this PR).
 
 ---
 
-### 2. **Order Management System** ❌ NOT IMPLEMENTED
-**Location**: `execution/order_manager.py` (MISSING)  
-**Status**: Referenced in documentation but file does not exist  
+### 2. **Order Management System** ✅ IMPLEMENTED
+**Location**: `execution/order_manager.py`  
+**Status**: Ships the full lifecycle manager described in the roadmap. Ties the
+new cTrader client to `RealTimeRiskManager` and `DatabaseManager`, enforces the
+2% position cap, and persists executions for dashboards.  
 **Priority**: CRITICAL - Required for live trading
 
-**Required Implementation**:
-```python
-# NEW: execution/order_manager.py (450 lines)
-class OrderManager:
-    """Complete order lifecycle management"""
-    
-    def manage_order_lifecycle(self, order: Order) -> LifecycleResult:
-        """Pre-trade → Execution → Post-trade"""
-        
-        # Pre-trade checks
-        pre_trade = self._pre_trade_checks(order)
-        if not pre_trade.passed:
-            return LifecycleResult(status='REJECTED', reason=pre_trade.failure_reason)
-        
-        # Execute
-        execution = self.ibkr_client.place_order(order.signal)
-        
-        # Monitor fills
-        fill_status = self._monitor_fills(execution.order_id)
-        
-        # Post-trade reconciliation
-        reconciliation = self._reconcile_trade(execution, fill_status)
-        
-        # Update database
-        self.db_manager.record_trade_execution(reconciliation)
-        
-        return LifecycleResult(
-            status='COMPLETE',
-            execution=execution,
-            reconciliation=reconciliation
-        )
-    
-    def _pre_trade_checks(self, order: Order) -> PreTradeResult:
-        """Validate order before execution"""
-        checks = {
-            'sufficient_cash': self._check_available_cash(order),
-            'position_limit': self._check_position_limits(order),
-            'daily_trade_limit': self._check_daily_trades(),
-            'circuit_breaker': self._check_circuit_breakers()
-        }
-        
-        passed = all(checks.values())
-        return PreTradeResult(passed=passed, checks=checks)
-```
-
-**Dependencies**:
-- `execution/ibkr_client.py`
-- `etl/database_manager.py`
-- `risk/real_time_risk_manager.py`
+**Highlights**:
+- Demo-first (default `mode="demo"`) with injectable cTrader client for tests
+  and future live runs.
+- Pre-trade checks cover confidence thresholds, free margin, 2% position caps,
+  daily trade limits, and circuit-breaker status from `RealTimeRiskManager`.
+- Confidence-weighted sizing + database persistence via
+  `DatabaseManager.save_trade_execution` for executed fills.
+- Structured `LifecycleResult` dataclass informs automation + monitoring.
 
 **Success Criteria**:
-- [ ] Order lifecycle management complete
-- [ ] Pre-trade validation working
-- [ ] Fill monitoring operational
-- [ ] Post-trade reconciliation accurate
-- [ ] Database integration complete
-- [ ] Integration tests passing
+- [x] Order lifecycle management implemented with dependency injection.
+- [x] Pre-trade validation + risk gating enforced automatically.
+- [x] Database writes triggered for executed trades.
+- [ ] Fill monitoring/post-trade reconciliation with live executions (pending
+  real broker runs).
+- [x] Integration-ready API used by forthcoming automation scripts.
 
 ---
 
@@ -591,89 +525,6 @@ class TimeSeriesRunner:
 
 ---
 
-### 9. **Signal Router with Feature Flags** ❌ NOT IMPLEMENTED
-**Location**: `signal_router.py` (MISSING)  
-**Status**: Referenced in Phase B documentation but not implemented  
-**Priority**: MEDIUM - Required for backward compatibility
-
-**Required Implementation**:
-```python
-# NEW: signal_router.py (180 lines)
-class SignalRouter:
-    """Merge legacy LLM signals with new time-series models"""
-    
-    def __init__(self, config: Dict):
-        self.config = config
-        self.feature_flags = {
-            'enable_samossa': config.get('enable_samossa', False),
-            'enable_sarimax': config.get('enable_sarimax', False),
-            'enable_garch': config.get('enable_garch', False),
-            'enable_llm': config.get('enable_llm', True)  # Default enabled
-        }
-    
-    def route(self, signals: List[Signal]) -> SignalBundle:
-        """Route signals based on feature flags and priority"""
-        
-        # Filter signals based on feature flags
-        enabled_signals = []
-        for signal in signals:
-            model_type = signal.provenance.get('model_type', 'unknown')
-            
-            if model_type == 'SAMOSSAForecaster' and not self.feature_flags['enable_samossa']:
-                continue
-            if model_type == 'SARIMAXForecaster' and not self.feature_flags['enable_sarimax']:
-                continue
-            if model_type == 'GARCHForecaster' and not self.feature_flags['enable_garch']:
-                continue
-            if model_type == 'LLMSignalGenerator' and not self.feature_flags['enable_llm']:
-                continue
-            
-            enabled_signals.append(signal)
-        
-        # Priority ordering based on confidence and risk score
-        sorted_signals = sorted(
-            enabled_signals,
-            key=lambda s: (
-                s.confidence_score * 0.6 +  # 60% weight on confidence
-                (1 - s.risk_score) * 0.4    # 40% weight on low risk
-            ),
-            reverse=True
-        )
-        
-        # Create signal bundle with unchanged interface
-        return SignalBundle(
-            signals=sorted_signals,
-            primary_signal=sorted_signals[0] if sorted_signals else None,
-            fallback_signal=sorted_signals[1] if len(sorted_signals) > 1 else None,
-            metadata={
-                'total_signals': len(sorted_signals),
-                'feature_flags': self.feature_flags,
-                'routing_timestamp': datetime.now()
-            }
-        )
-    
-    def toggle_feature_flag(self, flag_name: str, enabled: bool):
-        """Toggle feature flag for gradual rollout"""
-        if flag_name in self.feature_flags:
-            self.feature_flags[flag_name] = enabled
-            logger.info(f"Feature flag {flag_name} set to {enabled}")
-        else:
-            logger.warning(f"Unknown feature flag: {flag_name}")
-```
-
-**Dependencies**:
-- All signal generators
-- Configuration system
-
-**Success Criteria**:
-- [ ] Feature flags working
-- [ ] Priority ordering correct
-- [ ] Backward compatibility maintained
-- [ ] Downstream consumers see unchanged interface
-- [ ] Toggle restores LLM-only routing within 1 minute
-
----
-
 ### 10. **Time-Series Validation Framework** ❌ NOT IMPLEMENTED
 **Location**: `analysis/time_series_validation.py` (MISSING)  
 **Status**: Referenced in Phase B documentation but not implemented  
@@ -828,19 +679,56 @@ def _get_dir_size(self, path: Path) -> int:
 
 ---
 
+### 13. **ETL Data Validator Test Suite Missing** ❌ NOT IMPLEMENTED
+**Location**: `tests/etl/test_data_validator.py` (MISSING)  
+**Status**: `bash/comprehensive_brutal_test.sh` (Nov 12, 2025) warns that this test file is absent, so the ETL suite skips all validator coverage.  
+**Priority**: MEDIUM - Required to keep QA parity with documented validation steps.
+
+**Required Implementation**:
+```python
+# NEW: tests/etl/test_data_validator.py (~20 tests)
+import pandas as pd
+import pytest
+
+from etl.data_validator import DataValidator
+
+class TestDataValidator:
+    def setup_method(self):
+        self.validator = DataValidator()
+
+    def test_positive_prices_required(self):
+        df = pd.DataFrame({'Open': [1, -2], 'High': [2, 3], 'Low': [0.5, 0.2], 'Close': [1.5, -1], 'Volume': [100, 200]})
+        report = self.validator.validate_ohlcv(df)
+        assert not report['passed']
+        assert any('negative/zero prices' in err for err in report['errors'])
+
+    # ... additional tests for volume non-negativity, missing data thresholds,
+    # outlier detection, custom price column validation, etc.
+```
+
+**Success Criteria**:
+- [ ] File restored under `tests/etl/`
+- [ ] Price positivity, volume non-negativity, and missing-data checks covered
+- [ ] Pytest suite (`bash/comprehensive_brutal_test.sh`) no longer emits WARN for missing validator tests
+- [ ] Added to CI to guard against future regressions
+
+**Test Impact**: Until this file is restored, the brutal suite halts before the Time Series forecasting block (Broken pipe timeout on Nov 12, 2025). Reinstating this test suite is the gating item before re-running the comprehensive tests and capturing TS/LLM regression evidence.
+
+---
+
 ## 📊 Implementation Priority Matrix
 
 | Component | Priority | Effort | Dependencies | Status |
 |-----------|----------|--------|--------------|--------|
-| IBKR Client | CRITICAL | High | None | ❌ Not Started |
-| Order Manager | CRITICAL | High | IBKR Client | ❌ Not Started |
+| cTrader Client | CRITICAL | High | None | ✅ Completed |
+| Order Manager | CRITICAL | High | cTrader Client | ✅ Completed |
 | Performance Dashboard | HIGH | Medium | Database | ❌ Not Started |
 | Production Deployer | HIGH | Medium | All Components | ❌ Not Started |
 | Disaster Recovery | HIGH | Medium | Order Manager | ❌ Not Started |
 | Risk Manager Actions | MEDIUM | Low | Order Manager | 🟡 Partial |
 | Time-Series Features | MEDIUM | Medium | Database | ❌ Not Started |
 | Parallel Model Runner | MEDIUM | Medium | All Models | ❌ Not Started |
-| Signal Router | MEDIUM | Low | Signal Generators | ❌ Not Started |
+| Data Validator Test Suite | MEDIUM | Low | DataValidator | ❌ Not Started |
 | Time-Series Validation | MEDIUM | High | Models | ❌ Not Started |
 | Exception Logging | LOW | Low | None | 🟡 Partial |
 
@@ -849,17 +737,17 @@ def _get_dir_size(self, path: Path) -> int:
 ## 🎯 Implementation Roadmap
 
 ### Phase 1: Critical Trading Infrastructure (Weeks 1-2)
-1. **IBKR Client** (Week 1, Days 1-3)
-   - API integration
-   - Order placement
-   - Connection management
-   - Error handling
+1. ~~**IBKR Client**~~ ➜ **cTrader Client** (Week 1, Days 1-3) ✅ Completed
+   - Demo + live Open API endpoints with OAuth token refresh
+   - Dataclass order payloads + placement responses
+   - Environment-driven credential loader (`execution/ctrader_client.py`)
+   - Error handling, retries, and session lifecycle management
 
-2. **Order Manager** (Week 1, Days 4-5)
-   - Pre-trade checks
-   - Order lifecycle
-   - Fill monitoring
-   - Reconciliation
+2. **Order Manager** (Week 1, Days 4-5) ✅ Completed
+   - Pre-trade checks (confidence, free margin, daily limits, circuit breakers)
+   - Order lifecycle orchestration via `CTraderClient`
+   - Fill persistence through `DatabaseManager.save_trade_execution`
+   - Risk manager integration for automatic gating
 
 3. **Risk Manager Integration** (Week 2, Days 1-2)
    - Connect automatic actions to Order Manager
@@ -896,10 +784,9 @@ def _get_dir_size(self, path: Path) -> int:
    - Signal normalization
    - Provenance tracking
 
-9. **Signal Router** (Week 6, Days 1-2)
-   - Feature flags
-   - Priority ordering
-   - Backward compatibility
+9. ~~**Signal Router** (Week 6, Days 1-2)~~ ✅ Completed Nov 2025
+    - Feature flags (TS-primary, LLM fallback) implemented in `models/signal_router.py`
+    - Stage planner reordered in `scripts/run_etl_pipeline.py`
 
 10. **Time-Series Validation** (Week 6, Days 3-5)
     - Walk-forward CV
@@ -921,7 +808,7 @@ def _get_dir_size(self, path: Path) -> int:
 ## ✅ Success Criteria
 
 ### Critical Components
-- [ ] IBKR paper trading account connected
+- [ ] cTrader demo account connected (runtime validation + 50 sample trades)
 - [ ] Orders can be placed and monitored
 - [ ] Risk manager can automatically close positions
 - [ ] Performance dashboard shows live metrics
@@ -956,7 +843,6 @@ def _get_dir_size(self, path: Path) -> int:
 
 ---
 
-**Last Updated**: 2025-11-06  
+**Last Updated**: 2025-11-12  
 **Status**: ACTIVE  
-**Next Review**: After Phase 1 completion
-
+**Next Review**: After brutal test suite completes without warnings/timeouts

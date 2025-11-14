@@ -11,6 +11,17 @@
 
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration
 
+### 🆕 Immediate Updates (Nov 12, 2025)
+- `scripts/run_auto_trader.py` delivers the autonomous trading loop (extraction → validation → forecasting → TS signals → routing → execution) with optional LLM fallback; it must now be validated alongside the pipeline.
+- README + UNIFIED_ROADMAP position the platform as an **Autonomous Profit Engine**, elevating the loop to core capability and documenting how to launch it.
+- Stage planner in `scripts/run_etl_pipeline.py` now runs Time Series forecasting/signal routing before any LLM stages, keeping LLM strictly as fallback.
+- `logs/errors/errors.log` exposes unresolved blockers: DataStorage CV signature mismatch (`test_size`), zero-fold CV `ZeroDivisionError`, SQLite `disk I/O` writes, and missing parquet engines preventing checkpoints. These issues are immediate priorities before new sequencing work proceeds.
+- `bash/comprehensive_brutal_test.sh` (Nov 12) results: profit-critical + ETL suites passed (aside from missing `tests/etl/test_data_validator.py`), but the script timed out with a `Broken pipe` during the Time Series forecasting tests. Sequenced work cannot advance until the missing test file is restored and the brutal test completes without timeouts.
+- `models/time_series_signal_generator.py` now normalises pandas objects/Series before evaluation, records decision context in provenance, and passes `pytest tests/models/test_time_series_signal_generator.py -q` plus targeted integration cases; `logs/ts_signal_demo.json` captures a live SELL signal derived from SQLite OHLCV data to prove TS signals are no longer stuck in HOLD.
+- `etl/checkpoint_manager.py` swaps `Path.rename()` for `Path.replace()` so checkpoint metadata no longer crashes subsequent runs on Windows; temp metadata files are cleaned automatically.
+- `scripts/backfill_signal_validation.py` imports `sys`, injects the repo root into `sys.path`, and therefore runs from the brutal suite without `ModuleNotFoundError`; nightly scheduling can safely call the script from outside the repo.
+- `bash/comprehensive_brutal_test.sh` still reports `test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low` as the lone failure—sequenced fixes must keep this test at the top of the queue once the TS pipeline stabilises.
+
 **Recent Achievements**:
 - Phase 4.8: Checkpointing & Event Logging (Oct 7, 2025)
 - Phase 5.1: Alpha Vantage & Finnhub APIs Complete (Oct 7, 2025)
@@ -23,7 +34,8 @@
 
 **📚 NEW**: 
 - A comprehensive sequenced implementation plan has been created. See **`Documentation/SEQUENCED_IMPLEMENTATION_PLAN.md`** for the complete 12-week implementation plan with critical fixes prioritized first.
-- **Stub Implementation Review**: Complete review of all missing/incomplete implementations documented in **`Documentation/STUB_IMPLEMENTATION_PLAN.md`**. Identifies 12+ critical stubs including IBKR client, order manager, performance dashboard, and disaster recovery systems that must be completed before production deployment.
+- **Stub Implementation Review**: Complete review of all missing/incomplete implementations documented in **`Documentation/STUB_IMPLEMENTATION_PLAN.md`**. The cTrader client + order manager are now implemented; remaining critical stubs cover the performance dashboard, production deploy pipeline, and disaster recovery systems.
+- **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.
 
 ---
 
@@ -37,7 +49,9 @@
 - ⚠️ Paper trading engine, broker integration, and downstream dashboards remain untouched.
 - ✅ SAMOSSA SSA forecasts integrated with SARIMAX/GARCH; explained-variance diagnostics and backtests persist, while RL/CUSUM promotion remains gated on profitability.
 - ✅ `TimeSeriesForecaster.evaluate()` now emits RMSE / sMAPE / tracking error for every model and ensemble run; the metrics are persisted to SQLite, ensemble weights use variance-ratio testing and change-point density, and MSSA-RL can optionally offload its SSA SVD to CuPy for GPU acceleration.
+- ⚠️ `logs/errors/errors.log` (Nov 2–7) shows ETL blockers: `DataStorage.train_validation_test_split()` TypeError, zero-fold CV `ZeroDivisionError`, SQLite `disk I/O error`, and missing `pyarrow`/`fastparquet` causing checkpoint failures; `logs/monitor_llm_system.log` also shows LLM migration skips + >15 s latencies. These failures must be cleared before live data runs.
 - 🟡 Nightly validation wrapper `schedule_backfill.bat` ready—register via Task Scheduler (e.g. `schtasks /Create /TN PortfolioMaximizer_BackfillSignals /TR "\"C:\path\to\schedule_backfill.bat\"" /SC DAILY /ST 02:00 /F`) to ensure continuous backfills.
+- ✅ Time Series signal generator hardened (Nov 9, 2025): volatility forecasts converted to scalars, HOLD provenance timestamps logged, and regression validated via `pytest tests/models/test_time_series_signal_generator.py -q` plus targeted integration smoke (`tests/integration/test_time_series_signal_integration.py::TestTimeSeriesForecastingToSignalIntegration::test_forecast_to_signal_flow`).
 - ✅ Enhanced portfolio math pipeline: `scripts/run_etl_pipeline.py` now imports `etl.portfolio_math` (the former enhanced module) by default, satisfying the guardrails in `AGENT_DEV_CHECKLIST.md`, `QUANTIFIABLE_SUCCESS_CRITERIA.md`, and the verification steps in `TESTING_GUIDE.md`.
 
 ### Issue 1: Database Constraint Error ✅ RESOLVED (Nov 5, 2025)

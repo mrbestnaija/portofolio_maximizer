@@ -51,6 +51,7 @@ class LLMSignalTracker:
         """
         self.tracking_db_path = Path(tracking_db_path)
         self.tracking_db = self._load_tracking_db()
+        self._sync_metadata_counts()
     
     def _load_tracking_db(self) -> Dict:
         """Load tracking database or create new one"""
@@ -80,6 +81,17 @@ class LLMSignalTracker:
             json.dump(self.tracking_db, f, indent=2, default=str)
         
         logger.info(f"Tracking database saved to: {self.tracking_db_path}")
+
+    def _sync_metadata_counts(self) -> None:
+        """Ensure metadata counters match the underlying signal set."""
+        metadata = self.tracking_db.setdefault('metadata', {})
+        signals = self.tracking_db.get('signals', {})
+        metadata['total_signals'] = len(signals)
+        metadata['validated_signals'] = sum(
+            1
+            for sig in signals.values()
+            if str(sig.get('validation_status', '')).lower() == 'validated'
+        )
     
     def register_signal(self, ticker: str, date: str, signal: Dict[str, Any]) -> str:
         """
@@ -112,10 +124,36 @@ class LLMSignalTracker:
             'validation_results': {}
         }
         
-        self.tracking_db['metadata']['total_signals'] += 1
+        self._sync_metadata_counts()
         logger.info(f"Registered signal: {signal_id}")
-        
+        self._save_tracking_db()
+
         return signal_id
+
+    def record_validator_result(self, signal_id: str, result: Dict[str, Any],
+                                 status: str) -> None:
+        """Persist validator output and update aggregate counters."""
+        signal = self.tracking_db['signals'].get(signal_id)
+        if not signal:
+            logger.warning(f"Validator result received for unknown signal: {signal_id}")
+            return
+
+        status_normalised = (status or 'pending').strip().lower()
+        if status_normalised not in {'validated', 'failed', 'pending'}:
+            logger.warning(
+                f"Unsupported validation status '{status}' for {signal_id}; defaulting to 'failed'"
+            )
+            status_normalised = 'failed'
+
+        signal['validation_status'] = status_normalised
+        signal['validation_results'] = {
+            'validator_details': result,
+            'status': status_normalised,
+            'updated_at': datetime.now().isoformat()
+        }
+        self._sync_metadata_counts()
+
+        self._save_tracking_db()
     
     def update_signal_performance(self, signal_id: str, 
                                   actual_price: float, 
@@ -338,7 +376,11 @@ class LLMSignalTracker:
             return json.dumps(summary, indent=2, default=str)
         else:
             raise ValueError(f"Unsupported format: {output_format}")
-    
+
+    def flush(self) -> None:
+        """Force persistence of the in-memory tracking database."""
+        self._save_tracking_db()
+
     def _generate_text_report(self, summary: Dict) -> str:
         """Generate text format report"""
         lines = []

@@ -9,10 +9,17 @@ services:
     image: portfolio-maximizer:v4.5
     container_name: portfolio_maximizer_v45
     
+    # SECURITY: Use Docker secrets instead of environment variables
+    # Secrets are mounted as files and not visible in process lists
+    secrets:
+      - alpha_vantage_api_key
+      - finnhub_api_key
+    
     environment:
-      # Data source API keys (set in .env file)
-      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
-      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+      # Data source API keys (loaded from Docker secrets)
+      # Note: Secrets are mounted as files at /run/secrets/<secret_name>
+      - ALPHA_VANTAGE_API_KEY_FILE=/run/secrets/alpha_vantage_api_key
+      - FINNHUB_API_KEY_FILE=/run/secrets/finnhub_api_key
       
       # Portfolio configuration
       - PORTFOLIO_ENV=production
@@ -101,22 +108,27 @@ services:
     command: pytest -v --no-cov
 
   # Jupyter notebook service for analysis
-  portfolio-notebook:
-    extends: portfolio-maximizer
-    image: portfolio-maximizer:v4.5-notebook
-    container_name: portfolio_notebook
-    
-    ports:
-      - "8888:8888"
-    
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-    
-    command: >
-      bash -c "pip install jupyterlab && 
-               jupyter lab --ip=0.0.0.0 --port=8888 --no-browser 
-               --allow-root --NotebookApp.token='' 
-               --NotebookApp.password=''"
+  # SECURITY: DISABLED - Exposed without authentication (CRITICAL RISK)
+  # If needed, re-enable with proper authentication:
+  # - Require authentication token
+  # - Bind to localhost only
+  # - Use JupyterHub for multi-user access
+  # portfolio-notebook:
+  #   extends: portfolio-maximizer
+  #   image: portfolio-maximizer:v4.5-notebook
+  #   container_name: portfolio_notebook
+  #   
+  #   ports:
+  #     - "8888:8888"
+  #   
+  #   environment:
+  #     - JUPYTER_ENABLE_LAB=yes
+  #   
+  #   command: >
+  #     bash -c "pip install jupyterlab && 
+  #              jupyter lab --ip=0.0.0.0 --port=8888 --no-browser 
+  #              --allow-root --NotebookApp.token='' 
+  #              --NotebookApp.password=''"
 
 networks:
   default:
@@ -130,3 +142,13 @@ volumes:
     driver: local
   portfolio_cache:
     driver: local
+
+# Docker secrets configuration
+# SECURITY: Secrets are stored as files, not environment variables
+# Create secrets directory: mkdir -p secrets && chmod 700 secrets
+# Add secret files: echo "YOUR_KEY" > secrets/alpha_vantage_api_key.txt && chmod 600 secrets/*.txt
+secrets:
+  alpha_vantage_api_key:
+    file: ./secrets/alpha_vantage_api_key.txt
+  finnhub_api_key:
+    file: ./secrets/finnhub_api_key.txt

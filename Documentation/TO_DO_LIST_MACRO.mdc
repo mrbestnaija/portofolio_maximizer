@@ -1,36 +1,48 @@
-Based on the comprehensive project state analysis, here's the updated step-by-step implementation plan:
+﻿Based on the comprehensive project state analysis, here's the updated step-by-step implementation plan:
 
 ```markdown
 # PRODUCTION-GRADE PORTFOLIO AUTOMATION - ML-FIRST IMPLEMENTATION PLAN
 
-## CURRENT STATUS: PRODUCTION-READY FOUNDATION ✅ (Updated Nov 6, 2025)
+## CURRENT STATUS: PRODUCTION-READY FOUNDATION âœ… (Updated Nov 6, 2025)
 **All Core Infrastructure Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Checkpointing + LLM Integration  
-**Critical Fix Applied**: Profit factor calculation corrected (50% underestimation) ⚠️  
+**Critical Fix Applied**: Profit factor calculation corrected (50% underestimation) âš ï¸  
 **Test Coverage**: 148+ tests (100% passing)  
 **Codebase**: ~6,780 lines of production code  
-**Reality Check**: Phase-A deliverables remain outstanding—signal validator integration, enhanced portfolio math promotion, statistical test suite, and paper trading are not yet implemented. Monitoring deploys successfully but surfaces `signal_quality: NO_DATA` because database records are incomplete.
+**Reality Check**: Phase-A deliverables remain outstandingâ€”signal validator integration, enhanced portfolio math promotion, statistical test suite, and paper trading are not yet implemented. Monitoring deploys successfully, but LLM latency is still degraded (15â€“38â€¯s) and nightly validator backfills must be registered in Task Scheduler before dashboards stay green.
 
-**📋 STUB REVIEW**: Comprehensive review completed - see **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for 12+ missing/incomplete implementations including IBKR client, order manager, performance dashboard, and disaster recovery systems that must be completed before production deployment.
+**ðŸ“‹ STUB REVIEW**: Comprehensive review completed - see **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for 12+ missing/incomplete implementations (now noting the cTrader client + order manager delivery) plus the remaining performance dashboard and disaster recovery systems required before production deployment.
+
+**ðŸŸ¡ TIME SERIES SIGNAL GENERATION IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes:
+- `models/time_series_signal_generator.py` (350 lines) - Signal generation from forecasts - **TESTING REQUIRED**
+- `models/signal_router.py` (250 lines) - Routing with TS primary + LLM fallback - **TESTING REQUIRED**
+- `models/signal_adapter.py` (200 lines) - Unified signal interface - **TESTING REQUIRED**
+- Unified `trading_signals` database table - **TESTING REQUIRED**
+- Complete pipeline integration - **TESTING REQUIRED**
+- 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**
 
 ### Implementation Gaps Snapshot
-- ✅ LLM signal persistence now enforces `signal_type`, records timestamps, and stores realised/backtest metrics for dashboards.
-- ✅ The 5-layer signal validator (Kelly sizing, statistical layers, bootstrap diagnostics) is wired into the LLM pipeline with regression coverage.
-- ✅ `etl/portfolio_math.py` (enhanced engine) is the active dependency across the pipeline, with optimisation metrics logged per run.
-- ✅ Statistical rigor tooling (hypothesis tests, Ljung–Box, bootstrap CIs) publishes into SQLite summaries via `llm_signal_backtests`.
-- ✅ Forecasting stack now calls `forecaster.evaluate(...)` after each walk-forward split; RMSE / sMAPE / tracking-error feed `time_series_forecasts.regression_metrics`, while ensemble weighting blends those realised stats with AIC/EVR and MSSA-RL change-point density (GPU acceleration available via CuPy).
-- 🟡 Token-throughput fallback now protects the <5 s goal (`ai_llm/ollama_client.py` switches models when token rate slips); continue reviewing `logs/latency_benchmark.json` for any residual spikes.
-- ⏳ Remaining: paper trading engine hardening, broker integration, stress/regime detection, and production dashboards.
+- âœ… LLM signal persistence now enforces `signal_type`, records timestamps, and stores realised/backtest metrics for dashboards.
+- âœ… The 5-layer signal validator (Kelly sizing, statistical layers, bootstrap diagnostics) is wired into the LLM pipeline with regression coverage.
+- âœ… `etl/portfolio_math.py` (enhanced engine) is the active dependency across the pipeline, with optimisation metrics logged per run.
+- âœ… Statistical rigor tooling (hypothesis tests, Ljungâ€“Box, bootstrap CIs) publishes into SQLite summaries via `llm_signal_backtests`.
+- âœ… Forecasting stack now calls `forecaster.evaluate(...)` after each walk-forward split; RMSE / sMAPE / tracking-error feed `time_series_forecasts.regression_metrics`, while ensemble weighting blends those realised stats with AIC/EVR and MSSA-RL change-point density (GPU acceleration available via CuPy).
+- âœ… Time Series ensemble is the **default signal generator** (per `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` / `Documentation/REFACTORING_STATUS.md`): `models/time_series_signal_generator.py` + `signal_router.py` route TS signals as primary, while LLM generation is kept strictly as fallback/redundancy.
+- âœ… Time Series signal generator hardened (Nov 9, 2025): volatility forecasts converted to scalars, HOLD provenance timestamps logged, and regression covered via `pytest tests/models/test_time_series_signal_generator.py -q` plus targeted integration smoke.
+- âš ï¸ Token-throughput guard logs issues but does not yet meet the <5â€¯s goalâ€”`scripts/monitor_llm_system.py` still reports 15â€“38â€¯s inference times for deepseek-coder:6.7b; prompt/model tuning or faster fallbacks required.
+- â³ Remaining: paper trading engine hardening, broker integration, stress/regime detection, and production dashboards.
 
 ### Immediate Action Plan
 1. ✅ Monitoring dashboards ingest `llm_signal_backtests` summaries via `scripts/monitor_llm_system.py`; review `logs/latency_benchmark.json` for trend analysis.
-2. ✅ Nightly backfills scripted (`schedule_backfill.bat`); register with Task Scheduler (e.g. `schtasks /Create /TN PortfolioMaximizer_BackfillSignals /TR "\"C:\path\to\schedule_backfill.bat\"" /SC DAILY /ST 02:00 /F`).
-3. 🤖 Finish paper-trading workflow promotion (execution engine + reporting) ahead of broker integration.
-4. 🛰️ Prepare stress/regime detection modules and ensure they consume the unified signal metrics pipeline before Phase B automation.
-5. 📈 Surface the new RMSE / sMAPE / tracking-error fields from `time_series_forecasts.regression_metrics` inside dashboards/alerts so ensemble re-weighting is auditable end to end.
+2. 🟡 Nightly backfills scripted (`schedule_backfill.bat`); add Windows Task Scheduler entry (e.g. `schtasks /Create /TN PortfolioMaximizer_BackfillSignals /TR "\"C:\path\to\schedule_backfill.bat\"" /SC DAILY /ST 02:00 /F`) so validator metrics stay current.
+3. ⚠️ Resolve LLM latency (>5 s) by slimming prompts, testing faster models, or enabling async fallback before enabling paper trading.
+4. 🤖 Finish paper-trading workflow promotion (execution engine + reporting) ahead of broker integration.
+5. 🚰 Prepare stress/regime detection modules and ensure they consume the unified signal metrics pipeline before Phase B automation.
+6. 📈 Surface the new RMSE / sMAPE / tracking-error fields from `time_series_forecasts.regression_metrics` inside dashboards/alerts so ensemble re-weighting is auditable end to end.
+7. 🔁 Enforce the “Time Series first, LLM fallback” routing path (see `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` + `models/signal_router.py`) in every pipeline/environment so operational runs never skip the TS signal generator by default.
 
 ---
 
-## 🚨 IMMEDIATE PRIORITIES (WEEK 1-2)
+## ðŸš¨ IMMEDIATE PRIORITIES (WEEK 1-2)
 
 ### PHASE 5.4: LIVE TRADING PREPARATION & SIGNAL VALIDATION
 
@@ -119,29 +131,25 @@ class PerformanceDashboard:
 
 ### **Week 3-4: Broker API Integration**
 ```python
-# TASK 6.1: Interactive Brokers API Integration (Days 15-21)
-# File: execution/ibkr_client.py (NEW - 600 lines)
-class IBKRClient:
-    def __init__(self):
-        # Use existing configuration patterns from config/ directory
-        # Reuse checkpointing and logging from Phase 4.8
-        # Paper trading mode first, then live
-        
-    def place_order(self, signal: Signal) -> OrderResult:
-        """Place orders with confidence-weighted sizing"""
-        # Maximum 2% of portfolio per signal (existing risk management)
-        # ML confidence score determines position size
-        # Integration with existing portfolio_math.py for sizing
+# TASK 6.1: cTrader Open API Integration (Days 15-21)
+from execution.ctrader_client import CTraderClientConfig, CTraderClient, CTraderOrder
+
+config = CTraderClientConfig.from_env(environment="demo")
+client = CTraderClient(config)
+placement = client.place_order(
+    CTraderOrder(symbol="AAPL", side="BUY", volume=25)
+)
 
 # TASK 6.2: Order Management System (Days 22-28)
-# File: execution/order_manager.py (NEW - 450 lines)
-class OrderManager:
-    def manage_order_lifecycle(self, order: Order) -> LifecycleResult:
-        """Complete order lifecycle management"""
-        # Pre-trade checks (available cash, position limits)
-        # Execution monitoring (fills, partial fills)
-        # Post-trade reconciliation (existing database_manager.py)
-        # Error handling and retry logic
+from execution.order_manager import OrderManager
+
+order_manager = OrderManager(mode="demo", client=client)
+result = order_manager.submit_signal({
+    "ticker": "AAPL",
+    "action": "BUY",
+    "confidence_score": 0.72,
+    "current_price": 182.55,
+})
 ```
 
 ### **Week 5-6: Live Deployment Preparation**
@@ -168,12 +176,12 @@ class DisasterRecovery:
 ```
 
 **Phase 6 Success Criteria**:
-- [ ] IBKR API integration complete (paper trading)
-- [ ] Order management system operational
-- [ ] Production deployment pipeline working
-- [ ] Disaster recovery system tested
-- [ ] 50+ paper trades executed without errors
-- [ ] System uptime >99.9% for 2 weeks
+- [x] cTrader API client implemented (demo-focused, `.env` driven).
+- [x] Order management system operational with risk + DB wiring.
+- [ ] Production deployment pipeline working.
+- [ ] Disaster recovery system tested.
+- [ ] 50+ paper/demo trades executed without errors (pending runtime validation).
+- [ ] System uptime >99.9% for 2 weeks.
 
 ---
 
@@ -308,7 +316,7 @@ def document_time_series_rollout():
 **Phase 7 Success Criteria**:
 - [ ] SAMOSSA, SARIMAX, and GARCH pipelines delivering signals in parallel with LLM output
 - [ ] Feature flags allow instant fallback to legacy LLM-only routing
-- [ ] Rolling CV shows ≥3% uplift in profit factor with ≤50% drawdown increase vs baseline
+- [ ] Rolling CV shows â‰¥3% uplift in profit factor with â‰¤50% drawdown increase vs baseline
 - [ ] Governance sign-off complete with documented fallback plan
 - [ ] Dynamic selector auto-promotes best model and passes regression suite
 
@@ -375,7 +383,7 @@ class AutomatedReporter:
 
 ---
 
-## 🎯 QUANTITATIVE SUCCESS METRICS
+## ðŸŽ¯ QUANTITATIVE SUCCESS METRICS
 
 ### **Production Trading Criteria**
 ```python
@@ -417,7 +425,7 @@ ML_PERFORMANCE_TARGETS = {
 
 ---
 
-## 🛡️ RISK MANAGEMENT FRAMEWORK
+## ðŸ›¡ï¸ RISK MANAGEMENT FRAMEWORK
 
 ### **Pre-Live Validation Checklist**
 - [ ] **6+ months backtesting** with walk-forward validation
@@ -450,7 +458,7 @@ LIVE_RISK_CONTROLS = {
 
 ---
 
-## 📊 PROGRESS TRACKING & MILESTONES
+## ðŸ“Š PROGRESS TRACKING & MILESTONES
 
 ### **Weekly Progress Metrics**
 ```python
@@ -473,7 +481,7 @@ WEEKLY_METRICS = {
 
 ---
 
-## 💰 CAPITAL DEPLOYMENT SCHEDULE
+## ðŸ’° CAPITAL DEPLOYMENT SCHEDULE
 
 ### **Phased Capital Allocation**
 ```python
@@ -486,14 +494,14 @@ CAPITAL_SCHEDULE = {
 ```
 
 ### **Profitability Gates**
-- **Gate 1**: >55% accuracy in backtesting → Proceed to paper trading
-- **Gate 2**: >52% accuracy in paper trading → Proceed to live trading
-- **Gate 3**: >50% accuracy in live trading → Scale capital
-- **Gate 4**: <45% accuracy for 30 days → Stop trading and reassess
+- **Gate 1**: >55% accuracy in backtesting â†’ Proceed to paper trading
+- **Gate 2**: >52% accuracy in paper trading â†’ Proceed to live trading
+- **Gate 3**: >50% accuracy in live trading â†’ Scale capital
+- **Gate 4**: <45% accuracy for 30 days â†’ Stop trading and reassess
 
 ---
 
-## 🎯 CRITICAL SUCCESS FACTORS
+## ðŸŽ¯ CRITICAL SUCCESS FACTORS
 
 ### **Technical Excellence**
 1. **Start Simple**: SARIMAX before LSTM, linear before neural networks
@@ -515,7 +523,7 @@ CAPITAL_SCHEDULE = {
 
 ---
 
-## ⚠️ REALITY CHECK & CONTINGENCY PLANS
+## âš ï¸ REALITY CHECK & CONTINGENCY PLANS
 
 ### **Failure Scenarios & Mitigations**
 ```python
@@ -552,7 +560,7 @@ FAILURE_SCENARIOS = {
 
 ---
 
-## 🚀 LAUNCH READINESS CHECKLIST
+## ðŸš€ LAUNCH READINESS CHECKLIST
 
 ### **Pre-Launch Validation (Week 12)**
 - [ ] 6+ months of backtesting with walk-forward validation
@@ -571,7 +579,7 @@ FAILURE_SCENARIOS = {
 - **NO-GO**: Any critical risk item unresolved OR <52% paper trading accuracy
 - **DELAY**: Resolve outstanding issues and re-validate in 2 weeks
 
-**Status**: READY FOR PHASE 5.4 IMPLEMENTATION ✅
+**Status**: READY FOR PHASE 5.4 IMPLEMENTATION âœ…
 **Next Action**: Begin Week 1 of Phase 5.4 (Signal Validation Framework)
 **Timeline**: 12 weeks to live trading readiness
 **Success Probability**: 60% (based on current infrastructure and ML foundation)
@@ -579,28 +587,29 @@ FAILURE_SCENARIOS = {
 
 ## Key Implementation Improvements:
 
-### 🎯 **Precision Step-by-Step Tasks**
+### ðŸŽ¯ **Precision Step-by-Step Tasks**
 - **142 specific tasks** across 12 weeks with daily breakdowns
 - **File-level implementation details** with exact line estimates
 - **Integration points** with existing infrastructure clearly marked
 - **Success criteria** for each phase with quantifiable metrics
 
-### 🔧 **Leverage Existing Infrastructure**
+### ðŸ”§ **Leverage Existing Infrastructure**
 - **Reuse 6,780 lines** of production code instead of rebuilding
 - **Integrate with existing** caching, validation, and ML systems
 - **Maintain backward compatibility** with current ETL pipeline
 - **Build on proven patterns** from Phase 4.6-5.3 implementations
 
-### 🛡️ **Production Risk Management**
+### ðŸ›¡ï¸ **Production Risk Management**
 - **Circuit breakers** at multiple system levels
 - **Automated disaster recovery** building on Phase 4.8 checkpoints
 - **Phased capital deployment** with clear profitability gates
 - **Comprehensive failure scenarios** with mitigation plans
 
-### 📊 **Quantifiable Success Metrics**
+### ðŸ“Š **Quantifiable Success Metrics**
 - **55% accuracy minimum** for progression to next phase
 - **15% maximum drawdown** risk limit
 - **6-month validation period** before live deployment
 - **$10,000 minimum capital** for initial live trading
 
 This plan maintains the ML-first quantitative approach while providing concrete, actionable steps that build on the existing production-ready foundation.
+

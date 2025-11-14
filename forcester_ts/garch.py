@@ -40,17 +40,35 @@ class GARCHForecaster:
         self.model = None
         self.fitted_model = None
         self.forecast_results: Optional[Dict[str, Any]] = None
+        self._scale_factor = 1.0  # Track scaling factor for rescaling forecasts
 
     def fit(self, returns: pd.Series) -> "GARCHForecaster":
         if returns.isna().all():
             raise ValueError("Returns series cannot be all NaNs")
 
+        # Scale returns to improve GARCH convergence (recommended by arch library)
+        # arch recommends values between 1 and 1000 for better convergence
+        returns_clean = returns.dropna()
+        
+        # Check if scaling is needed (check original scale)
+        mean_abs = returns_clean.abs().mean()
+        if mean_abs < 1.0 or mean_abs > 1000.0:
+            # Scale to bring into recommended range (use 100x for typical returns ~0.001)
+            scale_factor = 100.0
+            returns_scaled = returns_clean * scale_factor
+            self._scale_factor = scale_factor
+        else:
+            # Already in good range, no scaling needed
+            self._scale_factor = 1.0
+            returns_scaled = returns_clean
+
         self.model = arch_model(
-            returns.dropna(),
+            returns_scaled,
             vol=self.vol,
             p=self.p,
             q=self.q,
             dist=self.dist,
+            rescale=False,  # We handle scaling manually
         )
         self.fitted_model = self.model.fit(disp="off")
         logger.info(
@@ -69,6 +87,14 @@ class GARCHForecaster:
         forecast_res = self.fitted_model.forecast(horizon=steps)
         variance = forecast_res.variance.iloc[-1]
         mean = forecast_res.mean.iloc[-1]
+        
+        # Rescale back if we scaled during fitting
+        scale_factor = getattr(self, '_scale_factor', 1.0)
+        if scale_factor != 1.0:
+            # Variance scales as scale_factor^2, volatility and mean scale as scale_factor
+            variance = variance / (scale_factor ** 2)
+            mean = mean / scale_factor
+        
         volatility = np.sqrt(variance)
 
         self.forecast_results = {

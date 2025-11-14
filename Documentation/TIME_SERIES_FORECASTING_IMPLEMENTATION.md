@@ -5,21 +5,43 @@
 **Status**: ✅ **FULLY IMPLEMENTED & WIRED** → 🟡 **REFACTORING IN PROGRESS**  
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress
 
+### 2025-11-12 Hardening Notes
+- models/time_series_signal_generator.py now normalises pandas/NumPy payloads before evaluation, eliminating the "truth value of a Series is ambiguous" crash and stamping decision context (expected return, confidence, risk, volatility) into provenance. logs/ts_signal_demo.json captures a SELL signal produced directly from SQLite OHLCV data.
+- Checkpoint metadata writes use Path.replace, so repeated Windows runs no longer fail with [WinError 183] when successive checkpoints are saved.
+- scripts/backfill_signal_validation.py injects the repo root into sys.path, allowing Task Scheduler or the brutal suite to invoke the script from any working directory without ModuleNotFoundError.
+
+
 ---
 
 ## ✅ Implementation Summary
 
 The time-series stack now comprises **SARIMAX**, **GARCH**, and the newly promoted **SAMOSSA (Seasonal Adaptive Moving-Window SSA)** modules, all coordinated by the unified forecaster and persisted through the ETL pipeline. The SAMOSSA work follows the mathematical and implementation blueprint documented in `SAMOSSA_algorithm_description.md`, `SAMOSSA_INTEGRATION.md`, and `mSSA_with_RL_changPoint_detection.json`, laying the groundwork for reinforcement-learning interventions and CUSUM change-point alarms while keeping production gating rules intact.
 
+### 🔄 2025-11-09 Wiring Update (Phase 5.4b)
+- `forcester_ts/` is now the canonical home for **SARIMAX**, **GARCH**, **SAMOSSA**, and **MSSA-RL**. `etl/time_series_forecaster.py` remains as a thin compatibility shim, so dashboards, notebooks, and ETL all import the same implementations.
+- `TimeSeriesForecaster` now builds each pandas series with an explicit frequency (using `pd.infer_freq` or a business-day fallback) before invoking statsmodels, so the SARIMAX diagnostics no longer emit `ValueWarning`/`ConvergenceWarning` noise about missing frequency metadata.
+- `models/time_series_signal_generator.py` now consumes GARCH volatility series safely (scalar conversion prevents the `The truth value of a Series is ambiguous` crash) and stamps HOLD provenance with ISO timestamps. This fix restores Time Series signal generation inside the monitoring job so `llm_signal_backtests` stops reporting **NO_DATA**.
+- Targeted regression tests executed under `simpleTrader_env`:
+  - `pytest tests/models/test_time_series_signal_generator.py -q`
+  - `pytest tests/integration/test_time_series_signal_integration.py::TestTimeSeriesForecastingToSignalIntegration::test_forecast_to_signal_flow -vv`
+- Monitoring + backfill context:
+  - `scripts/monitor_llm_system.py` ingests the same SQLite regression metrics and now surfaces latency plus `llm_signal_backtests` summaries (written to `logs/latency_benchmark.json`).
+  - `schedule_backfill.bat` replays nightly validation so the Time Series ensemble always has fresh metrics before routing signals (Task Scheduler registration still pending—see `NEXT_TO_DO.md`).
+
 ### 🎯 **ARCHITECTURAL REFACTORING IN PROGRESS**
 
-**Current State**: Time Series forecasting exists but is NOT used for signal generation. LLM is the primary signal source.
+**Current State**: Time Series ensemble drives signal generation (routing + monitoring live); pipeline stage reordering + nightly validation still hardening.
 
-**Target State**: Time Series ensemble becomes **DEFAULT signal generator**, with LLM as **fallback/redundancy**.
+**Target State**: Time Series ensemble remains the **DEFAULT signal generator**, with LLM as **fallback/redundancy**, after Stage 5/6 promotion inside `scripts/run_etl_pipeline.py`.
 
-**Status**: 🟡 **INITIALIZED** - Core components created, pipeline integration pending.
+**Status**: 🟡 **HARDENING** – Core components created and routed, Stage 5 promotion + scheduler registration in progress.
 
 See `Documentation/REFACTORING_STATUS.md` for complete status and critical issues.
+
+### 📝 Operational Logging & Checkpoints (2025‑11‑11)
+- `forcester_ts/forecaster.py` now records structured events for every model fit/forecast phase (start → success/failure) and emits them through the standard logging pipeline, satisfying the guardrails in `AGENT_INSTRUCTION.md`, `CHECKPOINTING_AND_LOGGING.md`, and `BRUTAL_TEST_README.md`.
+- Each model module (SARIMAX, SAMOSSA, MSSA‑RL, GARCH) reports dataset size, selected hyperparameters, and diagnostics; failures are caught per component so the ensemble keeps running while the event stream captures the root cause.
+- Ensemble metadata now includes `model_events` + `model_errors`, which the brutal test harness stores under `logs/brutal/results_*`, making it trivial to trace caching/forecast decisions back to the exact model invocation.
 
 ---
 
@@ -417,7 +439,8 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 
 See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 
-1. **Pipeline Integration Not Started** ❌ CRITICAL
+1. **Pipeline Integration Implemented – Validation Pending** 🟡  
+   Time Series forecasting, signal generation, and routing now execute before any LLM stages in `scripts/run_etl_pipeline.py`, but the refactored flow still needs end-to-end validation.
 2. **Signal Schema Mismatch** ⚠️ HIGH
 3. **Database Schema Updates Required** ⚠️ HIGH
 4. **Configuration System Not Updated** ⚠️ MEDIUM
@@ -456,7 +479,7 @@ See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 - [x] TimeSeriesSignalGenerator created
 - [x] SignalRouter created
 - [x] Status tracking document created
-- [ ] Pipeline integration complete
+- [x] Pipeline integration order updated (validation pending)
 - [ ] Database schema updated
 - [ ] Signal schema unified
 - [ ] Tests written
@@ -475,14 +498,16 @@ See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 - **Implementation**: ✅ Core models complete  
 - **Integration**: ✅ Pipeline + DB wired (forecasting only)  
 - **Testing**: ✅ Regression suite updated (forecasting only)  
+- **Latest Validation Attempt**: `bash/comprehensive_brutal_test.sh` (Nov 12) completed profit-critical + ETL suites but timed out with a `Broken pipe` during the Time Series forecasting block, so no TS-specific tests or signal-router suites were executed. This run must be repeated after fixing the missing `tests/etl/test_data_validator.py` file and the timeout root cause.
 - **Documentation**: ✅ Current (forecasting only)  
 - **Refactoring**: 🟡 **IN PROGRESS** - See `Documentation/REFACTORING_STATUS.md`
 
 ### Immediate Next Steps (Refactoring)
-1. **Pipeline Integration** (CRITICAL) - Integrate Time Series signal generation into pipeline
+1. **Pipeline & Autonomous Loop Validation** (CRITICAL) - Run `scripts/run_etl_pipeline.py` (with/without `--enable-llm`) and `scripts/run_auto_trader.py` to prove the reordered stages route TS signals before LLM fallback.
 2. **Database Schema** (HIGH) - Create unified signal storage
-3. **Testing** (HIGH) - Write comprehensive tests
+3. **Testing** (HIGH) - Execute the pending Time Series signal generator/router test suites and log results.
 4. **Backward Compatibility** (MEDIUM) - Ensure existing code works
+5. **ETL Error Remediation** (CRITICAL) - Resolve `DataStorage.train_validation_test_split()` signature mismatch, zero-fold CV `ZeroDivisionError`, SQLite `disk I/O` errors, and missing parquet engines surfaced in `logs/errors/errors.log` so forecasting can run on live data feeds.
 
 ### Phase B Focus (Per `SAMOSSA_INTEGRATION.md`)
 1. Promote CUSUM-based change-point scores into monitoring.

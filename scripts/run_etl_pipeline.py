@@ -552,6 +552,117 @@ def _resolve_cv_settings(
     )
 
 
+def _build_stage_execution_order(
+    stages_cfg: List[Dict[str, Any]],
+    enable_llm: bool,
+    logger: logging.Logger
+) -> List[str]:
+    """
+    Build stage execution order from config, respecting dependencies and enabled flags.
+    
+    This function implements config-driven orchestration:
+    1. Filters stages by enabled flag
+    2. Resolves dependencies to determine execution order
+    3. Includes LLM stages conditionally
+    4. Maintains backward compatibility with hardcoded stages
+    
+    Args:
+        stages_cfg: List of stage configurations from pipeline_config.yml
+        enable_llm: Whether LLM integration is enabled
+        logger: Logger instance
+        
+    Returns:
+        List of stage names in execution order
+    """
+    # Core stages that must always run (backward compatibility)
+    # Time Series-first architecture expects storage to precede forecasting.
+    core_stages = ['data_extraction', 'data_validation', 'data_preprocessing', 'data_storage']
+    
+    # Build stage map from config
+    stage_map = {}
+    for stage in stages_cfg:
+        stage_name = stage.get('name')
+        if stage_name:
+            stage_map[stage_name] = {
+                'enabled': stage.get('enabled', True),
+                'required': stage.get('required', False),
+                'depends_on': stage.get('depends_on', []),
+                'config': stage
+            }
+    
+    # Start with core stages (always included)
+    execution_order = core_stages.copy()
+    
+    # Add config-driven stages (Time Series forecasting, signal generation, routing)
+    # These stages respect enabled flag and dependencies
+    config_driven_stages = []
+    for stage_name, stage_info in stage_map.items():
+        # Skip core stages (already added)
+        if stage_name in core_stages or stage_name == 'data_storage':
+            continue
+            
+        # Skip LLM stages (handled separately above)
+        if stage_name.startswith('llm_'):
+            continue
+            
+        # Only include if enabled
+        if not stage_info.get('enabled', True):
+            logger.debug(f"Skipping disabled stage: {stage_name}")
+            continue
+            
+        config_driven_stages.append((stage_name, stage_info))
+    
+    # Sort config-driven stages by dependencies (topological sort)
+    # Simple approach: insert stages after their dependencies
+    for stage_name, stage_info in config_driven_stages:
+        depends_on = stage_info.get('depends_on', [])
+        
+        if not depends_on:
+            # No dependencies - add after data_storage
+            storage_idx = execution_order.index('data_storage')
+            execution_order.insert(storage_idx + 1, stage_name)
+        else:
+            # Has dependencies - insert after the last dependency
+            max_dep_idx = -1
+            for dep in depends_on:
+                if dep in execution_order:
+                    dep_idx = execution_order.index(dep)
+                    max_dep_idx = max(max_dep_idx, dep_idx)
+            
+            if max_dep_idx >= 0:
+                # Insert after last dependency
+                execution_order.insert(max_dep_idx + 1, stage_name)
+            else:
+                # Dependencies not found - add at end (shouldn't happen, but safe fallback)
+                logger.warning(f"Stage {stage_name} has dependencies {depends_on} not found in execution order. Adding at end.")
+                execution_order.append(stage_name)
+    
+    # Add LLM stages after Time Series routing (Time Series-first architecture)
+    if enable_llm:
+        llm_stages = ['llm_market_analysis', 'llm_signal_generation', 'llm_risk_assessment']
+        anchor_candidates = [
+            'signal_router',
+            'time_series_signal_generation',
+            'time_series_forecasting',
+            'data_storage',
+        ]
+        anchor_stage = next((stage for stage in anchor_candidates if stage in execution_order), 'data_storage')
+        anchor_idx = execution_order.index(anchor_stage) + 1
+        for llm_stage in llm_stages:
+            execution_order.insert(anchor_idx, llm_stage)
+            anchor_idx += 1
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_order = []
+    for stage in execution_order:
+        if stage not in seen:
+            seen.add(stage)
+            unique_order.append(stage)
+    
+    return unique_order
+
+
 def _load_llm_config_data() -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], str]:
     try:
         llm_config_data = load_config('config/llm_config.yml')
@@ -939,14 +1050,14 @@ def execute_pipeline(
     # Determine split strategy and log configuration
     _log_split_strategy(cv_settings)
 
-    # Define stage names (in execution order)
-    stage_names = ['data_extraction', 'data_validation', 'data_preprocessing']
+    # Build stage execution order from config (config-driven orchestration)
+    stage_names = _build_stage_execution_order(
+        stages_cfg=stages_cfg,
+        enable_llm=enable_llm,
+        logger=logger
+    )
     
-    # Add LLM stages if enabled
-    if enable_llm:
-        stage_names.extend(['llm_market_analysis', 'llm_signal_generation', 'llm_risk_assessment'])
-    
-    stage_names.append('data_storage')
+    logger.info(f"✓ Stage execution order (config-driven): {', '.join(stage_names)}")
 
     # Prepare synthetic data up-front when explicitly requested
     precomputed_raw_data: Optional[pd.DataFrame] = None
@@ -1474,6 +1585,8 @@ def execute_pipeline(
                         continue
                     
                     forecast_horizon = forecasting_cfg.get('default_forecast_horizon', 30)
+                    min_history_required = int(forecasting_cfg.get('minimum_history_required', 90))
+                    min_history_strict = int(forecasting_cfg.get('minimum_history_strict', 30))
                     sarimax_cfg = forecasting_cfg.get('sarimax', {})
                     garch_cfg = forecasting_cfg.get('garch', {})
                     samossa_cfg = forecasting_cfg.get('samossa', {})
@@ -1481,7 +1594,7 @@ def execute_pipeline(
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     
                     forecasts = {}
-                    
+
                     for ticker in ticker_list:
                         try:
                             # Get ticker-specific data
@@ -1489,6 +1602,13 @@ def execute_pipeline(
                                 ticker_data = processed.xs(ticker, level=0)
                             else:
                                 ticker_data = processed
+                                if 'ticker' in ticker_data.columns:
+                                    ticker_mask = ticker_data['ticker'].astype(str).str.upper() == ticker.upper()
+                                    ticker_data = ticker_data.loc[ticker_mask]
+
+                            if ticker_data.empty:
+                                logger.warning(f"  ⚠ {ticker}: No processed rows available after filtering")
+                                continue
                             
                             # Extract Close price series
                             if 'Close' in ticker_data.columns:
@@ -1499,13 +1619,26 @@ def execute_pipeline(
                                 logger.warning(f"  ⚠ {ticker}: No Close price data available")
                                 continue
                             
-                            if len(price_series) < 60:
-                                logger.warning(f"  ⚠ {ticker}: Insufficient data for forecasting (need >= 60, have {len(price_series)})")
+                            series_length = len(price_series)
+                            if series_length < min_history_strict:
+                                logger.warning(
+                                    "  ⚠ %s: Insufficient data for forecasting (need ≥ %s, have %s)",
+                                    ticker,
+                                    min_history_strict,
+                                    series_length,
+                                )
                                 continue
 
                             train_series = price_series
                             holdout_series = None
-                            if len(price_series) >= forecast_horizon * 2:
+
+                            if series_length < min_history_required:
+                                logger.warning(
+                                    "  ⚠ %s: Limited history (<%s observations). Using entire series; metrics disabled.",
+                                    ticker,
+                                    min_history_required,
+                                )
+                            elif series_length >= forecast_horizon * 2:
                                 train_series = price_series.iloc[:-forecast_horizon]
                                 holdout_series = price_series.iloc[-forecast_horizon:]
                             else:
@@ -1685,9 +1818,16 @@ def execute_pipeline(
                             logger.warning(f"  ⚠ {ticker} forecasting failed: {e}")
                             forecasts[ticker] = {'error': str(e)}
                     
-                    logger.info(f"✓ Generated forecasts for {len([f for f in forecasts.values() if 'error' not in f])} ticker(s)")
+                    successful_forecasts = len([f for f in forecasts.values() if 'error' not in f])
+                    logger.info(f"✓ Generated forecasts for {successful_forecasts}/{len(ticker_list)} ticker(s)")
+                    if successful_forecasts < len(ticker_list):
+                        missing = [t for t in ticker_list if t not in forecasts or 'error' in forecasts[t]]
+                        logger.warning("  ⚠ Forecasting skipped for: %s", ", ".join(missing))
 
-                    _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
+                    try:
+                        _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
+                    except Exception as viz_exc:  # pragma: no cover - visualization optional
+                        logger.warning("Time Series visualization generation failed: %s", viz_exc)
                     
                     # Save checkpoint
                     checkpoint_id = checkpoint_manager.save_checkpoint(
@@ -1698,13 +1838,228 @@ def execute_pipeline(
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
                     
-                except ImportError as e:
-                    logger.warning(f"Forecasting modules not available: {e}")
-                    logger.warning("Install required packages: pip install statsmodels arch")
+                    # Store forecasts for signal generation stage
+                    globals()['_ts_forecasts'] = forecasts or {}
+                        
                 except Exception as e:
                     from etl.security_utils import sanitize_error
                     safe_error = sanitize_error(e)
-                    logger.error(f"Forecasting stage failed: {safe_error}")
+                    logger.error(f"Time Series forecasting stage failed: {safe_error}")
+
+            elif stage_name == 'time_series_signal_generation':
+                # Stage 8: Time Series Signal Generation (NEW - DEFAULT SIGNAL SOURCE)
+                logger.info("Generating trading signals from Time Series forecasts...")
+                
+                try:
+                    from models.time_series_signal_generator import TimeSeriesSignalGenerator
+                    from models.signal_adapter import SignalAdapter
+                    import pandas as pd
+                    
+                    # Load signal routing config
+                    signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
+                    ts_signal_cfg = signal_routing_cfg.get('time_series', {})
+                    
+                    # Initialize signal generator
+                    signal_generator = TimeSeriesSignalGenerator(
+                        confidence_threshold=ts_signal_cfg.get('confidence_threshold', 0.55),
+                        min_expected_return=ts_signal_cfg.get('min_expected_return', 0.02),
+                        max_risk_score=ts_signal_cfg.get('max_risk_score', 0.7),
+                        use_volatility_filter=ts_signal_cfg.get('use_volatility_filter', True)
+                    )
+                    
+                    # Get forecasts from previous stage
+                    forecasts = globals().get('_ts_forecasts', {})
+                    if not forecasts:
+                        logger.warning("No Time Series forecasts available, skipping signal generation")
+                        continue
+                    
+                    ts_signals = {}
+                    current_prices = {}
+                    
+                    for ticker in ticker_list:
+                        try:
+                            # Get ticker-specific data for current price
+                            if isinstance(processed.index, pd.MultiIndex):
+                                ticker_data = processed.xs(ticker, level=0)
+                            else:
+                                ticker_data = processed
+                            
+                            # Extract current price
+                            if 'Close' in ticker_data.columns:
+                                current_price = float(ticker_data['Close'].iloc[-1])
+                            elif 'close' in ticker_data.columns:
+                                current_price = float(ticker_data['close'].iloc[-1])
+                            else:
+                                logger.warning(f"  ⚠ {ticker}: No Close price data available")
+                                continue
+                            
+                            current_prices[ticker] = current_price
+                            
+                            # Get forecast bundle
+                            forecast_bundle = forecasts.get(ticker)
+                            if not forecast_bundle or 'error' in forecast_bundle:
+                                logger.warning(f"  ⚠ {ticker}: No valid forecast available")
+                                continue
+                            
+                            # Generate signal
+                            signal = signal_generator.generate_signal(
+                                forecast_bundle=forecast_bundle,
+                                current_price=current_price,
+                                ticker=ticker,
+                                market_data=ticker_data
+                            )
+                            
+                            # Convert to unified format
+                            unified_signal = SignalAdapter.from_time_series_signal(signal)
+                            signal_dict = SignalAdapter.to_legacy_dict(unified_signal)
+                            ts_signals[ticker] = signal_dict
+                            
+                            # Save to unified trading_signals table
+                            signal_date = datetime.now().strftime('%Y-%m-%d')
+                            signal_id = db_manager.save_trading_signal(
+                                ticker=ticker,
+                                date=signal_date,
+                                signal=signal_dict,
+                                source='TIME_SERIES',
+                                model_type=signal.model_type,
+                                validation_status='pending',
+                                latency=0.0  # Time Series signals are fast
+                            )
+                            
+                            logger.info(
+                                f"  ✓ {ticker}: {signal.action} signal "
+                                f"(confidence={signal.confidence:.2f}, "
+                                f"expected_return={signal.expected_return:.2%}, "
+                                f"risk={signal.risk_score:.2f})"
+                            )
+                            
+                        except Exception as e:
+                            logger.warning(f"  ⚠ {ticker} Time Series signal generation failed: {e}")
+                            ts_signals[ticker] = {'action': 'HOLD', 'confidence': 0.0, 'error': str(e)}
+                    
+                    logger.info(f"✓ Generated {len([s for s in ts_signals.values() if s.get('action') != 'HOLD'])} Time Series signal(s)")
+                    
+                    # Store signals for routing stage
+                    globals()['_ts_signals'] = ts_signals
+                    globals()['_current_prices'] = current_prices
+                    
+                    # Save checkpoint
+                    checkpoint_id = checkpoint_manager.save_checkpoint(
+                        pipeline_id=pipeline_id,
+                        stage=stage_name,
+                        data=processed,
+                        metadata={'signals': ts_signals, 'forecasts': forecasts}
+                    )
+                    pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+                    
+                except ImportError as e:
+                    logger.warning(f"Time Series signal generation modules not available: {e}")
+                    logger.warning("Install required packages and ensure models package is available")
+                except Exception as e:
+                    from etl.security_utils import sanitize_error
+                    safe_error = sanitize_error(e)
+                    logger.error(f"Time Series signal generation stage failed: {safe_error}")
+
+            elif stage_name == 'signal_router':
+                # Stage 9: Signal Router (NEW - Routes TS primary + LLM fallback)
+                logger.info("Routing signals (Time Series primary, LLM fallback)...")
+                
+                try:
+                    from models.signal_router import SignalRouter
+                    from models.signal_adapter import SignalAdapter
+                    import pandas as pd
+                    
+                    # Load signal routing config
+                    signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
+                    
+                    # Initialize router
+                    router = SignalRouter(
+                        config=signal_routing_cfg,
+                        time_series_generator=None,  # Already generated signals
+                        llm_generator=signal_generator if enable_llm and 'signal_generator' in locals() else None
+                    )
+                    
+                    # Get Time Series signals from previous stage
+                    ts_signals = globals().get('_ts_signals', {})
+                    forecasts = globals().get('_ts_forecasts', {})
+                    current_prices = globals().get('_current_prices', {})
+                    
+                    # Get LLM signals if available
+                    llm_signals = globals().get('llm_signals', {})
+                    
+                    routed_bundles = {}
+                    
+                    for ticker in ticker_list:
+                        try:
+                            # Get ticker-specific data
+                            if isinstance(processed.index, pd.MultiIndex):
+                                ticker_data = processed.xs(ticker, level=0)
+                            else:
+                                ticker_data = processed
+                            
+                            current_price = current_prices.get(ticker, 0.0)
+                            if current_price == 0.0:
+                                # Try to extract from data
+                                if 'Close' in ticker_data.columns:
+                                    current_price = float(ticker_data['Close'].iloc[-1])
+                                elif 'close' in ticker_data.columns:
+                                    current_price = float(ticker_data['close'].iloc[-1])
+                            
+                            forecast_bundle = forecasts.get(ticker)
+                            llm_signal = llm_signals.get(ticker) if llm_signals else None
+                            
+                            # Route signal
+                            bundle = router.route_signal(
+                                ticker=ticker,
+                                forecast_bundle=forecast_bundle,
+                                current_price=current_price,
+                                market_data=ticker_data,
+                                llm_signal=llm_signal
+                            )
+                            
+                            routed_bundles[ticker] = bundle
+                            
+                            # Log routing result
+                            primary_action = bundle.primary_signal.get('action', 'HOLD') if bundle.primary_signal else 'HOLD'
+                            primary_source = bundle.primary_signal.get('source', 'UNKNOWN') if bundle.primary_signal else 'UNKNOWN'
+                            
+                            logger.info(
+                                f"  ✓ {ticker}: Routed {primary_action} signal "
+                                f"(source={primary_source}, "
+                                f"fallback={'yes' if bundle.fallback_signal else 'no'})"
+                            )
+                            
+                        except Exception as e:
+                            logger.warning(f"  ⚠ {ticker} signal routing failed: {e}")
+                            routed_bundles[ticker] = None
+                    
+                    logger.info(f"✓ Routed signals for {len([b for b in routed_bundles.values() if b])} ticker(s)")
+                    
+                    # Store routing stats
+                    routing_stats = router.get_routing_stats()
+                    logger.info(f"Routing statistics: {routing_stats['stats']}")
+                    
+                    # Save checkpoint
+                    checkpoint_id = checkpoint_manager.save_checkpoint(
+                        pipeline_id=pipeline_id,
+                        stage=stage_name,
+                        data=processed,
+                        metadata={
+                            'routed_bundles': {k: {
+                                'primary': v.primary_signal if v and v.primary_signal else None,
+                                'fallback': v.fallback_signal if v and v.fallback_signal else None
+                            } for k, v in routed_bundles.items() if v},
+                            'routing_stats': routing_stats
+                        }
+                    )
+                    pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
+                    
+                except ImportError as e:
+                    logger.warning(f"Signal router modules not available: {e}")
+                except Exception as e:
+                    from etl.security_utils import sanitize_error
+                    safe_error = sanitize_error(e)
+                    logger.error(f"Signal routing stage failed: {safe_error}")
 
             elif stage_name == 'data_storage':
                 # Stage 4: Data Storage (Split + Save)

@@ -49,9 +49,9 @@ class CheckpointManager:
     def _save_metadata(self, metadata: Dict[str, Any]) -> None:
         """Save metadata atomically."""
         temp_path = self.metadata_file.with_suffix('.tmp')
-        with open(temp_path, 'w') as f:
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2)
-        temp_path.rename(self.metadata_file)
+        temp_path.replace(self.metadata_file)
 
     def _load_metadata(self) -> Dict[str, Any]:
         """Load checkpoint metadata."""

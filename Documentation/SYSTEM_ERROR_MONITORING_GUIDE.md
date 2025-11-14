@@ -341,6 +341,7 @@ python scripts/error_monitor.py --watch
 - `logs/errors/errors.log` - Current error log
 - `logs/alerts/` - Alert notifications
 - `logs/archive/errors/` - Archived error logs
+- `logs/signals/quant_validation.jsonl` - Quant validation audit log for trading/algo efficiency triage
 
 ---
 

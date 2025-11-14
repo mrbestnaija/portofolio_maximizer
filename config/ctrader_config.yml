@@ -1,0 +1,55 @@
+# Portfolio Maximizer v45 - cTrader Open API Configuration
+
+ctrader:
+  # Demo-first connection policy aligns with UNIFIED_ROADMAP.md
+  environment: "demo"  # demo | live
+
+  connection:
+    demo_auth_url: "https://demo.ctraderapi.com/connect/token"
+    live_auth_url: "https://api.ctraderapi.com/connect/token"
+    demo_api_base: "https://demo.ctraderapi.com"
+    live_api_base: "https://api.ctraderapi.com"
+    request_timeout: 15
+    read_timeout: 30
+    max_retries: 3
+    retry_backoff: 1.5
+
+  auth:
+    username_env: "USERNAME_CTRADER"  # fallback to EMAIL_CTRADER if missing
+    password_env: "PASSWORD_CTRADER"
+    application_id_env: "APPLICATION_NAME_CTRADER"
+    application_secret_env: "CTRADER_APPLICATION_SECRET"
+    account_id_env: "CTRADER_ACCOUNT_ID"
+    allow_colon_assignment: true  # supports KEY:'value' syntax in regenerated .env
+
+  trading:
+    max_position_risk_pct: 0.02   # 2% equity cap per signal
+    min_confidence: 0.50
+    default_time_in_force: "GTC"
+    default_order_type: "MARKET"
+    max_trades_per_day: 25
+    slippage_buffer_pct: 0.001    # 0.1% placeholder for future limit orders
+
+  risk_management:
+    use_real_time_risk_manager: true
+    require_healthy_status: true
+    enforce_daily_limit: true
+    enforce_confidence_floor: true
+
+  logging:
+    log_orders: true
+    log_positions: true
+    log_file: "logs/ctrader_integration.log"
+    log_level: "INFO"
+
+  validation:
+    require_demo_first: true
+    min_demo_days: 30
+    min_demo_trades: 50
+    min_demo_win_rate: 0.55
+    max_demo_drawdown: 0.15
+
+metadata:
+  created: "2025-11-12"
+  owner: "Portfolio Maximizer v45"
+  context: "Replaces IBKR stub per STUB_IMPLEMENTATION_PLAN.md"

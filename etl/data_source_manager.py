@@ -128,9 +128,12 @@ class DataSourceManager:
             # Check if API key is required
             credentials_env = provider_config.get('credentials_env')
             if credentials_env:
-                api_key = os.getenv(credentials_env)
+                # SECURITY: Use secret_loader for secure secret management
+                # Supports both Docker secrets and environment variables
+                from etl.secret_loader import load_secret
+                api_key = load_secret(credentials_env)
                 if not api_key:
-                    logger.warning(f"Missing API key for {name}: {credentials_env} not set in .env")
+                    logger.warning(f"Missing API key for {name}: {credentials_env} not set in .env or Docker secrets")
                     return None
 
                 # Instantiate with API key

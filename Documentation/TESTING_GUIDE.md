@@ -1,8 +1,14 @@
-# Testing Guide - Profit-Critical Functions
+﻿# Testing Guide - Profit-Critical Functions
 
 **Per AGENT_INSTRUCTION.md Guidelines**  
 **Version**: 1.0  
 **Date**: 2025-10-14
+
+### Nov 12, 2025 Test Execution
+- pytest tests/models/test_time_series_signal_generator.py -q and targeted integration cases now pass under simpleTrader_env, validating the pandas-safe signal generator changes.
+- Pipeline dry-runs continue to hit the Ollama latency regression (brutal suite fails only in 	ests/ai_llm/test_ollama_client.py::test_generate_switches_model_when_token_rate_low); keep this test on every verification list until latency <5 s.
+- logs/ts_signal_demo.json is the new smoke artifact proving BUY/SELL signals can be generated outside the test harness.
+
 
 ---
 
@@ -101,6 +107,39 @@ pytest tests/integration/test_profit_critical_functions.py::TestProfitCriticalDa
 7. **test_mvs_passing_criteria**: MVS passing correctly identified
 
 **Run**: `pytest tests/integration/test_llm_report_generation.py -v`
+
+---
+
+### **3. Time-Series Signal Stack & Routing** (14+ tests)
+**File**: `tests/etl/test_time_series_forecaster.py`, `tests/models/test_time_series_signal_generator.py`, `tests/models/test_signal_router.py`
+
+#### **Why it Matters**
+- The refactor described in `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` makes the time-series ensemble the default signal generator; these tests ensure SARIMAX/SAMOSSA/GARCH/MSSA-RL outputs stay stable, ensemble regression metrics persist correctly, and `signal_router.py` always prefers TS signals before falling back to LLM.
+- Regression metrics (RMSE / sMAPE / tracking error) are now part of the SQLite persistence contract (`time_series_forecasts.regression_metrics`) and feed dashboards/weighting logic—tests must fail fast if those fields disappear.
+
+#### **Run**
+```bash
+pytest tests/etl/test_time_series_forecaster.py -q
+pytest tests/models/test_time_series_signal_generator.py -q
+pytest tests/models/test_signal_router.py -q
+```
+
+### **4. Monitoring & Nightly Backfill** (NEW – Nov 2025)
+**Why it Matters**: The monitoring job now enforces the <5 s latency target, surfaces `llm_signal_backtests`, and validates that Time Series signals actually exist. Nightly validation backfills keep those metrics fresh so dashboards never regress to `NO_DATA`.
+
+**Run**
+```bash
+# LLM monitoring smoke (writes logs/latency_benchmark.json + monitoring report)
+.\simpleTrader_env\Scripts\python.exe scripts/monitor_llm_system.py --headless
+
+# Register and dry-run the nightly backfill helper
+schedule_backfill.bat  # (from PowerShell) – mirror Task Scheduler wiring before prod
+```
+
+**Checks**
+- `logs/latency_benchmark.json` updated with latest latency/token-rate snapshot.
+- `logs/llm_monitoring_report_*.json` contains `signal_backtests.summary`.
+- SQLite tables `llm_signal_backtests` and `time_series_forecasts` show fresh timestamps after the helper executes.
 
 ---
 

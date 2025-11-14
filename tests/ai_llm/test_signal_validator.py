@@ -205,6 +205,7 @@ class TestSignalValidator:
         assert isinstance(report, BacktestReport)
         assert 0.0 <= report.hit_rate <= 1.0
         assert report.profit_factor >= 0.0
+        assert isinstance(report.annual_return, float)
         assert report.trades_analyzed >= 0
         assert report.recommendation in ['APPROVE_FOR_LIVE_TRADING', 
                                        'CONTINUE_PAPER_TRADING', 
@@ -227,6 +228,7 @@ class TestSignalValidator:
         report = validator.backtest_signal_quality(empty_signals, prices)
         
         assert report.hit_rate == 0.0
+        assert report.annual_return == 0.0
         assert report.trades_analyzed == 0
         assert report.recommendation == 'INSUFFICIENT_DATA'
         assert report.p_value == 1.0

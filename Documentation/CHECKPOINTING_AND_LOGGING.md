@@ -316,6 +316,19 @@ All events follow this JSON structure:
 
 **Status Values**: `success`, `error`, `warning`, `info`
 
+### Quant Validation Signal Log
+
+Complementing the pipeline/event logs, every Time Series signal run now appends a JSON line to `logs/signals/quant_validation.jsonl`. Each entry captures:
+
+- `pipeline_id` (if available) to correlate with checkpoints and stage timings.
+- Signal metadata (ticker, action, confidence, expected_return, risk_score, volatility).
+- Quantitative success profile (Sharpe, Sortino, drawdown, win rate, profit factor, failed criteria list).
+- Execution hints (position_value aligned to `execution/order_manager.py`, estimated shares using `request_safe_price`).
+- Market context (row count, lookback window start/end, cached data source if provided by ETL).
+- Visualization artifact path (`visualizations/quant_validation/<ticker>_quant_validation.png`) produced per entry for rapid troubleshooting.
+
+`bash/run_pipeline_live.sh` and `bash/run_pipeline_dry_run.sh` automatically tail this log (respecting the `tail_entries` value in `config/quant_success_config.yml`) and print a per-pipeline validation summary alongside stage timing and dataset artifacts, making it part of the standard checkpointing workflow.
+
 ---
 
 ## Integration Guide

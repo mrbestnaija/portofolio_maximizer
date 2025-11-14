@@ -1,10 +1,10 @@
-# Portfolio Maximizer
+# Portfolio Maximizer – Autonomous Profit Engine
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/mrbestnaija/portofolio_maximizer)
 
-> A production-ready quantitative portfolio management system with intelligent caching, comprehensive time series analysis, and publication-quality visualizations.
+> End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
 **Version**: 3.0
 **Status**: Production Ready ✅
@@ -14,7 +14,7 @@
 
 ## 🎯 Overview
 
-Portfolio Maximizer is a sophisticated ETL-based portfolio management system built with academic rigor and production-grade performance. It provides a complete pipeline for extracting, validating, preprocessing, and analyzing financial time series data with intelligent caching and vectorized operations.
+Portfolio Maximizer is a self-directed trading stack that marries institutional-grade ETL with autonomous execution. It continuously extracts, validates, preprocesses, forecasts, and trades financial time series so profit-focused decisions are generated without human babysitting.
 
 ### Key Features
 
@@ -26,6 +26,7 @@ Portfolio Maximizer is a sophisticated ETL-based portfolio management system bui
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
 - **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
 - **🔐 Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
+- **🤖 Autonomous Profit Engine**: `scripts/run_auto_trader.py` keeps the signal router + trading engine firing so positions are sized and executed automatically
 
 ---
 
@@ -217,6 +218,24 @@ python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
 ./bash/run_pipeline_live.sh
 ```
 
+### Launch The Autonomous Trading Loop
+
+```bash
+python scripts/run_auto_trader.py \
+  --tickers AAPL,MSFT,NVDA \
+  --lookback-days 365 \
+  --forecast-horizon 30 \
+  --initial-capital 25000 \
+  --cycles 5 \
+  --sleep-seconds 900
+```
+
+Add `--enable-llm` to activate the Ollama-backed fallback router whenever the ensemble hesitates. Each cycle:
+
+1. Streams fresh OHLCV windows via `DataSourceManager` with cache-first failover.
+2. Validates, imputes, and feeds the data into the SARIMAX/SAMOSSA/GARCH/MSSA-RL ensemble.
+3. Routes the highest-confidence trade and executes it through `PaperTradingEngine`, tracking cash, PnL, and open positions in real time.
+
 ### Analyze Dataset
 
 ```bash
@@ -381,6 +400,7 @@ portfolio_maximizer/
 │
 ├── scripts/                         # Executable scripts
 │   ├── run_etl_pipeline.py         # Main ETL orchestration
+│   ├── run_auto_trader.py          # Autonomous profit loop
 │   ├── analyze_dataset.py          # Analysis CLI
 │   ├── visualize_dataset.py        # Visualization CLI
 │   └── validate_environment.py     # Environment validation

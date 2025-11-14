@@ -9,6 +9,7 @@ Usage:
 
 import sys
 from pathlib import Path
+from typing import Optional, Dict
 import click
 import logging
 
@@ -26,9 +27,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_token(token: Optional[str]) -> Optional[str]:
+    """Normalize user-provided names (ticker / column) for filesystem safety."""
+    if not token:
+        return None
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in token.strip())
+    cleaned = cleaned.strip("_")
+    return cleaned or None
+
+
+def _build_save_path(output_dir: str, suffix: str, column: str, ticker: Optional[str] = None) -> Path:
+    """Compose a deterministic filename that includes the ticker when available."""
+    parts = []
+    ticker_token = _sanitize_token(ticker)
+    column_token = _sanitize_token(column)
+    if ticker_token:
+        parts.append(ticker_token)
+    if column_token:
+        parts.append(column_token)
+    parts.append(suffix)
+    filename = "_".join(parts)
+    return Path(output_dir) / f"{filename}.png"
+
+
 @click.command()
-@click.option('--data', required=True, help='Path to dataset file (parquet or csv)')
-@click.option('--column', required=True, help='Column to visualize')
+@click.option('--data', required=False, help='Path to dataset file (parquet or csv)')
+@click.option('--from-db', is_flag=True, help='Load data directly from the SQLite database')
+@click.option('--db-path', default='data/portfolio_maximizer.db', help='Path to SQLite database')
+@click.option('--ticker', help='Ticker symbol when loading from database')
+@click.option('--lookback-days', default=180, help='Lookback window (days) when loading from database')
+@click.option('--column', default='Close', help='Column to visualize (default: Close)')
 @click.option('--overview', is_flag=True, help='Plot time series overview')
 @click.option('--distribution', is_flag=True, help='Plot distribution analysis')
 @click.option('--acf', is_flag=True, help='Plot ACF/PACF')
@@ -36,6 +64,8 @@ logger = logging.getLogger(__name__)
 @click.option('--rolling', is_flag=True, help='Plot rolling statistics')
 @click.option('--spectral', is_flag=True, help='Plot spectral density')
 @click.option('--dashboard', is_flag=True, help='Create comprehensive dashboard')
+@click.option('--forecast-dashboard', is_flag=True, help='Create forecast performance dashboard (database only)')
+@click.option('--signal-dashboard', is_flag=True, help='Create signal performance dashboard (database only)')
 @click.option('--context-columns', default='', help='Comma-separated context columns (market/commodity indices)')
 @click.option('--all-plots', is_flag=True, help='Generate all visualization types')
 @click.option('--output-dir', default='visualizations', help='Output directory for plots')
@@ -43,9 +73,11 @@ logger = logging.getLogger(__name__)
 @click.option('--show', is_flag=True, default=True, help='Display plots interactively')
 @click.option('--window', default=30, help='Rolling window size (default: 30)')
 @click.option('--nlags', default=40, help='Number of lags for ACF/PACF (default: 40)')
-def visualize_dataset(data: str, column: str, overview: bool, distribution: bool,
+def visualize_dataset(data: Optional[str], from_db: bool, db_path: str, ticker: Optional[str],
+                     lookback_days: int, column: str, overview: bool, distribution: bool,
                      acf: bool, decomposition: bool, rolling: bool, spectral: bool,
-                     dashboard: bool, context_columns: str, all_plots: bool, output_dir: str,
+                     dashboard: bool, forecast_dashboard: bool, signal_dashboard: bool,
+                     context_columns: str, all_plots: bool, output_dir: str,
                      save: bool, show: bool, window: int, nlags: int):
     """Comprehensive time series visualization following MIT standards."""
 
@@ -54,24 +86,51 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
     logger.info("=" * 80)
 
     # Load data
-    logger.info(f"\n📊 Loading data from: {data}")
-    try:
-        if data.endswith('.parquet'):
-            df = pd.read_parquet(data)
-        else:
-            df = pd.read_csv(data)
+    forecast_bundle: Dict[str, Dict[str, Optional[pd.Series]]] = {}
+    signal_metrics = pd.DataFrame()
 
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-        elif not isinstance(df.index, pd.DatetimeIndex):
-            logger.warning("No datetime index found. Using integer index.")
+    if from_db:
+        if not ticker:
+            logger.error("--ticker is required when using --from-db")
+            sys.exit(1)
+        logger.info(f"\n📊 Loading {ticker} from database: {db_path}")
+        try:
+            from etl.dashboard_loader import DashboardDataLoader
+        except ImportError as exc:
+            logger.error(f"Unable to import dashboard loader: {exc}")
+            sys.exit(1)
 
-        logger.info(f"✓ Data loaded: {df.shape[0]} rows × {df.shape[1]} columns")
+        loader = DashboardDataLoader.from_path(db_path)
+        price_df = loader.get_price_history(ticker, lookback_days=lookback_days, columns=[column])
+        if price_df is None or price_df.empty:
+            logger.error("No price history available for ticker %s", ticker)
+            sys.exit(1)
+        df = price_df
+        forecast_bundle = loader.get_forecast_bundle(ticker)
+        signal_metrics = loader.get_signal_backtests(ticker)
+        logger.info(f"✓ Loaded {len(df)} rows from database for {ticker}")
+    else:
+        if not data:
+            logger.error("Either --data or --from-db must be provided.")
+            sys.exit(1)
+        logger.info(f"\n📊 Loading data from: {data}")
+        try:
+            if data.endswith('.parquet'):
+                df = pd.read_parquet(data)
+            else:
+                df = pd.read_csv(data)
 
-    except Exception as e:
-        logger.error(f"Failed to load data: {e}")
-        sys.exit(1)
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df.set_index('Date', inplace=True)
+            elif not isinstance(df.index, pd.DatetimeIndex):
+                logger.warning("No datetime index found. Using integer index.")
+
+            logger.info(f"✓ Data loaded: {df.shape[0]} rows × {df.shape[1]} columns")
+
+        except Exception as e:
+            logger.error(f"Failed to load data: {e}")
+            sys.exit(1)
 
     # Validate column
     if column not in df.columns:
@@ -84,8 +143,10 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
     # Determine which plots to create
     if all_plots:
         overview = distribution = acf = decomposition = rolling = spectral = dashboard = True
+        forecast_dashboard = signal_dashboard = True
 
-    if not any([overview, distribution, acf, decomposition, rolling, spectral, dashboard]):
+    if not any([overview, distribution, acf, decomposition, rolling, spectral, dashboard,
+                forecast_dashboard, signal_dashboard]):
         # Default: show overview if nothing specified
         overview = True
 
@@ -107,7 +168,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
                                                    title=f"Time Series Overview: {column}")
         plots_created.append(('overview', fig))
         if save:
-            save_path = Path(output_dir) / f"{column}_overview.png"
+            save_path = _build_save_path(output_dir, "overview", column, ticker)
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"  ✓ Saved to {save_path}")
 
@@ -117,7 +178,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
         fig = visualizer.plot_distribution_analysis(df, column)
         plots_created.append(('distribution', fig))
         if save:
-            save_path = Path(output_dir) / f"{column}_distribution.png"
+            save_path = _build_save_path(output_dir, "distribution", column, ticker)
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"  ✓ Saved to {save_path}")
 
@@ -127,7 +188,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
         fig = visualizer.plot_autocorrelation(df, column, nlags=nlags)
         plots_created.append(('acf', fig))
         if save:
-            save_path = Path(output_dir) / f"{column}_acf_pacf.png"
+            save_path = _build_save_path(output_dir, "acf_pacf", column, ticker)
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"  ✓ Saved to {save_path}")
 
@@ -138,7 +199,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
             fig = visualizer.plot_decomposition(df, column)
             plots_created.append(('decomposition', fig))
             if save:
-                save_path = Path(output_dir) / f"{column}_decomposition.png"
+                save_path = _build_save_path(output_dir, "decomposition", column, ticker)
                 fig.savefig(save_path, dpi=150, bbox_inches='tight')
                 logger.info(f"  ✓ Saved to {save_path}")
         except Exception as e:
@@ -150,7 +211,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
         fig = visualizer.plot_rolling_statistics(df, column, window=window)
         plots_created.append(('rolling', fig))
         if save:
-            save_path = Path(output_dir) / f"{column}_rolling_stats.png"
+            save_path = _build_save_path(output_dir, "rolling_stats", column, ticker)
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"  ✓ Saved to {save_path}")
 
@@ -160,7 +221,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
         fig = visualizer.plot_spectral_density(df, column)
         plots_created.append(('spectral', fig))
         if save:
-            save_path = Path(output_dir) / f"{column}_spectral.png"
+            save_path = _build_save_path(output_dir, "spectral", column, ticker)
             fig.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"  ✓ Saved to {save_path}")
 
@@ -169,7 +230,7 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
 
     if dashboard:
         logger.info("Creating comprehensive dashboard...")
-        save_path = Path(output_dir) / f"{column}_dashboard.png" if save else None
+        save_path = _build_save_path(output_dir, "dashboard", column, ticker) if save else None
         fig = visualizer.plot_comprehensive_dashboard(
             df,
             column,
@@ -180,10 +241,59 @@ def visualize_dataset(data: str, column: str, overview: bool, distribution: bool
         if save:
             logger.info(f"  ✓ Saved to {save_path}")
 
+    if forecast_dashboard:
+        if not from_db:
+            logger.warning("Forecast dashboard requires --from-db; skipping.")
+        else:
+            logger.info("Creating forecast dashboard...")
+            forecasts_available = {
+                model: payload
+                for model, payload in forecast_bundle.items()
+                if isinstance(payload, dict) and payload.get("forecast") is not None
+            }
+            if not forecasts_available:
+                logger.warning("No forecasts available in the database; skipping forecast dashboard.")
+            else:
+                ensemble_payload = forecasts_available.get("ENSEMBLE") or forecasts_available.get("COMBINED")
+                weights = None
+                if isinstance(ensemble_payload, dict):
+                    weights = ensemble_payload.get("weights")
+                fig = visualizer.plot_forecast_dashboard(
+                    df[column],
+                    forecasts_available,
+                    title=f"{ticker or column} Forecast Dashboard",
+                    weights=weights,
+                )
+                plots_created.append(('forecast_dashboard', fig))
+                if save:
+                    save_path = _build_save_path(output_dir, "forecast_dashboard", column, ticker)
+                    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                    logger.info(f"  ✓ Saved to {save_path}")
+
+    if signal_dashboard:
+        if not from_db:
+            logger.warning("Signal dashboard requires --from-db; skipping.")
+        else:
+            logger.info("Creating signal performance dashboard...")
+            if signal_metrics.empty:
+                logger.warning("No LLM signal backtest data available; skipping signal dashboard.")
+            else:
+                fig = visualizer.plot_signal_performance(
+                    signal_metrics,
+                    ticker=ticker,
+                )
+                plots_created.append(('signal_dashboard', fig))
+                if save:
+                    save_path = _build_save_path(output_dir, "signal_dashboard", column, ticker)
+                    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+                    logger.info(f"  ✓ Saved to {save_path}")
+
     # Summary
     logger.info("\n" + "=" * 80)
     logger.info(f"VISUALIZATION COMPLETE")
     logger.info("=" * 80)
+    if from_db and ticker:
+        logger.info(f"Ticker analyzed: {ticker}")
     logger.info(f"Column analyzed: {column}")
     logger.info(f"Plots created: {len(plots_created)}")
     for plot_name, _ in plots_created:

@@ -1,0 +1,11 @@
+{
+  "data_source": "synthetic",
+  "execution_mode": "synthetic",
+  "pipeline_id": "pipeline_20251112_064413",
+  "fold_id": 4,
+  "split_strategy": "cross_validation",
+  "freq": "<BusinessDay>",
+  "saved_at": "2025-11-12T06:44:14.156241",
+  "rows": 147,
+  "run_id": "pipeline_20251112_064413"
+}

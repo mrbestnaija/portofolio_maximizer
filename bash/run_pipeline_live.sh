@@ -89,9 +89,25 @@ import json
 import os
 from pathlib import Path
 
+import yaml
+
 root = Path(os.environ["ROOT_DIR"])
 pipeline_id = os.environ["PIPELINE_ID"]
 events_path = root / "logs" / "events" / "events.log"
+quant_log_path = root / "logs" / "signals" / "quant_validation.jsonl"
+config_path = root / "config" / "quant_success_config.yml"
+
+tail_entries = 10
+if config_path.exists():
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+        tail_entries = int(
+            cfg.get("quant_validation", {})
+            .get("logging", {})
+            .get("tail_entries", tail_entries)
+        )
+    except Exception:
+        tail_entries = 10
 
 stage_rows = []
 with events_path.open() as fh:
@@ -125,6 +141,36 @@ for split in ("training", "validation", "testing"):
     if latest:
         size_kb = latest.stat().st_size / 1024
         print(f"  - {split}: {latest.name} ({size_kb:0.1f} KiB)")
+
+print("\nQuant validation summary:")
+if not quant_log_path.exists():
+    print("  (quant validation log not found)")
+else:
+    entries = []
+    with quant_log_path.open() as fh:
+        for line in fh:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entries.append(record)
+
+    matching = [r for r in entries if r.get("pipeline_id") == pipeline_id and r.get("pipeline_id")]
+    target = matching if matching else entries
+    target = target[-tail_entries:]
+
+    if not target:
+        print("  (no quant validation entries yet)")
+    else:
+        for record in target:
+            ticker = record.get("ticker", "UNKNOWN")
+            status = record.get("status") or record.get("quant_validation", {}).get("status", "UNKNOWN")
+            confidence = record.get("confidence")
+            expected_return = record.get("expected_return")
+            conf_str = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "n/a"
+            exp_str = f"{expected_return:.2%}" if isinstance(expected_return, (int, float)) else "n/a"
+            viz = record.get("visualization_path") or "n/a"
+            print(f"  - {ticker}: {status} (conf={conf_str}, exp={exp_str}) viz={viz}")
 print("")
 PY
 

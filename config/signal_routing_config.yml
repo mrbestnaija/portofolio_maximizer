@@ -1,0 +1,38 @@
+# Signal Routing Configuration
+# Time Series as Default Signal Generator, LLM as Fallback
+
+signal_routing:
+  # Primary signal source
+  time_series_primary: true  # DEFAULT: true - Time Series is primary
+  
+  # Fallback/redundancy
+  llm_fallback: true  # DEFAULT: true - Use LLM when Time Series fails
+  llm_redundancy: false  # Run both for validation (slower but more robust)
+  
+  # Time Series model flags
+  enable_samossa: true
+  enable_sarimax: true
+  enable_garch: true
+  enable_mssa_rl: true
+  
+  # Time Series signal generation thresholds
+  time_series:
+    confidence_threshold: 0.55  # Minimum confidence for signal (55%)
+    min_expected_return: 0.02   # 2% minimum expected return
+    max_risk_score: 0.7         # Maximum risk score (70%)
+    use_volatility_filter: true # Filter signals based on volatility
+  
+  # Fallback triggers
+  ts_fallback_triggers:
+    - forecast_unavailable
+    - confidence_below_threshold
+    - model_failure
+    - insufficient_data
+  
+  # Routing mode
+  routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:
+  # - TIME_SERIES_PRIMARY_LLM_FALLBACK (default)
+  # - TIME_SERIES_PRIMARY_LLM_REDUNDANCY
+  # - TIME_SERIES_ONLY
+  # - LLM_ONLY (legacy mode)
+

@@ -106,15 +106,23 @@ class LLMSignalGenerator:
             
             # Parse LLM signal
             signal = self._parse_signal_response(llm_response)
-            
+
+            # Align signal timestamp with the latest available market data point
+            latest_index = data.index[-1]
+            if isinstance(latest_index, datetime):
+                timestamp_iso = latest_index.isoformat()
+            else:
+                timestamp_iso = pd.to_datetime(latest_index).isoformat()
+
             # Add metadata
             signal.update({
                 'ticker': ticker,
-                'signal_timestamp': datetime.now().isoformat(),
+                'signal_timestamp': timestamp_iso,
                 'data_period': period_info,
                 'indicators': indicators,
                 'llm_model': self.client.model,
                 'fallback': False,
+                'signal_type': signal.get('action'),
             })
 
             should_fallback, reason = self._latency_guard()

@@ -1,20 +1,26 @@
 # System Status Report - Portfolio Maximizer v45
-**Date**: October 22, 2025  
-**Status**: 🟢 **PRODUCTION READY**  
-**Last Updated**: 2025-10-22 20:40 UTC
+**Date**: November 9, 2025  
+**Status**: 🟠 **DEGRADED (Latency + Scheduler pending)**  
+**Last Updated**: 2025-11-09 23:00 UTC
 
 ---
 
 ## 🎯 Executive Summary
 
-The Portfolio Maximizer v45 system is **production ready** with all core components operational. The recent LLM integration completion and Ollama health check fixes have resolved the final blocking issues. The system is now ready for live trading operations.
+The core ETL + Time Series stack remains production ready, but the **LLM monitoring job reports DEGRADED latency (15–38 s vs <5 s target)** and nightly validation backfills still need Task Scheduler registration. The new `forcester_ts` package, Time Series signal generator fix, and monitoring/backfill scripts are live; paper trading/broker wiring is on hold until latency and nightly jobs are closed.
 
-### Key Achievements
-- ✅ **LLM Integration**: Complete with 3 models operational
-- ✅ **Ollama Service**: Fixed and cross-platform compatible
-- ✅ **Pipeline Stability**: 100% success rate on recent runs
-- ✅ **Test Coverage**: 196 tests passing (100% success rate)
-- ✅ **Performance**: Sub-second cached runs, ~36s fresh data
+### Key Achievements (Nov 2025)
+- ✅ **Time Series Ensemble**: Default signal source with SARIMAX/SAMOSSA/MSSA‑RL/GARCH housed in `forcester_ts/` and regression metrics persisted to SQLite.
+- ✅ **Monitoring Upgrade**: `scripts/monitor_llm_system.py` now logs latency benchmarks (`logs/latency_benchmark.json`), surfaces `llm_signal_backtests`, and saves JSON run reports.
+- ✅ **Nightly Backfill Helper**: `schedule_backfill.bat` replays signal validation nightly; needs production Task Scheduler entry.
+- ✅ **Signal Generator Fix**: Volatility handling converted to scalars so GARCH output no longer crashes the generator—monitoring sees real signals again.
+- ⚠️ **LLM Latency**: deepseek-coder:6.7b still returns 15–38 s inference times (9–18 tokens/sec); requires prompt/model tuning or async fallback.
+- ⚠️ **Operational To-Do**: Register `schedule_backfill.bat`, investigate occasional SQLite `disk I/O error` during `llm_signals` migration, then green-light paper trading/broker wiring.
+- ✅ **Nov 12 delta**:
+  - `models/time_series_signal_generator.py` normalises pandas/NumPy payloads before decisioning and records the decision context; `logs/ts_signal_demo.json` proves SELL signals are now produced from SQLite OHLCV data instead of being stuck in HOLD.
+  - `etl/checkpoint_manager.py` writes metadata via `Path.replace`, removing the `[WinError 183]` blocker that previously halted second-run checkpoints on Windows.
+  - `scripts/backfill_signal_validation.py` injects the repo root into `sys.path`, so nightly cron jobs and the brutal suite can execute it from any directory without `ModuleNotFoundError`.
+  - Brutal suite status: everything except `tests/ai_llm/test_ollama_client.py::test_generate_switches_model_when_token_rate_low` now passes; latency mitigation remains the gating item before paper trading.
 
 ---
 
@@ -33,7 +39,8 @@ The Portfolio Maximizer v45 system is **production ready** with all core compone
 |-----------|--------|-------|-------------|
 | Ollama Service | 🟢 Active | 3 models available | Local GPU processing |
 | Market Analyzer | 🟢 Ready | qwen:14b-chat-q4_K_M | Primary model |
-| Signal Generator | 🟢 Ready | deepseek-coder:6.7b | Fallback model |
+| Time-Series Signal Generator | 🟢 Ready | SARIMAX/SAMOSSA/GARCH/MSSA-RL ensemble | **Primary** (per `REFACTORING_IMPLEMENTATION_COMPLETE.md`) |
+| LLM Signal Generator | 🟢 Ready | deepseek-coder:6.7b | Fallback / redundancy only |
 | Risk Assessor | 🟢 Ready | codellama:13b | Fallback model |
 
 ### Data Sources ✅ **OPERATIONAL**
@@ -78,15 +85,31 @@ data_storage         0.109s     ✅ SUCCESS
 TOTAL                0.44s      ✅ SUCCESS
 ```
 
+## 📈 Monitoring Snapshot (2025-11-06)
+
+| Metric | 19:09 run | 19:24 run | Notes |
+|--------|-----------|-----------|-------|
+| `llm_performance.status` | `DEGRADED_LATENCY` | `DEGRADED_LATENCY` | deepseek-coder:6.7b inference time 15.7 s → 37.6 s (threshold 5 s) |
+| Token rate | 3.12 tok/s | 1.65 tok/s | Triggered low token-rate warnings |
+| Signal quality | `NO_DATA` | `NO_DATA` | **Resolved** after Time Series generator fix + nightly backfill |
+| Signal backtests | `NO_DATA` | `NO_DATA` | Backfill job must run nightly (schedule_backfill.bat) |
+| DB integration | `HEALTHY` | `HEALTHY` | Risk assessments persisted (IDs 8 & 9) |
+| Performance optimization | `HEALTHY` | `HEALTHY` | Model recommendations still default to deepseek; consider faster fallback |
+
+**Action Items**
+1. Re-run `scripts/monitor_llm_system.py --headless` after each tuning attempt; review `logs/latency_benchmark.json`.
+2. Register `schedule_backfill.bat` (e.g., `schtasks /Create ... /SC DAILY /ST 02:00 /F`) so `llm_signal_backtests.summary` is never empty.
+3. Evaluate smaller Ollama models or prompt slimming to reach the <5 s target before enabling live paper trading/broker wiring.
+
 ---
 
 ## 🔧 Technical Infrastructure
 
 ### Virtual Environment
-- **Status**: ✅ Active (`simpleTrader_env`)
-- **Python Version**: 3.12
-- **Dependencies**: All installed and current
-- **Platform Support**: Linux/WSL + Windows PowerShell
+- **Status**: ✅ Active (`simpleTrader_env` – authorised environment)
+- **Python Version**: 3.12.x
+- **Dependencies**: `pip install -r requirements.txt` executed inside `simpleTrader_env`; parity with monitoring + ETL confirmed
+- **Platform Support**: Windows PowerShell (primary) + WSL-compatible scripts remain
 
 ### Database
 - **Type**: SQLite (`data/portfolio_maximizer.db`)
@@ -177,10 +200,11 @@ TOTAL                0.44s      ✅ SUCCESS
 ## 🎯 Next Steps
 
 ### Immediate Actions (Next 7 Days)
-1. **Monitor LLM Performance**: Track inference times in live scenarios
-2. **Validate Signal Quality**: Ensure LLM-generated signals are accurate
-3. **Database Integration**: Verify LLM risk assessments save properly
-4. **Performance Optimization**: Fine-tune model selection for speed
+1. **Register Nightly Backfill**: Add `schedule_backfill.bat` to Windows Task Scheduler (02:00 daily) so validator metrics never lapse.
+2. **Latency Mitigation**: Run `scripts/monitor_llm_system.py --headless` after testing prompt/model tweaks; keep `logs/latency_benchmark.json` <5 s before promoting to paper trading.
+3. **Signal Quality Regression**: Verify `llm_signal_backtests.summary` and Time Series signal counts after each pipeline run; rerun targeted pytest suites if gaps reappear.
+4. **Database Health**: Investigate the intermittent SQLite `disk I/O error` seen while adding `signal_timestamp/backtest_*` columns (likely file lock); document workaround.
+5. **Routing Compliance**: Keep `signal_routing.time_series_primary=true` and confirm `TimeSeriesSignalGenerator` outputs persist for dashboards/backtests.
 
 ### Short-term Goals (Next 30 Days)
 1. **Mathematical Enhancements**: Implement advanced risk metrics

@@ -15,7 +15,7 @@ import time
 import json
 import hashlib
 from collections import OrderedDict
-from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
+from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING, Sequence
 from datetime import datetime
 from .performance_monitor import monitor_inference
 
@@ -56,7 +56,9 @@ class OllamaClient:
                  generation_options: Optional[Dict[str, Any]] = None,
                  http_client: Optional[Any] = None,
                  cache_ttl_seconds: Optional[int] = 600,
-                 latency_failover_threshold: float = 12.0):
+                 latency_failover_threshold: float = 12.0,
+                 token_rate_failover_threshold: float = 12.0,
+                 fallback_models: Optional[Sequence[str]] = None):
         """
         Initialize Ollama client with strict validation.
         
@@ -72,6 +74,8 @@ class OllamaClient:
             http_client: Optional requests-compatible client (for testing/mocking)
             cache_ttl_seconds: Optional cache expiry in seconds (None disables TTL)
             latency_failover_threshold: Seconds before switching to faster fallback model on retry
+            token_rate_failover_threshold: Minimum tokens/sec before throughput fallback triggers
+            fallback_models: Optional ordered list of model names to attempt when performance degrades
         
         Raises:
             OllamaConnectionError: If Ollama is unavailable (REQUIRED per 3b)
@@ -86,6 +90,8 @@ class OllamaClient:
         self.timeout = timeout
         self.cache_ttl_seconds = cache_ttl_seconds
         self.latency_failover_threshold = max(1.0, float(latency_failover_threshold))
+        self.token_rate_failover_threshold = max(0.5, float(token_rate_failover_threshold))
+        self._manual_fallbacks = [m.strip() for m in (fallback_models or []) if m]
         self._session = http_client if http_client is not None else requests.Session()
         self._owns_session = http_client is None and hasattr(self._session, "close")
         self._explicit_model = model is not None
@@ -112,6 +118,12 @@ class OllamaClient:
                 self._optimizer_alternatives = []
         else:
             self._optimizer_alternatives = []
+
+        if self._manual_fallbacks:
+            fallback_chain = list(dict.fromkeys(self._manual_fallbacks))
+            self._optimizer_alternatives.extend(
+                model for model in fallback_chain if model != resolved_model
+            )
 
         self.model = resolved_model
         self._tried_models = {self.model}
@@ -323,6 +335,18 @@ class OllamaClient:
             return False
         return True
 
+    def _should_switch_model_for_token_rate(self, tokens_per_second: float) -> bool:
+        """Decide if we should swap models due to low token throughput."""
+        if tokens_per_second >= self.token_rate_failover_threshold:
+            return False
+        alternatives = getattr(self, "_optimizer_alternatives", [])
+        if not alternatives:
+            return False
+        for candidate in alternatives:
+            if candidate not in self._tried_models:
+                return True
+        return False
+
     def _switch_to_alternative_model(self, reason: str) -> bool:
         """Switch to the next available alternative model if present."""
         alternatives = getattr(self, "_optimizer_alternatives", [])
@@ -449,6 +473,20 @@ class OllamaClient:
                 duration = time.time() - start_time
                 duration = max(duration, 1e-6)
                 tokens_per_second = len(generated_text.split()) / duration
+                low_token_rate = tokens_per_second < self.token_rate_failover_threshold
+                low_token_reason = None
+                if low_token_rate:
+                    low_token_reason = (
+                        f"LLM token throughput {tokens_per_second:.2f} tokens/sec "
+                        f"below threshold {self.token_rate_failover_threshold:.2f} tokens/sec"
+                    )
+                    logger.warning(
+                        "%s (model=%s, prompt_chars=%d, response_chars=%d)",
+                        low_token_reason,
+                        self.model,
+                        len(optimised_prompt),
+                        len(generated_text),
+                    )
 
                 self._last_inference_stats = {
                     "success": True,
@@ -458,7 +496,50 @@ class OllamaClient:
                     "timestamp": datetime.now(),
                     "prompt_length": len(optimised_prompt),
                     "response_length": len(generated_text),
+                    "low_token_rate": low_token_rate,
                 }
+                if low_token_rate:
+                    self._last_inference_stats["error"] = low_token_reason
+
+                optimizer_recorded = False
+                if low_token_rate and self._should_switch_model_for_token_rate(tokens_per_second):
+                    if self.optimizer:
+                        try:
+                            self.optimizer.update_model_performance(
+                                model_name=self.model,
+                                inference_time=duration,
+                                tokens_per_second=tokens_per_second,
+                                success=False,
+                            )
+                            optimizer_recorded = True
+                        except Exception:  # pragma: no cover - defensive
+                            pass
+                    previous_model = self.model
+                    switched = self._switch_to_alternative_model("low token throughput")
+                    if switched:
+                        self._last_inference_stats.update(
+                            {
+                                "success": False,
+                                "fallback_reason": "low_token_throughput",
+                            }
+                        )
+                        monitor_inference(
+                            model_name=previous_model,
+                            prompt=optimised_prompt,
+                            response=generated_text,
+                            inference_time=duration,
+                            success=False,
+                            error_message=low_token_reason,
+                            fallback_used=True,
+                            fallback_reason="low_token_throughput",
+                        )
+                        cache_key = self._build_cache_key(optimised_prompt, system, temperature)
+                        continue
+                    logger.warning(
+                        "Low token throughput detected but alternative model validation failed; "
+                        "continuing with current model '%s'.",
+                        self.model,
+                    )
 
                 self._cache_set(
                     cache_key,
@@ -469,24 +550,25 @@ class OllamaClient:
                     },
                 )
 
-                if self.optimizer:
+                if self.optimizer and not optimizer_recorded:
                     try:
                         self.optimizer.update_model_performance(
                             model_name=self.model,
                             inference_time=duration,
                             tokens_per_second=tokens_per_second,
-                            success=True,
+                            success=not low_token_rate,
                         )
                     except Exception as opt_err:  # pragma: no cover - defensive
                         logger.debug(f"Performance optimizer update failed: {opt_err}")
                 
-                # Record performance metrics
                 monitor_inference(
                     model_name=self.model,
                     prompt=optimised_prompt,
                     response=generated_text,
                     inference_time=duration,
-                    success=True
+                    success=True,
+                    error_message=low_token_reason if low_token_rate else None,
+                    fallback_used=False,
                 )
                 
                 logger.info(

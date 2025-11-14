@@ -12,9 +12,13 @@ keys/
 api_keys.json
 database_credentials.json
 
+# Docker secrets directory (SECURITY: Contains API keys)
+secrets/
+*.txt
+
 # Virtual environments
 portfolio_env/
-simpleTrader_env/
+# simpleTrader_env/    # Uncomment if using simpleTrader
 portfolio-optimizer/
 venv/
 env/
@@ -77,6 +81,7 @@ data/testing/*.parquet
 # Visualizations (generated)
 visualizations/*.png
 visualizations/training/*.png
+visualizations/quant_validation/
 
 # Temporary files
 tmp/

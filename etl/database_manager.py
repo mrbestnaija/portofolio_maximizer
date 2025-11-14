@@ -479,6 +479,44 @@ class DatabaseManager:
             )
         """)
 
+        # Unified trading signals table (Time Series + LLM)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trading_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                signal_date DATE NOT NULL,
+                signal_timestamp TIMESTAMP,
+                action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL', 'HOLD')),
+                source TEXT NOT NULL CHECK(source IN ('TIME_SERIES', 'LLM', 'HYBRID')),
+                model_type TEXT,
+                confidence REAL CHECK(confidence BETWEEN 0 AND 1),
+                entry_price REAL NOT NULL,
+                target_price REAL,
+                stop_loss REAL,
+                expected_return REAL,
+                risk_score REAL,
+                volatility REAL,
+                reasoning TEXT,
+                provenance TEXT,  -- JSON string
+                validation_status TEXT DEFAULT 'pending' CHECK(validation_status IN ('pending', 'validated', 'failed', 'executed', 'archived')),
+                actual_return REAL,
+                backtest_annual_return REAL,
+                backtest_sharpe REAL,
+                backtest_alpha REAL,
+                backtest_hit_rate REAL,
+                backtest_profit_factor REAL,
+                latency_seconds REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker, signal_date, source, model_type)
+            )
+        """)
+        
+        # Create index for faster queries
+        self.cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trading_signals_ticker_date 
+            ON trading_signals(ticker, signal_date DESC)
+        """)
+        
         self._migrate_llm_risks_table()
         self._migrate_llm_signals_table()
 
@@ -1242,6 +1280,142 @@ class DatabaseManager:
         except Exception as e:
             safe_error = sanitize_error(e)
             logger.error(f"Failed to save forecast: {safe_error}")
+            return -1
+    
+    def save_trading_signal(
+        self,
+        ticker: str,
+        date: str,
+        signal: Dict,
+        source: str = 'TIME_SERIES',  # 'TIME_SERIES', 'LLM', 'HYBRID'
+        model_type: Optional[str] = None,
+        validation_status: str = 'pending',
+        latency: float = 0.0,
+    ) -> int:
+        """
+        Save unified trading signal (Time Series or LLM) to trading_signals table.
+        
+        Args:
+            ticker: Stock ticker symbol
+            date: Signal date (YYYY-MM-DD)
+            signal: Signal dictionary with action, confidence, etc.
+            source: Signal source ('TIME_SERIES', 'LLM', 'HYBRID')
+            model_type: Model type (e.g., 'ENSEMBLE', 'SARIMAX', 'qwen:14b-chat-q4_K_M')
+            validation_status: Validation status
+            latency: Signal generation latency in seconds
+            
+        Returns:
+            Signal ID or -1 on error
+        """
+        allowed_statuses = {'pending', 'validated', 'failed', 'executed', 'archived'}
+        status = validation_status.lower() if validation_status else 'pending'
+        if status not in allowed_statuses:
+            status = 'pending'
+        
+        if source not in ('TIME_SERIES', 'LLM', 'HYBRID'):
+            logger.warning(f"Invalid source '{source}', defaulting to 'TIME_SERIES'")
+            source = 'TIME_SERIES'
+        
+        try:
+            action = str(signal.get('action', 'HOLD')).upper()
+            if action not in {'BUY', 'SELL', 'HOLD'}:
+                action = 'HOLD'
+            
+            timestamp_raw = signal.get('signal_timestamp')
+            if isinstance(timestamp_raw, datetime):
+                signal_timestamp = timestamp_raw
+            elif isinstance(timestamp_raw, str) and timestamp_raw.strip():
+                try:
+                    signal_timestamp = datetime.fromisoformat(timestamp_raw.replace('Z', '+00:00'))
+                except ValueError:
+                    signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
+            else:
+                signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
+            
+            # Extract provenance (convert dict to JSON string if needed)
+            provenance = signal.get('provenance', {})
+            if isinstance(provenance, dict):
+                provenance = json.dumps(provenance)
+            elif not isinstance(provenance, str):
+                provenance = json.dumps({})
+            
+            actual_return = signal.get('actual_return')
+            backtest_metrics = signal.get('backtest_metrics', {}) or {}
+            
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO trading_signals
+                    (ticker, signal_date, signal_timestamp, action, source, model_type,
+                     confidence, entry_price, target_price, stop_loss, expected_return,
+                     risk_score, volatility, reasoning, provenance, validation_status,
+                     latency_seconds, actual_return, backtest_annual_return, backtest_sharpe,
+                     backtest_alpha, backtest_hit_rate, backtest_profit_factor)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, signal_date, source, model_type)
+                    DO UPDATE SET
+                        signal_timestamp = COALESCE(excluded.signal_timestamp, trading_signals.signal_timestamp),
+                        action = excluded.action,
+                        confidence = excluded.confidence,
+                        entry_price = excluded.entry_price,
+                        target_price = excluded.target_price,
+                        stop_loss = excluded.stop_loss,
+                        expected_return = excluded.expected_return,
+                        risk_score = excluded.risk_score,
+                        volatility = excluded.volatility,
+                        reasoning = excluded.reasoning,
+                        provenance = excluded.provenance,
+                        validation_status = excluded.validation_status,
+                        latency_seconds = excluded.latency_seconds,
+                        actual_return = COALESCE(excluded.actual_return, trading_signals.actual_return),
+                        backtest_annual_return = COALESCE(excluded.backtest_annual_return, trading_signals.backtest_annual_return),
+                        backtest_sharpe = COALESCE(excluded.backtest_sharpe, trading_signals.backtest_sharpe),
+                        backtest_alpha = COALESCE(excluded.backtest_alpha, trading_signals.backtest_alpha),
+                        backtest_hit_rate = COALESCE(excluded.backtest_hit_rate, trading_signals.backtest_hit_rate),
+                        backtest_profit_factor = COALESCE(excluded.backtest_profit_factor, trading_signals.backtest_profit_factor)
+                    """,
+                    (
+                        ticker,
+                        date,
+                        signal_timestamp,
+                        action,
+                        source,
+                        model_type or signal.get('model_type'),
+                        float(signal.get('confidence', 0.5)),
+                        float(signal.get('entry_price', 0.0)),
+                        signal.get('target_price'),
+                        signal.get('stop_loss'),
+                        signal.get('expected_return'),
+                        signal.get('risk_score'),
+                        signal.get('volatility'),
+                        signal.get('reasoning', ''),
+                        provenance,
+                        status,
+                        latency,
+                        actual_return,
+                        backtest_metrics.get('annual_return'),
+                        backtest_metrics.get('sharpe_ratio'),
+                        backtest_metrics.get('information_ratio'),
+                        backtest_metrics.get('hit_rate'),
+                        backtest_metrics.get('profit_factor'),
+                    ),
+                )
+            
+            self.cursor.execute(
+                """
+                SELECT id FROM trading_signals
+                WHERE ticker = ? AND signal_date = ? AND source = ? AND model_type = ?
+                """,
+                (ticker, date, source, model_type or signal.get('model_type')),
+            )
+            row = self.cursor.fetchone()
+            row_id = row['id'] if row else -1
+            logger.info("Saved trading signal for %s on %s (source=%s, ID: %s)", ticker, date, source, row_id)
+            return row_id
+            
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save trading signal: %s", safe_error)
             return -1
     
     def get_latest_signals(self, ticker: Optional[str] = None, limit: int = 10) -> List[Dict]:
