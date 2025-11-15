@@ -2,13 +2,28 @@
 **Refactoring to Time Series as Default Signal Generator**
 
 **Date**: 2025-11-06 (Updated)  
-**Status**: ✅ **FULLY IMPLEMENTED & WIRED** → 🟡 **REFACTORING IN PROGRESS**  
+**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run exposed regressions**  
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress
 
 ### 2025-11-12 Hardening Notes
 - models/time_series_signal_generator.py now normalises pandas/NumPy payloads before evaluation, eliminating the "truth value of a Series is ambiguous" crash and stamping decision context (expected return, confidence, risk, volatility) into provenance. logs/ts_signal_demo.json captures a SELL signal produced directly from SQLite OHLCV data.
 - Checkpoint metadata writes use Path.replace, so repeated Windows runs no longer fail with [WinError 183] when successive checkpoints are saved.
 - scripts/backfill_signal_validation.py injects the repo root into sys.path, allowing Task Scheduler or the brutal suite to invoke the script from any working directory without ModuleNotFoundError.
+- Stack reference: Time-series dependencies must stay within the Tier-1 baseline documented in `Documentation/QUANT_TIME_SERIES_STACK.md` (reuse the YAML/JSON AI-companion snippets there when provisioning new agents or CI containers).
+
+### 🚨 2025-11-15 Brutal Run Regression
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the MSSA serialization block (`scripts/run_etl_pipeline.py:1755-1764`) still raises `ValueError: The truth value of a DatetimeIndex is ambiguous` after ~90 inserts per ticker, contradicting the hardening claim above. Every ticker finishes with “Generated forecasts for 0 ticker(s)” so Stage 8 has nothing to route.
+- `logs/pipeline_run.log:16932-17729` together with `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirm the database is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so the persisted SARIMAX/SAMOSSA/MSSA rows referenced later in this document are now invalid. `DatabaseManager._connect` must treat this error like `"disk i/o error"` (reset/mirror) before re-running the stage.
+- The visualization hook fails immediately afterwards with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so forecast dashboards are not being generated.
+- Pandas/statsmodels warnings still flood the log because `forcester_ts/forecaster.py:128-136` forces a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged parameter grids, undermining the “ValueWarning-free” narrative above.
+- `scripts/backfill_signal_validation.py:281-292` continues to use `datetime.utcnow()` and sqlite’s default converters, causing the deprecation warnings documented in `logs/backfill_signal_validation.log:15-22`.
+
+**Blocking actions**
+1. Recover/rebuild `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` reuses the disk-I/O recovery path.
+2. Replace `change_points = mssa_result.get('change_points') or []` with logic that copies the `DatetimeIndex` into a list without boolean coercion, rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm Stage 8 consumes the ensemble outputs.
+3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboards exist again.
+4. Replace the deprecated Period coercion and narrow the SARIMAX search grid to eliminate the warning storm and improve convergence.
+5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before re-enabling nightly validation/backfills.
 
 
 ---

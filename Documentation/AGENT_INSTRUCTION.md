@@ -21,6 +21,13 @@
 - **Prerequisites**: ✅ All data infrastructure complete
 - **Status**: Ready to begin
 
+## Approved Time-Series Stack (Tier-1 default)
+- Canonical reference: `Documentation/QUANT_TIME_SERIES_STACK.md` (pin in every AI companion's context). Consider Tier-1 the only sanctioned dependency set until profitability + GPU budget gates unlock higher tiers.
+- Runtime: Python 3.10-3.12 inside `simpleTrader_env`, NumPy, pandas, SciPy.
+- Time-series libraries: statsmodels (SARIMAX), arch (GARCH), and in-repo SAMOSSA/MSSA-RL implementations.
+- Optional GPU assist: CuPy only when MSSA/SARIMAX workloads hit >70% CPU during brutal runs on <=8 GB GPUs. Escalate before introducing Tier-2 RAPIDS/torch stacks.
+- Automation: Reuse the YAML/JSON snippets from `QUANT_TIME_SERIES_STACK.md` under `config/ai_companion.yml` so autonomous agents inherit the same guardrails automatically.
+
 ## Pre-Development AI Instructions
 
 ### Core Directive for AI Assistant
@@ -41,6 +48,7 @@ MANDATORY: Before suggesting any code or architecture:
 - [ ] **Profitable strategy proven?** Awaiting Phase 5 (Portfolio Optimization)
 - [ ] **Working execution system?** Data pipeline operational, execution pending
 - [x] **Budget constraints respected?** Free tier data sources only
+- [ ] **Stack alignment locked?** Tier-1 stack from `QUANT_TIME_SERIES_STACK.md` confirmed as the only dependency delta; deviations documented + approved.
 
 ### Before Adding New Features
 - [ ] **Business case proven?** How does this improve returns by >1%?
