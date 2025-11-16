@@ -17,6 +17,7 @@ import logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from etl.visualizer import TimeSeriesVisualizer
+from forcester_ts.instrumentation import describe_dataframe
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -137,6 +138,10 @@ def visualize_dataset(data: Optional[str], from_db: bool, db_path: str, ticker: 
         logger.error(f"Column '{column}' not found. Available: {df.columns.tolist()}")
         sys.exit(1)
 
+    context_cols = [c.strip() for c in context_columns.split(",") if c.strip()]
+    metadata_columns = [column] + [col for col in context_cols if col in df.columns]
+    dataset_metadata = describe_dataframe(df, columns=metadata_columns)
+
     # Initialize visualizer
     visualizer = TimeSeriesVisualizer(figsize=(16, 12))
 
@@ -226,8 +231,6 @@ def visualize_dataset(data: Optional[str], from_db: bool, db_path: str, ticker: 
             logger.info(f"  ✓ Saved to {save_path}")
 
     # 7. Comprehensive Dashboard
-    context_cols = [c.strip() for c in context_columns.split(",") if c.strip()]
-
     if dashboard:
         logger.info("Creating comprehensive dashboard...")
         save_path = _build_save_path(output_dir, "dashboard", column, ticker) if save else None
@@ -236,6 +239,7 @@ def visualize_dataset(data: Optional[str], from_db: bool, db_path: str, ticker: 
             column,
             save_path=str(save_path) if save_path else None,
             market_columns=context_cols or None,
+            metadata=dataset_metadata,
         )
         plots_created.append(('dashboard', fig))
         if save:

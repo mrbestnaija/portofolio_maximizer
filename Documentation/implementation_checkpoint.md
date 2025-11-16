@@ -1,8 +1,44 @@
 # Implementation Checkpoint Document
-**Version**: 6.8
-**Date**: 2025-11-06 (Updated)
+**Version**: 6.9
+**Date**: 2025-11-14 (Updated)
 **Project**: Portfolio Maximizer
 **Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine + Remote Synchronization Enhancements + Time Series Signal Generation Refactoring
+
+---
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the production SQLite file is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every checkpoint/log reference cited in this document now points at a broken datastore. The writers in `etl/database_manager.py:689` and `:1213` currently fail.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` reveal Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The exception fires after the “Saved forecast …” block, so Stage 8 sees “No valid forecast available”.
+- The visualization hook immediately crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), preventing the PNG artefacts that usually accompany this checkpoint.
+- Pandas/statsmodels warnings remain unresolved (`forcester_ts/forecaster.py:128-136` still coerces a `PeriodIndex`; `_select_best_order` in `forcester_ts/sarimax.py:136-183` still retains unconverged grids) even though the Nov‑09 notes claimed otherwise. *(Warnings from these modules are now logged to `logs/warnings/warning_events.log`, so the checkpoint stream can be audited without relying on console spam.)*
+- `scripts/backfill_signal_validation.py:281-292` continues to call `datetime.utcnow()` with sqlite’s default converters, so the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22` persist.
+
+**Blocking actions**
+1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the same reset/mirror branch we already use for `"disk i/o error"`.
+2. Patch the MSSA `change_points` handling (copy to list instead of boolean short-circuit), rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm Stage 8 receives forecasts.
+3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are generated again.
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (the new warning recorder writes any remaining events to `logs/warnings/warning_events.log` for triage).
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document.
+
+## Executive Highlights (2025-11-14)
+### Autonomous Profit Engine + Broker Stack
+- `scripts/run_auto_trader.py` now owns the production automation path: it loads internal modules through `site.addsitedir`, executes extraction -> validation -> forecasting -> Time Series signal generation -> routing -> execution, and keeps book state synchronized each cycle with LLM fallbacks only when explicitly enabled.
+- `config/ai_companion.yml` plus the updated `scripts/run_auto_trader.py` boot sequence now expose the Tier-1 AI companion guardrails (tier tag + knowledge-base paths via `AI_COMPANION_*` env vars) so every automation run inherits the approved tooling stack before touching SARIMAX/SAMOSSA code.
+- Demo-first broker wiring is live in `execution/ctrader_client.py` and `execution/order_manager.py`, while `config/ctrader_config.yml` captures demo/live endpoints, margin caps, and lifecycle guardrails so PaperTradingEngine smoke runs can promote to broker demos without code changes.
+
+### Quant Success + Signal Assurance
+- `models/time_series_signal_generator.py` enforces the quant-success policy defined in `config/quant_success_config.yml`, persisting every scored decision to `logs/signals/quant_validation.jsonl` so brutal/dry-run scripts can surface the newest audit rows beside their stage timings.
+- `config/signal_routing_config.yml` stores the TS-first, LLM-fallback gating logic that both `scripts/run_auto_trader.py` and `scripts/run_etl_pipeline.py` now honor, keeping documentation, configuration, and runtime behavior aligned.
+
+### Validation + Risk Snapshot
+- Local automation currently lacks Python (`python -m pytest` fails with “Python was not found”), so none of the 246 unit/integration suites or the new execution tests can be exercised until the toolchain is reinstalled inside `simpleTrader_env`.
+- `bash/comprehensive_brutal_test.sh` (2025-11-12) passed the profit-critical + ETL suites, but it skipped `tests/etl/test_data_validator.py` (file missing) and timed out inside the Time Series block with a `Broken pipe`, leaving TS/LLM regression coverage outstanding. *(Nov 16 update: the script now defaults to TS-first runs with `BRUTAL_ENABLE_LLM=0`; set the variable to `1` only when you must exercise the LLM fallback.)*
+
+### Immediate Follow-Ups
+- [ ] Reinstall Python 3.12 + `pytest` in `simpleTrader_env`, then follow `Documentation/NEXT_IMMEDIATE_ACTION.md` to execute the unit/integration suites and capture logs.
+- [ ] Restore `tests/etl/test_data_validator.py` and rerun `bash/comprehensive_brutal_test.sh` so TS/LLM regressions produce full artifacts under `logs/brutal/`.
+- [ ] Capture a one-cycle smoke log from `scripts/run_auto_trader.py` (PaperTradingEngine only) to document the TS-first routing path before enabling live cTrader credentials.
+- [ ] Update `README.md` and `Documentation/UNIFIED_ROADMAP.md` once the above verification artifacts are attached, keeping the Autonomous Profit Engine messaging grounded in executed evidence.
 
 ---
 ## New Capabilities (2025-11-12)

@@ -4,6 +4,29 @@
 
 The `comprehensive_brutal_test.sh` script provides exhaustive, multi-hour testing of the entire Portfolio Maximizer project. It tests all stages, components, data sources, and configurations with multiple iterations to ensure robust operation.
 
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` plus `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` prove the SQLite store is corrupted (“rowid … out of order”, “row … missing from index”), so every writer in `etl/database_manager.py:689`/`:1213` now raises `database disk image is malformed`. The brutal suite currently exercises a broken database.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the time-series stage repeatedly failing with `ValueError: The truth value of a DatetimeIndex is ambiguous` after the MSSA serialization block in `scripts/run_etl_pipeline.py:1755-1764` evaluates `change_points or []`. Because the exception fires after the “Saved forecast …” messages, the suite still logs IDs 871‑960 and then reports “Generated forecasts for 0 ticker(s)”.
+- The visualization hook crashes immediately afterwards (`FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` at log lines 2626, 2981, …), so the dashboard export artefacts listed later in this README are currently not produced.
+- Hardening notes in `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md` claim the DatetimeIndex ambiguity was fixed, yet pandas/statsmodels continue to emit `PeriodDtype[B]` FutureWarnings and `ValueWarning`/`ConvergenceWarning` spam because `forcester_ts/forecaster.py:128-136` still does a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unstable combinations in the grid.
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` and sqlite’s default converters, which triggers the Python 3.12 deprecation warnings documented in `logs/backfill_signal_validation.log:15-22`. The brutal job will continue to warn until the script is modernised.
+
+**Immediate actions before rerunning the brutal suite**
+1. Recover or recreate `data/portfolio_maximizer.db`, then update `DatabaseManager._connect` so `"database disk image is malformed"` follows the same reset/mirror path we already use for `"disk i/o error"`.
+2. Patch `scripts/run_etl_pipeline.py` to copy MSSA `change_points` to a list (without boolean coercion), re-run `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and verify Stage 8 receives usable forecasts.
+3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` in the dashboard loader, generate a PNG, and attach it to the brutal output folder.
+4. Replace the Period coercion inside `forcester_ts/forecaster.py`, tighten the SARIMAX search space (`forcester_ts/sarimax.py:136-183`), and extend regression tests so pandas/statsmodels warnings stop polluting the brutal logs.
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(datetime.UTC)`) and explicit sqlite adapters before the nightly run that the brutal harness triggers.
+
+### ✅ 2025-11-16 Regression Fixes (validated via `logs/pipeline_run.log:22237-22986`)
+- `etl/database_manager.py` now normalises SQLite paths, backs up corrupt stores, and automatically mirrors `/mnt/*` deployments into `/tmp` without throwing warnings—all recent runs show clean INFO logs while writes succeed.
+- `scripts/run_etl_pipeline.py` serialises MSSA change points explicitly, so Stage 7/8 complete and IDs 361‑393 persist without DatetimeIndex crashes.
+- `etl/visualizer.py` monkey patches `Figure.autofmt_xdate` to ignore unsupported `axis` kwargs, restoring dashboard PNG exports for brutal artefacts.
+- `forcester_ts/forecaster.py` suppresses KPSS `InterpolationWarning`s and `forcester_ts/sarimax.py` demotes the fallback-order notice to INFO, preventing the warning storm highlighted above.
+- Finnhub availability is now treated as optional; when `FINNHUB_API_KEY` is absent the manager logs a single INFO line instead of spamming warnings.
+- Outstanding item: `scripts/backfill_signal_validation.py` still needs timezone-aware adapters before nightly brutal tasks can be marked green.
+- **Transparency upgrade (Nov 16)**: `forcester_ts/instrumentation.py` captures dataset shape/frequency/statistics per stage and `TimeSeriesVisualizer` renders those summaries directly on dashboards (see `logs/forecast_audits/*.json`). Every brutal report now references concrete data dimensions rather than hand-wavy descriptions.
+
 ## Features
 
 ### ✅ Comprehensive Stage Testing

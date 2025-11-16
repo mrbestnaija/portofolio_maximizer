@@ -206,6 +206,8 @@ def _generate_visual_dashboards(
         price_df = loader.get_price_history(ticker, lookback_days=lookback_days)
         if price_df is None or price_df.empty:
             continue
+        price_df = price_df.sort_index()
+        price_df = price_df.loc[~price_df.index.duplicated(keep="last")]
 
         if generate_forecast:
             forecast_bundle = loader.get_forecast_bundle(ticker)
@@ -234,6 +236,8 @@ def _generate_visual_dashboards(
         if generate_signal:
             signal_df = loader.get_signal_backtests(ticker)
             if not signal_df.empty:
+                signal_df = signal_df.sort_index()
+                signal_df = signal_df.loc[~signal_df.index.duplicated(keep="last")]
                 fig = visualizer.plot_signal_performance(signal_df, ticker=ticker)
                 save_path = output_dir / f"{ticker}_signal_dashboard.png"
                 fig.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -1757,10 +1761,18 @@ def execute_pipeline(
                                 mssa_series = mssa_result.get('forecast', pd.Series())
                                 lower_ci = mssa_result.get('lower_ci')
                                 upper_ci = mssa_result.get('upper_ci')
-                                change_points = mssa_result.get('change_points') or []
+                                raw_change_points = mssa_result.get('change_points')
+                                if raw_change_points is None:
+                                    change_points_iterable: List[Any] = []
+                                elif isinstance(raw_change_points, (pd.Index, pd.Series, np.ndarray)):
+                                    change_points_iterable = list(raw_change_points)
+                                elif isinstance(raw_change_points, (list, tuple, set)):
+                                    change_points_iterable = list(raw_change_points)
+                                else:
+                                    change_points_iterable = [raw_change_points]
                                 change_points = [
                                     cp.isoformat() if hasattr(cp, 'isoformat') else str(cp)
-                                    for cp in change_points
+                                    for cp in change_points_iterable
                                 ]
                                 diagnostics = {
                                     'baseline_variance': mssa_result.get('baseline_variance'),

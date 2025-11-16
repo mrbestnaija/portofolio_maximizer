@@ -1,40 +1,35 @@
 # Core scientific stack
-numpy>=1.24.0,<3.0.0
-pandas>=2.0.0,<3.0.0
-scipy>=1.10.0,<2.0.0
-scikit-learn>=1.3.0
+numpy>=1.26,<3.0
+pandas>=2.1,<3.0
+scipy>=1.11,<2.0
+scikit-learn>=1.3,<2.0
 
-# Time series, plotting, visualization
-statsmodels>=0.14.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
+# Time-series, econometrics, and data APIs
+statsmodels>=0.14,<1.0
+arch>=6.0,<7.0
+yfinance>=0.2,<1.0
+pandas-datareader>=0.10,<1.0
 
-# Data access and I/O
-yfinance>=0.2.0
-pandas-datareader>=0.10.0
-requests>=2.31.0
-pyarrow>=12.0.0
+# Visualization & reporting
+matplotlib>=3.8,<4.0
+seaborn>=0.13,<1.0
 
-# Configuration and utilities
-pyyaml>=6.0
-python-dotenv>=1.0.0
-click>=8.1.0
-tqdm>=4.65.0
+# Data access / serialization / utilities
+requests>=2.31,<3.0
+pyarrow>=12.0,<15.0
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0,<2.0
+click>=8.1,<9.0
+tqdm>=4.66,<5.0
 
-# LLM integration
-ollama>=0.1.0
+# LLM + Ollama client
+ollama>=0.1,<1.0
+
+# Optional GPU acceleration for MSSA-RL (Linux CUDA hosts only)
+cupy-cuda12x>=13.0 ; platform_system == "Linux"
+
+# Database optional (PostgreSQL support)
+psycopg[binary]>=3.1,<4.0
 
 # Testing
-pytest>=7.4.0
-
-# Time Series Forecasting Dependencies
-# Install with: pip install -r requirements_forecasting.txt
-
-# SARIMAX model
-statsmodels>=0.14.0
-
-# GARCH volatility modeling
-arch>=6.0.0
-
-# Optional GPU acceleration for MSSA-RL (requires CUDA 12.x runtime)
-cupy-cuda12x>=13.0.0; platform_system == "Linux"
+pytest>=7.4,<9.0

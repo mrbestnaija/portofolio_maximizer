@@ -12,14 +12,16 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
+import os
 import site
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import pandas as pd
+import yaml
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 site.addsitedir(str(ROOT_PATH))
@@ -42,6 +44,7 @@ except Exception:  # pragma: no cover - optional path
     OllamaConnectionError = Exception  # type: ignore
 
 logger = logging.getLogger(__name__)
+AI_COMPANION_CONFIG_PATH = ROOT_PATH / "config" / "ai_companion.yml"
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -63,7 +66,7 @@ def _initialize_llm_generator(model: str) -> Optional[LLMSignalGenerator]:
         logger.info("LLM fallback READY (%s)", model)
         return LLMSignalGenerator(ollama_client=client)
     except OllamaConnectionError as err:
-        logger.warning("LLM fallback disabled: %s", err)
+            logger.warning("LLM fallback disabled: %s", err)
         return None
 
 
@@ -204,6 +207,48 @@ def _summarize_portfolio(engine: PaperTradingEngine) -> Dict:
     }
 
 
+def _load_ai_companion_config(config_path: Path = AI_COMPANION_CONFIG_PATH) -> Dict[str, Any]:
+    """Load the AI companion guardrail file so launchers inherit the approved stack."""
+    if not config_path.exists():
+        logger.warning("AI companion config missing at %s", config_path)
+        return {}
+
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+    except yaml.YAMLError as exc:
+        logger.error("Failed to parse AI companion config: %s", exc)
+        return {}
+
+    return payload
+
+
+def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
+    """Expose tier + knowledge base guardrails via env vars for downstream agents."""
+    if not companion_config:
+        return
+
+    settings = companion_config.get("ai_companion") or {}
+    stack_meta = settings.get("recommended_stack") or {}
+    tier = stack_meta.get("tier")
+    knowledge_base = settings.get("knowledge_base") or []
+
+    if tier:
+        os.environ["AI_COMPANION_STACK_TIER"] = str(tier)
+    if knowledge_base:
+        resolved = [
+            str((ROOT_PATH / kb_entry).resolve())
+            for kb_entry in knowledge_base
+        ]
+        os.environ["AI_COMPANION_KB"] = os.pathsep.join(resolved)
+
+    logger.info(
+        "AI companion guardrails active (tier=%s, kb_entries=%s)",
+        tier or "unknown",
+        len(knowledge_base),
+    )
+
+
 @click.command()
 @click.option(
     "--tickers",
@@ -270,6 +315,9 @@ def main(
 ) -> None:
     """Entry point for the automated profit engine."""
     _configure_logging(verbose)
+    companion_config = _load_ai_companion_config()
+    _activate_ai_companion_guardrails(companion_config)
+
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     if not ticker_list:
         raise click.UsageError("At least one ticker symbol is required.")

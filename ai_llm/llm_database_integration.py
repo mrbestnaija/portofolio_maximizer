@@ -6,15 +6,18 @@ Ensures LLM risk assessments and signals are properly saved to database
 import logging
 import sqlite3
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
+from pathlib import Path
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
 DEFAULT_RISK_LEVEL = "high"
+DEFAULT_DB_PATH = os.environ.get("LLM_DB_PATH", "data/portfolio_maximizer.db")
 
 
 def _normalise_risk_level(level: Any) -> str:
@@ -63,8 +66,29 @@ class LLMDatabaseManager:
     """
     
     def __init__(self, db_path: str = "data/portfolio_maximizer.db"):
+        # Preserve original string path for backward compatibility/tests.
         self.db_path = db_path
+        self._db_file: Optional[Path] = None
+        self._db_path_str = db_path
+        if db_path != ":memory:":
+            resolved = Path(db_path).resolve()
+            self._db_file = resolved
+            self._db_path_str = str(resolved)
+        self._prepare_db_path()
         self._ensure_tables_exist()
+
+    def _prepare_db_path(self) -> None:
+        """Ensure the SQLite file and parent directories exist with safe permissions."""
+        if self.db_path == ":memory:" or self._db_file is None:
+            return
+        parent = self._db_file.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if not self._db_file.exists():
+            self._db_file.touch()
+        try:
+            os.chmod(self._db_file, 0o600)
+        except OSError:  # pragma: no cover - best effort on Windows/WSL
+            logger.debug("Unable to update permissions for %s", self._db_file)
 
     # ------------------------------------------------------------------ #
     # Utility helpers (backward compatibility for legacy schemas)
@@ -115,7 +139,7 @@ class LLMDatabaseManager:
     
     def _ensure_tables_exist(self):
         """Create LLM-specific tables if they don't exist"""
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self._db_path_str) as conn:
             cursor = conn.cursor()
             
             # LLM Signals table
@@ -266,7 +290,7 @@ class LLMDatabaseManager:
     def save_llm_signal(self, signal: LLMSignal) -> int:
         """Save LLM signal to database"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute("""
@@ -301,7 +325,7 @@ class LLMDatabaseManager:
     def save_risk_assessment(self, assessment: LLMRiskAssessment) -> int:
         """Save LLM risk assessment to database"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
                 risk_level = _normalise_risk_level(assessment.risk_level)
                 
@@ -337,7 +361,7 @@ class LLMDatabaseManager:
                                error_message: Optional[str] = None) -> int:
         """Save LLM performance metrics to database"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute("""
@@ -366,7 +390,7 @@ class LLMDatabaseManager:
     def get_recent_signals(self, hours: int = 24) -> List[LLMSignal]:
         """Get recent LLM signals"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -412,7 +436,7 @@ class LLMDatabaseManager:
     def get_recent_risk_assessments(self, hours: int = 24) -> List[LLMRiskAssessment]:
         """Get recent LLM risk assessments"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -457,7 +481,7 @@ class LLMDatabaseManager:
     def get_performance_summary(self, hours: int = 24) -> Dict[str, Any]:
         """Get LLM performance summary"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -517,7 +541,7 @@ class LLMDatabaseManager:
     def cleanup_old_data(self, days_to_keep: int = 30):
         """Clean up old LLM data to prevent database bloat"""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self._db_path_str) as conn:
                 cursor = conn.cursor()
                 
                 cutoff_date = datetime.now().replace(day=datetime.now().day - days_to_keep)
@@ -547,8 +571,16 @@ class LLMDatabaseManager:
             logger.error(f"Failed to cleanup old data: {e}")
 
 
-# Global database manager instance
-llm_db_manager = LLMDatabaseManager()
+# Global database manager instance (lazy load to avoid import-time DB access)
+_DEFAULT_LLM_DB_MANAGER: Optional[LLMDatabaseManager] = None
+
+
+def get_llm_db_manager() -> LLMDatabaseManager:
+    """Return a cached LLMDatabaseManager using DEFAULT_DB_PATH."""
+    global _DEFAULT_LLM_DB_MANAGER
+    if _DEFAULT_LLM_DB_MANAGER is None:
+        _DEFAULT_LLM_DB_MANAGER = LLMDatabaseManager(DEFAULT_DB_PATH)
+    return _DEFAULT_LLM_DB_MANAGER
 
 
 def save_llm_signal(ticker: str, signal_type: str, confidence: float,
@@ -569,7 +601,7 @@ def save_llm_signal(ticker: str, signal_type: str, confidence: float,
         timestamp=datetime.now(),
         market_data_snapshot=market_data_snapshot or {}
     )
-    return llm_db_manager.save_llm_signal(signal)
+    return get_llm_db_manager().save_llm_signal(signal)
 
 
 def save_risk_assessment(portfolio_id: str, risk_score: float,
@@ -590,9 +622,9 @@ def save_risk_assessment(portfolio_id: str, risk_score: float,
         market_conditions=market_conditions or {},
         confidence=confidence
     )
-    return llm_db_manager.save_risk_assessment(assessment)
+    return get_llm_db_manager().save_risk_assessment(assessment)
 
 
 def get_performance_summary(hours: int = 24) -> Dict[str, Any]:
     """Convenience function to retrieve aggregated LLM performance data."""
-    return llm_db_manager.get_performance_summary(hours)
+    return get_llm_db_manager().get_performance_summary(hours)

@@ -1,7 +1,21 @@
 # Feature Implementation Verification Report
 
 **Date**: 2025-01-27  
-**Status**: ✅ **VERIFIED - Implementation Status**
+**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run uncovered regressions**
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` both report `database disk image is malformed` with dozens of “rowid … out of order / missing from index” errors, so feature evidence backed by SQLite rows is presently untrustworthy. All writers in `etl/database_manager.py:689` and `:1213` now fail.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the time-series stage failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The stage therefore logs “Saved forecast …” and then “Generated forecasts for 0 ticker(s)”.
+- The visualization step immediately crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so the dashboards cited in this report are not being generated.
+- Hardening statements elsewhere about pandas/statsmodels warnings being resolved are contradicted by the brutal log: `forcester_ts/forecaster.py:128-136` still uses the deprecated Period round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged orders, filling the logs with `FutureWarning`/`ValueWarning`.
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` plus sqlite’s default converters, triggering the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22`.
+
+**Required follow-up before any feature remains “verified”**
+1. Rebuild the SQLite store (or run `sqlite3 … ".recover"`), then extend `DatabaseManager._connect` so `"database disk image is malformed"` reuses the existing disk-I/O reset/mirror path.
+2. Patch the MSSA `change_points` logic to convert the `DatetimeIndex` into a list instead of using boolean short-circuiting, re-run the forecasting stage, and confirm Stage 8 consumes the resulting bundles.
+3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so visualization proof points exist again.
+4. Replace the Period coercion and tighten SARIMAX order search to silence the warnings that now dominate the logs.
+5. Modernize `scripts/backfill_signal_validation.py` (timezone-aware timestamps + sqlite adapters) so nightly jobs stop emitting deprecation warnings.
 
 ---
 

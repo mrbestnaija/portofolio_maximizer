@@ -3,9 +3,24 @@ I'll update the `next-to-do.md` file with comprehensive ML modeling and optimiza
 ```markdown
 # UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
 
-## CURRENT PROJECT STATUS: PRODUCTION READY ✅ (UPDATED Nov 12, 2025)
+## CURRENT PROJECT STATUS: 🔴 BLOCKED (Updated Nov 15, 2025 brutal run)
 **Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
 **Recent Achievements**:
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite store is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every persistence-dependent task in this list is blocked until the DB is rebuilt and `DatabaseManager._connect` handles this error like the existing disk-I/O branch.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` demonstrate Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. As soon as ~90 forecast rows are inserted the stage logs “Generated forecasts for 0 ticker(s)”, so all downstream Time Series/LLM tasks stall.
+- The visualization hook subsequently throws `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), meaning the dashboards mentioned in this file cannot be produced right now.
+- Pandas/statsmodels warning spam remains (`forcester_ts/forecaster.py:128-136` Period round-trip; `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged grids) even though the Nov‑09 hardening note claimed otherwise.
+- `scripts/backfill_signal_validation.py:281-292` still calls `datetime.utcnow()` with sqlite’s default converters, triggering the Python 3.12 deprecation warnings seen in `logs/backfill_signal_validation.log:15-22`.
+
+**Blocking tasks that must precede every other TODO**
+1. Recover/recreate `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` leverages the reset/mirror logic.
+2. Fix the MSSA `change_points` path (copy the `DatetimeIndex` to a list) and rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting` to rehydrate Stage 8.
+3. Remove the unsupported `axis=` argument before invoking `FigureBase.autofmt_xdate()` so visualization checkpoints generate artefacts again.
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid to stop warning spam from drowning out actionable errors. *(Completed Nov 16; any residual warnings are now routed to `logs/warnings/warning_events.log` for auditing via `etl/warning_recorder.py`.)*
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters prior to the nightly job described later in this document.
+- ✅ **2025-11-16 status**: Items 1–4 shipped in `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, `forcester_ts/forecaster.py`, and `forcester_ts/sarimax.py`. See `logs/pipeline_run.log:22237-22986` for the clean ETL execution. Item 5 (validator modernization) remains outstanding.
 - Phase 4.8: Checkpointing & Event Logging (Oct 7, 2025)
 - Phase 5.1: Alpha Vantage & Finnhub APIs Complete (Oct 7, 2025)
 - Phase 5.2: LLM Integration Complete (Ollama) (Oct 8, 2025)

@@ -2,7 +2,7 @@
 
 **Version**: 1.0
 **Date**: 2025-10-07
-**Status**: ✅ PRODUCTION READY
+**Status**: 🔴 BLOCKED – See 2025-11-15 brutal run regressions
 
 ## Executive Summary
 
@@ -12,6 +12,28 @@ Comprehensive checkpointing and event logging system implemented for the ETL pip
 - **7-day retention policy** for logs and checkpoints
 - **Automatic cleanup** of old files
 - **Zero breaking changes** - fully backward compatible
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and a direct `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` run show the primary SQLite store is corrupted (“rowid … out of order / missing from index”), so the checkpoint metadata the system saves is being written into a broken container. Every insert from `etl/database_manager.py:689` and `:1213` now raises `database disk image is malformed`.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` capture repeated `ValueError: The truth value of a DatetimeIndex is ambiguous` exceptions inside the MSSA serialization block (`scripts/run_etl_pipeline.py:1755-1764`). The crash occurs after `checkpoint_manager.save_checkpoint()` is called, so we log “Saved forecast …” and still end up with empty stage metadata downstream.
+- Immediately afterwards the visualization hook fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so the logging/artefact promises in this document are not true right now.
+- We continue to emit pandas/statmodels warnings during forecasting because `forcester_ts/forecaster.py:128-136` still coerces a `PeriodIndex` and `_select_best_order` in `forcester_ts/sarimax.py:136-183` leaves unconverged grids in place. These warnings swamp the log stream this guide relies upon.
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` and sqlite’s default converters, causing repeated Python 3.12 deprecation warnings in `logs/backfill_signal_validation.log:15-22`, which undermines the “clean logging” requirement.
+
+**Immediate actions**
+1. Rebuild or recover `data/portfolio_maximizer.db` and extend `DatabaseManager._connect` so `"database disk image is malformed"` triggers the same reset/mirror branch as `"disk i/o error"`. Only then will checkpoints and log rotation have a trustworthy backend.
+2. Patch the MSSA `change_points` block in `scripts/run_etl_pipeline.py` to cast the `DatetimeIndex` to a list instead of using boolean short-circuiting, then rerun the forecasting stage to confirm checkpoints contain actual forecasts.
+3. Remove the unsupported `axis=` argument in the Matplotlib auto-format call so the visualization stage can record dashboards/log references again.
+4. Update `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py` as noted above to eliminate the warning storm that currently buries meaningful events.
+5. Modernize `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and explicit sqlite adapters to keep log noise minimal.
+
+### ✅ 2025-11-16 Regression Fixes
+- `etl/database_manager.py` now auto-backs up corrupt stores and mirrors `/mnt/*` paths to `/tmp`, so the checkpoint metadata in `logs/pipeline_run.log:22237-22986` was written without any SQLite warnings.
+- `scripts/run_etl_pipeline.py` serialises MSSA change points cleanly, keeping the stage-level checkpoint hashes (`pipeline_20251116_005737_*`) consistent across data extraction → router runs.
+- The Matplotlib fix in `etl/visualizer.py` restores PNG artefacts and event log cross-references that this guide touts.
+- KPSS/Convergence warning noise has been silenced by `forcester_ts/forecaster.py` (InterpolationWarning guard) and `forcester_ts/sarimax.py` (INFO-only fallback notices), keeping the structured log stream readable.
+- Remaining monitoring gap: `scripts/backfill_signal_validation.py` still uses naive UTC stamps; once adapters land, we can flip the status banner above to 🟢.
+- **Transparency note**: Forecast checkpoints now bundle the instrumentation payload (`forcester_ts/instrumentation.py`), and dashboards surface dataset dimensions/statistics via `TimeSeriesVisualizer`. Every logged checkpoint references the exact data shape/frequency processed that run.
 
 ---
 

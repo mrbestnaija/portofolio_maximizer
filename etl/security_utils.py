@@ -64,12 +64,12 @@ def sanitize_log_message(message: str, sensitive_patterns: Optional[list] = None
     import re
     
     if sensitive_patterns is None:
-        # Default patterns for common sensitive data
+        # Default patterns for common sensitive data (case-insensitive)
         sensitive_patterns = [
-            (r'api[_-]?key["\s:=]+([a-zA-Z0-9_-]{20,})', r'api_key=***REDACTED***'),
-            (r'password["\s:=]+([^\s"\']+)', r'password=***REDACTED***'),
-            (r'token["\s:=]+([a-zA-Z0-9_-]{20,})', r'token=***REDACTED***'),
-            (r'secret["\s:=]+([a-zA-Z0-9_-]{20,})', r'secret=***REDACTED***'),
+            (r'(api[_-]?key["\s:=]+)([^\s,"\']+)', r'\1***REDACTED***'),
+            (r'(password["\s:=]+)([^\s,"\']+)', r'\1***REDACTED***'),
+            (r'(token["\s:=]+)([^\s,"\']+)', r'\1***REDACTED***'),
+            (r'(secret["\s:=]+)([^\s,"\']+)', r'\1***REDACTED***'),
         ]
     
     sanitized = message

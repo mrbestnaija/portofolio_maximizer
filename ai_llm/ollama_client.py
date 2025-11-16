@@ -91,6 +91,7 @@ class OllamaClient:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.latency_failover_threshold = max(1.0, float(latency_failover_threshold))
         self.token_rate_failover_threshold = max(0.5, float(token_rate_failover_threshold))
+        self._token_rate_baseline_seconds = 1.0
         self._manual_fallbacks = [m.strip() for m in (fallback_models or []) if m]
         self._session = http_client if http_client is not None else requests.Session()
         self._owns_session = http_client is None and hasattr(self._session, "close")
@@ -472,7 +473,11 @@ class OllamaClient:
                 
                 duration = time.time() - start_time
                 duration = max(duration, 1e-6)
-                tokens_per_second = len(generated_text.split()) / duration
+                effective_duration = max(duration, self._token_rate_baseline_seconds)
+                word_tokens = max(1.0, float(len(generated_text.split())))
+                char_tokens = max(1.0, len(generated_text) / 4.0)
+                token_estimate = min(word_tokens, char_tokens)
+                tokens_per_second = token_estimate / effective_duration
                 low_token_rate = tokens_per_second < self.token_rate_failover_threshold
                 low_token_reason = None
                 if low_token_rate:

@@ -55,6 +55,9 @@ MONITORING_LATENCY_HARD_LIMIT="${MONITORING_LATENCY_HARD_LIMIT:-45}"
 BRUTAL_KEEP_DB_CHANGES="${BRUTAL_KEEP_DB_CHANGES:-0}"
 DB_BACKUP_FILE=""
 
+# Time Series is canonical; LLM fallback requires explicit opt-in (see docs)
+BRUTAL_ENABLE_LLM="${BRUTAL_ENABLE_LLM:-0}"
+
 # Virtual environment (authorised)
 VENV_NAME="${VENV_NAME:-simpleTrader_env}"
 
@@ -280,15 +283,20 @@ setup_environment() {
         log_warning "pytest.ini not found (tests may still work)"
     fi
     
-    # Step 7: Check Ollama (optional, per arch_tree.md)
-    if command -v ollama &> /dev/null; then
-        log_success "Ollama found"
-        OLLAMA_AVAILABLE=1
+    # Step 7: Check Ollama only when LLM fallback suite is explicitly enabled
+    if [ "$BRUTAL_ENABLE_LLM" = "1" ]; then
+        if command -v ollama &> /dev/null; then
+            log_success "Ollama found"
+            OLLAMA_AVAILABLE=1
+        else
+            log_warning "Ollama not found - LLM fallback tests will be skipped"
+            OLLAMA_AVAILABLE=0
+        fi
     else
-        log_warning "Ollama not found - LLM tests will be skipped"
+        log_info "BRUTAL_ENABLE_LLM=0 -> Skipping Ollama detection (Time Series suite is canonical per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)"
         OLLAMA_AVAILABLE=0
     fi
-    
+
     # Step 8: Verify .env exists but don't expose keys (per API_KEYS_SECURITY.md)
     if [ -f ".env" ]; then
         log_success ".env file found (keys protected)"
@@ -679,13 +687,20 @@ test_signal_routing() {
 }
 
 test_llm_integration() {
+    log_section "LLM Integration Tests"
+    if [ "$BRUTAL_ENABLE_LLM" != "1" ]; then
+        log_info "LLM fallback suite disabled (BRUTAL_ENABLE_LLM=0). Forecaster models are the default per TIME_SERIES_FORECASTING_IMPLEMENTATION.md."
+        echo "llm_integration,0,0" >> "$RESULTS_DIR/stage_summary.csv"
+        return
+    fi
+
     if [ "$OLLAMA_AVAILABLE" = "0" ]; then
         log_warning "Skipping LLM integration tests (Ollama not available)"
+        echo "llm_integration,0,0" >> "$RESULTS_DIR/stage_summary.csv"
         return
     fi
     
-    log_section "LLM Integration Tests"
-    log_info "Testing LLM modules (per arch_tree.md)"
+    log_info "Testing LLM modules (fallback benchmark only; see arch_tree.md)"
     
     local test_log="$LOGS_DIR/llm_tests.log"
     local passed=0
@@ -1043,8 +1058,18 @@ def fetch_one(sql, params=()):
     return row[0] if row and row[0] is not None else 0
 
 ts_signals = fetch_one("SELECT COUNT(*) FROM trading_signals WHERE source='TIME_SERIES'")
-if ts_signals < min_ts:
-    print(json.dumps({"error": "INSUFFICIENT_TS_SIGNALS", "time_series_signals": int(ts_signals)}, indent=2))
+dynamic_min = max(len(tickers), 1) if tickers else 0
+required_signals = min_ts if dynamic_min == 0 else min(min_ts, dynamic_min)
+if ts_signals < required_signals:
+    print(json.dumps(
+        {
+            "error": "INSUFFICIENT_TS_SIGNALS",
+            "time_series_signals": int(ts_signals),
+            "required": int(required_signals),
+            "tickers": tickers,
+        },
+        indent=2,
+    ))
     sys.exit(3)
 
 missing_tickers = []
@@ -1435,7 +1460,9 @@ EOF
         echo "- ⚠️  Review failed tests in $LOGS_DIR" >> "$report_file"
     fi
     
-    if [ "$OLLAMA_AVAILABLE" = "0" ]; then
+    if [ "$BRUTAL_ENABLE_LLM" != "1" ]; then
+        echo "- ⚙️  LLM fallback suite intentionally skipped (BRUTAL_ENABLE_LLM=0). Time Series brutal checks are the approval gate per TIME_SERIES_FORECASTING_IMPLEMENTATION.md." >> "$report_file"
+    elif [ "$OLLAMA_AVAILABLE" = "0" ]; then
         echo "- ⚠️  LLM tests skipped (Ollama not available)" >> "$report_file"
     fi
     
@@ -1454,6 +1481,9 @@ main() {
     log_info "Per AGENT_INSTRUCTION.md, AGENT_DEV_CHECKLIST.md, and project guidelines"
     log_info "Expected duration: $TEST_DURATION_HOURS hours"
     log_info "Script is fully self-contained - all setup is automatic"
+    if [ "$BRUTAL_ENABLE_LLM" != "1" ]; then
+        log_info "Operating in TIME_SERIES-FIRST mode (LLM fallback disabled). Export BRUTAL_ENABLE_LLM=1 to include LLM benchmarks."
+    fi
     
     # Initialize stage summary
     echo "stage,passed,failed" > "$RESULTS_DIR/stage_summary.csv"

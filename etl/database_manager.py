@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 # Updated in Phase 5.x to support extreme risk classification
 ALLOWED_RISK_LEVELS = {'low', 'medium', 'high', 'extreme'}
 
+# SQLite error markers used to decide fallback strategies (docs: arch_tree/implementation)
+SQLITE_TRANSIENT_ERRORS = ("disk i/o error",)
+SQLITE_CORRUPTION_ERRORS = (
+    "database disk image is malformed",
+    "file is encrypted or is not a database",
+    "unable to open database file",
+)
+SQLITE_RECOVERABLE_ERRORS = SQLITE_TRANSIENT_ERRORS + SQLITE_CORRUPTION_ERRORS
+
 
 def _normalise_risk_level(level: Any) -> str:
     """Coerce risk levels into the allowed database taxonomy."""
@@ -72,38 +81,122 @@ class DatabaseManager:
         Args:
             db_path: Path to SQLite database file
         """
-        self.db_path = Path(db_path).resolve()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # SECURITY: Set secure file permissions (read/write for owner only)
-        try:
-            if self.db_path.exists():
-                os.chmod(self.db_path, 0o600)  # Read/write for owner only
-            else:
-                self.db_path.touch()
-                os.chmod(self.db_path, 0o600)
-        except OSError as exc:  # pragma: no cover - best effort on Windows/WSL mounts
-            logger.debug("Unable to adjust permissions for %s: %s", self.db_path, exc)
+        self.backend = "sqlite"
+        self.paramstyle = "?"
+
+        db_path_str = str(db_path).strip()
+        self._sqlite_in_memory = self.backend == "sqlite" and db_path_str == ":memory:"
+        self._db_path_hint_is_dir = isinstance(db_path, str) and db_path_str.endswith(("/", "\\"))
+        self.db_path = Path(db_path_str)
         
         self.conn = None
         self.cursor = None
         self._busy_timeout_ms = 10000  # Reduce disk I/O contention on Windows
         self._mirror_path: Optional[Path] = None
         self._active_db_path: Path = self.db_path
-
+        if self.backend == "sqlite":
+            self._ensure_sqlite_path_exists()
         self._connect()
         self._initialize_schema()
         
         logger.info(f"Database initialized at: {self.db_path}")
+
+    def _ensure_sqlite_path_exists(self) -> None:
+        """
+        Ensure the SQLite database path is valid before connecting.
+        
+        Handles three cases documented in the architecture/implementation notes:
+        1. Respect explicit in-memory connections (":memory:") without touching disk.
+        2. Allow callers to pass a directory so we drop the default DB name inside it.
+        3. Create/secure the SQLite file on disk with owner-only permissions.
+        """
+        if getattr(self, "_sqlite_in_memory", False):
+            # Keep the special value untouched so sqlite3.connect(":memory:") works.
+            self.db_path = Path(":memory:")
+            self._active_db_path = self.db_path
+            logger.debug("Configured DatabaseManager to use in-memory SQLite database.")
+            return
+
+        normalized_path = Path(self.db_path).expanduser()
+
+        # Allow callers to pass a directory and automatically place the DB inside it.
+        if self._db_path_hint_is_dir or normalized_path.is_dir():
+            normalized_path = normalized_path / "portfolio_maximizer.db"
+
+        normalized_path = normalized_path.resolve()
+
+        try:
+            normalized_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"Unable to create SQLite directory for {normalized_path}: {exc}") from exc
+
+        if not normalized_path.exists():
+            try:
+                normalized_path.touch()
+            except OSError as exc:
+                raise RuntimeError(f"Unable to create SQLite file at {normalized_path}: {exc}") from exc
+
+        # SECURITY: Set secure file permissions (read/write for owner only)
+        try:
+            os.chmod(normalized_path, 0o600)
+        except OSError as exc:  # pragma: no cover - best effort on Windows/WSL mounts
+            logger.debug("Unable to adjust permissions for %s: %s", normalized_path, exc)
+
+        self.db_path = normalized_path
+        self._active_db_path = normalized_path
+    
+    def _is_transient_sqlite_error(self, message: str) -> bool:
+        """Return True if the sqlite error message is a transient I/O issue."""
+        return any(marker in message for marker in SQLITE_TRANSIENT_ERRORS)
+
+    def _is_corruption_sqlite_error(self, message: str) -> bool:
+        """Return True if sqlite reported corruption/missing backing files."""
+        return any(marker in message for marker in SQLITE_CORRUPTION_ERRORS)
+
+    def _backup_corrupted_database(self) -> Optional[Path]:
+        """Move the corrupted SQLite store aside so a clean file can be created."""
+        if getattr(self, "_sqlite_in_memory", False):
+            return None
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        backup_name = f"{self.db_path.name}.corrupt.{timestamp}"
+        backup_path = self.db_path.with_name(backup_name)
+
+        try:
+            if self.db_path.exists():
+                shutil.move(str(self.db_path), str(backup_path))
+        except OSError as exc:
+            logger.error("Failed to back up corrupted SQLite database %s: %s", self.db_path, exc)
+            raise
+
+        # Preserve any lingering WAL/SHM files for forensic analysis.
+        for suffix in ("-wal", "-shm"):
+            artifact = Path(f"{self.db_path}{suffix}")
+            if artifact.exists():
+                artifact_backup = artifact.with_name(f"{artifact.name}.corrupt.{timestamp}")
+                try:
+                    shutil.move(str(artifact), str(artifact_backup))
+                except OSError as exc:
+                    logger.debug("Unable to move SQLite artifact %s: %s", artifact, exc)
+
+        return backup_path if backup_path.exists() else None
     
     def _connect(self):
         """Establish database connection"""
         connect_kwargs = {
             "detect_types": sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            "timeout": self._busy_timeout_ms / 1000.0,
         }
+        if self._should_skip_wal(self.db_path):
+            logger.debug(
+                "Database path %s is on a Windows mount; operating on a POSIX mirror to avoid locking issues.",
+                self.db_path,
+            )
+            self._activate_posix_mirror(connect_kwargs)
+            return
         attempts = 0
         use_wal = True
         last_error: Optional[Exception] = None
+        rebuild_attempted = False
 
         while attempts < 3:
             try:
@@ -112,9 +205,9 @@ class DatabaseManager:
             except sqlite3.OperationalError as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if "disk i/o error" in message:
+                if self._is_transient_sqlite_error(message):
                     logger.warning(
-                        "SQLite disk I/O error while configuring journal (%s). "
+                        "SQLite storage error while configuring journal (%s). "
                         "Attempt %s/%s falling back to DELETE mode.",
                         exc,
                         attempts + 1,
@@ -125,6 +218,19 @@ class DatabaseManager:
                     use_wal = False
                     attempts += 1
                     time.sleep(min(0.2 * attempts, 1.0))
+                    continue
+                if self._is_corruption_sqlite_error(message) and not rebuild_attempted:
+                    rebuild_attempted = True
+                    self._close_safely()
+                    backup_path = self._backup_corrupted_database()
+                    logger.error(
+                        "SQLite reported corruption (%s). Backed up broken store to %s and creating a clean database.",
+                        exc,
+                        backup_path or "N/A",
+                    )
+                    self._ensure_sqlite_path_exists()
+                    attempts = 0
+                    use_wal = True
                     continue
                 raise
 
@@ -138,14 +244,52 @@ class DatabaseManager:
     def _establish_connection(self, target_path: Path, use_wal: bool, connect_kwargs: Dict[str, Any]) -> None:
         """Open a SQLite connection to the desired path."""
         self.conn = sqlite3.connect(str(target_path), **connect_kwargs)
-        journal_mode = "WAL" if use_wal else "DELETE"
-        self.conn.execute(f"PRAGMA journal_mode={journal_mode};")
-        self.conn.execute("PRAGMA synchronous=NORMAL;")
-        self.conn.execute("PRAGMA foreign_keys=ON;")
-        self.conn.execute(f"PRAGMA busy_timeout={self._busy_timeout_ms};")
         self.conn.row_factory = sqlite3.Row  # Return rows as dictionaries
         self.cursor = self.conn.cursor()
         self._active_db_path = target_path
+        self._configure_sqlite_connection(target_path, use_wal)
+
+    def _configure_sqlite_connection(self, target_path: Path, use_wal: bool) -> None:
+        """
+        Apply SQLite tuning pragmas but gracefully handle environments where they fail.
+        
+        WSL/Windows drives often reject WAL/synchronous pragmas, so we treat them as optional.
+        """
+        if use_wal:
+            if not self._should_skip_wal(target_path):
+                if not self._safe_execute_pragma("journal_mode", "WAL"):
+                    logger.warning(
+                        "Unable to enable SQLite WAL mode on %s. Continuing with default journal mode.",
+                        target_path,
+                    )
+            else:
+                logger.debug("Skipping WAL configuration for %s due to cross-filesystem constraints.", target_path)
+
+        self._safe_execute_pragma("synchronous", "NORMAL")
+        self._safe_execute_pragma("foreign_keys", "ON")
+        self._safe_execute_pragma("busy_timeout", str(self._busy_timeout_ms))
+
+    def _safe_execute_pragma(self, pragma: str, value: str) -> bool:
+        """Apply a SQLite PRAGMA and return True on success."""
+        try:
+            self.conn.execute(f"PRAGMA {pragma}={value}")
+            return True
+        except sqlite3.OperationalError as exc:
+            logger.debug(
+                "Unable to apply SQLite PRAGMA %s=%s on %s: %s",
+                pragma,
+                value,
+                getattr(self, "_active_db_path", "unknown"),
+                exc,
+            )
+            return False
+
+    def _should_skip_wal(self, target_path: Path) -> bool:
+        """WSL Windows mounts (/mnt/*) do not support SQLite WAL reliably."""
+        if os.name != "posix":
+            return False
+        target = str(target_path)
+        return target.startswith("/mnt/")
 
     def _cleanup_wal_artifacts(self, target: Optional[Path] = None) -> None:
         """Remove stale WAL/SHM files that can trigger disk I/O errors."""
@@ -165,7 +309,7 @@ class DatabaseManager:
             return False
         err = str(error).lower()
         path_str = str(self.db_path)
-        return "disk i/o error" in err and path_str.startswith("/mnt/")
+        return any(marker in err for marker in SQLITE_RECOVERABLE_ERRORS) and path_str.startswith("/mnt/")
 
     def _activate_posix_mirror(self, connect_kwargs: Dict[str, Any]) -> None:
         """Copy the database to a POSIX-friendly temp path and operate on that copy."""
@@ -183,7 +327,7 @@ class DatabaseManager:
             raise
 
         self._mirror_path = mirror_path
-        logger.warning(
+        logger.info(
             "Operating on temporary SQLite mirror %s due to cross-filesystem locking issues with %s.",
             mirror_path,
             self.db_path,
@@ -338,7 +482,10 @@ class DatabaseManager:
         """)
         
         # Trade executions (for profit/loss tracking)
-        self.cursor.execute("""
+        fk_clause = ""
+        if self.backend != "sqlite":
+            fk_clause = ", FOREIGN KEY (signal_id) REFERENCES llm_signals (id)"
+        trade_executions_sql = f"""
             CREATE TABLE IF NOT EXISTS trade_executions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT NOT NULL,
@@ -348,14 +495,15 @@ class DatabaseManager:
                 price REAL NOT NULL,
                 total_value REAL NOT NULL,
                 commission REAL DEFAULT 0,
-                signal_id INTEGER,  -- Link to llm_signals
+                signal_id INTEGER,
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
                 holding_period_days INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (signal_id) REFERENCES llm_signals (id)
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                {fk_clause}
             )
-        """)
+        """
+        self.cursor.execute(trade_executions_sql)
         
         # Time series forecasts (SARIMAX/GARCH/SAMOSSA)
         forecast_table_sql = """

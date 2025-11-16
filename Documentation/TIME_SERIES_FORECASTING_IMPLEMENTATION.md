@@ -1,4 +1,4 @@
-# Time Series Forecasting Implementation - Complete
+﻿# Time Series Forecasting Implementation - Complete
 **Refactoring to Time Series as Default Signal Generator**
 
 **Date**: 2025-11-06 (Updated)  
@@ -10,12 +10,13 @@
 - Checkpoint metadata writes use Path.replace, so repeated Windows runs no longer fail with [WinError 183] when successive checkpoints are saved.
 - scripts/backfill_signal_validation.py injects the repo root into sys.path, allowing Task Scheduler or the brutal suite to invoke the script from any working directory without ModuleNotFoundError.
 - Stack reference: Time-series dependencies must stay within the Tier-1 baseline documented in `Documentation/QUANT_TIME_SERIES_STACK.md` (reuse the YAML/JSON AI-companion snippets there when provisioning new agents or CI containers).
+- `bash/comprehensive_brutal_test.sh` now runs in **Time Series-first** mode by default; export `BRUTAL_ENABLE_LLM=1` only if you need to benchmark the legacy LLM fallback. This keeps the brutal gate aligned with the TS-first mandate captured in this document.
 
 ### 🚨 2025-11-15 Brutal Run Regression
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the MSSA serialization block (`scripts/run_etl_pipeline.py:1755-1764`) still raises `ValueError: The truth value of a DatetimeIndex is ambiguous` after ~90 inserts per ticker, contradicting the hardening claim above. Every ticker finishes with “Generated forecasts for 0 ticker(s)” so Stage 8 has nothing to route.
 - `logs/pipeline_run.log:16932-17729` together with `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirm the database is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so the persisted SARIMAX/SAMOSSA/MSSA rows referenced later in this document are now invalid. `DatabaseManager._connect` must treat this error like `"disk i/o error"` (reset/mirror) before re-running the stage.
 - The visualization hook fails immediately afterwards with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so forecast dashboards are not being generated.
-- Pandas/statsmodels warnings still flood the log because `forcester_ts/forecaster.py:128-136` forces a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged parameter grids, undermining the “ValueWarning-free” narrative above.
+- Pandas/statsmodels warnings still flood the log because `forcester_ts/forecaster.py:128-136` forces a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged parameter grids, undermining the “ValueWarning-free” narrative above. *(Nov 16 update: these warnings are now captured automatically in `logs/warnings/warning_events.log`, so follow that file for regression analysis even when console output stays quiet.)*
 - `scripts/backfill_signal_validation.py:281-292` continues to use `datetime.utcnow()` and sqlite’s default converters, causing the deprecation warnings documented in `logs/backfill_signal_validation.log:15-22`.
 
 **Blocking actions**
@@ -24,6 +25,10 @@
 3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboards exist again.
 4. Replace the deprecated Period coercion and narrow the SARIMAX search grid to eliminate the warning storm and improve convergence.
 5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before re-enabling nightly validation/backfills.
+
+### ✅ 2025-11-16 Interpretability & Telemetry Upgrade
+- `forcester_ts/instrumentation.py` now captures per-model timing, configuration, diagnostic artifacts, and data snapshots (shape, window, missing %, statistical moments). `TimeSeriesForecaster.forecast()` embeds this report under `instrumentation_report` and (when `ensemble_kwargs.audit_log_dir` or the `TS_FORECAST_AUDIT_DIR` env var is set) writes JSON audits to disk.
+- Each SARIMAX/SAMOSSA/MSSA/GARCH fit/forecast phase is wrapped in the instrumentation context manager so change-points, orders, and information-criteria become searchable logs aligned with `Documentation/QUANT_TIME_SERIES_STACK.md` guidance on interpretable AI. The comprehensive dashboard prints this metadata directly on the figure so visual evidence matches the dataset actually processed.
 
 
 ---
@@ -207,59 +212,49 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
 
 ---
 
-## 🔄 Pipeline Flow
+## 🚀 Pipeline Flow
 
-### Current Flow (Before Refactoring)
+### Production Flow (Time Series-First, Current)
+```
+1. Data Extraction
+2. Data Validation
+3. Data Preprocessing
+4. Data Storage / Splitting
+5. Time Series Forecasting      (PRIMARY SIGNAL SOURCE)
+   - SARIMAX mean forecasts
+   - GARCH volatility forecasts
+   - SAMOSSA SSA-based forecasts
+   - MSSA-RL change-point forecasts
+   - Ensemble/combined bundles
+6. Time Series Signal Generation (convert forecasts to actions + confidence)
+7. Signal Router                (routes TS first, invokes LLM fallback only when required)
+8. LLM Market Analysis          (optional fallback diagnostics)
+9. LLM Signal Generation        (optional fallback signals)
+10. LLM Risk Assessment         (optional fallback risk summary)
+11. Signal Validation & Execution
+12. Persistence to `trading_signals`
+```
+
+### Legacy Flow (LLM-First, Deprecated)
 ```
 1. Data Extraction
 2. Data Validation
 3. Data Preprocessing
 4. Data Storage / Splitting
 5. LLM Market Analysis          (optional)
-6. LLM Signal Generation        (optional) ← PRIMARY SIGNAL SOURCE
+6. LLM Signal Generation        (optional) - PRIOR PRIMARY SIGNAL SOURCE (retired)
 7. LLM Risk Assessment          (optional)
-8. Time Series Forecasting      ★ Enhanced (separate, not used for signals)
-   ├─ SARIMAX mean forecasts
-   ├─ GARCH volatility forecasts
-   ├─ SAMOSSA SSA-based forecasts
-   ├─ MSSA-RL change-point forecasts
-   └─ Hybrid mean + diagnostics (AIC/BIC/EVR/CUSUM hooks)
+8. Time Series Forecasting      - Enhanced (separate, not used for signals)
+   - SARIMAX mean forecasts
+   - GARCH volatility forecasts
+   - SAMOSSA SSA-based forecasts
+   - MSSA-RL change-point forecasts
+   - Hybrid mean + diagnostics (AIC/BIC/EVR/CUSUM hooks)
 9. Persistence to `time_series_forecasts`
 ```
 
-### Target Flow (After Refactoring)
-```
-1. Data Extraction
-2. Data Validation
-3. Data Preprocessing
-4. Data Storage / Splitting
-5. Time Series Forecasting      ★ MOVED UP, PRIMARY SIGNAL SOURCE
-   ├─ SARIMAX mean forecasts
-   ├─ GARCH volatility forecasts
-   ├─ SAMOSSA SSA-based forecasts
-   ├─ MSSA-RL change-point forecasts
-   └─ Ensemble forecast bundle
-6. Time Series Signal Generation ★ NEW
-   ├─ Convert forecasts to signals
-   ├─ Calculate confidence scores
-   ├─ Calculate risk scores
-   └─ Determine actions (BUY/SELL/HOLD)
-7. Signal Router                 ★ NEW
-   ├─ Route Time Series signals (PRIMARY)
-   ├─ Route LLM signals (FALLBACK)
-   └─ Combine/reconcile signals
-8. LLM Market Analysis          (fallback/redundancy)
-9. LLM Signal Generation        (fallback/redundancy)
-10. LLM Risk Assessment         (fallback/redundancy)
-11. Signal Validation & Execution
-12. Persistence to `trading_signals` (unified table)
-```
-
-> ℹ️ **Refactoring Status**: Core components created. Pipeline integration in progress. See `Documentation/REFACTORING_STATUS.md` for detailed progress and critical issues.
-
----
-
-## 📊 Usage Examples
+> ✅ **Refactoring Status**: Core components created. Pipeline integration complete for TS-first flow; LLM stages are fallback only. See Documentation/REFACTORING_STATUS.md for detailed progress and critical issues.
+## ?? Usage Examples
 
 ### Current Usage (Forecasting Only)
 ```python

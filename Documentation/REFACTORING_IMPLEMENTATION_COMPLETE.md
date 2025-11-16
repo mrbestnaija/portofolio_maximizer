@@ -1,12 +1,25 @@
 # Time Series as Default Signal Generator - Implementation Status
 **Date**: 2025-11-06  
-**Status**: 🟡 **IMPLEMENTED - ROBUST TESTING REQUIRED**
+**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run regressions**
 
 ### Nov 12, 2025 Snapshot
 - Signal generator hardened (pandas-safe payload handling + provenance decision context); see logs/ts_signal_demo.json for real BUY/SELL output.
 - Checkpoint metadata persistence uses Path.replace, eliminating [WinError 183] when multiple checkpoints save on Windows.
 - Validator backfill script now bootstraps sys.path, so nightly automation hits the same code paths exercised by the brutal suite.
 
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite datastore is corrupted, so none of the TS-first routing claims in this document can be validated until `DatabaseManager._connect` treats `"database disk image is malformed"` like `"disk i/o error"` (reset/mirror) and the file is rebuilt.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. Despite the Nov‑09 regression update, the crash persists and the pipeline logs “Generated forecasts for 0 ticker(s)”.
+- Immediately afterwards the visualization hook throws `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so there are no dashboard artefacts to accompany this refactor.
+- Pandas/statsmodels warning spam remains unresolved (`forcester_ts/forecaster.py:128-136` Period round-trip; `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged grids), contradicting the hardening narrative above.
+- `scripts/backfill_signal_validation.py:281-292` still calls `datetime.utcnow()` with sqlite’s default converters, generating Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`) each time the nightly validation job runs.
+
+**Mandatory fix list**
+1. Recover/rebuild `data/portfolio_maximizer.db` and extend `DatabaseManager._connect` so `"database disk image is malformed"` hits the reset/mirror path.
+2. Patch `scripts/run_etl_pipeline.py:1755-1764` to copy the MSSA `DatetimeIndex` into a list before iterating, rerun the forecasting stage, and confirm Stage 8 receives TS forecasts.
+3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so visualization artefacts exist again.
+4. Replace the deprecated Period coercion + tighten the SARIMAX grid to eliminate the warning storm.
+5. Update `scripts/backfill_signal_validation.py` with timezone-aware timestamps and sqlite adapters before re-enabling nightly validation.
 
 ---
 

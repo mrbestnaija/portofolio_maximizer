@@ -2,6 +2,9 @@ Here’s a curated, institution-grade stack you can run fully locally on CPU/GPU
 
 Quant & Time-Series Stack (Local CPU/GPU)
 
+> **Nov 16, 2025 Update**  
+> The Tier-1 stack now includes the hardened SQLite + statsmodels settings shipped alongside `etl/database_manager.py`, `forcester_ts/forecaster.py`, and `forcester_ts/sarimax.py`. Warning streams from these components are no longer suppressed—they are forwarded to `logs/warnings/warning_events.log` via `etl/warning_recorder.py`, and `forcester_ts/instrumentation.py` emits JSON audits (dataset shape, statistics, timing) for interpretable forecasting when `TS_FORECAST_AUDIT_DIR` is configured.
+
 Focus: data science, ML, and statistical modeling for time series / investments / portfolios, widely used in academia and industry, all runnable locally.
 
 ## Tiered Stack Overview (Project-Aligned)

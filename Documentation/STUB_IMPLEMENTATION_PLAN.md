@@ -2,7 +2,7 @@
 **Comprehensive Review and Replacement Strategy**
 
 **Date**: 2025-11-12  
-**Status**: ACTIVE  
+**Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions  
 **Priority**: HIGH - Complete all stubs before production deployment
 
 ### Nov 12, 2025 Update
@@ -10,6 +10,20 @@
 - Checkpoint/metadata utilities are stable on Windows thanks to Path.replace, unblocking future stub work that writes checkpoints repeatedly.
 - Validator/backfill stubs can assume scripts/backfill_signal_validation.py is callable from scheduled jobs; only the scheduler glue remains.
 
+### 🚨 2025-11-15 Brutal Run Regression
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the database that these stubs rely on is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”). `DatabaseManager._connect` must treat this error like the existing disk-I/O path before any stub replacement can be validated.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 still failing with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The refactors cited above therefore leave Stage 8 without data.
+- The visualization hook crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so dashboard/pipeline stubs that depend on PNG artefacts cannot be closed yet.
+- Pandas/statsmodels warning spam persists because `forcester_ts/forecaster.py:128-136` forces a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged orders, contradicting the “forecaster stubs resolved” statement. *(Resolved with warning capture on Nov 16 — review `logs/warnings/warning_events.log` for the preserved warning stream.)*
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` and sqlite’s default converters, generating Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`) whenever validator stubs run.
+
+**Blocking fixes**
+1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the reset/mirror flow.
+2. Patch the MSSA `change_points` branch (cast to list) and rerun the forecasting stage to feed Stage 8.
+3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so visualization-dependent stubs can be validated.
+4. Replace the deprecated Period coercion + tighten SARIMAX order search to silence warnings and stabilise the forecasting core.
+5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before scheduling nightly backfills that exercise these stubs.
+- ✅ `2025-11-16` note: Fixes 1–4 are now complete (see `logs/pipeline_run.log:22237-22986` for the clean pipeline run). Remaining blocker for this plan is the validator modernization in item 5.
 
 ---
 

@@ -133,7 +133,12 @@ class DataSourceManager:
                 from etl.secret_loader import load_secret
                 api_key = load_secret(credentials_env)
                 if not api_key:
-                    logger.warning(f"Missing API key for {name}: {credentials_env} not set in .env or Docker secrets")
+                    logger.info(
+                        "Skipping %s extractor; credential %s not configured. "
+                        "Set the environment variable or Docker secret to enable this provider.",
+                        name,
+                        credentials_env,
+                    )
                     return None
 
                 # Instantiate with API key

@@ -38,7 +38,22 @@ python scripts/generate_llm_report.py --format json --output metrics.json
 python scripts/generate_llm_report.py --format html --output dashboard.html
 ```
 
-### **3. Check Database**
+### **3. Export Forecast Audit (Interpretable AI)**
+```bash
+# Save instrumentation report for the latest Time Series run
+python - <<'PY'
+from forcester_ts.forecaster import TimeSeriesForecaster
+from forcester_ts.forecaster import TimeSeriesForecasterConfig
+from pathlib import Path
+
+cfg = TimeSeriesForecasterConfig(ensemble_kwargs={"audit_log_dir": "logs/forecast_audits"})
+forecaster = TimeSeriesForecaster(config=cfg)
+# ... fit + forecast with your series, then:
+forecaster.save_audit_report(Path("logs/forecast_audits/manual_audit.json"))
+PY
+```
+
+### **4. Check Database**
 ```bash
 # Open database
 sqlite3 data/portfolio_maximizer.db

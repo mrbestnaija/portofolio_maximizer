@@ -2,7 +2,7 @@
 **Production-Ready ML Trading System - Feasible Implementation Roadmap**
 
 **Date**: October 19, 2025 (Updated November 6, 2025)  
-**Status**: Ready for Implementation  
+**Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions  
 **Priority**: **CRITICAL** - Based on log analysis and system requirements  
 **Timeline**: 12 weeks to production deployment
 
@@ -10,11 +10,14 @@
 - Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for the remaining items (performance dashboard, disaster recovery, etc.) now that the cTrader client + order manager replacements have landed.
 - **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.
 - **🆕 2025-11-09 Update**: `scripts/monitor_llm_system.py` now logs latency benchmarks + `llm_signal_backtests`, `schedule_backfill.bat` automates nightly validation (Task Scheduler registration pending), and `models/time_series_signal_generator.py` was hardened (volatility scalar conversion + provenance timestamps) with targeted pytest coverage. LLM latency remains above the <5 s goal (15–38 s); tuning required before broker/paper trading workstreams resume.
+- **🆕 2025-11-16 Update**: `forcester_ts/instrumentation.py` + the upgraded `TimeSeriesForecaster` record per-model fit/forecast durations, diagnostic payloads, and ensemble weights, satisfying the interpretable-AI requirement from `AGENT_DEV_CHECKLIST.md`. JSON audits land under `logs/forecast_audits/` when `ensemble_kwargs.audit_log_dir` or `TS_FORECAST_AUDIT_DIR` is configured.
 
 ### Nov 12, 2025 Status Notes
 - Time Series signal generation is no longer blocked by pandas truth-value errors; provenance now includes the decision context needed by the router and dashboards.
 - Checkpoint metadata writes are atomic on Windows, clearing the [WinError 183] escalation noted during dry-run pipelines.
 - Nightly backfill scripts (schedule_backfill.bat + scripts/backfill_signal_validation.py) can now be invoked from Task Scheduler without ModuleNotFoundError; only registration remains.
+- **🚨 2025-11-15 Brutal Run Regression**: Despite the notes above, the latest brutal log shows `logs/pipeline_run.log:16932-17729` (plus `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"`) reporting a corrupted database, `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` repeating the MSSA `DatetimeIndex` ambiguity (`scripts/run_etl_pipeline.py:1755-1764`), the visualization hook throwing `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'`, and the pandas/statsmodels warnings unresolved because `forcester_ts/forecaster.py:128-136` still performs a deprecated Period round-trip while `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged orders. `scripts/backfill_signal_validation.py:281-292` also continues to use `datetime.utcnow()`, causing deprecation warnings in `logs/backfill_signal_validation.log:15-22`. These blockers must be cleared (DB rebuild + `DatabaseManager._connect` guard, MSSA fix, Matplotlib fix, frequency/order hardening, validator modernization) before Phase A can continue. *(Nov 16 note: all time-series warnings/ConvergenceWarnings are now piped to `logs/warnings/warning_events.log`, giving the team a durable audit log instead of suppressing the messages.)*
+- ✅ **2025-11-16 confirmation**: The first four blockers above are now resolved (database hardening, MSSA serialization, visualization hook, statsmodels warning stream). The remaining gating item for Phase A is the timezone-aware update to `scripts/backfill_signal_validation.py`.
 
 
 ---

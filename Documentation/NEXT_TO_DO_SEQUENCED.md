@@ -7,11 +7,26 @@
 
 ---
 
-## 📊 CURRENT PROJECT STATUS: PRODUCTION READY ✅
+## 📊 CURRENT PROJECT STATUS: 🔴 BLOCKED (2025-11-15 brutal run regression)
 
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration
 
 ### 🆕 Immediate Updates (Nov 12, 2025)
+- **🚨 2025-11-15 Brutal Run Blocking Findings**
+  - `logs/pipeline_run.log:16932-17729` + `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` show the SQLite datastore is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so all sequenced tasks that rely on persistence are currently blocked. `DatabaseManager._connect` must treat this error the same way it treats `"disk i/o error"` (reset connection or activate the POSIX mirror) before further work.
+  - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` capture Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The stage logs “Saved forecast …” followed by “Generated forecasts for 0 ticker(s)”, so nothing reaches Stage 8.
+  - The visualization hook immediately fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), meaning dashboard deliverables cited throughout this plan cannot be produced.
+  - Hardening claims about pandas/statsmodels warnings being resolved are false: `forcester_ts/forecaster.py:128-136` still performs the deprecated Period round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` still keeps unconverged orders, so the brutal logs are full of `FutureWarning`/`ValueWarning` spam.
+  - `scripts/backfill_signal_validation.py:281-292` continues to call `datetime.utcnow()` with sqlite’s default converters, triggering Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`) every time the scheduled job runs.
+
+  **Must-complete blockers before resuming sequenced work**
+  1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` shares the disk-I/O recovery path.
+  2. Patch the MSSA `change_points` block to convert the `DatetimeIndex` into a list without boolean coercion, rerun the forecasting stage, and confirm Stage 8 consumes the bundles.
+  3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so visualization artefacts exist again.
+  4. Replace the Period coercion + tighten the SARIMAX search space to eliminate the warning storm (all related warnings now flow into `logs/warnings/warning_events.log` so they are audit-able without spamming console output).
+  5. Modernize `scripts/backfill_signal_validation.py` (timezone-aware timestamps + sqlite adapters) before running nightly validation/backfill tasks.
+  - ✅ `2025-11-16 note`: Blockers 1–4 are now cleared (see `logs/pipeline_run.log:22237-22986` for the healthy ETL run); only the validator modernization remains outstanding.
+
 - `scripts/run_auto_trader.py` delivers the autonomous trading loop (extraction → validation → forecasting → TS signals → routing → execution) with optional LLM fallback; it must now be validated alongside the pipeline.
 - README + UNIFIED_ROADMAP position the platform as an **Autonomous Profit Engine**, elevating the loop to core capability and documenting how to launch it.
 - Stage planner in `scripts/run_etl_pipeline.py` now runs Time Series forecasting/signal routing before any LLM stages, keeping LLM strictly as fallback.

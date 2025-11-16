@@ -1,12 +1,26 @@
 # Next Immediate Action: Test Execution & Validation
 **Date**: 2025-11-06  
-**Status**: 🟡 **READY FOR EXECUTION**
+**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run regressions**
 
 ---
 
 ## 🎯 Overview
 
 With config-driven orchestration complete, the **next immediate step** is to incorporate the latest architectural updates and immediately validate them end-to-end. The new autonomous trading loop, README/roadmap repositioning, and pipeline stage reordering are all live; they must now be treated as production-critical work that requires verification plus remediation of the blocking errors surfaced in the logs.
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the database is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so none of the validation runs below can proceed until the datastore is rebuilt and `DatabaseManager._connect` treats this error like the existing disk-I/O branch.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. Every “Saved forecast …” message is followed by “Generated forecasts for 0 ticker(s)”, so Stage 8 never executes.
+- The visualization hook then fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), meaning required dashboard artefacts are missing.
+- Pandas/statsmodels warning spam remains (`forcester_ts/forecaster.py:128-136` Period round-trip; `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged grids) despite earlier hardening notes.
+- `scripts/backfill_signal_validation.py:281-292` still relies on `datetime.utcnow()` and sqlite’s default converters, producing the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22`.
+
+**Immediate blocking tasks**
+1. Rebuild/recover `data/portfolio_maximizer.db` and extend `DatabaseManager._connect` so `"database disk image is malformed"` follows the disk-I/O recovery path.
+2. Patch the MSSA `change_points` block to cast the `DatetimeIndex` to a list, rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm forecasts exist before executing any test suites.
+3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so dashboards referenced later can actually be generated.
+4. Replace the deprecated Period coercion and tighten the SARIMAX order grid to silence warning spam that currently hides actionable log lines.
+5. Update `scripts/backfill_signal_validation.py` to be timezone-aware and register sqlite adapters prior to the nightly job.
 
 ### 🔄 Immediate Updates To Acknowledge
 

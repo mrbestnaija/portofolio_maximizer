@@ -53,6 +53,29 @@ class DashboardDataLoader:
             columns = ["close"]
         return df[columns].rename(columns=str.title)
 
+    def _get_latest_close(self, ticker: str) -> Optional[float]:
+        try:
+            query = "SELECT close FROM ohlcv_data WHERE ticker = ? ORDER BY date DESC LIMIT 1"
+            value = pd.read_sql_query(query, self.db_manager.conn, params=(ticker,))
+            if value.empty:
+                return None
+            return float(value["close"].iloc[0])
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Unable to fetch latest close for %s: %s", ticker, exc)
+            return None
+
+    @staticmethod
+    def _needs_rescaling(series: pd.Series, latest_close: Optional[float]) -> bool:
+        if latest_close is None or latest_close == 0.0:
+            return False
+        if series is None or series.empty:
+            return False
+        median_abs = float(series.abs().median())
+        if pd.isna(median_abs):
+            return False
+        ratio = median_abs / abs(latest_close)
+        return ratio < 0.2
+
     def get_forecast_bundle(self, ticker: str) -> Dict[str, Dict[str, pd.Series]]:
         query = """
             SELECT
@@ -75,6 +98,7 @@ class DashboardDataLoader:
         if df.empty:
             return {}
 
+        latest_close = self._get_latest_close(ticker)
         df["forecast_date"] = pd.to_datetime(df["forecast_date"])
         bundles: Dict[str, Dict[str, pd.Series]] = {}
         forecast_date = df["forecast_date"].iloc[0]
@@ -106,14 +130,30 @@ class DashboardDataLoader:
             else:
                 regression_metrics = {}
 
-            bundles[model] = {
-                "forecast": pd.Series(subset["forecast_value"].astype(float).values, index=index),
-                "lower_ci": pd.Series(subset["lower_ci"].astype(float).values, index=index)
+            series = pd.Series(subset["forecast_value"].astype(float).values, index=index)
+            lower = (
+                pd.Series(subset["lower_ci"].astype(float).values, index=index)
                 if subset["lower_ci"].notna().any()
-                else None,
-                "upper_ci": pd.Series(subset["upper_ci"].astype(float).values, index=index)
+                else None
+            )
+            upper = (
+                pd.Series(subset["upper_ci"].astype(float).values, index=index)
                 if subset["upper_ci"].notna().any()
-                else None,
+                else None
+            )
+
+            if self._needs_rescaling(series, latest_close):
+                shift = latest_close or 0.0
+                series = series + shift
+                if isinstance(lower, pd.Series):
+                    lower = lower + shift
+                if isinstance(upper, pd.Series):
+                    upper = upper + shift
+
+            bundles[model] = {
+                "forecast": series,
+                "lower_ci": lower,
+                "upper_ci": upper,
                 "diagnostics": diagnostics,
                 "weights": diagnostics.get("weights") if isinstance(diagnostics, dict) else None,
                 "regression_metrics": regression_metrics,

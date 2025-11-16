@@ -2,10 +2,26 @@
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
 
 **Date**: October 14, 2025  
-**Status**: Ready for Implementation  
+**Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions pending  
 **Priority**: **CRITICAL** - Required for institutional-grade production
 
 ---
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite datastore is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so no optimization evidence can be trusted until the file is rebuilt and `DatabaseManager._connect` handles this error the same way it already handles `"disk i/o error"`.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`, leaving Stage 8 empty.
+- The visualization hook immediately fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so the dashboards cited later in this plan are missing.
+- Pandas/statsmodels warning spam remains unresolved (`forcester_ts/forecaster.py:128-136` uses a deprecated Period round-trip; `_select_best_order` in `forcester_ts/sarimax.py:136-183` retains unconverged grids).
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` and sqlite’s default converters, triggering Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`).
+
+**Blocking actions before resuming this plan**
+1. Recover/rebuild `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the disk-I/O recovery path.
+2. Fix the MSSA `change_points` block (cast to list without boolean coercion), rerun the forecasting stage, and confirm Stage 8 receives forecasts.
+3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are produced.
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid to quell warning spam (all warnings now archived in `logs/warnings/warning_events.log` via `etl/warning_recorder.py` for troubleshooting).
+5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before running nightly validation.
+
+> ✅ **2025-11-16 update**: Actions 1‑4 are complete (see `logs/pipeline_run.log:22237-22986`). The optimization plan remains blocked only on the validator modernization in item 5.
 
 ## 📊 EXECUTIVE SUMMARY
 
@@ -793,5 +809,3 @@ python -m pytest tests/etl/test_portfolio_math_enhanced.py -v
 **Timeline**: 4-8 weeks for full optimization  
 **Investment**: High (mathematical expertise required)  
 **ROI**: High (institutional-grade system)
-
-

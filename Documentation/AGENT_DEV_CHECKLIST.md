@@ -149,6 +149,7 @@ echo "Git commits today: $(git log --since='1 day ago' --oneline | wc -l)"
 echo "Working strategies: $(python test_strategies.py --count-profitable)"
 echo "Monthly costs: $$(python calculate_costs.py)"
 ```
+- [ ] **Interpretability telemetry on?** Ensure `TS_FORECAST_AUDIT_DIR` (or `ensemble_kwargs.audit_log_dir`) is set so `forcester_ts/instrumentation.py` writes dataset statistics + run timings for every forecast.
 
 ### Weekly Validation Protocol
 - [ ] **Strategy performance test** - Run full backtest, verify >10% annual returns

@@ -4,6 +4,28 @@
 
 This guide provides comprehensive information about the enhanced error monitoring and management system implemented for the Portfolio Maximizer v45 project.
 
+### 🚨 2025-11-15 Brutal Run Findings (monitoring priority)
+- The newest brutal run logs (`logs/pipeline_run.log:16932-17729`) plus `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` show persistent `database disk image is malformed` errors (rowids out of order/missing from index). The monitoring stack must treat this as a P0 signal—`DatabaseManager._connect` needs the same reset/mirror handling for this message as it already has for `"disk i/o error"`.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` now emit repeated `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. Alerting should be updated to flag this regression until the MSSA serialization code is patched.
+- Dashboard generation crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (`logs/pipeline_run.log:2626, 2981, …`), so the monitoring guide must note that visualization evidence is currently unavailable.
+- Pandas/statsmodels warning storms (PeriodDtype + convergence) have returned because `forcester_ts/forecaster.py:128-136` and `_select_best_order` in `forcester_ts/sarimax.py:136-183` remain unpatched despite previous hardening claims.
+- `scripts/backfill_signal_validation.py:281-292` continues to use `datetime.utcnow()` with sqlite’s default converters, leading to the Python 3.12 deprecation warnings surfaced in `logs/backfill_signal_validation.log:15-22`. Monitoring should treat these warnings as actionable items rather than noise.
+
+**Monitoring action items**
+1. Add explicit alerts for “database disk image is malformed” so corruption is escalated immediately.
+2. Track occurrences of the MSSA `DatetimeIndex` ambiguity (`scripts/run_etl_pipeline.py:1755-1764`) and block promotion until the change_points handling is fixed.
+3. Capture and alert on the Matplotlib `autofmt_xdate(axis=…)` regression so visualization failures are not silent.
+4. Expand warning classification to include pandas/statmodels FutureWarnings coming from `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py`.
+5. Flag deprecation warnings originating in `scripts/backfill_signal_validation.py` until the script uses timezone-aware timestamps and sqlite adapters.
+
+### ✅ 2025-11-16 Monitoring Update
+- Database corruption detection is now proactive: `etl/database_manager.py` backs up malformed files and falls onto a `/tmp` mirror without emitting warnings (see `logs/pipeline_run.log:22245-22250`).
+- MSSA serialization no longer trips DatetimeIndex exceptions, so the monitoring stack can downgrade that alert to “resolved” while Stage 7+ metrics remain populated.
+- The visualization hook was hardened (`etl/visualizer.py`), eliminating the `autofmt_xdate(axis=…)` alert and restoring dashboard evidence this guide references.
+- KPSS and SARIMAX fallback chatter has been demoted to INFO by guards in `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py`, reducing noise in `pipeline_events`.
+- Outstanding alert: keep watching for the UTC deprecation warnings from `scripts/backfill_signal_validation.py` until its timezone overhaul lands.
+- Data-focused instrumentation (`forcester_ts/instrumentation.py`) now records dataset shape/frequency/statistics every run, and the comprehensive dashboard prints the summary directly on the figure—monitoring teams can open `logs/forecast_audits/*.json` to inspect the exact data profile that triggered an alert.
+
 ---
 
 ## 🚨 **Error Monitoring System**

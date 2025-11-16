@@ -6,14 +6,33 @@ and the new MSSA-RL variant in parallel.
 from __future__ import annotations
 
 import logging
+import os
+import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 
+try:
+    from statsmodels.tsa.stattools import adfuller, kpss
+    from statsmodels.tools.sm_exceptions import InterpolationWarning  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    adfuller = None
+    kpss = None
+    InterpolationWarning = None
+
+try:
+    from etl.warning_recorder import log_warning_records
+except Exception:  # pragma: no cover - logging helper optional in standalone runs
+    def log_warning_records(records, context):
+        return
+
 from .ensemble import EnsembleConfig, EnsembleCoordinator, derive_model_confidence
 from .garch import GARCHForecaster
+from .instrumentation import ModelInstrumentation
 from .mssa_rl import MSSARLConfig, MSSARLForecaster
 from .samossa import SAMOSSAForecaster
 from .sarimax import SARIMAXForecaster
@@ -70,12 +89,22 @@ class TimeSeriesForecaster:
         self._garch: Optional[GARCHForecaster] = None
         self._samossa: Optional[SAMOSSAForecaster] = None
         self._mssa: Optional[MSSARLForecaster] = None
-        self._ensemble_config = EnsembleConfig(**self.config.ensemble_kwargs) if self.config.ensemble_enabled else EnsembleConfig(enabled=False)
+        self._ensemble_config = (
+            EnsembleConfig(**self.config.ensemble_kwargs)
+            if self.config.ensemble_enabled
+            else EnsembleConfig(enabled=False)
+        )
         self._model_summaries: Dict[str, Dict[str, Any]] = {}
         self._latest_results: Dict[str, Any] = {}
         self._latest_metrics: Dict[str, Dict[str, float]] = {}
         self._model_errors: Dict[str, str] = {}
         self._model_events: list[Dict[str, Any]] = []
+        self._series_diagnostics: Dict[str, Any] = {}
+        self._instrumentation = ModelInstrumentation()
+        audit_dir = self.config.ensemble_kwargs.get("audit_log_dir") if isinstance(self.config.ensemble_kwargs, dict) else None
+        if not audit_dir:
+            audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
+        self._audit_dir: Optional[Path] = Path(audit_dir).expanduser() if audit_dir else None
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -123,20 +152,81 @@ class TimeSeriesForecaster:
             logger.debug("Dropping duplicate index values for forecasting series")
         series = series[~series.index.duplicated(keep="last")]
         series = series.sort_index()
+        # Normalise index to naive timestamps for statsmodels compatibility
+        series = series.copy()
+        series.index = pd.DatetimeIndex(series.index).tz_localize(None)
         inferred_freq = pd.infer_freq(series.index)
-        if inferred_freq:
+        freq_to_use = inferred_freq or ("B" if len(series) > 3 else None)
+        if freq_to_use:
+            series.attrs["_pm_freq_hint"] = freq_to_use
             try:
-                series = series.asfreq(inferred_freq)
-            except ValueError:
-                logger.debug("Unable to reindex series to inferred freq %s", inferred_freq)
-        else:
-            # Fallback: coerce to a business-day offset so statsmodels sees a freq
-            fallback_offset = to_offset("B")
-            try:
-                series.index.freq = fallback_offset
-            except ValueError:
-                logger.debug("Unable to assign fallback freq %s to index", fallback_offset)
+                freq_offset = to_offset(freq_to_use)
+                series.index = pd.DatetimeIndex(series.index, freq=freq_offset)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "Unable to enforce frequency %s on series index: %s",
+                    freq_to_use,
+                    exc,
+                )
         return series
+
+    def _capture_series_diagnostics(self, series: pd.Series) -> Dict[str, Any]:
+        diagnostics: Dict[str, Any] = {
+            "length": int(len(series)),
+            "start": str(series.index[0]),
+            "end": str(series.index[-1]),
+        }
+        values = series.dropna()
+        if adfuller is not None and len(values) > 10:
+            try:
+                adf_stat, adf_pvalue, _, _, crit, _ = adfuller(values, autolag="AIC")
+                diagnostics["adf_stat"] = float(adf_stat)
+                diagnostics["adf_pvalue"] = float(adf_pvalue)
+                diagnostics["adf_critical"] = {k: float(v) for k, v in crit.items()}
+                diagnostics["is_adf_stationary"] = adf_pvalue < 0.05
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                diagnostics["adf_error"] = str(exc)
+        else:
+            diagnostics["adf_available"] = False
+
+        if kpss is not None and len(values) > 10:
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    if InterpolationWarning is not None:
+                        warnings.simplefilter("always", InterpolationWarning)
+                    kpss_stat, kpss_pvalue, _, crit = kpss(values, nlags="auto")
+                log_warning_records(caught, "TimeSeriesForecaster.kpss")
+                diagnostics["kpss_stat"] = float(kpss_stat)
+                diagnostics["kpss_pvalue"] = float(kpss_pvalue)
+                diagnostics["kpss_critical"] = {k: float(v) for k, v in crit.items()}
+                diagnostics["is_kpss_stationary"] = kpss_pvalue > 0.05
+            except Exception as exc:  # pragma: no cover - diagnostics only
+                diagnostics["kpss_error"] = str(exc)
+        else:
+            diagnostics["kpss_available"] = diagnostics.get("kpss_error") is None and kpss is not None
+
+        self._record_model_event(
+            "series",
+            "diagnostics",
+            adf_pvalue=diagnostics.get("adf_pvalue"),
+            kpss_pvalue=diagnostics.get("kpss_pvalue"),
+            length=diagnostics.get("length"),
+        )
+        return diagnostics
+
+    @staticmethod
+    def _enforce_convexity(weights: Dict[str, float]) -> Dict[str, float]:
+        if not weights:
+            return {}
+        positive = {model: max(float(w), 0.0) for model, w in weights.items()}
+        total = sum(positive.values())
+        if total <= 0.0:
+            return {}
+        normalized = {model: value / total for model, value in positive.items()}
+        normal_sum = sum(normalized.values())
+        if abs(normal_sum - 1.0) > 1e-6 and normal_sum > 0:
+            normalized = {model: value / normal_sum for model, value in normalized.items()}
+        return normalized
 
     def fit(
         self,
@@ -144,8 +234,19 @@ class TimeSeriesForecaster:
         returns_series: Optional[pd.Series] = None,
     ) -> "TimeSeriesForecaster":
         price_series = self._ensure_series(price_series)
+        self._series_diagnostics = self._capture_series_diagnostics(price_series)
         self._model_events.clear()
         self._model_errors.clear()
+        self._instrumentation.reset()
+        self._instrumentation.set_dataset_metadata(
+            length=len(price_series),
+            start=str(price_series.index.min()),
+            end=str(price_series.index.max()),
+            frequency=str(getattr(price_series.index, "freqstr", None) or price_series.attrs.get("_pm_freq_hint")),
+        )
+        if self._series_diagnostics:
+            self._instrumentation.record_artifact("series_diagnostics", self._series_diagnostics)
+        self._instrumentation.record_series_snapshot("price_series", price_series)
 
         if self.config.sarimax_enabled:
             self._record_model_event(
@@ -156,8 +257,11 @@ class TimeSeriesForecaster:
                 last=str(price_series.index.max()),
             )
             try:
-                self._sarimax = SARIMAXForecaster(**self.config.sarimax_kwargs)
-                self._sarimax.fit(price_series)
+                with self._instrumentation.track("sarimax", "fit", points=len(price_series)) as meta:
+                    self._sarimax = SARIMAXForecaster(**self.config.sarimax_kwargs)
+                    self._sarimax.fit(price_series)
+                    meta["order"] = getattr(self._sarimax, "best_order", None)
+                    meta["seasonal"] = getattr(self._sarimax, "best_seasonal_order", None)
                 self._record_model_event(
                     "sarimax",
                     "fit_complete",
@@ -177,9 +281,13 @@ class TimeSeriesForecaster:
                 last=str(price_series.index.max()),
             )
             try:
-                self._samossa = SAMOSSAForecaster(**self.config.samossa_kwargs)
-                self._samossa.fit(price_series)
-                summary = self._samossa.get_model_summary()
+                with self._instrumentation.track("samossa", "fit", points=len(price_series)) as meta:
+                    self._samossa = SAMOSSAForecaster(**self.config.samossa_kwargs)
+                    self._samossa.fit(price_series)
+                    summary = self._samossa.get_model_summary()
+                    meta["explained_variance"] = summary.get("explained_variance_ratio")
+                    meta["components"] = summary.get("n_components")
+                    meta["window"] = summary.get("window_length_used")
                 self._record_model_event(
                     "samossa",
                     "fit_complete",
@@ -198,10 +306,13 @@ class TimeSeriesForecaster:
                 points=len(price_series),
             )
             try:
-                mssa_config = MSSARLConfig(**self.config.mssa_rl_kwargs)
-                self._mssa = MSSARLForecaster(config=mssa_config)
-                self._mssa.fit(price_series)
-                diagnostics = self._mssa.get_diagnostics()
+                with self._instrumentation.track("mssa_rl", "fit", points=len(price_series)) as meta:
+                    mssa_config = MSSARLConfig(**self.config.mssa_rl_kwargs)
+                    self._mssa = MSSARLForecaster(config=mssa_config)
+                    self._mssa.fit(price_series)
+                    diagnostics = self._mssa.get_diagnostics()
+                    meta["change_points"] = len(diagnostics.get("change_points", []))
+                    meta["rank"] = diagnostics.get("rank")
                 self._record_model_event(
                     "mssa_rl",
                     "fit_complete",
@@ -217,6 +328,7 @@ class TimeSeriesForecaster:
                 returns_series = price_series.pct_change().dropna()
             else:
                 returns_series = returns_series.dropna()
+            self._instrumentation.record_series_snapshot("returns_series", returns_series)
 
             if returns_series.empty:
                 self._handle_model_failure(
@@ -231,9 +343,13 @@ class TimeSeriesForecaster:
                     points=len(returns_series),
                 )
                 try:
-                    self._garch = GARCHForecaster(**self.config.garch_kwargs)
-                    self._garch.fit(returns_series)
-                    summary = self._garch.get_model_summary()
+                    with self._instrumentation.track("garch", "fit", points=len(returns_series)) as meta:
+                        self._garch = GARCHForecaster(**self.config.garch_kwargs)
+                        self._garch.fit(returns_series)
+                        summary = self._garch.get_model_summary()
+                        meta["order"] = {"p": self._garch.p, "q": self._garch.q}
+                        meta["aic"] = summary.get("aic")
+                        meta["bic"] = summary.get("bic")
                     self._record_model_event(
                         "garch",
                         "fit_complete",
@@ -246,16 +362,23 @@ class TimeSeriesForecaster:
                     self._handle_model_failure("garch", "fit", exc)
 
         self._model_summaries = self.get_component_summaries()
+        if self._series_diagnostics:
+            self._model_summaries["series_diagnostics"] = self._series_diagnostics
+        if self._model_summaries:
+            self._instrumentation.record_artifact("component_summaries", self._model_summaries)
         return self
 
     def forecast(self, *, steps: Optional[int] = None, alpha: float = 0.05) -> Dict[str, Any]:
         horizon = int(steps) if steps is not None else self.config.forecast_horizon
         results: Dict[str, Any] = {"horizon": horizon}
+        self._instrumentation.set_dataset_metadata(forecast_horizon=horizon)
 
         if self._sarimax:
             try:
                 self._record_model_event("sarimax", "forecast_start", horizon=horizon)
-                results["sarimax_forecast"] = self._sarimax.forecast(steps=horizon, alpha=alpha)
+                with self._instrumentation.track("sarimax", "forecast", horizon=horizon) as meta:
+                    results["sarimax_forecast"] = self._sarimax.forecast(steps=horizon, alpha=alpha)
+                    meta["confidence_interval"] = alpha
                 self._record_model_event("sarimax", "forecast_complete")
             except Exception as exc:
                 results["sarimax_forecast"] = None
@@ -266,7 +389,12 @@ class TimeSeriesForecaster:
         if self._samossa:
             try:
                 self._record_model_event("samossa", "forecast_start", horizon=horizon)
-                results["samossa_forecast"] = self._samossa.forecast(steps=horizon)
+                with self._instrumentation.track("samossa", "forecast", horizon=horizon) as meta:
+                    samossa_result = self._samossa.forecast(steps=horizon)
+                    results["samossa_forecast"] = samossa_result
+                    summary = self._samossa.get_model_summary()
+                    meta["trend_strength"] = summary.get("trend_strength")
+                    meta["seasonal_strength"] = summary.get("seasonal_strength")
                 self._record_model_event("samossa", "forecast_complete")
             except Exception as exc:
                 results["samossa_forecast"] = None
@@ -277,9 +405,12 @@ class TimeSeriesForecaster:
         if self._mssa:
             try:
                 self._record_model_event("mssa_rl", "forecast_start", horizon=horizon)
-                mssa_output = self._mssa.forecast(steps=horizon)
-                results["mssa_rl_forecast"] = mssa_output
-                results["mssa_rl_diagnostics"] = self._mssa.get_diagnostics()
+                with self._instrumentation.track("mssa_rl", "forecast", horizon=horizon) as meta:
+                    mssa_output = self._mssa.forecast(steps=horizon)
+                    diagnostics = self._mssa.get_diagnostics()
+                    results["mssa_rl_forecast"] = mssa_output
+                    results["mssa_rl_diagnostics"] = diagnostics
+                    meta["change_points"] = len(diagnostics.get("change_points", []))
                 self._record_model_event("mssa_rl", "forecast_complete")
             except Exception as exc:
                 results["mssa_rl_forecast"] = None
@@ -292,15 +423,18 @@ class TimeSeriesForecaster:
         if self._garch:
             try:
                 self._record_model_event("garch", "forecast_start", horizon=horizon)
-                garch_result = self._garch.forecast(steps=horizon)
-                results["garch_forecast"] = garch_result
-                results["volatility_forecast"] = {
-                    "volatility": garch_result.get("volatility"),
-                    "variance": garch_result.get("variance_forecast"),
-                    "model_order": {"p": self._garch.p, "q": self._garch.q},
-                    "aic": garch_result.get("aic"),
-                    "bic": garch_result.get("bic"),
-                }
+                with self._instrumentation.track("garch", "forecast", horizon=horizon) as meta:
+                    garch_result = self._garch.forecast(steps=horizon)
+                    results["garch_forecast"] = garch_result
+                    volatility_payload = {
+                        "volatility": garch_result.get("volatility"),
+                        "variance": garch_result.get("variance_forecast"),
+                        "model_order": {"p": self._garch.p, "q": self._garch.q},
+                        "aic": garch_result.get("aic"),
+                        "bic": garch_result.get("bic"),
+                    }
+                    results["volatility_forecast"] = volatility_payload
+                    meta.update(volatility_payload)
                 self._record_model_event("garch", "forecast_complete")
             except Exception as exc:
                 results["garch_forecast"] = None
@@ -311,16 +445,26 @@ class TimeSeriesForecaster:
             results["volatility_forecast"] = None
 
         self._model_summaries = self.get_component_summaries()
-        ensemble = self._build_ensemble(results)
+        with self._instrumentation.track("ensemble", "build", horizon=horizon) as ensemble_phase:
+            ensemble = self._build_ensemble(results)
+            ensemble_phase["models_considered"] = sum(
+                1
+                for key in ("sarimax_forecast", "samossa_forecast", "garch_forecast", "mssa_rl_forecast")
+                if results.get(key) is not None
+            )
         if ensemble:
             results["ensemble_forecast"] = ensemble["forecast_bundle"]
             results["ensemble_metadata"] = ensemble["metadata"]
             results["mean_forecast"] = ensemble["forecast_bundle"]
+            self._instrumentation.record_artifact(
+                "ensemble_weights", ensemble["metadata"].get("weights", {})
+            )
+            ensemble_meta = ensemble["metadata"]
             self._record_model_event(
                 "ensemble",
                 "build_complete",
-                weights=ensemble["metadata"].get("weights"),
-                confidence=ensemble["metadata"].get("confidence"),
+                weights=ensemble_meta.get("weights"),
+                confidence=ensemble_meta.get("confidence"),
             )
         else:
             results["ensemble_forecast"] = None
@@ -330,6 +474,11 @@ class TimeSeriesForecaster:
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)
         results["model_events"] = list(self._model_events)
+        results["instrumentation_report"] = self._instrumentation.export()
+        if self._audit_dir:
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
+            self.save_audit_report(audit_path)
         return results
 
     def get_component_summaries(self) -> Dict[str, Any]:
@@ -341,6 +490,14 @@ class TimeSeriesForecaster:
             "errors": dict(self._model_errors),
             "events": list(self._model_events),
         }
+
+    def get_instrumentation_report(self) -> Dict[str, Any]:
+        """Expose the detailed model instrumentation payload."""
+        return self._instrumentation.export()
+
+    def save_audit_report(self, output_path: Path) -> None:
+        """Persist the instrumentation report to disk for interpretable-AI auditing."""
+        self._instrumentation.dump_json(output_path)
 
     def _build_config_from_kwargs(
         self,
@@ -395,6 +552,7 @@ class TimeSeriesForecaster:
         coordinator = EnsembleCoordinator(self._ensemble_config)
         confidence = derive_model_confidence(self._model_summaries)
         weights, score = coordinator.select_weights(confidence)
+        weights = self._enforce_convexity(weights)
         if not weights:
             return None
 

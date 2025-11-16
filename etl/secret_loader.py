@@ -54,13 +54,14 @@ def load_secret(env_var_name: str, secret_file_env: Optional[str] = None) -> Opt
     # Try Docker secret file first (production)
     if secret_file_path and Path(secret_file_path).exists():
         try:
-            with open(secret_file_path, 'r') as f:
-                secret = f.read().strip()
-                if secret and not secret.startswith('#'):
+            with open(secret_file_path, 'r', encoding='utf-8') as handle:
+                for raw_line in handle:
+                    stripped = raw_line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        continue
                     logger.debug(f"Loaded {env_var_name} from Docker secret: {secret_file_path}")
-                    return secret
-                else:
-                    logger.warning(f"Docker secret file {secret_file_path} is empty or contains only comments")
+                    return stripped
+            logger.warning(f"Docker secret file {secret_file_path} is empty or contains only comments")
         except Exception as e:
             logger.warning(f"Failed to read Docker secret file {secret_file_path}: {e}")
     

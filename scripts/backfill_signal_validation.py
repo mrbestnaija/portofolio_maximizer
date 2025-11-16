@@ -17,7 +17,7 @@ import sys
 import warnings
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -31,6 +31,36 @@ from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+UTC = timezone.utc
+
+
+def _ensure_utc_datetime(value: Any) -> datetime:
+    """Normalize assorted SQLite/built-in types into timezone-aware UTC datetimes."""
+    if value is None:
+        return datetime.now(UTC)
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time(), tzinfo=UTC)
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            return datetime.now(UTC)
+        normalized = normalized.replace("Z", "+00:00") if normalized.endswith("Z") else normalized
+        if "T" not in normalized:
+            normalized = f"{normalized}T00:00:00"
+        dt = datetime.fromisoformat(normalized)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    raise TypeError(f"Unsupported timestamp value: {value!r}")
+
+
+sqlite3.register_adapter(datetime, lambda val: _ensure_utc_datetime(val).isoformat())
+sqlite3.register_converter("TIMESTAMP", lambda raw: _ensure_utc_datetime(raw))
+sqlite3.register_converter("DATETIME", lambda raw: _ensure_utc_datetime(raw))
+sqlite3.register_converter("DATE", lambda raw: _ensure_utc_datetime(raw).date())
 
 
 @dataclass
@@ -117,8 +147,9 @@ def load_market_data(
     lookback_days: int,
 ) -> pd.DataFrame:
     """Load OHLCV data for the specified ticker around the signal date."""
-    start_date = (signal_date - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    end_date = signal_date.strftime("%Y-%m-%d")
+    signal_date = _ensure_utc_datetime(signal_date)
+    start_date = (signal_date - timedelta(days=lookback_days)).date().isoformat()
+    end_date = signal_date.date().isoformat()
     query = """
         SELECT CAST(date AS TEXT) AS date, open, high, low, close, volume
         FROM ohlcv_data
@@ -150,13 +181,19 @@ def build_signal_dict(row: sqlite3.Row) -> Dict[str, Any]:
     """Convert a database row into the structure expected by the validator."""
     keys = {key: True for key in row.keys()}
     risk_level = row["risk_level"] if "risk_level" in keys and row["risk_level"] else "medium"
+    timestamp_source = (
+        row["signal_timestamp"]
+        if "signal_timestamp" in keys and row["signal_timestamp"]
+        else row["signal_date"]
+    )
+    timestamp_iso = _ensure_utc_datetime(timestamp_source).isoformat()
     return {
         "ticker": row["ticker"],
         "action": row["action"],
         "confidence": row["confidence"] if row["confidence"] is not None else 0.5,
         "reasoning": row["reasoning"] or "",
         "risk_level": risk_level,
-        "signal_timestamp": row["signal_date"],
+        "signal_timestamp": timestamp_iso,
     }
 
 
@@ -278,9 +315,8 @@ def backfill_pending_signals(
 
         backtest_summary: Dict[str, Any] = {}
         if backtest_days > 0:
-            cutoff = (datetime.utcnow() - timedelta(days=backtest_days)).strftime(
-                "%Y-%m-%d"
-            )
+            now_utc = datetime.now(UTC)
+            cutoff = (now_utc - timedelta(days=backtest_days)).date().isoformat()
             recent_signals = db.conn.execute(
                 """
                 SELECT *
@@ -293,12 +329,14 @@ def backfill_pending_signals(
 
             signals_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
             for row in recent_signals:
+                timestamp_source = row["signal_timestamp"] if "signal_timestamp" in row.keys() and row["signal_timestamp"] else row["signal_date"]
+                timestamp_iso = _ensure_utc_datetime(timestamp_source).isoformat()
                 signals_by_ticker.setdefault(row["ticker"], []).append(
                     {
                         "action": row["action"],
                         "confidence": row["confidence"] or 0.5,
                         "ticker": row["ticker"],
-                        "signal_timestamp": row["signal_date"],
+                        "signal_timestamp": timestamp_iso,
                         "risk_level": "medium",
                     }
                 )
@@ -308,7 +346,7 @@ def backfill_pending_signals(
                 if not signals:
                     continue
                 last_date = max(
-                    datetime.fromisoformat(sig["signal_timestamp"]) for sig in signals
+                    _ensure_utc_datetime(sig["signal_timestamp"]) for sig in signals
                 )
                 price_df = load_market_data(db.conn, ticker, last_date, backtest_days * 2)
                 if price_df.empty:

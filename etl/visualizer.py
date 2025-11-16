@@ -32,16 +32,44 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.figure import Figure
 import seaborn as sns
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 from pathlib import Path
 from scipy import signal, stats
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+from forcester_ts.instrumentation import describe_dataframe
+
+from etl.warning_recorder import log_warning_records
 from statsmodels.tsa.seasonal import seasonal_decompose
 import logging
 import warnings
 
 logger = logging.getLogger(__name__)
+
+
+def _monkey_patch_autofmt_axis_kwarg() -> None:
+    """Ensure Figure.autofmt_xdate ignores the deprecated axis kwarg (logs/pipeline_run.log:2626+)."""
+    try:
+        original = Figure.autofmt_xdate
+    except AttributeError:  # pragma: no cover - Matplotlib missing
+        return
+
+    if getattr(original, "_pm_axis_safe", False):
+        return
+
+    def safe_autofmt(self: Figure, *args, **kwargs):
+        if "axis" in kwargs:
+            dropped = kwargs.pop("axis", None)
+            logger.debug("Dropped unsupported axis kwarg (%s) before calling Figure.autofmt_xdate", dropped)
+        return original(self, *args, **kwargs)
+
+    setattr(safe_autofmt, "_pm_axis_safe", True)
+    Figure.autofmt_xdate = safe_autofmt  # type: ignore[assignment]
+
+
+_monkey_patch_autofmt_axis_kwarg()
 
 
 class TimeSeriesVisualizer:
@@ -177,11 +205,12 @@ class TimeSeriesVisualizer:
 
         # 3. Box Plot (Outlier Detection)
         ax3 = fig.add_subplot(gs[2, 0])
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", category=PendingDeprecationWarning)
             bp = ax3.boxplot(series, vert=False, patch_artist=True,
                             boxprops=dict(facecolor=self.colors[1], alpha=0.7),
                             medianprops=dict(color='red', linewidth=2))
+        log_warning_records(caught, "TimeSeriesVisualizer.boxplot_horizontal")
         ax3.set_xlabel(column, fontsize=10)
         ax3.set_title('Box Plot (Outliers)', fontsize=11, fontweight='bold')
         ax3.grid(True, alpha=0.3, axis='x')
@@ -463,6 +492,7 @@ class TimeSeriesVisualizer:
         column: str,
         save_path: Optional[str] = None,
         market_columns: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> plt.Figure:
         """Create comprehensive dashboard with all analyses.
 
@@ -546,9 +576,10 @@ class TimeSeriesVisualizer:
 
         # 4. Box plot
         ax4 = fig.add_subplot(gs[1, 2])
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", category=PendingDeprecationWarning)
             ax4.boxplot(series, vert=True, patch_artist=True)
+        log_warning_records(caught, "TimeSeriesVisualizer.boxplot_vertical")
         ax4.set_title('Box Plot', fontsize=11, fontweight='bold')
         ax4.grid(True, alpha=0.3, axis='y')
 
@@ -695,6 +726,9 @@ class TimeSeriesVisualizer:
                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
             )
 
+        if metadata:
+            self._render_metadata_panel(fig, metadata, column)
+
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             logger.info(f"Dashboard saved to {save_path}")
@@ -770,6 +804,51 @@ class TimeSeriesVisualizer:
 
         logger.info(f"Saved {len(saved_files)} visualizations to {output_dir}")
         return saved_files
+
+    def _render_metadata_panel(self, fig: plt.Figure, metadata: Dict[str, Any], column: str) -> None:
+        """Render dataset statistics text block on the supplied figure."""
+        text = self._format_metadata_text(metadata, column)
+        fig.text(
+            0.01,
+            0.01,
+            text,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            family="monospace",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        )
+
+    def _format_metadata_text(self, metadata: Dict[str, Any], column: str) -> str:
+        lines = ["Dataset Summary", "=" * 18]
+        shape = metadata.get("shape")
+        if shape:
+            lines.append(f"Shape: {shape[0]} × {shape[1]}")
+        lines.append(f"Column: {column}")
+        start = metadata.get("index_start")
+        end = metadata.get("index_end")
+        if start and end:
+            lines.append(f"Range: {start} → {end}")
+        freq = metadata.get("frequency")
+        if freq:
+            lines.append(f"Frequency: {freq}")
+        missing = metadata.get("missing_pct")
+        if missing is not None:
+            lines.append(f"Missing: {missing:.2f}%")
+        column_summaries = metadata.get("column_summaries") or []
+        for col_summary in column_summaries[:4]:
+            stats = col_summary.get("stats", {})
+            col_name = col_summary.get("name", "value")
+            mean = stats.get("mean")
+            std = stats.get("std")
+            data_range = (stats.get("min"), stats.get("max"))
+            line = f"{col_name}: "
+            if mean is not None and std is not None:
+                line += f"μ={mean:.2f}, σ={std:.2f}"
+            if all(v is not None for v in data_range):
+                line += f", min={data_range[0]:.2f}, max={data_range[1]:.2f}"
+            lines.append(line)
+        return "\n".join(lines)
 
     def plot_forecast_dashboard(
         self,

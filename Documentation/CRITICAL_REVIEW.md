@@ -7,7 +7,7 @@
 ---
 
 ## Executive Summary
-- Overall assessment: **A-** – production-ready system with LLM integration complete.
+- Overall assessment: **C (temporarily)** – the 2025-11-15 brutal run exposed blocking failures (database corruption, MSSA serialization crash, dashboard regression), so the platform is not production ready until those issues are closed.
 - Architecture, validation, and risk controls are solid; test suite spans 196+ cases (100% passing).
 - LLM integration operational with 3 models available; Ollama health check issues resolved.
 - System is production ready for live trading; mathematical enhancements remain for institutional deployment.
@@ -22,6 +22,27 @@
 | Test Coverage | A | ✅ Excellent | Expand statistical tests |
 | Production Readiness | A- | ✅ **IMPROVED** | LLM integration complete |
 | LLM Integration | A | ✅ **NEW** | 3 models operational, Ollama fixed |
+
+### 🚨 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` showed the primary SQLite file is corrupted (`database disk image is malformed`, “rowid … out of order”, “row … missing from index”), so all evidence cited in earlier reviews is now invalid until the datastore is rebuilt.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` captured repeated `ValueError: The truth value of a DatetimeIndex is ambiguous` triggered by the MSSA serialization block in `scripts/run_etl_pipeline.py:1755-1764`. After ~90 inserts the stage fails, so no ticker actually produces a usable forecast bundle.
+- Immediately after the crash the visualization hook fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), meaning the dashboards referenced throughout this review are not being generated.
+- Pandas/statsmodels warnings remain unsolved because `forcester_ts/forecaster.py:128-136` still forces a deprecated `PeriodIndex` round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` leaves unconverged parameter grids in circulation, despite the hardening claims documented elsewhere.
+- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` with sqlite’s default converters, generating Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`), so the monitoring stack is noisier than these scores assume.
+
+**Action Items**
+1. Recover/recreate `data/portfolio_maximizer.db` and update `DatabaseManager._connect` to treat `"database disk image is malformed"` like `"disk i/o error"` (reset/mirror) to stop silently corrupting writes.
+2. Fix the MSSA `change_points` handling in `scripts/run_etl_pipeline.py` by copying the `DatetimeIndex` into a list instead of using boolean short-circuiting, then rerun the forecasting stage to prove the ensemble populates downstream checkpoints.
+3. Remove the unsupported `axis=` argument in the Matplotlib auto-format call so dashboards can be generated again.
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid to eliminate the warning storm and improve convergence.
+5. Make `scripts/backfill_signal_validation.py` timezone-aware and register sqlite adapters so scheduled runs stop emitting deprecation warnings.
+
+### ✅ 2025-11-16 Review Update
+- The latest ETL run (`logs/pipeline_run.log:22237-22986`) proves the rebuilt `DatabaseManager` handles corruption + WSL mirror activation transparently, restoring trust in the evidence cited here.
+- MSSA serialization, router persistence, and dashboard exports completed without error thanks to the `scripts/run_etl_pipeline.py` and `etl/visualizer.py` fixes, so the “no usable forecasts”/“no PNGs” findings are now historical.
+- KPSS/Convergence warnings have been demoted or suppressed via `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py`, sharpening the logs that this critical review depends upon.
+- Remaining yellow flag: `scripts/backfill_signal_validation.py` still logs UTC deprecation warnings and should remain on the punch list before flipping the Executive Summary grade back to **B+/A-**.
+- Interpretable-AI requirement satisfied: `forcester_ts/instrumentation.py` now emits dataset snapshots (shape, missingness, statistics) and the visualization dashboards display those details inline, giving reviewers line-of-sight into the exact data used for every finding.
 
 ---
 

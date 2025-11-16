@@ -386,6 +386,8 @@ git fetch origin
 git log HEAD..origin/master
 ```
 
+> **Time Series-first brutal suite**: `bash/comprehensive_brutal_test.sh` now defaults to forecaster-only validation. Run `BRUTAL_ENABLE_LLM=1 bash bash/comprehensive_brutal_test.sh` only if you must benchmark the legacy LLM fallback; otherwise leave the variable unset so the brutal gate mirrors the TS-first architecture described throughout the documentation set.
+
 ### Automated Testing (Recommended)
 
 Create a pre-push hook (optional):

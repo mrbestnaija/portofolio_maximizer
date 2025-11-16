@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -52,6 +52,7 @@ class SAMOSSAForecaster:
         self._residuals: Optional[pd.Series] = None
         self._explained_variance_ratio: float = 0.0
         self._last_index: Optional[pd.Timestamp] = None
+        self._trajectory_shape: Tuple[int, int] = (0, 0)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -71,6 +72,7 @@ class SAMOSSAForecaster:
 
     def _ssa_decompose(self, series: pd.Series) -> np.ndarray:
         trajectory = self._build_trajectory_matrix(series)
+        self._trajectory_shape = trajectory.shape
         svd = TruncatedSVD(n_components=self.config.n_components, random_state=0)
         components = svd.fit_transform(trajectory)
         self._explained_variance_ratio = float(svd.explained_variance_ratio_.sum())
@@ -170,4 +172,5 @@ class SAMOSSAForecaster:
             "n_components": self.config.n_components,
             "explained_variance_ratio": self._explained_variance_ratio,
             "use_residual_arima": self.config.use_residual_arima,
+            "trajectory_matrix_shape": self._trajectory_shape,
         }
