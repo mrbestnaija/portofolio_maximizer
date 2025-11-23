@@ -6,7 +6,7 @@ Traceable record of end-to-end dry-runs that validate portfolio pipeline wiring 
 
 ## 2025-10-19 — pipeline_20251019_082659
 
-- **Execution command**: `simpleTrader_env/bin/python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2024-01-02 --end 2024-01-19 --dry-run --enable-llm`
+- **Execution command**: `simpleTrader_env/bin/python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --start 2024-01-02 --end 2024-01-19 --dry-run --enable-llm`
 - **Invocation method**: manual CLI run (synthetic OHLCV data flow, checkpoints enabled, sequential execution)
 - **LLM context**: qwen:14b-chat-q4_K_M served locally via Ollama
 

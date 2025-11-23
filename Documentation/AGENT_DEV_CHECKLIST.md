@@ -1,25 +1,34 @@
 # AI Developer Guardrails: Reality-Based Development Checklist
 
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 ## Project Status (Updated: 2025-10-04)
 
-### Current Phase: 4.5 - Time Series Cross-Validation ✅ COMPLETE
+### Current Phase: 4.5 - Time Series Cross-Validation ? COMPLETE
 - **Implementation**: k-fold CV with expanding window
-- **Test Coverage**: 85/85 tests passing (100%)
+- **Test Coverage**: 85/85 tests passing (100%) _(historical benchmark; brutal runs currently blocked - see integration tracker below)_
 - **Configuration**: Modular, platform-agnostic architecture
 - **Documentation**: Comprehensive (implementation_checkpoint.md, arch_tree.md, TIME_SERIES_CV.md)
-- **Performance**: 5.5x temporal coverage improvement (15% → 83%)
+- **Performance**: 5.5x temporal coverage improvement (15% ? 83%)
+- **Integration status**: **BLOCKED** - follow `Documentation/integration_fix_plan.md` before trusting any historical metrics.
+
+### Integration Recovery Tracker
+- Treat `Documentation/integration_fix_plan.md` as the canonical remediation log; do not promote any downstream status in this file until that tracker is cleared.
+- Mirror every successful brutal run back into `Documentation/INTEGRATION_TESTING_COMPLETE.md` so cross-references remain truthful.
+
+
 
 ### Completed Phases
-1. ✅ **Phase 1**: ETL Foundation - Data extraction, validation, preprocessing, storage
-2. ✅ **Phase 2**: Analysis Framework - Time series analysis with MIT standards
-3. ✅ **Phase 3**: Visualization Framework - Publication-quality plots (7 types)
-4. ✅ **Phase 4**: Caching Mechanism - 100% cache hit rate, 20x speedup
-5. ✅ **Phase 4.5**: Time Series Cross-Validation - k-fold CV, backward compatible
+1. ? **Phase 1**: ETL Foundation - Data extraction, validation, preprocessing, storage
+2. ? **Phase 2**: Analysis Framework - Time series analysis with MIT standards
+3. ? **Phase 3**: Visualization Framework - Publication-quality plots (7 types)
+4. ? **Phase 4**: Caching Mechanism - 100% cache hit rate, 20x speedup
+5. ? **Phase 4.5**: Time Series Cross-Validation - k-fold CV, backward compatible
 
 ### Next Phase: 5 - Portfolio Optimization
 - **Focus**: Markowitz mean-variance optimization, risk parity
-- **Prerequisites**: ✅ All data infrastructure complete
-- **Status**: Ready to begin
+- **Prerequisites**: ? All data infrastructure complete
+- **Status**: **BLOCKED** until `Documentation/integration_fix_plan.md` and `Documentation/INTEGRATION_TESTING_COMPLETE.md` both confirm a successful brutal run.
 
 ## Pre-Development AI Instructions
 
@@ -58,7 +67,7 @@ REQUIREMENTS:
 - Maximum 500 lines of code per phase
 - Must work with free data sources only
 - Prove profitability before adding complexity
-- No ML models until Phase 7+ and $25K+ capital
+- No ML models until Phase 7+ and $25K+ capital  # Prepare to replace LLM with forcasters/ML Models
 
 FORBIDDEN RESPONSES:
 - "This would be better with [complex framework]"
@@ -149,7 +158,7 @@ echo "Git commits today: $(git log --since='1 day ago' --oneline | wc -l)"
 echo "Working strategies: $(python test_strategies.py --count-profitable)"
 echo "Monthly costs: $$(python calculate_costs.py)"
 ```
-- [ ] **Interpretability telemetry on?** Ensure `TS_FORECAST_AUDIT_DIR` (or `ensemble_kwargs.audit_log_dir`) is set so `forcester_ts/instrumentation.py` writes dataset statistics + run timings for every forecast.
+- [ ] **Interpretability telemetry on?** Ensure `TS_FORECAST_AUDIT_DIR` (or `ensemble_kwargs.audit_log_dir`) is set so `forcester_ts/instrumentation.py` writes dataset statistics, benchmarking metrics (RMSE/sMAPE/tracking error), and run timings for every forecast.
 
 ### Weekly Validation Protocol
 - [ ] **Strategy performance test** - Run full backtest, verify >10% annual returns
@@ -196,6 +205,7 @@ Before discussing any development:
 - [ ] **PERFORMANCE.md** - Current strategy returns, Sharpe ratio, drawdowns
 - [ ] **COSTS.md** - Monthly expense breakdown with receipts
 - [ ] **ROADMAP.md** - Phase completion status, next priorities
+- [ ] **Reward-to-Effort reference** - Any new documentation page, to-do list, or automation stub must include the reference banner pointing to `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md` so future assistants inherit the monetization/automation guardrails.
 - [ ] **FAILURES.md** - What didn't work and why, lessons learned
 
 ### Decision Log Template
@@ -327,14 +337,14 @@ echo "Running pre-commit validation..."
 # 1. Run core business logic tests
 python -m pytest test_core_functions.py -v
 if [ $? -ne 0 ]; then
-    echo "❌ Core tests failed - fix before committing"
+    echo "? Core tests failed - fix before committing"
     exit 1
 fi
 
 # 2. Validate strategy performance
 python test_strategy_performance.py
 if [ $? -ne 0 ]; then
-    echo "❌ Strategy performance degraded - investigate"
+    echo "? Strategy performance degraded - investigate"
     exit 1
 fi
 
@@ -342,18 +352,18 @@ fi
 lines=$(find . -name "*.py" | xargs wc -l | tail -1 | awk '{print $1}')
 max_lines_for_phase=$(python get_phase_limits.py)
 if [ $lines -gt $max_lines_for_phase ]; then
-    echo "❌ Code too complex for current phase: $lines > $max_lines_for_phase"
+    echo "? Code too complex for current phase: $lines > $max_lines_for_phase"
     exit 1
 fi
 
 # 4. Verify costs are under budget
 python calculate_monthly_costs.py --validate
 if [ $? -ne 0 ]; then
-    echo "❌ Monthly costs exceed budget"
+    echo "? Monthly costs exceed budget"
     exit 1
 fi
 
-echo "✅ All validations passed"
+echo "? All validations passed"
 ```
 
 #### Daily Automated Tests
@@ -439,26 +449,26 @@ if __name__ == "__main__":
 ### Repository Structure
 ```
 portfolio-system/
-├── .git/
-├── .gitignore                 # Exclude credentials, cache files
-├── README.md                  # Current status, how to run
-├── PERFORMANCE.md             # Latest strategy results
-├── requirements.txt           # Exact dependency versions
-├── 
-├── src/                       # All source code
-│   ├── core/                  # Business logic
-│   ├── strategies/            # Trading strategies
-│   ├── data/                  # Data management
-│   └── execution/             # Trade execution
-├── 
-├── tests/                     # All test code
-│   ├── unit/                  # Unit tests
-│   ├── integration/           # Integration tests
-│   └── performance/           # Strategy validation
-├── 
-├── config/                    # Configuration files
-├── scripts/                   # Deployment and utility scripts
-└── docs/                      # Documentation
++-- .git/
++-- .gitignore                 # Exclude credentials, cache files
++-- README.md                  # Current status, how to run
++-- PERFORMANCE.md             # Latest strategy results
++-- requirements.txt           # Exact dependency versions
++-- 
++-- src/                       # All source code
+�   +-- core/                  # Business logic
+�   +-- strategies/            # Trading strategies
+�   +-- data/                  # Data management
+�   +-- execution/             # Trade execution
++-- 
++-- tests/                     # All test code
+�   +-- unit/                  # Unit tests
+�   +-- integration/           # Integration tests
+�   +-- performance/           # Strategy validation
++-- 
++-- config/                    # Configuration files
++-- scripts/                   # Deployment and utility scripts
++-- docs/                      # Documentation
 ```
 
 ### Branching Strategy (Simplified)
@@ -594,7 +604,7 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Running deployment validation..."
 python deployment_validation.py
 if [ $? -ne 0 ]; then
-    echo "❌ Deployment validation failed"
+    echo "? Deployment validation failed"
     exit 1
 fi
 
@@ -604,7 +614,7 @@ timestamp=$(date +%Y%m%d_%H%M%S)
 mkdir -p backups/${timestamp}
 cp -r config/ backups/${timestamp}/
 cp -r data/ backups/${timestamp}/
-echo "✅ Backup created: backups/${timestamp}"
+echo "? Backup created: backups/${timestamp}"
 
 # 3. Update system with minimal downtime
 echo "Updating system..."
@@ -626,7 +636,7 @@ sleep 10
 echo "Running post-deployment health check..."
 python health_check.py --comprehensive
 if [ $? -ne 0 ]; then
-    echo "❌ Health check failed - rolling back"
+    echo "? Health check failed - rolling back"
     bash rollback_script.sh
     exit 1
 fi
@@ -644,7 +654,7 @@ cat > deployments/${timestamp}.json << EOF
 }
 EOF
 
-echo "✅ Deployment successful"
+echo "? Deployment successful"
 echo "Monitoring for 1 hour for any issues..."
 
 # Monitor system for first hour
@@ -652,14 +662,14 @@ for i in {1..12}; do
     sleep 300  # 5 minutes
     python health_check.py --quick
     if [ $? -ne 0 ]; then
-        echo "❌ Post-deployment issue detected"
+        echo "? Post-deployment issue detected"
         bash rollback_script.sh
         exit 1
     fi
-    echo "✅ Health check $i/12 passed"
+    echo "? Health check $i/12 passed"
 done
 
-echo "🎉 Deployment completed successfully"
+echo "?? Deployment completed successfully"
 ```
 
 ### Rollback Procedure
@@ -693,12 +703,12 @@ sleep 10
 # Validate rollback
 python health_check.py --quick
 if [ $? -eq 0 ]; then
-    echo "✅ Rollback successful"
+    echo "? Rollback successful"
     
     # Send alert about rollback
     python send_alert.py "System rolled back to ${latest_backup} due to deployment issues"
 else
-    echo "❌ Rollback failed - manual intervention required"
+    echo "? Rollback failed - manual intervention required"
     exit 1
 fi
 ```
@@ -752,3 +762,4 @@ class SystemMonitor:
 ```
 
 This testing and deployment framework ensures your system remains profitable while adding necessary software engineering rigor. The key principle is that all testing and deployment complexity must be justified by the business value at stake - don't over-engineer for a simple trading system.
+

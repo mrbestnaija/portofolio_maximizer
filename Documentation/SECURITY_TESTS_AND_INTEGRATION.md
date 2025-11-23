@@ -1,7 +1,17 @@
-# Security Tests & Integration Summary
+﻿# Security Tests & Integration Summary
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Date**: 2025-01-27  
 **Status**: ✅ **COMPLETED - Tests Created & Integrated**
+
+---
+
+### Frontier Market Test Hooks (2025-11-15)
+- Multi-ticker integration tests now flip `--include-frontier-tickers` on (`bash/test_real_time_pipeline.sh`, brutal suite) so the Nigeria → Bulgaria dataset from `etl/frontier_markets.py` is represented when executing security validations (secret scrubbing, audit logging). Update any future SOC evidence to mention whether runs were synthetic (default) or real-market.
+
+### SQLite Corruption Recovery (2025-11-18)
+- Add regression tests (or brutal gated smoke) to assert that `etl/database_manager.DatabaseManager` backs up and recreates the SQLite store when the inserts hit “database disk image is malformed,” ensuring audit logs/tests verify recoverability.
 
 ---
 
@@ -280,4 +290,5 @@ api_key = load_secret('MY_API_KEY', 'MY_API_KEY_FILE')
 
 **Status**: ✅ **All Security Tests Created and Integrated**  
 **Next**: Run tests and verify in CI/CD pipeline
+
 

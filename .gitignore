@@ -54,6 +54,13 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+*.json
+# Ignore local database files
+local_database.db
+*.db.*
+
+
+
 
 # Model files (large)
 *.pkl
@@ -70,6 +77,13 @@ data/training/*.parquet
 data/validation/*.parquet
 data/testing/*.parquet
 *.csv
+.data/
+data/cache/
+data/temp/
+data/ideas/
+data/external/
+
+
 
 # Keep directory structure but ignore large files
 !data/raw/.gitkeep

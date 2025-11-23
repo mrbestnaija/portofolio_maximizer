@@ -1,14 +1,19 @@
-# System Error Monitoring Guide - 2025-10-22
+﻿# System Error Monitoring Guide - 2025-10-22
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 ## Overview
 
 This guide provides comprehensive information about the enhanced error monitoring and management system implemented for the Portfolio Maximizer v45 project.
 
+### Frontier Market Telemetry (2025-11-15)
+- Monitoring dashboards must now track the Nigeria → Bulgaria frontier ticker atlas introduced via `etl/frontier_markets.py` and the `--include-frontier-tickers` flag. Synthetic runs remain the default, but alerts should note whether a failure originated while exercising frontier symbols (per `bash/test_real_time_pipeline.sh` Step 10 and the brutal frontier stage) so spread/liquidity anomalies are triaged separately from mega-cap incidents.
+
 ### 🚨 2025-11-15 Brutal Run Findings (monitoring priority)
 - The newest brutal run logs (`logs/pipeline_run.log:16932-17729`) plus `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` show persistent `database disk image is malformed` errors (rowids out of order/missing from index). The monitoring stack must treat this as a P0 signal—`DatabaseManager._connect` needs the same reset/mirror handling for this message as it already has for `"disk i/o error"`.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` now emit repeated `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. Alerting should be updated to flag this regression until the MSSA serialization code is patched.
 - Dashboard generation crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (`logs/pipeline_run.log:2626, 2981, …`), so the monitoring guide must note that visualization evidence is currently unavailable.
-- Pandas/statsmodels warning storms (PeriodDtype + convergence) have returned because `forcester_ts/forecaster.py:128-136` and `_select_best_order` in `forcester_ts/sarimax.py:136-183` remain unpatched despite previous hardening claims.
+- Pandas/statsmodels warning storms (PeriodDtype + convergence) have returned because `forcester_ts/forecaster.py:128-136` and `_select_best_order` in `forcester_ts/sarimax.py:136-183` remain unpatched despite previous hardening claims. *(Nov 18 update: the frequency coercion was removed and SARIMAX series are now auto-scaled with a capped grid; monitoring should still watch `logs/warnings/warning_events.log` for any new ConvergenceWarnings.)*
 - `scripts/backfill_signal_validation.py:281-292` continues to use `datetime.utcnow()` with sqlite’s default converters, leading to the Python 3.12 deprecation warnings surfaced in `logs/backfill_signal_validation.log:15-22`. Monitoring should treat these warnings as actionable items rather than noise.
 
 **Monitoring action items**
@@ -25,6 +30,7 @@ This guide provides comprehensive information about the enhanced error monitorin
 - KPSS and SARIMAX fallback chatter has been demoted to INFO by guards in `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py`, reducing noise in `pipeline_events`.
 - Outstanding alert: keep watching for the UTC deprecation warnings from `scripts/backfill_signal_validation.py` until its timezone overhaul lands.
 - Data-focused instrumentation (`forcester_ts/instrumentation.py`) now records dataset shape/frequency/statistics every run, and the comprehensive dashboard prints the summary directly on the figure—monitoring teams can open `logs/forecast_audits/*.json` to inspect the exact data profile that triggered an alert.
+- Nov 18 update: the same database manager now rebuilds a fresh SQLite store automatically when “database disk image is malformed” occurs mid-run, so alerting can focus on the timestamp of the self-heal rather than hundreds of repeated write failures.
 
 ---
 
@@ -370,3 +376,4 @@ python scripts/error_monitor.py --watch
 **Last Updated**: October 22, 2025  
 **Version**: 1.0  
 **Status**: ✅ **ACTIVE**
+

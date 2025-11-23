@@ -1,19 +1,17 @@
-# Portfolio Maximizer v4.5 - Multi-Stage Docker Build
-# Optimized for reproducibility, security, and minimal image size
+# Portfolio Maximizer v4.5 - Multi-Stage Docker Build (reproducible)
+# Installs dependencies inside the image (no host venv) for portability.
 
 # =============================================================================
 # Stage 1: Base Python Environment with System Dependencies
 # =============================================================================
 FROM python:3.12-slim-bookworm AS base
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -28,20 +26,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # =============================================================================
-# Stage 2: Copy Existing Virtual Environment
+# Stage 2: Builder - create venv and install Python deps from requirements
 # =============================================================================
 FROM base AS builder
 
-# Copy existing virtual environment from host
-COPY simpleTrader_env /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+WORKDIR /app
+COPY requirements.txt .
+
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --upgrade pip setuptools wheel && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # =============================================================================
 # Stage 3: Final Production Image
 # =============================================================================
 FROM python:3.12-slim-bookworm AS production
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH" \
@@ -50,7 +50,6 @@ ENV PYTHONUNBUFFERED=1 \
     PORTFOLIO_LOGS=/app/logs \
     PORTFOLIO_CONFIG=/app/config
 
-# Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libblas3 \
@@ -67,10 +66,7 @@ RUN useradd -m -u 1000 -s /bin/bash portfolio && \
 # Copy virtual environment from builder
 COPY --from=builder --chown=portfolio:portfolio /opt/venv /opt/venv
 
-# Set working directory
 WORKDIR /app
-
-# Copy project files
 COPY --chown=portfolio:portfolio . .
 
 # Create required directories
@@ -85,22 +81,16 @@ RUN mkdir -p \
     cache && \
     chown -R portfolio:portfolio /app
 
-# Switch to non-root user
 USER portfolio
 
-# Validate installation
-RUN python -c "import numpy, pandas, scipy, sklearn, matplotlib, yfinance; print('Dependencies validated')"
+# Validate key imports
+RUN python - <<'PY'\nimport importlib\nfor mod in [\"numpy\",\"pandas\",\"scipy\",\"sklearn\",\"matplotlib\",\"yfinance\"]:\n    importlib.import_module(mod)\nprint(\"Dependencies validated\")\nPY
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
+    CMD python - <<'PY'\nimport importlib, sys\ntry:\n    importlib.import_module('etl.yfinance_extractor')\n    sys.exit(0)\nexcept Exception:\n    sys.exit(1)\nPY
 
-# Default command: show help
 CMD ["python", "scripts/run_etl_pipeline.py", "--help"]
 
-# =============================================================================
-# Metadata
-# =============================================================================
 LABEL maintainer="Bestman Ezekwu Enock <mrbestnaija@example.com>" \
       version="4.5" \
       description="Portfolio Management System with Quantitative Trading Strategies" \
@@ -111,14 +101,4 @@ LABEL maintainer="Bestman Ezekwu Enock <mrbestnaija@example.com>" \
       org.opencontainers.image.vendor="Portfolio Maximizer Team" \
       org.opencontainers.image.licenses="MIT"
 
-# Exposed volumes for data persistence
 VOLUME ["/app/data", "/app/logs", "/app/config"]
-
-# =============================================================================
-# Usage Examples:
-# =============================================================================
-# Build: docker build -t portfolio-maximizer:v4.5 .
-# Run ETL: docker run --rm -v $(pwd)/data:/app/data portfolio-maximizer:v4.5 python scripts/run_etl_pipeline.py
-# Interactive: docker run -it --rm portfolio-maximizer:v4.5 /bin/bash
-# With CV: docker run --rm -v $(pwd)/data:/app/data portfolio-maximizer:v4.5 python scripts/run_etl_pipeline.py --use-cv
-# =============================================================================

@@ -176,16 +176,16 @@ else
     print_warning "HTML report generation had issues"
 fi
 
-# 10. Run multi-ticker test
+# 10. Run multi-ticker test (frontier markets included via synthetic payload)
 echo ""
-echo "10. Testing pipeline with multiple tickers..."
-print_info "Running: python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --enable-llm --verbose"
+echo "10. Testing pipeline with global + frontier tickers (synthetic run)..."
+print_info "Running: python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --execution-mode synthetic --enable-llm --verbose"
 echo ""
 
-python3 scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --enable-llm --verbose
+python3 scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --execution-mode synthetic --enable-llm --verbose
 
 if [ $? -eq 0 ]; then
-    print_success "Multi-ticker pipeline: SUCCESSFUL"
+    print_success "Multi-ticker pipeline (with frontier coverage): SUCCESSFUL"
 else
     print_warning "Multi-ticker pipeline had issues"
 fi
@@ -211,4 +211,3 @@ echo "Reports: metrics.json, dashboard.html"
 echo ""
 echo "Status: SYSTEM OPERATIONAL ✓"
 echo "=========================================="
-

@@ -31,6 +31,7 @@ DATA_SOURCE="${DATA_SOURCE:-}"
 USE_CV="${USE_CV:-0}"
 ENABLE_LLM="${ENABLE_LLM:-1}"
 LLM_MODEL="${LLM_MODEL:-}"
+INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-1}"
 
 CMD=("$PYTHON_BIN" "$PIPELINE_SCRIPT"
   --tickers "$TICKERS"
@@ -53,6 +54,10 @@ fi
 
 if [[ -n "$LLM_MODEL" ]]; then
   CMD+=(--llm-model "$LLM_MODEL")
+fi
+
+if [[ "$INCLUDE_FRONTIER_TICKERS" == "1" ]]; then
+  CMD+=(--include-frontier-tickers)
 fi
 
 # Allow callers to append additional overrides.

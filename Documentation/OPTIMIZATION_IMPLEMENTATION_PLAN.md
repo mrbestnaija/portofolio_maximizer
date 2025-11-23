@@ -1,4 +1,7 @@
-# 🚀 OPTIMIZATION IMPLEMENTATION PLAN
+﻿# 🚀 OPTIMIZATION IMPLEMENTATION PLAN
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
 
 **Date**: October 14, 2025  
@@ -22,6 +25,8 @@
 5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before running nightly validation.
 
 > ✅ **2025-11-16 update**: Actions 1‑4 are complete (see `logs/pipeline_run.log:22237-22986`). The optimization plan remains blocked only on the validator modernization in item 5.
+> ✅ **2025-11-18 update**: `etl/database_manager.py` now backs up malformed SQLite stores mid-stream and rebuilds them automatically, so brutal/test runs no longer emit hundreds of identical “database disk image is malformed” errors before operators intervene.
+> 📊 Telemetry note: `forcester_ts/instrumentation.py` now records dataset diagnostics and benchmark metrics (RMSE, sMAPE, tracking error) per model with JSON audits under `logs/forecast_audits/`. Use these artifacts to quantify optimization impact.
 
 ## 📊 EXECUTIVE SUMMARY
 
@@ -36,6 +41,10 @@
 - **Statistical Rigor**: A+ (Professional standards)
 - **Production Readiness**: A+ (Institutional deployment ready)
 - **Test Coverage**: A+ (Enhanced with statistical tests)
+
+### Frontier Market Coverage Mandate (2025-11-15)
+- `etl/frontier_markets.py` + the new `--include-frontier-tickers` flag ensure every optimization dry-run touches the guided frontier venues (Nigeria → Bulgaria list supplied in the liquidity brief). Multi-ticker bash workflows (`bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh`, brutal suite) now default to the flag, so model tuning inherently exercises these shapelier spread/latency scenarios.
+- Optimization checkpoints must document whether live/API tickers are mapped (NGX/NSE/BSE suffixing) or whether the run used the synthetic fallback; reference `Documentation/arch_tree.md` for the canonical list when drafting future release notes.
 
 ---
 
@@ -788,6 +797,81 @@ python -m pytest tests/etl/test_portfolio_math_enhanced.py -v
 
 ---
 
+---
+
+## Africa-First Sentiment Integration (Post-Optimization Milestone)
+
+### 1. Objective and Constraints
+- Integrate sentiment as a forecaster input once profitability gates are passed.
+- Prioritise African exchanges (NGX, JSE, NSE Kenya, etc.) and free sources only.
+- Run lexicon and transformer models locally (CPU or GPU) with no paid API calls.
+- Treat sentiment as a weighted factor layered on top of price-based TS forecasts; LLM remains fallback only.
+- Require statistical and economic validation before giving the factor production weight.
+
+### 2. Africa-First Data Sources
+**Exchange and market announcements (highest weight)**
+- NGX media centre releases, weekly market reports, delayed price lists.
+- JSE SENS announcements and ETF notices.
+- NSE Kenya press releases.
+- Free delayed snapshots such as afx.kwayisi.org to cross-check quotes.
+
+**African business RSS / web feeds**
+- Nairametrics (https://nairametrics.com/feed) and BusinessDay Nigeria feeds.
+- Additional Nigerian and pan-African finance feeds (Premium Times business, Vanguard business, etc.).
+- Respect robots.txt and ToS; scrape full text only when allowed.
+
+**Global free sources (lower priority)**
+- SEC EDGAR (for dual-listed African companies) and global macro feeds (Nasdaq, MarketWatch) as spillover signals.
+- Weight global items lower for NGX/JSE/NSE assets unless macro shocks dominate.
+
+### 3. Local Sentiment Models
+**Lexicon / deterministic**
+- VADER, FinVADER, Loughran-McDonald, FinSenticNet (all zero-cost and Python-ready).
+- Store lexicon scores with document metadata for transparency.
+
+**Transformer / learned**
+- FinBERT variants (ProsusAI/finBERT, yiyanghkust/finbert-tone, peejm/finbert-financial-sentiment) and FinSoSent.
+- Run locally via Hugging Face weights; fine-tune on African corpora when enough labelled text exists.
+
+### 4. Document-Level Ensemble (Africa-aware)
+1. Parse each headline/article/announcement d, compute lexicon scores s_d,m and transformer score s_d,finbert.
+2. Tag metadata: region (africa/global), country (NG, ZA, KE, ...), source_type (exchange_announcement, africa_news, global_news), asset_id, timestamp.
+3. Deterministic weights: set w_m proportional to each model's F1/accuracy on labelled African text, normalize so sum(w_m)=1, and keep separate weights per region if needed.
+4. Optional stochastic weights: sample w ~ Dirichlet(alpha_m) with alpha_m = kappa * F1_m (africa) to quantify ensemble uncertainty; store E[s_d] and Var[s_d].
+
+### 5. Asset-Time Aggregation with Africa-First Source Classes
+- Define source classes: africa_exchange, africa_news, global_news.
+- For asset i and bucket t compute S_i,t(class) = average document score for that class.
+- Estimate regression r_{i,t+1} = alpha + beta_price * rhat_{i,t+1}(price) + sum_class beta_class * S_i,t(class).
+- For African assets set weights w_class proportional to max(beta_class, 0) with africa_exchange > africa_news > global_news by default.
+- Aggregate to S_i,t(agg) = sum_class w_class * S_i,t(class); store alongside diagnostics for QA.
+
+### 6. Integration into the TS Forecaster
+**Deterministic blend**
+- Combine forecasts as rhat_{i,t+1}(combined) = alpha_i * rhat_price + beta_i * S_i,t(agg); calibrate alpha_i/beta_i with walk-forward CV on African histories.
+- Add event-type refinements by tagging exchange announcements (earnings, listings, index weight changes) and fitting deltas per event type.
+
+**Bayesian / regime-aware (optional)**
+- Fit Bayesian regression with priors on beta_price and beta_sentiment to obtain posterior mean/variance for sentiment weight.
+- Introduce regime features Z_t (NGX/JSE realized volatility, USD/NGN FX volatility, African news volume) and set sentiment weight w_s(t) = sigmoid(gamma0 + gamma * Z_t); down-weight sentiment during calm periods.
+
+### 7. Evaluation Focused on African Markets
+- Universe: NGX equities, JSE Top40, NSE blue chips, African ETFs/indices.
+- Horizons: 1D, 3D, 5D bars; monitor return correlation, directional hit rate, forecast error reduction, and portfolio metrics (Sharpe, Calmar, turnover, drawdown).
+- Run sub-period and sector breakdowns (banks, oil and gas, telcos, consumer) plus macro regimes (pre-COVID, FX devaluations, subsidy changes).
+- If sentiment fails stability criteria the weight defaults to zero for that asset class.
+
+### 8. Implementation Checklist
+1. Configure high-priority sources (NGX/JSE/NSE + Nairametrics/BusinessDay) and lower-priority global feeds.
+2. Build RSS + scraper jobs with metadata tagging and cache under data/raw/sentiment/.
+3. Implement lexicon + transformer pipelines with local inference, caching intermediate logits for traceability.
+4. Label several hundred African documents for validation, compute F1/accuracy, and derive ensemble weights.
+5. Aggregate sentiment per asset/time bucket with Africa-first weighting; persist to data/processed/sentiment_factors.parquet.
+6. Integrate deterministic blend into the TS forecaster, keep LLM path as minimum benchmark/fallback.
+7. Add Bayesian/regime extensions when deterministic path proves profitable.
+8. Enforce deployment gates: sentiment-enabled runs must beat no-sentiment baseline and pass statistical significance plus economic impact reviews.
+
+
 ## 📈 EXPECTED OUTCOMES
 
 ### Quantitative Improvements
@@ -809,3 +893,4 @@ python -m pytest tests/etl/test_portfolio_math_enhanced.py -v
 **Timeline**: 4-8 weeks for full optimization  
 **Investment**: High (mathematical expertise required)  
 **ROI**: High (institutional-grade system)
+

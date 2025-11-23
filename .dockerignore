@@ -29,12 +29,12 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environments (except simpleTrader_env which is needed)
+# Virtual environments (do not bake host venvs into images)
 venv/
 ENV/
 env/
 .venv/
-# simpleTrader_env/ - DO NOT IGNORE: copied into container
+simpleTrader_env/
 
 # IDE files
 .vscode/

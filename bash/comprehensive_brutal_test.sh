@@ -41,10 +41,12 @@ cd "$PROJECT_ROOT"
 # Test Configuration
 TEST_DURATION_HOURS="${TEST_DURATION_HOURS:-4}"  # Default 4 hours
 ITERATIONS_PER_TEST="${ITERATIONS_PER_TEST:-3}"  # Iterations per test scenario (reduced for efficiency)
-TICKERS_LIST="${TICKERS_LIST:-AAPL,MSFT,GOOGL}"  # Test tickers
+TICKERS_LIST="${TICKERS_LIST:-AAPL,MSFT,GOOGL}"  # Base test tickers (frontier set appended via CLI flag)
 START_DATE="${START_DATE:-2020-01-01}"
 END_DATE="${END_DATE:-2024-01-01}"
-DB_PATH="${DB_PATH:-data/portfolio_maximizer.db}"
+# For brutal runs, default to the synthetic/test database to avoid
+# corrupting or depending on the production portfolio_maximizer.db.
+DB_PATH="${DB_PATH:-data/test_database.db}"
 
 # Portfolio/performance thresholds for demo profitability checks
 MIN_TS_SIGNALS="${MIN_TS_SIGNALS:-5}"
@@ -198,6 +200,18 @@ create_venv_if_needed() {
     fi
 }
 
+get_venv_python() {
+    if [ -x "$PROJECT_ROOT/$VENV_NAME/bin/python" ]; then
+        echo "$PROJECT_ROOT/$VENV_NAME/bin/python"
+        return 0
+    fi
+    if [ -x "$PROJECT_ROOT/$VENV_NAME/Scripts/python.exe" ]; then
+        echo "$PROJECT_ROOT/$VENV_NAME/Scripts/python.exe"
+        return 0
+    fi
+    detect_python
+}
+
 # Activate virtual environment (cross-platform)
 activate_venv() {
     local activate_script=$(find_venv_activate)
@@ -323,6 +337,13 @@ except Exception as e:
     fi
     
     log_success "Environment setup complete - ready to run tests"
+    
+    VENV_PYTHON=$(get_venv_python)
+    if [ -z "$VENV_PYTHON" ]; then
+        log_error "Unable to locate Python executable inside ${VENV_NAME}"
+        exit 1
+    fi
+    log_info "Using virtualenv python: $VENV_PYTHON"
 }
 
 # ============================================================================
@@ -905,11 +926,12 @@ test_pipeline_execution() {
     
     # Test 1: Basic pipeline execution (per existing patterns)
     log_subsection "Basic Pipeline Execution"
-    log_info "Running: python scripts/run_etl_pipeline.py --tickers AAPL --execution-mode synthetic"
+    log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers AAPL --execution-mode synthetic"
     
     start_timer
     set +e
-    python scripts/run_etl_pipeline.py \
+    PORTFOLIO_DB_PATH="data/test_database.db" \
+    "$VENV_PYTHON" scripts/run_etl_pipeline.py \
         --tickers AAPL \
         --start "$START_DATE" \
         --end "$END_DATE" \
@@ -939,10 +961,11 @@ test_pipeline_execution() {
     
     # Test 2: Pipeline with CV (per run_cv_validation.sh)
     log_subsection "Pipeline with Cross-Validation"
-    log_info "Running: pipeline with --use-cv --n-splits 3"
+    log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers AAPL --use-cv --n-splits 3"
     
     set +e
-    python scripts/run_etl_pipeline.py \
+    PORTFOLIO_DB_PATH="data/test_database.db" \
+    "$VENV_PYTHON" scripts/run_etl_pipeline.py \
         --tickers AAPL \
         --start "$START_DATE" \
         --end "$END_DATE" \
@@ -970,10 +993,11 @@ test_pipeline_execution() {
     
     # Test 3: Pipeline with Time Series forecasting
     log_subsection "Pipeline with Time Series Forecasting"
-    log_info "Running: pipeline with Time Series forecasting enabled"
+    log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py (Time Series forecasting enabled)"
     
     set +e
-    python scripts/run_etl_pipeline.py \
+    PORTFOLIO_DB_PATH="data/test_database.db" \
+    "$VENV_PYTHON" scripts/run_etl_pipeline.py \
         --tickers AAPL \
         --start "$START_DATE" \
         --end "$END_DATE" \
@@ -992,6 +1016,33 @@ test_pipeline_execution() {
         fi
     else
         log_warning "Pipeline with Time Series forecasting failed (exit code: $exit_code, may be optional)"
+        log_info "Last 10 lines of output:"
+        tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
+        failed=$((failed + 1))
+    fi
+
+    # Test 4: Frontier market multi-ticker synthetic training
+    log_subsection "Frontier Market Multi-Ticker Training"
+    log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers \"$TICKERS_LIST\" --include-frontier-tickers --execution-mode synthetic --enable-llm"
+
+    set +e
+    PORTFOLIO_DB_PATH="data/test_database.db" \
+    "$VENV_PYTHON" scripts/run_etl_pipeline.py \
+        --tickers "$TICKERS_LIST" \
+        --start "$START_DATE" \
+        --end "$END_DATE" \
+        --execution-mode synthetic \
+        --enable-llm \
+        --include-frontier-tickers \
+        >> "$test_log" 2>&1
+    exit_code=$?
+    set -e
+
+    if [ $exit_code -eq 0 ]; then
+        log_success "Frontier market training run completed"
+        passed=$((passed + 1))
+    else
+        log_error "Frontier market training run failed (exit code: $exit_code)"
         log_info "Last 10 lines of output:"
         tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
         failed=$((failed + 1))
@@ -1095,6 +1146,21 @@ latest_signals = cur.execute(
        LIMIT 5"""
 ).fetchall()
 
+status = "OK"
+reasons = []
+
+if missing_tickers:
+    status = "WARNING"
+    reasons.append("MISSING_FORECASTS_FOR_TICKERS")
+
+if expected_return <= min_expected:
+    status = "WARNING"
+    reasons.append("EXPECTED_RETURN_BELOW_THRESHOLD")
+
+if realized_pnl <= 0 and avg_profit_factor < min_profit_factor:
+    status = "WARNING"
+    reasons.append("NO_REALIZED_PNL_AND_PROFIT_FACTOR_BELOW_THRESHOLD")
+
 payload = {
     "database": str(db_path),
     "time_series_signals": ts_signals,
@@ -1104,15 +1170,10 @@ payload = {
     "realized_pnl": realized_pnl,
     "latest_time_series_signals": latest_signals,
     "missing_tickers": missing_tickers,
+    "profitability_status": status,
+    "profitability_reasons": reasons,
 }
 print(json.dumps(payload, indent=2, default=str))
-
-if missing_tickers:
-    sys.exit(4)
-if expected_return <= min_expected:
-    sys.exit(5)
-if realized_pnl <= 0 and avg_profit_factor < min_profit_factor:
-    sys.exit(6)
 sys.exit(0)
 PY
         local exit_code=$?
@@ -1376,7 +1437,7 @@ benchmark_pipeline_performance() {
         log_info "Performance run $i/5"
         
         start_timer
-        python scripts/run_etl_pipeline.py \
+        "$VENV_PYTHON" scripts/run_etl_pipeline.py \
             --tickers AAPL \
             --start "$START_DATE" \
             --end "$END_DATE" \

@@ -5,7 +5,7 @@
 **Status**: Production Standard  
 **Primary Goal**: **MEASURABLE PROFIT ON TRADE**
 
-> **Telemetry update (Nov 16, 2025):** Time-series forecaster instrumentation now emits per-model audit reports, so every KPI listed here can be traced back to concrete runs (`logs/forecast_audits/*.json` when enabled).
+> **Telemetry update (Nov 16, 2025):** Time-series forecaster instrumentation now emits per-model audit reports (dataset summary + RMSE/sMAPE/tracking error), so every KPI listed here can be traced back to concrete runs (`logs/forecast_audits/*.json` when enabled).
 
 ---
 

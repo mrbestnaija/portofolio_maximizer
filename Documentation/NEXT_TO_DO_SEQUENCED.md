@@ -1,4 +1,7 @@
-# 🎯 SEQUENCED TO-DO LIST: Portfolio Maximizer v45
+﻿# 🎯 SEQUENCED TO-DO LIST: Portfolio Maximizer v45
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Production-Ready ML Trading System - Critical Fixes First**
 
 **Date**: October 19, 2025  
@@ -25,7 +28,7 @@
   3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so visualization artefacts exist again.
   4. Replace the Period coercion + tighten the SARIMAX search space to eliminate the warning storm (all related warnings now flow into `logs/warnings/warning_events.log` so they are audit-able without spamming console output).
   5. Modernize `scripts/backfill_signal_validation.py` (timezone-aware timestamps + sqlite adapters) before running nightly validation/backfill tasks.
-  - ✅ `2025-11-16 note`: Blockers 1–4 are now cleared (see `logs/pipeline_run.log:22237-22986` for the healthy ETL run); only the validator modernization remains outstanding.
+  - ✅ `2025-11-16 note`: Blockers 1–4 are now cleared (see `logs/pipeline_run.log:22237-22986` for the healthy ETL run); only the validator modernization remains outstanding. Instrumentation now logs benchmark metrics and dataset diagnostics so sequenced tasks can reference `logs/forecast_audits/*.json` when evaluating future steps.
 
 - `scripts/run_auto_trader.py` delivers the autonomous trading loop (extraction → validation → forecasting → TS signals → routing → execution) with optional LLM fallback; it must now be validated alongside the pipeline.
 - README + UNIFIED_ROADMAP position the platform as an **Autonomous Profit Engine**, elevating the loop to core capability and documenting how to launch it.
@@ -305,3 +308,4 @@ def document_time_series_rollout():
 - [ ] Rolling CV shows >= 3% profit-factor uplift with <= 50% drawdown increase versus baseline
 - [ ] Governance sign-off documented with a tested fallback plan
 - [ ] Dynamic selector promotes the top model automatically and regression suite passes
+

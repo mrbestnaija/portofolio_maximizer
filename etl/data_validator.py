@@ -83,7 +83,9 @@ class DataValidator:
         if results['passed']:
             logger.info("Data validation passed")
         else:
-            logger.error(f"Data validation failed: {len(results['errors'])} errors")
+            # Use WARNING to avoid treating expected negative cases in tests
+            # as system-level errors while still surfacing validation issues.
+            logger.warning("Data validation failed: %d errors", len(results['errors']))
 
         return results
 

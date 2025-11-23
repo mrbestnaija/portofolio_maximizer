@@ -97,6 +97,7 @@ python -m pytest tests/integration/test_time_series_signal_integration.py -v --t
 # Dry-run test with config-driven stages
 python scripts/run_etl_pipeline.py \
     --tickers AAPL,MSFT \
+    --include-frontier-tickers \
     --start 2023-01-01 \
     --end 2023-12-31 \
     --dry-run \
@@ -120,6 +121,7 @@ python scripts/run_etl_pipeline.py \
 ```bash
 python scripts/run_auto_trader.py \
   --tickers AAPL,MSFT \
+  --include-frontier-tickers \
   --lookback-days 365 \
   --forecast-horizon 30 \
   --initial-capital 25000 \

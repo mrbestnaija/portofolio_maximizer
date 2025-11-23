@@ -1,4 +1,4 @@
-Here’s a curated, institution-grade stack you can run fully locally on CPU/GPU, formatted in Markdown so you can drop it straight into your AI-companion’s knowledge base.
+﻿Here’s a curated, institution-grade stack you can run fully locally on CPU/GPU, formatted in Markdown so you can drop it straight into your AI-companion’s knowledge base.
 
 Quant & Time-Series Stack (Local CPU/GPU)
 
@@ -8,6 +8,8 @@ Quant & Time-Series Stack (Local CPU/GPU)
 Focus: data science, ML, and statistical modeling for time series / investments / portfolios, widely used in academia and industry, all runnable locally.
 
 ## Tiered Stack Overview (Project-Aligned)
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 | Tier | Use Case | Components | Notes |
 | --- | --- | --- | --- |
@@ -26,6 +28,16 @@ The ETL + forecasting codebase (`forcester_ts/*`, `etl/time_series_forecaster.py
 - **Workflow**: JupyterLab / VS Code notebooks, pytest, brutal suite harness.
 
 Deployments or tests targeting “lean GPU” build containers should pin to the Tier-1 list above; everything else is deferred until the AI assistant can justify cost/complexity per `QUANTIFIABLE_SUCCESS_CRITERIA.md`.
+
+### SAMoSSA vs. SARIMAX — Spatial/Frequency Treatment
+
+| Aspect | **SAMoSSA / mSSA** | **SARIMAX** |
+| --- | --- | --- |
+| Spatial-Structural Relationship | Uses stacked **Page** or **Hankel** matrices to retain cross-series structure before HSVT; the multivariate Page matrix `Zf` captures harmonics shared across tickers (per `SAMOSSA_IMPLEMENTATION_CHECKLIST.md`). | No explicit spatial stack; focuses on temporal dynamics of a single series via AR/MA blocks and optional exogenous regressors. |
+| Frequency Handling | Frequency components extracted directly from the Page/Hankel decomposition; deterministic trends vs. AR noise are separated before forecasting. | Frequency inferred from the pandas index; mapped to seasonal periods (e.g., B → 5, M → 12) so seasonal ARIMA orders represent the cadence described in this stack. |
+| Noise Modelling | Residual AutoReg fits operate on the stationary component after HSVT, respecting the same index frequency. | Seasonal differencing (D) + seasonal AR/MA (P/Q) capture periodic behaviour; warnings in statsmodels stay quiet only when frequency metadata is attached. |
+
+When implementing either forecaster, ensure the chosen technique honours the frequency/seasonality expectations encoded here; refer to the respective checklists for validation steps.
 
 **Contribution reminder**: Before proposing or merging any dependency changes, re-read this Tier-1 section and document exactly why the existing stack cannot satisfy the requirement. PRs that add time-series libraries without referencing this file will be rejected during review.
 
@@ -481,3 +493,4 @@ Arch Documentation
 +2
 DataCamp Campus
 +2
+

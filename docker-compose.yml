@@ -55,7 +55,7 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      test: ["CMD", "python", "-c", "import importlib, sys; importlib.import_module('etl.yfinance_extractor'); sys.exit(0)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -90,6 +90,28 @@ services:
     command: /bin/bash
     stdin_open: true
     tty: true
+
+  portfolio-auto:
+    extends: portfolio-maximizer
+    image: portfolio-maximizer:v4.5-auto
+    container_name: portfolio_maximizer_auto
+    environment:
+      - PORTFOLIO_ENV=production
+      - PORTFOLIO_LOG_LEVEL=INFO
+      - TICKERS=${TICKERS:-AAPL,MSFT}
+      - LOOKBACK_DAYS=${LOOKBACK_DAYS:-180}
+      - FORECAST_HORIZON=${FORECAST_HORIZON:-10}
+      - INITIAL_CAPITAL=${INITIAL_CAPITAL:-10000}
+      - CYCLES=${CYCLES:-1}
+      - SLEEP_SECONDS=${SLEEP_SECONDS:-200}
+    command: >
+      sh -c "python scripts/run_auto_trader.py
+             --tickers ${TICKERS:-AAPL,MSFT}
+             --lookback-days ${LOOKBACK_DAYS:-180}
+             --forecast-horizon ${FORECAST_HORIZON:-10}
+             --initial-capital ${INITIAL_CAPITAL:-10000}
+             --cycles ${CYCLES:-1}
+             --sleep-seconds ${SLEEP_SECONDS:-200}"
 
   # Service for running tests
   portfolio-test:

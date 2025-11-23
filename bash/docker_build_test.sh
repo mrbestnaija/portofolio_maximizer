@@ -237,9 +237,10 @@ run_sample_etl() {
         -v "$(pwd)/logs:/app/logs" \
         ${IMAGE_NAME}:${VERSION} \
         python scripts/run_etl_pipeline.py \
-        --tickers AAPL MSFT GOOG \
-        --start-date 2023-01-01 \
-        --end-date 2023-12-31 \
+        --tickers AAPL,MSFT,GOOGL \
+        --start 2023-01-01 \
+        --end 2023-12-31 \
+        --include-frontier-tickers \
         --no-cache || {
         print_warning "ETL pipeline run failed (this might be due to missing API keys)"
     }
@@ -264,7 +265,7 @@ docker build -t ${IMAGE_NAME}:${VERSION} .
 
 # Run ETL pipeline:
 docker run --rm -v \$(pwd)/data:/app/data ${IMAGE_NAME}:${VERSION} \\
-    python scripts/run_etl_pipeline.py --tickers AAPL MSFT --start-date 2023-01-01
+    python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2023-01-01 --include-frontier-tickers
 
 # Interactive shell:
 docker run -it --rm -v \$(pwd):/app ${IMAGE_NAME}:${VERSION}-dev /bin/bash

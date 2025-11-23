@@ -162,7 +162,7 @@ python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm --verbose
 ### **Test 2: Multi-Ticker Pipeline**
 ```bash
 # Run with 3 tickers
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --enable-llm --verbose
+python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --enable-llm --verbose
 
 # Verify all 3 tickers processed
 # Check database for 3 sets of data

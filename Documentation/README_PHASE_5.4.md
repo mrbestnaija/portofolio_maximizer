@@ -153,6 +153,13 @@ Supporting:
 
 ---
 
+## Africa-First Sentiment Roadmap (Post-Optimization)
+- Sentiment enters the stack only after TS forecasters hit profitability gates; LLM paths remain fallback only.
+- Data and model sourcing prioritises NGX/JSE/NSE announcements plus African finance feeds, with tooling described in Documentation/OPTIMIZATION_IMPLEMENTATION_PLAN.md.
+- Lexicon (VADER/FinVADER/LM/FinSenticNet) and FinBERT-class transformers run locally; ensemble weights favor African accuracy metrics.
+- Aggregated sentiment factors (africa_exchange, africa_news, global_news) feed deterministic and Bayesian TS blends before any live deployment.
+- Refer to the optimization plan section "Africa-First Sentiment Integration" for the detailed checklist, gating tests, and validation requirements.
+
 ## 📚 Documentation
 
 ### Main Documents

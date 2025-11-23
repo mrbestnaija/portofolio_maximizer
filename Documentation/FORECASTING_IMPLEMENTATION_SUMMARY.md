@@ -108,29 +108,66 @@ CREATE TABLE time_series_forecasts (
 # config/forecasting_config.yml
 forecasting:
   enabled: true
-  default_forecast_horizon: 30
+  default_forecast_horizon: 30      # Days ahead
+  minimum_history_required: 90      # Soft requirement for metrics
+  minimum_history_strict: 30        # Hard minimum for any forecasting
+
   sarimax:
     enabled: true
     auto_select_order: true
     max_p: 3
     max_d: 2
     max_q: 3
+    seasonal_periods: null          # Auto-detect by default
+    max_P: 2
+    max_D: 1
+    max_Q: 2
+    trend: "c"
+    enforce_stationarity: true
+    enforce_invertibility: true
+
   garch:
     enabled: true
     p: 1
     q: 1
+    vol: "GARCH"
+    dist: "normal"
+
   samossa:
     enabled: true
     window_length: 40
     n_components: 6
+    use_residual_arima: true
+    arima_order: [1, 0, 1]
+    seasonal_order: [0, 0, 0, 0]
+    min_series_length: 120
+    max_forecast_steps: 63
+    reconstruction_method: "diagonal_averaging"
+
   mssa_rl:
     enabled: true
+    window_length: 30
+    rank: null
+    change_point_threshold: 2.5
+    q_learning_alpha: 0.3
+    q_learning_gamma: 0.85
+    q_learning_epsilon: 0.1
     use_gpu: false
+
+  combined:
+    enabled: true
+    use_sarimax_mean: true
+    use_garch_volatility: true
+    combine_confidence_intervals: true
+
   ensemble:
     enabled: true
+    confidence_scaling: true
     candidate_weights:
       - {sarimax: 0.6, samossa: 0.4}
-      - {sarimax: 0.4, samossa: 0.4, mssa_rl: 0.2}
+      - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
+      - {sarimax: 0.5, mssa_rl: 0.5}
+    minimum_component_weight: 0.05
 ```
 
 ---
@@ -140,7 +177,8 @@ forecasting:
 ### **Run Pipeline with Forecasting**
 ```bash
 python scripts/run_etl_pipeline.py \
-    --tickers AAPL MSFT \
+    --tickers AAPL,MSFT \
+    --include-frontier-tickers \
     --start 2020-01-01 \
     --end 2024-01-01 \
     --config config/pipeline_config.yml

@@ -90,7 +90,7 @@ export TEST_DURATION_HOURS=6
 # Iterations per test - default: 3
 export ITERATIONS_PER_TEST=5
 
-# Tickers to test - default: AAPL,MSFT,GOOGL
+# Tickers to test - default: AAPL,MSFT,GOOGL (frontier list auto-appended via --include-frontier-tickers)
 export TICKERS_LIST="AAPL,MSFT,GOOGL,TSLA,AMZN"
 
 # Date range - default: 2020-01-01 to 2024-01-01
@@ -113,6 +113,8 @@ $env:TICKERS_LIST = "AAPL,MSFT,GOOGL"
 .\simpleTrader_env\Scripts\Activate.ps1
 bash bash/comprehensive_brutal_test.sh
 ```
+
+`bash/comprehensive_brutal_test.sh` now passes `--include-frontier-tickers`, so the Nigeria → Bulgaria atlas from `etl/frontier_markets.py` is exercised automatically alongside whatever base symbols you define in `TICKERS_LIST`.
 
 ---
 

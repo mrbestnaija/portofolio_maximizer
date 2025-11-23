@@ -196,6 +196,7 @@ source simpleTrader_env/bin/activate
 # Recommended: live run with automatic synthetic fallback
 python scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT \
+  --include-frontier-tickers \
   --start 2020-01-01 \
   --end 2024-01-01 \
   --execution-mode auto \
@@ -205,7 +206,7 @@ python scripts/run_etl_pipeline.py \
 python scripts/run_etl_pipeline.py --execution-mode live
 
 # Offline validation (synthetic data, no network)
-python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
+python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm --include-frontier-tickers
 
 # Expected output:
 # ✓ Extraction complete (cache hit: <0.1s)
@@ -218,11 +219,17 @@ python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
 ./bash/run_pipeline_live.sh
 ```
 
+`--include-frontier-tickers` automatically adds the Nigeria → Bulgaria frontier symbols
+curated in `etl/frontier_markets.py` (see `Documentation/arch_tree.md`) so every multi-ticker
+training or validation run exercises less-liquid market scenarios. Synthetic mode is
+recommended until provider-specific ticker mappings are finalized.
+
 ### Launch The Autonomous Trading Loop
 
 ```bash
 python scripts/run_auto_trader.py \
   --tickers AAPL,MSFT,NVDA \
+  --include-frontier-tickers \
   --lookback-days 365 \
   --forecast-horizon 30 \
   --initial-capital 25000 \

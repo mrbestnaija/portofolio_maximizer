@@ -3,6 +3,8 @@
 ```markdown
 # PRODUCTION-GRADE PORTFOLIO AUTOMATION - ML-FIRST IMPLEMENTATION PLAN
 
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 ## CURRENT STATUS: PRODUCTION-READY FOUNDATION âœ… (Updated Nov 6, 2025)
 **All Core Infrastructure Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Checkpointing + LLM Integration  
 **Critical Fix Applied**: Profit factor calculation corrected (50% underestimation) âš ï¸  
@@ -39,6 +41,8 @@
 5. 🚰 Prepare stress/regime detection modules and ensure they consume the unified signal metrics pipeline before Phase B automation.
 6. 📈 Surface the new RMSE / sMAPE / tracking-error fields from `time_series_forecasts.regression_metrics` inside dashboards/alerts so ensemble re-weighting is auditable end to end.
 7. 🔁 Enforce the “Time Series first, LLM fallback” routing path (see `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` + `models/signal_router.py`) in every pipeline/environment so operational runs never skip the TS signal generator by default.
+8. 🌍 Keep `--include-frontier-tickers` enabled (via `etl/frontier_markets.py`) for every multi-ticker training/test invocation in `.bash/` + `.script/` so Nigeria → Bulgaria frontier venues remain in regression coverage; synthetic mode is acceptable until live ticker suffix mapping is finalized.
+9. 💾 Database hygiene: rely on the new auto-recovery path in `etl/database_manager.py` (backs up + rebuilds the SQLite store when “database disk image is malformed” hits) and monitor the `.corrupt.*` artifacts in `data/` before rerunning brutal tests.
 
 ---
 
@@ -612,4 +616,5 @@ FAILURE_SCENARIOS = {
 - **$10,000 minimum capital** for initial live trading
 
 This plan maintains the ML-first quantitative approach while providing concrete, actionable steps that build on the existing production-ready foundation.
+
 

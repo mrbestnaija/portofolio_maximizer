@@ -18,6 +18,9 @@ The `comprehensive_brutal_test.sh` script provides exhaustive, multi-hour testin
 4. Replace the Period coercion inside `forcester_ts/forecaster.py`, tighten the SARIMAX search space (`forcester_ts/sarimax.py:136-183`), and extend regression tests so pandas/statsmodels warnings stop polluting the brutal logs.
 5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(datetime.UTC)`) and explicit sqlite adapters before the nightly run that the brutal harness triggers.
 
+> **2025-11-19 remediation note**  
+> Actions 1–4 are now implemented in code (`etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, `forcester_ts/forecaster.py`, `forcester_ts/sarimax.py`) and tracked in `Documentation/integration_fix_plan.md`. Synthetic/brutal runs have also been redirected to an isolated SQLite file (`data/test_database.db`) via the `PORTFOLIO_DB_PATH` override in `bash/comprehensive_brutal_test.sh`, so the primary `data/portfolio_maximizer.db` is no longer stressed by these tests. The remaining blocker for this brutal gate is modernising `scripts/backfill_signal_validation.py` and validating a fresh brutal run.
+
 ### ✅ 2025-11-16 Regression Fixes (validated via `logs/pipeline_run.log:22237-22986`)
 - `etl/database_manager.py` now normalises SQLite paths, backs up corrupt stores, and automatically mirrors `/mnt/*` deployments into `/tmp` without throwing warnings—all recent runs show clean INFO logs while writes succeed.
 - `scripts/run_etl_pipeline.py` serialises MSSA change points explicitly, so Stage 7/8 complete and IDs 361‑393 persist without DatetimeIndex crashes.
@@ -25,6 +28,7 @@ The `comprehensive_brutal_test.sh` script provides exhaustive, multi-hour testin
 - `forcester_ts/forecaster.py` suppresses KPSS `InterpolationWarning`s and `forcester_ts/sarimax.py` demotes the fallback-order notice to INFO, preventing the warning storm highlighted above.
 - Finnhub availability is now treated as optional; when `FINNHUB_API_KEY` is absent the manager logs a single INFO line instead of spamming warnings.
 - Outstanding item: `scripts/backfill_signal_validation.py` still needs timezone-aware adapters before nightly brutal tasks can be marked green.
+- **DB isolation for tests (Nov 19)**: `bash/comprehensive_brutal_test.sh` exports `PORTFOLIO_DB_PATH=data/test_database.db` for synthetic runs so brutal/test pipelines write into a dedicated SQLite file instead of the production `data/portfolio_maximizer.db`.
 - **Transparency upgrade (Nov 16)**: `forcester_ts/instrumentation.py` captures dataset shape/frequency/statistics per stage and `TimeSeriesVisualizer` renders those summaries directly on dashboards (see `logs/forecast_audits/*.json`). Every brutal report now references concrete data dimensions rather than hand-wavy descriptions.
 
 ## Features
@@ -86,7 +90,7 @@ export TEST_DURATION_HOURS=6
 # Set iterations per test
 export ITERATIONS_PER_TEST=10
 
-# Set tickers to test
+# Set tickers to test (frontier list appended automatically via --include-frontier-tickers)
 export TICKERS_LIST="AAPL,MSFT,GOOGL,TSLA,AMZN,NVDA"
 
 # Set date range
@@ -106,6 +110,8 @@ chmod +x bash/comprehensive_brutal_test.sh
 # Run
 bash bash/comprehensive_brutal_test.sh
 ```
+
+The brutal runner passes `--include-frontier-tickers`, so you do **not** need to manually append the Nigeria → Bulgaria symbols; `etl/frontier_markets.py` handles that automatically for every multi-ticker stage.
 
 ## Test Structure
 

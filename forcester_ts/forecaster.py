@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
-from pandas.tseries.frequencies import to_offset
 
 try:
     from statsmodels.tsa.stattools import adfuller, kpss
@@ -153,21 +152,21 @@ class TimeSeriesForecaster:
         series = series[~series.index.duplicated(keep="last")]
         series = series.sort_index()
         # Normalise index to naive timestamps for statsmodels compatibility
+        normalized_index = pd.DatetimeIndex(series.index).tz_localize(None)
         series = series.copy()
-        series.index = pd.DatetimeIndex(series.index).tz_localize(None)
-        inferred_freq = pd.infer_freq(series.index)
+        series.index = normalized_index
+        try:
+            inferred_freq = pd.infer_freq(series.index)
+        except Exception:  # pragma: no cover - inference best effort
+            inferred_freq = None
         freq_to_use = inferred_freq or ("B" if len(series) > 3 else None)
         if freq_to_use:
             series.attrs["_pm_freq_hint"] = freq_to_use
             try:
-                freq_offset = to_offset(freq_to_use)
-                series.index = pd.DatetimeIndex(series.index, freq=freq_offset)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug(
-                    "Unable to enforce frequency %s on series index: %s",
-                    freq_to_use,
-                    exc,
-                )
+                # Enforce a concrete DatetimeIndex frequency to keep statsmodels quiet.
+                series = series.asfreq(freq_to_use, method="pad")
+            except Exception:  # pragma: no cover - defensive; do not fail forecasting
+                logger.debug("Unable to enforce frequency %s on series", freq_to_use)
         return series
 
     def _capture_series_diagnostics(self, series: pd.Series) -> Dict[str, Any]:
@@ -613,6 +612,7 @@ class TimeSeriesForecaster:
             raise RuntimeError("Call forecast() before evaluate().")
 
         actual = self._ensure_series(actual_series)
+        self._instrumentation.record_series_snapshot("actual_realized", actual)
         metrics_map: Dict[str, Dict[str, float]] = {}
 
         def _evaluate_model(name: str, payload: Optional[Dict[str, Any]]) -> None:
@@ -633,6 +633,14 @@ class TimeSeriesForecaster:
 
         self._latest_metrics = metrics_map
         self._latest_results.setdefault("regression_metrics", {}).update(metrics_map)
+        self._instrumentation.record_artifact("evaluation_metrics", metrics_map)
+        for model, metrics in metrics_map.items():
+            self._instrumentation.record_model_metrics(
+                model,
+                metrics,
+                horizon=self.config.forecast_horizon,
+                n_observations=metrics.get("n_observations"),
+            )
 
         for model, metrics in metrics_map.items():
             summary = self._model_summaries.setdefault(model, {})

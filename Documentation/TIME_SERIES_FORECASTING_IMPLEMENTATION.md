@@ -12,6 +12,16 @@
 - Stack reference: Time-series dependencies must stay within the Tier-1 baseline documented in `Documentation/QUANT_TIME_SERIES_STACK.md` (reuse the YAML/JSON AI-companion snippets there when provisioning new agents or CI containers).
 - `bash/comprehensive_brutal_test.sh` now runs in **Time Series-first** mode by default; export `BRUTAL_ENABLE_LLM=1` only if you need to benchmark the legacy LLM fallback. This keeps the brutal gate aligned with the TS-first mandate captured in this document.
 
+## Condensed “practical recipe” for SARIMAX/SAMOSSA stability
+
+1. **Keep preprocessing enabled** – every price series is interpolated (`method="time"`), de-NaN’d, and optionally log-transformed after scaling. This maintains the correlation structure while improving numerical conditioning.
+2. **Attach explicit frequency hints** – we preserve the inferred `freqstr`/`inferred_freq` on `series.attrs["_pm_freq_hint"]`. When no hint exists but the median gap is ~1 day, we explicitly use `"B"` (business day) and log the decision.
+3. **Run with constraints first, relax only on demand** – the primary fit uses `enforce_stationarity=True` and `enforce_invertibility=True`. If convergence fails, we retry with relaxed constraints, emitting a warning event so the operator knows a fallback occurred.
+4. **Keep the order grid data-aware** – `_exceeds_parameter_budget` plus conservative `max_p/max_q/max_P/max_Q` caps ensure each candidate has enough observations. High-order seasonal MA terms are never allowed to consume short series.
+5. **Handle zeros explicitly** – if `log_transform=True` and we encounter non-positive values, we add the smallest possible positive shift Δ (recorded in attrs + model summary) before logging. Otherwise users can keep `log_transform=False`.
+6. **Scale tiny/huge series, don’t shift arbitrarily** – `_scale_series` multiplies by a factor between 1/1000 and 1000 so statsmodels sees stable magnitudes without corrupting the data.
+7. **Treat invertibility warnings as diagnostics** – they describe the solver’s path, not necessarily the final model. We forward them to `logs/warnings/warning_events.log` and continue when the solver converges.
+
 ### 🚨 2025-11-15 Brutal Run Regression
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the MSSA serialization block (`scripts/run_etl_pipeline.py:1755-1764`) still raises `ValueError: The truth value of a DatetimeIndex is ambiguous` after ~90 inserts per ticker, contradicting the hardening claim above. Every ticker finishes with “Generated forecasts for 0 ticker(s)” so Stage 8 has nothing to route.
 - `logs/pipeline_run.log:16932-17729` together with `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirm the database is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so the persisted SARIMAX/SAMOSSA/MSSA rows referenced later in this document are now invalid. `DatabaseManager._connect` must treat this error like `"disk i/o error"` (reset/mirror) before re-running the stage.
@@ -28,7 +38,14 @@
 
 ### ✅ 2025-11-16 Interpretability & Telemetry Upgrade
 - `forcester_ts/instrumentation.py` now captures per-model timing, configuration, diagnostic artifacts, and data snapshots (shape, window, missing %, statistical moments). `TimeSeriesForecaster.forecast()` embeds this report under `instrumentation_report` and (when `ensemble_kwargs.audit_log_dir` or the `TS_FORECAST_AUDIT_DIR` env var is set) writes JSON audits to disk.
-- Each SARIMAX/SAMOSSA/MSSA/GARCH fit/forecast phase is wrapped in the instrumentation context manager so change-points, orders, and information-criteria become searchable logs aligned with `Documentation/QUANT_TIME_SERIES_STACK.md` guidance on interpretable AI. The comprehensive dashboard prints this metadata directly on the figure so visual evidence matches the dataset actually processed.
+- Each SARIMAX/SAMOSSA/MSSA/GARCH fit/forecast phase is wrapped in the instrumentation context manager so change-points, orders, and information-criteria become searchable logs aligned with `Documentation/QUANT_TIME_SERIES_STACK.md` guidance on interpretable AI. Regression benchmarking (`compute_regression_metrics` → RMSE, sMAPE, tracking error) is logged alongside the dataset diagnostics, and the comprehensive dashboard prints this metadata directly on the figure so visual evidence matches the dataset actually processed.
+
+### ✅ 2025-11-18 SARIMAX Convergence Hardening
+- Guided by the regression notes in `Documentation/BRUTAL_TEST_README.md`, `SYSTEM_ERROR_MONITORING_GUIDE.md`, and `CRITICAL_REVIEW.md`, the SARIMAX forecaster now rescales every series into the statsmodels “1–1000” range before fitting, suppressing the DataScale warnings that polluted the brutal logs and improving optimizer stability.
+- `_select_best_order` enforces a data-per-parameter budget (mirroring the checkpointing/logging guardrails) and stops the grid search after repeated non-converged fits, so the warning recorder referenced in `Documentation/CHECKPOINTING_AND_LOGGING.md` no longer fills with redundant combinations.
+- Frequency hints are stored—but no longer forced onto the pandas index—preventing the `PeriodIndex` coercion that previously triggered ValueWarnings and cascaded into the non-convergence pattern seen in `Documentation/implementation_checkpoint.md`.
+- SAMoSSA now mirrors the `Documentation/SAMOSSA_IMPLEMENTATION_CHECKLIST.md`: time-series inputs are interpolated/normalised, Page matrices enforce \(1 < L \leq \sqrt{T}\), HSVT outputs are rescaled to the original units, and residuals are passed through an AutoReg fallback so deterministic + AR components are forecast independently as demanded by the checklist.
+- Nov 18 update: SARIMAX/SAMoSSA both use native `Series.ffill()/bfill()` (no deprecated `fillna(method=...)`), default to Business-day frequencies when none can be inferred, and carry those indices through AutoReg + statsmodels fit/forecast paths—eliminating the `ValueWarning`/`UserWarning` spam recorded in the brutal run logs while staying aligned with `Documentation/QUANT_TIME_SERIES_STACK.md`.
 
 
 ---
@@ -39,7 +56,7 @@ The time-series stack now comprises **SARIMAX**, **GARCH**, and the newly promot
 
 ### 🔄 2025-11-09 Wiring Update (Phase 5.4b)
 - `forcester_ts/` is now the canonical home for **SARIMAX**, **GARCH**, **SAMOSSA**, and **MSSA-RL**. `etl/time_series_forecaster.py` remains as a thin compatibility shim, so dashboards, notebooks, and ETL all import the same implementations.
-- `TimeSeriesForecaster` now builds each pandas series with an explicit frequency (using `pd.infer_freq` or a business-day fallback) before invoking statsmodels, so the SARIMAX diagnostics no longer emit `ValueWarning`/`ConvergenceWarning` noise about missing frequency metadata.
+- `TimeSeriesForecaster` now records frequency hints without forcing pandas to coerce the index into a fixed `PeriodIndex`, eliminating the `ValueWarning` spam called out in `Documentation/CHECKPOINTING_AND_LOGGING.md` and keeping SARIMAX aligned with the log-stream guardrails.
 - `models/time_series_signal_generator.py` now consumes GARCH volatility series safely (scalar conversion prevents the `The truth value of a Series is ambiguous` crash) and stamps HOLD provenance with ISO timestamps. This fix restores Time Series signal generation inside the monitoring job so `llm_signal_backtests` stops reporting **NO_DATA**.
 - Targeted regression tests executed under `simpleTrader_env`:
   - `pytest tests/models/test_time_series_signal_generator.py -q`
@@ -343,23 +360,31 @@ if bundle.fallback_signal:
 ```bash
 # Pipeline run with Time Series as default signal generator
 python scripts/run_etl_pipeline.py \
-    --tickers AAPL MSFT \
+    --tickers AAPL,MSFT \
+    --include-frontier-tickers \
     --start 2024-01-01 --end 2024-06-30 \
     --config config/pipeline_config.yml
 
 # Enable LLM redundancy mode (run both TS and LLM)
 python scripts/run_etl_pipeline.py \
-    --tickers AAPL MSFT \
+    --tickers AAPL,MSFT \
+    --include-frontier-tickers \
     --enable-llm \
     --config config/pipeline_config.yml
 
 # Force LLM-only mode (legacy behavior)
 python scripts/run_etl_pipeline.py \
-    --tickers AAPL MSFT \
+    --tickers AAPL,MSFT \
+    --include-frontier-tickers \
     --enable-llm \
     --config config/pipeline_config.yml \
     --signal-source llm  # New flag (to be implemented)
 ```
+
+`--include-frontier-tickers` taps `etl/frontier_markets.py` so every multi-ticker training
+run carries the curated Nigeria → Bulgaria coverage list referenced in
+`Documentation/arch_tree.md`. Keep synthetic mode enabled until data-source specific ticker
+suffix mappings for NGX/NSE/BSE are configured.
 
 ---
 

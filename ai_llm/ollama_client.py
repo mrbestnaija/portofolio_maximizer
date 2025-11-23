@@ -444,7 +444,9 @@ class OllamaClient:
         
         while attempts < max_attempts:
             attempts += 1
-            start_time = time.time()
+            # Use a monotonic clock for latency measurement so tests that monkeypatch
+            # time.time() don't interfere with inference timing.
+            start_time = time.perf_counter()
             try:
                 options = self._build_generation_options(temperature)
                 payload = {
@@ -471,7 +473,7 @@ class OllamaClient:
                 if not generated_text.strip():
                     raise OllamaConnectionError("Empty LLM response")
                 
-                duration = time.time() - start_time
+                duration = time.perf_counter() - start_time
                 duration = max(duration, 1e-6)
                 effective_duration = max(duration, self._token_rate_baseline_seconds)
                 word_tokens = max(1.0, float(len(generated_text.split())))
@@ -589,7 +591,7 @@ class OllamaClient:
                 return generated_text
                 
             except requests.exceptions.Timeout:
-                duration = time.time() - start_time
+                duration = time.perf_counter() - start_time
                 error_msg = f"LLM generation timeout (>{self.timeout}s)"
                 
                 monitor_inference(
@@ -629,7 +631,7 @@ class OllamaClient:
                     f"{error_msg}. Try reducing prompt length or increasing timeout."
                 ) from None
             except Exception as e:
-                duration = time.time() - start_time
+                duration = time.perf_counter() - start_time
                 error_msg = f"LLM generation failed: {e}"
                 
                 monitor_inference(
@@ -660,7 +662,7 @@ class OllamaClient:
                 if self._last_inference_stats is None:
                     self._last_inference_stats = {
                         "success": False,
-                        "inference_time": time.time() - start_time,
+                        "inference_time": time.perf_counter() - start_time,
                         "tokens_per_second": 0.0,
                         "model_name": self.model,
                         "timestamp": datetime.now(),

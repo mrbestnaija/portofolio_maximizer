@@ -29,35 +29,9 @@
 
 ### For New Contributors
 
-```bash
-# 1. Clone the repository
-git clone https://github.com/mrbestnaija/portofolio_maximizer.git
-cd portofolio_maximizer
-
-# 2. Configure git settings (one-time setup)
-git config --local pull.rebase false
-git config --local push.default current
-git config --local merge.ff false
-
-# 3. Verify configuration
-git config --local --list | grep -E "(pull|push|merge)"
-
-# 4. Check repository status
-git status
-git remote -v
-```
 
 ### For Existing Contributors
 
-```bash
-# Verify your setup is current
-git config --local --list | grep -E "(pull|push|merge)"
-
-# Expected output:
-# pull.rebase=false
-# push.default=current
-# merge.ff=false
-```
 
 ---
 
@@ -69,24 +43,9 @@ git config --local --list | grep -E "(pull|push|merge)"
 
 ### Remote Configuration
 
-```bash
-# View current remote setup
-git remote -v
-
-# Expected output:
-# origin  https://github.com/mrbestnaija/portofolio_maximizer.git (fetch)
-# origin  https://github.com/mrbestnaija/portofolio_maximizer.git (push)
-```
 
 ### Adding Upstream (For Contributors)
 
-```bash
-# Add upstream remote (if contributing from fork)
-git remote add upstream https://github.com/mrbestnaija/portofolio_maximizer.git
-
-# Verify remotes
-git remote -v
-```
 
 ---
 
@@ -94,12 +53,6 @@ git remote -v
 
 The following git settings ensure local changes always take precedence and maintain a clear history:
 
-```bash
-# Apply configuration (run once per repository)
-git config --local pull.rebase false      # Merge, don't rebase on pull
-git config --local push.default current   # Push current branch only
-git config --local merge.ff false         # Always create merge commits
-```
 
 ### What These Settings Do
 
@@ -111,15 +64,6 @@ git config --local merge.ff false         # Always create merge commits
 
 ### Verification
 
-```bash
-# Check configuration
-git config --local --list | grep -E "(pull|push|merge)"
-
-# Expected output:
-# pull.rebase=false
-# push.default=current
-# merge.ff=false
-```
 
 ---
 
@@ -157,49 +101,14 @@ git config --local --list | grep -E "(pull|push|merge)"
 
 #### 1. Make Local Changes
 
-```bash
-# Edit files normally
-# (Use your preferred editor: vim, VS Code, etc.)
-
-# Stage specific files
-git add path/to/file.py
-
-# Or stage all changes
-git add .
-
-# Commit with descriptive message
-git commit -m "feat(etl): Add intelligent caching to yfinance extractor"
-```
 
 #### 2. Sync to Remote (Backup)
 
-```bash
-# Standard push (if no conflicts)
-git push origin master
-
-# If remote has diverged, use force-with-lease (safer than --force)
-git push --force-with-lease origin master
-
-# Verify push succeeded
-git log --oneline -1
-```
 
 **Note**: `--force-with-lease` is safer than `--force` as it checks if remote has changed since last fetch.
 
 #### 3. Pull from Remote (When Needed)
 
-```bash
-# Fetch latest changes without merging
-git fetch origin
-
-# View what changed
-git log HEAD..origin/master
-
-# Pull and merge
-git pull origin master
-
-# If conflicts occur, see [Conflict Resolution](#conflict-resolution)
-```
 
 ---
 
@@ -207,73 +116,12 @@ git pull origin master
 
 ### For External Contributors (Pull Requests)
 
-```bash
-# 1. Fork the repository on GitHub
-
-# 2. Clone your fork
-git clone https://github.com/YOUR_USERNAME/portofolio_maximizer.git
-cd portofolio_maximizer
-
-# 3. Add upstream remote
-git remote add upstream https://github.com/mrbestnaija/portofolio_maximizer.git
-
-# 4. Create feature branch
-git checkout -b feature/your-feature-name
-
-# 5. Make changes and commit
-git add .
-git commit -m "feat(scope): Your feature description"
-
-# 6. Push to your fork
-git push origin feature/your-feature-name
-
-# 7. Open Pull Request on GitHub
-# GitHub will provide the PR link after push
-```
 
 ### Keeping Fork Up to Date
 
-```bash
-# Fetch latest from upstream
-git fetch upstream
-
-# Merge upstream/master into your branch
-git checkout master
-git merge upstream/master
-
-# Push updated master to your fork
-git push origin master
-```
 
 ### For Team Members (Direct Access)
 
-```bash
-# 1. Clone repository
-git clone https://github.com/mrbestnaija/portofolio_maximizer.git
-cd portofolio_maximizer
-
-# 2. Configure git (one-time)
-git config --local pull.rebase false
-git config --local push.default current
-git config --local merge.ff false
-
-# 3. Create feature branch (recommended)
-git checkout -b feature/your-feature
-
-# 4. Make changes, test, commit
-git add .
-git commit -m "feat(scope): Feature description"
-
-# 5. Push feature branch
-git push origin feature/your-feature
-
-# 6. Merge to master locally (if approved)
-git checkout master
-git merge --no-ff feature/your-feature
-
-# 7. Push master
-git push origin master
-```
 
 ---
 
@@ -292,53 +140,15 @@ Conflicts occur when:
 
 #### Method 1: Keep Local Version (Recommended)
 
-```bash
-# During merge conflict
-git checkout --ours <file>
-git add <file>
-git commit -m "merge: Resolve conflicts, keep local changes"
-```
 
 #### Method 2: Keep Remote Version
 
-```bash
-# If you want remote version instead
-git checkout --theirs <file>
-git add <file>
-git commit -m "merge: Resolve conflicts, accept remote changes"
-```
 
 #### Method 3: Manual Resolution
 
-```bash
-# 1. Open conflicted file in editor
-# 2. Look for conflict markers:
-#    <<<<<<< HEAD
-#    (local changes)
-#    =======
-#    (remote changes)
-#    >>>>>>> origin/master
-# 3. Edit to resolve conflict
-# 4. Remove conflict markers
-# 5. Stage and commit
-git add <file>
-git commit -m "merge: Manually resolve conflicts"
-```
 
 ### Conflict Prevention
 
-```bash
-# Before starting work, fetch latest
-git fetch origin
-
-# Check if local is behind
-git status
-
-# Update local if needed
-git pull origin master
-
-# Then start your work
-```
 
 ---
 
@@ -348,43 +158,11 @@ git pull origin master
 
 Before committing, verify:
 
-```bash
-# 1. Run tests
-pytest tests/ -v
-
-# 2. Check for linting errors
-# (If using flake8, black, etc.)
-# flake8 .
-# black --check .
-
-# 3. Verify imports work
-python -c "from scripts.run_etl_pipeline import execute_pipeline; print('✓ Imports OK')"
-
-# 4. Check git status
-git status
-
-# 5. Review changes
-git diff --cached
-```
 
 ### Pre-Push Checklist
 
 Before pushing to remote:
 
-```bash
-# 1. Run full test suite
-pytest tests/ --cov=etl
-
-# 2. Verify no sensitive data
-git diff origin/master | grep -i "password\|api_key\|secret"
-
-# 3. Check commit messages are clear
-git log origin/master..HEAD
-
-# 4. Verify branch is up to date (optional)
-git fetch origin
-git log HEAD..origin/master
-```
 
 > **Time Series-first brutal suite**: `bash/comprehensive_brutal_test.sh` now defaults to forecaster-only validation. Run `BRUTAL_ENABLE_LLM=1 bash bash/comprehensive_brutal_test.sh` only if you must benchmark the legacy LLM fallback; otherwise leave the variable unset so the brutal gate mirrors the TS-first architecture described throughout the documentation set.
 
@@ -392,17 +170,6 @@ git log HEAD..origin/master
 
 Create a pre-push hook (optional):
 
-```bash
-# Create pre-push hook
-cat > .git/hooks/pre-push << 'EOF'
-#!/bin/bash
-echo "Running pre-push checks..."
-pytest tests/ -v --tb=short || exit 1
-echo "✓ All checks passed"
-EOF
-
-chmod +x .git/hooks/pre-push
-```
 
 ---
 
@@ -425,42 +192,9 @@ chmod +x .git/hooks/pre-push
 
 ### Creating Feature Branches
 
-```bash
-# Create and switch to feature branch
-git checkout -b feature/portfolio-optimization
-
-# Work on feature
-git add .
-git commit -m "feat(portfolio): Add Markowitz optimization"
-
-# Push feature branch
-git push origin feature/portfolio-optimization
-
-# Merge to master (locally)
-git checkout master
-git merge --no-ff feature/portfolio-optimization
-
-# Push master
-git push origin master
-
-# Clean up feature branch (optional)
-git branch -d feature/portfolio-optimization
-git push origin --delete feature/portfolio-optimization
-```
 
 ### Backup Branches
 
-```bash
-# Create backup before major changes
-git branch backup/before-refactor-$(date +%Y%m%d)
-
-# List all backup branches
-git branch --list 'backup/*'
-
-# Restore from backup if needed
-git checkout backup/before-refactor-20251106
-git checkout -b recovery-from-backup
-```
 
 ---
 
@@ -475,21 +209,6 @@ git checkout -b recovery-from-backup
 
 ### Local Backups
 
-```bash
-# Create timestamped backup branch
-git branch backup/before-refactor-$(date +%Y%m%d_%H%M%S)
-
-# Create backup tag
-git tag backup-v1.0-$(date +%Y%m%d)
-
-# List backups
-git branch --list 'backup/*'
-git tag --list 'backup-*'
-
-# Push backup branches/tags (optional)
-git push origin backup/before-refactor-20251106
-git push origin backup-v1.0-20251106
-```
 
 ### Backup Best Practices
 
@@ -506,85 +225,22 @@ git push origin backup-v1.0-20251106
 
 **Situation**: Remote was accidentally updated, need to restore local version
 
-```bash
-# Verify local has correct version
-git log --oneline -5
-
-# Force push local to remote (overwrites remote)
-git push --force-with-lease origin master
-
-# Verify push succeeded
-git log --oneline -5
-```
 
 ### Scenario 2: Local Repository Corruption
 
 **Situation**: Local git repository is corrupted or lost
 
-```bash
-# 1. Clone fresh copy from remote
-cd /path/to/parent/directory
-git clone https://github.com/mrbestnaija/portofolio_maximizer.git portfolio_maximizer_recovery
-
-# 2. Copy important local files (if any) before replacing
-cp -r portfolio_maximizer_v45/local_changes/* portfolio_maximizer_recovery/
-
-# 3. Replace corrupted repository
-rm -rf portfolio_maximizer_v45
-mv portfolio_maximizer_recovery portfolio_maximizer_v45
-
-# 4. Reconfigure git settings
-cd portfolio_maximizer_v45
-git config --local pull.rebase false
-git config --local push.default current
-git config --local merge.ff false
-```
 
 ### Scenario 3: Need to Inspect Remote Changes
 
 **Situation**: Want to see what changed on remote without merging
 
-```bash
-# Fetch remote changes
-git fetch origin
-
-# View remote changes
-git log master..origin/master --oneline
-
-# See detailed diff
-git diff master origin/master
-
-# View specific file changes
-git diff master origin/master -- path/to/file.py
-
-# Merge only if you want remote changes
-git merge origin/master
-```
 
 ### Scenario 4: Undo Last Commit (Before Push)
 
-```bash
-# Undo last commit, keep changes
-git reset --soft HEAD~1
-
-# Undo last commit, discard changes (careful!)
-git reset --hard HEAD~1
-
-# Verify
-git status
-```
 
 ### Scenario 5: Undo Last Commit (After Push)
 
-```bash
-# Create revert commit (recommended)
-git revert HEAD
-git push origin master
-
-# Or force push (only if no one else has pulled)
-git reset --hard HEAD~1
-git push --force-with-lease origin master
-```
 
 ---
 
@@ -602,13 +258,6 @@ git push --force-with-lease origin master
 
 **Always use `--force-with-lease` instead of `--force`**:
 
-```bash
-# Safe: Checks remote hasn't changed
-git push --force-with-lease origin master
-
-# Dangerous: Overwrites remote without checking
-# git push --force origin master  # ❌ Avoid unless necessary
-```
 
 ### Force Push Best Practices
 
@@ -646,16 +295,6 @@ Keep in version control:
 
 ### Verifying .gitignore
 
-```bash
-# Check what would be ignored
-git status --ignored
-
-# Test if file is ignored
-git check-ignore -v path/to/file
-
-# View .gitignore rules
-cat .gitignore
-```
 
 ---
 
@@ -663,77 +302,15 @@ cat .gitignore
 
 ### Check Git Configuration
 
-```bash
-# View all local git config
-git config --local --list
-
-# Check specific settings
-git config --local --get pull.rebase
-git config --local --get push.default
-git config --local --get merge.ff
-
-# Expected values:
-# pull.rebase=false
-# push.default=current
-# merge.ff=false
-```
 
 ### Check Repository Status
 
-```bash
-# Full status
-git status
-
-# Short status
-git status --short
-
-# View recent commits
-git log --oneline -10
-
-# View remote tracking
-git remote -v
-
-# Check branch information
-git branch -vv
-```
 
 ### Check Uncommitted Changes
 
-```bash
-# Unstaged changes
-git diff
-
-# Staged changes
-git diff --cached
-
-# All changes (staged + unstaged)
-git diff HEAD
-
-# Changes in specific file
-git diff path/to/file.py
-
-# Summary of changes
-git diff --stat
-```
 
 ### Check Commit History
 
-```bash
-# Recent commits
-git log --oneline -10
-
-# Detailed recent commit
-git log -1
-
-# Commits not yet pushed
-git log origin/master..HEAD
-
-# Commits in remote not in local
-git log HEAD..origin/master
-
-# Visual graph
-git log --oneline --graph --all -10
-```
 
 ---
 
@@ -773,9 +350,14 @@ git log --oneline --graph --all -10
    git log origin/master..HEAD
    ```
 
-3. **Use Safe Force Push**: Always `--force-with-lease`
+3. **Push Safely**: Prefer rebase/push on the current branch; only force-with-lease when history must be rewritten
    ```bash
-   git push --force-with-lease origin master
+   # Sync current branch
+   git pull --rebase origin $(git rev-parse --abbrev-ref HEAD)
+   git push origin $(git rev-parse --abbrev-ref HEAD)
+
+   # Rare: rewrite published history safely
+   git push --force-with-lease origin $(git rev-parse --abbrev-ref HEAD)
    ```
 
 4. **Push Regularly**: Don't accumulate too many local commits
@@ -838,30 +420,6 @@ git log --oneline --graph --all -10
 
 ### Examples
 
-```bash
-# Feature with scope
-git commit -m "feat(etl): Add intelligent caching to yfinance extractor"
-
-# Bug fix
-git commit -m "fix(preprocessor): Handle missing data edge cases"
-
-# Refactoring
-git commit -m "refactor(pipeline): Extract testable execute_pipeline() function"
-
-# Documentation
-git commit -m "docs: Update README with Ollama prerequisite documentation"
-
-# Test
-git commit -m "test(etl): Add comprehensive cache mechanism tests"
-
-# Multi-line commit message
-git commit -m "feat(etl): Add timestamp and run_id to parquet filenames
-
-- Include timestamp in filename to prevent overwrites
-- Add run_id parameter for unique run identification
-- Persist comprehensive metadata alongside artifacts
-- Maintain backward compatibility with existing code"
-```
 
 ### Footer Options
 
@@ -885,77 +443,30 @@ Closes #456
 #### Issue 1: "Your branch is ahead of 'origin/master'"
 
 **Solution**: Push your local commits
-```bash
-git push origin master
-```
 
 #### Issue 2: "Your branch and 'origin/master' have diverged"
 
 **Solution**: Use force-with-lease (local takes priority)
-```bash
-git push --force-with-lease origin master
-```
 
 #### Issue 3: Merge conflicts during pull
 
 **Solution**: Keep local version
-```bash
-git checkout --ours .
-git add .
-git commit -m "merge: Resolve conflicts, keep local changes"
-```
 
 #### Issue 4: Accidentally committed sensitive data
 
 **Solution**: Remove from history (before push)
-```bash
-# Remove file from last commit
-git reset --soft HEAD~1
-git reset HEAD sensitive_file.txt
-git commit -m "feat: Your original message"
-
-# Add to .gitignore
-echo "sensitive_file.txt" >> .gitignore
-git add .gitignore
-git commit -m "chore: Add sensitive_file.txt to .gitignore"
-```
 
 #### Issue 5: Want to undo last commit (not pushed)
 
 **Solution**: Reset to previous commit
-```bash
-# Keep changes
-git reset --soft HEAD~1
-
-# Discard changes (careful!)
-git reset --hard HEAD~1
-```
 
 #### Issue 6: Git configuration not applied
 
 **Solution**: Reapply configuration
-```bash
-git config --local pull.rebase false
-git config --local push.default current
-git config --local merge.ff false
-
-# Verify
-git config --local --list | grep -E "(pull|push|merge)"
-```
 
 #### Issue 7: Remote URL incorrect
 
 **Solution**: Update remote URL
-```bash
-# View current remote
-git remote -v
-
-# Update remote URL
-git remote set-url origin https://github.com/mrbestnaija/portofolio_maximizer.git
-
-# Verify
-git remote -v
-```
 
 ### Getting Help
 
@@ -987,29 +498,6 @@ git remote -v
 
 ### Collaboration Workflow
 
-```bash
-# 1. Before starting work
-git fetch origin
-git status
-
-# 2. Create feature branch
-git checkout -b feature/your-feature
-
-# 3. Make changes, test, commit
-# ... make changes ...
-pytest tests/
-git add .
-git commit -m "feat(scope): Description"
-
-# 4. Push feature branch
-git push origin feature/your-feature
-
-# 5. (For PRs) Open Pull Request on GitHub
-# (For direct access) Merge to master after review
-git checkout master
-git merge --no-ff feature/your-feature
-git push origin master
-```
 
 ---
 
@@ -1030,26 +518,7 @@ git push origin master
 - **Last Commit**: 6839f0b (refactor(pipeline): Implement remote synchronization enhancements)
 - **Status**: All local changes synced to GitHub ✅
 
-### Quick Reference
 
-```bash
-# Daily workflow
-git add .
-git commit -m "type(scope): Description"
-git push origin master
-
-# If conflicts
-git checkout --ours .
-git add .
-git commit -m "merge: Resolve conflicts"
-
-# If remote diverged
-git push --force-with-lease origin master
-
-# Verify
-git status
-git log --oneline -5
-```
 
 ---
 
@@ -1077,28 +546,38 @@ git branch backup/before-refactor-$(Get-Date -Format "yyyyMMdd")
 
 ### Linux/WSL
 
-```bash
-# Standard git commands
-git status
-git add .
-git commit -m "feat: Description"
-
-# Date formatting for backup branches
-git branch backup/before-refactor-$(date +%Y%m%d)
-```
 
 ### macOS
 
-```bash
-# Standard git commands (same as Linux)
-git status
-git add .
-git commit -m "feat: Description"
-
-# Date formatting
-git branch backup/before-refactor-$(date +%Y%m%d)
-```
 
 ---
 
 **End of Document**
+
+### Recent Sync Status
+
+- **Last Push**: 2025-11-06
+- **Last Commit**: 6839f0b (refactor(pipeline): Implement remote synchronization enhancements)
+- **Status**: All local changes synced to GitHub o. *(New work since then includes SQLite self-healing, MSSA/SARIMAX/visualization fixes, test-DB isolation, and documentation updatescommit and push as described below.)*
+
+### Quick Reference
+
+```bash
+# Daily workflow (docs + code)
+git status
+git add Documentation/implementation_checkpoint.md Documentation/arch_tree.md Documentation/BRUTAL_TEST_README.md Documentation/FORECASTING_IMPLEMENTATION_SUMMARY.md bash/comprehensive_brutal_test.sh
+git commit -m "docs(brutal+forecasting): Sync docs with DB/test isolation fixes"
+git push origin master
+
+# If conflicts
+git checkout --ours .
+git add .
+git commit -m "merge: Resolve conflicts"
+
+# If remote diverged
+git push --force-with-lease origin master
+
+# Verify
+git status
+git log --oneline -5
+```

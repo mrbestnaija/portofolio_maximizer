@@ -1,4 +1,6 @@
-# Security Audit & Production Hardening Plan
+﻿# Security Audit & Production Hardening Plan
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Date**: 2025-01-27  
 **Version**: 1.0  
@@ -22,6 +24,13 @@ This portfolio management system has **good foundational security** (API keys pr
 - No security monitoring/audit logging
 
 **Estimated Time to SaaS-Ready**: 6-12 months with dedicated security engineering resources.
+
+### Frontier Market Data Coverage (2025-11-15)
+- Multi-ticker training/tests now append the Nigeria → Bulgaria frontier list via `etl/frontier_markets.py` + the `--include-frontier-tickers` flag baked into every `.bash/`/`.script/` runner. Treat these symbols as high-volatility/low-liquidity datasets: confirm export controls, jurisdictional compliance, and data-source entitlements before enabling live (non-synthetic) pipelines.
+- Security accreditation deliverables (`SECURITY_IMPLEMENTATION_SUMMARY.md`, `SECURITY_TESTS_AND_INTEGRATION.md`) now reference this flag so frontier-market telemetry remains auditable alongside US mega-cap coverage.
+
+### SQLite Integrity (2025-11-18)
+- `etl/database_manager.py` automatically backs up corrupted SQLite files (“database disk image is malformed”) and rebuilds a clean store before re-attempting writes, reducing data-loss risk during brutal or real-time pipeline runs. Incident response now reviews the `.corrupt.*` artifacts rather than triaging hundreds of repeated errors.
 
 ---
 
@@ -614,4 +623,5 @@ Before deploying to production, verify:
 **Last Updated**: 2025-01-27  
 **Next Review**: Monthly or after major changes  
 **Status**: 🔴 **NOT PRODUCTION READY - SECURITY HARDENING REQUIRED**
+
 

@@ -27,7 +27,6 @@ from ai_llm.signal_quality_validator import (
     SignalDirection,
 )
 from ai_llm.llm_database_integration import (
-    llm_db_manager,
     get_performance_summary,
     save_risk_assessment,
 )

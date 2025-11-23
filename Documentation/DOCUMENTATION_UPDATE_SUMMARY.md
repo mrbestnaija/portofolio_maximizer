@@ -1,4 +1,7 @@
-# Documentation Update Summary - Time Series Signal Generation Refactoring
+﻿# Documentation Update Summary - Time Series Signal Generation Refactoring
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Date**: 2025-11-06  
 **Status**: ✅ **COMPLETE**
 
@@ -7,6 +10,14 @@
 ## 📋 Overview
 
 All documentation files in the `Documentation/` directory have been updated to reflect the completed Time Series signal generation refactoring. The system now uses Time Series ensemble as the DEFAULT signal generator with LLM as fallback/redundancy.
+
+## 🔄 Frontier Market Coverage Update (2025-11-15)
+- Added `etl/frontier_markets.py` + `--include-frontier-tickers` flag to every multi-ticker script/CLI so Nigeria → Bulgaria symbols (MTNN/AIRTELAFRI/…/SYN) are part of both synthetic training and brutal smoke tests per the frontier liquidity guide.
+- Updated `Documentation/arch_tree.md`, `implementation_checkpoint.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `UNIFIED_ROADMAP.md`, `TO_DO_LIST_MACRO.mdc`, `OPTIMIZATION_IMPLEMENTATION_PLAN.md`, `SECURITY_AUDIT_AND_HARDENING.md`, `SECURITY_IMPLEMENTATION_SUMMARY.md`, `SECURITY_TESTS_AND_INTEGRATION.md`, `STUB_IMPLEMENTATION_PLAN.md`, `SYSTEM_STATUS_2025-10-22.md`, and `SYSTEM_ERROR_MONITORING_GUIDE.md` with consistent messaging + cross-links so every governance artifact reflects the new requirement.
+- Refreshed `README.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TESTING_GUIDE.md`, `BRUTAL_TEST_*` guides, and the `bash/` orchestrators to showcase the `--include-frontier-tickers` flag next to each multi-ticker run (brutal suite now has a dedicated frontier training stage).
+
+## 🧱 SQLite Self-Healing (2025-11-18)
+- `etl/database_manager.py` now detects `"database disk image is malformed"` (or mid-run `"database is locked"`) events, backs up the corrupted store, rebuilds a clean SQLite file, resets the connection, and retries the write automatically. Docs referencing DB integrity (`CRITICAL_REVIEW.md`, `SYSTEM_ERROR_MONITORING_GUIDE.md`, security summaries, roadmap/to-do files) highlight this safeguard so brutal/test_real_time_pipeline logs stay actionable instead of repeating the failure 100+ times.
 
 ---
 
@@ -166,4 +177,5 @@ All documentation files in the `Documentation/` directory have been updated to r
 **Status**: ✅ **ALL DOCUMENTATION SYNCHRONIZED**  
 **Files Updated**: 10+ documentation files  
 **Next Review**: After performance benchmarks complete
+
 

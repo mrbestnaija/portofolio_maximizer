@@ -1,7 +1,9 @@
-I'll update the `next-to-do.md` file with comprehensive ML modeling and optimization integration while maintaining the production-ready status and existing architecture.
+﻿I'll update the `next-to-do.md` file with comprehensive ML modeling and optimization integration while maintaining the production-ready status and existing architecture.
 
 ```markdown
 # UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 ## CURRENT PROJECT STATUS: 🔴 BLOCKED (Updated Nov 15, 2025 brutal run)
 **Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
@@ -21,6 +23,7 @@ I'll update the `next-to-do.md` file with comprehensive ML modeling and optimiza
 4. Replace the deprecated Period coercion and tighten the SARIMAX grid to stop warning spam from drowning out actionable errors. *(Completed Nov 16; any residual warnings are now routed to `logs/warnings/warning_events.log` for auditing via `etl/warning_recorder.py`.)*
 5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters prior to the nightly job described later in this document.
 - ✅ **2025-11-16 status**: Items 1–4 shipped in `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, `forcester_ts/forecaster.py`, and `forcester_ts/sarimax.py`. See `logs/pipeline_run.log:22237-22986` for the clean ETL execution. Item 5 (validator modernization) remains outstanding.
+- ✅ **2025-11-16 telemetry**: `forcester_ts/instrumentation.py` now records dataset shape/statistics snapshots and per-model benchmarking metrics (RMSE, sMAPE, tracking error). Forecast runs automatically emit JSON audits under `logs/forecast_audits/` and the comprehensive dashboard prints the dataset summary inline.
 - Phase 4.8: Checkpointing & Event Logging (Oct 7, 2025)
 - Phase 5.1: Alpha Vantage & Finnhub APIs Complete (Oct 7, 2025)
 - Phase 5.2: LLM Integration Complete (Ollama) (Oct 8, 2025)
@@ -703,3 +706,4 @@ def document_time_series_rollout():
 - Configuration-driven deployment
 
 The updated architecture makes ML the **central quantitative engine** while maintaining all existing production capabilities and adding sophisticated forecasting, risk management, and adaptive strategy optimization.
+

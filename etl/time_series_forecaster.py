@@ -13,6 +13,8 @@ from forcester_ts import (
     SARIMAXForecaster,
     TimeSeriesForecaster,
     TimeSeriesForecasterConfig,
+    RollingWindowValidator,
+    RollingWindowCVConfig,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "SARIMAXForecaster",
     "TimeSeriesForecaster",
     "TimeSeriesForecasterConfig",
+    "RollingWindowValidator",
+    "RollingWindowCVConfig",
 ]

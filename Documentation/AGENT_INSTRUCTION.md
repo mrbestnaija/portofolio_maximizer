@@ -21,6 +21,9 @@
 - **Prerequisites**: ✅ All data infrastructure complete
 - **Status**: Ready to begin
 
+### Integration Recovery Tracker
+- Track and update pipeline remediation tasks in `Documentation/integration_fix_plan.md` before advancing Phase 5 work or refreshing `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
+
 ## Approved Time-Series Stack (Tier-1 default)
 - Canonical reference: `Documentation/QUANT_TIME_SERIES_STACK.md` (pin in every AI companion's context). Consider Tier-1 the only sanctioned dependency set until profitability + GPU budget gates unlock higher tiers.
 - Runtime: Python 3.10-3.12 inside `simpleTrader_env`, NumPy, pandas, SciPy.

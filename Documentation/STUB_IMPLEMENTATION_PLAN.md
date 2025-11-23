@@ -1,4 +1,7 @@
-# Stub & Incomplete Implementation Plan
+﻿# Stub & Incomplete Implementation Plan
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Comprehensive Review and Replacement Strategy**
 
 **Date**: 2025-11-12  
@@ -9,6 +12,13 @@
 - Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
 - Checkpoint/metadata utilities are stable on Windows thanks to Path.replace, unblocking future stub work that writes checkpoints repeatedly.
 - Validator/backfill stubs can assume scripts/backfill_signal_validation.py is callable from scheduled jobs; only the scheduler glue remains.
+
+### Nov 15, 2025 Frontier Coverage Update
+- Added `etl/frontier_markets.py` + `--include-frontier-tickers` plumbing so every stub exercise in `.bash/`/`.script/` land includes the Nigeria → Bulgaria ticker atlas provided in the liquidity guide. Synthetic runs remain default until live ticker suffix mapping (e.g., NGX `.LG`) is finalized; document whether each stub validation used synthetic or live data.
+- Update stub replacement PRDs to reference `Documentation/arch_tree.md` and `README.md` for the canonical frontier list—future placeholder removals must preserve this coverage requirement.
+
+### Nov 18, 2025 SQLite Recovery
+- `etl/database_manager.py` now auto-backs up corrupted SQLite files and rebuilds them when `database disk image is malformed` trips the brutal suite. Any stub work touching persistence (checkpointing, validation backfills, trade logs) should rely on this code path instead of crafting ad-hoc repair logic.
 
 ### 🚨 2025-11-15 Brutal Run Regression
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the database that these stubs rely on is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”). `DatabaseManager._connect` must treat this error like the existing disk-I/O path before any stub replacement can be validated.
@@ -40,6 +50,7 @@ This document identifies all stub implementations, incomplete code, and placehol
 - ✅ UPDATE (Nov 9, 2025): `models/time_series_signal_generator.py` is no longer a stub—volatility handling, provenance metadata, and regression coverage have been completed and verified via `pytest tests/models/test_time_series_signal_generator.py -q` plus the targeted integration smoke test. Remove it from the open-stub list; remaining signal-related stubs now focus on broker/paper-trading glue.
 - ✅ UPDATE (Nov 12, 2025): `models/signal_router.py` and the TS-first pipeline reordering are production code (see `Documentation/UNIFIED_ROADMAP.md`). Remove Signal Router from the open-stub list.
 - ⚠️ UPDATE (Nov 12, 2025): `bash/comprehensive_brutal_test.sh` highlighted new gaps—`tests/etl/test_data_validator.py` is missing, and the Time Series forecasting tests timed out with a `Broken pipe`. Section 13 documents these testing placeholders.
+- ✅ UPDATE (Nov 16, 2025): `forcester_ts/instrumentation.py` now emits dataset snapshots plus RMSE/sMAPE/tracking-error benchmarks for every forecast run, and `TimeSeriesVisualizer` renders those summaries on dashboards. Future stub replacements must consume `logs/forecast_audits/*.json` instead of inventing ad-hoc diagnostics.
 
 ---
 
@@ -860,3 +871,4 @@ class TestDataValidator:
 **Last Updated**: 2025-11-12  
 **Status**: ACTIVE  
 **Next Review**: After brutal test suite completes without warnings/timeouts
+

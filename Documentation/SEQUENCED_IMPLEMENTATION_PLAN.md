@@ -1,4 +1,7 @@
-# 🎯 SEQUENCED IMPLEMENTATION PLAN - Portfolio Maximizer v45
+﻿# 🎯 SEQUENCED IMPLEMENTATION PLAN - Portfolio Maximizer v45
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Production-Ready ML Trading System - Feasible Implementation Roadmap**
 
 **Date**: October 19, 2025 (Updated November 6, 2025)  
@@ -10,7 +13,7 @@
 - Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for the remaining items (performance dashboard, disaster recovery, etc.) now that the cTrader client + order manager replacements have landed.
 - **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.
 - **🆕 2025-11-09 Update**: `scripts/monitor_llm_system.py` now logs latency benchmarks + `llm_signal_backtests`, `schedule_backfill.bat` automates nightly validation (Task Scheduler registration pending), and `models/time_series_signal_generator.py` was hardened (volatility scalar conversion + provenance timestamps) with targeted pytest coverage. LLM latency remains above the <5 s goal (15–38 s); tuning required before broker/paper trading workstreams resume.
-- **🆕 2025-11-16 Update**: `forcester_ts/instrumentation.py` + the upgraded `TimeSeriesForecaster` record per-model fit/forecast durations, diagnostic payloads, and ensemble weights, satisfying the interpretable-AI requirement from `AGENT_DEV_CHECKLIST.md`. JSON audits land under `logs/forecast_audits/` when `ensemble_kwargs.audit_log_dir` or `TS_FORECAST_AUDIT_DIR` is configured.
+- **🆕 2025-11-16 Update**: `forcester_ts/instrumentation.py` + the upgraded `TimeSeriesForecaster` record per-model fit/forecast durations, diagnostic payloads, ensemble weights, and benchmarking metrics (RMSE / sMAPE / tracking error), satisfying the interpretable-AI requirement from `AGENT_DEV_CHECKLIST.md`. JSON audits land under `logs/forecast_audits/` when `ensemble_kwargs.audit_log_dir` or `TS_FORECAST_AUDIT_DIR` is configured.
 
 ### Nov 12, 2025 Status Notes
 - Time Series signal generation is no longer blocked by pandas truth-value errors; provenance now includes the decision context needed by the router and dashboards.
@@ -601,4 +604,5 @@ CAPITAL_SCHEDULE = {
 **Date**: October 19, 2025  
 **Status**: Ready for immediate implementation  
 **Priority**: Critical system fixes first, then enhancement
+
 

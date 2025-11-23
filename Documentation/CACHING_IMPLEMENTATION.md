@@ -170,7 +170,7 @@ data = extractor.extract_ohlcv(['AAPL'], '2020-01-01', '2023-12-31')
 ### Pipeline Integration
 ```bash
 # Run pipeline (uses cache automatically)
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01 --end 2023-12-31
+python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01 --end 2023-12-31 --include-frontier-tickers
 
 # Output shows cache performance:
 # Cache HIT for AAPL: 1006 rows (age: 0.3h)

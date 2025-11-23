@@ -1,4 +1,6 @@
-# Quick Reference - Optimized Portfolio Maximizer
+﻿# Quick Reference - Optimized Portfolio Maximizer
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Version**: 2.0  
 **Date**: 2025-10-14  
@@ -20,11 +22,19 @@ ollama serve
 # Run pipeline with Qwen 14B model (automatic)
 python scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT,GOOGL \
+  --include-frontier-tickers \
   --enable-llm \
   --verbose
 
 # All data automatically saved to database
 ```
+
+`--include-frontier-tickers` automatically merges the Nigeria → Bulgaria ticker atlas from
+`etl/frontier_markets.py`, ensuring every “optimized pipeline” invocation exercises the guided
+frontier-market liquidity scenarios documented in `Documentation/arch_tree.md`.
+SQLite self-heal: as of 2025‑11‑18 `etl/database_manager.py` automatically backs up and rebuilds the
+database if “database disk image is malformed” appears, so brutal/test runs keep saving forecasts
+without manual intervention.
 
 ### **2. Generate Profit Report**
 ```bash
@@ -360,7 +370,7 @@ portfolio_maximizer_v45/
 ### **Morning**
 ```bash
 # 1. Run pipeline
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --enable-llm
+python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --enable-llm
 
 # 2. Check profit
 sqlite3 data/portfolio_maximizer.db \
@@ -459,5 +469,6 @@ PROFIT IS THE ONLY TRUE SUCCESS METRIC.
 **MODEL**: **Qwen 14B Chat (q4_K_M)**  
 **DATABASE**: **SQLite with 7 tables**  
 **FOCUS**: **QUANTIFIABLE PROFIT ON TRADE**
+
 
 

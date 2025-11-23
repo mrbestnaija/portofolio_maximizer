@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
 LOG_DIR="$ROOT_DIR/logs/live_runs"
+DASH_PATH="$ROOT_DIR/visualizations/dashboard_data.json"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python interpreter not found at $PYTHON_BIN" >&2
@@ -32,6 +33,7 @@ USE_CV="${USE_CV:-0}"
 ENABLE_LLM="${ENABLE_LLM:-1}"
 LLM_MODEL="${LLM_MODEL:-}"
 EXECUTION_MODE="${EXECUTION_MODE:-auto}"
+INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-1}"
 
 CMD=("$PYTHON_BIN" "$PIPELINE_SCRIPT"
   --tickers "$TICKERS"
@@ -54,6 +56,10 @@ fi
 
 if [[ -n "$LLM_MODEL" ]]; then
   CMD+=(--llm-model "$LLM_MODEL")
+fi
+
+if [[ "$INCLUDE_FRONTIER_TICKERS" == "1" ]]; then
+  CMD+=(--include-frontier-tickers)
 fi
 
 # Allow callers to append additional overrides.
@@ -175,4 +181,7 @@ print("")
 PY
 
 echo "Log captured at: $LOG_FILE"
+if [[ -f "$DASH_PATH" ]]; then
+  echo "Dashboard JSON available at: $DASH_PATH"
+fi
 echo "Bestman's Portfolio Maximizer v45 Live pipeline run complete."

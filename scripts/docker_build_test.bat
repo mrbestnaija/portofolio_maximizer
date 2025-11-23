@@ -189,7 +189,7 @@ echo GOOG>> data\sample_tickers.txt
 
 REM Run ETL pipeline
 echo Running ETL pipeline with sample data...
-docker run --rm -v "%cd%\data:/app/data" -v "%cd%\config:/app/config" -v "%cd%\logs:/app/logs" %IMAGE_NAME%:%VERSION% python scripts/run_etl_pipeline.py --tickers AAPL MSFT GOOG --start-date 2023-01-01 --end-date 2023-12-31 --no-cache
+docker run --rm -v "%cd%\data:/app/data" -v "%cd%\config:/app/config" -v "%cd%\logs:/app/logs" %IMAGE_NAME%:%VERSION% python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --start 2023-01-01 --end 2023-12-31 --include-frontier-tickers --no-cache
 if %errorlevel% neq 0 (
     echo [WARNING] ETL pipeline run failed - this might be due to missing API keys
 ) else (
@@ -216,7 +216,7 @@ echo Build images:
 echo   docker build -t %IMAGE_NAME%:%VERSION% .
 echo.
 echo Run ETL pipeline:
-echo   docker run --rm -v "%cd%\data:/app/data" %IMAGE_NAME%:%VERSION% python scripts/run_etl_pipeline.py --tickers AAPL MSFT --start-date 2023-01-01
+echo   docker run --rm -v "%cd%\data:/app/data" %IMAGE_NAME%:%VERSION% python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2023-01-01 --include-frontier-tickers
 echo.
 echo Interactive shell:
 echo   docker run -it --rm -v "%cd%:/app" %IMAGE_NAME%:%VERSION%-dev /bin/bash

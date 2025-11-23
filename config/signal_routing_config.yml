@@ -7,7 +7,7 @@ signal_routing:
   
   # Fallback/redundancy
   llm_fallback: true  # DEFAULT: true - Use LLM when Time Series fails
-  llm_redundancy: false  # Run both for validation (slower but more robust)
+  llm_redundancy: true  # Run both for validation/benchmarking
   
   # Time Series model flags
   enable_samossa: true

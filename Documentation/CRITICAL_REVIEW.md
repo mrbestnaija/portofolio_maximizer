@@ -39,6 +39,7 @@
 
 ### ✅ 2025-11-16 Review Update
 - The latest ETL run (`logs/pipeline_run.log:22237-22986`) proves the rebuilt `DatabaseManager` handles corruption + WSL mirror activation transparently, restoring trust in the evidence cited here.
+- Nov 18 update: the database manager now backs up malformed files the moment insert operations throw “database disk image is malformed,” recreates a clean store, and retries the write so brutal/test runs no longer spam the same failure hundreds of times.
 - MSSA serialization, router persistence, and dashboard exports completed without error thanks to the `scripts/run_etl_pipeline.py` and `etl/visualizer.py` fixes, so the “no usable forecasts”/“no PNGs” findings are now historical.
 - KPSS/Convergence warnings have been demoted or suppressed via `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py`, sharpening the logs that this critical review depends upon.
 - Remaining yellow flag: `scripts/backfill_signal_validation.py` still logs UTC deprecation warnings and should remain on the punch list before flipping the Executive Summary grade back to **B+/A-**.

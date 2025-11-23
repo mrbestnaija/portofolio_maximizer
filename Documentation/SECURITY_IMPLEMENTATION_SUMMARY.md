@@ -1,7 +1,17 @@
-# Security Hardening Implementation Summary
+﻿# Security Hardening Implementation Summary
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Date**: 2025-01-27  
 **Status**: ✅ **COMPLETED - All Quick Fixes Implemented**
+
+---
+
+### Frontier Market Coverage Alignment (2025-11-15)
+- All multi-ticker scripts now use `--include-frontier-tickers` so Nigeria → Bulgaria symbols outlined in `etl/frontier_markets.py` are exercised during synthetic tests. Security controls (key rotation, access logging, jurisdictional checks) must treat those datasets the same way as US tickers before enabling live feeds; reference `Documentation/arch_tree.md` for the canonical list.
+
+### SQLite Integrity Guard (2025-11-18)
+- `etl/database_manager.py` now auto-backs up malformed SQLite stores and recreates them when the brutal harness logs “database disk image is malformed,” ensuring persistence remains trustworthy after corruption events.
 
 ---
 
@@ -223,4 +233,5 @@ api_key = load_secret('ALPHA_VANTAGE_API_KEY', 'ALPHA_VANTAGE_API_KEY_FILE')
 
 **Status**: ✅ **All Quick Fixes Implemented**  
 **Next Phase**: Phase 1 Critical Security (Authentication, Encryption)
+
 

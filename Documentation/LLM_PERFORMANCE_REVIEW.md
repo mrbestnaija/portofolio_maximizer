@@ -30,7 +30,7 @@
 ```bash
 # Synthetic fallback pipeline run with LLM stages enabled
 LLM_FORCE_FALLBACK=1 python scripts/run_etl_pipeline.py --config config.yml \
-  --enable-llm --execution-mode synthetic --tickers AAPL MSFT
+  --enable-llm --execution-mode synthetic --tickers AAPL,MSFT --include-frontier-tickers
 
 # Generate refreshed performance report
 python scripts/track_llm_signals.py --report --output llm_performance.txt

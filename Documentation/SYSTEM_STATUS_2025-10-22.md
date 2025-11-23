@@ -1,4 +1,7 @@
-# System Status Report - Portfolio Maximizer v45
+﻿# System Status Report - Portfolio Maximizer v45
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Date**: November 9, 2025  
 **Status**: 🟠 **DEGRADED (Latency + Scheduler pending)**  
 **Last Updated**: 2025-11-09 23:00 UTC
@@ -14,6 +17,8 @@ The core ETL + Time Series stack remains production ready, but the **LLM monitor
 - ✅ **Monitoring Upgrade**: `scripts/monitor_llm_system.py` now logs latency benchmarks (`logs/latency_benchmark.json`), surfaces `llm_signal_backtests`, and saves JSON run reports.
 - ✅ **Nightly Backfill Helper**: `schedule_backfill.bat` replays signal validation nightly; needs production Task Scheduler entry.
 - ✅ **Signal Generator Fix**: Volatility handling converted to scalars so GARCH output no longer crashes the generator—monitoring sees real signals again.
+- ✅ **Frontier Market Coverage (Nov 15)**: `etl/frontier_markets.py` + `--include-frontier-tickers` wired across `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, brutal tests, and README/roadmap docs so every multi-ticker run now exercises the Nigeria → Bulgaria frontier list from the liquidity guide.
+- ✅ **SQLite Auto-Recovery (Nov 18)**: `etl/database_manager.py` now backs up corrupted SQLite files and rebuilds them automatically when “database disk image is malformed” appears, keeping brutal/test runs from flooding logs and ensuring persistence resumes immediately after the fix.
 - ⚠️ **LLM Latency**: deepseek-coder:6.7b still returns 15–38 s inference times (9–18 tokens/sec); requires prompt/model tuning or async fallback.
 - ⚠️ **Operational To-Do**: Register `schedule_backfill.bat`, investigate occasional SQLite `disk I/O error` during `llm_signals` migration, then green-light paper trading/broker wiring.
 - ✅ **Nov 12 delta**:
@@ -262,3 +267,4 @@ TOTAL                0.44s      ✅ SUCCESS
 **Recommendation**: **APPROVED FOR LIVE TRADING**  
 **Next Review**: Monitor LLM performance in live scenarios  
 **Critical Path**: Validate signal generation accuracy
+

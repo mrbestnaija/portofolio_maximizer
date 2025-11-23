@@ -25,6 +25,7 @@ import sys
 import yaml
 import logging
 import warnings
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -60,6 +61,10 @@ from etl.portfolio_math import (
     calculate_enhanced_portfolio_metrics,
     optimize_portfolio_markowitz,
 )
+from etl.frontier_markets import (
+    FRONTIER_MARKET_TICKERS_BY_REGION,
+    merge_frontier_tickers,
+)
 
 # LLM Integration (Phase 5.2)
 from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -78,6 +83,32 @@ import time
 
 # Supported execution modes for data extraction
 EXECUTION_MODES = ('auto', 'live', 'synthetic')
+
+
+def _normalize_change_points(raw_change_points: Any) -> List[str]:
+    """Convert MSSA change point payloads into serialisable ISO strings."""
+    if raw_change_points is None:
+        return []
+    if isinstance(raw_change_points, (pd.Index, pd.Series, np.ndarray)):
+        iterable = list(raw_change_points)
+    elif isinstance(raw_change_points, (list, tuple, set)):
+        iterable = list(raw_change_points)
+    else:
+        iterable = [raw_change_points]
+
+    normalized: List[str] = []
+    for cp in iterable:
+        if cp is None:
+            continue
+        if isinstance(cp, (float, np.floating)) and np.isnan(cp):
+            continue
+        if isinstance(cp, (pd.Timestamp, datetime, np.datetime64)):
+            normalized.append(pd.Timestamp(cp).isoformat())
+        elif hasattr(cp, 'isoformat'):
+            normalized.append(cp.isoformat())  # type: ignore[call-arg]
+        else:
+            normalized.append(str(cp))
+    return normalized
 
 
 def _setup_logging(verbose: bool = False) -> logging.Logger:
@@ -914,7 +945,9 @@ def execute_pipeline(
     execution_mode: str = 'auto',
     use_ticker_discovery: bool = False,
     refresh_ticker_universe: bool = False,
-    logger_instance: Optional[logging.Logger] = None
+    include_frontier_tickers: bool = False,
+    db_path: Optional[str] = None,
+    logger_instance: Optional[logging.Logger] = None,
 ) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
     
@@ -939,6 +972,7 @@ def execute_pipeline(
         execution_mode: Data extraction mode (auto, live, synthetic)
         use_ticker_discovery: Load tickers from discovery universe
         refresh_ticker_universe: Force refresh of ticker universe
+        include_frontier_tickers: Append curated frontier markets to multi-ticker runs
         logger_instance: Optional logger instance (for testing)
     """
     # Use provided logger or setup new one (only when run as main)
@@ -972,6 +1006,17 @@ def execute_pipeline(
         use_ticker_discovery=use_ticker_discovery,
         refresh_ticker_universe=refresh_ticker_universe,
     )
+
+    if include_frontier_tickers:
+        original_count = len(ticker_list)
+        ticker_list = merge_frontier_tickers(ticker_list, include_frontier=True)
+        appended = len(ticker_list) - original_count
+        regions = ", ".join(FRONTIER_MARKET_TICKERS_BY_REGION.keys())
+        logger.info(
+            "Frontier market coverage enabled (+%d tickers across %s)",
+            appended,
+            regions,
+        )
 
     llm_config_data: Dict[str, Any] = {}
     llm_cfg: Dict[str, Any] = {}
@@ -1020,7 +1065,14 @@ def execute_pipeline(
     storage = DataStorage()
 
     # Initialize database for persistent storage
-    db_manager = DatabaseManager(db_path="data/portfolio_maximizer.db")
+    # Allow overrides for synthetic/brutal runs so they don't contend with the primary DB.
+    resolved_db_path = db_path or os.environ.get("PORTFOLIO_DB_PATH")
+    if not resolved_db_path:
+        if execution_mode.lower() == "synthetic":
+            resolved_db_path = "data/test_database.db"
+        else:
+            resolved_db_path = "data/portfolio_maximizer.db"
+    db_manager = DatabaseManager(db_path=resolved_db_path)
     signal_tracker = LLMSignalTracker()
     logger.info("✓ Database manager initialized")
 
@@ -1579,7 +1631,12 @@ def execute_pipeline(
                 logger.info("Generating time series forecasts...")
                 
                 try:
-                    from etl.time_series_forecaster import TimeSeriesForecaster
+                    from etl.time_series_forecaster import (
+                        TimeSeriesForecaster,
+                        TimeSeriesForecasterConfig,
+                        RollingWindowValidator,
+                        RollingWindowCVConfig,
+                    )
                     import pandas as pd
                     
                     # Load forecasting config
@@ -1596,8 +1653,34 @@ def execute_pipeline(
                     samossa_cfg = forecasting_cfg.get('samossa', {})
                     mssa_rl_cfg = forecasting_cfg.get('mssa_rl', {})
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
+                    rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
                     
                     forecasts = {}
+
+                    def _build_model_config(target_horizon: int) -> TimeSeriesForecasterConfig:
+                        return TimeSeriesForecasterConfig(
+                            forecast_horizon=int(target_horizon),
+                            sarimax_enabled=sarimax_cfg.get('enabled', True),
+                            garch_enabled=garch_cfg.get('enabled', True),
+                            samossa_enabled=samossa_cfg.get('enabled', False),
+                            mssa_rl_enabled=mssa_rl_cfg.get('enabled', True),
+                            ensemble_enabled=ensemble_cfg.get('enabled', True),
+                            sarimax_kwargs={
+                                k: v for k, v in sarimax_cfg.items() if k != 'enabled'
+                            },
+                            garch_kwargs={
+                                k: v for k, v in garch_cfg.items() if k != 'enabled'
+                            },
+                            samossa_kwargs={
+                                k: v for k, v in samossa_cfg.items() if k != 'enabled'
+                            },
+                            mssa_rl_kwargs={
+                                k: v for k, v in mssa_rl_cfg.items() if k != 'enabled'
+                            },
+                            ensemble_kwargs={
+                                k: v for k, v in ensemble_cfg.items() if k != 'enabled'
+                            },
+                        )
 
                     for ticker in ticker_list:
                         try:
@@ -1654,11 +1737,7 @@ def execute_pipeline(
                                 )
 
                             forecaster = TimeSeriesForecaster(
-                                sarimax_config=sarimax_cfg if sarimax_cfg.get('enabled', True) else None,
-                                garch_config=garch_cfg if garch_cfg.get('enabled', True) else None,
-                                samossa_config=samossa_cfg if samossa_cfg.get('enabled', False) else None,
-                                mssa_rl_config=mssa_rl_cfg if mssa_rl_cfg.get('enabled', True) else None,
-                                ensemble_config=ensemble_cfg,
+                                config=_build_model_config(forecast_horizon)
                             )
 
                             train_returns = train_series.pct_change().dropna()
@@ -1676,6 +1755,53 @@ def execute_pipeline(
                                 except Exception as exc:  # pragma: no cover - metrics optional
                                     logger.warning("  ⚠ %s: Unable to compute regression metrics: %s", ticker, exc)
                             forecast_result["regression_metrics"] = metrics_map
+
+                            cv_results = None
+                            if rolling_cv_cfg.get('enabled', False):
+                                try:
+                                    cv_min_train = int(rolling_cv_cfg.get('min_train_size', min_history_required))
+                                    cv_horizon = int(rolling_cv_cfg.get('horizon', max(1, min(forecast_horizon, 5))))
+                                    cv_step = int(rolling_cv_cfg.get('step_size', cv_horizon))
+                                    max_folds_raw = rolling_cv_cfg.get('max_folds')
+                                    cv_max_folds = int(max_folds_raw) if max_folds_raw not in (None, "", False) else None
+                                    if series_length >= cv_min_train + cv_horizon:
+                                        cv_validator = RollingWindowValidator(
+                                            forecaster_config=_build_model_config(cv_horizon),
+                                            cv_config=RollingWindowCVConfig(
+                                                min_train_size=cv_min_train,
+                                                horizon=cv_horizon,
+                                                step_size=max(1, cv_step),
+                                                max_folds=cv_max_folds,
+                                            ),
+                                        )
+                                        returns_for_cv = price_series.pct_change().dropna()
+                                        cv_results = cv_validator.run(
+                                            price_series=price_series,
+                                            returns_series=returns_for_cv,
+                                        )
+                                        aggregate = cv_results.get("aggregate_metrics", {})
+                                        sarimax_metrics = aggregate.get("sarimax", {})
+                                        rmse_val = sarimax_metrics.get("rmse")
+                                        logger.info(
+                                            "  ↪ %s rolling CV (%s folds, horizon=%s, sarimax_rmse=%s)",
+                                            ticker,
+                                            cv_results.get("fold_count"),
+                                            cv_results.get("horizon"),
+                                            f"{rmse_val:.4f}" if isinstance(rmse_val, (int, float)) else "n/a",
+                                        )
+                                    else:
+                                        logger.info(
+                                            "  ↪ %s rolling CV skipped (need ≥ %s observations, have %s)",
+                                            ticker,
+                                            cv_min_train + cv_horizon,
+                                            series_length,
+                                        )
+                                except Exception as cv_exc:
+                                    logger.warning("  ⚠ %s: Rolling CV failed (%s)", ticker, cv_exc)
+
+                            if cv_results:
+                                forecast_result["cross_validation"] = cv_results
+
                             forecasts[ticker] = forecast_result
 
                             # Save forecasts to database
@@ -1761,19 +1887,9 @@ def execute_pipeline(
                                 mssa_series = mssa_result.get('forecast', pd.Series())
                                 lower_ci = mssa_result.get('lower_ci')
                                 upper_ci = mssa_result.get('upper_ci')
-                                raw_change_points = mssa_result.get('change_points')
-                                if raw_change_points is None:
-                                    change_points_iterable: List[Any] = []
-                                elif isinstance(raw_change_points, (pd.Index, pd.Series, np.ndarray)):
-                                    change_points_iterable = list(raw_change_points)
-                                elif isinstance(raw_change_points, (list, tuple, set)):
-                                    change_points_iterable = list(raw_change_points)
-                                else:
-                                    change_points_iterable = [raw_change_points]
-                                change_points = [
-                                    cp.isoformat() if hasattr(cp, 'isoformat') else str(cp)
-                                    for cp in change_points_iterable
-                                ]
+                                change_points = _normalize_change_points(
+                                    mssa_result.get('change_points'),
+                                )
                                 diagnostics = {
                                     'baseline_variance': mssa_result.get('baseline_variance'),
                                     'q_table_size': mssa_result.get('q_table_size'),
@@ -2242,15 +2358,30 @@ def execute_pipeline(
 @click.option('--execution-mode', default='auto',
               type=click.Choice(EXECUTION_MODES, case_sensitive=False),
               help='Data extraction mode: live (network), synthetic (offline), or auto (try live, fallback to synthetic)')
+@click.option(
+    '--db-path',
+    default=None,
+    help='Override SQLite database path (default: data/portfolio_maximizer.db; synthetic runs default to data/test_database.db)',
+)
 @click.option('--use-ticker-discovery', is_flag=True, default=False,
               help='Load tickers from the configured ticker discovery universe.')
 @click.option('--refresh-ticker-universe', is_flag=True, default=False,
               help='Force refresh of the ticker discovery universe before running the pipeline.')
+@click.option(
+    '--include-frontier-tickers',
+    is_flag=True,
+    default=False,
+    help=(
+        'Append curated frontier market tickers (Nigeria, Kenya, Vietnam, '
+        'Bangladesh, Sri Lanka, Pakistan, Kuwait, Qatar, Romania, Bulgaria) '
+        'to multi-ticker runs.'
+    ),
+)
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
                 use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
                 enable_llm: bool, llm_model: str, dry_run: bool,
-                execution_mode: str, use_ticker_discovery: bool,
-                refresh_ticker_universe: bool) -> None:
+                execution_mode: str, db_path: Optional[str], use_ticker_discovery: bool,
+                refresh_ticker_universe: bool, include_frontier_tickers: bool) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
     Data Splitting Strategy:
@@ -2262,7 +2393,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
 
     Examples:
         # Simple split (backward compatible)
-        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01
+        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --start 2020-01-01
 
         # k-fold CV (recommended for production)
         python scripts/run_etl_pipeline.py --tickers AAPL --use-cv --n-splits 5
@@ -2274,7 +2405,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         python scripts/run_etl_pipeline.py --tickers NVDA --execution-mode auto --enable-llm
 
         # Dry run (no network) with synthetic data
-        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2024-01-02 --end 2024-01-19 --dry-run
+        python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --start 2024-01-02 --end 2024-01-19 --dry-run
     """
     # Convert Click arguments to execute_pipeline call
     execute_pipeline(
@@ -2292,8 +2423,10 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         llm_model=llm_model,
         dry_run=dry_run,
         execution_mode=execution_mode,
+        db_path=db_path,
         use_ticker_discovery=use_ticker_discovery,
-        refresh_ticker_universe=refresh_ticker_universe
+        refresh_ticker_universe=refresh_ticker_universe,
+        include_frontier_tickers=include_frontier_tickers,
     )
 
 

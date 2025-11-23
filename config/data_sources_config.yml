@@ -24,6 +24,12 @@ data_sources:
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
+    - name: "ctrader"
+      type: "market_data"
+      enabled: true  # Substitutes finnhub when API key is missing
+      priority: 4
+      config_file: "config/ctrader_config.yml"
+
   # Data source selection strategy
   selection_strategy:
     mode: "fallback"  # Options: priority, fallback, parallel, custom
@@ -113,6 +119,7 @@ data_sources:
       yfinance: "etl.yfinance_extractor.YFinanceExtractor"
       alpha_vantage: "etl.alpha_vantage_extractor.AlphaVantageExtractor"
       finnhub: "etl.finnhub_extractor.FinnhubExtractor"
+      ctrader: "etl.ctrader_extractor.CTraderExtractor"
       # Deprecated adapters removed during v4.5 cleanup
 
     # Adapter loading strategy

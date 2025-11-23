@@ -17,6 +17,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import datetime as dt
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 import logging
@@ -49,6 +50,8 @@ SQLITE_CORRUPTION_ERRORS = (
     "unable to open database file",
 )
 SQLITE_RECOVERABLE_ERRORS = SQLITE_TRANSIENT_ERRORS + SQLITE_CORRUPTION_ERRORS
+# Errors that should go through the disk I/O fallback + mirror branch before any rebuild.
+SQLITE_CONNECT_DISK_IO_ERRORS = SQLITE_TRANSIENT_ERRORS + ("database disk image is malformed",)
 
 
 def _normalise_risk_level(level: Any) -> str:
@@ -153,6 +156,15 @@ class DatabaseManager:
         """Return True if sqlite reported corruption/missing backing files."""
         return any(marker in message for marker in SQLITE_CORRUPTION_ERRORS)
 
+    def _should_route_disk_io_recovery(self, message: str) -> bool:
+        """
+        Determine if connection setup should run through the disk I/O fallback path.
+        
+        Even known corruption markers (e.g., "database disk image is malformed") first
+        flow through the disk I/O cleanup/mirror branch before we attempt a rebuild.
+        """
+        return any(marker in message for marker in SQLITE_CONNECT_DISK_IO_ERRORS)
+
     def _backup_corrupted_database(self) -> Optional[Path]:
         """Move the corrupted SQLite store aside so a clean file can be created."""
         if getattr(self, "_sqlite_in_memory", False):
@@ -187,6 +199,14 @@ class DatabaseManager:
             "timeout": self._busy_timeout_ms / 1000.0,
         }
         if self._should_skip_wal(self.db_path):
+            if self._mirror_path and self._mirror_path.exists():
+                logger.debug(
+                    "Reusing existing SQLite mirror at %s for %s",
+                    self._mirror_path,
+                    self.db_path,
+                )
+                self._establish_connection(self._mirror_path, use_wal=False, connect_kwargs=connect_kwargs)
+                return
             logger.debug(
                 "Database path %s is on a Windows mount; operating on a POSIX mirror to avoid locking issues.",
                 self.db_path,
@@ -205,20 +225,33 @@ class DatabaseManager:
             except sqlite3.OperationalError as exc:
                 last_error = exc
                 message = str(exc).lower()
-                if self._is_transient_sqlite_error(message):
-                    logger.warning(
-                        "SQLite storage error while configuring journal (%s). "
-                        "Attempt %s/%s falling back to DELETE mode.",
-                        exc,
-                        attempts + 1,
-                        3,
-                    )
+                if self._should_route_disk_io_recovery(message):
+                    if self._is_corruption_sqlite_error(message):
+                        logger.warning(
+                            "SQLite reported corruption during connection (%s). "
+                            "Attempt %s/%s invoking disk I/O recovery before rebuild.",
+                            exc,
+                            attempts + 1,
+                            3,
+                        )
+                    else:
+                        logger.warning(
+                            "SQLite storage error while configuring journal (%s). "
+                            "Attempt %s/%s falling back to DELETE mode.",
+                            exc,
+                            attempts + 1,
+                            3,
+                        )
                     self._cleanup_wal_artifacts()
                     self._close_safely()
                     use_wal = False
                     attempts += 1
                     time.sleep(min(0.2 * attempts, 1.0))
-                    continue
+                    if not self._is_corruption_sqlite_error(message):
+                        continue
+                    logger.warning(
+                        "Disk I/O branch completed for sqlite corruption marker; attempting rebuild fallback next."
+                    )
                 if self._is_corruption_sqlite_error(message) and not rebuild_attempted:
                     rebuild_attempted = True
                     self._close_safely()
@@ -315,23 +348,30 @@ class DatabaseManager:
         """Copy the database to a POSIX-friendly temp path and operate on that copy."""
         tmp_root = Path(os.environ.get("WSL_SQLITE_TMP", "/tmp"))
         tmp_root.mkdir(parents=True, exist_ok=True)
-        mirror_path = tmp_root / f"{self.db_path.name}.wsl"
+        mirror_path = self._mirror_path or (tmp_root / f"{self.db_path.name}.wsl")
 
-        try:
-            if self.db_path.exists():
-                shutil.copy2(self.db_path, mirror_path)
-            else:
-                mirror_path.touch()
-        except OSError as exc:
-            logger.error("Failed to stage mirror database at %s: %s", mirror_path, exc)
-            raise
+        if not mirror_path.exists():
+            try:
+                if self.db_path.exists():
+                    shutil.copy2(self.db_path, mirror_path)
+                else:
+                    mirror_path.touch()
+                logger.info(
+                    "Operating on temporary SQLite mirror %s due to cross-filesystem locking issues with %s.",
+                    mirror_path,
+                    self.db_path,
+                )
+            except OSError as exc:
+                logger.error("Failed to stage mirror database at %s: %s", mirror_path, exc)
+                raise
+        else:
+            logger.debug(
+                "Continuing to use existing SQLite mirror %s for %s.",
+                mirror_path,
+                self.db_path,
+            )
 
         self._mirror_path = mirror_path
-        logger.info(
-            "Operating on temporary SQLite mirror %s due to cross-filesystem locking issues with %s.",
-            mirror_path,
-            self.db_path,
-        )
         # Mirrors stay in DELETE journal mode for compatibility.
         self._establish_connection(mirror_path, use_wal=False, connect_kwargs=connect_kwargs)
 
@@ -370,6 +410,48 @@ class DatabaseManager:
         """Reset SQLite connection (used after disk I/O errors)."""
         self._close_safely()
         self._connect()
+    
+    def _rebuild_sqlite_store(self) -> None:
+        """Backup the corrupted database, recreate the file, and reload schema."""
+        self._close_safely()
+        backup_path = self._backup_corrupted_database()
+        logger.error(
+            "SQLite reported corruption; backed up broken store to %s and rebuilding.",
+            backup_path or "N/A",
+        )
+        self._ensure_sqlite_path_exists()
+        self._connect()
+        self._initialize_schema()
+
+    def _recover_sqlite_failure(self, exc: Exception, context: str) -> bool:
+        """Attempt recovery steps for SQLite write failures."""
+        if not isinstance(exc, (sqlite3.DatabaseError, sqlite3.OperationalError)):
+            return False
+        message = str(exc).lower()
+        if "database is locked" in message:
+            logger.warning(
+                "SQLite reported 'database is locked' during %s; resetting connection.",
+                context,
+            )
+            self._reset_connection()
+            return True
+        if self._is_transient_sqlite_error(message):
+            logger.warning(
+                "SQLite transient error during %s (%s). Resetting connection.",
+                context,
+                exc,
+            )
+            self._reset_connection()
+            return True
+        if self._is_corruption_sqlite_error(message):
+            logger.error(
+                "SQLite corruption detected during %s: %s",
+                context,
+                exc,
+            )
+            self._rebuild_sqlite_store()
+            return True
+        return False
     
     def _initialize_schema(self):
         """Create database schema if not exists"""
@@ -504,6 +586,38 @@ class DatabaseManager:
             )
         """
         self.cursor.execute(trade_executions_sql)
+
+        # Data quality snapshots
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS data_quality_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                window_start DATE NOT NULL,
+                window_end DATE NOT NULL,
+                length INTEGER NOT NULL,
+                missing_pct REAL,
+                coverage REAL,
+                outlier_frac REAL,
+                quality_score REAL,
+                source TEXT,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker, window_start, window_end, source)
+            )
+        """)
+
+        # Latency metrics per ticker/run
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS latency_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                run_id TEXT,
+                stage TEXT,
+                ts_ms REAL,
+                llm_ms REAL,
+                recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # Time series forecasts (SARIMAX/GARCH/SAMOSSA)
         forecast_table_sql = """
@@ -830,6 +944,9 @@ class DatabaseManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_risks_ticker_date ON llm_risks(ticker, assessment_date)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker_date ON trade_executions(ticker, trade_date)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_performance_date ON performance_metrics(metric_date)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_quality_ticker_dates ON data_quality_snapshots(ticker, window_start, window_end)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_latency_ticker_date ON llm_signals(ticker, signal_date)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_latency_metrics_ticker ON latency_metrics(ticker)")
         
         self.conn.commit()
         logger.info("Database schema initialized successfully")
@@ -837,311 +954,87 @@ class DatabaseManager:
     def save_ohlcv_data(self, df: pd.DataFrame, source: str = 'yfinance') -> int:
         """
         Save OHLCV data to database.
-        
-        Args:
-            df: DataFrame with OHLCV data (MultiIndex: ticker, date)
-            source: Data source name
-        
-        Returns:
-            Number of rows inserted
         """
 
-        def _perform_inserts(cursor: sqlite3.Cursor) -> int:
-            rows = 0
-            if isinstance(df.index, pd.MultiIndex):
-                for (ticker, date), row in df.iterrows():
-                    try:
-                        cursor.execute(
-                            """
-                            INSERT OR REPLACE INTO ohlcv_data 
-                            (ticker, date, open, high, low, close, volume, adj_close, source, quality_score)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                ticker,
-                                date.strftime('%Y-%m-%d'),
-                                float(row.get('Open', 0)),
-                                float(row.get('High', 0)),
-                                float(row.get('Low', 0)),
-                                float(row.get('Close', 0)),
-                                int(row.get('Volume', 0)),
-                                float(row.get('Adj Close', row.get('Close', 0))),
-                                source,
-                                1.0,
-                            ),
-                        )
-                        rows += 1
-                    except Exception as exc:  # pragma: no cover - defensive
-                        safe_error = sanitize_error(exc)
-                        logger.error("Failed to insert %s %s: %s", ticker, date, safe_error)
-            else:
-                default_ticker = df.attrs.get('ticker')
-                if not default_ticker and 'ticker' in df.columns and not df['ticker'].dropna().empty:
-                    default_ticker = str(df['ticker'].dropna().iloc[0])
-                default_ticker = default_ticker or 'UNKNOWN'
+        insert_sql = """
+            INSERT OR REPLACE INTO ohlcv_data 
+            (ticker, date, open, high, low, close, volume, adj_close, source, quality_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
 
-                has_ticker_column = 'ticker' in df.columns
-                for date, row in df.iterrows():
-                    ticker_value = row.get('ticker') if has_ticker_column else None
-                    ticker_value = str(ticker_value) if ticker_value not in (None, '') else default_ticker
-                    try:
-                        cursor.execute(
-                            """
-                            INSERT OR REPLACE INTO ohlcv_data 
-                            (ticker, date, open, high, low, close, volume, adj_close, source, quality_score)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                ticker_value,
-                                date.strftime('%Y-%m-%d'),
-                                float(row.get('Open', 0)),
-                                float(row.get('High', 0)),
-                                float(row.get('Low', 0)),
-                                float(row.get('Close', 0)),
-                                int(row.get('Volume', 0)),
-                                float(row.get('Adj Close', row.get('Close', 0))),
-                                source,
-                                1.0,
-                            ),
-                        )
-                        rows += 1
-                    except Exception as exc:  # pragma: no cover - defensive
-                        safe_error = sanitize_error(exc)
-                        logger.error("Failed to insert %s %s: %s", ticker_value, date, safe_error)
-            return rows
-
-        try:
-            rows_inserted = _perform_inserts(self.cursor)
-            self.conn.commit()
-            logger.info("Saved %s OHLCV rows to database", rows_inserted)
-            return rows_inserted
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-            message = str(exc).lower()
-            if "disk i/o error" in message:
-                logger.warning(
-                    "Disk I/O error while saving OHLCV data; attempting connection reset."
-                )
-                self._reset_connection()
+        def _insert_row(payload: Tuple[Any, ...], ticker: str, date_label: Any) -> bool:
+            attempts = 0
+            while attempts < 3:
                 try:
-                    rows_inserted = _perform_inserts(self.cursor)
+                    cursor = self.cursor
+                    cursor.execute(insert_sql, payload)
                     self.conn.commit()
-                    logger.info(
-                        "Saved %s OHLCV rows to database after connection reset",
-                        rows_inserted,
-                    )
-                    return rows_inserted
-                except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc2:
-                    safe_error = sanitize_error(exc2)
-                    logger.error("Retry failed to save OHLCV data after reset: %s", safe_error)
-                    raise
-            safe_error = sanitize_error(exc)
-            logger.error("Failed to save OHLCV data: %s", safe_error)
-            raise
-    
-    def save_llm_analysis(self, ticker: str, date: str, analysis: Dict, 
-                         model_name: str = 'qwen:14b-chat-q4_K_M', 
-                         latency: float = 0.0) -> int:
-        """
-        Save LLM market analysis to database.
-        
-        Args:
-            ticker: Stock ticker
-            date: Analysis date (YYYY-MM-DD)
-            analysis: Analysis dictionary from LLMMarketAnalyzer
-            model_name: LLM model used
-            latency: Analysis latency in seconds
-        
-        Returns:
-            Row ID of inserted/updated record
-        """
-        try:
-            self.cursor.execute("""
-                INSERT OR REPLACE INTO llm_analyses
-                (ticker, analysis_date, trend, strength, regime, key_levels, summary, 
-                 model_name, confidence, latency_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ticker, date,
-                analysis.get('trend', 'neutral'),
-                int(analysis.get('strength', 5)),
-                analysis.get('regime', 'unknown'),
-                json.dumps(analysis.get('key_levels', [])),
-                analysis.get('summary', ''),
-                model_name,
-                analysis.get('confidence', 0.5),
-                latency
-            ))
-            
-            self.conn.commit()
-            row_id = self.cursor.lastrowid
-            logger.info(f"Saved LLM analysis for {ticker} on {date} (ID: {row_id})")
-            return row_id
-        
-        except Exception as e:
-            safe_error = sanitize_error(e)
-            logger.error(f"Failed to save LLM analysis: {safe_error}")
-            return -1
-    
-    def save_llm_signal(
-        self,
-        ticker: str,
-        date: str,
-        signal: Dict,
-        model_name: str = 'qwen:14b-chat-q4_K_M',
-        latency: float = 0.0,
-        validation_status: str = 'pending',
-    ) -> int:
-        """Persist an LLM trading signal and keep schema metrics in sync."""
-        allowed_statuses = {'pending', 'validated', 'failed', 'executed', 'archived'}
-        status = validation_status.lower() if validation_status else 'pending'
-        if status not in allowed_statuses:
-            status = 'pending'
-
-        try:
-            action = str(signal.get('action', 'HOLD')).upper()
-            signal_type = str(signal.get('signal_type', action)).upper()
-            if action not in {'BUY', 'SELL', 'HOLD'}:
-                action = 'HOLD'
-            if signal_type not in {'BUY', 'SELL', 'HOLD'}:
-                signal_type = action
-
-            timestamp_raw = signal.get('signal_timestamp')
-            if isinstance(timestamp_raw, datetime):
-                signal_timestamp = timestamp_raw
-            elif isinstance(timestamp_raw, str) and timestamp_raw.strip():
-                try:
-                    signal_timestamp = datetime.fromisoformat(timestamp_raw.replace('Z', '+00:00'))
-                except ValueError:
-                    signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
-            else:
-                signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
-
-            actual_return = signal.get('actual_return')
-            backtest_metrics = signal.get('backtest_metrics', {}) or {}
-
-            with self.conn:
-                self.cursor.execute(
-                    """
-                    INSERT INTO llm_signals
-                    (ticker, signal_date, signal_timestamp, action, signal_type, confidence,
-                     reasoning, model_name, entry_price, validation_status, latency_seconds,
-                     actual_return, backtest_annual_return, backtest_sharpe, backtest_alpha,
-                     backtest_hit_rate, backtest_profit_factor)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(ticker, signal_date, model_name)
-                    DO UPDATE SET
-                        signal_timestamp = COALESCE(excluded.signal_timestamp, llm_signals.signal_timestamp),
-                        action = excluded.action,
-                        signal_type = excluded.signal_type,
-                        confidence = excluded.confidence,
-                        reasoning = excluded.reasoning,
-                        entry_price = excluded.entry_price,
-                        validation_status = excluded.validation_status,
-                        latency_seconds = excluded.latency_seconds,
-                        actual_return = COALESCE(excluded.actual_return, llm_signals.actual_return),
-                        backtest_annual_return = COALESCE(excluded.backtest_annual_return, llm_signals.backtest_annual_return),
-                        backtest_sharpe = COALESCE(excluded.backtest_sharpe, llm_signals.backtest_sharpe),
-                        backtest_alpha = COALESCE(excluded.backtest_alpha, llm_signals.backtest_alpha),
-                        backtest_hit_rate = COALESCE(excluded.backtest_hit_rate, llm_signals.backtest_hit_rate),
-                        backtest_profit_factor = COALESCE(excluded.backtest_profit_factor, llm_signals.backtest_profit_factor)
-                    """,
-                    (
-                        ticker,
-                        date,
-                        signal_timestamp,
-                        action,
-                        signal_type,
-                        float(signal.get('confidence', 0.5)),
-                        signal.get('reasoning', ''),
-                        model_name,
-                        float(signal.get('entry_price', 0.0)),
-                        status,
-                        latency,
-                        actual_return,
-                        backtest_metrics.get('annual_return'),
-                        backtest_metrics.get('sharpe_ratio'),
-                        backtest_metrics.get('information_ratio'),
-                        backtest_metrics.get('hit_rate'),
-                        backtest_metrics.get('profit_factor'),
-                    ),
-                )
-
-            self.cursor.execute(
-                """
-                SELECT id FROM llm_signals
-                WHERE ticker = ? AND signal_date = ? AND model_name = ?
-                """,
-                (ticker, date, model_name),
+                    return True
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+                    attempts += 1
+                    if self._recover_sqlite_failure(
+                        exc, context=f"save_ohlcv_data ({ticker} {date_label})"
+                    ):
+                        continue
+                    safe_error = sanitize_error(exc)
+                    logger.error("Failed to insert %s %s: %s", ticker, date_label, safe_error)
+                    return False
+                except Exception as exc:  # pragma: no cover - defensive
+                    safe_error = sanitize_error(exc)
+                    logger.error("Failed to insert %s %s: %s", ticker, date_label, safe_error)
+                    return False
+            logger.error(
+                "Failed to insert %s %s after %s retries (SQLite remained locked).",
+                ticker,
+                date_label,
+                attempts,
             )
-            row = self.cursor.fetchone()
-            row_id = row['id'] if row else -1
-            logger.info("Saved LLM signal for %s on %s (ID: %s)", ticker, date, row_id)
-            return row_id
+            return False
 
-        except Exception as exc:
-            safe_error = sanitize_error(exc)
-            logger.error("Failed to save LLM signal: %s", safe_error)
-            raise
-
-    def save_signal_validation(self, signal_id: int, validation: Dict[str, Any]) -> int:
-        """Persist signal validation results for auditability."""
-        if signal_id <= 0:
-            logger.warning("Skipping validation save; invalid signal_id=%s", signal_id)
-            return -1
-
-        warnings_text = json.dumps(validation.get('warnings', []))
-        quality_metrics = json.dumps(validation.get('quality_metrics', {}))
-
-        def _execute_insert() -> int:
-            with self.conn:
-                self.cursor.execute(
-                    """
-                    INSERT INTO llm_signal_validations
-                    (signal_id, validator_version, confidence_score,
-                     recommendation, warnings, quality_metrics)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        signal_id,
-                        validation.get("validator_version", "v1"),
-                        float(validation.get("confidence_score", 0.0)),
-                        validation.get("recommendation", "HOLD"),
-                        warnings_text,
-                        quality_metrics,
-                    ),
+        rows_inserted = 0
+        if isinstance(df.index, pd.MultiIndex):
+            for (ticker, date), row in df.iterrows():
+                payload = (
+                    ticker,
+                    date.strftime('%Y-%m-%d'),
+                    float(row.get('Open', 0)),
+                    float(row.get('High', 0)),
+                    float(row.get('Low', 0)),
+                    float(row.get('Close', 0)),
+                    int(row.get('Volume', 0)),
+                    float(row.get('Adj Close', row.get('Close', 0))),
+                    source,
+                    1.0,
                 )
-            validation_id = self.cursor.lastrowid
-            logger.info(
-                "Recorded signal validation for signal_id=%s (ID: %s)",
-                signal_id,
-                validation_id,
-            )
-            return validation_id
+                if _insert_row(payload, ticker, date):
+                    rows_inserted += 1
+        else:
+            default_ticker = df.attrs.get('ticker')
+            if not default_ticker and 'ticker' in df.columns and not df['ticker'].dropna().empty:
+                default_ticker = str(df['ticker'].dropna().iloc[0])
+            default_ticker = default_ticker or 'UNKNOWN'
 
-        try:
-            return _execute_insert()
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
-            message = str(exc).lower()
-            if "disk i/o error" in message:
-                logger.warning(
-                    "Disk I/O error while saving signal validation; attempting connection reset."
+            has_ticker_column = 'ticker' in df.columns
+            for date, row in df.iterrows():
+                ticker_value = row.get('ticker') if has_ticker_column else None
+                ticker_value = str(ticker_value) if ticker_value not in (None, '') else default_ticker
+                payload = (
+                    ticker_value,
+                    date.strftime('%Y-%m-%d'),
+                    float(row.get('Open', 0)),
+                    float(row.get('High', 0)),
+                    float(row.get('Low', 0)),
+                    float(row.get('Close', 0)),
+                    int(row.get('Volume', 0)),
+                    float(row.get('Adj Close', row.get('Close', 0))),
+                    source,
+                    1.0,
                 )
-                self._reset_connection()
-                try:
-                    return _execute_insert()
-                except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc2:
-                    safe_error = sanitize_error(exc2)
-                    logger.error(
-                        "Retry failed to save signal validation after reset: %s", safe_error
-                    )
-                    return -1
-            safe_error = sanitize_error(exc)
-            logger.error(f"Failed to save signal validation: {safe_error}")
-            return -1
-        except Exception as exc:  # pragma: no cover - defensive
-            safe_error = sanitize_error(exc)
-            logger.error(f"Failed to save signal validation: {safe_error}")
-            return -1
+                if _insert_row(payload, ticker_value, date):
+                    rows_inserted += 1
+
+        logger.info("Saved %s OHLCV rows to database", rows_inserted)
+        return rows_inserted
 
     def fetch_recent_signals(
         self,
@@ -1262,6 +1155,372 @@ class DatabaseManager:
                     payload['autocorrelation'],
                 ),
             )
+
+    def save_llm_analysis(
+        self,
+        ticker: str,
+        date: Any,
+        analysis: Dict[str, Any],
+        model_name: str = 'qwen:14b-chat-q4_K_M',
+        latency: float = 0.0,
+    ) -> int:
+        """Persist high-level LLM market analysis snapshots."""
+        if not analysis:
+            logger.error("Failed to save LLM analysis: analysis payload missing")
+            return -1
+        if not isinstance(analysis, dict):
+            analysis = dict(getattr(analysis, "__dict__", {}))
+
+        def _normalise_date(value: Any) -> str:
+            if isinstance(value, dt.datetime):
+                return value.strftime("%Y-%m-%d")
+            if isinstance(value, dt.date):
+                return value.strftime("%Y-%m-%d")
+            return str(value)
+
+        def _clamp_strength(value: Any) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                strength_val = int(round(float(value)))
+            except (TypeError, ValueError):
+                return None
+            return int(min(10, max(1, strength_val)))
+
+        def _normalise_choice(value: Any, allowed: set, default: str) -> str:
+            if isinstance(value, str):
+                candidate = value.strip().lower()
+                if candidate in allowed:
+                    return candidate
+            return default
+
+        analysis_date = _normalise_date(date)
+        trend = _normalise_choice(analysis.get('trend'), {'bullish', 'bearish', 'neutral'}, 'neutral')
+        regime = _normalise_choice(
+            analysis.get('regime'),
+            {'trending', 'ranging', 'volatile', 'stable', 'unknown'},
+            'unknown',
+        )
+        strength = _clamp_strength(analysis.get('strength')) or 5
+        key_levels = analysis.get('key_levels') or []
+        if isinstance(key_levels, (list, tuple, set)):
+            serialisable_levels = list(key_levels)
+        elif key_levels in (None, ''):
+            serialisable_levels = []
+        else:
+            serialisable_levels = [key_levels]
+        cleaned_levels: List[Any] = []
+        for level in serialisable_levels:
+            try:
+                cleaned_levels.append(float(level))
+            except (TypeError, ValueError):
+                cleaned_levels.append(str(level))
+        summary = str(analysis.get('summary', '') or '')
+        try:
+            confidence_raw = analysis.get('confidence')
+            confidence = (
+                float(confidence_raw)
+                if confidence_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None:
+            confidence = max(0.0, min(1.0, confidence))
+        payload = (
+            ticker,
+            analysis_date,
+            trend,
+            strength,
+            regime,
+            json.dumps(cleaned_levels),
+            summary,
+            model_name,
+            confidence,
+            float(latency),
+        )
+
+        def _execute_insert() -> int:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO llm_analyses
+                    (ticker, analysis_date, trend, strength, regime, key_levels,
+                     summary, model_name, confidence, latency_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, analysis_date, model_name)
+                    DO UPDATE SET
+                        trend = excluded.trend,
+                        strength = excluded.strength,
+                        regime = excluded.regime,
+                        key_levels = excluded.key_levels,
+                        summary = excluded.summary,
+                        confidence = excluded.confidence,
+                        latency_seconds = excluded.latency_seconds
+                    """,
+                    payload,
+                )
+            self.cursor.execute(
+                """
+                SELECT id FROM llm_analyses
+                WHERE ticker = ? AND analysis_date = ? AND model_name = ?
+                """,
+                (ticker, analysis_date, model_name),
+            )
+            row = self.cursor.fetchone()
+            row_id = row['id'] if row else -1
+            logger.info("Saved LLM analysis for %s on %s (ID: %s)", ticker, analysis_date, row_id)
+            return row_id
+
+        try:
+            return _execute_insert()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            if self._recover_sqlite_failure(exc, context="save_llm_analysis"):
+                try:
+                    return _execute_insert()
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc2:
+                    safe_error = sanitize_error(exc2)
+                    logger.error("Retry failed to save LLM analysis: %s", safe_error)
+                    return -1
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save LLM analysis: %s", safe_error)
+            return -1
+        except Exception as exc:  # pragma: no cover - defensive
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save LLM analysis: %s", safe_error)
+            return -1
+
+    def save_llm_signal(
+        self,
+        ticker: str,
+        date: Any,
+        signal: Dict[str, Any],
+        model_name: str = 'qwen:14b-chat-q4_K_M',
+        latency: float = 0.0,
+        validation_status: str = 'pending',
+    ) -> int:
+        """Persist LLM signal outputs plus validation metadata."""
+        if not signal:
+            logger.error("Failed to save LLM signal: signal payload missing")
+            return -1
+        if not isinstance(signal, dict):
+            signal = dict(getattr(signal, "__dict__", {}))
+
+        def _normalise_date(value: Any) -> str:
+            if isinstance(value, dt.datetime):
+                return value.strftime("%Y-%m-%d")
+            if isinstance(value, dt.date):
+                return value.strftime("%Y-%m-%d")
+            return str(value)
+
+        def _parse_timestamp(raw: Any, fallback_date: str) -> datetime:
+            if isinstance(raw, datetime):
+                return raw
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+                except ValueError:
+                    pass
+            try:
+                return datetime.strptime(fallback_date, "%Y-%m-%d")
+            except ValueError:
+                return datetime.utcnow()
+
+        def _safe_float(value: Any) -> Optional[float]:
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        allowed_statuses = {'pending', 'validated', 'failed', 'executed', 'archived'}
+        status = (validation_status or 'pending').lower()
+        if status not in allowed_statuses:
+            status = 'pending'
+
+        action = str(signal.get('action', 'HOLD')).upper()
+        if action not in {'BUY', 'SELL', 'HOLD'}:
+            action = 'HOLD'
+        signal_type = str(signal.get('signal_type', action)).upper()
+        if signal_type not in {'BUY', 'SELL', 'HOLD'}:
+            signal_type = action
+
+        signal_date = _normalise_date(date)
+        timestamp = _parse_timestamp(signal.get('signal_timestamp'), signal_date)
+        confidence = signal.get('confidence', 0.0)
+        try:
+            confidence_val = float(confidence)
+        except (TypeError, ValueError):
+            confidence_val = 0.0
+        confidence_val = max(0.0, min(1.0, confidence_val))
+        entry_price = _safe_float(signal.get('entry_price'))
+        target_price = _safe_float(signal.get('target_price'))
+        stop_loss = _safe_float(signal.get('stop_loss'))
+        position_size = _safe_float(signal.get('position_size'))
+        actual_return = _safe_float(signal.get('actual_return'))
+
+        backtest_metrics = signal.get('backtest_metrics', {}) or {}
+        payload = (
+            ticker,
+            signal_date,
+            timestamp,
+            action,
+            signal_type,
+            confidence_val,
+            str(signal.get('reasoning', '') or ''),
+            model_name,
+            entry_price,
+            target_price,
+            stop_loss,
+            position_size,
+            status,
+            actual_return,
+            _safe_float(backtest_metrics.get('annual_return')),
+            _safe_float(backtest_metrics.get('sharpe_ratio')),
+            _safe_float(backtest_metrics.get('information_ratio')),
+            _safe_float(backtest_metrics.get('hit_rate')),
+            _safe_float(backtest_metrics.get('profit_factor')),
+            float(latency),
+        )
+
+        def _execute_insert() -> int:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO llm_signals
+                    (ticker, signal_date, signal_timestamp, action, signal_type, confidence,
+                     reasoning, model_name, entry_price, target_price, stop_loss, position_size,
+                     validation_status, actual_return, backtest_annual_return, backtest_sharpe,
+                     backtest_alpha, backtest_hit_rate, backtest_profit_factor, latency_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, signal_date, model_name)
+                    DO UPDATE SET
+                        signal_timestamp = COALESCE(excluded.signal_timestamp, llm_signals.signal_timestamp),
+                        action = excluded.action,
+                        signal_type = excluded.signal_type,
+                        confidence = excluded.confidence,
+                        reasoning = excluded.reasoning,
+                        entry_price = excluded.entry_price,
+                        target_price = excluded.target_price,
+                        stop_loss = excluded.stop_loss,
+                        position_size = excluded.position_size,
+                        validation_status = excluded.validation_status,
+                        actual_return = COALESCE(excluded.actual_return, llm_signals.actual_return),
+                        backtest_annual_return = COALESCE(excluded.backtest_annual_return, llm_signals.backtest_annual_return),
+                        backtest_sharpe = COALESCE(excluded.backtest_sharpe, llm_signals.backtest_sharpe),
+                        backtest_alpha = COALESCE(excluded.backtest_alpha, llm_signals.backtest_alpha),
+                        backtest_hit_rate = COALESCE(excluded.backtest_hit_rate, llm_signals.backtest_hit_rate),
+                        backtest_profit_factor = COALESCE(excluded.backtest_profit_factor, llm_signals.backtest_profit_factor),
+                        latency_seconds = excluded.latency_seconds
+                    """,
+                    payload,
+                )
+            self.cursor.execute(
+                """
+                SELECT id FROM llm_signals
+                WHERE ticker = ? AND signal_date = ? AND model_name = ?
+                """,
+                (ticker, signal_date, model_name),
+            )
+            row = self.cursor.fetchone()
+            row_id = row['id'] if row else -1
+            logger.info("Saved LLM signal for %s on %s (ID: %s)", ticker, signal_date, row_id)
+            return row_id
+
+        try:
+            return _execute_insert()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            if self._recover_sqlite_failure(exc, context="save_llm_signal"):
+                try:
+                    return _execute_insert()
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc2:
+                    safe_error = sanitize_error(exc2)
+                    logger.error("Retry failed to save LLM signal: %s", safe_error)
+                    return -1
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save LLM signal: %s", safe_error)
+            return -1
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save LLM signal: %s", safe_error)
+            return -1
+
+    def save_signal_validation(self, signal_id: int, payload: Dict[str, Any]) -> int:
+        """Persist validator audit trail entries for an LLM signal."""
+        if signal_id <= 0 or not payload:
+            return -1
+        if not isinstance(payload, dict):
+            payload = dict(getattr(payload, "__dict__", {}))
+
+        def _safe_float(value: Any) -> Optional[float]:
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        warnings = payload.get('warnings')
+        if isinstance(warnings, (list, tuple, set)):
+            warnings_blob = json.dumps(list(warnings))
+        elif warnings is None:
+            warnings_blob = json.dumps([])
+        else:
+            warnings_blob = str(warnings)
+
+        def _json_default(value: Any) -> Any:
+            if isinstance(value, np.generic):
+                return value.item()
+            return str(value)
+
+        quality_metrics = payload.get('quality_metrics')
+        if isinstance(quality_metrics, (dict, list)):
+            quality_blob = json.dumps(quality_metrics, default=_json_default)
+        elif quality_metrics is None:
+            quality_blob = json.dumps({})
+        else:
+            quality_blob = str(quality_metrics)
+
+        def _execute_insert() -> int:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO llm_signal_validations
+                    (signal_id, validator_version, confidence_score, recommendation,
+                     warnings, quality_metrics)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal_id,
+                        payload.get('validator_version'),
+                        _safe_float(payload.get('confidence_score')),
+                        payload.get('recommendation'),
+                        warnings_blob,
+                        quality_blob,
+                    ),
+                )
+            row_id = self.cursor.lastrowid
+            logger.info("Saved signal validation for signal_id=%s (ID: %s)", signal_id, row_id)
+            return row_id
+
+        try:
+            return _execute_insert()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            if self._recover_sqlite_failure(exc, context="save_signal_validation"):
+                try:
+                    return _execute_insert()
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc2:
+                    safe_error = sanitize_error(exc2)
+                    logger.error("Retry failed to save signal validation: %s", safe_error)
+                    return -1
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save signal validation: %s", safe_error)
+            return -1
+        except Exception as exc:  # pragma: no cover - defensive
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save signal validation: %s", safe_error)
+            return -1
     
     def save_llm_risk(self, ticker: str, date: str, risk: Dict,
                      model_name: str = 'qwen:14b-chat-q4_K_M',
@@ -1357,6 +1616,79 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save trade execution: %s", safe_error)
             return -1
+
+    def save_latency_metrics(
+        self,
+        ticker: str,
+        run_id: Optional[str],
+        stage: str,
+        ts_ms: Optional[float] = None,
+        llm_ms: Optional[float] = None,
+    ) -> int:
+        """Persist per-ticker latency metrics."""
+        try:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO latency_metrics (ticker, run_id, stage, ts_ms, llm_ms)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (ticker, run_id, stage, ts_ms, llm_ms),
+                )
+            return self.cursor.lastrowid
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save latency metrics: %s", safe_error)
+            return -1
+
+    def save_quality_snapshot(
+        self,
+        ticker: str,
+        window_start: Any,
+        window_end: Any,
+        length: int,
+        missing_pct: float,
+        coverage: float,
+        outlier_frac: float,
+        quality_score: float,
+        source: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> int:
+        """Persist data quality metrics for a window."""
+        try:
+            def _to_iso(val: Any) -> str:
+                if isinstance(val, datetime):
+                    val = val.date()
+                if isinstance(val, date):
+                    return val.isoformat()
+                return str(val)
+
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO data_quality_snapshots
+                    (ticker, window_start, window_end, length, missing_pct, coverage,
+                     outlier_frac, quality_score, source, note, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        ticker,
+                        _to_iso(window_start),
+                        _to_iso(window_end),
+                        int(length),
+                        float(missing_pct),
+                        float(coverage),
+                        float(outlier_frac),
+                        float(quality_score),
+                        source,
+                        note,
+                    ),
+                )
+            return self.cursor.lastrowid
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save data quality snapshot: %s", safe_error)
+            return -1
     
     def save_forecast(self, ticker: str, forecast_date: str, forecast_data: Dict) -> int:
         """
@@ -1381,53 +1713,77 @@ class DatabaseManager:
         Returns:
             Row ID of inserted record
         """
-        try:
-            import json
-            
-            model_type = forecast_data.get('model_type', 'COMBINED')
-            horizon = forecast_data.get('forecast_horizon', 1)
-            forecast_value = forecast_data.get('forecast_value')
-            
-            if forecast_value is None:
-                raise ValueError("forecast_value is required")
-            
-            # Convert model_order and diagnostics to JSON
-            model_order_str = json.dumps(forecast_data.get('model_order', {}))
-            diagnostics_data = forecast_data.get('diagnostics', {}) or {}
-            regression_metrics = forecast_data.get('regression_metrics')
-            diagnostics_str = json.dumps(diagnostics_data)
-            regression_metrics_str = json.dumps(regression_metrics or {})
-            
-            self.cursor.execute("""
+        import json
+
+        model_type = forecast_data.get('model_type', 'COMBINED')
+        horizon = forecast_data.get('forecast_horizon', 1)
+        forecast_value = forecast_data.get('forecast_value')
+
+        if forecast_value is None:
+            raise ValueError("forecast_value is required")
+
+        model_order_str = json.dumps(forecast_data.get('model_order', {}))
+        diagnostics_data = forecast_data.get('diagnostics', {}) or {}
+        regression_metrics = forecast_data.get('regression_metrics')
+        diagnostics_str = json.dumps(diagnostics_data)
+        regression_metrics_str = json.dumps(regression_metrics or {})
+
+        def _execute_insert() -> int:
+            self.cursor.execute(
+                """
                 INSERT OR REPLACE INTO time_series_forecasts
                 (ticker, forecast_date, model_type, forecast_horizon,
                  forecast_value, lower_ci, upper_ci, volatility,
                  model_order, aic, bic, diagnostics, regression_metrics)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                ticker,
-                forecast_date,
-                model_type,
-                horizon,
-                float(forecast_value),
-                float(forecast_data.get('lower_ci')) if forecast_data.get('lower_ci') is not None else None,
-                float(forecast_data.get('upper_ci')) if forecast_data.get('upper_ci') is not None else None,
-                float(forecast_data.get('volatility')) if forecast_data.get('volatility') is not None else None,
-                model_order_str,
-                float(forecast_data.get('aic')) if forecast_data.get('aic') is not None else None,
-                float(forecast_data.get('bic')) if forecast_data.get('bic') is not None else None,
-                diagnostics_str,
-                regression_metrics_str,
-            ))
-            
+                """,
+                (
+                    ticker,
+                    forecast_date,
+                    model_type,
+                    horizon,
+                    float(forecast_value),
+                    float(forecast_data.get('lower_ci'))
+                    if forecast_data.get('lower_ci') is not None
+                    else None,
+                    float(forecast_data.get('upper_ci'))
+                    if forecast_data.get('upper_ci') is not None
+                    else None,
+                    float(forecast_data.get('volatility'))
+                    if forecast_data.get('volatility') is not None
+                    else None,
+                    model_order_str,
+                    float(forecast_data.get('aic'))
+                    if forecast_data.get('aic') is not None
+                    else None,
+                    float(forecast_data.get('bic'))
+                    if forecast_data.get('bic') is not None
+                    else None,
+                    diagnostics_str,
+                    regression_metrics_str,
+                ),
+            )
             self.conn.commit()
             row_id = self.cursor.lastrowid
-            logger.info(f"Saved forecast for {ticker} on {forecast_date} (ID: {row_id})")
+            logger.info("Saved forecast for %s on %s (ID: %s)", ticker, forecast_date, row_id)
             return row_id
-            
-        except Exception as e:
-            safe_error = sanitize_error(e)
-            logger.error(f"Failed to save forecast: {safe_error}")
+
+        try:
+            return _execute_insert()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            if self._recover_sqlite_failure(exc, context="save_forecast"):
+                try:
+                    return _execute_insert()
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc2:
+                    safe_error = sanitize_error(exc2)
+                    logger.error("Retry failed to save forecast: %s", safe_error)
+                    return -1
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save forecast: %s", safe_error)
+            return -1
+        except Exception as exc:  # pragma: no cover - defensive
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save forecast: %s", safe_error)
             return -1
     
     def save_trading_signal(

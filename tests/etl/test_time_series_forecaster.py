@@ -57,6 +57,16 @@ class TestSAMOSSA:
         assert len(result["forecast"]) == 8
         assert "explained_variance_ratio" in result
 
+    def test_scaling_normalization(self, price_series: pd.Series) -> None:
+        warped_series = price_series * 1000 + 5000
+        forecaster = SAMOSSAForecaster(window_length=25, n_components=4, normalize=True)
+        forecaster.fit(warped_series)
+        summary = forecaster.get_model_summary()
+        assert summary["scale_mean"] > 0
+        assert summary["scale_std"] > 0
+        assert abs(summary["normalized_mean"]) < 1e-9
+        assert math.isclose(summary["normalized_std"], 1.0, rel_tol=1e-6)
+
 
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestSARIMAX:

@@ -123,7 +123,7 @@ data_split:
 
 Then run without any flags:
 ```bash
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT
+python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers
 ```
 
 ---

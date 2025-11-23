@@ -54,3 +54,20 @@ def test_comprehensive_dashboard_renders_metadata_panel():
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+def test_autofmt_xdate_axis_kwarg_is_safe():
+    """Matplotlib should accept axis kwarg after visualizer patches Figure.autofmt_xdate."""
+    import matplotlib.pyplot as plt
+
+    _ = TimeSeriesVisualizer()  # ensure module import / monkey patch executed
+    idx = pd.date_range(start="2025-01-01", periods=10, freq="D")
+    values = np.linspace(0, 1, len(idx))
+
+    fig, ax = plt.subplots()
+    try:
+        ax.plot(idx, values)
+        # Previously raised: FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'
+        fig.autofmt_xdate(axis='x')
+    finally:
+        plt.close(fig)

@@ -12,13 +12,21 @@
 - The visualization hook immediately crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), preventing the PNG artefacts that usually accompany this checkpoint.
 - Pandas/statsmodels warnings remain unresolved (`forcester_ts/forecaster.py:128-136` still coerces a `PeriodIndex`; `_select_best_order` in `forcester_ts/sarimax.py:136-183` still retains unconverged grids) even though the Nov‑09 notes claimed otherwise. *(Warnings from these modules are now logged to `logs/warnings/warning_events.log`, so the checkpoint stream can be audited without relying on console spam.)*
 - `scripts/backfill_signal_validation.py:281-292` continues to call `datetime.utcnow()` with sqlite’s default converters, so the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22` persist.
+- Interpretable telemetry is now live: `forcester_ts/instrumentation.py` records dataset profiles (shape, frequency, missing %, statistical moments) and benchmarking metrics (RMSE / sMAPE / tracking error) for every forecast stage. Audit JSON files land under `logs/forecast_audits/`, and `TimeSeriesVisualizer` renders the same summary on dashboards so every checkpoint references the exact data processed.
 
 **Blocking actions**
 1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the same reset/mirror branch we already use for `"disk i/o error"`.
 2. Patch the MSSA `change_points` handling (copy to list instead of boolean short-circuit), rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm Stage 8 receives forecasts.
 3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are generated again.
-4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (the new warning recorder writes any remaining events to `logs/warnings/warning_events.log` for triage).
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (Nov 18 update: frequency hints are now stored instead of forced, the SARIMAX grid enforces a data-per-parameter budget, and the warning recorder in `logs/warnings/warning_events.log` only captures genuinely new ConvergenceWarnings).
 5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document.
+
+> **2025-11-19 remediation note**  
+> Items 1�4 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. This checkpoint remains BLOCKED until `scripts/backfill_signal_validation.py` is modernised and `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run; treat `Documentation/integration_fix_plan.md` as the canonical source for remediation progress.
+
+
+> **Documentation hygiene:** The sections below capture the last green build (2025-11-06). Follow `Documentation/integration_fix_plan.md` for canonical remediation steps and only refresh this checkpoint after `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run.
+
 
 ## Executive Highlights (2025-11-14)
 ### Autonomous Profit Engine + Broker Stack
@@ -29,6 +37,15 @@
 ### Quant Success + Signal Assurance
 - `models/time_series_signal_generator.py` enforces the quant-success policy defined in `config/quant_success_config.yml`, persisting every scored decision to `logs/signals/quant_validation.jsonl` so brutal/dry-run scripts can surface the newest audit rows beside their stage timings.
 - `config/signal_routing_config.yml` stores the TS-first, LLM-fallback gating logic that both `scripts/run_auto_trader.py` and `scripts/run_etl_pipeline.py` now honor, keeping documentation, configuration, and runtime behavior aligned.
+
+### Frontier Market Coverage (2025-11-15)
+- `etl/frontier_markets.py` introduces the Nigeria → Bulgaria ticker atlas provided in the frontier liquidity guide (Nigeria: `MTNN`/`AIRTELAFRI`/`ZENITHBANK`/`GUARANTY`/`FBNH`, Kenya: `EABL`/`KCB`/`SCANGROUP`/`COOP`, South Africa: `NPN`/`BIL`/`SAB`/`SOL`/`MTN`, Vietnam: `VHM`/`GAS`/`BID`/`SSI`, Bangladesh: `BRACBANK`/`LAFSURCEML`/`IFADAUTOS`/`RELIANCE`, Sri Lanka: `COMBANK`/`HNB`/`SAMP`/`LOLC`, Pakistan: `OGDC`/`MEBL`/`LUCK`/`UBL`, Kuwait: `ZAIN`/`NBK`/`KFH`/`MAYADEEN`, Qatar: `QNBK`/`DUQM`/`QISB`/`QAMC`, Romania: `SIF1`/`TGN`/`BRD`/`TLV`, Bulgaria: `5EN`/`BGO`/`AIG`/`SYN`).
+- `scripts/run_etl_pipeline.py` now exports a `--include-frontier-tickers` flag so every multi-ticker training/test run automatically appends that atlas. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh`’s new frontier training stage so `.bash/` and `.script/` orchestrators stay synchronized.
+- Documentation excerpts (`README.md`, `Documentation/arch_tree.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, `SECURITY_*` files) now reference the flag so operational teams don’t forget to exercise frontier venues during simulations.
+
+### Time-Series Forecaster Hardening (2025-11-18)
+- `forcester_ts/sarimax.py` now follows the `Documentation/SARIMAX_IMPLEMENTATION_CHECKLIST.md`: time-series inputs are interpolated/log-transformed safely, exogenous frames are aligned before fitting, series are rescaled into the statsmodels stability band, and the order search halts after repeated non-convergence so `bash/test_real_time_pipeline.sh` no longer floods logs with DataScale + convergence warnings.
+- `forcester_ts/samossa.py` implements the Page-matrix/HSV decomposition pipeline from `Documentation/SAMOSSA_IMPLEMENTATION_CHECKLIST.md`, enforces \(L \le \sqrt{T}\), rescales outputs to the original units, and pushes residuals through an AutoReg fallback so deterministic + AR components are forecast separately—the errors that paused `bash/comprehensive_brutal_test.sh` now surface with actionable context under `logs/warnings/warning_events.log`.
 
 ### Validation + Risk Snapshot
 - Local automation currently lacks Python (`python -m pytest` fails with “Python was not found”), so none of the 246 unit/integration suites or the new execution tests can be exercised until the toolchain is reinstalled inside `simpleTrader_env`.

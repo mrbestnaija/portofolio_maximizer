@@ -1,4 +1,7 @@
-# UNIFIED ROADMAP: Portfolio Maximizer v45
+﻿# UNIFIED ROADMAP: Portfolio Maximizer v45
+
+> **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+
 **Production-Ready Autonomous Profit Machine**
 
 **Last Updated**: November 6, 2025  
@@ -16,6 +19,13 @@
 - Checkpoint persistence uses Path.replace, clearing the [WinError 183] blocker that previously halted second-run checkpoints on Windows.
 - scripts/backfill_signal_validation.py bootstraps sys.path, so nightly automation and the brutal suite can run the validator without reproducing ModuleNotFoundError.
 
+
+### Nov 15, 2025 Frontier Market Coverage Delta
+- Added `etl/frontier_markets.py` and the `--include-frontier-tickers` flag so every multi-ticker run in `.bash/` and `.script/` tooling appends the Nigeria → Bulgaria ticker atlas from the liquidity/spread guide (MTNN…SYN). `README.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, and all security guides now call out the flag explicitly.
+- `bash/test_real_time_pipeline.sh` Step 10 and the brutal suite gained synthetic multi-runs that exercise these symbols, keeping regression coverage honest even before NGX/NSE/BSE live suffix mappings land.
+
+### Nov 18, 2025 SQLite Corruption Recovery
+- `etl/database_manager.py` now backs up and recreates the SQLite store automatically whenever races produce “database disk image is malformed,” so brutal/test runs stop spamming the same failure 100+ times and rehydrate a clean DB without manual `.recover` steps.
 
 ---
 
@@ -975,6 +985,7 @@ CAPITAL_SCHEDULE = {
 **Next Action**: Implement signal validator (`ai_llm/signal_validator.py`)  
 **Timeline**: 12 weeks to production ML trading system  
 **Success Probability**: 60% (conservative estimate)
+
 
 
 

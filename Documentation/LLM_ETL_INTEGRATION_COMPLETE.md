@@ -35,7 +35,7 @@ Successfully integrated local LLM (Ollama) into the ETL pipeline with comprehens
 **Usage**:
 ```bash
 # Run pipeline with LLM integration
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --enable-llm
+python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --enable-llm
 
 # Select specific model
 python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm --llm-model qwen:14b-chat-q4_K_M
@@ -315,6 +315,7 @@ GOOGL          10           2          +15.2%
 # Full pipeline with LLM integration
 python scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT,GOOGL \
+  --include-frontier-tickers \
   --start 2023-01-01 \
   --end 2024-01-01 \
   --enable-llm \

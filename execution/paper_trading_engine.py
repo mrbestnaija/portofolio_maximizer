@@ -139,9 +139,15 @@ class PaperTradingEngine:
         """
         ticker = signal.get('ticker', 'UNKNOWN')
         action = signal.get('action', 'HOLD').upper()
+        current_position = self.portfolio.positions.get(ticker, 0)
+        if action not in {"BUY", "SELL"}:
+            logger.info("Skipping non-actionable signal (%s) for %s", action, ticker)
+            return ExecutionResult(
+                status='REJECTED',
+                reason="Non-actionable signal",
+            )
         
         logger.info(f"Executing %s signal for %s", action, ticker)
-        
         # Step 1: Validate signal
         validation = self.signal_validator.validate_llm_signal(
             signal,
@@ -159,7 +165,7 @@ class PaperTradingEngine:
         
         # Step 2: Calculate position size
         position_size = self._calculate_position_size(
-            signal, validation.confidence_score, market_data
+            signal, validation.confidence_score, market_data, current_position
         )
         
         if position_size == 0:
@@ -254,7 +260,8 @@ class PaperTradingEngine:
     def _calculate_position_size(self, 
                                  signal: Dict[str, Any],
                                  confidence_score: float,
-                                 market_data: pd.DataFrame) -> int:
+                                 market_data: pd.DataFrame,
+                                 current_position: int) -> int:
         """
         Calculate position size using Kelly criterion with confidence adjustment.
         
@@ -262,6 +269,7 @@ class PaperTradingEngine:
             signal: Trading signal
             confidence_score: Adjusted confidence (0-1)
             market_data: Historical data for risk estimation
+            current_position: Existing shares held (long only)
             
         Returns:
             Number of shares to trade
@@ -269,13 +277,39 @@ class PaperTradingEngine:
         # Maximum position size (2% of portfolio as risk management)
         portfolio_value = self._current_portfolio_value()
         max_position_value = portfolio_value * 0.02
+        action = signal.get("action", "HOLD").upper()
+        if action == "SELL":
+            # Tighter cap for shorts (1% of equity)
+            max_position_value = portfolio_value * 0.01
         
-        # Adjust by confidence
-        position_value = max_position_value * confidence_score
+        # Adjust by confidence (floor at 50% to avoid zero-size)
+        confidence_weight = max(confidence_score, 0.5)
+        position_value = max_position_value * confidence_weight
         
         # Calculate shares
         current_price = market_data['Close'].iloc[-1]
-        shares = int(position_value / current_price)
+
+        if action == "SELL":
+            desired = max(1, int(position_value / current_price))
+            # Protect against stacking shorts beyond cap
+            if current_position < 0:
+                current_exposure = abs(current_position) * current_price
+                remaining_capacity = max(0.0, max_position_value - current_exposure)
+                if remaining_capacity <= 0:
+                    return 0
+                cap_shares = max(1, int(remaining_capacity / current_price))
+                shares = min(desired, cap_shares)
+            elif current_position > 0:
+                shares = min(current_position, desired)
+            else:
+                shares = desired
+        else:
+            desired = max(1, int(position_value / current_price))
+            if current_position < 0:
+                shares = min(abs(current_position), desired)
+            else:
+                shares = desired
+
         return max(0, shares)
     
     def _simulate_entry_price(self, 
@@ -340,14 +374,25 @@ class PaperTradingEngine:
                 # Average entry price calculation
                 old_shares = new_portfolio.positions[trade.ticker]
                 old_price = new_portfolio.entry_prices[trade.ticker]
-                
+
                 total_shares = old_shares + trade.shares
-                avg_price = (
-                    (old_shares * old_price + trade.shares * trade.entry_price) / total_shares
-                )
-                
-                new_portfolio.positions[trade.ticker] = total_shares
-                new_portfolio.entry_prices[trade.ticker] = avg_price
+                if old_shares < 0:
+                    # Covering a short
+                    if total_shares < 0:
+                        new_portfolio.positions[trade.ticker] = total_shares
+                        new_portfolio.entry_prices[trade.ticker] = old_price
+                    elif total_shares == 0:
+                        del new_portfolio.positions[trade.ticker]
+                        del new_portfolio.entry_prices[trade.ticker]
+                    else:
+                        new_portfolio.positions[trade.ticker] = total_shares
+                        new_portfolio.entry_prices[trade.ticker] = trade.entry_price
+                else:
+                    avg_price = (
+                        (old_shares * old_price + trade.shares * trade.entry_price) / total_shares
+                    )
+                    new_portfolio.positions[trade.ticker] = total_shares
+                    new_portfolio.entry_prices[trade.ticker] = avg_price
             else:
                 new_portfolio.positions[trade.ticker] = trade.shares
                 new_portfolio.entry_prices[trade.ticker] = trade.entry_price
@@ -359,37 +404,68 @@ class PaperTradingEngine:
             
             # Update position
             if trade.ticker in new_portfolio.positions:
-                new_portfolio.positions[trade.ticker] -= trade.shares
-                
-                # Remove if position closed
-                if new_portfolio.positions[trade.ticker] <= 0:
-                    del new_portfolio.positions[trade.ticker]
-                    del new_portfolio.entry_prices[trade.ticker]
+                old_shares = new_portfolio.positions[trade.ticker]
+                old_price = new_portfolio.entry_prices[trade.ticker]
+                new_shares = old_shares - trade.shares
+
+                if old_shares > 0:
+                    if new_shares > 0:
+                        new_portfolio.positions[trade.ticker] = new_shares
+                        new_portfolio.entry_prices[trade.ticker] = old_price
+                    elif new_shares == 0:
+                        del new_portfolio.positions[trade.ticker]
+                        del new_portfolio.entry_prices[trade.ticker]
+                    else:
+                        new_portfolio.positions[trade.ticker] = new_shares
+                        new_portfolio.entry_prices[trade.ticker] = trade.entry_price
+                else:
+                    # Expanding an existing short
+                    total_short = abs(old_shares) + trade.shares
+                    avg_price = (
+                        (abs(old_shares) * old_price + trade.shares * trade.entry_price) / total_short
+                    )
+                    new_portfolio.positions[trade.ticker] = -total_short
+                    new_portfolio.entry_prices[trade.ticker] = avg_price
+            else:
+                # Open a new short
+                new_portfolio.positions[trade.ticker] = -trade.shares
+                new_portfolio.entry_prices[trade.ticker] = trade.entry_price
         
         # Update total value
         current_prices = {trade.ticker: trade.entry_price}
         new_portfolio.update_value(current_prices)
         
         return new_portfolio
+
+    def mark_to_market(self, price_map: Dict[str, float]) -> float:
+        """Refresh portfolio valuation using the latest market prices."""
+        self.portfolio.update_value(price_map)
+        return self.portfolio.total_value
     
     def _store_trade_execution(self, trade: Trade):
         """Store trade execution in database"""
         try:
             # Calculate P&L if closing position
             realized_pnl = 0.0
-            if trade.action == 'SELL' and trade.ticker in self.portfolio.entry_prices:
-                entry_price = self.portfolio.entry_prices[trade.ticker]
-                realized_pnl = (
-                    (trade.entry_price - entry_price) * trade.shares
-                    - trade.transaction_cost
-                )
-                realized_pct = (
-                    ((trade.entry_price - entry_price) / entry_price)
-                    if entry_price > 0
-                    else 0.0
-                )
-            else:
-                realized_pct = None
+            realized_pct = None
+            prior_entry = self.portfolio.entry_prices.get(trade.ticker)
+            prior_shares = self.portfolio.positions.get(trade.ticker, 0)
+
+            if prior_entry and prior_entry > 0:
+                if trade.action == 'SELL' and prior_shares > 0:
+                    close_size = min(prior_shares, trade.shares)
+                    realized_pnl = (
+                        (trade.entry_price - prior_entry) * close_size
+                        - trade.transaction_cost
+                    )
+                    realized_pct = (trade.entry_price - prior_entry) / prior_entry
+                elif trade.action == 'BUY' and prior_shares < 0:
+                    close_size = min(abs(prior_shares), trade.shares)
+                    realized_pnl = (
+                        (prior_entry - trade.entry_price) * close_size
+                        - trade.transaction_cost
+                    )
+                    realized_pct = (prior_entry - trade.entry_price) / prior_entry
 
             self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
@@ -400,7 +476,7 @@ class PaperTradingEngine:
                 total_value=trade.shares * trade.entry_price,
                 commission=trade.transaction_cost,
                 signal_id=trade.signal_id,
-                realized_pnl=realized_pnl,
+                realized_pnl=realized_pnl if realized_pct is not None else None,
                 realized_pnl_pct=realized_pct,
                 holding_period_days=None,
             )
