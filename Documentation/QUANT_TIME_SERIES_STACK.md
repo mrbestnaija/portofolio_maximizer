@@ -7,6 +7,11 @@ Quant & Time-Series Stack (Local CPU/GPU)
 
 Focus: data science, ML, and statistical modeling for time series / investments / portfolios, widely used in academia and industry, all runnable locally.
 
+> **Nov 24, 2025 Delta**  
+> - Data-source-aware ticker resolver (`etl/data_universe.py`) added; auto-trader now resolves tickers via helper (explicit + frontier default, provider discovery when empty).  
+> - LLM fallback defaults to enabled in trading runs; thresholds unchanged.  
+> - Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings in live loops.
+
 ## Tiered Stack Overview (Project-Aligned)
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.

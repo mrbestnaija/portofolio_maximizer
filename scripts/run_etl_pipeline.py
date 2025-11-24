@@ -26,6 +26,7 @@ import yaml
 import logging
 import warnings
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -61,6 +62,7 @@ from etl.portfolio_math import (
     calculate_enhanced_portfolio_metrics,
     optimize_portfolio_markowitz,
 )
+from etl.split_diagnostics import summarize_returns, drift_metrics, validate_non_overlap
 from etl.frontier_markets import (
     FRONTIER_MARKET_TICKERS_BY_REGION,
     merge_frontier_tickers,
@@ -198,7 +200,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     try:
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
-        logger.info(f"✓ Loaded configuration from: {config_path}")
+        logger.info(f"OK Loaded configuration from: {config_path}")
         return config
     except yaml.YAMLError as e:
         logger.error(f"Invalid YAML in configuration: {e}")
@@ -280,6 +282,24 @@ def _generate_visual_dashboards(
         logger.info("Visualization dashboards generated: %s", generated)
     else:
         logger.info("Visualization dashboard generation skipped (no data available).")
+
+
+def _emit_split_drift_json(path: Path, run_id: str, records: List[Dict[str, Any]]) -> None:
+    """Persist drift diagnostics to JSON for dashboards/audits."""
+    if not records:
+        return
+    payload = {
+        "run_id": run_id,
+        "generated_at": datetime.utcnow().isoformat(),
+        "drift": records,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        logger.info("Split drift diagnostics emitted to %s", path)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Failed to emit split drift JSON: %s", exc)
 
 
 def generate_synthetic_ohlcv(tickers: List[str], start_date: str,
@@ -561,7 +581,7 @@ def _resolve_cv_settings(
 
     expanding_window = cv_config.get('expanding_window')
     if expanding_window is None:
-        window_strategy_cfg = str(cv_config.get('window_strategy', 'expanding')).lower()
+        window_strategy_cfg = str(cv_config.get('window_strategy', 'sliding')).lower()
         expanding_window = window_strategy_cfg != 'sliding'
     elif isinstance(expanding_window, str):
         expanding_window = expanding_window.lower() != 'false'
@@ -839,9 +859,9 @@ def _initialize_llm_components(
         components.signal_validator = signal_validator
         components.optimizer = optimizer
 
-        logger.info("✓ LLM initialized: %s", llm_client.model)
+        logger.info("OK LLM initialized: %s", llm_client.model)
     except OllamaConnectionError as exc:
-        logger.warning("⚠ LLM initialization failed: %s", exc)
+        logger.warning("WARN LLM initialization failed: %s", exc)
         logger.warning("  LLM features will be disabled. Pipeline will continue without LLM.")
         logger.warning("  To enable LLM features, ensure Ollama is running: 'ollama serve'")
         # Return components with enabled=False (graceful degradation)
@@ -849,7 +869,7 @@ def _initialize_llm_components(
     except Exception as exc:  # pragma: no cover - defensive logging
         from etl.security_utils import sanitize_error
         safe_error = sanitize_error(exc)
-        logger.warning("⚠ LLM initialization error: %s", safe_error)
+        logger.warning("WARN LLM initialization error: %s", safe_error)
         logger.warning("  LLM features will be disabled. Pipeline will continue without LLM.")
         components.enabled = False
 
@@ -912,7 +932,7 @@ def _prepare_ticker_list(
 
 def _log_split_strategy(settings: CVSettings) -> None:
     if settings.use_cv:
-        logger.info("✓ Using k-fold cross-validation (k=%d)", settings.n_splits)
+        logger.info("OK Using k-fold cross-validation (k=%d)", settings.n_splits)
         logger.info("  - Test size: %d%%", int(settings.test_size * 100))
         logger.info("  - Gap between train/val: %d periods", settings.gap)
         logger.info("  - Window strategy: %s", settings.window_strategy)
@@ -1074,14 +1094,14 @@ def execute_pipeline(
             resolved_db_path = "data/portfolio_maximizer.db"
     db_manager = DatabaseManager(db_path=resolved_db_path)
     signal_tracker = LLMSignalTracker()
-    logger.info("✓ Database manager initialized")
+    logger.info("OK Database manager initialized")
 
     # Initialize checkpoint manager and pipeline logger
     pipeline_id = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     checkpoint_manager = CheckpointManager(checkpoint_dir="data/checkpoints")
     pipeline_log = PipelineLogger(log_dir="logs", retention_days=7)
 
-    logger.info(f"✓ Pipeline ID: {pipeline_id}")
+    logger.info(f"OK Pipeline ID: {pipeline_id}")
     pipeline_log.log_event('pipeline_start', pipeline_id, metadata={
         'tickers': ticker_list,
         'start_date': start,
@@ -1095,7 +1115,7 @@ def execute_pipeline(
             config_path='config/data_sources_config.yml',
             storage=storage
         )
-        logger.info(f"✓ Data source manager initialized")
+        logger.info(f"OK Data source manager initialized")
         logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
         logger.info(f"  Active source: {data_source_manager.get_active_source()}")
     except Exception as e:
@@ -1113,7 +1133,7 @@ def execute_pipeline(
         logger=logger
     )
     
-    logger.info(f"✓ Stage execution order (config-driven): {', '.join(stage_names)}")
+    logger.info(f"OK Stage execution order (config-driven): {', '.join(stage_names)}")
 
     # Prepare synthetic data up-front when explicitly requested
     precomputed_raw_data: Optional[pd.DataFrame] = None
@@ -1173,7 +1193,7 @@ def execute_pipeline(
                     else:
                         raise RuntimeError("Data extraction failed - empty dataset")
 
-                logger.info(f"✓ Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
+                logger.info(f"OK Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
                 logger.info(f"  Source: {extraction_source}")
 
                 if synthetic_fallback:
@@ -1189,7 +1209,7 @@ def execute_pipeline(
                     raw_data,
                     source=extraction_source
                 )
-                logger.info(f"✓ Saved {rows_saved} rows to database")
+                logger.info("Saved {rows_saved} rows to database")
 
                 # Log cache statistics
                 if extraction_source and not extraction_source.lower().startswith('synthetic'):
@@ -1221,13 +1241,13 @@ def execute_pipeline(
                 report = validator.validate_ohlcv(raw_data)
 
                 if not report['passed']:
-                    logger.warning(f"⚠ Validation warnings detected")
+                    logger.warning(f"WARN Validation warnings detected")
                     logger.warning(f"  Errors: {len(report.get('errors', []))}")
                     logger.warning(f"  Warnings: {len(report.get('warnings', []))}")
                     if verbose:
                         logger.debug(f"Validation report: {report}")
                 else:
-                    logger.info("✓ Data validation passed")
+                    logger.info("OK Data validation passed")
 
             elif stage_name == 'data_preprocessing':
                 # Stage 3: Data Preprocessing
@@ -1241,7 +1261,7 @@ def execute_pipeline(
                 # Normalize (returns tuple: data, stats)
                 normalized, stats = processor.normalize(filled)
                 processed = normalized
-                logger.debug(f"  Normalization complete (μ=0, σ²=1)")
+                logger.debug(f"  Normalization complete (mu=0, sigma^2=1)")
 
                 # Save processed data with run metadata
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1256,7 +1276,7 @@ def execute_pipeline(
                     },
                     run_id=pipeline_id
                 )
-                logger.info(f"✓ Preprocessed {len(processed)} rows")
+                logger.info(f"OK Preprocessed {len(processed)} rows")
 
             elif stage_name == 'llm_market_analysis':
                 # Stage 4 (LLM): Market Analysis
@@ -1284,14 +1304,14 @@ def execute_pipeline(
                             latency=latency
                         )
                         
-                        logger.info(f"  ✓ {ticker}: Trend={analysis['trend']}, Strength={analysis['strength']}/10 ({latency:.1f}s)")
+                        logger.info(f"  OK {ticker}: Trend={analysis['trend']}, Strength={analysis['strength']}/10 ({latency:.1f}s)")
                         if verbose:
                             logger.debug(f"    Summary: {analysis['summary']}")
                     except Exception as e:
-                        logger.warning(f"  ⚠ {ticker} analysis failed: {e}")
+                        logger.warning(f"  WARN {ticker} analysis failed: {e}")
                         llm_analyses[ticker] = {'trend': 'neutral', 'strength': 5, 'error': str(e)}
                 
-                logger.info(f"✓ Analyzed {len(llm_analyses)} ticker(s) with LLM")
+                logger.info(f"OK Analyzed {len(llm_analyses)} ticker(s) with LLM")
                 
                 # Save checkpoint with LLM analysis
                 checkpoint_id = checkpoint_manager.save_checkpoint(
@@ -1527,7 +1547,7 @@ def execute_pipeline(
                                     )
                             except Exception as metrics_exc:
                                 logger.warning(
-                                    "  ⚠ %s: Unable to compute signal backtest metrics (%s)",
+                                    "  WARN %s: Unable to compute signal backtest metrics (%s)",
                                     ticker,
                                     metrics_exc,
                                 )
@@ -1553,7 +1573,7 @@ def execute_pipeline(
                         
                         confidence_pct = float(signal.get('confidence', 0.0)) * 100
                         logger.info(
-                            "  ✓ %s: Action=%s, Confidence=%.1f%% (%0.1fs) Validation=%s",
+                            "  OK %s: Action=%s, Confidence=%.1f%% (%0.1fs) Validation=%s",
                             ticker,
                             signal['action'],
                             confidence_pct,
@@ -1563,11 +1583,11 @@ def execute_pipeline(
                         if verbose:
                             logger.debug(f"    Reasoning: {signal['reasoning']}")
                     except Exception as e:
-                        logger.warning(f"  ⚠ {ticker} signal generation failed: {e}")
+                        logger.warning(f"  WARN {ticker} signal generation failed: {e}")
                         llm_signals[ticker] = {'action': 'HOLD', 'confidence': 0.5, 'error': str(e)}
                 
-                logger.info(f"✓ Generated {len(llm_signals)} signal(s) with LLM")
-                logger.warning("⚠ ADVISORY ONLY: LLM signals require 30-day validation before trading")
+                logger.info(f"OK Generated {len(llm_signals)} signal(s) with LLM")
+                logger.warning("WARN ADVISORY ONLY: LLM signals require 30-day validation before trading")
                 
                 # Save checkpoint with signals
                 checkpoint_id = checkpoint_manager.save_checkpoint(
@@ -1608,14 +1628,14 @@ def execute_pipeline(
                             latency=latency
                         )
                         
-                        logger.info(f"  ✓ {ticker}: Risk Level={risk['risk_level']}, Score={risk['risk_score']}/100 ({latency:.1f}s)")
+                        logger.info(f"  OK {ticker}: Risk Level={risk['risk_level']}, Score={risk['risk_score']}/100 ({latency:.1f}s)")
                         if verbose and risk.get('concerns'):
                             logger.debug(f"    Concerns: {', '.join(risk['concerns'][:2])}")
                     except Exception as e:
-                        logger.warning(f"  ⚠ {ticker} risk assessment failed: {e}")
+                        logger.warning(f"  WARN {ticker} risk assessment failed: {e}")
                         llm_risks[ticker] = {'risk_level': 'medium', 'risk_score': 50, 'error': str(e)}
                 
-                logger.info(f"✓ Assessed {len(llm_risks)} ticker(s) risk with LLM")
+                logger.info(f"OK Assessed {len(llm_risks)} ticker(s) risk with LLM")
                 
                 # Save checkpoint with risk assessment
                 checkpoint_id = checkpoint_manager.save_checkpoint(
@@ -1637,8 +1657,6 @@ def execute_pipeline(
                         RollingWindowValidator,
                         RollingWindowCVConfig,
                     )
-                    import pandas as pd
-                    
                     # Load forecasting config
                     forecasting_cfg = pipeline_cfg.get('forecasting', {})
                     if not forecasting_cfg.get('enabled', True):
@@ -1694,7 +1712,7 @@ def execute_pipeline(
                                     ticker_data = ticker_data.loc[ticker_mask]
 
                             if ticker_data.empty:
-                                logger.warning(f"  ⚠ {ticker}: No processed rows available after filtering")
+                                logger.warning(f"  WARN {ticker}: No processed rows available after filtering")
                                 continue
                             
                             # Extract Close price series
@@ -1703,13 +1721,13 @@ def execute_pipeline(
                             elif 'close' in ticker_data.columns:
                                 price_series = ticker_data['close'].dropna()
                             else:
-                                logger.warning(f"  ⚠ {ticker}: No Close price data available")
+                                logger.warning(f"  WARN {ticker}: No Close price data available")
                                 continue
                             
                             series_length = len(price_series)
                             if series_length < min_history_strict:
                                 logger.warning(
-                                    "  ⚠ %s: Insufficient data for forecasting (need ≥ %s, have %s)",
+                                    "  WARN %s: Insufficient data for forecasting (need >= %s, have %s)",
                                     ticker,
                                     min_history_strict,
                                     series_length,
@@ -1721,7 +1739,7 @@ def execute_pipeline(
 
                             if series_length < min_history_required:
                                 logger.warning(
-                                    "  ⚠ %s: Limited history (<%s observations). Using entire series; metrics disabled.",
+                                    "  WARN %s: Limited history (<%s observations). Using entire series; metrics disabled.",
                                     ticker,
                                     min_history_required,
                                 )
@@ -1730,7 +1748,7 @@ def execute_pipeline(
                                 holdout_series = price_series.iloc[-forecast_horizon:]
                             else:
                                 logger.warning(
-                                    "  ⚠ %s: Not enough history for walk-forward validation (required ≥ %s observations). "
+                                    "  WARN %s: Not enough history for walk-forward validation (required >= %s observations). "
                                     "Using entire series for training; metrics will be skipped.",
                                     ticker,
                                     forecast_horizon * 2,
@@ -1753,7 +1771,7 @@ def execute_pipeline(
                                 try:
                                     metrics_map = forecaster.evaluate(holdout_series)
                                 except Exception as exc:  # pragma: no cover - metrics optional
-                                    logger.warning("  ⚠ %s: Unable to compute regression metrics: %s", ticker, exc)
+                                    logger.warning("  WARN %s: Unable to compute regression metrics: %s", ticker, exc)
                             forecast_result["regression_metrics"] = metrics_map
 
                             cv_results = None
@@ -1783,7 +1801,7 @@ def execute_pipeline(
                                         sarimax_metrics = aggregate.get("sarimax", {})
                                         rmse_val = sarimax_metrics.get("rmse")
                                         logger.info(
-                                            "  ↪ %s rolling CV (%s folds, horizon=%s, sarimax_rmse=%s)",
+                                            "  -> %s rolling CV (%s folds, horizon=%s, sarimax_rmse=%s)",
                                             ticker,
                                             cv_results.get("fold_count"),
                                             cv_results.get("horizon"),
@@ -1791,13 +1809,13 @@ def execute_pipeline(
                                         )
                                     else:
                                         logger.info(
-                                            "  ↪ %s rolling CV skipped (need ≥ %s observations, have %s)",
+                                            "  -> %s rolling CV skipped (need >= %s observations, have %s)",
                                             ticker,
                                             cv_min_train + cv_horizon,
                                             series_length,
                                         )
                                 except Exception as cv_exc:
-                                    logger.warning("  ⚠ %s: Rolling CV failed (%s)", ticker, cv_exc)
+                                    logger.warning("  WARN %s: Rolling CV failed (%s)", ticker, cv_exc)
 
                             if cv_results:
                                 forecast_result["cross_validation"] = cv_results
@@ -1940,17 +1958,17 @@ def execute_pipeline(
                                             forecast_data=forecast_data,
                                         )
                             
-                            logger.info(f"  ✓ {ticker}: Generated {forecast_horizon}-step forecast")
+                            logger.info(f"  OK {ticker}: Generated {forecast_horizon}-step forecast")
                             
                         except Exception as e:
-                            logger.warning(f"  ⚠ {ticker} forecasting failed: {e}")
+                            logger.warning(f"  WARN {ticker} forecasting failed: {e}")
                             forecasts[ticker] = {'error': str(e)}
                     
                     successful_forecasts = len([f for f in forecasts.values() if 'error' not in f])
-                    logger.info(f"✓ Generated forecasts for {successful_forecasts}/{len(ticker_list)} ticker(s)")
+                    logger.info(f"OK Generated forecasts for {successful_forecasts}/{len(ticker_list)} ticker(s)")
                     if successful_forecasts < len(ticker_list):
                         missing = [t for t in ticker_list if t not in forecasts or 'error' in forecasts[t]]
-                        logger.warning("  ⚠ Forecasting skipped for: %s", ", ".join(missing))
+                        logger.warning("  WARN Forecasting skipped for: %s", ", ".join(missing))
 
                     try:
                         _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
@@ -1981,7 +1999,6 @@ def execute_pipeline(
                 try:
                     from models.time_series_signal_generator import TimeSeriesSignalGenerator
                     from models.signal_adapter import SignalAdapter
-                    import pandas as pd
                     
                     # Load signal routing config
                     signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
@@ -2018,7 +2035,7 @@ def execute_pipeline(
                             elif 'close' in ticker_data.columns:
                                 current_price = float(ticker_data['close'].iloc[-1])
                             else:
-                                logger.warning(f"  ⚠ {ticker}: No Close price data available")
+                                logger.warning(f"  WARN {ticker}: No Close price data available")
                                 continue
                             
                             current_prices[ticker] = current_price
@@ -2026,7 +2043,7 @@ def execute_pipeline(
                             # Get forecast bundle
                             forecast_bundle = forecasts.get(ticker)
                             if not forecast_bundle or 'error' in forecast_bundle:
-                                logger.warning(f"  ⚠ {ticker}: No valid forecast available")
+                                logger.warning(f"  WARN {ticker}: No valid forecast available")
                                 continue
                             
                             # Generate signal
@@ -2055,17 +2072,17 @@ def execute_pipeline(
                             )
                             
                             logger.info(
-                                f"  ✓ {ticker}: {signal.action} signal "
+                                f"  OK {ticker}: {signal.action} signal "
                                 f"(confidence={signal.confidence:.2f}, "
                                 f"expected_return={signal.expected_return:.2%}, "
                                 f"risk={signal.risk_score:.2f})"
                             )
                             
                         except Exception as e:
-                            logger.warning(f"  ⚠ {ticker} Time Series signal generation failed: {e}")
+                            logger.warning(f"  WARN {ticker} Time Series signal generation failed: {e}")
                             ts_signals[ticker] = {'action': 'HOLD', 'confidence': 0.0, 'error': str(e)}
                     
-                    logger.info(f"✓ Generated {len([s for s in ts_signals.values() if s.get('action') != 'HOLD'])} Time Series signal(s)")
+                    logger.info(f"OK Generated {len([s for s in ts_signals.values() if s.get('action') != 'HOLD'])} Time Series signal(s)")
                     
                     # Store signals for routing stage
                     globals()['_ts_signals'] = ts_signals
@@ -2095,7 +2112,6 @@ def execute_pipeline(
                 try:
                     from models.signal_router import SignalRouter
                     from models.signal_adapter import SignalAdapter
-                    import pandas as pd
                     
                     # Load signal routing config
                     signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
@@ -2152,16 +2168,16 @@ def execute_pipeline(
                             primary_source = bundle.primary_signal.get('source', 'UNKNOWN') if bundle.primary_signal else 'UNKNOWN'
                             
                             logger.info(
-                                f"  ✓ {ticker}: Routed {primary_action} signal "
+                                f"  OK {ticker}: Routed {primary_action} signal "
                                 f"(source={primary_source}, "
                                 f"fallback={'yes' if bundle.fallback_signal else 'no'})"
                             )
                             
                         except Exception as e:
-                            logger.warning(f"  ⚠ {ticker} signal routing failed: {e}")
+                            logger.warning(f"  WARN {ticker} signal routing failed: {e}")
                             routed_bundles[ticker] = None
                     
-                    logger.info(f"✓ Routed signals for {len([b for b in routed_bundles.values() if b])} ticker(s)")
+                    logger.info(f"OK Routed signals for {len([b for b in routed_bundles.values() if b])} ticker(s)")
                     
                     # Store routing stats
                     routing_stats = router.get_routing_stats()
@@ -2194,6 +2210,7 @@ def execute_pipeline(
                 logger.info("Splitting and saving datasets...")
                 logger.info(f"  Configuration source: pipeline_config.yml")
                 logger.info(f"  Split strategy: {'CV' if use_cv else 'Simple'}")
+                drift_records: List[Dict[str, Any]] = []
 
                 # Perform split using configuration-driven parameters
                 if use_cv:
@@ -2212,6 +2229,132 @@ def execute_pipeline(
                         val_ratio=val_ratio,
                         use_cv=False
                     )
+
+                # Split diagnostics and drift checks
+                def _log_split_stats(name: str, frame: pd.DataFrame) -> None:
+                    summary = summarize_returns(name, frame)
+                    logger.info(
+                        "Split %s: len=%d start=%s end=%s mean=%.4f std=%.4f skew=%.4f kurt=%.4f",
+                        summary.name,
+                        summary.length,
+                        summary.start,
+                        summary.end,
+                        summary.mean,
+                        summary.std,
+                        summary.skew,
+                        summary.kurtosis,
+                    )
+
+                if use_cv and splits.get('cv_folds'):
+                    for fold in splits['cv_folds']:
+                        tr = fold['train']
+                        va = fold['validation']
+                        if not validate_non_overlap(tr.index, va.index):
+                            logger.warning("Overlap detected in CV fold %s", fold['fold_id'])
+                    _log_split_stats(f"cv{fold['fold_id']}_train", tr)
+                    _log_split_stats(f"cv{fold['fold_id']}_val", va)
+                    drift = drift_metrics(tr, va)
+                    drift_records.append(
+                        {
+                            "split": f"cv{fold['fold_id']}_train_val",
+                            "psi": drift["psi"],
+                            "mean_delta": drift["mean_delta"],
+                            "std_delta": drift["std_delta"],
+                            "vol_psi": drift["vol_psi"],
+                            "vol_delta": drift["vol_delta"],
+                            "volatility_ratio": drift.get("volatility_ratio"),
+                        }
+                    )
+                    try:
+                        db_manager.save_split_drift(
+                            run_id=pipeline_id,
+                            ticker=None,
+                            split_name=f"cv_fold_{fold['fold_id']}",
+                            metrics=drift,
+                        )
+                    except Exception:
+                        logger.debug("Skipping drift persistence for CV fold %s", fold['fold_id'])
+                    if drift["psi"] > 0.2 or drift["vol_psi"] > 0.2:
+                        logger.warning(
+                            "Drift detected in CV fold %s (psi=%.3f vol_psi=%.3f)",
+                            fold['fold_id'],
+                            drift["psi"],
+                            drift["vol_psi"],
+                        )
+                    else:
+                        logger.info(
+                            "CV fold %s drift psi=%.3f vol_psi=%.3f (OK)",
+                            fold['fold_id'],
+                            drift["psi"],
+                            drift["vol_psi"],
+                        )
+                    try:
+                        db_manager.save_latency_metrics(
+                            ticker="CV",
+                            run_id=pipeline_id,
+                            stage=f"cv_fold_{fold['fold_id']}",
+                            ts_ms=None,
+                            llm_ms=None,
+                        )
+                    except Exception:
+                        logger.debug("Skipping latency metrics persistence for CV fold %s", fold['fold_id'])
+                test_df = splits.get('testing')
+                if test_df is not None and not test_df.empty:
+                    _log_split_stats("test", test_df)
+            else:
+                tr = splits.get('training', pd.DataFrame())
+                va = splits.get('validation', pd.DataFrame())
+                te = splits.get('testing', pd.DataFrame())
+                if not validate_non_overlap(tr.index, va.index):
+                    logger.warning("Overlap detected between train and val")
+                if not validate_non_overlap(tr.index, te.index):
+                    logger.warning("Overlap detected between train and test")
+                _log_split_stats("train", tr)
+                _log_split_stats("val", va)
+                _log_split_stats("test", te)
+                drift_tv = drift_metrics(tr, va)
+                drift_tt = drift_metrics(tr, te)
+                drift_records.extend(
+                    [
+                        {
+                            "split": "train_val",
+                            "psi": drift_tv["psi"],
+                            "mean_delta": drift_tv["mean_delta"],
+                            "std_delta": drift_tv["std_delta"],
+                            "vol_psi": drift_tv["vol_psi"],
+                            "vol_delta": drift_tv["vol_delta"],
+                            "volatility_ratio": drift_tv.get("volatility_ratio"),
+                        },
+                        {
+                            "split": "train_test",
+                            "psi": drift_tt["psi"],
+                            "mean_delta": drift_tt["mean_delta"],
+                            "std_delta": drift_tt["std_delta"],
+                            "vol_psi": drift_tt["vol_psi"],
+                            "vol_delta": drift_tt["vol_delta"],
+                            "volatility_ratio": drift_tt.get("volatility_ratio"),
+                        },
+                    ]
+                )
+                try:
+                    db_manager.save_split_drift(
+                        run_id=pipeline_id,
+                        ticker=None,
+                        split_name="train_val",
+                        metrics=drift_tv,
+                    )
+                    db_manager.save_split_drift(
+                        run_id=pipeline_id,
+                        ticker=None,
+                        split_name="train_test",
+                        metrics=drift_tt,
+                    )
+                except Exception:
+                    logger.debug("Skipping drift persistence for holdout splits")
+                if drift_tv["psi"] > 0.2 or drift_tv["vol_psi"] > 0.2:
+                    logger.warning("Train/Val drift psi=%.3f vol_psi=%.3f", drift_tv["psi"], drift_tv["vol_psi"])
+                if drift_tt["psi"] > 0.2 or drift_tt["vol_psi"] > 0.2:
+                    logger.warning("Train/Test drift psi=%.3f vol_psi=%.3f", drift_tt["psi"], drift_tt["vol_psi"])
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -2259,10 +2402,10 @@ def execute_pipeline(
                     avg_train_size = sum(len(f['train']) for f in splits['cv_folds']) / len(splits['cv_folds'])
                     avg_val_size = sum(len(f['validation']) for f in splits['cv_folds']) / len(splits['cv_folds'])
 
-                    logger.info(f"✓ Saved {len(splits['cv_folds'])} CV folds + 1 test set")
-                    logger.info(f"  - Train size (avg): {avg_train_size:.0f} rows")
-                    logger.info(f"  - Val size (avg): {avg_val_size:.0f} rows")
-                    logger.info(f"  - Test size: {len(splits['testing'])} rows")
+                    logger.info("Saved %s CV folds + 1 test set", len(splits['cv_folds']))
+                    logger.info("  - Train size (avg): %.0f rows", avg_train_size)
+                    logger.info("  - Val size (avg): %.0f rows", avg_val_size)
+                    logger.info("  - Test size: %s rows", len(splits['testing']))
                 else:
                     # Simple split (backward compatible) with run metadata
                     for split_name, split_data in splits.items():
@@ -2279,10 +2422,12 @@ def execute_pipeline(
                             run_id=pipeline_id
                         )
 
-                    logger.info(f"✓ Saved simple split:")
-                    logger.info(f"  - Training: {len(splits['training'])} rows (70%)")
-                    logger.info(f"  - Validation: {len(splits['validation'])} rows (15%)")
-                    logger.info(f"  - Testing: {len(splits['testing'])} rows (15%)")
+                    logger.info("Saved simple split:")
+                    logger.info("  - Training: %s rows (70%)", len(splits['training']))
+                    logger.info("  - Validation: %s rows (15%)", len(splits['validation']))
+                    logger.info("  - Testing: %s rows (15%)", len(splits['testing']))
+
+                _emit_split_drift_json(Path("visualizations") / "split_drift_latest.json", pipeline_id, drift_records)
 
                 compute_portfolio_metrics(
                     raw_data=raw_data,
@@ -2303,7 +2448,7 @@ def execute_pipeline(
         except Exception as e:
             from etl.security_utils import sanitize_error
             safe_error = sanitize_error(e)
-            logger.error(f"✗ Stage '{stage_name}' failed: {safe_error}")
+            logger.error(f"X Stage '{stage_name}' failed: {safe_error}")
             # Log original error internally for debugging
             pipeline_log.log_stage_error(pipeline_id, stage_name, e)
 
@@ -2314,7 +2459,7 @@ def execute_pipeline(
 
     # Pipeline completion
     logger.info("=" * 70)
-    logger.info("✓ Pipeline completed successfully")
+    logger.info("OK Pipeline completed successfully")
     logger.info("=" * 70)
 
     # Log pipeline completion
@@ -2387,7 +2532,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
     Data Splitting Strategy:
     - Default (--use-cv=False): Simple 70/15/15 chronological split (backward compatible)
     - Recommended (--use-cv): k-fold cross-validation with expanding window
-      * 5.5x better temporal coverage (15% → 83%)
+      * 5.5x better temporal coverage (15% -> 83%)
       * Eliminates temporal gap (0 years vs 2.5 years)
       * Strict test isolation (15% never exposed during CV)
 

@@ -618,6 +618,36 @@ class DatabaseManager:
                 recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Split drift diagnostics for CV and holdout evaluation
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS split_drift_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                ticker TEXT,
+                split_name TEXT NOT NULL,
+                psi REAL,
+                mean_delta REAL,
+                std_delta REAL,
+                vol_psi REAL,
+                vol_delta REAL,
+                volatility_delta REAL,
+                volatility_ratio REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Strategy optimization cache (stochastic search results)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                regime TEXT NOT NULL,
+                params TEXT NOT NULL,
+                metrics TEXT NOT NULL,
+                score REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         # Time series forecasts (SARIMAX/GARCH/SAMOSSA)
         forecast_table_sql = """
@@ -947,6 +977,8 @@ class DatabaseManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_quality_ticker_dates ON data_quality_snapshots(ticker, window_start, window_end)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_latency_ticker_date ON llm_signals(ticker, signal_date)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_latency_metrics_ticker ON latency_metrics(ticker)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_split_drift_run_split ON split_drift_metrics(run_id, split_name)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_configs_regime_score ON strategy_configs(regime, score)")
         
         self.conn.commit()
         logger.info("Database schema initialized successfully")
@@ -1641,6 +1673,42 @@ class DatabaseManager:
             logger.error("Failed to save latency metrics: %s", safe_error)
             return -1
 
+    def save_split_drift(
+        self,
+        run_id: Optional[str],
+        ticker: Optional[str],
+        split_name: str,
+        metrics: Dict[str, float],
+    ) -> int:
+        """Persist drift diagnostics for a specific split."""
+        try:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO split_drift_metrics
+                    (run_id, ticker, split_name, psi, mean_delta, std_delta,
+                     vol_psi, vol_delta, volatility_delta, volatility_ratio)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        ticker,
+                        split_name,
+                        metrics.get("psi"),
+                        metrics.get("mean_delta"),
+                        metrics.get("std_delta"),
+                        metrics.get("vol_psi"),
+                        metrics.get("vol_delta"),
+                        metrics.get("std_delta"),  # volatility_delta aligns to std_delta
+                        metrics.get("volatility_ratio"),
+                    ),
+                )
+            return self.cursor.lastrowid
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save split drift metrics: %s", safe_error)
+            return -1
+
     def save_quality_snapshot(
         self,
         ticker: str,
@@ -1939,6 +2007,160 @@ class DatabaseManager:
         
         self.cursor.execute(query, params)
         return [dict(row) for row in self.cursor.fetchall()]
+
+    def get_realized_pnl_history(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Return realized PnL events for equity curve construction."""
+        self.cursor.execute(
+            """
+            SELECT trade_date, realized_pnl, realized_pnl_pct, ticker, action
+            FROM trade_executions
+            WHERE realized_pnl IS NOT NULL
+            ORDER BY trade_date ASC, id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in self.cursor.fetchall()]
+
+    def get_equity_curve(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        initial_capital: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a simple equity curve from realized PnL events within a date window.
+        Returns a list of {"date": iso_date, "equity": value} ordered by date.
+        """
+        query = """
+            SELECT trade_date, realized_pnl
+            FROM trade_executions
+            WHERE realized_pnl IS NOT NULL
+        """
+        params: List[Any] = []
+        if start_date:
+            query += " AND trade_date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND trade_date <= ?"
+            params.append(end_date)
+        query += " ORDER BY trade_date ASC, id ASC"
+
+        self.cursor.execute(query, params)
+        rows = self.cursor.fetchall()
+        equity = []
+        running = float(initial_capital)
+        for row in rows:
+            pnl = row["realized_pnl"] if row["realized_pnl"] is not None else 0.0
+            running += float(pnl)
+            equity.append({"date": row["trade_date"], "equity": running})
+        return equity
+
+    def load_ohlcv(
+        self,
+        tickers: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Load OHLCV data for one or more tickers within an optional date range."""
+        if not tickers:
+            return pd.DataFrame()
+        query = """
+            SELECT ticker, date, open, high, low, close, volume
+            FROM ohlcv_data
+            WHERE ticker IN ({placeholders})
+        """
+        placeholders = ",".join(["?"] * len(tickers))
+        params: List[Any] = list(tickers)
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+        query += " ORDER BY date ASC"
+        query = query.format(placeholders=placeholders)
+
+        df = pd.read_sql_query(query, self.conn, params=params, parse_dates=["date"])
+        if not df.empty:
+            # Ensure date column parsed to datetime
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values(["ticker", "date"]).set_index("date")
+        return df
+
+    def get_distinct_tickers(self, limit: Optional[int] = None) -> List[str]:
+        """Return distinct tickers from stored OHLCV data."""
+        query = "SELECT DISTINCT ticker FROM ohlcv_data ORDER BY ticker"
+        params: List[Any] = []
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+        self.cursor.execute(query, params)
+        rows = self.cursor.fetchall()
+        return [row[0] for row in rows] if rows else []
+
+    def save_strategy_config(
+        self,
+        regime: str,
+        params: Dict[str, Any],
+        metrics: Dict[str, Any],
+        score: float,
+    ) -> int:
+        """Persist a single strategy optimization result for a given regime."""
+        try:
+            payload_params = json.dumps(params or {})
+            payload_metrics = json.dumps(metrics or {})
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO strategy_configs (regime, params, metrics, score)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (regime, payload_params, payload_metrics, float(score)),
+                )
+            return self.cursor.lastrowid
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save strategy config: %s", safe_error)
+            return -1
+
+    def get_best_strategy_config(self, regime: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return the highest-scoring cached strategy configuration for a regime."""
+        try:
+            if regime:
+                self.cursor.execute(
+                    """
+                    SELECT regime, params, metrics, score, created_at
+                    FROM strategy_configs
+                    WHERE regime = ?
+                    ORDER BY score DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (regime,),
+                )
+            else:
+                self.cursor.execute(
+                    """
+                    SELECT regime, params, metrics, score, created_at
+                    FROM strategy_configs
+                    ORDER BY score DESC, created_at DESC
+                    LIMIT 1
+                    """
+                )
+            row = self.cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "regime": row["regime"],
+                "params": json.loads(row["params"] or "{}"),
+                "metrics": json.loads(row["metrics"] or "{}"),
+                "score": float(row["score"]),
+                "created_at": row["created_at"],
+            }
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to load best strategy config: %s", safe_error)
+            return None
     
     def get_performance_summary(self, start_date: Optional[str] = None,
                                end_date: Optional[str] = None) -> Dict:

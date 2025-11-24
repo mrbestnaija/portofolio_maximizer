@@ -24,6 +24,26 @@ from etl.base_extractor import BaseExtractor, ExtractorMetadata
 
 logger = logging.getLogger(__name__)
 
+def _is_unrecoverable_ticker_error(error: Exception) -> bool:
+    """Return True when the ticker is clearly unavailable/delisted."""
+    try:
+        from yfinance.shared import YFTzMissingError, YFPricesMissingError  # type: ignore
+        if isinstance(error, (YFTzMissingError, YFPricesMissingError)):
+            return True
+    except Exception:
+        # yfinance internals may change; fall back to string matching
+        pass
+
+    message = str(error).lower()
+    substrings = [
+        "possibly delisted",
+        "no timezone found",
+        "no price data found",
+        "no data fetched",
+    ]
+    return any(text in message for text in substrings)
+
+
 def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 30.0):
     """Decorator for exponential backoff retry logic."""
     def decorator(func):
@@ -81,6 +101,10 @@ def fetch_ticker_data(ticker: str, start_date: datetime, end_date: datetime,
         logger.error(f"Network error fetching {ticker}: {e}")
         raise  # Re-raise for retry decorator
     except Exception as e:
+        if _is_unrecoverable_ticker_error(e):
+            logger.warning(f"Skipping {ticker}: {e} (likely stale/delisted)")
+            return pd.DataFrame()
+
         logger.error(f"Failed to fetch {ticker}: {e}")
         return pd.DataFrame()
 
@@ -173,7 +197,7 @@ class YFinanceExtractor(BaseExtractor):
     def __init__(self, name: str = 'yfinance', timeout: int = 30,
                  rate_limit_delay: float = 0.5, retention_years: int = 10,
                  cleanup_days: int = 7, cache_hours: int = 24, storage=None,
-                 **kwargs):
+                 failure_backoff_hours: int = 6, **kwargs):
         """Initialize Yahoo Finance extractor.
 
         Args:
@@ -195,6 +219,35 @@ class YFinanceExtractor(BaseExtractor):
         self.retention_years = retention_years
         self.cleanup_days = cleanup_days
         self._cache_events: Dict[str, Dict[str, Any]] = {}
+        self.failure_backoff_hours = failure_backoff_hours
+        self._recent_failures: Dict[str, datetime] = {}
+
+    def _should_skip_ticker(self, ticker: str) -> bool:
+        """Skip tickers that recently failed to reduce noisy retries."""
+        failure_time = self._recent_failures.get(ticker)
+        if not failure_time:
+            return False
+
+        elapsed = datetime.now() - failure_time
+        if elapsed <= timedelta(hours=self.failure_backoff_hours):
+            self._record_cache_event(ticker, "skipped", 0)
+            logger.warning(
+                "Skipping %s: last failure %.1fh ago (backoff %sh)",
+                ticker,
+                elapsed.total_seconds() / 3600,
+                self.failure_backoff_hours,
+            )
+            return True
+
+        # Backoff window expired; allow fetch and clear flag
+        self._recent_failures.pop(ticker, None)
+        return False
+
+    def _mark_failure(self, ticker: str, reason: str) -> None:
+        """Mark ticker as failed to avoid noisy repeated downloads."""
+        self._recent_failures[ticker] = datetime.now()
+        self._record_cache_event(ticker, "failed", 0)
+        logger.warning("Marked %s as failed (reason: %s); will back off", ticker, reason)
 
     def _load_cache_metadata(self, parquet_path) -> Dict[str, Any]:
         """Load metadata saved alongside cached parquet file."""
@@ -376,9 +429,14 @@ class YFinanceExtractor(BaseExtractor):
         cache_misses = 0
         cache_partial_hits = 0
         self._cache_events.clear()
+        failed_tickers: List[str] = []
 
         for i, ticker in enumerate(tickers):
             try:
+                if self._should_skip_ticker(ticker):
+                    failed_tickers.append(ticker)
+                    continue
+
                 # Cache-first strategy: check local storage before network request
                 cached_data = self._check_cache(ticker, start, end)
                 event = self._cache_events.get(ticker, {})
@@ -422,12 +480,17 @@ class YFinanceExtractor(BaseExtractor):
                             self._record_cache_event(ticker, "refreshed", len(data_to_save))
                         except Exception as e:
                             logger.warning(f"Failed to cache {ticker}: {e}")
+                else:
+                    failed_tickers.append(ticker)
+                    self._mark_failure(ticker, "no data returned from yfinance")
 
                 # Rate limiting (only for network requests)
                 if i < len(tickers) - 1:
                     time.sleep(self.rate_limit_delay)
 
             except Exception as e:
+                failed_tickers.append(ticker)
+                self._mark_failure(ticker, str(e))
                 logger.error(f"Skipping {ticker} after failed retries: {e}")
                 cache_misses += 1
                 continue
@@ -445,7 +508,17 @@ class YFinanceExtractor(BaseExtractor):
             logger.info(f"Cache performance: {cache_hits}/{total} hits ({hit_rate:.1%} hit rate){partial_note}")
 
         if not all_data:
+            if failed_tickers:
+                logger.warning(
+                    "No data returned; failed tickers: %s",
+                    ", ".join(sorted(set(failed_tickers))),
+                )
             return pd.DataFrame()
+        elif failed_tickers:
+            logger.warning(
+                "Partial success; failed tickers skipped: %s",
+                ", ".join(sorted(set(failed_tickers))),
+            )
 
         # Reset index before concat to avoid duplicate indices
         combined = pd.concat([df.reset_index() for df in all_data], ignore_index=True)

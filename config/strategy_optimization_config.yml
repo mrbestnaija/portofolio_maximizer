@@ -1,0 +1,45 @@
+strategy_optimization:
+  # Search space for stochastic optimization. Values here define ranges and
+  # choices only; no single configuration is treated as "best" in code.
+  search_space:
+    ensemble_weight_sarimax:
+      type: continuous
+      bounds: [0.0, 1.0]
+    ensemble_weight_samossa:
+      type: continuous
+      bounds: [0.0, 1.0]
+    sizing_kelly_fraction_cap:
+      type: continuous
+      bounds: [0.0, 0.5]
+    diversification_penalty:
+      type: continuous
+      bounds: [0.0, 1.0]
+    execution_style:
+      type: categorical
+      choices: ["market", "limit_bias"]
+
+  # Objective weights for scoring candidates. Positive weights reward; negative
+  # weights penalize. These weights are purely configuration-driven.
+  objectives:
+    total_return: 1.0
+    profit_factor: 0.5
+    max_drawdown: -0.5
+
+  # Hard constraints on metrics. The optimizer will discard candidates whose
+  # evaluated metrics do not satisfy these thresholds.
+  constraints:
+    min:
+      win_rate: 0.5
+      profit_factor: 1.2
+    max:
+      max_drawdown: 0.2
+
+  evaluation:
+    # Shorten the default window so recent trades (e.g., last week) are evaluated
+    default_lookback_days: 14
+    quant_config_path: config/quant_success_config.yml
+
+  regimes:
+    default:
+      description: "Fallback regime; drift and volatility not classified."
+      lookback_days: 14

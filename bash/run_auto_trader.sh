@@ -34,6 +34,15 @@ ENABLE_LLM="${ENABLE_LLM:-0}"
 LLM_MODEL="${LLM_MODEL:-deepseek-coder:6.7b-instruct-q4_K_M}"
 INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-0}"
 VERBOSE="${VERBOSE:-0}"
+HYPEROPT_ROUNDS="${HYPEROPT_ROUNDS:-0}"
+
+if [[ "$HYPEROPT_ROUNDS" != "0" ]]; then
+  echo "Hyperopt mode enabled via HYPEROPT_ROUNDS=$HYPEROPT_ROUNDS; delegating to bash/run_post_eval.sh"
+  ROOT_DIR="$ROOT_DIR" HYPEROPT_ROUNDS="$HYPEROPT_ROUNDS" TICKERS="$TICKERS" \
+    START="${START_DATE:-2018-01-01}" END="${END_DATE:-$(date +%Y-%m-%d)}" \
+    "$ROOT_DIR/bash/run_post_eval.sh"
+  exit 0
+fi
 
 CMD=(
   "$PYTHON_BIN" "$TRADER_SCRIPT"

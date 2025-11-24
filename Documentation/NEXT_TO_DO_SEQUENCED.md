@@ -10,6 +10,11 @@
 
 ---
 
+## 🔄 2025-11-24 Delta (currency update)
+- Data-source-aware ticker resolver (`etl/data_universe.py`) added; auto-trader now resolves tickers via this helper (explicit + frontier default, optional provider discovery when empty).
+- LLM fallback defaults to enabled in the trading loop for redundancy without changing thresholds.
+- Dashboard JSON emission hardened (datetime → ISO) to eliminate serialization warnings during live runs.
+
 ## 📊 CURRENT PROJECT STATUS: 🔴 BLOCKED (2025-11-15 brutal run regression)
 
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration

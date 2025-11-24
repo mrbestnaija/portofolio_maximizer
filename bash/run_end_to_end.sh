@@ -48,6 +48,18 @@ if [[ "$PIPE_EXIT" -ne 0 ]]; then
 fi
 echo "Pipeline complete. Log: $PIPELINE_LOG"
 
+# Higher-order hyper-parameter exploration (project-wide default)
+HYPEROPT_ROUNDS="${HYPEROPT_ROUNDS:-0}"
+
+if [[ "$HYPEROPT_ROUNDS" != "0" ]]; then
+  echo "=== Hyperopt mode enabled for end-to-end run (rounds=$HYPEROPT_ROUNDS) ==="
+  ROOT_DIR="$ROOT_DIR" HYPEROPT_ROUNDS="$HYPEROPT_ROUNDS" TICKERS="$TICKERS" \
+    START="$START_DATE" END="$END_DATE" \
+    "$ROOT_DIR/bash/run_post_eval.sh"
+  echo "End-to-end hyperopt run finished @ $RUN_STAMP"
+  exit 0
+fi
+
 echo "=== [2/3] Running Auto-Trader ==="
 TRADER_CMD=(
   "$PYTHON_BIN" "$TRADER_SCRIPT"

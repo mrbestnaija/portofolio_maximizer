@@ -42,6 +42,8 @@ class Trade:
     trade_id: Optional[str] = None
     slippage: float = 0.0
     signal_id: Optional[int] = None
+    realized_pnl: float = 0.0
+    realized_pnl_pct: Optional[float] = None
     
     def __post_init__(self):
         if self.trade_id is None:
@@ -217,7 +219,9 @@ class PaperTradingEngine:
             updated_portfolio = self._update_portfolio(trade, self.portfolio)
             
             # Step 8: Store in database
-            self._store_trade_execution(trade)
+            realized_pnl, realized_pct = self._store_trade_execution(trade)
+            trade.realized_pnl = realized_pnl
+            trade.realized_pnl_pct = realized_pct
             
             # Step 9: Calculate performance impact
             performance_impact = self._calculate_performance_impact(trade, updated_portfolio)
@@ -443,7 +447,7 @@ class PaperTradingEngine:
         return self.portfolio.total_value
     
     def _store_trade_execution(self, trade: Trade):
-        """Store trade execution in database"""
+        """Store trade execution in database and return realized PnL details."""
         try:
             # Calculate P&L if closing position
             realized_pnl = 0.0
@@ -482,9 +486,10 @@ class PaperTradingEngine:
             )
             
             logger.debug("Trade stored in database: %s", trade.trade_id)
-
+            return realized_pnl if realized_pct is not None else None, realized_pct
         except Exception as exc:
             logger.error("Failed to store trade: %s", exc)
+            return None, None
     
     def _calculate_performance_impact(self, 
                                      trade: Trade, 

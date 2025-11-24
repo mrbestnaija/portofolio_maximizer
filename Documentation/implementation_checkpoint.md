@@ -1,28 +1,28 @@
 # Implementation Checkpoint Document
-**Version**: 6.9
-**Date**: 2025-11-14 (Updated)
+**Version**: 7.0
+**Date**: 2025-11-24 (Updated)
 **Project**: Portfolio Maximizer
 **Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine + Remote Synchronization Enhancements + Time Series Signal Generation Refactoring
 
 ---
 
-### 🚨 2025-11-15 Brutal Run Findings (blocking)
-- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the production SQLite file is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every checkpoint/log reference cited in this document now points at a broken datastore. The writers in `etl/database_manager.py:689` and `:1213` currently fail.
-- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` reveal Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The exception fires after the “Saved forecast …” block, so Stage 8 sees “No valid forecast available”.
-- The visualization hook immediately crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), preventing the PNG artefacts that usually accompany this checkpoint.
-- Pandas/statsmodels warnings remain unresolved (`forcester_ts/forecaster.py:128-136` still coerces a `PeriodIndex`; `_select_best_order` in `forcester_ts/sarimax.py:136-183` still retains unconverged grids) even though the Nov‑09 notes claimed otherwise. *(Warnings from these modules are now logged to `logs/warnings/warning_events.log`, so the checkpoint stream can be audited without relying on console spam.)*
-- `scripts/backfill_signal_validation.py:281-292` continues to call `datetime.utcnow()` with sqlite’s default converters, so the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22` persist.
+### ð¨ 2025-11-15 Brutal Run Findings (blocking)
+- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the production SQLite file is corrupted (`database disk image is malformed`, ârowid â¦ out of order/missing from indexâ), so every checkpoint/log reference cited in this document now points at a broken datastore. The writers in `etl/database_manager.py:689` and `:1213` currently fail.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, â¦` reveal Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The exception fires after the âSaved forecast â¦â block, so Stage 8 sees âNo valid forecast availableâ.
+- The visualization hook immediately crashes with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, â¦), preventing the PNG artefacts that usually accompany this checkpoint.
+- Pandas/statsmodels warnings remain unresolved (`forcester_ts/forecaster.py:128-136` still coerces a `PeriodIndex`; `_select_best_order` in `forcester_ts/sarimax.py:136-183` still retains unconverged grids) even though the Novâ09 notes claimed otherwise. *(Warnings from these modules are now logged to `logs/warnings/warning_events.log`, so the checkpoint stream can be audited without relying on console spam.)*
+- `scripts/backfill_signal_validation.py:281-292` continues to call `datetime.utcnow()` with sqliteâs default converters, so the Python 3.12 deprecation warnings logged in `logs/backfill_signal_validation.log:15-22` persist.
 - Interpretable telemetry is now live: `forcester_ts/instrumentation.py` records dataset profiles (shape, frequency, missing %, statistical moments) and benchmarking metrics (RMSE / sMAPE / tracking error) for every forecast stage. Audit JSON files land under `logs/forecast_audits/`, and `TimeSeriesVisualizer` renders the same summary on dashboards so every checkpoint references the exact data processed.
 
 **Blocking actions**
 1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the same reset/mirror branch we already use for `"disk i/o error"`.
 2. Patch the MSSA `change_points` handling (copy to list instead of boolean short-circuit), rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm Stage 8 receives forecasts.
 3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are generated again.
-4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (Nov 18 update: frequency hints are now stored instead of forced, the SARIMAX grid enforces a data-per-parameter budget, and the warning recorder in `logs/warnings/warning_events.log` only captures genuinely new ConvergenceWarnings).
-5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document.
+4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (Novâ¯18 update: frequency hints are now stored instead of forced, the SARIMAX grid enforces a data-per-parameter budget, and the warning recorder in `logs/warnings/warning_events.log` only captures genuinely new ConvergenceWarnings).
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document. This remains the primary blocker for declaring the brutal suite green.
 
 > **2025-11-19 remediation note**  
-> Items 1�4 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. This checkpoint remains BLOCKED until `scripts/backfill_signal_validation.py` is modernised and `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run; treat `Documentation/integration_fix_plan.md` as the canonical source for remediation progress.
+> Items 14 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. This checkpoint remains BLOCKED until `scripts/backfill_signal_validation.py` is modernised and `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run; treat `Documentation/integration_fix_plan.md` as the canonical source for remediation progress.
 
 
 > **Documentation hygiene:** The sections below capture the last green build (2025-11-06). Follow `Documentation/integration_fix_plan.md` for canonical remediation steps and only refresh this checkpoint after `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run.
@@ -39,16 +39,16 @@
 - `config/signal_routing_config.yml` stores the TS-first, LLM-fallback gating logic that both `scripts/run_auto_trader.py` and `scripts/run_etl_pipeline.py` now honor, keeping documentation, configuration, and runtime behavior aligned.
 
 ### Frontier Market Coverage (2025-11-15)
-- `etl/frontier_markets.py` introduces the Nigeria → Bulgaria ticker atlas provided in the frontier liquidity guide (Nigeria: `MTNN`/`AIRTELAFRI`/`ZENITHBANK`/`GUARANTY`/`FBNH`, Kenya: `EABL`/`KCB`/`SCANGROUP`/`COOP`, South Africa: `NPN`/`BIL`/`SAB`/`SOL`/`MTN`, Vietnam: `VHM`/`GAS`/`BID`/`SSI`, Bangladesh: `BRACBANK`/`LAFSURCEML`/`IFADAUTOS`/`RELIANCE`, Sri Lanka: `COMBANK`/`HNB`/`SAMP`/`LOLC`, Pakistan: `OGDC`/`MEBL`/`LUCK`/`UBL`, Kuwait: `ZAIN`/`NBK`/`KFH`/`MAYADEEN`, Qatar: `QNBK`/`DUQM`/`QISB`/`QAMC`, Romania: `SIF1`/`TGN`/`BRD`/`TLV`, Bulgaria: `5EN`/`BGO`/`AIG`/`SYN`).
-- `scripts/run_etl_pipeline.py` now exports a `--include-frontier-tickers` flag so every multi-ticker training/test run automatically appends that atlas. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh`’s new frontier training stage so `.bash/` and `.script/` orchestrators stay synchronized.
-- Documentation excerpts (`README.md`, `Documentation/arch_tree.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, `SECURITY_*` files) now reference the flag so operational teams don’t forget to exercise frontier venues during simulations.
+- `etl/frontier_markets.py` introduces the Nigeria â Bulgaria ticker atlas provided in the frontier liquidity guide (Nigeria: `MTNN`/`AIRTELAFRI`/`ZENITHBANK`/`GUARANTY`/`FBNH`, Kenya: `EABL`/`KCB`/`SCANGROUP`/`COOP`, South Africa: `NPN`/`BIL`/`SAB`/`SOL`/`MTN`, Vietnam: `VHM`/`GAS`/`BID`/`SSI`, Bangladesh: `BRACBANK`/`LAFSURCEML`/`IFADAUTOS`/`RELIANCE`, Sri Lanka: `COMBANK`/`HNB`/`SAMP`/`LOLC`, Pakistan: `OGDC`/`MEBL`/`LUCK`/`UBL`, Kuwait: `ZAIN`/`NBK`/`KFH`/`MAYADEEN`, Qatar: `QNBK`/`DUQM`/`QISB`/`QAMC`, Romania: `SIF1`/`TGN`/`BRD`/`TLV`, Bulgaria: `5EN`/`BGO`/`AIG`/`SYN`).
+- `scripts/run_etl_pipeline.py` now exports a `--include-frontier-tickers` flag so every multi-ticker training/test run automatically appends that atlas. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh`âs new frontier training stage so `.bash/` and `.script/` orchestrators stay synchronized.
+- Documentation excerpts (`README.md`, `Documentation/arch_tree.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, `SECURITY_*` files) now reference the flag so operational teams donât forget to exercise frontier venues during simulations.
 
 ### Time-Series Forecaster Hardening (2025-11-18)
 - `forcester_ts/sarimax.py` now follows the `Documentation/SARIMAX_IMPLEMENTATION_CHECKLIST.md`: time-series inputs are interpolated/log-transformed safely, exogenous frames are aligned before fitting, series are rescaled into the statsmodels stability band, and the order search halts after repeated non-convergence so `bash/test_real_time_pipeline.sh` no longer floods logs with DataScale + convergence warnings.
-- `forcester_ts/samossa.py` implements the Page-matrix/HSV decomposition pipeline from `Documentation/SAMOSSA_IMPLEMENTATION_CHECKLIST.md`, enforces \(L \le \sqrt{T}\), rescales outputs to the original units, and pushes residuals through an AutoReg fallback so deterministic + AR components are forecast separately—the errors that paused `bash/comprehensive_brutal_test.sh` now surface with actionable context under `logs/warnings/warning_events.log`.
+- `forcester_ts/samossa.py` implements the Page-matrix/HSV decomposition pipeline from `Documentation/SAMOSSA_IMPLEMENTATION_CHECKLIST.md`, enforces \(L \le \sqrt{T}\), rescales outputs to the original units, and pushes residuals through an AutoReg fallback so deterministic + AR components are forecast separatelyâthe errors that paused `bash/comprehensive_brutal_test.sh` now surface with actionable context under `logs/warnings/warning_events.log`.
 
 ### Validation + Risk Snapshot
-- Local automation currently lacks Python (`python -m pytest` fails with “Python was not found”), so none of the 246 unit/integration suites or the new execution tests can be exercised until the toolchain is reinstalled inside `simpleTrader_env`.
+- Local automation currently lacks Python (`python -m pytest` fails with âPython was not foundâ), so none of the 246 unit/integration suites or the new execution tests can be exercised until the toolchain is reinstalled inside `simpleTrader_env`.
 - `bash/comprehensive_brutal_test.sh` (2025-11-12) passed the profit-critical + ETL suites, but it skipped `tests/etl/test_data_validator.py` (file missing) and timed out inside the Time Series block with a `Broken pipe`, leaving TS/LLM regression coverage outstanding. *(Nov 16 update: the script now defaults to TS-first runs with `BRUTAL_ENABLE_LLM=0`; set the variable to `1` only when you must exercise the LLM fallback.)*
 
 ### Immediate Follow-Ups
@@ -59,8 +59,8 @@
 
 ---
 ## New Capabilities (2025-11-12)
-- **Autonomous Profit Engine Loop**: `scripts/run_auto_trader.py` now orchestrates extraction → validation → forecasting → Time Series signal generation → signal routing → execution (PaperTradingEngine), keeping cash/positions/trade history synchronized each cycle with optional LLM fallback.
-- **Documentation & Positioning Update**: `README.md` and `Documentation/UNIFIED_ROADMAP.md` now present Portfolio Maximizer as an “Autonomous Profit Engine,” highlight the hands-free loop in Key Features, and provide a Quick Start recipe plus project-structure pointer.
+- **Autonomous Profit Engine Loop**: `scripts/run_auto_trader.py` now orchestrates extraction â validation â forecasting â Time Series signal generation â signal routing â execution (PaperTradingEngine), keeping cash/positions/trade history synchronized each cycle with optional LLM fallback.
+- **Documentation & Positioning Update**: `README.md` and `Documentation/UNIFIED_ROADMAP.md` now present Portfolio Maximizer as an âAutonomous Profit Engine,â highlight the hands-free loop in Key Features, and provide a Quick Start recipe plus project-structure pointer.
 - **Stage Planner Reorder**: `scripts/run_etl_pipeline.py` treats `data_storage` as part of the immutable core stages, runs Time Series forecasting/signal routing before any LLM stage, and appends LLM stages only after the router so LLM signals remain fallback/redundancy.
 - **Auto-Trader Module Loading**: `scripts/run_auto_trader.py` now adds the repo root to `sys.path` via `site.addsitedir(...)` before importing internal modules so the demo training loop can locate `etl`, `execution`, and other packages without needing an editable install or manual PYTHONPATH adjustments.
 - **Quant Success Helper (TS Signals)**: `models/time_series_signal_generator.py` now ships a configuration-driven helper (`config/quant_success_config.yml`) that fuses `etl.portfolio_math` (Sharpe/Sortino/VaR CIs), `execution.order_manager.request_safe_price`, and optional `etl.visualizer.TimeSeriesVisualizer` dashboards to score every signal against `QUANTIFIABLE_SUCCESS_CRITERIA.md` thresholds before it reaches routing/execution. The helper now persists a JSONL audit trail (`logs/signals/quant_validation.jsonl`) plus PNG artifacts per ticker; both live/dry-run bash orchestrators surface the latest entries right after stage timings so debugging/troubleshooting align with the checkpointing/logging standard.
@@ -69,31 +69,31 @@
 - **Validation Status**: `python3 -m compileall scripts/run_auto_trader.py` executed successfully; full end-to-end validation (including `bash/comprehensive_brutal_test.sh`) is pending due to the outstanding issues listed below.
 
 ## New Capabilities (2025-11-09)
-- **Monitoring & Latency Benchmarking**: `scripts/monitor_llm_system.py` now logs latency benchmarks to `logs/latency_benchmark.json`, surfaces `llm_signal_backtests` summaries, and saves full JSON reports (IDs 7–9) so dashboards can validate Time Series + LLM health in one place.
+- **Monitoring & Latency Benchmarking**: `scripts/monitor_llm_system.py` now logs latency benchmarks to `logs/latency_benchmark.json`, surfaces `llm_signal_backtests` summaries, and saves full JSON reports (IDs 7â9) so dashboards can validate Time Series + LLM health in one place.
 - **Nightly Validation Helper**: `schedule_backfill.bat` automates validator replays/nightly backfills using the authorised `simpleTrader_env` environment; Task Scheduler registration (02:00 daily) is the remaining ops step.
 - **Time Series Signal Generator Hardening**: Volatility forecasts are converted to scalars and HOLD provenance timestamps recorded, eliminating the `The truth value of a Series is ambiguous` crash during integration/monitoring runs. Regression tests executed: `pytest tests/models/test_time_series_signal_generator.py -q` and `pytest tests/integration/test_time_series_signal_integration.py::TestTimeSeriesForecastingToSignalIntegration::test_forecast_to_signal_flow -vv`.
 - **Environment Standardisation**: `simpleTrader_env/` (Python 3.12) is the sole supported virtual environment across Windows + WSL; all other virtual environments were removed to prevent drift.
 
 ## New Capabilities (2025-11-06)
-- **Time Series Signal Generation Refactoring IMPLEMENTED** (Testing Required): Time Series ensemble is now the DEFAULT signal generator with LLM as fallback/redundancy. **⚠️ ROBUST TESTING REQUIRED** before production use:
+- **Time Series Signal Generation Refactoring IMPLEMENTED** (Testing Required): Time Series ensemble is now the DEFAULT signal generator with LLM as fallback/redundancy. **â ï¸ ROBUST TESTING REQUIRED** before production use:
   - **Time Series Signal Generator** (`models/time_series_signal_generator.py`, 350 lines): Converts Time Series forecasts (SARIMAX, SAMOSSA, GARCH, MSSA-RL) to trading signals with confidence scores, risk metrics, and target/stop-loss calculations. Supports all Time Series models and ensemble forecasts.
   - **Signal Router** (`models/signal_router.py`, 250 lines): Routes signals with Time Series as PRIMARY and LLM as FALLBACK. Supports redundancy mode for validation. Feature flags enable gradual rollout and backward compatibility.
   - **Signal Adapter** (`models/signal_adapter.py`, 200 lines): Unified signal interface ensuring backward compatibility between Time Series and LLM signals. Converts between signal formats and validates signal integrity.
   - **Unified Database Schema** (`etl/database_manager.py`): New `trading_signals` table supports both Time Series and LLM signals with unified fields (target_price, stop_loss, expected_return, risk_score, volatility, provenance). `save_trading_signal()` method for unified persistence.
   - **Pipeline Integration** (`scripts/run_etl_pipeline.py`): New stages added - `time_series_signal_generation` (Stage 8) and `signal_router` (Stage 9). Time Series forecasting runs before signal generation. LLM signals serve as fallback/redundancy.
   - **Configuration** (`config/signal_routing_config.yml`): Feature flags for routing behavior, thresholds for signal generation, and fallback trigger configuration.
-  - **Comprehensive Testing**: 50 tests written (38 unit + 12 integration) covering all critical paths from forecasting through database persistence. **⚠️ NEEDS EXECUTION & VALIDATION**. See `Documentation/TESTING_IMPLEMENTATION_SUMMARY.md` and `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
+  - **Comprehensive Testing**: 50 tests written (38 unit + 12 integration) covering all critical paths from forecasting through database persistence. **â ï¸ NEEDS EXECUTION & VALIDATION**. See `Documentation/TESTING_IMPLEMENTATION_SUMMARY.md` and `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
   - **Documentation**: Complete refactoring documentation in `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`, `Documentation/REFACTORING_STATUS.md`, and updated `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`.
 - **Regression Metrics & Routing**: `forcester_ts/forecaster.py` now emits RMSE / sMAPE / tracking error per model/ensemble and saves them via `DatabaseManager.save_forecast(regression_metrics=...)`; `models/time_series_signal_generator.py` & `signal_router.py` ingest those metrics before falling back to LLM, ensuring routing decisions stay data-driven.
 
-## Comprehensive Brutal Test Run – 2025-11-12
+## Comprehensive Brutal Test Run â 2025-11-12
 - **Script**: `bash/comprehensive_brutal_test.sh` (expected duration ~4 hours) executed under `simpleTrader_env`.
-- **Profit-Critical Suite**: ✅ `tests/integration/test_profit_critical_functions.py`, `test_profit_factor_calculation`, and `tests/integration/test_llm_report_generation.py` all passed.
-- **ETL Suites**: ✅ `tests/etl/test_data_storage.py`, `test_preprocessor.py`, `test_time_series_cv.py`, `test_data_source_manager.py`, and `test_checkpoint_manager.py` (92 tests) passed. ⚠️ `tests/etl/test_data_validator.py` not found (script emits WARN); file needs restoration.
-- **Time Series / Signal Router Suites**: ❌ NOT EXECUTED — script timed out with `Broken pipe` during the “Time Series Forecasting Tests” block, so no TS/LLM regression coverage or database persistence checks were recorded.
+- **Profit-Critical Suite**: â `tests/integration/test_profit_critical_functions.py`, `test_profit_factor_calculation`, and `tests/integration/test_llm_report_generation.py` all passed.
+- **ETL Suites**: â `tests/etl/test_data_storage.py`, `test_preprocessor.py`, `test_time_series_cv.py`, `test_data_source_manager.py`, and `test_checkpoint_manager.py` (92 tests) passed. â ï¸ `tests/etl/test_data_validator.py` not found (script emits WARN); file needs restoration.
+- **Time Series / Signal Router Suites**: â NOT EXECUTED â script timed out with `Broken pipe` during the âTime Series Forecasting Testsâ block, so no TS/LLM regression coverage or database persistence checks were recorded.
 - **Follow-up Actions**:
   1. Restore `tests/etl/test_data_validator.py` so the ETL suite is complete.
-  2. Investigate and fix the timeout (likely due to the known `DataStorage.train_validation_test_split()` / zero-fold CV / SQLite `disk I/O` / missing parquet engine issues logged Nov 2–7) before rerunning the brutal suite.
+  2. Investigate and fix the timeout (likely due to the known `DataStorage.train_validation_test_split()` / zero-fold CV / SQLite `disk I/O` / missing parquet engine issues logged Novâ¯2â7) before rerunning the brutal suite.
   3. Re-run `bash/comprehensive_brutal_test.sh` end-to-end once the blockers are cleared to capture TS-first regression evidence.
 
 - **Remote Synchronization Enhancements**: Implemented comprehensive improvements for remote collaboration and production readiness:
@@ -113,15 +113,15 @@
 - **Modular Time-Series Engine**: SARIMAX, GARCH, SAMOSSA, and the new MSSA-RL forecaster now live under `forcester_ts/`, with `TimeSeriesForecaster` orchestrating parallel model runs and exports re-exposed via `etl/time_series_forecaster.py` for backward compatibility.
 
 ## New Capabilities (2025-11-02)
-- **Statistical Validation Toolkit**: Introduced `etl/statistical_tests.py` with the `StatisticalTestSuite` covering benchmark significance tests, Ljung–Box / Durbin–Watson diagnostics, and bootstrap confidence intervals for Sharpe ratio and max drawdown.
+- **Statistical Validation Toolkit**: Introduced `etl/statistical_tests.py` with the `StatisticalTestSuite` covering benchmark significance tests, LjungâBox / DurbinâWatson diagnostics, and bootstrap confidence intervals for Sharpe ratio and max drawdown.
 - **Signal Validation Telemetry**: `ai_llm/signal_validator.py` now packages statistical backtest outputs (`statistical_summary`, `autocorrelation`, `bootstrap_intervals`) and `scripts/backfill_signal_validation.py` forwards the enriched metrics so dashboards and reports can inspect significance, autocorrelation, and confidence bands per ticker.
-- **SQLite Disk I/O Resilience**: `DatabaseManager.save_ohlcv_data` mirrors the validation retry logic—gracefully resetting the connection and reattempting writes when SQLite reports transient “disk I/O” faults during bulk OHLCV imports.
-- **Config Alias Convenience**: `scripts/run_etl_pipeline.py` now treats `--config config.yml` as a shorthand for `config/pipeline_config.yml` (and other config/… fallbacks), eliminating the previous hard failure when the root-level alias was used.
+- **SQLite Disk I/O Resilience**: `DatabaseManager.save_ohlcv_data` mirrors the validation retry logicâgracefully resetting the connection and reattempting writes when SQLite reports transient âdisk I/Oâ faults during bulk OHLCV imports.
+- **Config Alias Convenience**: `scripts/run_etl_pipeline.py` now treats `--config config.yml` as a shorthand for `config/pipeline_config.yml` (and other config/â¦ fallbacks), eliminating the previous hard failure when the root-level alias was used.
 - **Paper Trading Engine Promotion**: `execution/paper_trading_engine.py` now supports dependency injection, executes signals only after five-layer validation, simulates slippage and transaction costs, and persists executions via `DatabaseManager.save_trade_execution` while maintaining portfolio state.
 - **Trade Persistence API**: Added `DatabaseManager.save_trade_execution`, normalising trade metadata (dates, commissions, realised P&L) for paper and future live execution flows.
-- **LLM Performance Controls**: Updated `config/llm_config.yml` and `scripts/run_etl_pipeline.py` to surface cache toggles, tighter token budgets, and a latency-focused `default_use_case` to keep Ollama responses under the <5 s SLA.
+- **LLM Performance Controls**: Updated `config/llm_config.yml` and `scripts/run_etl_pipeline.py` to surface cache toggles, tighter token budgets, and a latency-focused `default_use_case` to keep Ollama responses under the <5â¯s SLA.
 - **Regression Coverage Expansion**: Added `tests/etl/test_statistical_tests.py` and `tests/execution/test_paper_trading_engine.py` to protect the new quantitative toolkit and trade execution paths.
-- **Documentation Refresh**: Synchronised `Documentation/arch_tree.md` and this checkpoint with Week 1 deliverables, noting the statistical suite, paper trading engine enhancements, and new automated tests.
+- **Documentation Refresh**: Synchronised `Documentation/arch_tree.md` and this checkpoint with Weekâ¯1 deliverables, noting the statistical suite, paper trading engine enhancements, and new automated tests.
 - **Visualization Dashboard Upgrade**: `etl/visualizer.py` and `scripts/visualize_dataset.py` now surface market context (volume, returns, commodity/index overlays) via `--context-columns`, and `tests/etl/test_visualizer_dashboard.py` locks in the enhanced layout.
 - **Latency Guard Monitoring**: The LLM stages (`ai_llm/market_analyzer.py`, `ai_llm/signal_generator.py`, `ai_llm/risk_assessor.py`) publish deterministic fallback events through `ai_llm/performance_monitor.record_latency_fallback`, and `scripts/monitor_llm_system.py` promotes the metrics so operators see when heuristic mode activates.
 - **Token-Throughput Failover**: `ai_llm/ollama_client.py` now enforces a `token_rate_failover_threshold`, swapping to faster alternative models when tokens/sec degrade and logging the event into the monitoring pipeline.
@@ -176,21 +176,22 @@ python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
 
 ## Executive Summary
 
-**Status**: ✅ ALL PHASES COMPLETE
+**Status**: â ALL PHASES COMPLETE
 
-- **Phase 1**: ETL Foundation COMPLETE ✓
-- **Phase 2**: Analysis Framework COMPLETE ✓
-- **Phase 3**: Visualization Framework COMPLETE ✓
-- **Phase 4**: Caching Mechanism COMPLETE ✓
-- **Phase 4.5**: Time Series Cross-Validation COMPLETE ✓
-- **Phase 4.6**: Multi-Data Source Architecture COMPLETE ✓
-- **Phase 4.7**: Configuration-Driven Cross-Validation COMPLETE ✓
-- **Phase 4.8**: Checkpointing and Event Logging COMPLETE ✓
-- **Phase 5.1**: Alpha Vantage & Finnhub API Integration COMPLETE ✓
-- **Phase 5.2**: Local LLM Integration (Ollama) COMPLETE ✓
-- **Phase 5.3**: Profit Calculation Fix COMPLETE ✓
-- **Phase 5.4**: Ollama Health Check Fix COMPLETE ✓
-- **Phase 5.5**: Error Monitoring & Performance Optimization COMPLETE ✓
+- **Phase 1**: ETL Foundation COMPLETE â
+- **Phase 2**: Analysis Framework COMPLETE â
+- **Phase 3**: Visualization Framework COMPLETE â
+- **Phase 4**: Caching Mechanism COMPLETE â
+- **Phase 4.5**: Time Series Cross-Validation COMPLETE â
+- **Phase 4.6**: Multi-Data Source Architecture COMPLETE â
+- **Phase 4.7**: Configuration-Driven Cross-Validation COMPLETE â
+- **Phase 4.8**: Checkpointing and Event Logging COMPLETE â
+- **Phase 5.1**: Alpha Vantage & Finnhub API Integration COMPLETE â
+- **Phase 5.2**: Local LLM Integration (Ollama) COMPLETE â
+- **Phase 5.3**: Profit Calculation Fix COMPLETE â
+- **Phase 5.4**: Ollama Health Check Fix COMPLETE â
+- **Phase 5.5**: Error Monitoring & Performance Optimization COMPLETE â
+- **Phase 5.6**: Higher-Order Hyper-Parameter Orchestration (Hyperopt Driver) IN PROGRESS 🟡
 
 This checkpoint captures the complete implementation of:
 1. ETL pipeline with intelligent caching
@@ -203,7 +204,7 @@ This checkpoint captures the complete implementation of:
 8. Checkpointing and structured event logging with 7-day retention
 9. Alpha Vantage and Finnhub production API integrations with rate limiting
 10. Local LLM integration with Ollama for market analysis and signal generation
-11. Critical profit factor calculation fix and comprehensive profit-critical testing ⚠️ **CRITICAL FIX**
+11. Critical profit factor calculation fix and comprehensive profit-critical testing â ï¸ **CRITICAL FIX**
 12. Comprehensive error monitoring system with automated alerting and real-time dashboard
 13. Advanced LLM performance optimization and signal quality validation
 14. Automated cache management with health monitoring and performance optimization
@@ -223,365 +224,368 @@ portfolio_maximizer_v45/
 ├── config/                          # Configuration files (YAML) - Modular Architecture ⭐
 │   ├── pipeline_config.yml          # Main orchestration config (6.5 KB)
 │   ├── data_sources_config.yml      # Platform-agnostic data sources
-│   ├── yfinance_config.yml         # Yahoo Finance settings (2.6 KB)
+│   ├── yfinance_config.yml          # Yahoo Finance settings (2.6 KB)
 │   ├── alpha_vantage_config.yml     # Alpha Vantage config
 │   ├── finnhub_config.yml           # Finnhub config
-│   ├── llm_config.yml              # LLM configuration (Phase 5.2) ⭐ NEW
+│   ├── llm_config.yml               # LLM configuration (Phase 5.2) ⭐ NEW
 │   ├── preprocessing_config.yml     # Data preprocessing settings (4.8 KB)
 │   ├── validation_config.yml        # Data validation rules (7.7 KB)
 │   ├── storage_config.yml           # Storage and split config (5.9 KB)
 │   ├── analysis_config.yml          # Time series analysis parameters (MIT standards)
+│   ├── quant_success_config.yml     # Quant success / guardrails (min_expected_profit, Sharpe, etc.)
+│   ├── signal_routing_config.yml    # Time Series primary + LLM fallback routing thresholds
+│   ├── strategy_optimization_config.yml  # Search space + objectives for StrategyOptimizer / hyperopt
 │   ├── ctrader_config.yml           # Broker integration + risk gating (Phase 5.10)
 │
 ├── data/                            # Data storage (organized by ETL stage)
 │   ├── raw/                         # Original extracted data + cache
-│   │   ├── AAPL_20251001.parquet   # Cached AAPL data (1,006 rows)
-│   │   ├── MSFT_20251001.parquet   # Cached MSFT data (1,006 rows)
-│   │   ├── extraction_*.parquet    # Historical extractions
-│   │   └── yfinance/               # Yahoo Finance data directory
-│   ├── processed/                   # Cleaned and transformed data
-│   ├── training/                    # Training set (70% - 704 rows)
-│   ├── validation/                  # Validation set (15% - 151 rows)
-│   ├── testing/                     # Test set (15% - 151 rows)
-│   ├── checkpoints/                 # Pipeline checkpoints (7-day retention) ⭐ NEW
-│   │   ├── checkpoint_metadata.json # Checkpoint registry
-│   │   ├── pipeline_*_*.parquet    # Checkpoint data
-│   │   └── pipeline_*_*_state.pkl  # Checkpoint metadata
-│   └── analysis_report_training.json # Analysis results (JSON)
-│
-├── ai_llm/                          # LLM integration modules (1,500+ lines) ⭐ UPDATED (Phase 5.2-5.5)
-│   ├── __init__.py
-│   ├── ollama_client.py            # Ollama API wrapper (251 lines) ⭐ UPDATED
-│   │                                # Features: Fail-fast validation, health checks, performance monitoring
-│   ├── market_analyzer.py          # Market data interpretation (180 lines)
-│   │                                # Features: LLM-powered analysis, trend detection
-│   ├── signal_generator.py         # Trading signal generation (198 lines)
-│   │                                # Features: ML-driven signals, confidence scores
-│   ├── risk_assessor.py            # Risk assessment (120 lines)
-│   │                                # Features: Portfolio risk analysis, recommendations
-│   ├── performance_monitor.py      # LLM performance monitoring (208 lines) ⭐ NEW
-│   │                                # Features: Real-time tracking, metrics collection, alerting
-│   ├── signal_quality_validator.py # Signal quality validation (378 lines) ⭐ NEW
-│   │                                # Features: 5-layer validation, market context, risk-return analysis
-│   ├── llm_database_integration.py # LLM data persistence (421 lines) ⭐ NEW
-│   │                                # Features: Signal storage, risk assessment persistence, performance metrics
-│   └── performance_optimizer.py    # Model selection optimization (359 lines) ⭐ NEW
-│                                    # Features: Use-case optimization, performance-based selection, reporting
-│
-├── etl/                             # ETL pipeline modules (4,936 lines)
-│   ├── __init__.py
-│   ├── base_extractor.py           # Abstract base class (280 lines)
-│   │                                # Features: Standardized OHLCV interface, validation
-│   ├── data_source_manager.py      # Multi-source orchestration (340 lines)
-│   │                                # Features: Dynamic source selection, failover, priority
-│   ├── yfinance_extractor.py       # Yahoo Finance extraction (498 lines)
-│   │                                # Features: BaseExtractor impl, cache-first, validation
-│   ├── alpha_vantage_extractor.py  # Alpha Vantage extraction (518 lines) ⭐ PRODUCTION
-│   │                                # Features: Full API, 5 req/min rate limit, exponential retry
-│   ├── finnhub_extractor.py        # Finnhub extraction (532 lines) ⭐ PRODUCTION
-│   │                                # Features: Full API, 60 req/min rate limit, Unix timestamps
-│   ├── data_validator.py           # Data quality validation (117 lines)
-│   │                                # Features: Statistical validation, outlier detection
-│   ├── preprocessor.py             # Data preprocessing (101 lines)
-│   │                                # Features: Missing data handling, normalization
-│   ├── data_storage.py             # Data persistence (210+ lines)
-│   │                                # Features: Parquet storage, CV splits, timestamped filenames, run metadata persistence, backward compatible (Remote Sync 2025-11-06) ⭐ UPDATED
-│   ├── time_series_cv.py           # Cross-validation (336 lines)
-│   │                                # Features: k-fold CV, expanding window, test isolation
-│   ├── checkpoint_manager.py       # State persistence (362 lines) ⭐ NEW
-│   │                                # Features: Atomic checkpoints, SHA256 validation, 7-day retention
-│   ├── pipeline_logger.py          # Event logging (415 lines) ⭐ NEW
-│   │                                # Features: Structured JSON logs, rotation, 7-day retention
-│   ├── portfolio_math.py           # Enhanced risk metrics, optimisation, statistical testing ⭐ UPDATED
-│   ├── portfolio_math_legacy.py    # Legacy portfolio math engine (read-only reference)
-│   │                                # Features: Returns, volatility, Sharpe ratio
-│   ├── time_series_analyzer.py     # Time series analysis (500+ lines)
-│   │                                # Features: ADF test, ACF/PACF, stationarity
-│   └── visualizer.py               # Visualization engine (600+ lines)
-│                                    # Features: 7 plot types, publication quality
-│
-├── scripts/                         # Executable scripts (1,200+ lines) ⭐ UPDATED
-│   ├── run_etl_pipeline.py         # Main ETL orchestration (1,900+ lines) ⭐ UPDATED
-│   │                                # Features: Config-driven, multi-source, CV params, testable execute_pipeline(), logging isolation, graceful LLM failure (Remote Sync 2025-11-06)
-│   ├── analyze_dataset.py          # Dataset analysis CLI (270+ lines)
-│   │                                # Features: Full analysis, JSON export
-│   ├── visualize_dataset.py        # Visualization CLI (200+ lines)
-│   │                                # Features: All plots, auto-save
-│   ├── validate_environment.py     # Environment validation
-│   ├── error_monitor.py            # Error monitoring system (286 lines) ⭐ NEW
-│   │                                # Features: Real-time monitoring, automated alerting, threshold management
-│   ├── cache_manager.py            # Cache management system (359 lines) ⭐ NEW
-│   │                                # Features: Health monitoring, automated cleanup, performance optimization
-│   ├── monitor_llm_system.py       # LLM system monitoring (418 lines) ⭐ NEW
-│   │                                # Features: Comprehensive monitoring, performance tracking, health checks
-│   ├── test_llm_implementations.py # LLM implementation testing (150 lines) ⭐ NEW
-│   │                                # Features: Quick validation, component testing, end-to-end verification
-│   └── deploy_monitoring.sh        # Monitoring deployment script (213 lines) ⭐ NEW
-│                                    # Features: One-click deployment, systemd services, cron jobs
-│
-├── bash/                            # Validation scripts ⭐ NEW
-│   ├── run_cv_validation.sh        # Comprehensive CV validation suite
-│   │                                # Features: 5 pipeline tests, 88 unit tests
-│   └── test_config_driven_cv.sh    # Configuration-driven CV demonstration
-│                                    # Features: Default config, CLI overrides
-│
-├── tests/                           # Test suite (3,500+ lines, 200+ tests) ⭐ UPDATED (Phase 5.2-5.5)
-│   ├── __init__.py
-│   ├── ai_llm/                     # LLM module tests (700+ lines, 50+ tests) ⭐ UPDATED
-│   │   ├── test_ollama_client.py   # 15 tests (Ollama integration)
-│   │   ├── test_market_analyzer.py # 8 tests (Market analysis)
-│   │   ├── test_signal_generator.py # 6 tests (Signal generation)
-│   │   ├── test_signal_validator.py # 3 tests (Signal validation)
-│   │   └── test_llm_enhancements.py # 20+ tests (LLM enhancements) ⭐ NEW
-│   ├── etl/                        # ETL module tests
-│   │   ├── test_yfinance_cache.py        # 10 tests (caching mechanism)
-│   │   ├── test_time_series_cv.py        # 22 tests (CV mechanism)
-│   │   ├── test_data_source_manager.py   # 18 tests (multi-source) ⭐ NEW
-│   │   ├── test_checkpoint_manager.py    # 33 tests (checkpointing) ⭐ NEW
-│   │   ├── test_method_signature_validation.py # 15 tests (method signature validation) ⭐ NEW
-│   │   ├── test_preprocessor.py          # 8 tests (preprocessing)
-│   │   ├── test_data_storage.py          # 6 tests (storage operations)
-│   │   ├── test_portfolio_math.py        # Legacy compatibility checks
-│   │   ├── test_portfolio_math_enhanced.py # Institutional metrics & optimisation suite ⭐ UPDATED
-│   │   └── test_time_series_analyzer.py  # 17 tests (analysis framework)
-│   └── integration/                      # Integration tests
-│
-├── visualizations/                  # Generated visualizations (1.6 MB, 8 plots)
-│   ├── training/                    # Training data visualizations
-│   │   ├── Close_acf_pacf.png      # Autocorrelation function plot
-│   │   ├── Close_decomposition.png # Trend/Seasonal/Residual
-│   │   ├── Close_distribution.png  # Histogram + KDE + QQ-plot
-│   │   ├── Close_overview.png      # Time series overview
-│   │   └── Close_rolling_stats.png # Rolling mean/std
-│   ├── Close_dashboard.png         # 8-panel executive dashboard
-│   ├── Close_spectral.png          # Spectral density (Welch's method)
-│   └── Volume_dashboard.png        # Volume analysis dashboard
-│
-├── workflows/                       # Pipeline orchestration (YAML)
-│   ├── etl_pipeline.yml            # Main ETL workflow (4 stages)
-│
-├── .local_automation/              # Local automation configuration (developer only)
-│   ├── developer_notes.md          # Project-specific automation checklist
-│   └── settings.local.json        # Tooling configuration (ignored in VCS)
-│
-├── Documentation/                   # Project documentation (20+ files) ⭐ UPDATED
-│   ├── implementation_checkpoint.md  # This file (Version 6.5) ⭐ UPDATED
-│   ├── CACHING_IMPLEMENTATION.md    # Caching guide (7.9 KB)
-│   ├── TIME_SERIES_CV.md           # Cross-validation guide (15 KB)
-│   ├── CV_CONFIGURATION_GUIDE.md   # Config-driven CV guide (3.3 KB) ⭐ NEW
-│   ├── IMPLEMENTATION_SUMMARY.md   # Multi-source summary (4.8 KB) ⭐ NEW
-│   ├── CHECKPOINTING_AND_LOGGING.md # Checkpointing guide (30+ KB) ⭐ NEW
-│   ├── IMPLEMENTATION_SUMMARY_CHECKPOINTING.md # Checkpoint summary (12 KB) ⭐ NEW
-│   ├── SYSTEM_ERROR_MONITORING_GUIDE.md # Error monitoring guide (15+ KB) ⭐ NEW
-│   ├── ERROR_FIXES_SUMMARY_2025-10-22.md # Error fixes summary (8+ KB) ⭐ NEW
-│   ├── LLM_ENHANCEMENTS_IMPLEMENTATION_SUMMARY_2025-10-22.md # LLM enhancements (12+ KB) ⭐ NEW
-│   ├── RECOMMENDED_ACTIONS_IMPLEMENTATION_SUMMARY_2025-10-22.md # Actions summary (10+ KB) ⭐ NEW
-│   ├── GIT_WORKFLOW.md             # Git workflow (local-first)
-│   ├── arch_tree.md                # Architecture tree ⭐ UPDATED
-│   ├── AGENT_INSTRUCTION.md        # Agent guidelines
-│   └── AGENT_DEV_CHECKLIST.md     # Development checklist
-│
-├── simpleTrader_env/                # Python virtual environment
-├── .gitignore                       # Git ignore rules
-├── .env                            # Environment variables (secrets)
-└── requirements.txt                # Python dependencies
+│   │   ├── AAPL_20251001.parquet    # Cached AAPL data (1,006 rows)
+â   â   âââ MSFT_20251001.parquet   # Cached MSFT data (1,006 rows)
+â   â   âââ extraction_*.parquet    # Historical extractions
+â   â   âââ yfinance/               # Yahoo Finance data directory
+â   âââ processed/                   # Cleaned and transformed data
+â   âââ training/                    # Training set (70% - 704 rows)
+â   âââ validation/                  # Validation set (15% - 151 rows)
+â   âââ testing/                     # Test set (15% - 151 rows)
+â   âââ checkpoints/                 # Pipeline checkpoints (7-day retention) â­ NEW
+â   â   âââ checkpoint_metadata.json # Checkpoint registry
+â   â   âââ pipeline_*_*.parquet    # Checkpoint data
+â   â   âââ pipeline_*_*_state.pkl  # Checkpoint metadata
+â   âââ analysis_report_training.json # Analysis results (JSON)
+â
+âââ ai_llm/                          # LLM integration modules (1,500+ lines) â­ UPDATED (Phase 5.2-5.5)
+â   âââ __init__.py
+â   âââ ollama_client.py            # Ollama API wrapper (251 lines) â­ UPDATED
+â   â                                # Features: Fail-fast validation, health checks, performance monitoring
+â   âââ market_analyzer.py          # Market data interpretation (180 lines)
+â   â                                # Features: LLM-powered analysis, trend detection
+â   âââ signal_generator.py         # Trading signal generation (198 lines)
+â   â                                # Features: ML-driven signals, confidence scores
+â   âââ risk_assessor.py            # Risk assessment (120 lines)
+â   â                                # Features: Portfolio risk analysis, recommendations
+â   âââ performance_monitor.py      # LLM performance monitoring (208 lines) â­ NEW
+â   â                                # Features: Real-time tracking, metrics collection, alerting
+â   âââ signal_quality_validator.py # Signal quality validation (378 lines) â­ NEW
+â   â                                # Features: 5-layer validation, market context, risk-return analysis
+â   âââ llm_database_integration.py # LLM data persistence (421 lines) â­ NEW
+â   â                                # Features: Signal storage, risk assessment persistence, performance metrics
+â   âââ performance_optimizer.py    # Model selection optimization (359 lines) â­ NEW
+â                                    # Features: Use-case optimization, performance-based selection, reporting
+â
+âââ etl/                             # ETL pipeline modules (4,936 lines)
+â   âââ __init__.py
+â   âââ base_extractor.py           # Abstract base class (280 lines)
+â   â                                # Features: Standardized OHLCV interface, validation
+â   âââ data_source_manager.py      # Multi-source orchestration (340 lines)
+â   â                                # Features: Dynamic source selection, failover, priority
+â   âââ yfinance_extractor.py       # Yahoo Finance extraction (498 lines)
+â   â                                # Features: BaseExtractor impl, cache-first, validation
+â   âââ alpha_vantage_extractor.py  # Alpha Vantage extraction (518 lines) â­ PRODUCTION
+â   â                                # Features: Full API, 5 req/min rate limit, exponential retry
+â   âââ finnhub_extractor.py        # Finnhub extraction (532 lines) â­ PRODUCTION
+â   â                                # Features: Full API, 60 req/min rate limit, Unix timestamps
+â   âââ data_validator.py           # Data quality validation (117 lines)
+â   â                                # Features: Statistical validation, outlier detection
+â   âââ preprocessor.py             # Data preprocessing (101 lines)
+â   â                                # Features: Missing data handling, normalization
+â   âââ data_storage.py             # Data persistence (210+ lines)
+â   â                                # Features: Parquet storage, CV splits, timestamped filenames, run metadata persistence, backward compatible (Remote Sync 2025-11-06) â­ UPDATED
+â   âââ time_series_cv.py           # Cross-validation (336 lines)
+â   â                                # Features: k-fold CV, expanding window, test isolation
+â   âââ checkpoint_manager.py       # State persistence (362 lines) â­ NEW
+â   â                                # Features: Atomic checkpoints, SHA256 validation, 7-day retention
+â   âââ pipeline_logger.py          # Event logging (415 lines) â­ NEW
+â   â                                # Features: Structured JSON logs, rotation, 7-day retention
+â   âââ portfolio_math.py           # Enhanced risk metrics, optimisation, statistical testing â­ UPDATED
+â   âââ portfolio_math_legacy.py    # Legacy portfolio math engine (read-only reference)
+â   â                                # Features: Returns, volatility, Sharpe ratio
+â   âââ time_series_analyzer.py     # Time series analysis (500+ lines)
+â   â                                # Features: ADF test, ACF/PACF, stationarity
+â   âââ visualizer.py               # Visualization engine (600+ lines)
+â                                    # Features: 7 plot types, publication quality
+â
+âââ scripts/                         # Executable scripts (1,200+ lines) â­ UPDATED
+â   âââ run_etl_pipeline.py         # Main ETL orchestration (1,900+ lines) â­ UPDATED
+â   â                                # Features: Config-driven, multi-source, CV params, testable execute_pipeline(), logging isolation, graceful LLM failure (Remote Sync 2025-11-06)
+â   âââ analyze_dataset.py          # Dataset analysis CLI (270+ lines)
+â   â                                # Features: Full analysis, JSON export
+â   âââ visualize_dataset.py        # Visualization CLI (200+ lines)
+â   â                                # Features: All plots, auto-save
+â   âââ validate_environment.py     # Environment validation
+â   âââ error_monitor.py            # Error monitoring system (286 lines) â­ NEW
+â   â                                # Features: Real-time monitoring, automated alerting, threshold management
+â   âââ cache_manager.py            # Cache management system (359 lines) â­ NEW
+â   â                                # Features: Health monitoring, automated cleanup, performance optimization
+â   âââ monitor_llm_system.py       # LLM system monitoring (418 lines) â­ NEW
+â   â                                # Features: Comprehensive monitoring, performance tracking, health checks
+â   âââ test_llm_implementations.py # LLM implementation testing (150 lines) â­ NEW
+â   â                                # Features: Quick validation, component testing, end-to-end verification
+â   âââ deploy_monitoring.sh        # Monitoring deployment script (213 lines) â­ NEW
+â                                    # Features: One-click deployment, systemd services, cron jobs
+â
+âââ bash/                            # Validation scripts â­ NEW
+â   âââ run_cv_validation.sh        # Comprehensive CV validation suite
+â   â                                # Features: 5 pipeline tests, 88 unit tests
+â   âââ test_config_driven_cv.sh    # Configuration-driven CV demonstration
+â                                    # Features: Default config, CLI overrides
+â
+âââ tests/                           # Test suite (3,500+ lines, 200+ tests) â­ UPDATED (Phase 5.2-5.5)
+â   âââ __init__.py
+â   âââ ai_llm/                     # LLM module tests (700+ lines, 50+ tests) â­ UPDATED
+â   â   âââ test_ollama_client.py   # 15 tests (Ollama integration)
+â   â   âââ test_market_analyzer.py # 8 tests (Market analysis)
+â   â   âââ test_signal_generator.py # 6 tests (Signal generation)
+â   â   âââ test_signal_validator.py # 3 tests (Signal validation)
+â   â   âââ test_llm_enhancements.py # 20+ tests (LLM enhancements) â­ NEW
+â   âââ etl/                        # ETL module tests
+â   â   âââ test_yfinance_cache.py        # 10 tests (caching mechanism)
+â   â   âââ test_time_series_cv.py        # 22 tests (CV mechanism)
+â   â   âââ test_data_source_manager.py   # 18 tests (multi-source) â­ NEW
+â   â   âââ test_checkpoint_manager.py    # 33 tests (checkpointing) â­ NEW
+â   â   âââ test_method_signature_validation.py # 15 tests (method signature validation) â­ NEW
+â   â   âââ test_preprocessor.py          # 8 tests (preprocessing)
+â   â   âââ test_data_storage.py          # 6 tests (storage operations)
+â   â   âââ test_portfolio_math.py        # Legacy compatibility checks
+â   â   âââ test_portfolio_math_enhanced.py # Institutional metrics & optimisation suite â­ UPDATED
+â   â   âââ test_time_series_analyzer.py  # 17 tests (analysis framework)
+â   âââ integration/                      # Integration tests
+â
+âââ visualizations/                  # Generated visualizations (1.6 MB, 8 plots)
+â   âââ training/                    # Training data visualizations
+â   â   âââ Close_acf_pacf.png      # Autocorrelation function plot
+â   â   âââ Close_decomposition.png # Trend/Seasonal/Residual
+â   â   âââ Close_distribution.png  # Histogram + KDE + QQ-plot
+â   â   âââ Close_overview.png      # Time series overview
+â   â   âââ Close_rolling_stats.png # Rolling mean/std
+â   âââ Close_dashboard.png         # 8-panel executive dashboard
+â   âââ Close_spectral.png          # Spectral density (Welch's method)
+â   âââ Volume_dashboard.png        # Volume analysis dashboard
+â
+âââ workflows/                       # Pipeline orchestration (YAML)
+â   âââ etl_pipeline.yml            # Main ETL workflow (4 stages)
+â
+âââ .local_automation/              # Local automation configuration (developer only)
+â   âââ developer_notes.md          # Project-specific automation checklist
+â   âââ settings.local.json        # Tooling configuration (ignored in VCS)
+â
+âââ Documentation/                   # Project documentation (20+ files) â­ UPDATED
+â   âââ implementation_checkpoint.md  # This file (Version 6.5) â­ UPDATED
+â   âââ CACHING_IMPLEMENTATION.md    # Caching guide (7.9 KB)
+â   âââ TIME_SERIES_CV.md           # Cross-validation guide (15 KB)
+â   âââ CV_CONFIGURATION_GUIDE.md   # Config-driven CV guide (3.3 KB) â­ NEW
+â   âââ IMPLEMENTATION_SUMMARY.md   # Multi-source summary (4.8 KB) â­ NEW
+â   âââ CHECKPOINTING_AND_LOGGING.md # Checkpointing guide (30+ KB) â­ NEW
+â   âââ IMPLEMENTATION_SUMMARY_CHECKPOINTING.md # Checkpoint summary (12 KB) â­ NEW
+â   âââ SYSTEM_ERROR_MONITORING_GUIDE.md # Error monitoring guide (15+ KB) â­ NEW
+â   âââ ERROR_FIXES_SUMMARY_2025-10-22.md # Error fixes summary (8+ KB) â­ NEW
+â   âââ LLM_ENHANCEMENTS_IMPLEMENTATION_SUMMARY_2025-10-22.md # LLM enhancements (12+ KB) â­ NEW
+â   âââ RECOMMENDED_ACTIONS_IMPLEMENTATION_SUMMARY_2025-10-22.md # Actions summary (10+ KB) â­ NEW
+â   âââ GIT_WORKFLOW.md             # Git workflow (local-first)
+â   âââ arch_tree.md                # Architecture tree â­ UPDATED
+â   âââ AGENT_INSTRUCTION.md        # Agent guidelines
+â   âââ AGENT_DEV_CHECKLIST.md     # Development checklist
+â
+âââ simpleTrader_env/                # Python virtual environment
+âââ .gitignore                       # Git ignore rules
+âââ .env                            # Environment variables (secrets)
+âââ requirements.txt                # Python dependencies
 ```
 
 ### System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Portfolio Maximizer v45                      │
-│                    Production-Ready System                       │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-        ┌─────────────────────────────────────────────┐
-        │         Data Extraction Layer               │
-        │  (Cache-First Strategy - 100% Hit Rate)     │
-        └─────────────────────────────────────────────┘
-                │                    │
-                ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │ - Cache: 24h     │  │ - Direct query   │
-    │ - Retry: 3x      │  │ - Structured     │
-    │ - Rate limited   │  │                  │
-    └──────────────────┘  └──────────────────┘
-                │                    │
-                └──────────┬─────────┘
-                           ▼
-        ┌─────────────────────────────────────────────┐
-        │           Data Storage Layer                │
-        │      (Parquet Format - Atomic Writes)       │
-        └─────────────────────────────────────────────┘
-                           │
-                ┌──────────┼──────────┐
-                ▼          ▼          ▼
-         ┌──────────┐ ┌─────────┐ ┌─────────┐
-         │   Raw    │ │Processed│ │ Splits  │
-         │ + Cache  │ │  Data   │ │ 70/15/15│
-         └──────────┘ └─────────┘ └─────────┘
-                           │
-                           ▼
-        ┌─────────────────────────────────────────────┐
-        │        Data Validation Layer                │
-        │   (Statistical Quality Checks - MIT Std)    │
-        └─────────────────────────────────────────────┘
-                │                    │
-                ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │ Price Validation │  │ Volume Validation│
-    │ - Positivity     │  │ - Non-negativity │
-    │ - Continuity     │  │ - Zero detection │
-    │ - Outliers       │  │ - Gaps           │
-    └──────────────────┘  └──────────────────┘
-                           │
-                           ▼
-        ┌─────────────────────────────────────────────┐
-        │      Data Preprocessing Layer               │
-        │    (Vectorized Transformations)             │
-        └─────────────────────────────────────────────┘
-                │                    │
-                ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │ Missing Data     │  │ Normalization    │
-    │ - Forward fill   │  │ - Z-score        │
-    │ - Backward fill  │  │ - μ=0, σ²=1      │
-    └──────────────────┘  └──────────────────┘
-                           │
-                           ▼
-        ┌─────────────────────────────────────────────┐
-        │       Analysis & Visualization Layer        │
-        │   (MIT Statistical Standards - Academic)    │
-        └─────────────────────────────────────────────┘
-                │                    │
-                ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │ Time Series      │  │ Visualization    │
-    │ Analysis         │  │ Engine           │
-    │ - ADF test       │  │ - 7 plot types   │
-    │ - ACF/PACF       │  │ - Publication    │
-    │ - Stationarity   │  │   quality        │
-    │ - Statistics     │  │ - 150 DPI        │
-    └──────────────────┘  └──────────────────┘
-                           │
-                           ▼
-        ┌─────────────────────────────────────────────┐
-        │            Output Layer                     │
-        └─────────────────────────────────────────────┘
-                │                    │
-                ▼                    ▼
-    ┌──────────────────┐  ┌──────────────────┐
-    │ JSON Reports     │  │ PNG Visualizations│
-    │ - Analysis       │  │ - 8 plots        │
-    │ - Metrics        │  │ - 1.6 MB total   │
-    └──────────────────┘  └──────────────────┘
+âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+â                     Portfolio Maximizer v45                      â
+â                    Production-Ready System                       â
+âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+                              â
+                              â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â         Data Extraction Layer               â
+        â  (Cache-First Strategy - 100% Hit Rate)     â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                â                    â
+                â¼                    â¼
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+    â - Cache: 24h     â  â - Direct query   â
+    â - Retry: 3x      â  â - Structured     â
+    â - Rate limited   â  â                  â
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+                â                    â
+                ââââââââââââ¬ââââââââââ
+                           â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â           Data Storage Layer                â
+        â      (Parquet Format - Atomic Writes)       â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                           â
+                ââââââââââââ¼âââââââââââ
+                â¼          â¼          â¼
+         ââââââââââââ âââââââââââ âââââââââââ
+         â   Raw    â âProcessedâ â Splits  â
+         â + Cache  â â  Data   â â 70/15/15â
+         ââââââââââââ âââââââââââ âââââââââââ
+                           â
+                           â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â        Data Validation Layer                â
+        â   (Statistical Quality Checks - MIT Std)    â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                â                    â
+                â¼                    â¼
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+    â Price Validation â  â Volume Validationâ
+    â - Positivity     â  â - Non-negativity â
+    â - Continuity     â  â - Zero detection â
+    â - Outliers       â  â - Gaps           â
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+                           â
+                           â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â      Data Preprocessing Layer               â
+        â    (Vectorized Transformations)             â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                â                    â
+                â¼                    â¼
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+    â Missing Data     â  â Normalization    â
+    â - Forward fill   â  â - Z-score        â
+    â - Backward fill  â  â - Î¼=0, ÏÂ²=1      â
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+                           â
+                           â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â       Analysis & Visualization Layer        â
+        â   (MIT Statistical Standards - Academic)    â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                â                    â
+                â¼                    â¼
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+    â Time Series      â  â Visualization    â
+    â Analysis         â  â Engine           â
+    â - ADF test       â  â - 7 plot types   â
+    â - ACF/PACF       â  â - Publication    â
+    â - Stationarity   â  â   quality        â
+    â - Statistics     â  â - 150 DPI        â
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+                           â
+                           â¼
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+        â            Output Layer                     â
+        âââââââââââââââââââââââââââââââââââââââââââââââ
+                â                    â
+                â¼                    â¼
+    ââââââââââââââââââââ  ââââââââââââââââââââ
+    â JSON Reports     â  â PNG Visualizationsâ
+    â - Analysis       â  â - 8 plots        â
+    â - Metrics        â  â - 1.6 MB total   â
+    ââââââââââââââââââââ  ââââââââââââââââââââ
 ```
 
 ### Data Flow
 
 ```
 External Data Sources
-    │
-    ├─► Yahoo Finance API ──┐
-    │                       │
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │  Cache Check  │◄─── 24h validity
-                    └───────────────┘
-                            │
-                    ┌───────┴───────┐
-                    │               │
-                Hit ▼               ▼ Miss
-            ┌──────────┐    ┌──────────┐
-            │  Cache   │    │ Network  │
-            │  (Fast)  │    │ (Fetch)  │
-            └──────────┘    └──────────┘
-                    │               │
-                    └───────┬───────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │  Raw Storage  │
-                    │  (Parquet)    │
-                    └───────────────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │  Validation   │
-                    │  (Quality)    │
-                    └───────────────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │ Preprocessing │
-                    │ (Transform)   │
-                    └───────────────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │ Train/Val/Test│
-                    │  Split (70/15/15) │
-                    └───────────────┘
-                            │
-                ┌───────────┼───────────┐
-                │           │           │
-                ▼           ▼           ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Training │ │Validation│ │  Testing │
-        │ (704)    │ │  (151)   │ │  (151)   │
-        └──────────┘ └──────────┘ └──────────┘
-                            │
-                ┌───────────┼───────────┐
-                │           │           │
-                ▼           ▼           ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │ Analysis │ │Portfolio │ │Backtest  │
-        │          │ │ Opt      │ │ (Future) │
-        └──────────┘ └──────────┘ └──────────┘
-                            │
-                            ▼
-                    ┌───────────────┐
-                    │Visualizations │
-                    │   & Reports   │
-                    └───────────────┘
+    â
+    âââº Yahoo Finance API âââ
+    â                       â
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    â  Cache Check  âââââ 24h validity
+                    âââââââââââââââââ
+                            â
+                    âââââââââ´ââââââââ
+                    â               â
+                Hit â¼               â¼ Miss
+            ââââââââââââ    ââââââââââââ
+            â  Cache   â    â Network  â
+            â  (Fast)  â    â (Fetch)  â
+            ââââââââââââ    ââââââââââââ
+                    â               â
+                    âââââââââ¬ââââââââ
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    â  Raw Storage  â
+                    â  (Parquet)    â
+                    âââââââââââââââââ
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    â  Validation   â
+                    â  (Quality)    â
+                    âââââââââââââââââ
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    â Preprocessing â
+                    â (Transform)   â
+                    âââââââââââââââââ
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    â Train/Val/Testâ
+                    â  Split (70/15/15) â
+                    âââââââââââââââââ
+                            â
+                âââââââââââââ¼ââââââââââââ
+                â           â           â
+                â¼           â¼           â¼
+        ââââââââââââ ââââââââââââ ââââââââââââ
+        â Training â âValidationâ â  Testing â
+        â (704)    â â  (151)   â â  (151)   â
+        ââââââââââââ ââââââââââââ ââââââââââââ
+                            â
+                âââââââââââââ¼ââââââââââââ
+                â           â           â
+                â¼           â¼           â¼
+        ââââââââââââ ââââââââââââ ââââââââââââ
+        â Analysis â âPortfolio â âBacktest  â
+        â          â â Opt      â â (Future) â
+        ââââââââââââ ââââââââââââ ââââââââââââ
+                            â
+                            â¼
+                    âââââââââââââââââ
+                    âVisualizations â
+                    â   & Reports   â
+                    âââââââââââââââââ
 ```
 
 ### Module Dependencies
 
 ```
 scripts/run_etl_pipeline.py
-    │
-    ├─► etl/yfinance_extractor.py
-    │       ├─► etl/data_storage.py (cache)
-    │       └─► retry logic, rate limiting
-    │
-    ├─► etl/data_validator.py
-    │       └─► statistical validation
-    │
-    ├─► etl/preprocessor.py
-    │       ├─► missing data handling
-    │       └─► normalization
-    │
-    └─► etl/data_storage.py
-            ├─► train/val/test split
-            └─► parquet I/O
+    â
+    âââº etl/yfinance_extractor.py
+    â       âââº etl/data_storage.py (cache)
+    â       âââº retry logic, rate limiting
+    â
+    âââº etl/data_validator.py
+    â       âââº statistical validation
+    â
+    âââº etl/preprocessor.py
+    â       âââº missing data handling
+    â       âââº normalization
+    â
+    âââº etl/data_storage.py
+            âââº train/val/test split
+            âââº parquet I/O
 
 scripts/analyze_dataset.py
-    │
-    └─► etl/time_series_analyzer.py
-            ├─► ADF test (statsmodels)
-            ├─► ACF/PACF computation
-            ├─► Statistical summary
-            └─► JSON report generation
+    â
+    âââº etl/time_series_analyzer.py
+            âââº ADF test (statsmodels)
+            âââº ACF/PACF computation
+            âââº Statistical summary
+            âââº JSON report generation
 
 scripts/visualize_dataset.py
-    │
-    └─► etl/visualizer.py
-            ├─► matplotlib/seaborn
-            ├─► 7 plot types
-            └─► publication quality (150 DPI)
+    â
+    âââº etl/visualizer.py
+            âââº matplotlib/seaborn
+            âââº 7 plot types
+            âââº publication quality (150 DPI)
 ```
 
 ### Key Features by Module
@@ -596,12 +600,12 @@ scripts/visualize_dataset.py
 #### 2. **data_validator.py** (117 lines)
 - **Price Validation**: Positivity, continuity, gaps
 - **Volume Validation**: Non-negativity, zero detection
-- **Outlier Detection**: Z-score method (3σ threshold)
-- **Statistical Validation**: Missing data rate (ρ_missing)
+- **Outlier Detection**: Z-score method (3Ï threshold)
+- **Statistical Validation**: Missing data rate (Ï_missing)
 
 #### 3. **preprocessor.py** (101 lines)
 - **Missing Data**: Forward-fill + backward-fill
-- **Normalization**: Z-score (μ=0, σ²=1)
+- **Normalization**: Z-score (Î¼=0, ÏÂ²=1)
 - **Returns Calculation**: Log returns r_t = ln(P_t / P_{t-1})
 - **Numeric Column Selection**: Handles mixed types
 
@@ -614,7 +618,7 @@ scripts/visualize_dataset.py
 #### 5. **time_series_analyzer.py** (500+ lines)
 - **ADF Test**: Augmented Dickey-Fuller stationarity
 - **ACF/PACF**: Autocorrelation with confidence intervals
-- **Statistical Summary**: μ, σ², γ₁, γ₂
+- **Statistical Summary**: Î¼, ÏÂ², Î³â, Î³â
 - **Missing Data Analysis**: Pattern detection, entropy
 - **Temporal Structure**: Frequency detection (f_s, f_N)
 
@@ -646,22 +650,22 @@ scripts/visualize_dataset.py
 
 | Metric | Value |
 |--------|-------|
-| Total Production Code | ~9,400+ lines ⭐ UPDATED (Phase 5.5 + TS Refactoring) |
-| Models Package | 800+ lines ⭐ NEW (Time Series signal generation, Nov 6, 2025) |
-| AI/LLM Modules | 1,500+ lines ⭐ UPDATED (Phase 5.5 - +4 new modules) |
+| Total Production Code | ~9,400+ lines â­ UPDATED (Phase 5.5 + TS Refactoring) |
+| Models Package | 800+ lines â­ NEW (Time Series signal generation, Nov 6, 2025) |
+| AI/LLM Modules | 1,500+ lines â­ UPDATED (Phase 5.5 - +4 new modules) |
 | ETL Modules | 4,945 lines |
-| Scripts | 1,200+ lines ⭐ UPDATED (Phase 5.5 - +5 new scripts) |
-| Test Files | 4,700+ lines ⭐ UPDATED (Phase 5.5 + TS Refactoring - +700+ lines) |
-| Test Coverage | 100% (246/246) ⭐ UPDATED (Phase 5.5 + TS Refactoring Nov 6, 2025) |
-| Modules | 28+ core + 10+ scripts ⭐ UPDATED (Phase 5.5 + TS Refactoring) |
-| Test Files | 23+ ⭐ UPDATED (Phase 5.5 + TS Refactoring - +7 new test files) |
-| Bash Scripts | 4 ⭐ UPDATED (Phase 5.3 - +2 test scripts) |
+| Scripts | 1,200+ lines â­ UPDATED (Phase 5.5 - +5 new scripts) |
+| Test Files | 4,700+ lines â­ UPDATED (Phase 5.5 + TS Refactoring - +700+ lines) |
+| Test Coverage | 100% (246/246) â­ UPDATED (Phase 5.5 + TS Refactoring Nov 6, 2025) |
+| Modules | 28+ core + 10+ scripts â­ UPDATED (Phase 5.5 + TS Refactoring) |
+| Test Files | 23+ â­ UPDATED (Phase 5.5 + TS Refactoring - +7 new test files) |
+| Bash Scripts | 4 â­ UPDATED (Phase 5.3 - +2 test scripts) |
 | Visualizations | 8 plots (1.6 MB) |
-| Documentation | 30+ files ⭐ UPDATED (Phase 5.5 - +5 new docs) |
+| Documentation | 30+ files â­ UPDATED (Phase 5.5 - +5 new docs) |
 
 ---
 
-## 1. Phase 4: Caching Implementation (NEW - COMPLETE ✓)
+## 1. Phase 4: Caching Implementation (NEW - COMPLETE â)
 
 ### 1.1 Overview
 
@@ -677,7 +681,7 @@ scripts/visualize_dataset.py
 - **Cache-first strategy**: Checks local storage before network requests
 - **Freshness validation**: 24-hour default cache validity
 - **Coverage validation**: Ensures cached data spans requested date range
-- **Tolerance handling**: ±3 days for non-trading days (weekends, holidays)
+- **Tolerance handling**: Â±3 days for non-trading days (weekends, holidays)
 - **Auto-caching**: New data automatically saved to cache
 - **Hit rate reporting**: Logs cache performance metrics
 
@@ -688,8 +692,8 @@ def _check_cache(self, ticker: str, start_date: datetime, end_date: datetime) ->
     """Check local cache for recent data matching date range.
 
     Mathematical Foundation:
-    - Cache validity: t_now - t_file ≤ cache_hours × 3600s
-    - Coverage check: [cache_start, cache_end] ⊇ [start_date ± tolerance, end_date ± tolerance]
+    - Cache validity: t_now - t_file â¤ cache_hours Ã 3600s
+    - Coverage check: [cache_start, cache_end] â [start_date Â± tolerance, end_date Â± tolerance]
 
     Returns:
         Cached DataFrame if valid and complete, None otherwise
@@ -698,8 +702,8 @@ def _check_cache(self, ticker: str, start_date: datetime, end_date: datetime) ->
 
 **Cache Decision Tree**:
 ```
-Storage available? → Files exist? → Fresh (<24h)? → Coverage OK? → Cache HIT ✓
-      ↓ No             ↓ No           ↓ No            ↓ No
+Storage available? â Files exist? â Fresh (<24h)? â Coverage OK? â Cache HIT â
+      â No             â No           â No            â No
    Cache MISS      Cache MISS     Cache MISS      Cache MISS
 ```
 
@@ -715,7 +719,7 @@ Storage available? → Files exist? → Fresh (<24h)? → Coverage OK? → Cache
 
 2. **Date coverage tolerance** (Line 221-225)
    - Issue: Cache missed due to non-trading days
-   - Fix: Added ±3 day tolerance for weekends/holidays
+   - Fix: Added Â±3 day tolerance for weekends/holidays
 
 ### 1.3 Data Storage Enhancements
 
@@ -836,22 +840,22 @@ Location: data/raw/{TICKER}_{YYYYMMDD}.parquet
 
 **Cache Validity**:
 ```
-t_now - t_file ≤ cache_hours × 3600s
+t_now - t_file â¤ cache_hours Ã 3600s
 ```
 
 **Coverage Check**:
 ```
-[cache_start, cache_end] ⊇ [start_date ± tolerance, end_date ± tolerance]
+[cache_start, cache_end] â [start_date Â± tolerance, end_date Â± tolerance]
 ```
 
 **Cache Hit Rate**:
 ```
-η = n_cached / n_total
+Î· = n_cached / n_total
 ```
 
 **Network Efficiency**:
 ```
-Network reduction factor = 1 - η
+Network reduction factor = 1 - Î·
 ```
 
 ### 1.8 Documentation
@@ -865,7 +869,7 @@ Network reduction factor = 1 - η
 
 ---
 
-## 2. Phase 4.5: Time Series Cross-Validation (NEW - COMPLETE ✓)
+## 2. Phase 4.5: Time Series Cross-Validation (NEW - COMPLETE â)
 
 ### 2.1 Overview
 
@@ -906,20 +910,20 @@ python scripts/run_etl_pipeline.py --config config.yml --use-cv --n-splits 5
 | Temporal gap | 2.5 years | 0 years | **Eliminated** |
 | Training data usage | 1 subset (70%) | 5 subsets (expanding) | **5x** |
 | Validation robustness | Single window | 5 windows | **5x** |
-| Test isolation | ✓ (15%) | ✓ (15%) | Same |
+| Test isolation | â (15%) | â (15%) | Same |
 
 **Test verification** (tests/etl/test_time_series_cv.py - 22 tests, 490 lines):
-- ✓ Coverage improvement quantified: 5.5x verified
-- ✓ Temporal gap elimination: 0 gaps detected
-- ✓ Backward compatibility: 63/63 existing tests pass
-- ✓ No look-ahead bias: Temporal ordering enforced
-- ✓ Test isolation: CV ∩ test = ∅ (no intersection)
+- â Coverage improvement quantified: 5.5x verified
+- â Temporal gap elimination: 0 gaps detected
+- â Backward compatibility: 63/63 existing tests pass
+- â No look-ahead bias: Temporal ordering enforced
+- â Test isolation: CV â© test = â (no intersection)
 
 ### 2.4 Mathematical Foundation
 
 **CV Region Split**:
 ```
-cv_size = floor(0.85 × n)  # 85% for CV
+cv_size = floor(0.85 Ã n)  # 85% for CV
 test_size = n - cv_size    # 15% isolated for testing
 
 fold_size = cv_size // (n_splits + 1)  # Ensures all folds have training data
@@ -927,7 +931,7 @@ fold_size = cv_size // (n_splits + 1)  # Ensures all folds have training data
 
 **Expanding Window Strategy** (for fold i):
 ```
-train_end = fold_size × (i + 1)
+train_end = fold_size Ã (i + 1)
 val_start = train_end + gap
 val_end = val_start + fold_size
 
@@ -937,7 +941,7 @@ val_indices = [val_start, val_end)  # Moving validation window
 
 **Temporal Ordering Guarantee**:
 ```
-∀ fold_i: max(train_indices[i]) < min(val_indices[i])
+â fold_i: max(train_indices[i]) < min(val_indices[i])
 No look-ahead bias enforced
 ```
 
@@ -1006,11 +1010,11 @@ test_df = splits['testing']        # 15% (never seen in CV)
 - [x] Production-grade error handling
 - [x] Type hints throughout
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ---
 
-## 2.9 Phase 4.6: Multi-Data Source Architecture (NEW - COMPLETE ✓)
+## 2.9 Phase 4.6: Multi-Data Source Architecture (NEW - COMPLETE â)
 
 ### 2.9.1 Overview
 
@@ -1050,7 +1054,7 @@ class BaseExtractor(ABC):
 - **Multi-source orchestration** with failover support
 - **Dynamic extractor instantiation** from config/data_sources_config.yml
 - **Selection modes**: priority (default), fallback, parallel (future)
-- **Failover probability**: P(success) = 1 - ∏(1 - p_i)
+- **Failover probability**: P(success) = 1 - â(1 - p_i)
 
 ```python
 class DataSourceManager:
@@ -1118,7 +1122,7 @@ python scripts/run_etl_pipeline.py --tickers AAPL --data-source yfinance
    - Source availability checks
 
 3. **Failover Tests** (3 tests)
-   - Primary failure → fallback success
+   - Primary failure â fallback success
    - Multi-level failover chain
    - All sources failed scenario
 
@@ -1175,21 +1179,21 @@ enable_failover: true
 
 **Failover Success Probability**:
 ```
-Given sources S₁, S₂, ..., Sₙ with success probabilities p₁, p₂, ..., pₙ
-P(overall success) = 1 - ∏(1 - pᵢ)
+Given sources Sâ, Sâ, ..., Sâ with success probabilities pâ, pâ, ..., pâ
+P(overall success) = 1 - â(1 - páµ¢)
 
 Example: 3 sources with p=0.95 each
-P(success) = 1 - (0.05)³ = 0.999875 (99.99% reliability)
+P(success) = 1 - (0.05)Â³ = 0.999875 (99.99% reliability)
 ```
 
 **Data Quality Score**:
 ```
-Q = 1.0 - (w₁·ρ_missing + w₂·ρ_outliers + w₃·ρ_gaps)
+Q = 1.0 - (wâÂ·Ï_missing + wâÂ·Ï_outliers + wâÂ·Ï_gaps)
 where:
-  ρ_missing = missing data rate
-  ρ_outliers = outlier rate (>3σ)
-  ρ_gaps = temporal gap rate
-  w₁, w₂, w₃ = weights (default: 0.3, 0.2, 0.5)
+  Ï_missing = missing data rate
+  Ï_outliers = outlier rate (>3Ï)
+  Ï_gaps = temporal gap rate
+  wâ, wâ, wâ = weights (default: 0.3, 0.2, 0.5)
 ```
 
 ### 2.9.8 Performance Characteristics
@@ -1217,7 +1221,7 @@ where:
 
 ---
 
-## 2.10 Phase 4.7: Configuration-Driven Cross-Validation (NEW - COMPLETE ✓)
+## 2.10 Phase 4.7: Configuration-Driven Cross-Validation (NEW - COMPLETE â)
 
 ### 2.10.1 Overview
 
@@ -1416,11 +1420,11 @@ cross_validation:
 - [x] No performance degradation
 - [x] Configuration examples provided
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ---
 
-## 2.11 Phase 4.8: Checkpointing and Event Logging (COMPLETE ✓)
+## 2.11 Phase 4.8: Checkpointing and Event Logging (COMPLETE â)
 
 ### 2.11.1 Overview
 
@@ -1439,10 +1443,10 @@ cross_validation:
 **Mathematical Foundation**:
 - State vector: `S(t) = {stage, data_hash, metadata, timestamp}`
 - Data integrity: `H = SHA256(hash_pandas_object(data.sort_index()))`
-- Recovery strategy: `S(t_failed) → S(t_last_valid)`
+- Recovery strategy: `S(t_failed) â S(t_last_valid)`
 
 **Core Features**:
-1. **Atomic Checkpoint Operations** - temp → rename pattern prevents corruption
+1. **Atomic Checkpoint Operations** - temp â rename pattern prevents corruption
 2. **Data Integrity Validation** - SHA256 hash verification on load
 3. **Pipeline Progress Tracking** - Complete execution history
 4. **Automatic 7-Day Cleanup** - Removes checkpoints older than retention period
@@ -1451,9 +1455,9 @@ cross_validation:
 **File Structure**:
 ```
 data/checkpoints/
-├── checkpoint_metadata.json                      # Registry
-├── pipeline_{id}_{stage}_{time}.parquet         # Data (snappy)
-└── pipeline_{id}_{stage}_{time}_state.pkl       # Metadata
+âââ checkpoint_metadata.json                      # Registry
+âââ pipeline_{id}_{stage}_{time}.parquet         # Data (snappy)
+âââ pipeline_{id}_{stage}_{time}_state.pkl       # Metadata
 ```
 
 **API Highlights**:
@@ -1476,13 +1480,13 @@ deleted = manager.cleanup_old_checkpoints(retention_days=7)
 **Log Directory Structure**:
 ```
 logs/
-├── pipeline.log                    # Main log (10MB rotation)
-├── events/
-│   ├── events.log                 # JSON events (daily rotation)
-│   └── events.log.2025-10-06      # Previous day
-├── errors/
-│   └── errors.log                 # Errors with stack traces
-└── stages/                        # Reserved for future use
+âââ pipeline.log                    # Main log (10MB rotation)
+âââ events/
+â   âââ events.log                 # JSON events (daily rotation)
+â   âââ events.log.2025-10-06      # Previous day
+âââ errors/
+â   âââ errors.log                 # Errors with stack traces
+âââ stages/                        # Reserved for future use
 ```
 
 **Event Types**:
@@ -1617,32 +1621,32 @@ pytest tests/etl/test_checkpoint_manager.py -v
 - [x] Automatic cleanup implemented
 - [x] Production-grade code quality
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ### 2.11.8 Comprehensive Validation Results
 
 **Validation Test Suite** (run_cv_validation.sh):
-- ✅ **Pipeline Tests**: 5/5 passing
+- â **Pipeline Tests**: 5/5 passing
   - Default config (k=5, test_size=0.15, gap=0): PASSED
   - k=7 folds: PASSED
   - k=3 folds: PASSED
   - test_size=0.2: PASSED
   - gap=1: PASSED
-- ✅ **Unit Tests**: 47/47 passing
+- â **Unit Tests**: 47/47 passing
   - TimeSeriesCrossValidator: 22/22 PASSED
   - DataStorage with CV: 7/7 PASSED
   - DataSourceManager: 18/18 PASSED
 
 **Config-Driven CV Tests** (test_config_driven_cv.sh):
-- ✅ Default config values from YAML: PASSED
-- ✅ CLI parameter overrides: PASSED
-- ✅ Simple split fallback (no --use-cv): PASSED
+- â Default config values from YAML: PASSED
+- â CLI parameter overrides: PASSED
+- â Simple split fallback (no --use-cv): PASSED
 
 **Full Test Suite Verification**:
-- ✅ **Total Tests**: 121/121 passing (100%)
-- ✅ **Test Duration**: 6.57 seconds
-- ✅ **Backward Compatibility**: All existing tests pass
-- ✅ **No Regressions**: Checkpoint and logging integration validated
+- â **Total Tests**: 121/121 passing (100%)
+- â **Test Duration**: 6.57 seconds
+- â **Backward Compatibility**: All existing tests pass
+- â **No Regressions**: Checkpoint and logging integration validated
 
 ### 2.11.9 Documentation
 
@@ -1662,7 +1666,7 @@ pytest tests/etl/test_checkpoint_manager.py -v
 
 ### 2.11.10 Key Innovations
 
-1. **Atomic Operations**: temp → rename pattern prevents corruption
+1. **Atomic Operations**: temp â rename pattern prevents corruption
 2. **Data Integrity**: SHA256 hash validation on checkpoint load
 3. **Structured Events**: JSON format enables analysis and monitoring
 4. **Automatic Cleanup**: 7-day retention policy (logs and checkpoints)
@@ -1681,7 +1685,7 @@ pytest tests/etl/test_checkpoint_manager.py -v
 
 ---
 
-## 2.12 Phase 5.1: Alpha Vantage & Finnhub API Integration (COMPLETE ✓)
+## 2.12 Phase 5.1: Alpha Vantage & Finnhub API Integration (COMPLETE â)
 
 ### 2.12.1 Overview
 
@@ -1719,7 +1723,7 @@ pytest tests/etl/test_checkpoint_manager.py -v
    ```python
    max_retries: 3
    retry_delay: 5s
-   backoff_factor: 2.0  # delays: 5s → 10s → 20s
+   backoff_factor: 2.0  # delays: 5s â 10s â 20s
    ```
 
 3. **Column Mapping**
@@ -1736,7 +1740,7 @@ pytest tests/etl/test_checkpoint_manager.py -v
 
 4. **Cache-First Strategy**
    - 24-hour validity (configurable)
-   - ±3 days tolerance for non-trading days
+   - Â±3 days tolerance for non-trading days
    - Parquet storage with snappy compression
    - Automatic cache checking before API calls
 
@@ -1802,7 +1806,7 @@ data = extractor.extract_ohlcv(
 
 4. **Cache-First Strategy**
    - 24-hour validity (configurable)
-   - ±3 days tolerance for non-trading days
+   - Â±3 days tolerance for non-trading days
    - Parquet storage with snappy compression
    - Automatic cache checking before API calls
 
@@ -1846,12 +1850,12 @@ data_sources:
     extractor_class: 'etl.yfinance_extractor.YFinanceExtractor'
 
   alpha_vantage:
-    enabled: true  # ✅ NOW OPERATIONAL
+    enabled: true  # â NOW OPERATIONAL
     priority: 2
     extractor_class: 'etl.alpha_vantage_extractor.AlphaVantageExtractor'
 
   finnhub:
-    enabled: true  # ✅ NOW OPERATIONAL
+    enabled: true  # â NOW OPERATIONAL
     priority: 3
     extractor_class: 'etl.finnhub_extractor.FinnhubExtractor'
 
@@ -1863,7 +1867,7 @@ enable_failover: true
 ```
 Mathematical Foundation:
 Given 3 sources with individual success probability p = 0.95:
-P(overall success) = 1 - ∏(1 - pᵢ) = 1 - (0.05)³ = 0.999875 (99.99%)
+P(overall success) = 1 - â(1 - páµ¢) = 1 - (0.05)Â³ = 0.999875 (99.99%)
 ```
 
 **Usage Example**:
@@ -1905,10 +1909,10 @@ FINNHUB_API_KEY='your_finnhub_api_key_here'
 ```
 
 **Security**:
-- ✅ `.env` file in `.gitignore` (never committed)
-- ✅ `.env.template` provided for developers
-- ✅ API keys loaded via `python-dotenv`
-- ✅ Validation on extractor initialization
+- â `.env` file in `.gitignore` (never committed)
+- â `.env.template` provided for developers
+- â API keys loaded via `python-dotenv`
+- â Validation on extractor initialization
 
 **Getting API Keys**:
 1. **Alpha Vantage**: https://www.alphavantage.co/support/#api-key (Free: 5 calls/min)
@@ -1969,17 +1973,17 @@ Both extractors implement comprehensive validation:
 
 **Validation Checks**:
 1. **Price Positivity**: Open, High, Low, Close > 0
-2. **Volume Non-negativity**: Volume ≥ 0
-3. **Price Relationships**: Low ≤ Close ≤ High
-4. **Outlier Detection**: Z-score > 3σ flagged
-5. **Missing Data Rate**: ρ_missing = Σ NA / (n × p)
+2. **Volume Non-negativity**: Volume â¥ 0
+3. **Price Relationships**: Low â¤ Close â¤ High
+4. **Outlier Detection**: Z-score > 3Ï flagged
+5. **Missing Data Rate**: Ï_missing = Î£ NA / (n Ã p)
 
 **Quality Scoring**:
 ```python
 quality_score = 1.0
 if errors:
     quality_score -= 0.5
-quality_score -= len(warnings) × 0.1
+quality_score -= len(warnings) Ã 0.1
 quality_score = max(0.0, min(1.0, quality_score))
 ```
 
@@ -2003,23 +2007,23 @@ quality_score = max(0.0, min(1.0, quality_score))
 
 ### 2.12.9 Test Coverage
 
-**Status**: ✅ All 121 tests passing (100%)
+**Status**: â All 121 tests passing (100%)
 
 **Test Duration**: 7.01 seconds
 
 **Validation**:
-- ✅ All existing tests pass (no regressions)
-- ✅ Backward compatibility maintained
-- ✅ Multi-source failover working
-- ✅ Cache performance maintained
+- â All existing tests pass (no regressions)
+- â Backward compatibility maintained
+- â Multi-source failover working
+- â Cache performance maintained
 
 ### 2.12.10 Code Metrics
 
 **Lines of Code (Phase 5.1)**:
 | Module | Lines | Change |
 |--------|-------|--------|
-| `alpha_vantage_extractor.py` | 518 | +378 (stub → production) |
-| `finnhub_extractor.py` | 532 | +387 (stub → production) |
+| `alpha_vantage_extractor.py` | 518 | +378 (stub â production) |
+| `finnhub_extractor.py` | 532 | +387 (stub â production) |
 | **Total ETL Code** | **4,936** | **+950 lines** |
 | **Total Project** | **~6,150** | **+950 lines** |
 
@@ -2039,7 +2043,7 @@ quality_score = max(0.0, min(1.0, quality_score))
 - [x] Backward compatibility verified
 - [x] Documentation complete
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ### 2.12.12 Key Innovations
 
@@ -2061,7 +2065,7 @@ quality_score = max(0.0, min(1.0, quality_score))
 
 ---
 
-## 2.13 Phase 5.2: Local LLM Integration (Ollama) (COMPLETE ✓)
+## 2.13 Phase 5.2: Local LLM Integration (Ollama) (COMPLETE â)
 
 ### 2.13.1 Overview
 
@@ -2208,7 +2212,7 @@ performance:
 - [x] Documentation complete
 - [x] Data privacy ensured (100% local)
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ### 2.13.9 Key Innovations
 
@@ -2231,29 +2235,29 @@ performance:
 
 ---
 
-## 3. Phase 1: ETL Foundation (COMPLETE ✓)
+## 3. Phase 1: ETL Foundation (COMPLETE â)
 
 ### 3.1 Core ETL Components
 
 #### **yfinance_extractor.py** (327 lines)
 - **Pattern**: Robust data extraction with caching, retry, and rate limiting
 - **Key Features**:
-  - Cache-first data retrieval ⭐ NEW
+  - Cache-first data retrieval â­ NEW
   - Automatic retry (3 attempts with exponential backoff)
   - Network timeout handling (30s default)
   - Data retention policy (10 years configurable)
   - Auto-cleanup of old files
   - Vectorized quality checks
-  - MultiIndex column flattening ⭐ FIXED
+  - MultiIndex column flattening â­ FIXED
 - **Validation**: Handles network failures gracefully, all tests passing
 
 #### **data_validator.py** (117 lines)
 - **Pattern**: Vectorized statistical validation
 - **Validation Rules**:
-  - Missing data rate: ρ_missing = (Σ I(x_ij = NA)) / (n × p)
+  - Missing data rate: Ï_missing = (Î£ I(x_ij = NA)) / (n Ã p)
   - Price positivity: P_t > 0 for all t
-  - Volume non-negativity: V_t ≥ 0 for all t
-  - Outlier detection: Z-score method with 3σ threshold
+  - Volume non-negativity: V_t â¥ 0 for all t
+  - Outlier detection: Z-score method with 3Ï threshold
 - **Bug Fix**: Empty series handling in validate_prices
 - **Output**: Comprehensive validation report with MIT severity classification
 
@@ -2261,7 +2265,7 @@ performance:
 - **Pattern**: Pipeline preprocessing with vectorized operations
 - **Transformations**:
   - Missing value handling: Forward-fill + backward-fill
-  - Normalization: Z-score (μ=0, σ²=1) for numeric columns only
+  - Normalization: Z-score (Î¼=0, ÏÂ²=1) for numeric columns only
   - Return calculation: Log returns r_t = ln(P_t / P_{t-1})
 - **Bug Fix**: Non-numeric column handling in normalization
 - **Validation**: Handles categorical columns gracefully
@@ -2271,17 +2275,17 @@ performance:
 - **Directory Structure**:
   ```
   data/
-    ├── raw/           # Original extracted data + cache (1006 rows AAPL)
-    ├── processed/     # Cleaned and transformed data
-    ├── training/      # Training set (704 rows, 70%)
-    ├── validation/    # Validation set (151 rows, 15%)
-    └── testing/       # Test set (151 rows, 15%)
+    âââ raw/           # Original extracted data + cache (1006 rows AAPL)
+    âââ processed/     # Cleaned and transformed data
+    âââ training/      # Training set (704 rows, 70%)
+    âââ validation/    # Validation set (151 rows, 15%)
+    âââ testing/       # Test set (151 rows, 15%)
   ```
 - **Features**:
   - Parquet format (10x faster than CSV)
   - Atomic writes with temp files
-  - Train/val/test splitting ⭐ NEW
-  - Cache storage management ⭐ NEW
+  - Train/val/test splitting â­ NEW
+  - Cache storage management â­ NEW
 - **Status**: All data directories populated with real AAPL data
 
 #### **portfolio_math.py** (45 lines)
@@ -2292,8 +2296,8 @@ performance:
 ### 2.2 Orchestration Scripts
 
 #### **run_etl_pipeline.py** (67 lines)
-- **Pattern**: Stage-by-stage pipeline execution with caching ⭐ UPDATED
-- **Stages**: Extraction (cached) → Validation → Preprocessing → Storage
+- **Pattern**: Stage-by-stage pipeline execution with caching â­ UPDATED
+- **Stages**: Extraction (cached) â Validation â Preprocessing â Storage
 - **Features**: Click CLI, YAML config, progress tracking
 - **Status**: Full pipeline tested with real AAPL data, 100% cache hit rate
 
@@ -2309,7 +2313,7 @@ performance:
 - **Failing**: 1 (network timeout - expected)
 
 **Test Files**:
-- `test_yfinance_cache.py` (10 tests) ⭐ NEW
+- `test_yfinance_cache.py` (10 tests) â­ NEW
 - `test_preprocessor.py` (8 tests)
 - `test_data_storage.py` (6 tests)
 - `test_portfolio_math.py` (5 tests)
@@ -2317,18 +2321,18 @@ performance:
 
 ---
 
-## 3. Phase 2: Analysis Framework (COMPLETE ✓)
+## 3. Phase 2: Analysis Framework (COMPLETE â)
 
 ### 3.1 Time Series Analyzer
 
 #### **time_series_analyzer.py** (500+ lines)
 - **Class**: `TimeSeriesDatasetAnalyzer`
 - **Mathematical Foundations**:
-  - Missing data: ρ_missing = (Σ I(x_ij = NA)) / (n × p)
-  - Sampling frequency: f_s = 1/Δt, Nyquist: f_N = f_s/2
-  - Stationarity (ADF): Δy_t = α + βt + γy_{t-1} + Σ δ_i Δy_{t-i} + ε_t
-  - Autocorrelation: ρ(k) = Cov(y_t, y_{t-k}) / Var(y_t)
-  - Statistical moments: μ, σ², γ₁ (skewness), γ₂ (kurtosis)
+  - Missing data: Ï_missing = (Î£ I(x_ij = NA)) / (n Ã p)
+  - Sampling frequency: f_s = 1/Ît, Nyquist: f_N = f_s/2
+  - Stationarity (ADF): Îy_t = Î± + Î²t + Î³y_{t-1} + Î£ Î´_i Îy_{t-i} + Îµ_t
+  - Autocorrelation: Ï(k) = Cov(y_t, y_{t-k}) / Var(y_t)
+  - Statistical moments: Î¼, ÏÂ², Î³â (skewness), Î³â (kurtosis)
 
 - **Methods Implemented**:
   1. `load_and_inspect_data()` - Dataset characterization
@@ -2362,7 +2366,7 @@ performance:
 
 ---
 
-## 4. Phase 3: Visualization Framework (COMPLETE ✓)
+## 4. Phase 3: Visualization Framework (COMPLETE â)
 
 ### 4.1 Visualization Engine
 
@@ -2375,8 +2379,8 @@ performance:
 2. `plot_distribution_analysis()` - Histogram + KDE + QQ-plot
 3. `plot_autocorrelation()` - ACF/PACF with confidence intervals
 4. `plot_decomposition()` - Trend + Seasonal + Residual (y_t = T_t + S_t + R_t)
-5. `plot_rolling_statistics()` - μ(t) and σ(t) evolution
-6. `plot_spectral_density()` - Welch's method (S(f) = |FFT(x_t)|²)
+5. `plot_rolling_statistics()` - Î¼(t) and Ï(t) evolution
+6. `plot_spectral_density()` - Welch's method (S(f) = |FFT(x_t)|Â²)
 7. `plot_comprehensive_dashboard()` - 8-panel executive summary
 
 **Bug Fix**: Series slicing in Welch's method (converted to numpy arrays)
@@ -2407,39 +2411,39 @@ performance:
 
 ### 5.1 Critical Fixes (Total: 9)
 
-1. **Empty array in validate_prices()** ✓
+1. **Empty array in validate_prices()** â
    - Error: `ValueError: zero-size array to reduction operation maximum`
    - Fix: Added length checks before operations (data_validator.py:59-63)
 
-2. **MultiIndex columns from yfinance** ✓
+2. **MultiIndex columns from yfinance** â
    - Error: Duplicate column names in concat
    - Fix: Flatten MultiIndex before operations (yfinance_extractor.py:72-74)
 
-3. **Non-numeric columns in normalization** ✓
+3. **Non-numeric columns in normalization** â
    - Error: `TypeError: Could not convert to numeric`
    - Fix: Select only numeric columns (preprocessor.py:38-39)
 
-4. **TimedeltaIndex mode() not available** ✓
+4. **TimedeltaIndex mode() not available** â
    - Error: `AttributeError: 'TimedeltaIndex' object has no attribute 'mode'`
    - Fix: Used value_counts() instead (time_series_analyzer.py)
 
-5. **Pandas Series slicing in Welch's method** ✓
+5. **Pandas Series slicing in Welch's method** â
    - Error: Complex scipy.signal.welch error
    - Fix: Convert to numpy array (visualizer.py)
 
-6. **Preprocessing method chain** ✓
+6. **Preprocessing method chain** â
    - Error: `AttributeError: 'DataFrame' object has no attribute 'normalize'`
    - Fix: Separated method calls (run_etl_pipeline.py:50-57)
 
-7. **Missing split method** ✓
+7. **Missing split method** â
    - Error: `AttributeError: 'DataStorage' object has no attribute 'train_validation_test_split'`
    - Fix: Added method to DataStorage (data_storage.py:118-158)
 
-8. **Cache coverage validation** ✓ NEW
+8. **Cache coverage validation** â NEW
    - Error: Cache missed due to non-trading days
-   - Fix: Added ±3 day tolerance (yfinance_extractor.py:221-225)
+   - Fix: Added Â±3 day tolerance (yfinance_extractor.py:221-225)
 
-9. **MultiIndex in cached data** ✓ NEW
+9. **MultiIndex in cached data** â NEW
    - Error: Cached data retained MultiIndex columns
    - Fix: Flatten before saving to cache (yfinance_extractor.py:298-300)
 
@@ -2515,14 +2519,14 @@ performance:
 
 | Test Suite | Tests | Passing | Time |
 |------------|-------|---------|------|
-| Checkpoint Manager | 33 | 33/33 | 2.3s ⭐ NEW |
+| Checkpoint Manager | 33 | 33/33 | 2.3s â­ NEW |
 | Data Source Manager | 18 | 18/18 | 3.1s |
 | Data Storage | 7 | 7/7 | 2.2s |
 | Time Series CV | 22 | 22/22 | 2.6s |
 | Core ETL | 27 | 27/27 | 4.5s |
 | Cache | 10 | 10/10 | 1.2s |
 | Analysis | 17 | 17/17 | 3.5s |
-| **Total** | **121** | **121/121** | **6.6s** ⭐ UPDATED |
+| **Total** | **121** | **121/121** | **6.6s** â­ UPDATED |
 
 ---
 
@@ -2544,7 +2548,7 @@ performance:
 ### 8.2 Test Coverage
 
 - **Unit Tests**: 121
-- **Coverage**: 100% (121/121 passing) ⭐ UPDATED
+- **Coverage**: 100% (121/121 passing) â­ UPDATED
 - **Integration Tests**: Full ETL pipeline tested
 - **Real Data Tests**: AAPL dataset validated
 - **Validation Scripts**: 2 bash scripts (CV validation + config-driven tests)
@@ -2557,9 +2561,9 @@ performance:
 | TIME_SERIES_CV.md | 15 KB | Complete |
 | CV_CONFIGURATION_GUIDE.md | 3.3 KB | Complete |
 | IMPLEMENTATION_SUMMARY.md | 4.8 KB | Complete |
-| CHECKPOINTING_AND_LOGGING.md | 30+ KB | Complete ⭐ NEW |
-| IMPLEMENTATION_SUMMARY_CHECKPOINTING.md | 12 KB | Complete ⭐ NEW |
-| API_KEYS_SECURITY.md | - | Complete ⭐ NEW |
+| CHECKPOINTING_AND_LOGGING.md | 30+ KB | Complete â­ NEW |
+| IMPLEMENTATION_SUMMARY_CHECKPOINTING.md | 12 KB | Complete â­ NEW |
+| API_KEYS_SECURITY.md | - | Complete â­ NEW |
 | implementation_checkpoint.md | This file | Complete |
 | Code docstrings | Inline | 100% coverage |
 | Mathematical formulas | Inline | Documented |
@@ -2575,7 +2579,7 @@ git commit -m "feat: Add intelligent caching to ETL pipeline
 
 - Implement cache-first data extraction strategy
 - Add cache validity and coverage validation
-- Support ±3 day tolerance for non-trading days
+- Support Â±3 day tolerance for non-trading days
 - Auto-cache fetched data for future requests
 - Add train/validation/test split to DataStorage
 - Fix MultiIndex column flattening
@@ -2624,10 +2628,10 @@ git commit -m "docs: Add caching implementation documentation
 
 ### 10.1 Immediate Priorities
 
-1. ✅ **Phase 1**: ETL Foundation - COMPLETE
-2. ✅ **Phase 2**: Analysis Framework - COMPLETE
-3. ✅ **Phase 3**: Visualization Framework - COMPLETE
-4. ✅ **Phase 4**: Caching Mechanism - COMPLETE
+1. â **Phase 1**: ETL Foundation - COMPLETE
+2. â **Phase 2**: Analysis Framework - COMPLETE
+3. â **Phase 3**: Visualization Framework - COMPLETE
+4. â **Phase 4**: Caching Mechanism - COMPLETE
 
 ### 10.2 Phase 5: Portfolio Optimization (NEXT)
 
@@ -2677,7 +2681,7 @@ git commit -m "docs: Add caching implementation documentation
 
 ## 11. Production Readiness Checklist
 
-### 11.1 Code Quality ✅
+### 11.1 Code Quality â
 - [x] Vectorized operations (no explicit loops)
 - [x] Type hints throughout
 - [x] Comprehensive docstrings
@@ -2685,7 +2689,7 @@ git commit -m "docs: Add caching implementation documentation
 - [x] Error handling implemented
 - [x] Logging configured
 
-### 11.2 Testing ✅
+### 11.2 Testing â
 - [x] Unit tests (63 tests)
 - [x] Integration tests (full pipeline)
 - [x] Real data validation (AAPL)
@@ -2693,21 +2697,21 @@ git commit -m "docs: Add caching implementation documentation
 - [x] Performance benchmarks
 - [x] 98.4% test pass rate
 
-### 11.3 Performance ✅
+### 11.3 Performance â
 - [x] Cache hit rate: 100%
 - [x] Analysis: <5s for 50k obs
 - [x] Visualization: <3s for all plots
 - [x] Pipeline: <1s with cache
 - [x] 20x speedup achieved
 
-### 11.4 Documentation ✅
+### 11.4 Documentation â
 - [x] Implementation checkpoint
 - [x] Caching guide
 - [x] Code documentation
 - [x] Usage examples
 - [x] Performance benchmarks
 
-### 11.5 Data Quality ✅
+### 11.5 Data Quality â
 - [x] Real data populated (AAPL)
 - [x] Validation passing
 - [x] Missing data: 0%
@@ -2721,32 +2725,32 @@ git commit -m "docs: Add caching implementation documentation
 ### 12.1 Summary of Achievements
 
 **12 Phases Complete**:
-1. ✅ ETL Foundation (5 modules, 27 tests)
-2. ✅ Analysis Framework (2 modules, 17 tests)
-3. ✅ Visualization Framework (2 modules, 8 outputs)
-4. ✅ Caching Mechanism (10 tests, 100% hit rate)
-5. ✅ Time Series Cross-Validation (22 tests, 5.5x coverage)
-6. ✅ Multi-Data Source Architecture (18 tests, 3 extractors)
-7. ✅ Configuration-Driven CV (0 hard-coded defaults)
-8. ✅ Checkpointing & Event Logging (33 tests, 7-day retention)
-9. ✅ Alpha Vantage & Finnhub APIs (3 data sources operational)
-10. ✅ Local LLM Integration (4 modules, 20 tests, $0 cost)
-11. ✅ Profit-Critical Testing (12 tests, critical bug fix) ⚠️ **CRITICAL** (2025-10-14)
-12. ✅ Error Monitoring & Performance Optimization (35+ tests, comprehensive monitoring) ⭐ NEW (2025-10-22)
+1. â ETL Foundation (5 modules, 27 tests)
+2. â Analysis Framework (2 modules, 17 tests)
+3. â Visualization Framework (2 modules, 8 outputs)
+4. â Caching Mechanism (10 tests, 100% hit rate)
+5. â Time Series Cross-Validation (22 tests, 5.5x coverage)
+6. â Multi-Data Source Architecture (18 tests, 3 extractors)
+7. â Configuration-Driven CV (0 hard-coded defaults)
+8. â Checkpointing & Event Logging (33 tests, 7-day retention)
+9. â Alpha Vantage & Finnhub APIs (3 data sources operational)
+10. â Local LLM Integration (4 modules, 20 tests, $0 cost)
+11. â Profit-Critical Testing (12 tests, critical bug fix) â ï¸ **CRITICAL** (2025-10-14)
+12. â Error Monitoring & Performance Optimization (35+ tests, comprehensive monitoring) â­ NEW (2025-10-22)
 
 **Total Deliverables**:
-- **Production Code**: ~8,500+ lines ⭐ UPDATED (+1,700+ from Phase 5.5)
-- **Test Coverage**: 200+ tests (100% passing) ⭐ UPDATED (+50+ from Phase 5.5)
+- **Production Code**: ~8,500+ lines â­ UPDATED (+1,700+ from Phase 5.5)
+- **Test Coverage**: 200+ tests (100% passing) â­ UPDATED (+50+ from Phase 5.5)
 - **Data Sources**: 3 operational (yfinance, Alpha Vantage, Finnhub)
 - **Database**: SQLite with 7 tables (OHLCV, LLM outputs, trades, performance)
-- **LLM Integration**: Local Ollama with 8 modules ($0 cost) ⭐ UPDATED (+4 modules)
-- **Error Monitoring**: Comprehensive real-time monitoring system ⭐ NEW
-- **Performance Optimization**: Advanced LLM optimization and signal validation ⭐ NEW
+- **LLM Integration**: Local Ollama with 8 modules ($0 cost) â­ UPDATED (+4 modules)
+- **Error Monitoring**: Comprehensive real-time monitoring system â­ NEW
+- **Performance Optimization**: Advanced LLM optimization and signal validation â­ NEW
 - **System Reliability**: 99.99% with failover + comprehensive monitoring
 - **Real Data**: 1,006 AAPL observations processed
 - **Visualizations**: 8 publication-ready plots
 - **Performance**: 20-150x speedup with caching
-- **Documentation**: 30+ comprehensive guides ⭐ UPDATED (+5 from Phase 5.5)
+- **Documentation**: 30+ comprehensive guides â­ UPDATED (+5 from Phase 5.5)
 
 ### 12.2 Key Innovations
 
@@ -2756,11 +2760,11 @@ git commit -m "docs: Add caching implementation documentation
 4. **Advanced Cross-Validation**: 5.5x temporal coverage improvement
 5. **Checkpointing & Logging**: Fault tolerance with 7-day retention
 6. **Multi-Source Failover**: Automatic source switching on failures
-7. **Comprehensive Error Monitoring**: Real-time monitoring with automated alerting ⭐ NEW
-8. **Advanced LLM Optimization**: Intelligent model selection and performance tracking ⭐ NEW
-9. **5-Layer Signal Validation**: Multi-dimensional signal quality assessment ⭐ NEW
-10. **Automated Cache Management**: Proactive cache health monitoring ⭐ NEW
-11. **Method Signature Validation**: Automated testing for parameter changes ⭐ NEW
+7. **Comprehensive Error Monitoring**: Real-time monitoring with automated alerting â­ NEW
+8. **Advanced LLM Optimization**: Intelligent model selection and performance tracking â­ NEW
+9. **5-Layer Signal Validation**: Multi-dimensional signal quality assessment â­ NEW
+10. **Automated Cache Management**: Proactive cache health monitoring â­ NEW
+11. **Method Signature Validation**: Automated testing for parameter changes â­ NEW
 12. **Academic Rigor**: MIT standards throughout
 13. **Vectorized Operations**: No explicit loops
 14. **Mathematical Foundations**: All formulas documented
@@ -2768,25 +2772,25 @@ git commit -m "docs: Add caching implementation documentation
 
 ### 12.3 System Status
 
-**PRODUCTION READY** ✅
+**PRODUCTION READY** â
 
 The system is fully operational with:
 - Robust multi-source data extraction (3 sources, 99.99% reliability)
 - Local LLM integration (Ollama, $0/month, 100% data privacy) with 8 modules
-- Comprehensive error monitoring with real-time alerting ⭐ NEW
-- Advanced LLM performance optimization and signal validation ⭐ NEW
+- Comprehensive error monitoring with real-time alerting â­ NEW
+- Advanced LLM performance optimization and signal validation â­ NEW
 - Platform-agnostic architecture (yfinance, Alpha Vantage, Finnhub operational)
 - Configuration-driven orchestration (0 hard-coded defaults)
 - Advanced time series cross-validation (5.5x coverage improvement)
 - Checkpointing and event logging (7-day retention, atomic writes)
 - Intelligent caching (20-150x speedup, 100% hit rate after first run)
-- Automated cache management with health monitoring ⭐ NEW
-- Method signature validation with automated testing ⭐ NEW
+- Automated cache management with health monitoring â­ NEW
+- Method signature validation with automated testing â­ NEW
 - Comprehensive validation and preprocessing
 - Advanced analysis capabilities (ADF, ACF/PACF, stationarity)
 - Publication-ready visualizations (7 plot types)
 - High performance (20x speedup with caching)
-- Excellent test coverage (100%, 200+ tests) ⭐ UPDATED
+- Excellent test coverage (100%, 200+ tests) â­ UPDATED
 
 ### 12.4 Architecture Highlights
 
@@ -2803,32 +2807,32 @@ The system is fully operational with:
 - Complete parameter documentation
 
 **Reliability Improvements**:
-- Failover success: P = 1 - ∏(1 - p_i) = 99.99% (3 sources @ 95% each)
+- Failover success: P = 1 - â(1 - p_i) = 99.99% (3 sources @ 95% each)
 - Cache hit rate: 100% after first run
 - Zero temporal gaps in cross-validation
-- Test isolation guaranteed: CV ∩ test = ∅
+- Test isolation guaranteed: CV â© test = â
 
 ---
 
 **Document Version**: 6.7
-**Last Updated**: 2025-11-06 (Remote Synchronization Enhancements Complete) ⭐
+**Last Updated**: 2025-11-06 (Remote Synchronization Enhancements Complete) â­
 **Next Review**: Before Phase 6.0 (Advanced Portfolio Optimization)
-**Status**: READY FOR PRODUCTION ✅
-**Critical Fix Applied**: Profit factor calculation (50% underestimation corrected) ⚠️
-**New Capabilities**: Comprehensive error monitoring, LLM optimization, signal validation, remote sync enhancements (pipeline refactoring, data auditing, graceful LLM failure) ⭐
+**Status**: READY FOR PRODUCTION â
+**Critical Fix Applied**: Profit factor calculation (50% underestimation corrected) â ï¸
+**New Capabilities**: Comprehensive error monitoring, LLM optimization, signal validation, remote sync enhancements (pipeline refactoring, data auditing, graceful LLM failure) â­
 
 ---
 
-## 13. Validation Summary (2025-10-14) ⭐ UPDATED
+## 13. Validation Summary (2025-10-14) â­ UPDATED
 
 ### 13.1 Comprehensive Test Results
 
 **Full Test Suite**:
-- ✅ **Total Tests**: 148+/148+ passing (100%) ⭐ UPDATED (Phase 5.3)
-- ✅ **Test Duration**: ~10 seconds ⭐ UPDATED
-- ✅ **Zero Failures**: All tests pass
-- ✅ **Zero Regressions**: Backward compatibility maintained
-- ✅ **New Tests**: +7 profit-critical tests (Phase 5.3) ⚠️ **CRITICAL**
+- â **Total Tests**: 148+/148+ passing (100%) â­ UPDATED (Phase 5.3)
+- â **Test Duration**: ~10 seconds â­ UPDATED
+- â **Zero Failures**: All tests pass
+- â **Zero Regressions**: Backward compatibility maintained
+- â **New Tests**: +7 profit-critical tests (Phase 5.3) â ï¸ **CRITICAL**
 
 **Validation Scripts**:
 1. **run_cv_validation.sh** - Comprehensive CV validation
@@ -2844,95 +2848,95 @@ The system is fully operational with:
 ### 13.2 Phase 5.2 Completion Verification
 
 **Local LLM Integration**:
-- ✅ 20/20 tests passing (ollama_client + market_analyzer)
-- ✅ Ollama service health checks working
-- ✅ Fail-fast validation implemented
-- ✅ Zero API costs validated ($0/month)
-- ✅ 100% data privacy (local processing)
-- ✅ 87% test coverage
-- ✅ DeepSeek Coder 6.7B operational (4.1GB)
+- â 20/20 tests passing (ollama_client + market_analyzer)
+- â Ollama service health checks working
+- â Fail-fast validation implemented
+- â Zero API costs validated ($0/month)
+- â 100% data privacy (local processing)
+- â 87% test coverage
+- â DeepSeek Coder 6.7B operational (4.1GB)
 
 **Modules Implemented**:
-- ✅ ollama_client.py (150 lines) - API wrapper
-- ✅ market_analyzer.py (170 lines) - Market analysis
-- ✅ signal_generator.py (160 lines) - Signal generation
-- ✅ risk_assessor.py (140 lines) - Risk assessment
+- â ollama_client.py (150 lines) - API wrapper
+- â market_analyzer.py (170 lines) - Market analysis
+- â signal_generator.py (160 lines) - Signal generation
+- â risk_assessor.py (140 lines) - Risk assessment
 
 **Configuration**:
-- ✅ llm_config.yml integrated
-- ✅ Hardware requirements documented
-- ✅ Model selection strategy defined
+- â llm_config.yml integrated
+- â Hardware requirements documented
+- â Model selection strategy defined
 
-### 13.3 Phase 5.3 Completion Verification ⚠️ **CRITICAL FIX**
+### 13.3 Phase 5.3 Completion Verification â ï¸ **CRITICAL FIX**
 
 **Profit Calculation Fix**:
-- ✅ **Critical Bug Fixed**: Profit factor calculation (was using averages, now uses totals)
-- ✅ **Impact**: 50% underestimation corrected
-- ✅ **Formula Changed**: From `avg_win / avg_loss` to `gross_profit / gross_loss`
-- ✅ **Production Impact**: All historical profit factors were INCORRECT
+- â **Critical Bug Fixed**: Profit factor calculation (was using averages, now uses totals)
+- â **Impact**: 50% underestimation corrected
+- â **Formula Changed**: From `avg_win / avg_loss` to `gross_profit / gross_loss`
+- â **Production Impact**: All historical profit factors were INCORRECT
 
 **Enhanced Test Suite**:
-- ✅ 12/12 profit-critical tests passing
-- ✅ Edge cases covered (all wins, more losses than wins)
-- ✅ 6 component validation (total profit, trade counts, avg profit, win rate, gross profit/loss, largest win/loss)
-- ✅ Exact precision (< $0.01 tolerance)
-- ✅ 7/7 report generation tests passing
+- â 12/12 profit-critical tests passing
+- â Edge cases covered (all wins, more losses than wins)
+- â 6 component validation (total profit, trade counts, avg profit, win rate, gross profit/loss, largest win/loss)
+- â Exact precision (< $0.01 tolerance)
+- â 7/7 report generation tests passing
 
 **Test Files Created**:
-- ✅ test_profit_critical_functions.py (565 lines, 12 comprehensive tests)
-- ✅ test_llm_report_generation.py (169 lines, 7 tests)
-- ✅ bash/test_profit_critical_functions.sh (131 lines) - Automated test runner
-- ✅ bash/test_real_time_pipeline.sh (215 lines) - Real-time pipeline testing
+- â test_profit_critical_functions.py (565 lines, 12 comprehensive tests)
+- â test_llm_report_generation.py (169 lines, 7 tests)
+- â bash/test_profit_critical_functions.sh (131 lines) - Automated test runner
+- â bash/test_real_time_pipeline.sh (215 lines) - Real-time pipeline testing
 
 **Documentation Created**:
-- ✅ PROFIT_CALCULATION_FIX.md - Complete fix documentation
-- ✅ TESTING_GUIDE.md (323 lines) - Comprehensive testing guide
-- ✅ TESTING_IMPLEMENTATION_SUMMARY.md (449 lines) - Executive summary
+- â PROFIT_CALCULATION_FIX.md - Complete fix documentation
+- â TESTING_GUIDE.md (323 lines) - Comprehensive testing guide
+- â TESTING_IMPLEMENTATION_SUMMARY.md (449 lines) - Executive summary
 
 **Database Integration**:
-- ✅ SQLite database with 7 tables (OHLCV, LLM outputs, trades, performance)
-- ✅ Profit/loss tracking operational
-- ✅ Report generation system (text, JSON, HTML formats)
+- â SQLite database with 7 tables (OHLCV, LLM outputs, trades, performance)
+- â Profit/loss tracking operational
+- â Report generation system (text, JSON, HTML formats)
 
 ### 13.4 Phase 4.8 Completion Verification
 
 **Checkpointing System**:
-- ✅ 33/33 tests passing
-- ✅ Atomic writes implemented (temp → rename)
-- ✅ SHA256 data integrity validation
-- ✅ 7-day retention policy active
-- ✅ <2% performance overhead
+- â 33/33 tests passing
+- â Atomic writes implemented (temp â rename)
+- â SHA256 data integrity validation
+- â 7-day retention policy active
+- â <2% performance overhead
 
 **Logging System**:
-- ✅ Structured JSON events
-- ✅ Multiple log streams (pipeline, events, errors)
-- ✅ Rotating file handlers (10MB size, daily time)
-- ✅ 7-day automatic cleanup
-- ✅ <1ms per event
+- â Structured JSON events
+- â Multiple log streams (pipeline, events, errors)
+- â Rotating file handlers (10MB size, daily time)
+- â 7-day automatic cleanup
+- â <1ms per event
 
 **Integration**:
-- ✅ Pipeline integration complete
-- ✅ API keys secured in .env (gitignored)
-- ✅ Documentation comprehensive (30+ KB guide)
-- ✅ Zero breaking changes
-- ✅ All 121 tests passing
+- â Pipeline integration complete
+- â API keys secured in .env (gitignored)
+- â Documentation comprehensive (30+ KB guide)
+- â Zero breaking changes
+- â All 121 tests passing
 
 ### 13.4 Production Readiness Confirmation
 
-**System Status**: ✅ **PRODUCTION READY**
+**System Status**: â **PRODUCTION READY**
 
 All phases complete with comprehensive validation:
-- Phase 1: ETL Foundation ✓
-- Phase 2: Analysis Framework ✓
-- Phase 3: Visualization Framework ✓
-- Phase 4: Caching Mechanism ✓
-- Phase 4.5: Time Series Cross-Validation ✓
-- Phase 4.6: Multi-Data Source Architecture ✓
-- Phase 4.7: Configuration-Driven Cross-Validation ✓
-- Phase 4.8: Checkpointing and Event Logging ✓
-- Phase 5.1: Alpha Vantage & Finnhub APIs ✓
-- Phase 5.2: Local LLM Integration ✓
-- Phase 5.3: Profit-Critical Functions & Testing ✓ ⚠️ **CRITICAL FIX** ⭐ NEW (2025-10-14)
+- Phase 1: ETL Foundation â
+- Phase 2: Analysis Framework â
+- Phase 3: Visualization Framework â
+- Phase 4: Caching Mechanism â
+- Phase 4.5: Time Series Cross-Validation â
+- Phase 4.6: Multi-Data Source Architecture â
+- Phase 4.7: Configuration-Driven Cross-Validation â
+- Phase 4.8: Checkpointing and Event Logging â
+- Phase 5.1: Alpha Vantage & Finnhub APIs â
+- Phase 5.2: Local LLM Integration â
+- Phase 5.3: Profit-Critical Functions & Testing â â ï¸ **CRITICAL FIX** â­ NEW (2025-10-14)
 
 **Critical Fix Applied**: Profit factor calculation corrected (50% underestimation fixed)
 
@@ -2940,7 +2944,7 @@ All phases complete with comprehensive validation:
 
 ---
 
-## 2.14 Phase 5.3: Profit-Critical Functions & Testing (COMPLETE ✓)
+## 2.14 Phase 5.3: Profit-Critical Functions & Testing (COMPLETE â)
 
 ### 2.14.1 Overview
 
@@ -2980,12 +2984,12 @@ Test Data:
 WRONG calculation:
 avg_win = (150 + 100) / 2 = $125
 avg_loss = $50
-Profit Factor = 125 / 50 = 2.5  ❌ INCORRECT
+Profit Factor = 125 / 50 = 2.5  â INCORRECT
 
 CORRECT calculation:
 gross_profit = 150 + 100 = $250
 gross_loss = 50
-Profit Factor = 250 / 50 = 5.0  ✅ CORRECT
+Profit Factor = 250 / 50 = 5.0  â CORRECT
 ```
 
 **Fix Applied**:
@@ -3035,7 +3039,7 @@ Where:
    - Ensures PF > 1.0 for profitable systems
 
 3. **Profit Factor Edge Cases** (NEW)
-   - All wins scenario (profit factor = ∞)
+   - All wins scenario (profit factor = â)
    - More losses than wins (profit factor < 1.0)
 
 4. **Additional Tests**:
@@ -3105,19 +3109,19 @@ def test_profit_factor_calculation(self, test_db):
 
 **Before Fix**:
 ```
-test_profit_calculation_accuracy     PASSED  ✓
-test_profit_factor_calculation       FAILED  ✗  (Expected 5.0, Got 2.5)
-test_negative_profit_tracking        PASSED  ✓
+test_profit_calculation_accuracy     PASSED  â
+test_profit_factor_calculation       FAILED  â  (Expected 5.0, Got 2.5)
+test_negative_profit_tracking        PASSED  â
 ```
 
 **After Fix**:
 ```
-test_profit_calculation_accuracy     PASSED  ✓
-test_profit_factor_calculation       PASSED  ✓  (Now correctly calculates 5.0)
-test_profit_factor_edge_cases        PASSED  ✓  (NEW test)
-test_negative_profit_tracking        PASSED  ✓
-test_llm_analysis_persistence        PASSED  ✓
-test_signal_validation_status        PASSED  ✓
+test_profit_calculation_accuracy     PASSED  â
+test_profit_factor_calculation       PASSED  â  (Now correctly calculates 5.0)
+test_profit_factor_edge_cases        PASSED  â  (NEW test)
+test_negative_profit_tracking        PASSED  â
+test_llm_analysis_persistence        PASSED  â
+test_signal_validation_status        PASSED  â
 ```
 
 ### 2.14.6 Documentation Created
@@ -3169,10 +3173,10 @@ test_signal_validation_status        PASSED  ✓
 ### 2.14.8 Impact Assessment
 
 **Systems Affected**:
-1. ✅ `etl/database_manager.py` - Fixed profit factor calculation
-2. ✅ `scripts/generate_llm_report.py` - Now uses correct profit factor
-3. ✅ `tests/integration/test_profit_critical_functions.py` - Enhanced validation
-4. ✅ All profit-related reports - Now show accurate metrics
+1. â `etl/database_manager.py` - Fixed profit factor calculation
+2. â `scripts/generate_llm_report.py` - Now uses correct profit factor
+3. â `tests/integration/test_profit_critical_functions.py` - Enhanced validation
+4. â All profit-related reports - Now show accurate metrics
 
 **Production Impact**:
 - **Critical**: All previous profit factor values were INCORRECT
@@ -3184,7 +3188,7 @@ test_signal_validation_status        PASSED  ✓
 |----------|-----------|-----------|------------|
 | 2 wins ($150, $100), 1 loss ($50) | PF = 2.5 | PF = 5.0 | +100% |
 | 3 wins ($100 each), 2 losses ($50 each) | PF = 2.0 | PF = 3.0 | +50% |
-| All wins (no losses) | PF = variable | PF = ∞ | Correct |
+| All wins (no losses) | PF = variable | PF = â | Correct |
 
 ### 2.14.9 Testing Compliance
 
@@ -3192,16 +3196,16 @@ test_signal_validation_status        PASSED  ✓
 - [x] **Profit calculations exact** (< $0.01 error)
 - [x] **Profit factor uses correct formula** (gross totals, not averages)
 - [x] **Edge cases tested** (all wins, all losses, mixed)
-- [x] **Tests focus on money-critical logic** (✓ Only profit calculations)
+- [x] **Tests focus on money-critical logic** (â Only profit calculations)
 - [x] **Comprehensive documentation** (3 new docs, 900+ lines)
 
 **Testing Principle**:
 > "Test only profit-critical functions. This is money - test thoroughly."
 
 This fix affects **THE PRIMARY** profitability metric. Tests are:
-- ✅ Exact (< $0.01 tolerance)
-- ✅ Comprehensive (including edge cases)
-- ✅ Focused (money-affecting logic only)
+- â Exact (< $0.01 tolerance)
+- â Comprehensive (including edge cases)
+- â Focused (money-affecting logic only)
 
 ### 2.14.10 Production Readiness
 
@@ -3217,7 +3221,7 @@ This fix affects **THE PRIMARY** profitability metric. Tests are:
 - [x] All tests passing (100%)
 - [x] Backward compatibility maintained
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ### 2.14.11 Key Innovations
 
@@ -3240,7 +3244,7 @@ This fix affects **THE PRIMARY** profitability metric. Tests are:
 
 ---
 
-## 2.15 Phase 5.5: Error Monitoring & Performance Optimization (COMPLETE ✓)
+## 2.15 Phase 5.5: Error Monitoring & Performance Optimization (COMPLETE â)
 
 ### 2.15.1 Overview
 
@@ -3423,7 +3427,7 @@ monitoring:
 - [x] Automated deployment scripts ready
 - [x] Real-time monitoring dashboard operational
 
-**Status**: READY FOR PRODUCTION ✅
+**Status**: READY FOR PRODUCTION â
 
 ### 2.15.10 Key Innovations
 
@@ -3447,3 +3451,11 @@ monitoring:
 | Production monitoring | Basic | Real-time | **Complete visibility** |
 
 ---
+
+## Recent Additions (2025-11-22)
+- Data quality scoring + gating: per-window quality snapshots persisted (data_quality_snapshots), routing blocks low-score windows, quality surfaces in dashboard JSON/PNG.
+- Latency telemetry: per-ticker TS/LLM latencies persisted (latency_metrics); routing captures per-ticker latencies and averages for dashboards.
+- Dashboard outputs: run_auto_trader.py emits visualizations/dashboard_data.json and dashboard_snapshot.png with quality, latency, routing, equity, win-rate.
+- Orchestration: bash/run_auto_trader.sh and bash/run_end_to_end.sh tie ETL â trading â dashboard refresh; bash/git_sync.sh supports safe pull/rebase/push.
+
+- 2025-11-23: Removed local pandas imports causing UnboundLocalError in data_storage; scrubbed Unicode checkmarks/log glyphs to avoid cp1252 console crashes; reran ETL with alternate DB path to validate CV splits and drift logging.

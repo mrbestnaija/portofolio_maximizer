@@ -2,6 +2,16 @@
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
+**Date**: 2025-11-24  
+**Status**: 🔄 **Incremental updates**
+
+### Latest additions (2025-11-24)
+- Added `Documentation/DATA_SOURCE_AWARE_TICKER_UNIVERSE.md` to codify a data-source-aware, config-driven ticker discovery flow reusing existing components (`DataSourceManager`, `frontier_markets`, `ticker_discovery` loaders) to ease migration from yfinance to cTrader/brokers without duplication.
+- Introduced `etl/data_universe.py` and wired `scripts/run_auto_trader.py` through the helper so explicit + frontier tickers remain default, with optional provider-universe discovery when no explicit tickers are given.
+- Added unit coverage for the resolver (`tests/etl/test_data_universe.py`) — offline/no network.
+
+---
+
 **Date**: 2025-11-06  
 **Status**: ✅ **COMPLETE**
 

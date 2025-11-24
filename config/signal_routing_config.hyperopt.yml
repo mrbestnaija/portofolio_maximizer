@@ -1,0 +1,19 @@
+signal_routing:
+  time_series_primary: true
+  llm_fallback: true
+  llm_redundancy: true
+  enable_samossa: true
+  enable_sarimax: true
+  enable_garch: true
+  enable_mssa_rl: true
+  time_series:
+    confidence_threshold: 0.55
+    min_expected_return: 0.002
+    max_risk_score: 0.7
+    use_volatility_filter: true
+  ts_fallback_triggers:
+  - forecast_unavailable
+  - confidence_below_threshold
+  - model_failure
+  - insufficient_data
+  routing_mode: TIME_SERIES_PRIMARY_LLM_FALLBACK

@@ -8,6 +8,11 @@
 **Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions  
 **Priority**: HIGH - Complete all stubs before production deployment
 
+### 🔄 2025-11-24 Delta (currency update)
+- New data-source-aware ticker resolver (`etl/data_universe.py`) wired into `scripts/run_auto_trader.py`; explicit + frontier remains default, provider discovery optional when no inputs.
+- LLM fallback defaults to on in the trading loop; guardrails unchanged.
+- Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings during live runs.
+
 ### Nov 12, 2025 Update
 - Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
 - Checkpoint/metadata utilities are stable on Windows thanks to Path.replace, unblocking future stub work that writes checkpoints repeatedly.
@@ -741,6 +746,62 @@ class TestDataValidator:
 
 ---
 
+### 14. **Higher-Order Hyper-Parameter Orchestration & Regime-Aware Backtesting** 🟡 PARTIAL
+**Location**: `bash/run_post_eval.sh`, `scripts/run_strategy_optimization.py`, `backtesting/candidate_backtester.py`, `scripts/run_backtest_for_candidate.py`  
+**Status**: Driver and plumbing in place; candidate-level evaluation and regime-aware Q-learning still stubbed  
+**Priority**: HIGH – Controls how the system searches for profitable configurations
+
+**Current State**:
+- `bash/run_post_eval.sh` implements a higher-order hyperopt driver that:
+  - Wraps ETL → auto-trader → strategy optimization in a stochastic loop.
+  - Treats evaluation windows, `min_expected_profit`, and `time_series.min_expected_return`
+    as tunable higher-order hyper-parameters.
+  - Uses a bandit-like explore/exploit policy (30% explore / 70% exploit by default,
+    adjusted after each trial) and logs trials to `logs/hyperopt/hyperopt_<RUN_ID>.log`.
+  - Dynamically tightens candidate ranges based on historic profitability (AAPL, COOP, GC=F,
+    EURUSD=X) using realistic expected-profit and expected-return bands.
+- `etl/strategy_optimizer.py` and `scripts/run_strategy_optimization.py` support stochastic
+  candidate sampling and scoring, but still rely on aggregate DB performance summaries per
+  regime instead of full candidate-specific backtests.
+- `backtesting/candidate_backtester.py` provides a simple rule-based simulator, and
+  `scripts/run_backtest_for_candidate.py` exposes only a summary view of performance; neither
+  is yet wired into the higher-order hyperopt loop as the canonical candidate evaluator.
+
+**Required Completion**:
+- Replace aggregate `DatabaseManager.get_performance_summary` usage in the optimizer’s
+  `evaluation_fn` with calls into `backtesting/candidate_backtester.backtest_candidate` so
+  each candidate is scored on its own simulated PnL (total_profit, profit_factor, win_rate,
+  max_drawdown, total_trades).
+- Extend `bash/run_post_eval.sh` to:
+  - Select different hyper-parameter candidate grids per regime (e.g., default vs high-vol),
+  - Support per-asset-class bands for `min_expected_profit` and `min_expected_return`
+    (e.g., FX vs frontier equities) driven from config rather than hardcoded arrays.
+- Implement a lightweight Q-table/bandit state (SQLite/JSON) that records
+  `(regime, hyper-parameter combo) -> reward` and is reused across runs to bias sampling
+  toward historically profitable regions instead of starting from a blank slate each time.
+- Enhance `scripts/run_backtest_for_candidate.py` so it:
+  - Accepts structured candidate JSON,
+  - Invokes `backtesting/candidate_backtester.backtest_candidate` under the appropriate regime,
+  - Returns a metrics dict compatible with `StrategyOptimizer` and the hyperopt driver.
+- Add tests:
+  - Unit tests for the higher-order driver (small synthetic DB) to confirm that best_score
+    improves over a few rounds and that candidate ranges are respected,
+  - Integration tests tying `bash/run_post_eval.sh` + `run_strategy_optimization.py` together
+    under a fixed synthetic regime.
+
+**Dependencies**:
+- `etl/database_manager.py` (performance summary and equity curves)
+- `backtesting/candidate_backtester.py`
+- `Documentation/STOCHASTIC_PNL_OPTIMIZATION.md` (design contract for non-convex search)
+
+**Success Criteria**:
+- [ ] StrategyOptimizer’s evaluation function uses candidate-level backtests, not only aggregate DB metrics.
+- [ ] Higher-order hyperopt respects regime- and asset-class-specific guardrails from config.
+- [ ] Q-table/bandit state persists across runs and systematically biases sampling toward profitable regions.
+- [ ] End-to-end hyperopt tests demonstrate improved realized PnL under stable regimes.
+
+---
+
 ## 📊 Implementation Priority Matrix
 
 | Component | Priority | Effort | Dependencies | Status |
@@ -753,6 +814,7 @@ class TestDataValidator:
 | Risk Manager Actions | MEDIUM | Low | Order Manager | 🟡 Partial |
 | Time-Series Features | MEDIUM | Medium | Database | ❌ Not Started |
 | Parallel Model Runner | MEDIUM | Medium | All Models | ❌ Not Started |
+| Higher-Order Hyperopt & Regime Backtesting | HIGH | High | Optimizer, Backtester | 🟡 Partial |
 | Data Validator Test Suite | MEDIUM | Low | DataValidator | ❌ Not Started |
 | Time-Series Validation | MEDIUM | High | Models | ❌ Not Started |
 | Exception Logging | LOW | Low | None | 🟡 Partial |
@@ -818,12 +880,17 @@ class TestDataValidator:
     - Statistical tests
     - Result persistence
 
+11. **Higher-Order Hyperopt & Regime Backtesting** (Week 6, Days 4-5)
+    - Wire candidate-level backtests into `StrategyOptimizer` evaluation_fn
+    - Enable per-regime/per-asset hyper-parameter grids from config
+    - Persist Q-table/bandit state to bias future sampling
+
 ### Phase 4: Polish & Testing (Week 7)
-11. **Exception Logging** (Week 7, Day 1)
+12. **Exception Logging** (Week 7, Day 1)
     - Fix silent exception handlers
     - Add proper logging
 
-12. **Integration Testing** (Week 7, Days 2-5)
+13. **Integration Testing** (Week 7, Days 2-5)
     - End-to-end tests
     - Performance benchmarks
     - Documentation updates

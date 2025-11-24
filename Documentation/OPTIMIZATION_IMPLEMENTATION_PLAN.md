@@ -894,3 +894,4 @@ python -m pytest tests/etl/test_portfolio_math_enhanced.py -v
 **Investment**: High (mathematical expertise required)  
 **ROI**: High (institutional-grade system)
 
+- 2025-11-23: Added stochastic StrategyOptimizer infrastructure (etl/strategy_optimizer.py, scripts/run_strategy_optimization.py, config/strategy_optimization_config.yml) with tests for sampling/constraints; no strategies hardcoded, all search spaces and objectives remain config-driven.

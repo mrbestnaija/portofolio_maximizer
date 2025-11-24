@@ -11,8 +11,8 @@ Design Pattern: Strategy + Factory + Chain of Responsibility
 - Factory: Instantiate extractors dynamically
 - Chain: Failover through multiple sources on failure
 Mathematical Foundation:
-- Failover probability: P(success) = 1 - ∏(1 - p_i) for n sources
-- Combined hit rate: η_combined = Σ(w_i × η_i) for weighted sources
+- Failover probability: P(success) = 1 - Pi(1 - p_i) for n sources
+- Combined hit rate: eta_combined = Sigma(w_i x eta_i) for weighted sources
 """
 
 import os
@@ -80,7 +80,7 @@ class DataSourceManager:
         if 'data_sources' not in config:
             raise ValueError("Invalid config: missing 'data_sources' section")
 
-        logger.info(f"✓ Loaded data sources configuration from {self.config_path}")
+        logger.info(f"OK Loaded data sources configuration from {self.config_path}")
         return config['data_sources']
 
     def _get_enabled_providers(self) -> List[Dict[str, Any]]:
@@ -154,7 +154,7 @@ class DataSourceManager:
                     storage=self.storage
                 )
 
-            logger.info(f"✓ Instantiated {name} extractor")
+            logger.info(f"OK Instantiated {name} extractor")
             return extractor
 
         except (ImportError, AttributeError) as e:
@@ -189,7 +189,7 @@ class DataSourceManager:
             if extractor:
                 self.extractors[primary['name']] = extractor
                 self.active_extractor = extractor
-                logger.info(f"✓ Using primary data source: {primary['name']}")
+                logger.info(f"OK Using primary data source: {primary['name']}")
             else:
                 raise RuntimeError(f"Failed to initialize primary source: {primary['name']}")
 
@@ -205,7 +205,7 @@ class DataSourceManager:
 
             # Set primary as active
             self.active_extractor = list(self.extractors.values())[0]
-            logger.info(f"✓ Initialized {len(self.extractors)} sources for failover")
+            logger.info(f"OK Initialized {len(self.extractors)} sources for failover")
             logger.info(f"  Primary: {self.active_extractor.name}")
 
         elif mode == 'parallel':
@@ -249,11 +249,11 @@ class DataSourceManager:
             if data is None or data.empty:
                 raise RuntimeError(f"{extractor.name} returned empty data")
 
-            logger.info(f"✓ Successfully extracted {len(data)} rows from {extractor.name}")
+            logger.info(f"OK Successfully extracted {len(data)} rows from {extractor.name}")
             return data
 
         except Exception as e:
-            logger.error(f"✗ Extraction failed from {extractor.name}: {e}")
+            logger.error(f"FAIL Extraction failed from {extractor.name}: {e}")
 
             # Attempt failover if enabled
             if mode == 'fallback':
@@ -296,7 +296,7 @@ class DataSourceManager:
                 data = extractor.extract_ohlcv(tickers, start_date, end_date)
 
                 if data is not None and not data.empty:
-                    logger.info(f"✓ Failover successful: {source_name} returned {len(data)} rows")
+                    logger.info(f"OK Failover successful: {source_name} returned {len(data)} rows")
                     self.active_extractor = extractor  # Switch active extractor
                     return data
 

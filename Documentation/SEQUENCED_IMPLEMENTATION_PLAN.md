@@ -9,6 +9,11 @@
 **Priority**: **CRITICAL** - Based on log analysis and system requirements  
 **Timeline**: 12 weeks to production deployment
 
+### 🔄 2025-11-24 Delta (currency update)
+- Data-source-aware ticker resolver (`etl/data_universe.py`) added; `scripts/run_auto_trader.py` now resolves tickers via the helper (explicit + frontier default, provider discovery when empty).
+- LLM fallback defaults to enabled in the trading loop for redundancy; thresholds unchanged.
+- Dashboard JSON emission hardened (datetime → ISO) to avoid serialization warnings during live runs.
+
 **📋 NEW**: 
 - Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for the remaining items (performance dashboard, disaster recovery, etc.) now that the cTrader client + order manager replacements have landed.
 - **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.

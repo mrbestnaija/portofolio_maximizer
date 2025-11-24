@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Portfolio Maximizer · Live Dashboard</title>
+  <title>Portfolio Maximizer Ã‚Â· Live Dashboard</title>
   <style>
     :root {
       --bg: #0f1720;
@@ -70,10 +70,13 @@
 <body>
   <header>
     <div>
-      <h1>Portfolio Maximizer · Live Dashboard</h1>
-      <div class="subtitle">Time-Series primary · LLM fallback · Latency-aware</div>
+      <h1>Portfolio Maximizer Ã‚Â· Live Dashboard</h1>
+      <div class="subtitle">Time-Series primary Ã‚Â· LLM fallback Ã‚Â· Latency-aware</div>
     </div>
-    <div class="pill" id="run-meta">Awaiting data…</div>
+    <div>
+      <div class="pill" id="run-meta">Awaiting dataÃ¢â‚¬Â¦</div>
+      <div class="subtitle" id="strategy-meta"></div>
+    </div>
   </header>
 
   <div class="grid">
@@ -89,18 +92,18 @@
     </div>
     <div class="card">
       <h3>Latency</h3>
-      <div class="metric" id="latency">–</div>
-      <div class="pill" id="llm-latency">LLM: –</div>
+      <div class="metric" id="latency">Ã¢â‚¬â€œ</div>
+      <div class="pill" id="llm-latency">LLM: Ã¢â‚¬â€œ</div>
     </div>
     <div class="card">
       <h3>Routing</h3>
       <div class="metric" id="routing">TS / LLM</div>
-      <div class="pill" id="fallback-usage">Fallback used: –</div>
+      <div class="pill" id="fallback-usage">Fallback used: Ã¢â‚¬â€œ</div>
     </div>
     <div class="card">
       <h3>Data Quality</h3>
-      <div class="metric" id="quality-avg">–</div>
-      <div class="pill" id="quality-min">Min: –</div>
+      <div class="metric" id="quality-avg">Ã¢â‚¬â€œ</div>
+      <div class="pill" id="quality-min">Min: Ã¢â‚¬â€œ</div>
     </div>
   </div>
 
@@ -116,7 +119,7 @@
         <tr><th>Ticker</th><th>Action</th><th>Conf.</th><th>Exp. Return</th><th>Source</th><th>Quality</th><th>When</th></tr>
       </thead>
       <tbody id="signals-body">
-        <tr><td class="muted" colspan="6">Waiting for data…</td></tr>
+        <tr><td class="muted" colspan="6">Waiting for dataÃ¢â‚¬Â¦</td></tr>
       </tbody>
     </table>
   </div>
@@ -126,7 +129,7 @@
   <script>
     async function loadData() {
       try {
-        const resp = await fetch('dashboard_data.json?_=' + Date.now());
+        const resp = await fetch('dashboard_data.json-_=' + Date.now());
         if (!resp.ok) throw new Error('No data file found');
         return await resp.json();
       } catch (e) {
@@ -142,6 +145,10 @@
             { t: "T-2", v: 10040 },
             { t: "T-1", v: 10020 },
             { t: "T", v: 10050 }
+          ],
+          equity_realized: [
+            { t: "T-3", v: 10000 },
+            { t: "T", v: 10040 }
           ],
           signals: []
         };
@@ -167,22 +174,22 @@
           <td>${(sig.confidence * 100).toFixed(1)}%</td>
           <td>${(sig.expected_return * 100).toFixed(2)}%</td>
           <td>${sig.source}</td>
-          <td>${sig.quality ? (sig.quality.quality_score * 100).toFixed(1) + '%' : 'n/a'}</td>
+          <td>${sig.quality - (sig.quality.quality_score * 100).toFixed(1) + '%' : 'n/a'}</td>
           <td>${sig.timestamp || ''}</td>
         `;
         body.appendChild(tr);
       });
     }
 
-    function renderEquity(equity) {
+    function renderEquity(equity, realized) {
       const canvas = document.getElementById('equity-chart');
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const w = canvas.width, h = canvas.height, pad = 16;
-      if (!equity || equity.length < 2) return;
-      const xs = equity.map((_, i) => i);
-      const ys = equity.map(p => p.v);
-      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const combined = [...(equity || []), ...(realized || [])];
+      if (!combined.length) return;
+      const minY = Math.min(...combined.map(p => p.v));
+      const maxY = Math.max(...combined.map(p => p.v));
       const yRange = maxY - minY || 1;
       ctx.beginPath();
       ctx.moveTo(pad, h - pad);
@@ -191,24 +198,48 @@
       ctx.lineTo(pad, h - pad);
       ctx.strokeStyle = 'rgba(255,255,255,0.08)';
       ctx.stroke();
-      ctx.beginPath();
-      equity.forEach((pt, i) => {
-        const x = pad + (i / (equity.length - 1)) * (w - 2 * pad);
-        const y = h - pad - ((pt.v - minY) / yRange) * (h - 2 * pad);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      });
-      ctx.strokeStyle = '#25c2a0';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      ctx.fillStyle = 'rgba(37,194,160,0.12)';
-      ctx.lineTo(w - pad, h - pad);
-      ctx.lineTo(pad, h - pad);
-      ctx.closePath();
-      ctx.fill();
+      if (equity && equity.length) {
+        ctx.beginPath();
+        equity.forEach((pt, i) => {
+          const x = pad + (i / Math.max(1, equity.length - 1)) * (w - 2 * pad);
+          const y = h - pad - ((pt.v - minY) / yRange) * (h - 2 * pad);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = '#25c2a0';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(37,194,160,0.12)';
+        ctx.lineTo(w - pad, h - pad);
+        ctx.lineTo(pad, h - pad);
+        ctx.closePath();
+        ctx.fill();
+      }
+      if (realized && realized.length) {
+        ctx.beginPath();
+        realized.forEach((pt, i) => {
+          const x = pad + (i / Math.max(1, realized.length - 1)) * (w - 2 * pad);
+          const y = h - pad - ((pt.v - minY) / yRange) * (h - 2 * pad);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = '#f6c344';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 2]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }
 
-    loadData().then(data => {
-      setText('run-meta', `Run: ${data.meta?.run_id || 'n/a'} · ${data.meta?.ts || ''}`);
+        loadData().then(data => {
+      setText('run-meta', `Run: ${data.meta?.run_id || 'n/a'} ? ${data.meta?.ts || ''}`);
+      const strat = data.meta?.strategy || {};
+      const params = strat && strat.params ? strat.params : {};
+      const keys = params ? Object.keys(params) : [];
+      const sample = keys.slice(0, 3).map(k => `${k}=${params[k]}`).join(', ');
+      const stratText = strat && strat.regime
+        ? `Strategy regime: ${strat.regime} (score=${(strat.score ?? 0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
+        : '';
+      setText('strategy-meta', stratText);
+
       setText('pnl-abs', formatUsd(data.pnl?.absolute || 0));
       const pnlPct = data.pnl?.pct || 0;
       const pnlPctEl = document.getElementById('pnl-pct');
@@ -218,17 +249,17 @@
       setText('win-rate', formatPct(data.win_rate || 0));
       setText('trade-count', `${data.trade_count || 0} trades`);
 
-      setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '—');
-      setText('llm-latency', data.latency?.llm_ms ? `LLM: ${data.latency.llm_ms.toFixed(0)} ms` : 'LLM: —');
+      setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '--');
+      setText('llm-latency', data.latency?.llm_ms ? `LLM: ${data.latency.llm_ms.toFixed(0)} ms` : 'LLM: --');
 
       const routing = `${data.routing?.ts_signals || 0} TS / ${data.routing?.llm_signals || 0} LLM`;
       setText('routing', routing);
       setText('fallback-usage', `Fallback used: ${data.routing?.fallback_used || 0}`);
 
-      setText('quality-avg', data.quality?.average !== undefined ? (data.quality.average * 100).toFixed(1) + '%' : '–');
-      setText('quality-min', data.quality?.minimum !== undefined ? `Min: ${(data.quality.minimum * 100).toFixed(1)}%` : 'Min: –');
+      setText('quality-avg', data.quality?.average !== undefined ? (data.quality.average * 100).toFixed(1) + '%' : '--');
+      setText('quality-min', data.quality?.minimum !== undefined ? `Min: ${(data.quality.minimum * 100).toFixed(1)}%` : 'Min: --');
 
-      renderEquity(data.equity);
+      renderEquity(data.equity, data.equity_realized);
       renderSignals(data.signals);
     });
   </script>

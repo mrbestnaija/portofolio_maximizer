@@ -243,6 +243,40 @@ Add `--enable-llm` to activate the Ollama-backed fallback router whenever the en
 2. Validates, imputes, and feeds the data into the SARIMAX/SAMOSSA/GARCH/MSSA-RL ensemble.
 3. Routes the highest-confidence trade and executes it through `PaperTradingEngine`, tracking cash, PnL, and open positions in real time.
 
+### Higher‑Order Hyper‑Parameter Optimization (Default Orchestration Mode)
+
+For post‑implementation evaluation and regime‑aware tuning, the project includes a higher‑order
+hyper‑parameter driver that wraps ETL → auto‑trader → strategy optimization in a stochastic loop.
+This driver treats configuration knobs such as:
+
+- Time window (`START` / `END` evaluation dates),
+- Quant success `min_expected_profit`,
+- Time Series `time_series.min_expected_return`
+
+as higher‑order hyper‑parameters and searches over them non‑convexly using a bandit‑style
+explore/exploit policy (30% explore / 70% exploit by default, dynamically adjusted).
+
+The canonical entrypoint is:
+
+```bash
+# Run a 5‑round higher‑order hyper‑parameter search
+HYPEROPT_ROUNDS=5 bash/bash/run_post_eval.sh
+```
+
+Each round:
+- Generates temporary override configs (`config/quant_success_config.hyperopt.yml`,
+  `config/signal_routing_config.hyperopt.yml`),
+- Runs `scripts/run_etl_pipeline.py`, `scripts/run_auto_trader.py`,
+  and `scripts/run_strategy_optimization.py` against a dedicated DB,
+- Scores the run by realized `total_profit` over a short evaluation window,
+- Logs trial parameters and scores to `logs/hyperopt/hyperopt_<RUN_ID>.log`,
+- Maintains a 30/70 explore/exploit policy that slowly shifts toward exploitation
+  as better configurations are discovered.
+
+The best configuration is re‑run as `<RUN_ID>_best` and surfaced in
+`visualizations/dashboard_data.json` so dashboards and downstream tools can treat it
+as the current regime‑specific optimum (without hardcoding it in code).
+
 ### Analyze Dataset
 
 ```bash

@@ -9,6 +9,11 @@
 **Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
 **Recent Achievements**:
 
+### 🔄 2025-11-24 Delta (currency update)
+- Data-source-aware ticker resolution added via `etl/data_universe.py` (wired into `scripts/run_auto_trader.py`); keeps explicit + frontier as default and allows provider discovery when empty inputs.
+- LLM fallback now enabled by default on the auto-trader flag to improve routing redundancy without changing thresholds.
+- Dashboard JSON emitter hardened (datetime → isoformat) to avoid serialization warnings during live runs.
+
 ### 🚨 2025-11-15 Brutal Run Findings (blocking)
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite store is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every persistence-dependent task in this list is blocked until the DB is rebuilt and `DatabaseManager._connect` handles this error like the existing disk-I/O branch.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` demonstrate Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. As soon as ~90 forecast rows are inserted the stage logs “Generated forecasts for 0 ticker(s)”, so all downstream Time Series/LLM tasks stall.

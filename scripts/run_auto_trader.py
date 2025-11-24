@@ -4,7 +4,7 @@ run_auto_trader.py
 ------------------
 
 Autonomous trading loop that turns Portfolio Maximizer into a profit-focused
-machine by wiring extraction → validation → forecasting → signal routing →
+machine by wiring extraction -> validation -> forecasting -> signal routing ->
 execution into a single continuously running workflow.
 """
 
@@ -36,7 +36,7 @@ from etl.preprocessor import Preprocessor
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_router import SignalRouter
-from etl.frontier_markets import merge_frontier_tickers
+from etl.data_universe import resolve_ticker_universe
 
 try:  # Optional Ollama dependency
     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -104,7 +104,21 @@ def _ensure_min_length(frame: pd.DataFrame, min_points: int = MIN_SERIES_POINTS)
         return frame
 
     idx = pd.DatetimeIndex(frame.index)
-    freq = pd.infer_freq(idx) or "B"
+
+    # Infer frequency defensively; if too few points, fall back to business day
+    try:
+        inferred = pd.infer_freq(idx)
+    except ValueError:
+        inferred = None
+    freq = inferred or "B"
+
+    # If fewer than 3 points, fabricate a tiny scaffold to allow padding
+    if len(idx) < 3:
+        start = idx.min()
+        scaffold = pd.date_range(start=start, periods=3, freq=freq)
+        frame = frame.reindex(idx.union(scaffold)).sort_index().ffill()
+        idx = pd.DatetimeIndex(frame.index)
+
     end = idx[-1]
     padded_index = pd.date_range(end=end, periods=min_points, freq=freq)
     padded = frame.reindex(idx.union(padded_index)).sort_index().ffill()
@@ -119,7 +133,7 @@ def _prepare_market_window(
     """Fetch the latest OHLCV window for all tickers."""
     end_date = datetime.now(UTC).date()
     start_date = end_date - timedelta(days=max(lookback_days, MIN_LOOKBACK_DAYS))
-    logger.info("Fetching OHLCV window: %s → %s", start_date, end_date)
+    logger.info("Fetching OHLCV window: %s -> %s", start_date, end_date)
     return manager.extract_ohlcv(
         tickers=tickers,
         start_date=start_date.strftime("%Y-%m-%d"),
@@ -170,6 +184,8 @@ def _execute_signal(
     forecast_bundle: Dict,
     current_price: float,
     market_data: pd.DataFrame,
+    quality: Optional[Dict[str, Any]] = None,
+    data_source: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -177,8 +193,8 @@ def _execute_signal(
         forecast_bundle=forecast_bundle,
         current_price=current_price,
         market_data=market_data,
-        quality=quality if 'quality' in locals() else None,
-        data_source=data_source if 'data_source' in locals() else None,
+        quality=quality,
+        data_source=data_source,
     )
 
     primary = bundle.primary_signal
@@ -199,9 +215,13 @@ def _execute_signal(
             "status": result.status,
             "reason": result.reason,
             "warnings": result.validation_warnings,
-            "quality": quality if 'quality' in locals() else None,
-            "data_source": data_source if 'data_source' in locals() else None,
+            "quality": quality,
+            "data_source": data_source,
         }
+
+    realized_pnl = getattr(result.trade, "realized_pnl", None)
+    realized_pnl_pct = getattr(result.trade, "realized_pnl_pct", None)
+    executed_at = result.trade.timestamp.isoformat() if result.trade else None
 
     return {
         "ticker": ticker,
@@ -213,8 +233,11 @@ def _execute_signal(
         "signal_source": primary.get("source", "TIME_SERIES"),
         "signal_confidence": primary.get("confidence"),
         "expected_return": primary.get("expected_return"),
-        "quality": quality if 'quality' in locals() else None,
-        "data_source": data_source if 'data_source' in locals() else None,
+        "quality": quality,
+        "data_source": data_source,
+        "timestamp": executed_at,
+        "realized_pnl": realized_pnl,
+        "realized_pnl_pct": realized_pnl_pct,
     }
 
 
@@ -281,12 +304,25 @@ def _emit_dashboard_json(
     summary: Dict[str, Any],
     routing_stats: Dict[str, Any],
     equity_points: list[Dict[str, Any]],
-    recent_signals: list[Dict[str, Any]],
+    realized_equity_points: Optional[list[Dict[str, Any]]] = None,
+    recent_signals: Optional[list[Dict[str, Any]]] = None,
     win_rate: float = 0.0,
     latencies: Optional[Dict[str, float]] = None,
     quality_summary: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the latest run snapshot for the HTML dashboard."""
+    def _json_safe(obj: Any) -> Any:
+        """Recursively convert datetimes/pd.Timestamps to ISO strings for JSON dump."""
+        from pandas import Timestamp  # lazy import to avoid circulars
+
+        if isinstance(obj, (datetime, Timestamp)):
+            return obj.isoformat()
+        if isinstance(obj, dict):
+            return {k: _json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_json_safe(v) for v in obj]
+        return obj
+
     payload = {
         "meta": meta,
         "pnl": {"absolute": summary["pnl_dollars"], "pct": summary["pnl_pct"]},
@@ -300,12 +336,13 @@ def _emit_dashboard_json(
         },
         "quality": quality_summary or {},
         "equity": equity_points,
-        "signals": recent_signals[-20:],  # keep it small
+        "equity_realized": realized_equity_points or [],
+        "signals": (recent_signals or [])[-20:],  # keep it small
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+            json.dump(_json_safe(payload), handle, indent=2)
         logger.info("Dashboard data emitted to %s", path)
     except Exception as exc:
         logger.warning("Unable to emit dashboard data: %s", exc)
@@ -419,6 +456,8 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
 @click.option(
     "--enable-llm",
     is_flag=True,
+    default=True,
+    show_default=True,
     help="Enable LLM fallback routing (requires local Ollama).",
 )
 @click.option(
@@ -451,16 +490,23 @@ def main(
     _activate_ai_companion_guardrails(companion_config)
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-    ticker_list = merge_frontier_tickers(
-        base_tickers,
-        include_frontier=include_frontier_tickers,
-    )
-    if not ticker_list:
-        raise click.UsageError("At least one ticker symbol is required.")
-
-    logger.info("Autonomous trading loop booting for tickers: %s", ", ".join(ticker_list))
-
     data_source_manager = DataSourceManager()
+    universe = resolve_ticker_universe(
+        base_tickers=base_tickers,
+        include_frontier=include_frontier_tickers,
+        active_source=data_source_manager.get_active_source(),
+        use_discovery=True,
+    )
+    ticker_list = universe.tickers
+    if not ticker_list:
+        raise click.UsageError("At least one ticker symbol is required (no tickers resolved).")
+
+    logger.info(
+        "Autonomous trading loop booting for tickers from %s (source=%s): %s",
+        universe.universe_source or "unknown",
+        universe.active_source,
+        ", ".join(ticker_list),
+    )
     data_validator = DataValidator()
     preprocessor = Preprocessor()
     trading_engine = PaperTradingEngine(initial_capital=initial_capital)
@@ -562,6 +608,8 @@ def main(
                 forecast_bundle=forecast_bundle,
                 current_price=current_price,
                 market_data=ticker_frame,
+                quality=quality,
+                data_source=data_source,
             )
 
             if execution_report:
@@ -625,18 +673,53 @@ def main(
 
     # Emit dashboard snapshot for visualization
     equity_points.append({"t": "end", "v": final_summary["total_value"]})
+    realized_equity_points: list[Dict[str, Any]] = []
+    realized_value = trading_engine.initial_capital
+    for idx, exec_sig in enumerate(executed_signals):
+        rpnl = exec_sig.get("realized_pnl")
+        if rpnl is None:
+            continue
+        realized_value += rpnl
+        realized_equity_points.append(
+            {
+                "t": exec_sig.get("timestamp") or f"trade_{idx+1}",
+                "v": realized_value,
+            }
+        )
+    if realized_equity_points:
+        realized_equity_points.insert(0, {"t": "start", "v": trading_engine.initial_capital})
+        realized_equity_points.append({"t": "end", "v": realized_value})
+    else:
+        try:
+            history = trading_engine.db_manager.get_realized_pnl_history(limit=500)
+            if history:
+                val = trading_engine.initial_capital
+                realized_equity_points.append({"t": "start", "v": val})
+                for rec in history:
+                    rp = rec.get("realized_pnl") or 0.0
+                    val += rp
+                    realized_equity_points.append({"t": str(rec.get("trade_date")), "v": val})
+                realized_equity_points.append({"t": "end", "v": val})
+        except Exception:
+            logger.debug("Skipping realized PnL history aggregation")
     ts_lat = signal_router.latencies.get("ts_ms", [])
     llm_lat = signal_router.latencies.get("llm_ms", [])
     latencies = {
         "ts_ms": sum(ts_lat) / len(ts_lat) if ts_lat else None,
         "llm_ms": sum(llm_lat) / len(llm_lat) if llm_lat else None,
     }
+    strategy_config = None
+    try:
+        strategy_config = trading_engine.db_manager.get_best_strategy_config(regime="default")
+    except Exception:
+        logger.debug("No cached strategy configuration available for dashboard.")
     meta = {
         "run_id": run_id,
         "ts": datetime.now(UTC).isoformat(),
         "tickers": ticker_list,
         "cycles": cycles,
         "llm_enabled": bool(llm_generator),
+        "strategy": strategy_config or {},
     }
     _emit_dashboard_json(
         path=DASHBOARD_DATA_PATH,
@@ -644,6 +727,7 @@ def main(
         summary=final_summary,
         routing_stats=signal_router.routing_stats,
         equity_points=equity_points,
+        realized_equity_points=realized_equity_points,
         recent_signals=recent_signals if 'recent_signals' in locals() else [],
         win_rate=win_rate,
         latencies=latencies,

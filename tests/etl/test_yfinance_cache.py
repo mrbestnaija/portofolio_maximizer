@@ -185,6 +185,45 @@ class TestCacheIntegration:
         assert 'AAPL' not in fetch_calls
         assert not data.empty
 
+    def test_backoff_skips_known_failed_tickers(self, temp_storage, monkeypatch):
+        """Delisted/missing tickers should be skipped after first failure while others proceed."""
+        fetch_calls = []
+
+        def mock_fetch(ticker, start, end, timeout):
+            fetch_calls.append(ticker)
+            if ticker == 'DELISTED':
+                return pd.DataFrame()  # simulate yfinance returning nothing
+            dates = pd.date_range(start, end, freq='D')
+            return pd.DataFrame({
+                'Open': np.ones(len(dates)),
+                'High': np.ones(len(dates)),
+                'Low': np.ones(len(dates)),
+                'Close': np.ones(len(dates)),
+                'Volume': np.ones(len(dates)),
+            }, index=dates)
+
+        import etl.yfinance_extractor
+        monkeypatch.setattr(etl.yfinance_extractor, 'fetch_ticker_data', mock_fetch)
+
+        extractor = YFinanceExtractor(
+            storage=temp_storage,
+            cache_hours=24,
+            rate_limit_delay=0,
+            failure_backoff_hours=1,  # short backoff for test
+        )
+
+        # First run should attempt both tickers; only AAPL has data
+        data = extractor.extract_ohlcv(['DELISTED', 'AAPL'], '2020-01-01', '2020-01-05')
+        assert not data.empty
+        assert set(data['ticker'].unique()) == {'AAPL'}
+        assert fetch_calls.count('DELISTED') == 1
+
+        # Second run within backoff window should skip DELISTED (no new fetch)
+        data2 = extractor.extract_ohlcv(['DELISTED', 'AAPL'], '2020-01-01', '2020-01-05')
+        assert not data2.empty
+        assert set(data2['ticker'].unique()) == {'AAPL'}
+        assert fetch_calls.count('DELISTED') == 1  # unchanged
+
 
 class TestCacheFreshness:
     """Test cache freshness validation."""

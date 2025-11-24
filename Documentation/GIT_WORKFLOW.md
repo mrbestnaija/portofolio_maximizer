@@ -1,9 +1,9 @@
 # Git Workflow - Local as Source of Truth
 
 **Policy**: Local repository is ALWAYS the source of truth  
-**Last Updated**: 2025-11-06  
+**Last Updated**: 2025-11-24  
 **Status**: ENFORCED  
-**Version**: 2.0
+**Version**: 2.1
 
 ---
 
@@ -32,6 +32,24 @@
 
 ### For Existing Contributors
 
+1. Ensure your local branch is clean and tests pass:
+   ```bash
+   git status
+   pytest tests/
+   ```
+
+2. Commit your work with a descriptive message:
+   ```bash
+   git add .
+   git commit -m "feat(hyperopt): add higher-order post-eval driver"
+   ```
+
+3. Sync with remote (local is source of truth, use current branch):
+   ```bash
+   git pull --rebase origin $(git rev-parse --abbrev-ref HEAD) || true
+   git push origin $(git rev-parse --abbrev-ref HEAD)
+   ```
+
 
 ---
 
@@ -39,7 +57,7 @@
 
 **GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git  
 **Primary Branch**: `master`  
-**Last Sync**: 2025-11-06 (Commit 6839f0b)
+**Last Sync**: 2025-11-24 (local hyperopt + doc updates, not yet pushed in this repo snapshot)
 
 ### Remote Configuration
 
@@ -163,8 +181,19 @@ Before committing, verify:
 
 Before pushing to remote:
 
-
-> **Time Series-first brutal suite**: `bash/comprehensive_brutal_test.sh` now defaults to forecaster-only validation. Run `BRUTAL_ENABLE_LLM=1 bash bash/comprehensive_brutal_test.sh` only if you must benchmark the legacy LLM fallback; otherwise leave the variable unset so the brutal gate mirrors the TS-first architecture described throughout the documentation set.
+- Run unit/integration tests relevant to your changes.
+- For profit-critical or hyperopt changes:
+  - Run the time series-first brutal suite when feasible:
+    ```bash
+    bash/bash/comprehensive_brutal_test.sh
+    # Optional legacy LLM path:
+    # BRUTAL_ENABLE_LLM=1 bash/bash/comprehensive_brutal_test.sh
+    ```
+- If you touched hyperopt/strategy tuning:
+  - Sanity-check `bash/run_post_eval.sh` on a small hyperopt run:
+    ```bash
+    HYPEROPT_ROUNDS=1 bash/bash/run_post_eval.sh
+    ```
 
 ### Automated Testing (Recommended)
 
