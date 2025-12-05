@@ -12,6 +12,7 @@
 - New data-source-aware ticker resolver (`etl/data_universe.py`) wired into `scripts/run_auto_trader.py`; explicit + frontier remains default, provider discovery optional when no inputs.
 - LLM fallback defaults to on in the trading loop; guardrails unchanged.
 - Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings during live runs.
+- Barbell integration tracked via `BARBELL_INTEGRATION_TODO.md`; future stub replacements around portfolio math, paper trading, and NGX/frontier exposure must respect safe/risk buckets and tail-aware evaluation (Sortino/Omega/CVaR + scenarios).
 
 ### Nov 12, 2025 Update
 - Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
@@ -71,7 +72,7 @@ This document identifies all stub implementations, incomplete code, and placehol
 
 ### 1. **Broker Integration - cTrader Client** ✅ IMPLEMENTED
 **Location**: `execution/ctrader_client.py`  
-**Status**: Replaces the missing IBKR stub with a demo-first cTrader Open API
+**Status**: Replaces the missing massive.com/polygon.io stub with a demo-first cTrader Open API
 client that reads credentials from `.env`, handles OAuth token refresh, and
 exposes order/account helpers for the order manager.  
 **Priority**: CRITICAL - Required for live trading (demo first per roadmap)
@@ -802,6 +803,48 @@ class TestDataValidator:
 
 ---
 
+### 15. **Options/Derivatives Integration (Barbell-Constrained)** 🟡 IN PROGRESS
+**Location**: `config/options_config.yml`, `config/barbell.yml`, `risk/barbell_policy.py`, `Documentation/BARBELL_OPTIONS_MIGRATION.md`, `Documentation/BARBELL_INTEGRATION_TODO.md`  
+**Status**: Core config + barbell policy scaffold in place; options ETL/execution still feature-flagged and inert  
+**Priority**: MEDIUM – Future extension once spot-only barbell is profitable
+
+**Current State**:
+- `config/options_config.yml` defines:
+  - `options_trading.enabled` master toggle (default `false`),
+  - barbell guardrails (`max_options_weight`, `max_premium_pct_nav`),
+  - default selection bands for OTM options (moneyness, expiry),
+  - per-asset-class limits (equity index, single-name equity, FX, commodity, frontier equity),
+  - a first set of allowed underlyings for barbell-style options (AAPL, MSFT, SPY, QQQ).
+- `config/barbell.yml` now provides the **global barbell shell**:
+  - Safe and risk buckets (symbol lists) with `min_weight` / `max_weight` bounds,
+  - Feature flags (`enable_barbell_allocation`, `enable_barbell_validation`, `enable_antifragility_tests`),
+  - Per-market caps for EM/NGX/crypto inside the risk sleeve.
+- `risk/barbell_policy.py` implements the initial `BarbellConfig` + `BarbellConstraint` helper:
+  - `bucket_weights(weights) -> (w_safe, w_risk, w_other)` for instrumentation and analytics,
+  - `project_to_feasible(weights)` that enforces barbell bounds when `enable_barbell_allocation: true`,
+  - No behaviour change when barbell allocation is disabled (no-op projection).
+- `Documentation/BARBELL_OPTIONS_MIGRATION.md` describes:
+  - What OTM options are and why they are used as convex risk-leg instruments,
+  - Data model extensions (options_quotes, underlyings, strikes, expiries, IV/Greeks),
+  - Phased migration (O1–O4) from spot-only to options/derivatives under a barbell allocation.
+- `Documentation/BARBELL_INTEGRATION_TODO.md` tracks the remaining barbell tasks (LLM/ML integration, antifragility suite) and is now partially satisfied at the config/policy layer.
+
+**Required Completion**:
+- Implement options ETL and storage alongside existing OHLCV tables (without changing spot behaviour when `options_trading.enabled` is false).
+- Add feature-flagged options/synthetic convex strategies to the risk sleeve only, honouring barbell caps and quant-success guardrails.
+- Extend brutal/backtest harness to include tail/antifragility tests for options strategies (premium-at-risk aware).
+- Keep options codepaths entirely inert unless `ENABLE_OPTIONS=true` and `options_trading.enabled: true` are both set.
+
+**Dependencies**:
+- `etl/data_source_manager.py` and new options extractor(s)
+- `risk/barbell_policy.py` (or equivalent barbell enforcement)
+- `Documentation/BARBELL_OPTIONS_MIGRATION.md` for design reference
+
+**Success Criteria**:
+- [ ] Spot-only system remains unchanged when options are disabled.
+- [ ] Options risk is always bounded by `max_options_weight` and `max_premium_pct_nav`.
+- [ ] Options strategies pass brutal + antifragility tests before being considered for live/paper promotion.
+
 ## 📊 Implementation Priority Matrix
 
 | Component | Priority | Effort | Dependencies | Status |
@@ -824,7 +867,7 @@ class TestDataValidator:
 ## 🎯 Implementation Roadmap
 
 ### Phase 1: Critical Trading Infrastructure (Weeks 1-2)
-1. ~~**IBKR Client**~~ ➜ **cTrader Client** (Week 1, Days 1-3) ✅ Completed
+1. ~~**massive.com/polygon.io Client**~~ ➜ **cTrader Client** (Week 1, Days 1-3) ✅ Completed
    - Demo + live Open API endpoints with OAuth token refresh
    - Dataclass order payloads + placement responses
    - Environment-driven credential loader (`execution/ctrader_client.py`)

@@ -708,6 +708,12 @@ Potential improvements for future versions:
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-10-07
-**Next Review**: After Phase 5 implementation
+### 2025-12-04 Update (MVS summaries + diagnostic hygiene)
+- End-to-end and live runners (`bash/run_end_to_end.sh`, `bash/run_pipeline_live.sh`) now clear `DIAGNOSTIC_MODE`/`TS_DIAGNOSTIC_MODE`/`EXECUTION_DIAGNOSTIC_MODE`/`LLM_FORCE_FALLBACK` before invoking the pipeline, ensuring that production checkpoint/log streams are collected with full TS/LLM guardrails enabled.
+- Both launchers print **MVS-style profitability summaries** after completion by calling `DatabaseManager.get_performance_summary()` (optionally windowed via `MVS_START_DATE` / `MVS_WINDOW_DAYS`). This couples the checkpoint/event log timeline with realised PnL metrics so operators can tie specific checkpoints to profitability regimes.
+
+---
+
+**Document Version**: 1.1
+**Last Updated**: 2025-12-04
+**Next Review**: After TS/LLM guardrail + MVS reporting validation

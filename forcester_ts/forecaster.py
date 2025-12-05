@@ -468,7 +468,12 @@ class TimeSeriesForecaster:
         else:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
-            results["mean_forecast"] = results.get("sarimax_forecast")
+            # Prefer SAMOSSA as the default TS baseline when available,
+            # falling back to SARIMAX for backward compatibility.
+            if results.get("samossa_forecast") is not None:
+                results["mean_forecast"] = results.get("samossa_forecast")
+            else:
+                results["mean_forecast"] = results.get("sarimax_forecast")
 
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)

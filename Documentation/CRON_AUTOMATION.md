@@ -198,7 +198,43 @@ keep their cron entries in place while implementation progresses.
 
 ---
 
-## 6. Quick Start Checklist
+## 6. Quant Threshold Sweeps & Cost Estimation
+
+Two read-only helpers can be wired into cron to keep TS thresholds and friction assumptions grounded in recent data:
+
+- `scripts/sweep_ts_thresholds.py` – summarises realised performance over a grid of `(confidence_threshold, min_expected_return)` values per ticker.
+- `scripts/estimate_transaction_costs.py` – estimates commission / transaction costs by ticker or simple asset class buckets.
+
+Example entries (adjust paths/schedules as needed):
+
+```cron
+# 8. Weekly TS threshold sweep (uses realised trades in trade_executions)
+0 4 * * 1 cd /opt/portfolio_maximizer_v45 && \
+  simpleTrader_env/bin/python scripts/sweep_ts_thresholds.py \
+    --lookback-days 365 \
+    --grid-confidence "0.50,0.55,0.60" \
+    --grid-min-return "0.001,0.002,0.003" \
+    --min-trades 10 \
+    --output logs/automation/ts_threshold_sweep.json \
+    >> logs/cron/ts_threshold_sweep.out 2>&1
+
+# 9. Monthly transaction cost estimation (per asset class)
+15 4 1 * * cd /opt/portfolio_maximizer_v45 && \
+  simpleTrader_env/bin/python scripts/estimate_transaction_costs.py \
+    --lookback-days 365 \
+    --grouping asset_class \
+    --min-trades 5 \
+    --output logs/automation/transaction_costs.json \
+    >> logs/cron/transaction_costs.out 2>&1
+```
+
+Both scripts:
+- Only read from the existing SQLite database; they do not modify configs.
+- Emit machine-readable JSON under `logs/automation/` for use by higher-level tooling (e.g., a proposal → config diff helper or notebooks).
+
+---
+
+## 7. Quick Start Checklist
 
 1. Ensure `simpleTrader_env` exists and is up to date:
    - `python3 -m venv simpleTrader_env`
@@ -215,4 +251,3 @@ keep their cron entries in place while implementation progresses.
    - `logs/cron/*.log` for cron‑level output.
    - `logs/pipeline_run.log`, `logs/events/events.log`,
      and monitoring logs for deeper diagnostics.
-

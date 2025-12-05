@@ -46,13 +46,36 @@ def _ensure_utc_datetime(value: Any) -> datetime:
     if isinstance(value, (bytes, bytearray)):
         value = value.decode()
     if isinstance(value, str):
-        normalized = value.strip()
-        if not normalized:
+        raw = value.strip()
+        if not raw:
             return datetime.now(UTC)
-        normalized = normalized.replace("Z", "+00:00") if normalized.endswith("Z") else normalized
-        if "T" not in normalized:
-            normalized = f"{normalized}T00:00:00"
-        dt = datetime.fromisoformat(normalized)
+        # Normalise simple Z suffix first.
+        candidate = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+
+        # First attempt: let datetime.fromisoformat handle common variants
+        try:
+            dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            # Heuristic repairs for legacy/broken formats.
+            repaired = candidate
+            # Case 1: legacy "YYYY-MM-DD HH:MM:SST00:00:00" -> strip trailing part
+            if " " in repaired and "T" in repaired:
+                base = repaired.split("T", 1)[0]
+                try:
+                    dt = datetime.fromisoformat(base)
+                except ValueError:
+                    # Fall back to replacing the space with 'T'
+                    base = base.replace(" ", "T", 1)
+                    dt = datetime.fromisoformat(base)
+            else:
+                # Case 2: "YYYY-MM-DD HH:MM:SS" without T – replace first space
+                if "T" not in repaired and " " in repaired:
+                    repaired = repaired.replace(" ", "T", 1)
+                # Case 3: date-only "YYYY-MM-DD" – append midnight
+                elif "T" not in repaired:
+                    repaired = f"{repaired}T00:00:00"
+                dt = datetime.fromisoformat(repaired)
+
         return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     raise TypeError(f"Unsupported timestamp value: {value!r}")
 

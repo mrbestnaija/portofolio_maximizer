@@ -14,6 +14,19 @@ quant_validation:
     min_expected_profit: 50.0
     require_significance: false
     min_information_ratio: 0.0
+  per_ticker:
+    BTC-USD:
+      success_criteria:
+        min_expected_profit: 75.0
+    CL=F:
+      success_criteria:
+        min_expected_profit: 75.0
+    SOL:
+      success_criteria:
+        min_expected_profit: 100.0
+    EURUSD=X:
+      success_criteria:
+        min_expected_profit: 50.0
   bootstrap:
     n_samples: 400
     confidence_level: 0.95

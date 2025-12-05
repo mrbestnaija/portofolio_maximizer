@@ -9,10 +9,24 @@
 **Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
 **Recent Achievements**:
 
+### 🔄 2025-12-03 Delta (diagnostic mode + invariants)
+- DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
+- Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts).
+- Diagnostic reduced-universe run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
+
 ### 🔄 2025-11-24 Delta (currency update)
 - Data-source-aware ticker resolution added via `etl/data_universe.py` (wired into `scripts/run_auto_trader.py`); keeps explicit + frontier as default and allows provider discovery when empty inputs.
 - LLM fallback now enabled by default on the auto-trader flag to improve routing redundancy without changing thresholds.
 - Dashboard JSON emitter hardened (datetime → isoformat) to avoid serialization warnings during live runs.
+- Barbell migration groundwork documented in `BARBELL_INTEGRATION_TODO.md`; future optimization tasks must treat long-vol/tail-hedge legs as convexity purchases and evaluate them with Sortino/Omega/CVaR + scenario analysis rather than Sharpe alone.
+- Forecaster monitoring config (`config/forecaster_monitoring.yml`) added to centralise TS health thresholds (profit_factor, win_rate, RMSE) reused by brutal CLIs, hyperopt, and dashboards.
+- `bash/run_post_eval.sh` and `scripts/run_strategy_optimization.py` now respect these thresholds so hyperopt only treats regimes as profitable when the TS ensemble passes PF/WR/RMSE checks.
+ - Global barbell shell and policy scaffold added:
+   - `config/barbell.yml` defines safe/risk buckets and feature flags (`enable_barbell_allocation`, `enable_barbell_validation`, `enable_antifragility_tests`).
+   - `risk/barbell_policy.py` exposes `BarbellConstraint` for safe vs risk bucket calculations and optional projection into the barbell-feasible region (no-op while barbell allocation is disabled).
+ - Options/barbell migration documented and partially wired:
+   - `config/options_config.yml` remains the single source of truth for options feature flags and risk caps (`max_options_weight`, `max_premium_pct_nav`, allowed underlyings).
+   - `Documentation/BARBELL_OPTIONS_MIGRATION.md` and `Documentation/BARBELL_INTEGRATION_TODO.md` updated to reflect the initial config/policy implementation and the feature-flag contract for future options/derivatives work.
 
 ### 🚨 2025-11-15 Brutal Run Findings (blocking)
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite store is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every persistence-dependent task in this list is blocked until the DB is rebuilt and `DatabaseManager._connect` handles this error like the existing disk-I/O branch.
@@ -36,6 +50,16 @@
 - Monitoring deployment script validated end-to-end (Oct 23, 2025)
 - Autonomous trading entry point (`scripts/run_auto_trader.py`) now chains extraction → validation → forecasting → signal routing → execution with optional LLM fallback, keeping cash/positions/trade history synchronized each cycle.
 - README + roadmap reposition the platform as an **Autonomous Profit Engine** and document the new loop in Key Features, Quick Start, and infrastructure bullet lists.
+
+### 🔄 2025-11-24 Options & Barbell Delta
+- `config/options_config.yml` added as the **single source of truth** for options/derivative feature flags and barbell guardrails:
+  - `options_trading.enabled`: master toggle (default: `false`).
+  - `barbell.max_options_weight` and `barbell.max_premium_pct_nav`: caps for options exposure inside the risk sleeve.
+  - `selection.moneyness` and `selection.expiry_days`: default seeds for OTM selection bands that higher-order hyperopt may refine.
+- `Documentation/BARBELL_OPTIONS_MIGRATION.md` documents the migration plan from spot-only portfolios to options/derivatives under a barbell allocation, focusing on:
+  - Clear definitions of OTM options and their role as convex risk-leg instruments.
+  - Data model changes (options_quotes, underlyings, strikes, expiries) that must be implemented without altering existing ETL/auto-trader behaviour when options are disabled.
+  - Phased rollout (O1–O4) with brutal-suite gates for each phase.
 - Pipeline stage planner now forces Time Series forecasting/signal routing before any LLM work; LLM stages run strictly as fallback after the router.
 
 **⚠️ STATUS ALERT**: Documentation is ahead of execution. Core Phase-A tasks (signal validation integration, enhanced portfolio math promotion, statistical tooling, paper trading) remain unshipped. Profitability metrics cannot yet be evaluated because the database holds incomplete signal records and no paper trades.

@@ -1,16 +1,17 @@
 # AI Developer Guardrails: Reality-Based Development Checklist
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+> **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
 
-## Project Status (Updated: 2025-10-04)
+## Project Status (Updated: 2025-12-04)
 
 ### Current Phase: 4.5 - Time Series Cross-Validation ? COMPLETE
 - **Implementation**: k-fold CV with expanding window
-- **Test Coverage**: 85/85 tests passing (100%) _(historical benchmark; brutal runs currently blocked - see integration tracker below)_
+- **Test Coverage**: Brutal suite exercises profit-critical, ETL, Time Series, signal routing, integration, and security tests under `simpleTrader_env`; latest run (`logs/brutal/results_20251204_190220/`) is structurally green but global quant health remains RED (see below).
 - **Configuration**: Modular, platform-agnostic architecture
 - **Documentation**: Comprehensive (implementation_checkpoint.md, arch_tree.md, TIME_SERIES_CV.md)
 - **Performance**: 5.5x temporal coverage improvement (15% ? 83%)
-- **Integration status**: **BLOCKED** - follow `Documentation/integration_fix_plan.md` before trusting any historical metrics.
+- **Integration status**: **PARTIALLY BLOCKED** â€“ structural ETL/TS/LLM issues from the 2025-11-15 brutal run have been remediated and the brutal harness now completes, but global quant validation health is still RED (FAIL_fraction > `max_fail_fraction=0.90`). Treat quant gating and profitability as active research constraints until `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and brutal reports show GREEN or acceptable YELLOW status.
 
 ### Integration Recovery Tracker
 - Treat `Documentation/integration_fix_plan.md` as the canonical remediation log; do not promote any downstream status in this file until that tracker is cleared.
@@ -50,6 +51,12 @@ MANDATORY: Before suggesting any code or architecture:
 - [ ] **Profitable strategy proven?** Awaiting Phase 5 (Portfolio Optimization)
 - [ ] **Working execution system?** Data pipeline operational, execution pending
 - [x] **Budget constraints respected?** Free tier data sources only
+
+### Options / Derivatives Introduction Gates
+- [ ] **Spot-only barbell profitable?** Barbell-constrained spot portfolio shows >10% annualised return in backtests and passes brutal suite.
+- [ ] **Options feature flag enabled?** `options_trading.enabled: true` in `config/options_config.yml` *and* `ENABLE_OPTIONS=true` in the environment.
+- [ ] **Risk budget configured?** `max_options_weight` and `max_premium_pct_nav` are explicitly set and justified in `config/options_config.yml`.
+- [ ] **Fallback path validated?** Turning `ENABLE_OPTIONS` off returns the system to spot-only behaviour without breaking existing tests.
 
 ### Before Adding New Features
 - [ ] **Business case proven?** How does this improve returns by >1%?
@@ -456,15 +463,15 @@ portfolio-system/
 +-- requirements.txt           # Exact dependency versions
 +-- 
 +-- src/                       # All source code
-¦   +-- core/                  # Business logic
-¦   +-- strategies/            # Trading strategies
-¦   +-- data/                  # Data management
-¦   +-- execution/             # Trade execution
+Â¦   +-- core/                  # Business logic
+Â¦   +-- strategies/            # Trading strategies
+Â¦   +-- data/                  # Data management
+Â¦   +-- execution/             # Trade execution
 +-- 
 +-- tests/                     # All test code
-¦   +-- unit/                  # Unit tests
-¦   +-- integration/           # Integration tests
-¦   +-- performance/           # Strategy validation
+Â¦   +-- unit/                  # Unit tests
+Â¦   +-- integration/           # Integration tests
+Â¦   +-- performance/           # Strategy validation
 +-- 
 +-- config/                    # Configuration files
 +-- scripts/                   # Deployment and utility scripts

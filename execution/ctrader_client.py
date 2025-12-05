@@ -1,7 +1,7 @@
 """execution.ctrader_client
 =================================
 
-Production-focused cTrader Open API client that replaces the original IBKR
+Production-focused cTrader Open API client that replaces the original massive.com/polygon.io
 stub described in ``Documentation/STUB_IMPLEMENTATION_PLAN.md``. The client
 is intentionally high level so that the order manager can operate the same
 portfolio lifecycle across demo (training) and live accounts without touching
@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import logging
 import os
@@ -431,6 +431,51 @@ class CTraderClient:
     # Public API
     # ------------------------------------------------------------------
 
+    def get_bars(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str = "D1",
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch OHLCV bars for a symbol from cTrader.
+
+        This is a thin wrapper over the cTrader REST bars endpoint. The exact
+        payload shape is normalised by the extractor layer so callers can rely
+        on a standard OHLCV schema.
+        """
+        if not self.config.account_id:
+            raise CTraderClientError(
+                "Account ID missing. Set CTRADER_ACCOUNT_ID or pass via overrides."
+            )
+
+        # cTrader REST endpoints expect ISO timestamps; we request a daily
+        # timeframe by default and let the extractor normalise the schema.
+        start_iso = start.isoformat() + "Z"
+        end_iso = end.isoformat() + "Z"
+
+        # NOTE: The concrete REST path/params follow the Open API docs. If the
+        # upstream contract evolves, this method is the single place that needs
+        # adjustment; downstream callers (extractors) remain stable.
+        path = f"/api/v1/accounts/{self.config.account_id}/symbols/{symbol}/bars"
+        params: Dict[str, Any] = {
+            "timeframe": timeframe,
+            "from": start_iso,
+            "to": end_iso,
+        }
+
+        payload = self._request("GET", path, params=params)
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            bars = payload.get("bars") or payload.get("data") or payload.get("candles")
+            if isinstance(bars, list):
+                return bars
+        raise CTraderClientError(
+            f"Unexpected bars payload for {symbol}: {type(payload).__name__}"
+        )
+
     def get_account_overview(self) -> AccountSnapshot:
         """Return balance/equity/margin snapshot."""
 
@@ -559,4 +604,3 @@ __all__ = [
     "CTraderOrderError",
     "OrderPlacement",
 ]
-

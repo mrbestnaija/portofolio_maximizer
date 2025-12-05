@@ -37,6 +37,7 @@ from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecaste
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_router import SignalRouter
 from etl.data_universe import resolve_ticker_universe
+from risk.barbell_policy import BarbellConfig
 
 try:  # Optional Ollama dependency
     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -75,6 +76,73 @@ def _initialize_llm_generator(model: str) -> Optional[LLMSignalGenerator]:
     except OllamaConnectionError as err:
         logger.warning("LLM fallback disabled: %s", err)
         return None
+
+
+def _llm_signals_ready_for_trading(
+    tracking_path: Path | None = None,
+) -> bool:
+    """
+    Inspect the LLM signal tracking DB and decide whether LLM fallback
+    should be allowed to influence trading decisions.
+
+    Per LLM_PERFORMANCE_REVIEW and AGENT guidance:
+    - Until at least one signal has passed validation, LLM outputs are
+      considered research-only and must not drive trades.
+    - In diagnostic modes we always allow LLM so behaviour can be
+      stress‑tested without gating.
+    """
+    # In diagnostic mode, keep LLM available so test runs can observe
+    # behaviour without production guardrails.
+    diag_mode = str(
+        os.getenv("DIAGNOSTIC_MODE")
+        or os.getenv("TS_DIAGNOSTIC_MODE")
+        or os.getenv("EXECUTION_DIAGNOSTIC_MODE")
+        or "0"
+    ) == "1"
+    if diag_mode:
+        return True
+
+    if tracking_path is None:
+        tracking_path = ROOT_PATH / "data" / "llm_signal_tracking.json"
+
+    if not tracking_path.exists():
+        logger.info(
+            "LLM tracking DB missing at %s; LLM fallback will be disabled for trading.",
+            tracking_path,
+        )
+        return False
+
+    try:
+        raw = tracking_path.read_text(encoding="utf-8")
+        payload = json.loads(raw) if raw.strip() else {}
+    except Exception as exc:  # pragma: no cover - guardrail must be robust
+        logger.warning(
+            "Failed to parse LLM tracking DB at %s (%s); disabling LLM fallback.",
+            tracking_path,
+            exc,
+        )
+        return False
+
+    meta = payload.get("metadata") or {}
+    total = int(meta.get("total_signals") or 0)
+    validated = int(meta.get("validated_signals") or 0)
+    if total <= 0 or validated <= 0:
+        logger.info(
+            "LLM tracking DB reports total_signals=%s, validated_signals=%s; "
+            "LLM fallback will be disabled until at least one signal passes "
+            "validation.",
+            total,
+            validated,
+        )
+        return False
+
+    logger.info(
+        "LLM tracking DB healthy for trading use "
+        "(total_signals=%s, validated_signals=%s).",
+        total,
+        validated,
+    )
+    return True
 
 
 def _split_ticker_frame(data: pd.DataFrame, ticker: str) -> Optional[pd.DataFrame]:
@@ -309,6 +377,8 @@ def _emit_dashboard_json(
     win_rate: float = 0.0,
     latencies: Optional[Dict[str, float]] = None,
     quality_summary: Optional[Dict[str, Any]] = None,
+    forecaster_health: Optional[Dict[str, Any]] = None,
+    quant_validation_health: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the latest run snapshot for the HTML dashboard."""
     def _json_safe(obj: Any) -> Any:
@@ -329,6 +399,8 @@ def _emit_dashboard_json(
         "win_rate": win_rate,
         "trade_count": summary["trades"],
         "latency": latencies or {},
+        "forecaster_health": forecaster_health or {},
+        "quant_validation_health": quant_validation_health or {},
         "routing": {
             "ts_signals": routing_stats.get("time_series_signals", 0),
             "llm_signals": routing_stats.get("llm_fallback_signals", 0),
@@ -507,15 +579,115 @@ def main(
         universe.active_source,
         ", ".join(ticker_list),
     )
+
+    # Optional barbell-aware quant gate: when barbell validation is enabled,
+    # use aggregate quant_validation health to temporarily disable risk-bucket
+    # tickers if recent TS signals look unhealthy. This keeps safe-bucket
+    # behaviour unchanged and aligns with BARBELL_OPTIONS_MIGRATION.md.
+    try:
+        barbell_cfg = BarbellConfig.from_yaml()
+    except Exception:
+        barbell_cfg = None
+
+    if barbell_cfg and barbell_cfg.enable_barbell_validation:
+        risk_symbols = set(barbell_cfg.risk_symbols or [])
+        quant_log_path = ROOT_PATH / "logs" / "signals" / "quant_validation.jsonl"
+        monitoring_cfg_path = ROOT_PATH / "config" / "forecaster_monitoring.yml"
+
+        if quant_log_path.exists() and monitoring_cfg_path.exists():
+            try:
+                from scripts.check_quant_validation_health import _load_entries, _summarize_global
+
+                entries = _load_entries(quant_log_path)
+                summary = _summarize_global(entries)
+
+                fm_raw = yaml.safe_load(monitoring_cfg_path.read_text()) or {}
+                fm_cfg = fm_raw.get("forecaster_monitoring") or {}
+                qv_cfg = fm_cfg.get("quant_validation") or {}
+
+                max_fail_fraction = float(qv_cfg.get("max_fail_fraction", 0.98))
+                max_neg_exp_frac = float(
+                    qv_cfg.get("max_negative_expected_profit_fraction", 0.50)
+                )
+
+                fail_frac = summary.fail_fraction
+                neg_frac = summary.negative_expected_profit_fraction
+                gate_active = (fail_frac > max_fail_fraction) or (
+                    neg_frac > max_neg_exp_frac
+                )
+
+                if gate_active:
+                    original_tickers = list(ticker_list)
+                    gated_tickers = [
+                        t for t in original_tickers if t not in risk_symbols
+                    ]
+                    if gated_tickers:
+                        disabled = sorted(risk_symbols.intersection(original_tickers))
+                        logger.warning(
+                            "Barbell quant gate ACTIVE: fail_fraction=%.3f "
+                            "(max=%.3f), neg_expected_profit_frac=%.3f (max=%.3f). "
+                            "Temporarily disabling risk-bucket tickers: %s",
+                            fail_frac,
+                            max_fail_fraction,
+                            neg_frac,
+                            max_neg_exp_frac,
+                            ", ".join(disabled) if disabled else "(none)",
+                        )
+                        ticker_list = gated_tickers
+                    else:
+                        logger.warning(
+                            "Barbell quant gate would remove all tickers; "
+                            "leaving universe unchanged."
+                        )
+            except SystemExit:
+                # Helper uses SystemExit for missing/empty logs; treat as no-op.
+                logger.debug(
+                    "Quant validation health helper exited early; skipping barbell gate."
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to evaluate barbell quant gate; proceeding without it: %s",
+                    exc,
+                )
+
     data_validator = DataValidator()
     preprocessor = Preprocessor()
     trading_engine = PaperTradingEngine(initial_capital=initial_capital)
 
-    llm_generator = _initialize_llm_generator(llm_model) if enable_llm else None
+    llm_generator: Optional[LLMSignalGenerator]
+    if enable_llm and _llm_signals_ready_for_trading():
+        llm_generator = _initialize_llm_generator(llm_model)
+    else:
+        if enable_llm:
+            logger.info(
+                "LLM fallback requested but guardrails are not satisfied; "
+                "running with Time Series only."
+            )
+        llm_generator = None
+
+    # Load signal routing config so TS thresholds and flags stay
+    # configuration-driven and aligned with the documented contract.
+    routing_cfg: Dict[str, Any] = {}
+    routing_cfg_path = ROOT_PATH / "config" / "signal_routing_config.yml"
+    if routing_cfg_path.exists():
+        try:
+            with routing_cfg_path.open("r", encoding="utf-8") as handle:
+                raw = yaml.safe_load(handle) or {}
+            routing_cfg = raw.get("signal_routing") or {}
+        except Exception as exc:
+            logger.warning("Failed to load signal routing config: %s", exc)
+
     router_config = {
-        "time_series_primary": True,
-        "llm_fallback": enable_llm and llm_generator is not None,
-        "llm_redundancy": False,
+        "time_series_primary": routing_cfg.get("time_series_primary", True),
+        "llm_fallback": routing_cfg.get(
+            "llm_fallback", enable_llm and llm_generator is not None
+        ),
+        "llm_redundancy": routing_cfg.get("llm_redundancy", False),
+        "enable_samossa": routing_cfg.get("enable_samossa", True),
+        "enable_sarimax": routing_cfg.get("enable_sarimax", True),
+        "enable_garch": routing_cfg.get("enable_garch", True),
+        "enable_mssa_rl": routing_cfg.get("enable_mssa_rl", True),
+        "time_series": routing_cfg.get("time_series") or {},
     }
     signal_router = SignalRouter(config=router_config, llm_generator=llm_generator)
     equity_points: list[Dict[str, Any]] = [{"t": "start", "v": initial_capital}]
@@ -660,6 +832,118 @@ def main(
 
     perf_summary = trading_engine.get_performance_metrics()
     win_rate = perf_summary.get("win_rate", 0.0)
+    profit_factor = perf_summary.get("profit_factor", 0.0)
+
+    # Compute forecaster health snapshot using shared monitoring thresholds so
+    # dashboards, brutal CLIs, and hyperopt all speak the same language.
+    forecaster_health: Dict[str, Any] = {}
+    quant_health: Dict[str, Any] = {}
+    monitoring_cfg_path = ROOT_PATH / "config" / "forecaster_monitoring.yml"
+    if monitoring_cfg_path.exists():
+        try:
+            fm_raw = yaml.safe_load(monitoring_cfg_path.read_text()) or {}
+            fm_cfg = fm_raw.get("forecaster_monitoring") or {}
+
+            qv_cfg = fm_cfg.get("quant_validation") or {}
+            rm_cfg = fm_cfg.get("regression_metrics") or {}
+
+            min_pf = qv_cfg.get("min_profit_factor")
+            min_wr = qv_cfg.get("min_win_rate")
+            max_fail_fraction = qv_cfg.get("max_fail_fraction")
+            max_neg_exp_frac = qv_cfg.get("max_negative_expected_profit_fraction")
+            max_ratio = rm_cfg.get("max_rmse_ratio_vs_baseline")
+
+            pf_ok = (
+                isinstance(min_pf, (int, float))
+                and isinstance(profit_factor, (int, float))
+                and float(profit_factor) >= float(min_pf)
+            )
+            wr_ok = (
+                isinstance(min_wr, (int, float))
+                and isinstance(win_rate, (int, float))
+                and float(win_rate) >= float(min_wr)
+            )
+
+            # Use the same regression summary helper as the brutal/optimizer path.
+            end_date = datetime.now(UTC).date()
+            start_date = end_date - timedelta(days=180)
+            try:
+                reg_window = trading_engine.db_manager.get_forecast_regression_summary(
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                )
+                reg_baseline = trading_engine.db_manager.get_forecast_regression_summary(
+                    model_type="SAMOSSA"
+                )
+            except Exception:  # pragma: no cover - dashboard is advisory
+                reg_window = {}
+                reg_baseline = {}
+
+            ens_win = (reg_window.get("ensemble") or {}) if reg_window else {}
+            samossa_base = (reg_baseline.get("samossa") or {}) if reg_baseline else {}
+            ensemble_rmse = ens_win.get("rmse")
+            baseline_rmse = samossa_base.get("rmse")
+            rmse_ratio = None
+            rmse_ok = None
+            if (
+                isinstance(ensemble_rmse, (int, float))
+                and isinstance(baseline_rmse, (int, float))
+                and baseline_rmse > 0
+            ):
+                rmse_ratio = float(ensemble_rmse) / float(baseline_rmse)
+                if isinstance(max_ratio, (int, float)):
+                    rmse_ok = rmse_ratio <= float(max_ratio)
+
+            forecaster_health = {
+                "thresholds": {
+                    "profit_factor_min": min_pf,
+                    "win_rate_min": min_wr,
+                    "max_fail_fraction": max_fail_fraction,
+                    "max_negative_expected_profit_fraction": max_neg_exp_frac,
+                    "rmse_ratio_max": max_ratio,
+                },
+                "metrics": {
+                    "profit_factor": float(profit_factor) if isinstance(profit_factor, (int, float)) else None,
+                    "win_rate": float(win_rate) if isinstance(win_rate, (int, float)) else None,
+                    "rmse": {
+                        "ensemble": ensemble_rmse,
+                        "baseline": baseline_rmse,
+                        "ratio": rmse_ratio,
+                    },
+                },
+                "status": {
+                    "profit_factor_ok": pf_ok if isinstance(pf_ok, bool) else None,
+                    "win_rate_ok": wr_ok if isinstance(wr_ok, bool) else None,
+                    "rmse_ok": rmse_ok,
+                },
+            }
+
+            # Attach a lightweight quant validation health summary derived
+            # from logs/signals/quant_validation.jsonl so dashboards and
+            # monitoring jobs can see aggregate PASS/FAIL behaviour.
+            quant_log_path = ROOT_PATH / "logs" / "signals" / "quant_validation.jsonl"
+            if quant_log_path.exists():
+                try:
+                    from scripts.check_quant_validation_health import _load_entries, _summarize_global
+
+                    entries = _load_entries(quant_log_path)
+                    summary = _summarize_global(entries)
+                    quant_health = {
+                        "total": summary.total,
+                        "pass_count": summary.pass_count,
+                        "fail_count": summary.fail_count,
+                        "fail_fraction": summary.fail_fraction,
+                        "negative_expected_profit_fraction": summary.negative_expected_profit_fraction,
+                        "max_fail_fraction": max_fail_fraction,
+                        "max_negative_expected_profit_fraction": max_neg_exp_frac,
+                    }
+                except SystemExit:
+                    # If helper exits early due to empty/missing logs, leave
+                    # quant_health empty; the dashboard is advisory only.
+                    quant_health = {}
+        except Exception:  # pragma: no cover - dashboard is advisory
+            forecaster_health = {}
+            quant_health = {}
 
     quality_summary = {}
     if quality_records:
@@ -732,6 +1016,8 @@ def main(
         win_rate=win_rate,
         latencies=latencies,
         quality_summary=quality_summary,
+        forecaster_health=forecaster_health,
+        quant_validation_health=quant_health,
     )
     _emit_dashboard_png(
         path=ROOT_PATH / "visualizations" / "dashboard_snapshot.png",

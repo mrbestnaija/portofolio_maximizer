@@ -164,6 +164,13 @@ class LLMSignalGenerator:
         # Simple Moving Averages
         sma_20 = close.rolling(20).mean().iloc[-1]
         sma_50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else sma_20
+
+        vol_ma20 = volume.rolling(20).mean().iloc[-1]
+        if pd.isna(vol_ma20) or vol_ma20 == 0:
+            # Avoid divide-by-zero/NaN when volumes are missing or zero
+            volume_ma_ratio = 0.0
+        else:
+            volume_ma_ratio = round(volume.iloc[-1] / vol_ma20, 2)
         
         # RSI (simplified)
         delta = close.diff()
@@ -177,7 +184,7 @@ class LLMSignalGenerator:
             'sma_20': round(sma_20, 2),
             'sma_50': round(sma_50, 2),
             'rsi_14': round(rsi, 2),
-            'volume_ma_ratio': round(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1], 2)
+            'volume_ma_ratio': volume_ma_ratio,
         }
     
     def _create_signal_prompt(self, ticker: str, analysis: Dict, indicators: Dict) -> str:
@@ -350,6 +357,11 @@ Output ONLY valid JSON."""
 
     def _latency_guard(self) -> Tuple[bool, Optional[str]]:
         """Return whether a latency-based fallback should trigger for signal generation."""
+        # In diagnostic mode, effectively disable latency fallback so we see LLM behaviour.
+        diag_mode = str(os.getenv("DIAGNOSTIC_MODE") or os.getenv("TS_DIAGNOSTIC_MODE") or "0") == "1"
+        if diag_mode:
+            return False, None
+
         max_latency_env = os.getenv("LLM_MAX_LATENCY_SECONDS", "5.0")
         min_tokens_env = os.getenv("LLM_MIN_TOKENS_PER_SEC", "5.0")
         try:

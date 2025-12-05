@@ -115,9 +115,19 @@ def main(
         """
         Evaluate a candidate using realized performance metrics for a regime.
 
-        This implementation is regime-aware via the evaluation window and uses
-        ONLY realized trades stored in the database. It does not synthesize
-        any new signals or trades.
+        Notes
+        -----
+        - Regime-aware via the evaluation window and uses ONLY realized trades
+          stored in the database; it does not synthesize new signals/trades.
+        - Consults time series forecaster regression metrics
+          (RMSE/sMAPE/tracking_error) stored in time_series_forecasts so that
+          candidates are only rewarded when the TS ensemble is performing
+          above configured monitoring thresholds.
+        - Barbell/tail-risk aware evaluation (Sortino, Omega, CVaR, antifragility
+          scenarios) is intentionally deferred to the portfolio math layer and
+          `BARBELL_INTEGRATION_TODO.md` so that this function remains a thin,
+          config-driven hook into realized PnL/health metrics instead of
+          hardcoding any specific risk model.
         """
         from datetime import datetime, timedelta, UTC
 
@@ -156,8 +166,81 @@ def main(
                 dd = (peak - val) / peak
                 max_dd = max(max_dd, dd)
 
+        # Incorporate forecaster monitoring thresholds (RMSE-aware).
+        # This is intentionally coarse-grained: we aggregate ensemble
+        # regression metrics over the evaluation window and, if the
+        # ensemble underperforms configured thresholds, we penalise the
+        # candidate by driving total_return toward zero. In addition, we
+        # apply soft gating based on realised profit_factor / win_rate so
+        # that hyperopt only rewards regimes where the TS ensemble is both
+        # statistically healthy (RMSE) and economically sensible (PF / WR).
+        monitoring_cfg_path = ROOT_PATH / "config" / "forecaster_monitoring.yml"
+        penalty = 1.0
+        if monitoring_cfg_path.exists():
+            try:
+                cfg_raw = yaml.safe_load(monitoring_cfg_path.read_text()) or {}
+                fm_cfg = cfg_raw.get("forecaster_monitoring") or {}
+                # 1) RMSE / regression health
+                rm_cfg = fm_cfg.get("regression_metrics") or {}
+                max_ratio = float(rm_cfg.get("max_rmse_ratio_vs_baseline", 1.10))
+                regression_summary = db_manager.get_forecast_regression_summary(
+                    start_date=start_iso,
+                    end_date=end_iso,
+                )
+                ens = regression_summary.get("ensemble") or {}
+                ensemble_rmse = ens.get("rmse")
+                baseline_summary = db_manager.get_forecast_regression_summary(
+                    model_type="SAMOSSA"
+                )
+                base = (baseline_summary.get("samossa") or {}) if baseline_summary else {}
+                baseline_rmse = base.get("rmse")
+                if (
+                    isinstance(ensemble_rmse, (int, float))
+                    and isinstance(baseline_rmse, (int, float))
+                    and baseline_rmse > 0
+                ):
+                    ratio = float(ensemble_rmse) / float(baseline_rmse)
+                    if ratio > max_ratio:
+                        logger.info(
+                            "Forecaster RMSE ratio %.3f exceeds max %.3f for regime %s; "
+                            "penalising candidate total_return.",
+                            ratio,
+                            max_ratio,
+                            candidate.regime or regime,
+                        )
+                        penalty = 0.0
+
+                # 2) Quant validation-style PF / WR health at the portfolio level.
+                qv_cfg = fm_cfg.get("quant_validation") or {}
+                min_pf = qv_cfg.get("min_profit_factor")
+                min_wr = qv_cfg.get("min_win_rate")
+
+                pf_bad = (
+                    isinstance(min_pf, (int, float))
+                    and profit_factor is not None
+                    and float(profit_factor) < float(min_pf)
+                )
+                wr_bad = (
+                    isinstance(min_wr, (int, float))
+                    and win_rate is not None
+                    and float(win_rate) < float(min_wr)
+                )
+                if pf_bad or wr_bad:
+                    logger.info(
+                        "Forecaster economic health check failed for regime %s "
+                        "(PF=%.3f, WR=%.3f, min_pf=%s, min_wr=%s); penalising candidate.",
+                        candidate.regime or regime,
+                        float(profit_factor),
+                        float(win_rate),
+                        min_pf,
+                        min_wr,
+                    )
+                    penalty = 0.0
+            except Exception:  # pragma: no cover - monitoring is advisory
+                penalty = 1.0
+
         return {
-            "total_return": float(total_profit),
+            "total_return": float(total_profit) * float(penalty),
             "profit_factor": float(profit_factor),
             "win_rate": float(win_rate),
             "total_trades": int(total_trades),

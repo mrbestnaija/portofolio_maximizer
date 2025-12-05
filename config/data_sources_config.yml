@@ -7,7 +7,7 @@ data_sources:
     - name: "yfinance"
       type: "market_data"
       enabled: true
-      priority: 1  # Primary data source
+      priority: 1  # Primary historical/live data source
       config_file: "config/yfinance_config.yml"
 
     - name: "alpha_vantage"
@@ -26,7 +26,7 @@ data_sources:
 
     - name: "ctrader"
       type: "market_data"
-      enabled: true  # Substitutes finnhub when API key is missing
+      enabled: true  # cTrader Open API OHLCV source (demo-first per ctrader_config.yml)
       priority: 4
       config_file: "config/ctrader_config.yml"
 

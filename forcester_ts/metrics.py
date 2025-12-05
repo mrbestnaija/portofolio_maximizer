@@ -81,6 +81,31 @@ def tracking_error(actual: pd.Series, predicted: pd.Series) -> Optional[float]:
     return float(np.std(residual, ddof=0))
 
 
+def directional_accuracy(actual: pd.Series, predicted: pd.Series) -> Optional[float]:
+    """
+    Directional accuracy of forecasts based on one-step price changes.
+
+    Computes the fraction of periods where the sign of the forecasted
+    price change matches the sign of the realised price change. Periods
+    with zero change in both series are counted as correct.
+    """
+    aligned = _align_series(actual, predicted)
+    if aligned is None:
+        return None
+
+    actual_vals, predicted_vals = aligned
+    if actual_vals.size < 2:
+        return None
+
+    actual_diff = np.diff(actual_vals)
+    pred_diff = np.diff(predicted_vals)
+    # Avoid division-by-zero; treat exact zeros separately.
+    actual_sign = np.sign(actual_diff)
+    pred_sign = np.sign(pred_diff)
+    correct = (actual_sign == pred_sign)
+    return float(np.mean(correct)) if correct.size > 0 else None
+
+
 def compute_regression_metrics(
     actual: pd.Series,
     predicted: pd.Series,
@@ -95,6 +120,7 @@ def compute_regression_metrics(
         "rmse": rmse(actual, predicted),
         "smape": smape(actual, predicted),
         "tracking_error": tracking_error(actual, predicted),
+        "directional_accuracy": directional_accuracy(actual, predicted),
         "n_observations": int(
             pd.concat([actual, predicted], axis=1, join="inner").dropna().shape[0]
         ),
@@ -107,4 +133,5 @@ __all__ = [
     "rmse",
     "smape",
     "tracking_error",
+    "directional_accuracy",
 ]

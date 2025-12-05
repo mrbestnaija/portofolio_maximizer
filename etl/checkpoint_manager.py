@@ -12,7 +12,9 @@ Success Criteria:
 """
 import json
 import hashlib
+import os
 import pickle
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
@@ -48,10 +50,20 @@ class CheckpointManager:
 
     def _save_metadata(self, metadata: Dict[str, Any]) -> None:
         """Save metadata atomically."""
-        temp_path = self.metadata_file.with_suffix('.tmp')
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2)
-        temp_path.replace(self.metadata_file)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            dir=self.checkpoint_dir,
+            prefix="checkpoint_metadata_",
+            suffix=".tmp",
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(metadata, handle, indent=2)
+            os.replace(temp_path, self.metadata_file)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
     def _load_metadata(self) -> Dict[str, Any]:
         """Load checkpoint metadata."""
@@ -103,7 +115,7 @@ class CheckpointManager:
         # Save data (atomic write)
         temp_data = checkpoint_path.with_suffix('.tmp')
         data.to_parquet(temp_data, compression='snappy', index=True)
-        temp_data.rename(checkpoint_path)
+        temp_data.replace(checkpoint_path)
 
         # Save state metadata
         state = {
@@ -121,7 +133,7 @@ class CheckpointManager:
         temp_state = state_path.with_suffix('.tmp')
         with open(temp_state, 'wb') as f:
             pickle.dump(state, f)
-        temp_state.rename(state_path)
+        temp_state.replace(state_path)
 
         # Update metadata registry
         meta = self._load_metadata()
@@ -138,8 +150,13 @@ class CheckpointManager:
         meta['last_updated'] = datetime.now().isoformat()
         self._save_metadata(meta)
 
-        logger.info(f"✓ Checkpoint saved: {checkpoint_id} "
-                   f"(stage={stage}, shape={data.shape}, hash={data_hash})")
+        logger.info(
+            "Checkpoint saved: %s (stage=%s, shape=%s, hash=%s)",
+            checkpoint_id,
+            stage,
+            data.shape,
+            data_hash,
+        )
 
         return checkpoint_id
 
@@ -174,8 +191,12 @@ class CheckpointManager:
             logger.warning(f"Data hash mismatch for {checkpoint_id}: "
                          f"expected {state['data_hash']}, got {loaded_hash}")
 
-        logger.info(f"✓ Checkpoint loaded: {checkpoint_id} "
-                   f"(stage={state['stage']}, shape={data.shape})")
+        logger.info(
+            "Checkpoint loaded: %s (stage=%s, shape=%s)",
+            checkpoint_id,
+            state["stage"],
+            data.shape,
+        )
 
         return {
             'data': data,
@@ -280,7 +301,7 @@ class CheckpointManager:
         self._save_metadata(meta)
 
         if deleted_count > 0:
-            logger.info(f"✓ Cleaned {deleted_count} old checkpoint(s)")
+            logger.info("Cleaned %s old checkpoint(s)", deleted_count)
 
         return deleted_count
 
@@ -324,7 +345,7 @@ class CheckpointManager:
         if updated:
             meta['last_updated'] = datetime.now().isoformat()
             self._save_metadata(meta)
-            logger.info(f"✓ Deleted checkpoint: {checkpoint_id}")
+            logger.info("Deleted checkpoint: %s", checkpoint_id)
 
         return True
 

@@ -8,7 +8,7 @@ This playbook integrates monetization, automation, backtesting realism, and loca
 
 ## 1. Mission & Current State Snapshot
 - **Goal:** Deliver monetizable signal outputs (alerts, reports, licensing) using proven foreign-market data while creating a fast handoff path for Nigerian manual execution.
-- **Context:** Time-series, portfolio, and LLM stacks are in place (per `implementation_checkpoint.md`), but recent brutal runs exposed SQLite corruption, MSSA change-point edge cases, visualization regressions, and validator warnings. Profitability proof remains the top gating factor.
+- **Context:** Time-series, portfolio, and LLM stacks are in place (per `implementation_checkpoint.md`); the latest brutal suite run (`logs/brutal/results_20251204_190220/`) is structurally green (profit-critical, ETL, Time Series, routing, integration, security all passing), but earlier brutal runs exposed SQLite corruption, MSSA change-point edge cases, visualization regressions, and validator warnings that have since been remediated. Profitability proof and global quant validation health (currently RED per `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`) remain the top gating factors.
 - **Key guardrails:** Free/low-cost infra only, phase-gate discipline, max line-count budgets, automation-first mindset, configuration-driven design, and backtest realism before new features.
 
 ---

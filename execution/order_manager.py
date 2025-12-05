@@ -2,7 +2,7 @@
 ============================
 
 End-to-end order lifecycle orchestration for Portfolio Maximizer. The
-historical roadmap expected an IBKR layer here; this module replaces that stub
+historical roadmap expected a massive.com/polygon.io layer here; this module replaces that stub
 with a production-ready cTrader integration that honours the same risk and
 governance constraints.
 

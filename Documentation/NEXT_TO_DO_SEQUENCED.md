@@ -10,10 +10,22 @@
 
 ---
 
+## 🔄 2025-12-03 Delta (diagnostic mode + invariants)
+- DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
+- Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts).
+- Diagnostic reduced-universe run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
+
 ## 🔄 2025-11-24 Delta (currency update)
 - Data-source-aware ticker resolver (`etl/data_universe.py`) added; auto-trader now resolves tickers via this helper (explicit + frontier default, optional provider discovery when empty).
 - LLM fallback defaults to enabled in the trading loop for redundancy without changing thresholds.
 - Dashboard JSON emission hardened (datetime → ISO) to eliminate serialization warnings during live runs.
+- Barbell integration TODO captured in `BARBELL_INTEGRATION_TODO.md`; optimization and risk evaluation steps must treat tail-hedge/long-vol legs as convexity purchases evaluated with Sortino/Omega/CVaR and crisis scenarios, not Sharpe alone.
+- Initial barbell config/policy implemented:
+  - `config/barbell.yml` now defines global safe/risk buckets, feature flags, and per-market caps.
+  - `risk/barbell_policy.BarbellConstraint` provides bucket weight computation and projection; behaviour remains unchanged while `enable_barbell_allocation=false`.
+- Regime-aware exploration/exploitation scaffolding added:
+  - `scripts/update_regime_state.py` computes per-ticker regime state (exploration vs exploitation, green/red/neutral) from realised PnL.
+  - `execution/paper_trading_engine.PaperTradingEngine` consults `config/regime_state.yml` to scale per-trade risk (micro-sizing in exploration/red regimes, modest uplift in green regimes) without altering global guardrails.
 
 ## 📊 CURRENT PROJECT STATUS: 🔴 BLOCKED (2025-11-15 brutal run regression)
 
@@ -32,14 +44,17 @@
   2. Patch the MSSA `change_points` block to convert the `DatetimeIndex` into a list without boolean coercion, rerun the forecasting stage, and confirm Stage 8 consumes the bundles.
   3. Remove the unsupported `axis=` argument from the Matplotlib auto-format call so visualization artefacts exist again.
   4. Replace the Period coercion + tighten the SARIMAX search space to eliminate the warning storm (all related warnings now flow into `logs/warnings/warning_events.log` so they are audit-able without spamming console output).
-  5. Modernize `scripts/backfill_signal_validation.py` (timezone-aware timestamps + sqlite adapters) before running nightly validation/backfill tasks.
-  - ✅ `2025-11-16 note`: Blockers 1–4 are now cleared (see `logs/pipeline_run.log:22237-22986` for the healthy ETL run); only the validator modernization remains outstanding. Instrumentation now logs benchmark metrics and dataset diagnostics so sequenced tasks can reference `logs/forecast_audits/*.json` when evaluating future steps.
+  5. Modernize `scripts/backfill_signal_validation.py` (timezone-aware timestamps + sqlite adapters) before running nightly validation/backfill tasks. [Completed 2025-12-04; covered by `tests/scripts/test_backfill_signal_validation.py` under `simpleTrader_env`.]
+
+  - 2025-12-04 update: All five blockers above now have code fixes in place. `scripts/backfill_signal_validation.py` uses timezone-aware UTC timestamps and sqlite adapters, and the new `tests/scripts/test_backfill_signal_validation.py` suite (4 tests) passes under `simpleTrader_env`. Instrumentation continues to log benchmark metrics and dataset diagnostics so sequenced tasks can reference `logs/forecast_audits/*.json` when evaluating future steps.
+
 
 - `scripts/run_auto_trader.py` delivers the autonomous trading loop (extraction → validation → forecasting → TS signals → routing → execution) with optional LLM fallback; it must now be validated alongside the pipeline.
 - README + UNIFIED_ROADMAP position the platform as an **Autonomous Profit Engine**, elevating the loop to core capability and documenting how to launch it.
 - Stage planner in `scripts/run_etl_pipeline.py` now runs Time Series forecasting/signal routing before any LLM stages, keeping LLM strictly as fallback.
 - `logs/errors/errors.log` exposes unresolved blockers: DataStorage CV signature mismatch (`test_size`), zero-fold CV `ZeroDivisionError`, SQLite `disk I/O` writes, and missing parquet engines preventing checkpoints. These issues are immediate priorities before new sequencing work proceeds.
-- `bash/comprehensive_brutal_test.sh` (Nov 12) results: profit-critical + ETL suites passed (aside from missing `tests/etl/test_data_validator.py`), but the script timed out with a `Broken pipe` during the Time Series forecasting tests. Sequenced work cannot advance until the missing test file is restored and the brutal test completes without timeouts.
+- `bash/comprehensive_brutal_test.sh` previously reported `tests/ai_llm/test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low` as the lone failure; `ai_llm/ollama_client.py` now passes this test under `simpleTrader_env`, so brutal runs should treat it as a regression guard rather than an expected failure.
+
 - `models/time_series_signal_generator.py` now normalises pandas objects/Series before evaluation, records decision context in provenance, and passes `pytest tests/models/test_time_series_signal_generator.py -q` plus targeted integration cases; `logs/ts_signal_demo.json` captures a live SELL signal derived from SQLite OHLCV data to prove TS signals are no longer stuck in HOLD.
 - `etl/checkpoint_manager.py` swaps `Path.rename()` for `Path.replace()` so checkpoint metadata no longer crashes subsequent runs on Windows; temp metadata files are cleaned automatically.
 - `scripts/backfill_signal_validation.py` imports `sys`, injects the repo root into `sys.path`, and therefore runs from the brutal suite without `ModuleNotFoundError`; nightly scheduling can safely call the script from outside the repo.
@@ -154,6 +169,25 @@ class StatisticalTestSuite:
         """Bootstrap validation for performance metrics"""
         # Confidence intervals for Sharpe ratio
         # Confidence intervals for max drawdown
+```
+
+##### **Day 4-5: Barbell & Options Feature-Flag Wiring**
+```text
+TASK A1.7: Options/Derivatives Feature Flags (2 hours) 🆕 NEW
+- Add `config/options_config.yml` with:
+  - `options_trading.enabled` (master toggle, default `false`),
+  - `barbell.max_options_weight` and `barbell.max_premium_pct_nav` to bound options exposure,
+  - default OTM selection bands (`selection.moneyness`, `selection.expiry_days`).
+- Reserve environment flags:
+  - `ENABLE_OPTIONS=true` to opt into options logic at runtime,
+  - `OPTIONS_CONFIG_PATH` to override the default options config.
+- Update documentation:
+  - `Documentation/BARBELL_OPTIONS_MIGRATION.md` for the migration path from spot-only to barbell options,
+  - AGENT_* guides to enforce "options must be feature-flagged and barbell-constrained".
+
+Success criteria:
+- [ ] Options disabled (default) ⇒ no behavioural change in ETL/auto-trader/brutal suite.
+- [ ] Options enabled (flag + config) ⇒ options are treated strictly as risk-bucket instruments under barbell guardrails.
 ```
 
 ##### **Day 5-7: Paper Trading Engine**

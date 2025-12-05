@@ -110,6 +110,8 @@ dist/
 # Documentation builds
 docs/_build/
 
+#Documentation/ #Comment out if you want to track documentation source files
+
 
 # Local automation configuration (keep private)
 .local_automation/

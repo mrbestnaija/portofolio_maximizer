@@ -25,7 +25,7 @@ The core ETL + Time Series stack remains production ready, but the **LLM monitor
   - `models/time_series_signal_generator.py` normalises pandas/NumPy payloads before decisioning and records the decision context; `logs/ts_signal_demo.json` proves SELL signals are now produced from SQLite OHLCV data instead of being stuck in HOLD.
   - `etl/checkpoint_manager.py` writes metadata via `Path.replace`, removing the `[WinError 183]` blocker that previously halted second-run checkpoints on Windows.
   - `scripts/backfill_signal_validation.py` injects the repo root into `sys.path`, so nightly cron jobs and the brutal suite can execute it from any directory without `ModuleNotFoundError`.
-  - Brutal suite status: everything except `tests/ai_llm/test_ollama_client.py::test_generate_switches_model_when_token_rate_low` now passes; latency mitigation remains the gating item before paper trading.
+  - Brutal suite status: all current Ollama client tests (including `tests/ai_llm/test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low`) now pass under `simpleTrader_env`; latency mitigation remains an ongoing optimisation target rather than a hard gate.
 
 ---
 

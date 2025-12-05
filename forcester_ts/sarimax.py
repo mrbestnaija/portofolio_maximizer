@@ -298,6 +298,14 @@ class SARIMAXForecaster:
         if freq_hint:
             try:
                 freq_offset = to_offset(freq_hint)
+                # Build a regular index so statsmodels sees an explicit frequency.
+                freq_index = pd.date_range(
+                    start=cleaned.index[0],
+                    end=cleaned.index[-1],
+                    freq=freq_offset,
+                )
+                if len(freq_index):
+                    cleaned = cleaned.reindex(freq_index).ffill()
                 cleaned.index = pd.DatetimeIndex(cleaned.index, freq=freq_offset)
                 freq_valid = True
             except Exception:

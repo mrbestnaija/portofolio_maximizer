@@ -21,6 +21,8 @@ Pipeline Flow:
 6. LLM Risk Assessment (optional - if --enable-llm flag set)
 7. Data Storage (train/val/test split with optional CV)
 """
+from __future__ import annotations
+
 import sys
 import yaml
 import logging
@@ -1166,12 +1168,16 @@ def execute_pipeline(
                     logger.info("Using synthetic OHLCV data (precomputed)")
                 else:
                     try:
-                        # Use data source manager for extraction (automatic failover support)
+                        # Use data source manager for extraction (automatic failover support).
+                        # If a specific --data-source is provided, prefer that adapter;
+                        # otherwise, defer to the manager's configured primary (now cTrader
+                        # for live/auto runs, with yfinance/others as fallbacks).
+                        prefer_source = data_source or None
                         raw_data = data_source_manager.extract_ohlcv(
                             tickers=ticker_list,
                             start_date=start,
                             end_date=end,
-                            prefer_source=data_source if data_source not in (None, 'yfinance') else None
+                            prefer_source=prefer_source,
                         )
                         extraction_source = data_source_manager.get_active_source()
                     except Exception as extraction_error:
@@ -2000,16 +2006,26 @@ def execute_pipeline(
                     from models.time_series_signal_generator import TimeSeriesSignalGenerator
                     from models.signal_adapter import SignalAdapter
                     
-                    # Load signal routing config
-                    signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
-                    ts_signal_cfg = signal_routing_cfg.get('time_series', {})
+                    # Load signal routing config (pipeline override or shared YAML)
+                    signal_routing_cfg = pipeline_cfg.get('signal_routing', {}) or {}
+                    ts_signal_cfg = signal_routing_cfg.get('time_series', {}) or {}
+                    if not ts_signal_cfg:
+                        cfg_path = Path("config") / "signal_routing_config.yml"
+                        if cfg_path.exists():
+                            try:
+                                with cfg_path.open("r", encoding="utf-8") as handle:
+                                    raw = yaml.safe_load(handle) or {}
+                                shared_cfg = raw.get("signal_routing") or {}
+                                ts_signal_cfg = shared_cfg.get("time_series", {}) or {}
+                            except Exception as exc:  # pragma: no cover - defensive
+                                logger.warning("Failed to load signal routing config: %s", exc)
                     
                     # Initialize signal generator
                     signal_generator = TimeSeriesSignalGenerator(
-                        confidence_threshold=ts_signal_cfg.get('confidence_threshold', 0.55),
-                        min_expected_return=ts_signal_cfg.get('min_expected_return', 0.02),
-                        max_risk_score=ts_signal_cfg.get('max_risk_score', 0.7),
-                        use_volatility_filter=ts_signal_cfg.get('use_volatility_filter', True)
+                        confidence_threshold=float(ts_signal_cfg.get('confidence_threshold', 0.55)),
+                        min_expected_return=float(ts_signal_cfg.get('min_expected_return', 0.003)),
+                        max_risk_score=float(ts_signal_cfg.get('max_risk_score', 0.7)),
+                        use_volatility_filter=bool(ts_signal_cfg.get('use_volatility_filter', True)),
                     )
                     
                     # Get forecasts from previous stage

@@ -11,6 +11,7 @@ Per TESTING_GUIDE.md: Focus on profit-critical functions only.
 import pytest
 import pandas as pd
 import numpy as np
+import yaml
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 import sys
@@ -74,13 +75,24 @@ def test_database(tmp_path):
     db.close()
 
 
+@pytest.fixture(scope="session")
+def ts_routing_config():
+    """Load Time Series routing thresholds from configuration."""
+    config_path = Path("config") / "signal_routing_config.yml"
+    if not config_path.exists():
+        pytest.skip("Time Series routing config is missing")
+    raw = yaml.safe_load(config_path.read_text()) or {}
+    return (raw.get("signal_routing") or {}).get("time_series") or {}
+
+
 @pytest.fixture
-def ts_signal_generator():
+def ts_signal_generator(ts_routing_config):
     """Create Time Series signal generator"""
     return TimeSeriesSignalGenerator(
-        confidence_threshold=0.55,
-        min_expected_return=0.02,
-        max_risk_score=0.7
+        confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+        min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+        max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+        use_volatility_filter=bool(ts_routing_config.get("use_volatility_filter", True)),
     )
 
 

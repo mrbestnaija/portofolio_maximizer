@@ -6,6 +6,11 @@
 
 This guide provides comprehensive information about the enhanced error monitoring and management system implemented for the Portfolio Maximizer v45 project.
 
+### Time Series Forecast Health Monitors (2025-11-27)
+- `scripts/check_quant_validation_health.py` scans `logs/signals/quant_validation.jsonl` and fails CI/brutal runs when too many TS signals register `status: "FAIL"` or negative `expected_profit`, turning quant validation into a first-class health gate.
+- `scripts/compare_forecast_models.py` compares the TS ensemble (`model_type='COMBINED'`) against the SAMOSSA (or SARIMAX) baseline on RMSE and `directional_accuracy` per ticker; the “Ensemble vs SAMOSSA Regression Check” in `bash/comprehensive_brutal_test.sh` escalates or fails when the underperforming fraction breaches configured limits.
+- Monitoring dashboards should surface both checks (quant validation health + ensemble-vs-baseline summary) alongside existing TS/LLM error metrics so model quality regressions are caught before they manifest as PnL degradation.
+
 ### Frontier Market Telemetry (2025-11-15)
 - Monitoring dashboards must now track the Nigeria → Bulgaria frontier ticker atlas introduced via `etl/frontier_markets.py` and the `--include-frontier-tickers` flag. Synthetic runs remain the default, but alerts should note whether a failure originated while exercising frontier symbols (per `bash/test_real_time_pipeline.sh` Step 10 and the brutal frontier stage) so spread/liquidity anomalies are triaged separately from mega-cap incidents.
 

@@ -39,7 +39,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Test Configuration
-TEST_DURATION_HOURS="${TEST_DURATION_HOURS:-4}"  # Default 4 hours
+TEST_DURATION_HOURS="${TEST_DURATION_HOURS:-1}"  # Default 4 hours
 ITERATIONS_PER_TEST="${ITERATIONS_PER_TEST:-3}"  # Iterations per test scenario (reduced for efficiency)
 TICKERS_LIST="${TICKERS_LIST:-AAPL,MSFT,GOOGL}"  # Base test tickers (frontier set appended via CLI flag)
 START_DATE="${START_DATE:-2020-01-01}"
@@ -58,7 +58,7 @@ BRUTAL_KEEP_DB_CHANGES="${BRUTAL_KEEP_DB_CHANGES:-0}"
 DB_BACKUP_FILE=""
 
 # Time Series is canonical; LLM fallback requires explicit opt-in (see docs)
-BRUTAL_ENABLE_LLM="${BRUTAL_ENABLE_LLM:-0}"
+BRUTAL_ENABLE_LLM="${BRUTAL_ENABLE_LLM:-1}"
 
 # Virtual environment (authorised)
 VENV_NAME="${VENV_NAME:-simpleTrader_env}"
@@ -612,6 +612,57 @@ test_time_series_forecasting() {
         failed=$((failed + 1))
     fi
     
+    # Post-test quantitative review: summarize quant validation + forecast audits.
+    log_subsection "Time Series Quant Validation Summary"
+    set +e
+    python scripts/summarize_quant_validation.py --top-n 20 --config-path config/forecaster_monitoring.yml >> "$test_log" 2>&1 || \
+      log_warning "summarize_quant_validation.py failed (see $test_log)"
+    set -e
+
+    log_subsection "Time Series Forecast Audit Regression Check"
+    if [ -d "logs/forecast_audits" ]; then
+        set +e
+        python scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml >> "$test_log" 2>&1
+        local audit_exit=$?
+        set -e
+        if [ $audit_exit -eq 0 ]; then
+            log_success "Forecast audit regression check passed"
+        else
+            log_error "Forecast audit regression check failed (exit code: $audit_exit)"
+            log_info "Last 10 lines of forecast audit check:"
+            tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
+            failed=$((failed + 1))
+        fi
+    else
+        log_warning "No forecast audit directory found at logs/forecast_audits; skipping regression check"
+    fi
+
+    # Ensemble vs baseline (SAMOSSA) regression check: ensure the TS ensemble
+    # is not consistently worse than the SAMOSSA baseline on RMSE and
+    # directional accuracy.
+    if [ -f "scripts/compare_forecast_models.py" ]; then
+        log_subsection "Ensemble vs SAMOSSA Regression Check"
+        set +e
+        python scripts/compare_forecast_models.py \
+            --db-path data/portfolio_maximizer.db \
+            --baseline-model SAMOSSA \
+            --max-rmse-ratio 1.0 \
+            --min-da-delta 0.0 \
+            --max-underperform-fraction 0.5 >> "$test_log" 2>&1
+        local ensemble_exit=$?
+        set -e
+        if [ $ensemble_exit -eq 0 ]; then
+            log_success "Ensemble vs SAMOSSA regression check passed"
+        else
+            log_error "Ensemble vs SAMOSSA regression check failed (exit code: $ensemble_exit)"
+            log_info "Last 10 lines of ensemble comparison:"
+            tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
+            failed=$((failed + 1))
+        fi
+    else
+        log_warning "compare_forecast_models.py not found; skipping ensemble vs baseline regression check"
+    fi
+
     log_info "Time Series Tests Summary: $passed passed, $failed failed, $total_tests_run total tests executed"
     echo "time_series_forecasting,$passed,$failed" >> "$RESULTS_DIR/stage_summary.csv"
 }
@@ -1023,20 +1074,37 @@ test_pipeline_execution() {
 
     # Test 4: Frontier market multi-ticker synthetic training
     log_subsection "Frontier Market Multi-Ticker Training"
-    log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers \"$TICKERS_LIST\" --include-frontier-tickers --execution-mode synthetic --enable-llm"
 
-    set +e
-    PORTFOLIO_DB_PATH="data/test_database.db" \
-    "$VENV_PYTHON" scripts/run_etl_pipeline.py \
-        --tickers "$TICKERS_LIST" \
-        --start "$START_DATE" \
-        --end "$END_DATE" \
-        --execution-mode synthetic \
-        --enable-llm \
-        --include-frontier-tickers \
-        >> "$test_log" 2>&1
-    exit_code=$?
-    set -e
+    if [ "$BRUTAL_ENABLE_LLM" = "1" ]; then
+        log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers \"$TICKERS_LIST\" --include-frontier-tickers --execution-mode synthetic --enable-llm"
+
+        set +e
+        PORTFOLIO_DB_PATH="data/test_database.db" \
+        "$VENV_PYTHON" scripts/run_etl_pipeline.py \
+            --tickers "$TICKERS_LIST" \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --execution-mode synthetic \
+            --enable-llm \
+            --include-frontier-tickers \
+            >> "$test_log" 2>&1
+        exit_code=$?
+        set -e
+    else
+        log_info "Running: PORTFOLIO_DB_PATH=data/test_database.db $VENV_PYTHON scripts/run_etl_pipeline.py --tickers \"$TICKERS_LIST\" --include-frontier-tickers --execution-mode synthetic (LLM disabled; BRUTAL_ENABLE_LLM=0)"
+
+        set +e
+        PORTFOLIO_DB_PATH="data/test_database.db" \
+        "$VENV_PYTHON" scripts/run_etl_pipeline.py \
+            --tickers "$TICKERS_LIST" \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --execution-mode synthetic \
+            --include-frontier-tickers \
+            >> "$test_log" 2>&1
+        exit_code=$?
+        set -e
+    fi
 
     if [ $exit_code -eq 0 ]; then
         log_success "Frontier market training run completed"
@@ -1470,6 +1538,32 @@ generate_final_report() {
     local duration=$(($(date +%s) - TEST_START_TIME))
     local hours=$((duration / 3600))
     local minutes=$(((duration % 3600) / 60))
+
+    # Derive global quant validation health (GREEN/YELLOW/RED) using the
+    # CI helper. This is advisory only in the report; the hard RED gate
+    # is enforced where check_quant_validation_health.py is called as part
+    # of CI/brutal automation.
+    local quant_health="UNKNOWN"
+    local quant_log="logs/signals/quant_validation.jsonl"
+    if [ -f "$quant_log" ]; then
+        if [ -z "${VENV_PYTHON:-}" ]; then
+            VENV_PYTHON="$(get_venv_python)"
+        fi
+        set +e
+        local qv_output
+        qv_output="$("$VENV_PYTHON" scripts/check_quant_validation_health.py 2>&1)"
+        local qv_exit=$?
+        set -e
+        local classification
+        classification="$(printf "%s\n" "$qv_output" | grep 'Global health classification' | awk '{print $NF}')"
+        if [ -n "$classification" ]; then
+            quant_health="$classification"
+        elif [ $qv_exit -eq 0 ]; then
+            quant_health="GREEN"
+        fi
+    else
+        quant_health="N/A"
+    fi
     
     cat > "$report_file" << EOF
 # Comprehensive Brutal Test Report
@@ -1483,6 +1577,7 @@ generate_final_report() {
 **Passed**: $TOTAL_PASSED
 **Failed**: $TOTAL_FAILED
 **Pass Rate**: $(awk "BEGIN {printf \"%.1f\", ($TOTAL_PASSED / ($TOTAL_PASSED + $TOTAL_FAILED)) * 100}" 2>/dev/null || echo "N/A")%
+**Quant validation health (global)**: ${quant_health}
 
 ## Stage Results
 

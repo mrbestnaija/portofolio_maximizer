@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Live/auto orchestration for Portfolio Maximizer ETL pipeline.
-# Executes with network data first, falling back per execution mode settings.
+# Executes with network data first (live mode by default), with optional
+# synthetic/auto modes controlled via EXECUTION_MODE.
 
 set -euo pipefail
+
+# Production-safe defaults: clear diagnostic shortcuts so live runs keep
+# quant validation and latency guards enabled.
+unset DIAGNOSTIC_MODE TS_DIAGNOSTIC_MODE EXECUTION_DIAGNOSTIC_MODE LLM_FORCE_FALLBACK || true
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
 LOG_DIR="$ROOT_DIR/logs/live_runs"
 DASH_PATH="$ROOT_DIR/visualizations/dashboard_data.json"
+
+# Enable TS forecast audit logs for live runs when forecaster instrumentation is active.
+export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-$ROOT_DIR/logs/forecast_audits}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python interpreter not found at $PYTHON_BIN" >&2
@@ -26,13 +34,15 @@ RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/pipeline_live_${RUN_STAMP}.log"
 
 TICKERS="${TICKERS:-AAPL,MSFT}"
-START_DATE="${START_DATE:-2015-01-01}"
-END_DATE="${END_DATE:-2024-01-01}"
+START_DATE="${START_DATE:-2020-01-01}"
+END_DATE="${END_DATE:-$(date +%Y-%m-%d)}"
 DATA_SOURCE="${DATA_SOURCE:-}"
 USE_CV="${USE_CV:-0}"
 ENABLE_LLM="${ENABLE_LLM:-1}"
 LLM_MODEL="${LLM_MODEL:-}"
-EXECUTION_MODE="${EXECUTION_MODE:-auto}"
+# Default to true live mode for this launcher; callers can override to
+# 'auto' or 'synthetic' via EXECUTION_MODE if needed.
+EXECUTION_MODE="${EXECUTION_MODE:-live}"
 INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-1}"
 
 CMD=("$PYTHON_BIN" "$PIPELINE_SCRIPT"
@@ -96,6 +106,7 @@ import os
 from pathlib import Path
 
 import yaml
+from etl.database_manager import DatabaseManager
 
 root = Path(os.environ["ROOT_DIR"])
 pipeline_id = os.environ["PIPELINE_ID"]
@@ -177,8 +188,59 @@ else:
             exp_str = f"{expected_return:.2%}" if isinstance(expected_return, (int, float)) else "n/a"
             viz = record.get("visualization_path") or "n/a"
             print(f"  - {ticker}: {status} (conf={conf_str}, exp={exp_str}) viz={viz}")
+
+print("\nPortfolio performance summary:")
+start_env = os.getenv("MVS_START_DATE")
+end_env = os.getenv("MVS_END_DATE")
+window_days = os.getenv("MVS_WINDOW_DAYS")
+
+start_date = start_env
+end_date = end_env
+
+if not start_date and window_days:
+    try:
+        days = int(window_days)
+        end = datetime.utcnow().date()
+        start = end - timedelta(days=days)
+        start_date = start.isoformat()
+        end_date = end.isoformat()
+    except ValueError:
+        start_date = None
+        end_date = None
+
+db = DatabaseManager(db_path=str(root / "data" / "portfolio_maximizer.db"))
+perf = db.get_performance_summary(start_date=start_date, end_date=end_date)
+db.close()
+
+total_trades = perf.get("total_trades", 0)
+total_profit = perf.get("total_profit", 0.0) or 0.0
+win_rate = perf.get("win_rate", 0.0) or 0.0
+profit_factor = perf.get("profit_factor", 0.0) or 0.0
+
+window_label = "full history"
+if start_date or end_date:
+    window_label = f"{start_date or '...'} -> {end_date or '...'}"
+
+print(f"  Window         : {window_label}")
+print(f"  Total trades   : {total_trades}")
+print(f"  Total profit   : {total_profit:.2f} USD")
+print(f"  Win rate       : {win_rate:.1%}")
+print(f"  Profit factor  : {profit_factor:.2f}")
+
+mvs_passed = (
+    total_profit > 0.0
+    and win_rate > 0.45
+    and profit_factor > 1.0
+    and total_trades >= 30
+)
+print(f"  MVS Status     : {'PASS' if mvs_passed else 'FAIL'}")
 print("")
 PY
+
+echo ""
+echo "Data source snapshot (from $LOG_FILE):"
+grep -E "Primary:" "$LOG_FILE" | tail -n 1 || echo "  (no primary source line found)"
+grep -E "OK Successfully extracted" "$LOG_FILE" | tail -n 1 || echo "  (no extraction success line found)"
 
 echo "Log captured at: $LOG_FILE"
 if [[ -f "$DASH_PATH" ]]; then

@@ -1,0 +1,34 @@
+barbell:
+  # Global master switches for Taleb-style barbell allocation. When
+  # enable_barbell_allocation is false, portfolio behaviour must remain
+  # unchanged relative to the pre-barbell implementation.
+  enable_barbell_allocation: false
+  enable_barbell_validation: false
+  enable_antifragility_tests: false
+
+  # Asset-level barbell buckets. These are intentionally generic; individual
+  # files (options_config.yml, universe configs) provide more detail.
+  safe_bucket:
+    symbols:
+      - "SHY"     # short-duration Treasuries / cash proxies
+      - "BIL"
+      - "IEF"
+    min_weight: 0.75
+    max_weight: 0.95
+
+  risk_bucket:
+    symbols:
+      # Core spot risk instruments and underlyings for options tail bets.
+      - "AAPL"
+      - "MSFT"
+      - "SPY"
+      - "QQQ"
+      - "BTC-USD"
+    max_weight: 0.25
+
+  # Per-market caps for nested barbell constraints (DM vs EM/NGX, crypto).
+  market_caps:
+    ngx_equity_max: 0.05
+    crypto_max: 0.10
+    em_equity_max: 0.10
+

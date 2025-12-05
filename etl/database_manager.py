@@ -1849,10 +1849,98 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save forecast: %s", safe_error)
             return -1
+
+    # ------------------------------------------------------------------
+    # Forecast monitoring helpers
+    # ------------------------------------------------------------------
+
+    def get_forecast_regression_summary(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        model_type: str = "COMBINED",
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Aggregate regression metrics (RMSE/sMAPE/tracking_error) for a given model
+        type from time_series_forecasts over an optional [start_date, end_date]
+        window.
+
+        Args:
+            start_date: Optional ISO date string (inclusive lower bound).
+            end_date: Optional ISO date string (inclusive upper bound).
+            model_type: One of the model_type values stored in
+                time_series_forecasts (e.g. 'COMBINED', 'SARIMAX', 'SAMOSSA',
+                'MSSA_RL'). Defaults to 'COMBINED' for backward compatibility.
+
+        Returns:
+            Mapping alias -> metrics dict with mean rmse/smape/tracking_error.
+            Alias is:
+              - 'ensemble' when model_type == 'COMBINED'
+              - model_type.lower() otherwise
+            If no rows are available, metrics are None.
+        """
+        import json
+
+        try:
+            where_clauses = ["model_type = ?"]
+            params: list[Any] = [model_type]
+
+            if start_date:
+                where_clauses.append("forecast_date >= ?")
+                params.append(start_date)
+            if end_date:
+                where_clauses.append("forecast_date <= ?")
+                params.append(end_date)
+
+            where_sql = " AND ".join(where_clauses)
+
+            query = f"""
+            SELECT regression_metrics
+            FROM time_series_forecasts
+            WHERE {where_sql}
+            """
+            cursor = self.cursor.execute(query, params)
+
+            rmse_vals: list[float] = []
+            smape_vals: list[float] = []
+            te_vals: list[float] = []
+
+            for row in cursor.fetchall():
+                raw = row["regression_metrics"]
+                if not raw:
+                    continue
+                try:
+                    metrics = json.loads(raw)
+                except Exception:
+                    continue
+                rmse_val = metrics.get("rmse")
+                smape_val = metrics.get("smape")
+                te_val = metrics.get("tracking_error")
+                if isinstance(rmse_val, (int, float)):
+                    rmse_vals.append(float(rmse_val))
+                if isinstance(smape_val, (int, float)):
+                    smape_vals.append(float(smape_val))
+                if isinstance(te_val, (int, float)):
+                    te_vals.append(float(te_val))
+
+            def _mean(xs: list[float]) -> Optional[float]:
+                return float(sum(xs) / len(xs)) if xs else None
+
+            alias = "ensemble" if model_type == "COMBINED" else model_type.lower()
+            return {
+                alias: {
+                    "rmse": _mean(rmse_vals),
+                    "smape": _mean(smape_vals),
+                    "tracking_error": _mean(te_vals),
+                }
+            }
         except Exception as exc:  # pragma: no cover - defensive
             safe_error = sanitize_error(exc)
-            logger.error("Failed to save forecast: %s", safe_error)
-            return -1
+            logger.error(
+                "Failed to aggregate forecast regression metrics: %s", safe_error
+            )
+            alias = "ensemble" if model_type == "COMBINED" else model_type.lower()
+            return {alias: {"rmse": None, "smape": None, "tracking_error": None}}
     
     def save_trading_signal(
         self,

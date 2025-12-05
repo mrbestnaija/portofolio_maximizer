@@ -9,6 +9,9 @@ PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
 LOG_DIR="$ROOT_DIR/logs/dry_runs"
 
+# Enable TS forecast audit logs for dry runs to make brutal regressions interpretable.
+export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-$ROOT_DIR/logs/forecast_audits}"
+
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python interpreter not found at $PYTHON_BIN" >&2
   exit 1

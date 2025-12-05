@@ -27,9 +27,11 @@
 ## Approved Time-Series Stack (Tier-1 default)
 - Canonical reference: `Documentation/QUANT_TIME_SERIES_STACK.md` (pin in every AI companion's context). Consider Tier-1 the only sanctioned dependency set until profitability + GPU budget gates unlock higher tiers.
 - Runtime: Python 3.10-3.12 inside `simpleTrader_env`, NumPy, pandas, SciPy.
-- Time-series libraries: statsmodels (SARIMAX), arch (GARCH), and in-repo SAMOSSA/MSSA-RL implementations.
+ - Time-series libraries: statsmodels (SARIMAX), arch (GARCH), and in-repo SAMOSSA/MSSA-RL implementations.
+ - TS governance: treat **SAMOSSA** as the primary Time Series baseline for regression metrics and ensemble comparisons; use SARIMAX only as a secondary candidate/fallback when SAMOSSA metrics are missing.
 - Optional GPU assist: CuPy only when MSSA/SARIMAX workloads hit >70% CPU during brutal runs on <=8 GB GPUs. Escalate before introducing Tier-2 RAPIDS/torch stacks.
 - Automation: Reuse the YAML/JSON snippets from `QUANT_TIME_SERIES_STACK.md` under `config/ai_companion.yml` so autonomous agents inherit the same guardrails automatically.
+- NAV & Barbell: Treat `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` as the canonical references for **TS-first, NAV-centric barbell wiring** (TS core signals as primary, LLM as capped fallback, options/derivatives strictly feature-flagged). Do not re-implement allocation logic ad hoc; route changes through these docs and `config/barbell.yml`/`risk/barbell_policy.py`.
 
 ## Pre-Development AI Instructions
 
@@ -43,6 +45,27 @@ MANDATORY: Before suggesting any code or architecture:
 5. Check: Configuration-driven design maintained
 6. Ensure: Backward compatibility preserved
 ```
+
+### Options / Derivatives Feature-Flag Discipline
+- Treat **options/derivatives support as strictly opt-in** and configuration-driven.
+- Do **not** touch core ETL/auto-trader paths for options unless all of the following are true:
+  - `options_trading.enabled: true` in `config/options_config.yml`, and/or `ENABLE_OPTIONS=true` in the environment.
+  - The existing spot-only brutal suite is green and `Documentation/INTEGRATION_TESTING_COMPLETE.md` reflects this.
+  - `Documentation/BARBELL_OPTIONS_MIGRATION.md` remains consistent with any proposed changes.
+- When adding options logic:
+  - Route all long OTM options and synthetic convex structures into the **risk bucket** only.
+  - Respect barbell guardrails (`max_options_weight`, `max_premium_pct_nav`) from `config/options_config.yml`.
+  - Keep spot-only behaviour unchanged when options are disabled (feature-flag off = no behavioural regression).
+
+### Barbell & Tail-Risk Evaluation Discipline
+- Do **not** use Sharpe alone to judge tail-hedge / barbell components; they are insurance, not linear alpha.
+- Prefer asymmetric / tail-aware metrics:
+  - Sortino ratio (downside deviation only)
+  - Omega ratio (gain vs loss mass around a MAR)
+  - CVaR / Expected Shortfall and stress scenarios (1987/2008/2020-style shocks)
+- Always assess barbell / long-vol strategies **at the portfolio level**:
+  - Impact on skew/kurtosis and left-tail truncation
+  - Cost of convexity vs reduction in crisis losses
 
 ## Phase-Gate Validation Checklist
 

@@ -52,4 +52,4 @@ ctrader:
 metadata:
   created: "2025-11-12"
   owner: "Portfolio Maximizer v45"
-  context: "Replaces IBKR stub per STUB_IMPLEMENTATION_PLAN.md"
+  context: "Replaces massive.com/polygon.io stub per STUB_IMPLEMENTATION_PLAN.md"

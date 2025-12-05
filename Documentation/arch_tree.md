@@ -3,6 +3,9 @@
 ## CURRENT PROJECT STATUS: PARTIALLY BLOCKED – 2025-11-15 brutal run issues largely remediated; higher-order hyperopt + validator/backfill work still in progress
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
 **Recent Achievements**:
+- 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
+- 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
+- 2025-12-03 Delta (diagnostic mode + invariants): DIAGNOSTIC_MODE/TS/EXECUTION toggles relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off) and make PaperTradingEngine permissive (>=1 share) while bypassing LLM latency guards in diagnostics; volume_ma_ratio now guards zero/NaN volume. Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts). Reduced-universe diagnostic run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
 - Remote Sync (2025-11-06): Pipeline entry point refactoring, data persistence auditing, LLM graceful failure, comprehensive documentation updates ⭐ NEW
 - Phase 4.6: Platform-agnostic architecture
 - Phase 4.7: Configuration-driven CV
@@ -36,6 +39,7 @@
 - Week 5.9: Autonomous Profit Engine roll-out (Nov 12, 2025) ⭐ NEW
   - `scripts/run_auto_trader.py` chains extraction → validation → forecasting → Time Series signal generation → signal routing → execution (PaperTradingEngine) with optional LLM fallback, keeping cash/positions/trade history synchronized each cycle.
   - `README.md` + `Documentation/UNIFIED_ROADMAP.md` now present the platform as an **Autonomous Profit Engine**, highlight the hands-free loop in Key Features, and add a Quick Start recipe plus project-structure pointer so operators can launch the trader immediately.
+  - See `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` for the NAV-centric barbell wiring (TS-first, LLM capped fallback) that wraps this loop.
   - `scripts/run_etl_pipeline.py` stage planner updated: `data_storage` is part of the core stage list, Time Series forecasting/signal routing run before any LLM stage, and LLM work is appended only as fallback after the router.
   - `scripts/run_auto_trader.py` now adds the repo root via `site.addsitedir(...)` before importing project packages so the runtime works even without an editable install or manual PYTHONPATH adjustments.
 - Week 5.10: Higher-Order Hyperopt & Regime-Aware Backtesting (Nov 24, 2025) ⭐ NEW
@@ -183,7 +187,7 @@ scripts/analyze_dataset.py
   - `logs/signals/quant_validation.jsonl` logs every scored signal (ticker, metrics, pass/fail) so brutal/dry-run invocations can surface quantitative guardrail breaches immediately after stage timings.
 
 - Week 5.10: Demo-first broker frosting (Nov 12, 2025) ⭐ NEW
-  - `execution/ctrader_client.py` and `execution/order_manager.py` replace the IBKR stub with a demo-ready cTrader Open API client that handles OAuth tokens, order placement, and lifecycle persistence while the order manager enforces the 2% per signal risk cap, daily trade limit, and risk-manager circuit breakers before submitting trades.
+  - `execution/ctrader_client.py` and `execution/order_manager.py` replace the massive.com/polygon.io stub with a demo-ready cTrader Open API client that handles OAuth tokens, order placement, and lifecycle persistence while the order manager enforces the 2% per signal risk cap, daily trade limit, and risk-manager circuit breakers before submitting trades.
   - `config/ctrader_config.yml` documents the demo/live endpoints, risk thresholds, and gating rules.
   - New unit tests (`tests/execution/test_ctrader_client.py`, `tests/execution/test_order_manager.py`) cover configuration loading, order placement, and lifecycle gating, keeping the new broker stack regression-tested.
 - Portfolio mathematics engine upgraded to institutional-grade metrics and optimisation (`etl/portfolio_math.py`)
@@ -209,17 +213,19 @@ scripts/analyze_dataset.py
 4. Replace the PeriodDtype round-trip with `Series.asfreq()` (or a resample) inside `forcester_ts/forecaster.py`, tighten the SARIMAX order grid via config, and add regression tests so the FutureWarning/ConvergenceWarning spam ceases.
 5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(datetime.UTC)`) and register sqlite adapters before the scheduled nightly job runs again.
 
-### Config Inventory (Nov 2025)
+### Config Inventory (Nov 2025; updated Dec 2025)
 - `config/pipeline_config.yml` defines the default stage planner ordering that both the ETL pipeline and autonomous trader invoke.
 - `config/forecasting_config.yml` tunes the SARIMAX/GARCH/SAMOSSA ensemble parameters consumed by `forcester_ts/forecaster.py`.
 - `config/llm_config.yml` lists the Ollama models, latency guardrails, and token-throughput failover policies enforced by `ai_llm/ollama_client.py`.
 - `config/signal_routing_config.yml` centralizes the TS-first, LLM-fallback feature flags shared by `scripts/run_etl_pipeline.py` and `scripts/run_auto_trader.py`.
-- `config/quant_success_config.yml` encodes the Sharpe/Sortino/VaR thresholds that gate Time Series signals before routing/execution.
+- `config/quant_success_config.yml` encodes the per-signal Sharpe/Sortino/VaR thresholds that gate Time Series signals before routing/execution.
+- `config/forecaster_monitoring.yml` plus `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` define the GREEN/YELLOW/RED quant validation thresholds used by `scripts/summarize_quant_validation.py` (per-ticker) and `scripts/check_quant_validation_health.py` (global), including the hard RED CI gate at `max_fail_fraction=0.90`.
 - `config/ai_companion.yml` lists the Tier-1 knowledge base + dependency guardrails that automation launchers consume before invoking SARIMAX/SAMOSSA workloads.
 - `config/ctrader_config.yml` captures demo/live endpoints plus per-signal risk caps for the cTrader order manager.
 
-### Artifact & Log Inventory (Nov 2025)
+### Artifact & Log Inventory (Nov 2025; updated Dec 2025)
 - `bash/comprehensive_brutal_test.sh` orchestrates the profit-critical, ETL, TS/LLM, and execution suites; the most recent run (2025-11-12) persisted its reports under `logs/brutal/` alongside the console summary. *(Set `BRUTAL_ENABLE_LLM=1` if you need the legacy LLM fallback stage�otherwise the script only exercises the forecaster stack.)*
+- Recent brutal runs (for example `logs/brutal/results_20251204_190220/`) use TS-first defaults (`BRUTAL_ENABLE_LLM=0`, frontier stage without `--enable-llm`) and, when quant logs are present, call `scripts/check_quant_validation_health.py` to write the global GREEN/YELLOW/RED quant health classification into `final_report.md`.
 - `logs/brutal/results_*/artifacts/portfolio_maximizer.db.bak`, `.bak-shm`, and `test_database.db` capture SQLite snapshots from brutal runs so validation teams can diff executions before enabling brokers.
 - `logs/signals/quant_validation.jsonl` retains the quant-success audit rows that the brutal and dry-run scripts surface immediately after stage timings, keeping the TS-first + LLM-fallback contract observable.
 

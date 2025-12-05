@@ -14,6 +14,11 @@
 
 **📋 NEW**: Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for complete list of missing/incomplete implementations that must be completed before production deployment.
 
+**🔀 Barbell & Options Migration Status (2025-11-24)**  
+- `config/options_config.yml` is the master options/derivatives config with `options_trading.enabled` (master toggle, default `false`) and barbell-style risk caps (`max_options_weight`, `max_premium_pct_nav`, per-asset-class limits).  
+- `Documentation/BARBELL_OPTIONS_MIGRATION.md` defines the phased migration (O1–O4) from spot-only portfolios to Taleb-style barbell portfolios with long OTM options/synthetic convexity in the risk leg.  
+- `config/barbell.yml` and `risk/barbell_policy.py` now provide a global barbell shell (safe/risk buckets with min/max weights, feature flags, and helper `BarbellConstraint`), but **barbell allocation is disabled by default** so existing spot behaviour remains unchanged until explicitly enabled.
+
 ### Nov 12, 2025 Delta
 - Time Series signals are now generated end-to-end (see logs/ts_signal_demo.json) thanks to the pandas-safe signal generator and the re-ordered pipeline stages.
 - Checkpoint persistence uses Path.replace, clearing the [WinError 183] blocker that previously halted second-run checkpoints on Windows.
@@ -92,7 +97,7 @@
 ### ⚠️ **NOT YET IMPLEMENTED** (See STUB_IMPLEMENTATION_PLAN.md for details)
 
 **CRITICAL (Blocking Production)**:
-- ✅ Broker integration (cTrader Client) - `execution/ctrader_client.py` demo-first implementation replacing the IBKR stub
+- ✅ Broker integration (cTrader Client) - `execution/ctrader_client.py` demo-first implementation replacing the massive.com/polygon.io stub
 - ❌ Order Management System - `execution/order_manager.py` MISSING
 - ❌ Production Performance Dashboard - `monitoring/performance_dashboard.py` MISSING
 - ❌ Production Deployment Pipeline - `deployment/production_deploy.py` MISSING

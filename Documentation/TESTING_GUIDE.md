@@ -6,7 +6,7 @@
 
 ### Nov 12, 2025 Test Execution
 - pytest tests/models/test_time_series_signal_generator.py -q and targeted integration cases now pass under simpleTrader_env, validating the pandas-safe signal generator changes.
-- Pipeline dry-runs continue to hit the Ollama latency regression (brutal suite fails only in 	ests/ai_llm/test_ollama_client.py::test_generate_switches_model_when_token_rate_low); keep this test on every verification list until latency <5 s.
+- Earlier pipeline dry-runs hit the Ollama latency regression (brutal suite failed only in `tests/ai_llm/test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low`); this test now passes under `simpleTrader_env` and should be treated as a regression guard for future latency changes.
 - logs/ts_signal_demo.json is the new smoke artifact proving BUY/SELL signals can be generated outside the test harness.
 
 

@@ -50,6 +50,15 @@
    git push origin $(git rev-parse --abbrev-ref HEAD)
    ```
 
+4. Optional: use the automated sync helper to run the same pull/push sequence for the current (or a named) branch:
+   ```bash
+   # Sync current branch
+   bash/bash/git_sync.sh
+
+   # Or sync a specific branch
+   bash/bash/git_sync.sh feature/branch-name
+   ```
+
 
 ---
 

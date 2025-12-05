@@ -18,7 +18,10 @@ signal_routing:
   # Time Series signal generation thresholds
   time_series:
     confidence_threshold: 0.55  # Minimum confidence for signal (55%)
-    min_expected_return: 0.02   # 2% minimum expected return
+    # Require at least ~0.3% edge after frictions so trades have a
+    # realistic chance of clearing costs before quant validation. This
+    # matches the default in TimeSeriesSignalGenerator.
+    min_expected_return: 0.003  # 0.3% minimum expected return
     max_risk_score: 0.7         # Maximum risk score (70%)
     use_volatility_filter: true # Filter signals based on volatility
   

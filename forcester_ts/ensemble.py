@@ -25,6 +25,10 @@ class EnsembleConfig:
             {"sarimax": 0.6, "samossa": 0.4},
             {"sarimax": 0.5, "samossa": 0.3, "mssa_rl": 0.2},
             {"sarimax": 0.5, "mssa_rl": 0.5},
+            # Allow non-SARIMAX-dominated blends when diagnostics support it.
+            {"samossa": 1.0},
+            {"mssa_rl": 1.0},
+            {"samossa": 0.7, "mssa_rl": 0.3},
         ]
     )
     minimum_component_weight: float = 0.05
@@ -124,7 +128,7 @@ class EnsembleCoordinator:
 
 
 def derive_model_confidence(
-    summaries: Dict[str, Dict[str, float]],
+    summaries: Dict[str, Dict[str, Any]],
 ) -> Dict[str, float]:
     """
     Convert per-model diagnostics into comparable confidence scores.
@@ -136,7 +140,14 @@ def derive_model_confidence(
     confidence: Dict[str, float] = {}
 
     sarimax_summary = summaries.get("sarimax", {})
-    baseline_metrics = sarimax_summary.get("regression_metrics", {})
+    samossa_summary = summaries.get("samossa", {})
+    mssa_summary = summaries.get("mssa_rl", {})
+
+    # Treat SAMOSSA as the primary TS baseline for variance tests when
+    # available; fall back to SARIMAX metrics otherwise.
+    samossa_metrics_baseline = samossa_summary.get("regression_metrics", {}) or {}
+    sarimax_metrics_baseline = sarimax_summary.get("regression_metrics", {}) or {}
+    baseline_metrics = samossa_metrics_baseline or sarimax_metrics_baseline
 
     def _combine_scores(*scores: Optional[float]) -> Optional[float]:
         valid = [float(np.clip(s, 0.0, 1.0)) for s in scores if s is not None]
@@ -157,17 +168,23 @@ def derive_model_confidence(
         te_val = metrics.get("tracking_error")
         if te_val is not None:
             components.append(1.0 / (1.0 + float(te_val)))
+        da_val = metrics.get("directional_accuracy")
+        if da_val is not None:
+            da = float(da_val)
+            # Treat 0.5 as random baseline; reward edges above that.
+            da_score = max(0.0, (da - 0.5) / 0.5)
+            components.append(da_score)
         if not components:
             return None
         return float(np.clip(np.mean(components), 0.0, 1.0))
 
-    def _variance_test_score(metrics: Dict[str, float]) -> Optional[float]:
-        if not metrics or not baseline_metrics:
+    def _variance_test_score(metrics: Dict[str, float], baseline: Dict[str, float]) -> Optional[float]:
+        if not metrics or not baseline:
             return None
         te = metrics.get("tracking_error")
-        base_te = baseline_metrics.get("tracking_error")
+        base_te = baseline.get("tracking_error")
         n = metrics.get("n_observations")
-        base_n = baseline_metrics.get("n_observations")
+        base_n = baseline.get("n_observations")
         if not all([te, base_te, n, base_n]):
             return None
         te = float(te)
@@ -199,41 +216,64 @@ def derive_model_confidence(
     sarimax_score = None
     if aic is not None and bic is not None:
         sarimax_score = np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6))
+    sarimax_metrics = sarimax_summary.get("regression_metrics", {}) or {}
     sarimax_score = _combine_scores(
         sarimax_score,
-        _score_from_metrics(baseline_metrics),
+        _score_from_metrics(sarimax_metrics),
+        _variance_test_score(sarimax_metrics, baseline_metrics)
+        if baseline_metrics
+        else None,
     )
     if sarimax_score is not None:
         confidence["sarimax"] = sarimax_score
 
-    samossa_summary = summaries.get("samossa", {})
     evr = samossa_summary.get("explained_variance_ratio")
     samossa_score = None
     if evr is not None:
         samossa_score = float(np.clip(evr, 0.0, 1.0))
-    samossa_metrics = samossa_summary.get("regression_metrics", {})
+    samossa_metrics = samossa_summary.get("regression_metrics", {}) or {}
     samossa_score = _combine_scores(
         samossa_score,
         _score_from_metrics(samossa_metrics),
-        _variance_test_score(samossa_metrics),
+        # SAMOSSA is treated as the primary baseline; skip variance
+        # test against itself to avoid degenerate scores.
+        None,
     )
     if samossa_score is not None:
         confidence["samossa"] = samossa_score
 
-    mssa_summary = summaries.get("mssa_rl", {})
     baseline_var = mssa_summary.get("baseline_variance")
     mssa_score = None
     if baseline_var is not None:
         mssa_score = 1.0 / (1.0 + baseline_var)
-    mssa_metrics = mssa_summary.get("regression_metrics", {})
+    mssa_metrics = mssa_summary.get("regression_metrics", {}) or {}
     mssa_score = _combine_scores(
         mssa_score,
         _score_from_metrics(mssa_metrics),
-        _variance_test_score(mssa_metrics),
+        _variance_test_score(mssa_metrics, baseline_metrics)
+        if baseline_metrics
+        else None,
         _change_point_boost(mssa_summary),
     )
     if mssa_score is not None:
         confidence["mssa_rl"] = mssa_score
+
+    # If SAMOSSA has strictly lower residual variance than SARIMAX but
+    # ended up with a lower raw score (e.g. due to information-criteria
+    # heuristics), gently bump it above SARIMAX so variance improvements
+    # are reflected in ordering before normalisation.
+    samossa_te = samossa_metrics.get("tracking_error")
+    sarimax_te = sarimax_metrics.get("tracking_error")
+    if (
+        samossa_score is not None
+        and sarimax_score is not None
+        and isinstance(samossa_te, (int, float))
+        and isinstance(sarimax_te, (int, float))
+        and samossa_te < sarimax_te
+        and samossa_score <= sarimax_score
+    ):
+        samossa_score = min(1.0, sarimax_score + 0.05)
+        confidence["samossa"] = samossa_score
 
     # Normalise to 0..1 range and avoid zero weights
     if confidence:

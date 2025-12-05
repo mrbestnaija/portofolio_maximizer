@@ -10,3 +10,4 @@
 - Monitoring/audit: extend dashboard JSON with quality/source/latency; show recent signals with quality badges; add DB inserts for performance snapshots (PnL, win rate if available), forecast quality, and signal provenance.
 - Normalization/scale control: standardize features per ticker with stored scalers; clamp expected_return for routing but log raw values for audit.
 - Checklist alignment: map completed items against AGENT_DEV_CHECKLIST, OPTIMIZATION/SEQUENCED plans, SARIMAX/SAMOSSA checklists; update NEXT_TO_DO_SEQUENCED.md and CRITICAL_REVIEW.md when gates (quality scoring, persistence, dashboards) land.
+- Quant validation & TS health gates: wire `logs/signals/quant_validation.jsonl`, `scripts/check_quant_validation_health.py`, and `scripts/compare_forecast_models.py` into brutal/CI so pipelines fail fast when TS signal quality (expected_profit, RMSE/sMAPE, directional accuracy vs SAMOSSA baseline) degrades beyond configured limits.

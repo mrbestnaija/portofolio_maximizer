@@ -12,6 +12,16 @@
 - LLM integration operational with 3 models available; Ollama health check issues resolved.
 - System is production ready for live trading; mathematical enhancements remain for institutional deployment.
 
+### 2025-12-03 Delta (diagnostic mode + invariants)
+- DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
+- Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts).
+- Diagnostic reduced-universe run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
+
+### 2025-12-04 Delta (TS/LLM guardrails + MVS reporting)
+- Time Series signals now honour a **quant-success hard gate**: `models/time_series_signal_generator.TimeSeriesSignalGenerator` attaches a `quant_profile` sourced from `config/quant_success_config.yml` and demotes BUY/SELL actions to HOLD when `status == "FAIL"` outside diagnostic modes. This materially strengthens the production gating between TS forecasts and realised trades.
+- Automated trading applies an **LLM readiness gate**: `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal, keeping LLM outputs in a research-only lane until they clear the quantitative criteria documented in `Documentation/LLM_PERFORMANCE_REVIEW.md`.
+- Live and end-to-end launchers now emit **MVS-style profitability summaries** (total trades, profit, win rate, profit factor, MVS PASS/FAIL) using `DatabaseManager.get_performance_summary()` over configurable windows. The critical review should therefore treat MVS as a first-class readiness metric alongside the existing mathematical and risk scorecard.
+
 ### Scorecard
 | Category | Score | Status | Primary Gap |
 |----------|-------|--------|-------------|
@@ -59,9 +69,33 @@
 
 ### ⚠️ **Mathematical Gaps Remain**
 1. **Kelly Criterion flaw** – current implementation deviates from canonical `(b * p - q) / b`. Correct formula required for position sizing.
-2. **Advanced risk metrics missing** – Sortino ratio, Conditional VaR, Information Ratio, Calmar ratio absent from production engine.
+2. **Advanced risk metrics missing (barbell/tail-aware)** – the engine still leans on Sharpe-style symmetric metrics:
+   - Sortino ratio (downside-only volatility) is not computed.
+   - Omega ratio (probability-weighted gains vs losses around a MAR) is absent.
+   - CVaR/Expected Shortfall and structured scenario tests (1987/2008/2020-style shocks) are not yet integrated.
+   - This makes long-vol / tail-hedge and barbell legs look “bad” under Sharpe even when they improve portfolio skew/kurtosis and crisis behavior.
 3. **Insufficient statistical validation** – no hypothesis testing, bootstrap confidence intervals, or autocorrelation analysis.
 4. **Robust covariance estimation** – portfolio covariance uses vanilla sample estimator; shrinkage/factor methods recommended.
+
+### ⚠️ **Time-Series Forecaster Evaluation Gaps (Nov 24, 2025)**
+- **Quant gate misalignment** – Analysis of `logs/signals/quant_validation.jsonl` shows 648 evaluations with `PASS=2` and `FAIL=646`. However:
+  - Median `profit_factor` ≈ 1.19 (75th percentile ≈ 1.50) – many regimes are actually profitable.
+  - Median `win_rate` ≈ 0.54 (75th percentile ≈ 0.56).
+  - Median `annual_return` ≈ ~8% with a strong right tail (75th percentile > 100%).
+  - Failures are dominated by the `expected_profit` criterion (601 failures) driven by a hard `min_expected_profit=500` in `config/quant_success_config.yml`, which is unrealistic for a 25k book and current sizing. The gating is rejecting almost everything, not because the models are catastrophically wrong, but because the bar is mis-set.
+- **Data sufficiency issues in live runs** – Recent ETL/live runs show:
+  - Forecasting skipped for many tickers with “need ≥30, have 5–8” rows due to too-short windows, leading to “Generated forecasts for 0 ticker(s)” and no downstream signals.
+  - CV splits with overlapping folds and high drift (e.g. PSI ≈ 13.4, vol_psi ≈ 11.6), so regime evaluation is noisy.
+- **Model fit fragility** – SARIMAX frequently requires relaxed constraints; GARCH emits ConvergenceWarnings (optimizer code 4). Fits complete but are sensitive, and the ensemble often degenerates to `weights={'sarimax': 1.0, 'samossa': 0.0, 'mssa_rl': 0.0}`.
+- **No realized TS PnL for optimizer** – Live/paper trading loops often execute 0 trades:
+  - Either because forecasts are absent (insufficient data), or
+  - Signals are downgraded to HOLD by min_return/confidence/quant validation and sizing.
+  - As a result, the strategy optimizer and hyperopt loops have almost no realized equity curves to learn from.
+
+### ✅ 2025-11-24 TS Monitoring & Hyperopt Implementation Status
+- **Shared monitoring config** – `config/forecaster_monitoring.yml` now centralises explicit numeric thresholds for `profit_factor`, `win_rate`, `annual_return`, and RMSE ratio vs baseline, with optional per‑ticker overrides (AAPL, MSFT, CL=F, GC=F, BTC-USD, EURUSD=X).
+- **Brutal / CLI integration** – `scripts/summarize_quant_validation.py` and `scripts/check_forecast_audits.py` ingest this config to surface ticker‑level PF/WR/AnnRet alerts and RMSE violations with human‑readable CLI tables, making forecaster health visible in every brutal run.
+- **Hyperopt / strategy optimizer gating** – `bash/run_post_eval.sh` (hyperopt scoring) and `scripts/run_strategy_optimization.py` (evaluation_fn) now apply these thresholds: candidates from regimes where the TS ensemble fails PF/WR or RMSE checks have their `total_return` score driven to zero, so “profitable regimes” in hyperopt must come from statistically and economically healthy TS periods.
 
 ---
 
@@ -112,7 +146,78 @@
 
 Risk management upgrades expected to reduce tail risk ~30% and improve confidence calibration 5–10%.
 
+### Phase 5 – Time-Series Forecaster Evaluation & Brutal Harness (Weeks 5–7)
+- **5.1 Recalibrate Quant Success Gate**
+  - Reduce `min_expected_profit` in `config/quant_success_config.yml` to a realistic band for TS-driven trades (e.g. 25–200 USD per idea, or a % of NAV / volatility), while keeping `max_drawdown`, `profit_factor`, and Sharpe/Sortino thresholds strict.
+  - Aim for a quant gate that:
+    - Rejects genuinely poor regimes (profit_factor ≤ 1, annual_return ≤ 0, excessive drawdown),
+    - Does not mark nearly all realistic TS ideas as `FAIL` purely on an over‑ambitious profit target.
+
+- **5.2 Add Forecaster Regression Block to Brutal Suite**
+  - For each ticker and horizon (at minimum 1‑day ahead):
+    - Compare SARIMAX/SAMOSSA/MSSA_RL/GARCH ensemble forecasts against a naive baseline (e.g. last close / random walk).
+    - Log:
+      - RMSE and sMAPE,
+      - Hit rate (direction of return),
+      - Calibration summaries (bucketed predicted vs realized returns).
+  - Brutal fails when:
+    - TS ensemble underperforms the naive baseline by more than a configured tolerance, or
+    - Rolling error/hit‑rate metrics degrade materially versus the last green checkpoint.
+
+- **5.3 Turn Quant Validation into a Real-Time TS Monitor**
+  - Build a small CLI/brutal helper over `logs/signals/quant_validation.jsonl` that:
+    - Aggregates metrics per ticker and regime (e.g. last 90–180 days),
+    - Flags tickers where `profit_factor < 1` or `annual_return < 0` for TS-driven trades,
+    - Tracks trends in `annual_return`, `Sharpe`, `profit_factor`, and `win_rate` (improving vs deteriorating).
+  - Expose this summary in dashboards so underperforming tickers/models are visible in near real time.
+
+- **5.4 Make Ensemble Weights Performance-Driven**
+  - Replace static or degenerate ensemble weights with per‑ticker, regime‑aware weights derived from recent performance:
+    - Use DB/quant_validation metrics (RMSE/sMAPE, profit_factor, drawdown) to periodically recompute weights for SARIMAX/SAMOSSA/MSSA_RL/GARCH per ticker.
+    - Down‑weight or disable models that are consistently inferior to SARIMAX in a given regime, instead of carrying them at non‑zero weight by default.
+
+- **5.5 Real-Time “Forecast → Outcome” Evaluation Loop**
+  - On each ETL + forecasting run (or auto‑trader cycle), per ticker:
+    - Record forecasted 1‑day (and optionally 5‑day) returns,
+    - After outcomes, store:
+      - Forecast vs realized return,
+      - Squared/absolute error,
+      - Directional correctness.
+  - Maintain rolling windows (e.g. last 60–90 forecasts) of:
+    - RMSE/sMAPE,
+    - Hit rate,
+    - Calibration metrics.
+  - Add brutal thresholds:
+    - Hit rate must stay above a minimal edge (e.g. 55% on 1‑day horizon vs a 50% random baseline),
+    - RMSE must remain below a multiple of the naive baseline’s RMSE.
+  - If a model/ticker pair violates thresholds, mark it for:
+    - Ensemble down‑weighting, or
+    - Temporary disablement until re‑tuned or retrained.
+
+- **5.6 Fix Data Sufficiency & CV Regime Checks**
+  - Enforce per‑cycle data sufficiency:
+    - Require a minimum history (e.g. ≥60 rows) before running forecasting; otherwise drop the ticker for that cycle with a clear log, rather than repeatedly warning and skipping.
+    - Use `_ensure_min_length` padding only when there is a base of meaningful points (e.g. ≥15) to avoid fabricating noisy series.
+  - Repair CV regime checks:
+    - Use non‑overlapping expanding/rolling folds with a fixed gap and ensure PSI/vol_psi are computed on chronologically coherent splits.
+    - When drift exceeds thresholds, explicitly down‑weight or exclude affected folds from aggregate metrics, rather than just logging warnings.
+
+- **5.7 Prioritise Realised TS PnL Collection**
+  - Run `scripts/run_auto_trader.py` in controlled paper‑trading sessions with:
+    - Longer lookbacks (e.g. 120–180 days),
+    - Shorter forecast horizons (e.g. 5–10 days),
+    - LLM fallback enabled for redundancy,
+    - Relaxed but still safe size/min_notional constraints so some trades actually execute.
+  - Validate that trades land in `trade_executions` and produce non‑zero equity curves.
+  - Only then rerun the strategy optimizer and brutal harness on realized PnL, so hyper‑parameter and candidate search is grounded in real performance instead of all‑HOLD/no‑trade regimes.
+
 ---
+
+### 5.8 2025-11-26 TS Regression Governance Update
+- Initial implementation of **SAMOSSA-as-baseline** forecaster governance landed:
+  - `forcester_ts/metrics.compute_regression_metrics` now records `directional_accuracy` alongside RMSE/sMAPE/tracking error.
+  - `forcester_ts/ensemble.derive_model_confidence` uses SAMOSSA metrics as the primary TS baseline (falling back to SARIMAX when absent) and folds directional accuracy into model-confidence scores so ensemble weights are trading-aware.
+  - `scripts/compare_forecast_models.py` and the “Ensemble vs SAMOSSA Regression Check” stage in `bash/comprehensive_brutal_test.sh` compare the TS ensemble (`model_type='COMBINED'`) against the SAMOSSA baseline per ticker and fail the brutal suite when the fraction of underperforming tickers (RMSE or directional accuracy) exceeds the configured ceiling.
 
 ## Business Impact & ROI
 - **Current**: Suitable for research/prop trading; medium operational risk due to missing tail metrics.
@@ -127,5 +232,6 @@ Risk management upgrades expected to reduce tail risk ~30% and improve confidenc
 2. Correct Kelly criterion in `ai_llm/signal_validator.py` and add statistical backtests (30-day rolling, bootstrap CI).
 3. Stand up statistical testing toolkit and integrate into CI pipeline.
 4. Launch stress-testing and regime-detection initiatives per roadmap.
+5. Execute Phase 5 (TS Forecaster Evaluation & Brutal Harness) before modifying core TS models (orders, features, MSSA/SAMOSSA internals); current evidence shows the primary gaps are in **gating, monitoring, and data sufficiency**, not fundamental model inability.
 
 **Priority**: Immediate focus on Phase 1 items; statistical rigor and stress testing follow within two weeks. Maintain documentation updates in `implementation_checkpoint.md` after each milestone.

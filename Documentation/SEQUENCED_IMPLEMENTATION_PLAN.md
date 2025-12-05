@@ -13,6 +13,9 @@
 - Data-source-aware ticker resolver (`etl/data_universe.py`) added; `scripts/run_auto_trader.py` now resolves tickers via the helper (explicit + frontier default, provider discovery when empty).
 - LLM fallback defaults to enabled in the trading loop for redundancy; thresholds unchanged.
 - Dashboard JSON emission hardened (datetime → ISO) to avoid serialization warnings during live runs.
+- Barbell migration roadmap documented in `BARBELL_INTEGRATION_TODO.md`; Phase A/B optimization tasks must incorporate asymmetric risk metrics (Sortino, Omega, CVaR) and antifragility scenarios when evaluating barbell/tail-hedge components.
+- Forecaster monitoring config (`config/forecaster_monitoring.yml`) introduced to centralise TS health thresholds (profit_factor, win_rate, RMSE) and keep brutal CLIs, hyperopt, and dashboards aligned.
+- Strategy optimizer (`scripts/run_strategy_optimization.py`) and post-eval hyperopt driver (`bash/run_post_eval.sh`) now gate candidate regimes on these thresholds so “profitable regimes” require both decent PF/WR and acceptable RMSE vs baseline.
 
 **📋 NEW**: 
 - Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for the remaining items (performance dashboard, disaster recovery, etc.) now that the cTrader client + order manager replacements have landed.

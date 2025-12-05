@@ -10,7 +10,9 @@ Focus: data science, ML, and statistical modeling for time series / investments 
 > **Nov 24, 2025 Delta**  
 > - Data-source-aware ticker resolver (`etl/data_universe.py`) added; auto-trader now resolves tickers via helper (explicit + frontier default, provider discovery when empty).  
 > - LLM fallback defaults to enabled in trading runs; thresholds unchanged.  
-> - Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings in live loops.
+> - Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings in live loops.  
+> - Barbell risk view captured in `BARBELL_INTEGRATION_TODO.md`: evaluation of long-vol/tail-hedge legs should lean on asymmetric/tail-aware metrics (Sortino, Omega, CVaR, crisis scenarios) rather than Sharpe alone.
+> - Options/derivatives path formalised as a **future, feature-flagged extension**: `config/options_config.yml` + `Documentation/BARBELL_OPTIONS_MIGRATION.md` describe how to add options under a barbell allocation *without* changing the Tier-1 time-series stack or spot-only pipelines when options are disabled.
 
 ## Tiered Stack Overview (Project-Aligned)
 

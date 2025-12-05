@@ -10,6 +10,9 @@ START=${START:-"2025-11-15"}
 END=${END:-"2025-11-23"}
 RUN_ID="eval_$(date +%Y%m%d_%H%M%S)"
 
+# Enable forecast audit logging for interpretable TS evaluation (forecester_ts/instrumentation.py).
+export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-logs/forecast_audits}"
+
 # Higher-order hyper-parameter exploration defaults (30/70 explore/exploit)
 HYPEROPT_ROUNDS=${HYPEROPT_ROUNDS:-0}
 HYPEROPT_EXPLORE_PCT=${HYPEROPT_EXPLORE_PCT:-30}
@@ -76,6 +79,7 @@ score_db_total_profit() {
   python3 - <<'PY' "$db_path"
 import sys
 from datetime import datetime, timedelta, UTC
+from pathlib import Path
 try:
     from etl.database_manager import DatabaseManager
 except Exception as exc:  # pragma: no cover
@@ -91,7 +95,64 @@ try:
         start_date=start.isoformat(),
         end_date=end.isoformat(),
     ) or {}
-    print(summary.get("total_profit") or 0.0)
+
+    total_profit = float(summary.get("total_profit") or 0.0)
+    profit_factor = summary.get("profit_factor") or 0.0
+    win_rate = summary.get("win_rate") or 0.0
+
+    # Apply the same monitoring thresholds used by the brutal suite and
+    # strategy optimizer so that hyperopt only treats regimes as
+    # "profitable" when the TS ensemble is both statistically and
+    # economically healthy.
+    penalty = 1.0
+    cfg_path = Path("config/forecaster_monitoring.yml")
+    if cfg_path.exists():
+        try:
+            import yaml  # Lazy import to keep dependency optional
+
+            cfg_raw = yaml.safe_load(cfg_path.read_text()) or {}
+            fm_cfg = cfg_raw.get("forecaster_monitoring") or {}
+
+            # 1) Quant validation-style PF / WR checks at portfolio level.
+            qv_cfg = fm_cfg.get("quant_validation") or {}
+            min_pf = qv_cfg.get("min_profit_factor")
+            min_wr = qv_cfg.get("min_win_rate")
+
+            pf_bad = (
+                isinstance(min_pf, (int, float))
+                and float(profit_factor) < float(min_pf)
+            )
+            wr_bad = (
+                isinstance(min_wr, (int, float))
+                and float(win_rate) < float(min_wr)
+            )
+            if pf_bad or wr_bad:
+                penalty = 0.0
+
+            # 2) RMSE-based forecaster health checks.
+            rm_cfg = fm_cfg.get("regression_metrics") or {}
+            max_ratio = float(rm_cfg.get("max_rmse_ratio_vs_baseline", 1.10))
+            regression_summary = db.get_forecast_regression_summary(
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+            )
+            ens = regression_summary.get("ensemble") or {}
+            ensemble_rmse = ens.get("rmse")
+            baseline_summary = db.get_forecast_regression_summary(model_type="SAMOSSA")
+            base = (baseline_summary.get("samossa") or {}) if baseline_summary else {}
+            baseline_rmse = base.get("rmse")
+            if (
+                isinstance(ensemble_rmse, (int, float))
+                and isinstance(baseline_rmse, (int, float))
+                and baseline_rmse > 0
+            ):
+                ratio = float(ensemble_rmse) / float(baseline_rmse)
+                if ratio > max_ratio:
+                    penalty = 0.0
+        except Exception:
+            penalty = 1.0
+
+    print(total_profit * penalty)
 except Exception:
     print(-1e12)
 PY

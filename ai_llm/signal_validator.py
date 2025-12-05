@@ -16,6 +16,7 @@ Per AGENT_INSTRUCTION.md:
 """
 
 import logging
+import os
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
@@ -385,6 +386,10 @@ class SignalValidator:
                                     market_data: pd.DataFrame,
                                     portfolio_value: float) -> tuple[bool, List[str]]:
         """Layer 5: Transaction cost feasibility"""
+        # In diagnostic mode, skip cost-based gating so trades can flow.
+        diag_mode = str(os.getenv("DIAGNOSTIC_MODE") or os.getenv("EXECUTION_DIAGNOSTIC_MODE") or "0") == "1"
+        if diag_mode:
+            return True, []
         warnings = []
         
         close = market_data['Close'].values

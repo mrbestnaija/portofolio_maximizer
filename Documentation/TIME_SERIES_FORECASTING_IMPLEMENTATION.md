@@ -1,9 +1,20 @@
 ﻿# Time Series Forecasting Implementation - Complete
 **Refactoring to Time Series as Default Signal Generator**
 
-**Date**: 2025-11-06 (Updated)  
-**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run exposed regressions**  
-**Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress
+**Date**: 2025-12-04 (Updated)  
+**Status**: 🔴 **PARTIALLY BLOCKED – 2025-11-15 brutal run exposed regressions; structural issues fixed and brutal harness green, global quant validation still RED**  
+**Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
+**Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
+
+### 2025-12-03 Delta (diagnostic mode + invariants)
+- DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard is bypassed in diagnostics and `volume_ma_ratio` now guards zero/NaN volume.
+- Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts).
+- Diagnostic reduced-universe run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
+
+### 2025-12-04 Delta (TS quant gates + LLM guardrails)
+- `models/time_series_signal_generator.TimeSeriesSignalGenerator` now treats quant validation as a **hard gate** for Time Series trades: when the per-signal `quant_profile.status` is `FAIL` and diagnostic toggles are off, BUY/SELL actions are demoted to HOLD while retaining full provenance (`quant_validation` attached to the signal) and JSONL logging via `logs/signals/quant_validation.jsonl`. Thresholds come from `config/quant_success_config.yml` (profit_factor, win_rate, min_expected_profit, etc.).
+- `config/signal_routing_config.yml` and the generator’s defaults are aligned on a **0.3% minimum expected return** (`min_expected_return=0.003`), so TS signals must clear a realistic edge after friction before routing/execution; diagnostic modes still reduce this floor to zero for stress runs.
+- `scripts/run_auto_trader.py` now enforces an **LLM readiness gate**: LLM fallback is only enabled when `data/llm_signal_tracking.json` reports at least one validated signal; otherwise the router runs in TS-only mode even if `--enable-llm` is passed. Diagnostic runs bypass this guard so LLM behaviour can still be exercised during experiments.
 
 ### 2025-11-12 Hardening Notes
 - models/time_series_signal_generator.py now normalises pandas/NumPy payloads before evaluation, eliminating the "truth value of a Series is ambiguous" crash and stamping decision context (expected return, confidence, risk, volatility) into provenance. logs/ts_signal_demo.json captures a SELL signal produced directly from SQLite OHLCV data.
@@ -148,11 +159,12 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
 - **Metrics**:
   - **RMSE** – square-root of mean squared residuals.
   - **sMAPE** – symmetric MAPE, robust when prices hover near zero.
-  - **Tracking Error** – standard deviation of residuals (proxy for portfolio tracking error).
+  - **Tracking Error** - standard deviation of residuals (proxy for portfolio tracking error).
+  - **Directional Accuracy** - hit-rate on the sign of forecasted vs realised returns; trading-aligned metric that now feeds ensemble confidence and TS health checks.
 - **Workflow**:
   1. Call `forecaster.forecast(...)` to cache the horizon.
   2. Once you have realised prices for the same index, call `forecaster.evaluate(actual_series)`; the returned dict includes the metrics above plus `n_observations`.
-  3. Metrics flow into SQLite (`time_series_forecasts.regression_metrics`) and dashboards via `etl/dashboard_loader.py`, so ensemble weighting can blend AIC/EVR with realised performance.
+  3. Metrics flow into SQLite (`time_series_forecasts.regression_metrics`) and dashboards via `etl/dashboard_loader.py`, so ensemble weighting can blend AIC/EVR with realised performance and directional edge.
   4. One-sided variance-ratio tests (a pragmatic Diebold–Mariano proxy) screen models before the ensemble grid-search finalises weights.
 
 #### Ensemble & GPU Enhancements ⚙️
@@ -206,6 +218,22 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
   - Optional visualization hook (`pipeline.visualization.auto_dashboard`) renders forecast and signal dashboards via `etl/dashboard_loader.py` and `TimeSeriesVisualizer`.
 
 **⚠️ REFACTORING REQUIRED**: See `Documentation/REFACTORING_STATUS.md` Issue 1 for detailed pipeline integration plan.
+
+### 8.1 Dashboard Health Quick-Check (NEW)
+- **File**: `scripts/check_dashboard_health.py`
+- **Usage**:
+  ```bash
+  python scripts/check_dashboard_health.py \
+    --dashboard-path visualizations/dashboard_data.json \
+    --config-path config/forecaster_monitoring.yml
+  ```
+- Reads the latest `dashboard_data.json` emitted by `scripts/run_auto_trader.py` and prints:
+  - Run metadata (run_id, timestamp, tickers, cycles).
+  - Forecaster health vs thresholds from `config/forecaster_monitoring.yml`:
+    - `profit_factor_ok`, `win_rate_ok`, `rmse_ok`, plus the underlying metrics and limits.
+  - A small per‑ticker summary based on the last few executed signals in the dashboard:
+    - Trade count, win rate, simple profit factor, and any PF/WR alerts based on the same monitoring config.
+- This keeps **brutal CLIs**, **hyperopt**, and **dashboard inspection** aligned on a single set of TS health thresholds without requiring manual JSON inspection.
 
 ### 9. Configuration ✅
 - **File**: `config/forecasting_config.yml`
@@ -533,7 +561,7 @@ See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 - **Implementation**: ✅ Core models complete  
 - **Integration**: ✅ Pipeline + DB wired (forecasting only)  
 - **Testing**: ✅ Regression suite updated (forecasting only)  
-- **Latest Validation Attempt**: `bash/comprehensive_brutal_test.sh` (Nov 12) completed profit-critical + ETL suites but timed out with a `Broken pipe` during the Time Series forecasting block, so no TS-specific tests or signal-router suites were executed. This run must be repeated after fixing the missing `tests/etl/test_data_validator.py` file and the timeout root cause.
+- **Latest Validation Attempt**: `bash/comprehensive_brutal_test.sh` now completes end-to-end in `simpleTrader_env` (see `logs/brutal/results_20251204_190220/`), with profit-critical, ETL, Time Series forecasting, signal routing, integration, and security suites all passing. The previous `Broken pipe` timeout in the Time Series block and the missing `tests/etl/test_data_validator.py` file have been remediated. The remaining gating item for this document is global quant validation health, which is still RED (FAIL_fraction above `max_fail_fraction=0.90`) per `scripts/check_quant_validation_health.py` and `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`.
 - **Documentation**: ✅ Current (forecasting only)  
 - **Refactoring**: 🟡 **IN PROGRESS** - See `Documentation/REFACTORING_STATUS.md`
 

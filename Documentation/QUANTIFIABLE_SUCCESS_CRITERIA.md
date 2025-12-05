@@ -81,6 +81,13 @@ profit_factor = sum(winning_trades) / abs(sum(losing_trades))
 - 1.5-2.0: Good
 - > 2.0: Excellent
 
+> **Barbell / Risk-Bucket Note**  
+> For Taleb-style barbell strategies, the **safe leg** must meet or exceed these PF/WR thresholds at the portfolio level.  
+> The **risk leg** (e.g. long OTM options, synthetic convex exposures) is allowed to have lower win rate and more volatile trade-level PnL, but:
+> - Its capital share is bounded by barbell guardrails (`config/barbell.yml`, `config/options_config.yml`), and  
+> - It must improve or at least not degrade portfolio-level tail behaviour (drawdown, tail ratio, CVaR) once barbell constraints are applied.  
+> In other words, risk-taking in the barbell risk bucket is intentional and acceptable **only** when sized according to the barbell allocation and evaluated on **total portfolio** PF/WR and tail metrics, not per-trade Sharpe alone.
+
 ### **1.5 Win/Loss Ratio**
 - **Definition**: Average win ÷ Average loss
 - **Target**: > 1.0

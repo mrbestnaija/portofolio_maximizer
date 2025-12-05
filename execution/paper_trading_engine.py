@@ -17,6 +17,7 @@ Per AGENT_INSTRUCTION.md:
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -150,20 +151,22 @@ class PaperTradingEngine:
             )
         
         logger.info(f"Executing %s signal for %s", action, ticker)
-        # Step 1: Validate signal
+        # Step 1: Validate signal (diagnostic toggle via env DIAGNOSTIC_MODE/EXECUTION_DIAGNOSTIC_MODE)
+        diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
         validation = self.signal_validator.validate_llm_signal(
             signal,
             market_data,
             self._current_portfolio_value()
         )
-        
-        if not validation.is_valid or validation.recommendation == 'REJECT':
+        if (not validation.is_valid or validation.recommendation == 'REJECT') and not diag_mode:
             logger.warning("Signal rejected: %s", validation.warnings)
             return ExecutionResult(
                 status='REJECTED',
                 reason=f"Validation failed: {validation.warnings}",
                 validation_warnings=validation.warnings
             )
+        if diag_mode and validation.warnings:
+            logger.warning("Validation warnings (ignored in DIAGNOSTIC_MODE): %s", validation.warnings)
         
         # Step 2: Calculate position size
         position_size = self._calculate_position_size(
@@ -265,7 +268,7 @@ class PaperTradingEngine:
                                  signal: Dict[str, Any],
                                  confidence_score: float,
                                  market_data: pd.DataFrame,
-                                 current_position: int) -> int:
+        current_position: int) -> int:
         """
         Calculate position size using Kelly criterion with confidence adjustment.
         
@@ -278,23 +281,35 @@ class PaperTradingEngine:
         Returns:
             Number of shares to trade
         """
-        # Maximum position size (2% of portfolio as risk management)
+        diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
+        # Maximum position size (2% of portfolio as risk management, scaled by
+        # per-ticker regime state when available).
         portfolio_value = self._current_portfolio_value()
-        max_position_value = portfolio_value * 0.02
+        max_position_value = portfolio_value * (0.10 if diag_mode else 0.02)
+
+        # Regime-aware risk scaling: use a smaller fraction of the 2% cap
+        # when a ticker is still in exploration mode or in a red regime, and a
+        # slightly larger fraction when it is in a green regime. This keeps
+        # realised PnL risk small while allowing more trades where evidence is
+        # scarce, and grows risk only where realised performance is strong.
+        ticker = signal.get("ticker")
+        if ticker:
+            risk_mult = self._get_regime_risk_multiplier(ticker)
+            max_position_value *= risk_mult
         action = signal.get("action", "HOLD").upper()
         if action == "SELL":
             # Tighter cap for shorts (1% of equity)
-            max_position_value = portfolio_value * 0.01
+            max_position_value = portfolio_value * (0.05 if diag_mode else 0.01)
         
         # Adjust by confidence (floor at 50% to avoid zero-size)
-        confidence_weight = max(confidence_score, 0.5)
+        confidence_weight = max(confidence_score, 0.1 if diag_mode else 0.5)
         position_value = max_position_value * confidence_weight
         
         # Calculate shares
         current_price = market_data['Close'].iloc[-1]
 
         if action == "SELL":
-            desired = max(1, int(position_value / current_price))
+            desired = max(0, int(position_value / current_price))
             # Protect against stacking shorts beyond cap
             if current_position < 0:
                 current_exposure = abs(current_position) * current_price
@@ -308,13 +323,49 @@ class PaperTradingEngine:
             else:
                 shares = desired
         else:
-            desired = max(1, int(position_value / current_price))
+            desired = max(0, int(position_value / current_price))
             if current_position < 0:
                 shares = min(abs(current_position), desired)
             else:
                 shares = desired
 
-        return max(0, shares)
+        return max(1, shares) if diag_mode else max(0, shares)
+
+    def _get_regime_risk_multiplier(self, ticker: str) -> float:
+        """
+        Look up a per-ticker risk multiplier from config/regime_state.yml.
+
+        Defaults to 1.0 when no regime information is available. Exploration
+        and red regimes shrink risk; green regimes allow a modest increase.
+        """
+        from pathlib import Path
+        import yaml  # local import to avoid hard dependency in minimal setups
+
+        regime_path = Path(__file__).resolve().parent.parent / "config" / "regime_state.yml"
+        if not regime_path.exists():
+            return 1.0
+
+        try:
+            raw = yaml.safe_load(regime_path.read_text(encoding="utf-8")) or {}
+            rs = raw.get("regime_state") or {}
+            info = rs.get(ticker)
+            if not isinstance(info, dict):
+                return 1.0
+            mode = info.get("mode")
+            state = info.get("state")
+        except Exception:
+            return 1.0
+
+        # Exploration mode: trade smaller until n_trades is sufficient.
+        if mode == "exploration":
+            return 0.25
+        # Exploitation + red regime: shrink risk aggressively.
+        if state == "red":
+            return 0.3
+        # Exploitation + green regime: modestly increase risk.
+        if state == "green":
+            return 1.2
+        return 1.0
     
     def _simulate_entry_price(self, 
                              market_price: float, 

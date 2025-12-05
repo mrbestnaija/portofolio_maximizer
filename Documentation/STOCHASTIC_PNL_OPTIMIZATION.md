@@ -167,3 +167,38 @@ Guardrails remain external and immutable:
 - Remaining ambition: swap the lightweight simulator for a full replay of historical OHLCV + forecasts -> `SignalRouter`/`TimeSeriesSignalGenerator`/`PaperTradingEngine` with candidate.params mapped into the real stack. This will provide true candidate-specific PnL for non-convex optimization under the existing guardrails.
 
 - 2025-11-23: Wired StrategyOptimizer into bash/run_post_eval.sh and run_strategy_optimization.py with regime-aware evaluation windows and persistent strategy_configs cache; dashboard meta now surfaces best-known strategy params/metrics per regime without hardcoding strategies.
+
+## Regime-Aware Exploration vs Exploitation (NEW)
+
+To keep optimisation PnL-first without overfitting, a lightweight regime / exploration layer now sits on top of the existing paper trading engine:
+
+- `scripts/update_regime_state.py`:
+  - Reads realised trades from `trade_executions` via `DatabaseManager`.
+  - For each ticker, collects the last *N* trades with non-null `realized_pnl`.
+  - If `n_trades < N_min`:
+    - Marks the ticker as `mode: exploration`, `state: neutral`.
+  - Otherwise computes a simple Sharpe-like score `sharpe_N = mean / (std + ε)` and classifies the regime as:
+    - `green` (Sharpe above a positive threshold),
+    - `red` (Sharpe below a negative threshold),
+    - `neutral` (in between).
+  - Writes the result to `config/regime_state.yml` under:
+    ```yaml
+    regime_state:
+      AAPL:
+        n_trades: 12
+        sharpe_N: 0.85
+        mode: exploitation
+        state: green
+    ```
+
+- `execution/paper_trading_engine.PaperTradingEngine`:
+  - Uses `_get_regime_risk_multiplier(ticker)` inside `_calculate_position_size` to scale the standard 2% per-trade risk cap:
+    - **Exploration** (`mode == "exploration"`): multiplies the cap by `0.25`, so early trades in low-sample regimes use micro-sizing.
+    - **Red regime** (`state == "red"`): multiplies the cap by `0.3`, shrinking risk for sleeves with poor realised Sharpe.
+    - **Green regime** (`state == "green"`): multiplies the cap by `1.2`, allowing a modest scale-up in statistically strong sleeves.
+    - **Neutral / missing state**: uses `1.0` (no change).
+
+This pattern implements a simple exploration/exploitation policy:
+- New or weakly-tested tickers get **more observations** at tiny size instead of being hard-blocked.
+- Strong regimes are allowed slightly more capital, consistent with the project’s quantitative success criteria and risk caps.
+- The mechanism is fully config-driven; if `config/regime_state.yml` is absent, behaviour falls back to the original fixed 2% cap.

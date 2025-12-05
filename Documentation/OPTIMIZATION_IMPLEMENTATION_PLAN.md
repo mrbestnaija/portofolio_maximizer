@@ -63,6 +63,9 @@
 - ✅ Statistical significance testing
 - ✅ Stress testing framework
 
+> 🔄 **Barbell Migration Note (2025-11-24)**  
+> Long-volatility / tail-hedge and barbell “risk bucket” legs must be evaluated primarily with these asymmetric/tail-aware metrics (Sortino, Omega, CVaR, scenario analysis) at the **portfolio** level, not by Sharpe alone. See `BARBELL_INTEGRATION_TODO.md` for the dedicated barbell allocation and antifragility plan.
+
 **Next Steps**:
 ```bash
 # 1. Replace existing portfolio_math.py

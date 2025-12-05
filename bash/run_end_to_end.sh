@@ -3,6 +3,10 @@
 
 set -euo pipefail
 
+# Production-safe defaults: ensure diagnostic shortcuts used by
+# brutal/diagnostic helpers do not leak into live profit runs.
+unset DIAGNOSTIC_MODE TS_DIAGNOSTIC_MODE EXECUTION_DIAGNOSTIC_MODE LLM_FORCE_FALLBACK || true
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
@@ -16,8 +20,8 @@ PIPELINE_LOG="$LOG_DIR/pipeline_${RUN_STAMP}.log"
 TRADER_LOG="$LOG_DIR/auto_trader_${RUN_STAMP}.log"
 
 # Defaults (override via env)
-TICKERS="${TICKERS:-AAPL,MSFT}"
-START_DATE="${START_DATE:-2018-01-01}"
+TICKERS="${TICKERS:-AAPL,MSFT, GOOGL}"
+START_DATE="${START_DATE:-2015-01-01}" 
 END_DATE="${END_DATE:-2024-01-01}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-180}"
 FORECAST_HORIZON="${FORECAST_HORIZON:-10}"
@@ -47,6 +51,9 @@ if [[ "$PIPE_EXIT" -ne 0 ]]; then
   exit "$PIPE_EXIT"
 fi
 echo "Pipeline complete. Log: $PIPELINE_LOG"
+echo "Data source snapshot (from $PIPELINE_LOG):"
+grep -E "Primary:" "$PIPELINE_LOG" | tail -n 1 || echo "  (no primary source line found)"
+grep -E "OK Successfully extracted" "$PIPELINE_LOG" | tail -n 1 || echo "  (no extraction success line found)"
 
 # Higher-order hyper-parameter exploration (project-wide default)
 HYPEROPT_ROUNDS="${HYPEROPT_ROUNDS:-0}"
@@ -89,5 +96,58 @@ if [[ -f "$DASH_PATH" ]]; then
 else
   echo "Dashboard JSON not found (expected at $DASH_PATH); ensure run_auto_trader emits it." >&2
 fi
+
+echo "=== Performance summary (SQLite: data/portfolio_maximizer.db) ==="
+"$PYTHON_BIN" - <<'PY'
+import os
+from datetime import datetime, timedelta
+
+from etl.database_manager import DatabaseManager
+
+start_env = os.getenv("MVS_START_DATE")
+end_env = os.getenv("MVS_END_DATE")
+window_days = os.getenv("MVS_WINDOW_DAYS")
+
+start_date = start_env
+end_date = end_env
+
+if not start_date and window_days:
+    try:
+        days = int(window_days)
+        end = datetime.utcnow().date()
+        start = end - timedelta(days=days)
+        start_date = start.isoformat()
+        end_date = end.isoformat()
+    except ValueError:
+        start_date = None
+        end_date = None
+
+db = DatabaseManager()
+perf = db.get_performance_summary(start_date=start_date, end_date=end_date)
+db.close()
+
+total_trades = perf.get("total_trades", 0)
+total_profit = perf.get("total_profit", 0.0) or 0.0
+win_rate = perf.get("win_rate", 0.0) or 0.0
+profit_factor = perf.get("profit_factor", 0.0) or 0.0
+
+window_label = "full history"
+if start_date or end_date:
+    window_label = f"{start_date or '...'} -> {end_date or '...'}"
+
+print(f"Window         : {window_label}")
+print(f"Total trades   : {total_trades}")
+print(f"Total profit   : {total_profit:.2f} USD")
+print(f"Win rate       : {win_rate:.1%}")
+print(f"Profit factor  : {profit_factor:.2f}")
+
+mvs_passed = (
+    total_profit > 0.0
+    and win_rate > 0.45
+    and profit_factor > 1.0
+    and total_trades >= 30
+)
+print(f"MVS Status     : {'PASS' if mvs_passed else 'FAIL'}")
+PY
 
 echo "End-to-end run finished @ $RUN_STAMP"
