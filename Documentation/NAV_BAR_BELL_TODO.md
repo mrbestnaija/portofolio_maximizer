@@ -125,9 +125,8 @@
 
 - [ ] Keep all **NAV/barbell/Medallion-style details** centralised in this file and a single architecture overview (e.g. `Documentation/NAV_RISK_BUDGET_ARCH.md`).
 - [ ] In existing docs:
-  - [ ] `Documentation/BARBELL_OPTIONS_MIGRATION.md` – reference this TODO for NAV-centric budgeting; avoid duplicating formulas.
+  - [ ] `Documentation/BARBELL_OPTIONS_MIGRATION.md` – reference this TODO for NAV-centric budgeting; avoid duplicating formulas and defer MTM specifics to `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md`.
   - [ ] `Documentation/BARBELL_INTEGRATION_TODO.md` – link to this file for NAV/bucket work; keep that file focused on high-level phases (A/B, antifragility, NGX).
 - [ ] When implementing, prefer:
   - [ ] Small, composable modules (`NAVTracker`, `NAVAllocator`, `RiskScaler`).
   - [ ] Clear feature flags so the legacy spot-only path remains easy to reason about.
-

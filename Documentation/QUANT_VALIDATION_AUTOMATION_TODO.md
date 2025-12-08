@@ -9,14 +9,14 @@ This document turns the current quant‑validation findings into a concrete, aut
 
 ## Phase 1 – Grow Quant‑Validation Sample Size
 
-- [ ] Align quant lookbacks  
+- [x] Align quant lookbacks  
   - Set `quant_validation.lookback_days = 365` in `config/quant_success_config.yml` and `config/quant_success_config.hyperopt.yml`.  
   - Ensure `scripts/run_auto_trader.py` is always invoked with `--lookback-days >= quant_validation.lookback_days` (default is already `365`).
 
-- [ ] Maintain robust per‑ticker series  
-  - If sparse histories cause instability, consider raising `MIN_SERIES_POINTS` in `scripts/run_auto_trader.py` so the `_ensure_min_length` padding targets a slightly larger window.
+- [x] Maintain robust per‑ticker series  
+  - Raised `MIN_SERIES_POINTS` in `scripts/run_auto_trader.py` to expand padding and stabilise sparse histories.
 
-- [ ] Schedule regular TS cycles for core names  
+- [x] Schedule regular TS cycles for core names  
   - Use `bash/production_cron.sh` (see `Documentation/CRON_AUTOMATION.md`) to run `auto_trader` daily for a curated list of **core tickers** (e.g., `AAPL,MSFT,GC=F,COOP` plus a few backtest‑strong names that already clear PF/WR/n criteria).  
   - Target: accumulate ≥30 closed trades overall and ≥10 closed trades in each of the core names before tightening thresholds.
 
@@ -24,9 +24,9 @@ This document turns the current quant‑validation findings into a concrete, aut
 
 ## Phase 2 – Threshold Sweeper for Time‑Series Parameters
 
-- [ ] Add `scripts/sweep_ts_thresholds.py`  
-  - CLI should accept:  
-    - `--tickers`: comma‑separated list of tickers (default: core universe).  
+- [x] Add `scripts/sweep_ts_thresholds.py`  
+  - CLI accepts:  
+    - `--tickers`: comma‑separated list of tickers (default: realised‑trade universe).  
     - `--grid-confidence`: JSON or simple list of `confidence_threshold` values.  
     - `--grid-min-return`: list of `min_expected_return` values.  
     - Optional: `--grid-max-risk`, `--min-trades`, `--output`.  
@@ -34,71 +34,75 @@ This document turns the current quant‑validation findings into a concrete, aut
     - Reconstruct realised or backtest PnL using existing DB history (`etl/database_manager.py`) and/or backtest helpers.  
     - Compute annualised PnL, profit factor (PF), win rate (WR), and trade count `n`.
 
-- [ ] Selection rule per ticker  
+- [x] Selection rule per ticker  
   - Choose θ that maximises annualised PnL subject to:  
     - `PF ≥ 1.1`,  
     - `WR ≥ 0.5`,  
     - `n ≥ min_trades` (e.g., 30 overall, 10 per core name).  
   - Write chosen thresholds to a machine‑readable artifact (JSON) and, in a later phase, map them into config (e.g., per‑ticker block in `config/signal_routing_config.yml` or a dedicated thresholds table).
 
-- [ ] Automation  
-  - Wire the sweeper into a weekly/monthly cron task after ETL + auto‑trader runs or after `bash/run_post_eval.sh` (hyperopt) so it always works from fresh data.
+- [x] Automation  
+  - Cron wrapper added via `bash/production_cron.sh ts_threshold_sweep` (defaults: 365‑day lookback, grid confidence 0.50/0.55/0.60, grid min_return 0.001/0.002/0.003, min_trades=10).
+- [x] Selection artifact  
+  - `scripts/sweep_ts_thresholds.py` now emits a per‑ticker `selection` block chosen by annualized PnL with PF/WR/min_trades gates. Use `bash/run_ts_sweep_and_proposals.sh` to run sweep + proposals in one step.
+- [x] Diagnostic liquidation caution  
+  - `scripts/liquidate_open_trades.py` (and `bash/force_close_and_sweep.sh`) are for evidence collection only; they force-close trades with synthetic MTM PnL and must not be used for real PnL reporting.
 
 ---
 
 ## Phase 3 – Transaction Cost Calibration
 
-- [ ] Add `scripts/estimate_transaction_costs.py`  
-  - CLI should accept:  
+- [x] Add `scripts/estimate_transaction_costs.py`  
+  - CLI accepts:  
     - `--as-of`: optional date; default = “now”.  
     - `--lookback-days`: window for trades to analyse.  
     - `--grouping`: how to bucket instruments (e.g., `asset_class`, `ticker`).  
     - `--output`: JSON path for proposed cost parameters.  
   - Use `etl/database_manager` trade tables to compute median and percentile round‑trip costs (fees + slippage) per group.
 
-- [ ] Feed costs back into configs  
-  - Derive recommended `friction_buffer` and `min_expected_return` per asset class such that both sit a few bps above observed median round‑trip cost.  
-  - Optionally adjust `quant_validation.success_criteria.min_expected_profit` in `config/quant_success_config.yml` to remain consistent with observed costs and capital base.
+- [x] Feed costs back into configs  
+  - `scripts/generate_signal_routing_overrides.py` writes `logs/automation/signal_routing_overrides.yml` with friction buffers and min_expected_return per asset class for review.
 
-- [ ] Schedule  
-  - Run cost estimation monthly/quarterly under cron and log proposals to `logs/automation/transaction_costs_*.json` for manual review before changing configs.
+- [x] Schedule  
+  - Cron wrapper added via `bash/production_cron.sh transaction_costs` (defaults: 365‑day lookback, asset_class grouping, min_trades=5; outputs under `logs/automation/transaction_costs*.json`).
+- [x] Apply to configs  
+  - Per‑ticker overrides and asset‑class friction buffers added to `config/signal_routing_config.yml` for review (CL=F, MSFT, MTN; US_EQUITY, FX).
 
 ---
 
 ## Phase 4 – Risk Buckets & Sleeve‑Level Performance
 
-- [ ] Formalise risk buckets  
-  - Extend `risk/barbell_policy.BarbellConfig` / `config/barbell.yml` to tag tickers as `core` vs `speculative` with per‑bucket capital and per‑trade risk caps.
+- [x] Formalise risk buckets  
+  - `risk/barbell_policy.BarbellConfig` / `config/barbell.yml` tag safe/core/spec sleeves with per‑bucket caps; optional gating is wired into `run_auto_trader.py`.
 
-- [ ] Per‑sleeve metrics  
-  - Extend `PaperTradingEngine.get_performance_metrics()` or add `scripts/summarize_sleeves.py` to emit PF, WR, annualised PnL, and trade count per `(ticker, route_type, bucket)` tuple.
+- [x] Per‑sleeve metrics  
+  - `scripts/summarize_sleeves.py` emits PF, WR, annualised PnL, and trade count per ticker with bucket tags for dashboards/cron.
 
-- [ ] Promotion / demotion rules  
-  - Promote “good sleeves”: if PF/WR and `n` exceed thresholds, allow a small size increase or slightly lower `min_expected_profit`.  
-  - Demote “weak sleeves”: raise `min_expected_profit` or disable the sleeve (especially for speculative bucket names) until metrics improve.
+- [x] Promotion / demotion rules  
+  - `scripts/evaluate_sleeve_promotions.py` consumes the JSON emitted by `scripts/summarize_sleeves.py` (sleeve-labelled metrics, consistent with `config/barbell.yml`) and proposes promotions/demotions once PF/WR/n thresholds are met (see `logs/automation/sleeve_promotion_plan.json`).
 
-- [ ] Automation  
-  - Schedule sleeve summary + promotion/demotion review weekly; write proposed config diffs to `logs/automation/sleeve_updates_*.json`.
+- [x] Automation  
+  - `bash/weekly_sleeve_maintenance.sh` schedules sleeve summaries + promotion/demotion review and writes artifacts to `logs/automation/sleeve_*.json`.
 
 ---
 
 ## Phase 5 – Execution Log & Time‑of‑Day Filters
 
-- [ ] Enhance execution logging  
-  - Ensure each execution record contains: `ticker`, `side`, `shares`, `fill_price`, approximated `mid_price` at fill, timestamp, and `route_type` (TS vs LLM).
+- [x] Enhance execution logging  
+  - `run_auto_trader.py` logs execution/skip events (ticker, side, entry, mid‑price, timestamp, source) to `logs/automation/execution_log.jsonl`.
 
-- [ ] Slippage analysis  
-  - Implement `scripts/analyze_slippage_windows.py` to compute slippage distributions by hour (or 30‑minute bins) per asset class and flag “bad” time windows.
+- [x] Slippage analysis  
+  - `scripts/analyze_slippage_windows.py` consumes the execution log to compute mid‑price slippage distributions by asset class and hour (commission proxy retained).
 
-- [ ] No‑trade windows  
-  - Add an `execution.no_trade_windows` block (per asset class) to the relevant config file and enforce it in the execution engine so trades are skipped when slippage is historically poor.
+- [x] No‑trade windows  
+  - `execution.no_trade_windows` lives in `config/signal_routing_config.yml` and is enforced before execution; skipped events are recorded.
 
 ---
 
 ## Phase 6 – Glue, Guardrails, and Reporting
 
 - [ ] Make all new automation scripts config‑driven and read‑only with respect to source code.  
-- [ ] Standardise outputs to `logs/automation/*.json` and `visualizations/dashboard_automation.json` so dashboards and agents can consume the latest recommendations.  
+- [ ] Standardise outputs to `logs/automation/*.json` and `visualizations/dashboard_automation.json` so dashboards and agents can consume the latest recommendations (sleeve + execution artifacts now live under `logs/automation/`; dashboard glue remains).  
 - [ ] Keep changes consistent with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md` and `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`: no permanent threshold changes without quantified justification (PF/WR/n, cost‑aware).
 
 ---
@@ -120,4 +124,3 @@ To keep this roadmap actionable, the following helpers are already implemented:
   - This script never edits configs directly; it is the bridge between cron‑driven evidence and human‑reviewed config diffs.
 
 For cron wiring examples of the sweep and cost scripts, see `Documentation/CRON_AUTOMATION.md`.
-

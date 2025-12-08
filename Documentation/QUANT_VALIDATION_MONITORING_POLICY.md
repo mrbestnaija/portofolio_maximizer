@@ -9,7 +9,7 @@ This document explains how the current quant validation monitoring thresholds wo
 The goal is twofold:
 
 - Make the behaviour of `config/forecaster_monitoring.yml`, `scripts/check_quant_validation_health.py`, and `scripts/summarize_quant_validation.py` fully explicit.
-- Provide a roadmap for tightening thresholds from “research hygiene” to “production gates” as empirical data accumulates.
+- Provide a roadmap for tightening thresholds from “research hygiene” to “production gates” as empirical data accumulates, and for wiring those tightened thresholds into automation (see `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` and the helper CLIs in `scripts/`).
 
 ---
 
@@ -232,6 +232,24 @@ Key calibration ideas:
 
 These calibrations can be added incrementally, always anchored to **empirical distributions from your own backtests** (calibrate quantiles for “good” vs “bad” strategies in hindsight) rather than borrowed rules of thumb.
 
+### 4.1 Hyper-Parameter Search Feedback (TS Model Candidates)
+
+As the TS hyper-parameter search infrastructure matures, monitoring thresholds should be increasingly informed by:
+
+- `ts_model_candidates` (see `etl/database_manager.py` and `Documentation/OPTIMIZATION_IMPLEMENTATION_PLAN.md` Phase 4), populated by:
+  - `scripts/run_ts_model_search.py` (rolling-window CV over small SARIMAX/SAMOSSA grids),
+  - `etl/statistical_tests.py` (Diebold–Mariano-style comparisons and rank stability metrics).
+- Automation snapshots emitted via `scripts/build_automation_dashboard.py` (`visualizations/dashboard_automation.json`), which consolidate:
+  - TS threshold sweeps,
+  - Transaction cost estimates,
+  - Sleeve promotion/demotion proposals,
+  - Best cached strategy/TS model candidates.
+
+Practical guidance:
+
+- Treat the distributions of PF/WR/RMSE and stability scores across `ts_model_candidates` as the **empirical prior** when tightening `forecaster_monitoring.yml` thresholds (research vs production).
+- Document any threshold changes and their rationale in `Documentation/CRITICAL_REVIEW.md` and `implementation_checkpoint.md`, explicitly linking them back to the candidate distributions and DM-style tests, so the quant validation policy remains institutional-grade and evidence-driven.
+
 ---
 
 ## 5. Practical Next Steps
@@ -256,4 +274,3 @@ Medium-term, as more data accumulates:
   - `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md` for how TS forecaster metrics are logged and interpreted.
 
 This keeps quant validation monitoring strictly configuration-driven, visible in brutal/CI outputs, and aligned with the project’s overall “no complexity without proven profitability” philosophy.
-

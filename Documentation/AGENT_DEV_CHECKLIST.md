@@ -2,6 +2,7 @@
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
+> **Quant Validation & MTM:** For quant gates and liquidation, treat `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`, and `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` as the canonical references (plus their helper scripts in `scripts/`), rather than embedding ad-hoc thresholds or pricing rules in new code.
 
 ## Project Status (Updated: 2025-12-04)
 
@@ -102,6 +103,23 @@ REQUIRED FOR EVERY CODE SUGGESTION:
 - Never monkey-patch third-party clients (e.g., `requests.Session.request`); pass configuration via documented parameters
 - Guard vectorised math (log returns, diff) against empty, single-row, or non-positive data before computing ratios
 - Treat cache refreshes as optional: fall back gracefully when cache metadata is missing or stale
+- Prefer **vectorized operations** for all data/array processing:
+  - Use NumPy/pandas operations over Python loops or row-wise `.apply()` in ETL, analysis, forecasting, and portfolio math.
+  - If a non-vectorized loop is unavoidable (e.g. integration with an external API), keep it isolated, small, and clearly documented as such.
+
+### Time-Series Model Search & Hyper-Parameter Guardrails
+- [ ] **Never** hardcode new SARIMAX/SAMOSSA/GARCH grids inside ad-hoc scripts; extend the shared, config-driven paths instead:
+  - Update `config/model_profiles.yml` when adding sleeve/regime-specific TS profiles.
+  - Extend `scripts/run_ts_model_search.py` if you need additional candidate types, and persist results via `ts_model_candidates` (see `etl/database_manager.py`).
+- [ ] Use shared statistical tooling:
+  - Prefer `etl/statistical_tests.py` (Diebold–Mariano-style tests, rank stability) over bespoke hypothesis tests when comparing TS models.
+  - Treat per-fold RMSE stability and DM p-values as first-class evidence when proposing TS hyper-parameter changes.
+- [ ] Always consult `visualizations/dashboard_automation.json` (from `scripts/build_automation_dashboard.py`) before touching TS thresholds or model configs; this JSON is the institutional-grade source of truth for:
+  - TS threshold sweeps,
+  - Transaction cost estimates,
+  - Sleeve promotion/demotion plans,
+  - Config proposals,
+  - Best cached strategy/TS model candidates.
 
 ### Logging Discipline
 - Library modules must avoid `logging.basicConfig`; configure logging in entry points or dedicated bootstrap modules only
@@ -250,6 +268,8 @@ This checklist is designed to prevent the architectural over-engineering and ana
 
 #### Phase 1-3: Core Testing Only
 **Maximum 200 lines of test code** - Don't spend more time testing than developing
+
+**Standing instruction**: Always build a unit test for every critical implementation path before shipping changes.
 
 ```python
 # test_core_functions.py - Essential tests only

@@ -6,7 +6,7 @@
 
 quant_validation:
   enabled: true
-  lookback_days: 180  # Use 6-month lookback aligned with dashboards
+  lookback_days: 365  # Align with quant-validation automation to grow sample size
   risk_free_rate: 0.04  # Annualized risk-free assumption per success doc
   benchmark_column: null  # Set to column name (e.g., 'SP500') when available
   capital_base: 25000  # Matches PRS readiness capital target
@@ -36,12 +36,6 @@ quant_validation:
     "CL=F":
       success_criteria:
         min_expected_profit: 75.0   # Crude oil: higher threshold due to volatility
-    "SOL":
-      success_criteria:
-        min_expected_profit: 100.0  # Highly volatile altcoin exposure
-    "EURUSD=X":
-      success_criteria:
-        min_expected_profit: 50.0   # FX: between equities and high-vol assets
 
   bootstrap:
     n_samples: 400

@@ -74,3 +74,10 @@ forecaster_monitoring:
       min_win_rate: 0.53
       min_annual_return: 0.0
       min_pass_rate: 0.03
+      disable_time_series: true
+    SOL:
+      min_profit_factor: 1.5
+      min_win_rate: 0.60
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true

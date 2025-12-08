@@ -87,7 +87,9 @@ class DatabaseManager:
         self.backend = "sqlite"
         self.paramstyle = "?"
 
-        db_path_str = str(db_path).strip()
+        # Allow env override to bypass locked/corrupt defaults.
+        import os
+        db_path_str = str(db_path or os.getenv("PORTFOLIO_DB_PATH", "data/portfolio_maximizer.db")).strip()
         self._sqlite_in_memory = self.backend == "sqlite" and db_path_str == ":memory:"
         self._db_path_hint_is_dir = isinstance(db_path, str) and db_path_str.endswith(("/", "\\"))
         self.db_path = Path(db_path_str)
@@ -581,11 +583,66 @@ class DatabaseManager:
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
                 holding_period_days INTEGER,
+                asset_class TEXT DEFAULT 'equity',
+                instrument_type TEXT DEFAULT 'spot',
+                underlying_ticker TEXT,
+                strike REAL,
+                expiry TEXT,
+                multiplier REAL DEFAULT 1.0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 {fk_clause}
             )
         """
         self.cursor.execute(trade_executions_sql)
+
+        # Migration: ensure extended trade metadata columns exist (SQLite only)
+        self.cursor.execute("PRAGMA table_info(trade_executions)")
+        trade_cols = {row["name"] for row in self.cursor.fetchall()}
+        # Add new columns one by one to avoid destructive migrations.
+        if "asset_class" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN asset_class TEXT DEFAULT 'equity'"
+            )
+        if "instrument_type" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN instrument_type TEXT DEFAULT 'spot'"
+            )
+        if "underlying_ticker" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN underlying_ticker TEXT"
+            )
+        if "strike" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN strike REAL")
+        if "expiry" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN expiry TEXT")
+        if "multiplier" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN multiplier REAL DEFAULT 1.0"
+            )
+
+        # Synthetic legs for synthetic/structured trades (Phase 4 – MTM plan).
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS synthetic_legs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                synthetic_trade_id INTEGER NOT NULL,
+                leg_type TEXT NOT NULL,
+                ticker TEXT,
+                underlying_ticker TEXT,
+                direction INTEGER NOT NULL,
+                quantity REAL NOT NULL,
+                strike REAL,
+                expiry TEXT,
+                multiplier REAL DEFAULT 1.0
+            )
+            """
+        )
+        self.cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_synthetic_legs_trade
+            ON synthetic_legs(synthetic_trade_id)
+            """
+        )
 
         # Data quality snapshots
         self.cursor.execute("""
@@ -638,7 +695,8 @@ class DatabaseManager:
         """)
 
         # Strategy optimization cache (stochastic search results)
-        self.cursor.execute("""
+        self.cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS strategy_configs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 regime TEXT NOT NULL,
@@ -647,8 +705,33 @@ class DatabaseManager:
                 score REAL NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
-        
+            """
+        )
+
+        # Time-series model candidate cache (TS hyper-parameter search results)
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ts_model_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                regime TEXT,
+                candidate_name TEXT NOT NULL,
+                params TEXT NOT NULL,
+                metrics TEXT NOT NULL,
+                stability REAL,
+                score REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        self.cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ts_model_candidates_ticker_regime
+            ON ts_model_candidates(ticker, regime)
+            """
+        )
+
         # Time series forecasts (SARIMAX/GARCH/SAMOSSA)
         forecast_table_sql = """
             CREATE TABLE IF NOT EXISTS time_series_forecasts (
@@ -1610,6 +1693,12 @@ class DatabaseManager:
         realized_pnl: Optional[float] = None,
         realized_pnl_pct: Optional[float] = None,
         holding_period_days: Optional[int] = None,
+        asset_class: str = "equity",
+        instrument_type: str = "spot",
+        underlying_ticker: Optional[str] = None,
+        strike: Optional[float] = None,
+        expiry: Optional[str] = None,
+        multiplier: float = 1.0,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -1624,8 +1713,9 @@ class DatabaseManager:
                     INSERT INTO trade_executions
                     (ticker, trade_date, action, shares, price, total_value,
                      commission, signal_id, realized_pnl, realized_pnl_pct,
-                     holding_period_days)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     holding_period_days, asset_class, instrument_type,
+                     underlying_ticker, strike, expiry, multiplier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -1639,6 +1729,12 @@ class DatabaseManager:
                         realized_pnl,
                         realized_pnl_pct,
                         holding_period_days,
+                        asset_class,
+                        instrument_type,
+                        underlying_ticker,
+                        strike,
+                        expiry,
+                        float(multiplier),
                     ),
                 )
             trade_id = self.cursor.lastrowid
@@ -2210,6 +2306,43 @@ class DatabaseManager:
         except Exception as exc:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save strategy config: %s", safe_error)
+            return -1
+
+    def save_ts_model_candidate(
+        self,
+        ticker: str,
+        regime: Optional[str],
+        candidate_name: str,
+        params: Dict[str, Any],
+        metrics: Dict[str, Any],
+        stability: Optional[float] = None,
+        score: Optional[float] = None,
+    ) -> int:
+        """Persist a single time-series model candidate (hyper-parameter search result)."""
+        try:
+            payload_params = json.dumps(params or {})
+            payload_metrics = json.dumps(metrics or {})
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO ts_model_candidates
+                    (ticker, regime, candidate_name, params, metrics, stability, score)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticker,
+                        regime,
+                        candidate_name,
+                        payload_params,
+                        payload_metrics,
+                        stability,
+                        None if score is None else float(score),
+                    ),
+                )
+            return self.cursor.lastrowid
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save TS model candidate: %s", safe_error)
             return -1
 
     def get_best_strategy_config(self, regime: Optional[str] = None) -> Optional[Dict[str, Any]]:

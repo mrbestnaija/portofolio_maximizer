@@ -1,8 +1,21 @@
 @echo off
-REM Scheduled task wrapper for nightly Time Series forecaster audit/health check
+@echo off
+REM Lightweight scheduled-task wrapper.
+REM Default: nightly TS forecaster audit/health check.
+REM Optional: trigger auto_trader_core via WSL to build TS evidence.
+
 set SCRIPT_DIR=%~dp0
 set PYTHON_BIN=%SCRIPT_DIR%simpleTrader_env\Scripts\python.exe
 set AUDIT_SCRIPT=%SCRIPT_DIR%scripts\check_forecast_audits.py
+set TASK=%1
+
+if /I "%TASK%"=="auto_trader_core" (
+  REM Use WSL to call the cron multiplexer for core tickers (halts after targets).
+  where wsl >nul 2>&1 || (echo [ERROR] WSL not found; cannot run auto_trader_core & exit /b 1)
+  wsl bash -lc "cd \"$(wslpath -a \"%SCRIPT_DIR%\")\" && bash/bash/production_cron.sh auto_trader_core"
+  exit /b %ERRORLEVEL%
+)
+
 if not exist "%PYTHON_BIN%" (
   echo [ERROR] Python interpreter not found at %PYTHON_BIN%
   exit /b 1

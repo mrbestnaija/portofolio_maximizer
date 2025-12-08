@@ -7,11 +7,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Defaults tuned to surface at least ~8 tickers x 6 cycles ≈ 48 trade opportunities.
-: "${TICKERS:=MTN,SOL,GC=F,EURUSD=X,BTC-USD,CL=F,AAPL,MSFT}"
-: "${CYCLES:=8}"
+: "${TICKERS:=MTN,CL=F,AAPL,MSFT}"
+: "${CYCLES:=6}"
 : "${FORECAST_HORIZON:=10}"
 : "${LOOKBACK_DAYS:=180}"
-: "${INITIAL_CAPITAL:=50000}"
+: "${INITIAL_CAPITAL:=25000}"
 : "${ENABLE_LLM:=1}"
 : "${VERBOSE:=0}"
 
@@ -20,6 +20,14 @@ export DIAGNOSTIC_MODE=1
 export TS_DIAGNOSTIC_MODE=1
 export EXECUTION_DIAGNOSTIC_MODE=1
 export LLM_FORCE_FALLBACK=0
+
+# Lightweight live notification (file-based) so operators can see active runs.
+NOTIFY_DIR="${ROOT_DIR}/logs/alerts"
+mkdir -p "${NOTIFY_DIR}"
+NOTIFY_FILE="${NOTIFY_DIR}/auto_trader_diagnostic_running.log"
+{
+  echo "$(date -Iseconds) | start | tickers=${TICKERS} | cycles=${CYCLES} | lookback_days=${LOOKBACK_DAYS}"
+} >> "${NOTIFY_FILE}"
 
 # Invoke the standard launcher with the diagnostic-friendly defaults.
 exec env \

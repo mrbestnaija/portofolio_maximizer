@@ -6,7 +6,7 @@ set -euo pipefail
 # 2) Auto-trader backtest pass to populate dashboard/metrics.
 
 TICKERS=${TICKERS:-"AAPL,MSFT,CL=F,GC=F,BTC-USD,EURUSD=X"}
-START=${START:-"2025-11-15"}
+START=${START:-"2024-11-15"}
 END=${END:-"2025-11-23"}
 RUN_ID="eval_$(date +%Y%m%d_%H%M%S)"
 

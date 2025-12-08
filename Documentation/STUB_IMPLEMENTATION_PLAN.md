@@ -26,6 +26,20 @@
 ### Nov 18, 2025 SQLite Recovery
 - `etl/database_manager.py` now auto-backs up corrupted SQLite files and rebuilds them when `database disk image is malformed` trips the brutal suite. Any stub work touching persistence (checkpointing, validation backfills, trade logs) should rely on this code path instead of crafting ad-hoc repair logic.
 
+### Nov 20, 2025 Quant Validation Automation Update
+- Quant validation automation helpers are now scaffolded as standalone, read-only CLIs:
+  - `scripts/sweep_ts_thresholds.py` sweeps `(confidence_threshold, min_expected_return)` and writes realised performance summaries to `logs/automation/ts_threshold_sweep.json`.
+  - `scripts/estimate_transaction_costs.py` estimates commission / transaction cost statistics by ticker or asset class and writes `logs/automation/transaction_costs.json`.
+  - `scripts/generate_config_proposals.py` ingests both artifacts and produces `logs/automation/config_proposals.json` with **proposed** TS threshold and cost-aware `min_expected_return` adjustments for human review.
+- These helpers are wired into the roadmap via `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` and cron examples in `Documentation/CRON_AUTOMATION.md`; they provide the evidence layer for tightening `time_series.min_expected_return` and `quant_validation.success_criteria.min_expected_profit` without hardcoding new thresholds in code.
+
+### Heuristics, Full Models, and Future ML Calibrators
+- Stub replacements must respect the three-layer stack described in `Documentation/AGENT_INSTRUCTION.md` and `Documentation/arch_tree.md`:
+  - **Heuristics** (fast, transparent): quant validation GREEN/YELLOW/RED tiers, MVS summaries, barbell gates and simple NAV guards – used for real-time monitoring and quick routing/guardrail decisions.
+  - **Full models** (authoritative): TS ensemble + portfolio math, auto trader, backtesting and strategy optimisation – the single source of truth for official NAV, drawdown, and PnL-based research.
+  - **ML calibrators** (future): regime-aware learning around heuristics (e.g., thresholds, bands), driven by full-model outcomes and documented in `Documentation/STOCHASTIC_PNL_OPTIMIZATION.md` and `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`; never silently replace TS/portfolio engines.
+- Any new stubs added to this file should clearly indicate which layer they belong to and avoid introducing undocumented ML behaviour before spot-only TS profitability and quant health (GREEN/YELLOW) are demonstrated in brutal reports.
+
 ### 🚨 2025-11-15 Brutal Run Regression
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the database that these stubs rely on is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”). `DatabaseManager._connect` must treat this error like the existing disk-I/O path before any stub replacement can be validated.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 still failing with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. The refactors cited above therefore leave Stage 8 without data.
@@ -182,6 +196,7 @@ class PerformanceDashboard:
 - `etl/portfolio_math.py`
 - Web framework (Flask/FastAPI) for serving dashboard
 - Charting library (Plotly/Bokeh)
+ - Existing heuristic outputs (MVS summaries, quant health, barbell gates) as documented in `Documentation/arch_tree.md`, `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, and `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` – the dashboard should surface these **heuristics alongside full-model metrics**, not invent new, untracked rules.
 
 **Success Criteria**:
 - [ ] Live dashboard operational
@@ -624,6 +639,11 @@ class TimeSeriesValidation:
 - `statsmodels` for statistical tests
 - `etl/time_series_cv.py` for walk-forward CV
 - Database for result persistence
+- Existing CV/quant infrastructure:
+  - Rolling/blocked CV patterns from `TIME_SERIES_CV.md`.
+  - Numeric/scaling invariants from `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`.
+  - Quant monitoring & automation from `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`.
+  - The framework should orchestrate and report on these **full-model evaluations** (TS ensemble + portfolio metrics), not replace the underlying forecaster or quant success helper.
 
 **Success Criteria**:
 - [ ] Walk-forward validation working

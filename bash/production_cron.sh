@@ -78,6 +78,94 @@ case "${TASK}" in
       "${PYTHON_BIN}" scripts/run_auto_trader.py "$@"
     ;;
 
+  auto_trader_core)
+    # Core tickers only, with a simple trade-count gate to stop once
+    # enough evidence has accumulated (>= total + per-ticker closed trades).
+    CORE_TICKERS="${CRON_CORE_TICKERS:-AAPL,MSFT,GC=F,COOP}"
+    CORE_DB_PATH="${CRON_CORE_DB_PATH:-data/portfolio_maximizer.db}"
+    CORE_TOTAL_TARGET="${CRON_CORE_TOTAL_TARGET:-30}"
+    CORE_PER_TARGET="${CRON_CORE_PER_TICKER_TARGET:-10}"
+
+    "${PYTHON_BIN}" - <<PY
+import sqlite3, sys, pathlib
+db_path = pathlib.Path(r"${CORE_DB_PATH}")
+tickers = [t.strip().upper() for t in "${CORE_TICKERS}".split(",") if t.strip()]
+total_target = int("${CORE_TOTAL_TARGET}")
+per_target = int("${CORE_PER_TARGET}")
+if not db_path.exists():
+    sys.exit(0)
+try:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT ticker, COUNT(*) FROM trade_executions "
+        "WHERE realized_pnl IS NOT NULL GROUP BY ticker"
+    )
+    rows = cur.fetchall()
+    counts = {str(t or "").upper(): int(n or 0) for t, n in rows}
+    total = sum(counts.values())
+    if total >= total_target and all(counts.get(t, 0) >= per_target for t in tickers):
+        print(f"[CRON] Core targets met (total={total} >= {total_target}; "
+              f"per_ticker min={per_target}); skipping auto_trader_core.")
+        sys.exit(1)
+except Exception:
+    # On errors, allow the run to proceed to avoid blocking automation.
+    sys.exit(0)
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+PY
+    gate_status=$?
+    if [[ ${gate_status} -eq 1 ]]; then
+      # Targets met; exit gracefully without running auto_trader.
+      exit 0
+    fi
+    run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
+      "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
+    ;;
+
+  ts_threshold_sweep)
+    # Weekly/monthly TS threshold sweep to grow evidence for per-ticker settings.
+    sweep_args=()
+    if [[ -n "${CRON_TS_SWEEP_TICKERS:-}" ]]; then
+      sweep_args+=(--tickers "${CRON_TS_SWEEP_TICKERS}")
+    fi
+    run_with_logging "ts_threshold_sweep: sweep_ts_thresholds.py" \
+      "${PYTHON_BIN}" scripts/sweep_ts_thresholds.py \
+        --lookback-days "${CRON_TS_SWEEP_LOOKBACK:-365}" \
+        --grid-confidence "${CRON_TS_SWEEP_CONFIDENCE:-0.50,0.55,0.60}" \
+        --grid-min-return "${CRON_TS_SWEEP_MIN_RETURN:-0.001,0.002,0.003}" \
+        --min-trades "${CRON_TS_SWEEP_MIN_TRADES:-10}" \
+        --output "${CRON_TS_SWEEP_OUTPUT:-logs/automation/ts_threshold_sweep.json}" \
+        "${sweep_args[@]}"
+    ;;
+
+  transaction_costs)
+    # Monthly/quarterly transaction cost estimation for friction-aware thresholds.
+    cost_args=()
+    if [[ -n "${CRON_COST_AS_OF:-}" ]]; then
+      cost_args+=(--as-of "${CRON_COST_AS_OF}")
+    fi
+    if [[ -n "${CRON_COST_DB_PATH:-}" ]]; then
+      cost_args+=(--db-path "${CRON_COST_DB_PATH}")
+    fi
+    run_with_logging "transaction_costs: estimate_transaction_costs.py" \
+      "${PYTHON_BIN}" scripts/estimate_transaction_costs.py \
+        --lookback-days "${CRON_COST_LOOKBACK:-365}" \
+        --grouping "${CRON_COST_GROUPING:-asset_class}" \
+        --min-trades "${CRON_COST_MIN_TRADES:-5}" \
+        --output "${CRON_COST_OUTPUT:-logs/automation/transaction_costs.json}" \
+        "${cost_args[@]}"
+    ;;
+
+  weekly_sleeve_maintenance)
+    # Weekly sleeve summary + promotion/demotion recommendations.
+    run_with_logging "weekly_sleeve_maintenance: summarize + promotion plan" \
+      bash/bash/weekly_sleeve_maintenance.sh
+    ;;
+
   nightly_backfill)
     # Nightly signal validation backfill.
     # NOTE: scripts/backfill_signal_validation.py is still under
@@ -144,10 +232,12 @@ Tasks:
   env_sanity           Run environment validation checks (if available).
   ticker_discovery_stub  Placeholder for future ticker discovery cron.
   optimizer_stub       Placeholder for future optimizer pipeline cron.
+  ts_threshold_sweep   Sweep TS thresholds over realised trades (logs/automation JSON).
+  transaction_costs    Estimate transaction costs grouped by ticker/asset class.
+  auto_trader_core     Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP).
 
 Cron examples and production guidance:
   See Documentation/CRON_AUTOMATION.md.
 EOF
     ;;
 esac
-

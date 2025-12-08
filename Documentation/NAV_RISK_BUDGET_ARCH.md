@@ -42,6 +42,7 @@ Textual data/control flow:
      - PnL, win_rate, routing stats.
      - `forecaster_health` (forecaster + TS metrics).
      - `quant_validation_health` (global PASS/FAIL/expected_profit metrics from `quant_validation.jsonl`).
+   - Diagnostic liquidation (`scripts/liquidate_open_trades.py`) is reserved for research workflows (e.g. quant threshold sweeps); it now honours `asset_class` / `instrument_type` hints and, when present, decomposes `instrument_type='synthetic'` trades via the `synthetic_legs` table and `etl/synthetic_pricer.py`. See `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` and `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` for the current mark-to-market policies used in experiments.
 
 ---
 

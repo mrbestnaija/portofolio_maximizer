@@ -56,6 +56,7 @@ class TickerProposal:
     win_rate: float
     profit_factor: float
     total_profit: float
+    annualized_pnl: float
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,6 +67,7 @@ class TickerProposal:
             "win_rate": self.win_rate,
             "profit_factor": self.profit_factor,
             "total_profit": self.total_profit,
+            "annualized_pnl": self.annualized_pnl,
         }
 
 
@@ -74,12 +76,14 @@ class CostProposal:
     group: str
     suggested_min_expected_return: float
     median_commission: float
+    suggested_friction_buffer: float
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "group": self.group,
             "suggested_min_expected_return": self.suggested_min_expected_return,
             "median_commission": self.median_commission,
+            "suggested_friction_buffer": self.suggested_friction_buffer,
         }
 
 
@@ -100,13 +104,32 @@ def _select_best_thresholds(
     min_profit_factor: float,
     min_win_rate: float,
 ) -> List[TickerProposal]:
+    # If the sweeper already produced a selection block, honour it.
+    selection = sweep_payload.get("selection") or {}
+    proposals: List[TickerProposal] = []
+    if selection:
+        for ticker, row in selection.items():
+            proposals.append(
+                TickerProposal(
+                    ticker=ticker,
+                    confidence_threshold=float(row.get("confidence_threshold")),
+                    min_expected_return=float(row.get("min_expected_return")),
+                    total_trades=int(row.get("total_trades") or 0),
+                    win_rate=float(row.get("win_rate") or 0.0),
+                    profit_factor=float(row.get("profit_factor") or 0.0),
+                    total_profit=float(row.get("total_profit") or 0.0),
+                    annualized_pnl=float(row.get("annualized_pnl") or 0.0),
+                )
+            )
+        return proposals
+
     results = sweep_payload.get("results") or []
     by_ticker: Dict[str, List[Dict[str, Any]]] = {}
     for row in results:
         ticker = str(row.get("ticker") or "UNKNOWN")
         by_ticker.setdefault(ticker, []).append(row)
 
-    proposals: List[TickerProposal] = []
+    proposals = []
     for ticker, rows in by_ticker.items():
         # Filter by constraints.
         candidates = [
@@ -118,10 +141,11 @@ def _select_best_thresholds(
         ]
         if not candidates:
             continue
-        # Choose candidate with highest total_profit; tie-break on PF.
+        # Choose candidate with highest annualized_pnl (fallback to total_profit), tie-break on PF.
         best = max(
             candidates,
             key=lambda r: (
+                float(r.get("annualized_pnl") or 0.0),
                 float(r.get("total_profit") or 0.0),
                 float(r.get("profit_factor") or 0.0),
             ),
@@ -135,6 +159,7 @@ def _select_best_thresholds(
                 win_rate=float(best.get("win_rate") or 0.0),
                 profit_factor=float(best.get("profit_factor") or 0.0),
                 total_profit=float(best.get("total_profit") or 0.0),
+                annualized_pnl=float(best.get("annualized_pnl") or 0.0),
             )
         )
     return proposals
@@ -154,11 +179,13 @@ def _derive_cost_proposals(
         # notional; for now we apply a simple multipler.
         bump = buffer_bps / 10_000.0
         suggested_min_expected_return = max(0.0, median_commission * (1.0 + bump))
+        suggested_friction_buffer = suggested_min_expected_return
         proposals.append(
             CostProposal(
                 group=group,
                 suggested_min_expected_return=suggested_min_expected_return,
                 median_commission=median_commission,
+                suggested_friction_buffer=suggested_friction_buffer,
             )
         )
     return proposals
@@ -274,4 +301,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-

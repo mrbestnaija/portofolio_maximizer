@@ -6,24 +6,49 @@ signal_routing:
   time_series_primary: true  # DEFAULT: true - Time Series is primary
   
   # Fallback/redundancy
-  llm_fallback: true  # DEFAULT: true - Use LLM when Time Series fails
-  llm_redundancy: true  # Run both for validation/benchmarking
+  llm_fallback: false  # Disable LLM fallback to speed up runs
+  llm_redundancy: false  # Disable redundancy to avoid latency overhead
   
   # Time Series model flags
   enable_samossa: true
   enable_sarimax: true
   enable_garch: true
   enable_mssa_rl: true
-  
-  # Time Series signal generation thresholds
+
+  # Time Series signal generation thresholds (production defaults)
   time_series:
-    confidence_threshold: 0.55  # Minimum confidence for signal (55%)
-    # Require at least ~0.3% edge after frictions so trades have a
-    # realistic chance of clearing costs before quant validation. This
-    # matches the default in TimeSeriesSignalGenerator.
-    min_expected_return: 0.003  # 0.3% minimum expected return
+    confidence_threshold: 0.55  # Production baseline
+    min_expected_return: 0.003  # Production baseline (re-tighten after research)
     max_risk_score: 0.7         # Maximum risk score (70%)
     use_volatility_filter: true # Filter signals based on volatility
+    # Production per-ticker overrides (aligned to proposals after review).
+    per_ticker:
+      "CL=F":
+        confidence_threshold: 0.55
+        min_expected_return: 0.005
+      "MSFT":
+        confidence_threshold: 0.50
+        min_expected_return: 0.001
+      "MTN":
+        confidence_threshold: 0.50
+        min_expected_return: 0.001
+      "AAPL":
+        confidence_threshold: 0.65
+        min_expected_return: 0.010
+
+    # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
+    # so production thresholds stay conservative while evidence is gathered.
+
+  # Diagnostic friction buffers from automation proposals (review before promotion).
+  friction_buffers:
+    US_EQUITY:
+      min_expected_return: 1.414298901677343
+      friction_buffer: 1.414298901677343
+      median_commission: 1.4135921056245309
+    FX:
+      min_expected_return: 0.7889130820614366
+      friction_buffer: 0.7889130820614366
+      median_commission: 0.7885188226501116
   
   # Fallback triggers
   ts_fallback_triggers:
@@ -31,6 +56,16 @@ signal_routing:
     - confidence_below_threshold
     - model_failure
     - insufficient_data
+
+  execution:
+    # No-trade windows by asset class (24h clock, inclusive of start, exclusive of end)
+    no_trade_windows:
+      US_EQUITY: []  # e.g., ["09:30-09:45", "15:50-16:00"]
+      FX: []         # e.g., ["16:00-18:00"]
+    enhanced_logging:
+      include_mid_price: true
+      include_route_type: true
+      include_fill_timestamp: true
   
   # Routing mode
   routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:

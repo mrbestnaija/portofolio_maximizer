@@ -15,6 +15,15 @@
 - `models/time_series_signal_generator.TimeSeriesSignalGenerator` now treats quant validation as a **hard gate** for Time Series trades: when the per-signal `quant_profile.status` is `FAIL` and diagnostic toggles are off, BUY/SELL actions are demoted to HOLD while retaining full provenance (`quant_validation` attached to the signal) and JSONL logging via `logs/signals/quant_validation.jsonl`. Thresholds come from `config/quant_success_config.yml` (profit_factor, win_rate, min_expected_profit, etc.).
 - `config/signal_routing_config.yml` and the generator’s defaults are aligned on a **0.3% minimum expected return** (`min_expected_return=0.003`), so TS signals must clear a realistic edge after friction before routing/execution; diagnostic modes still reduce this floor to zero for stress runs.
 - `scripts/run_auto_trader.py` now enforces an **LLM readiness gate**: LLM fallback is only enabled when `data/llm_signal_tracking.json` reports at least one validated signal; otherwise the router runs in TS-only mode even if `--enable-llm` is passed. Diagnostic runs bypass this guard so LLM behaviour can still be exercised during experiments.
+- Quant validation monitoring and automation are coordinated through:
+  - `config/forecaster_monitoring.yml` + `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` (GREEN/YELLOW/RED tiers, CI/brutal gates), and
+  - `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` (quant automation, TS threshold sweeps, transaction cost calibration, and config proposal tooling).
+
+In this stack:
+
+- **Heuristics** (quant validation tiers, simple MVS profit checks) are used for **real-time monitoring and quick routing decisions** (e.g. gating TS sleeves, disabling risk-bucket tickers under the barbell shell).
+- **Full TS ensemble models** (SARIMAX/SAMOSSA/GARCH/MSSA-RL + portfolio math) provide the **authoritative source of NAV, PnL, and risk metrics** used in research, reports, and higher-order hyper-parameter search.
+- **Future ML calibrators** are expected to sit on top of these, learning when to tighten or relax heuristics (e.g. regime-aware `min_expected_return` bands) based on full-model outcomes, but not replacing the TS ensemble or portfolio math as the primary decision engine.
 
 ### 2025-11-12 Hardening Notes
 - models/time_series_signal_generator.py now normalises pandas/NumPy payloads before evaluation, eliminating the "truth value of a Series is ambiguous" crash and stamping decision context (expected return, confidence, risk, volatility) into provenance. logs/ts_signal_demo.json captures a SELL signal produced directly from SQLite OHLCV data.

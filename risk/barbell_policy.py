@@ -40,23 +40,36 @@ class BarbellConfig:
   safe_max: float
   risk_max: float
   safe_symbols: Iterable[str]
-  risk_symbols: Iterable[str]
+  core_symbols: Iterable[str]
+  speculative_symbols: Iterable[str]
+  core_max: float
+  core_max_per: float
+  spec_max: float
+  spec_max_per: float
+  risk_symbols: Iterable[str] | None = None
 
   @classmethod
   def from_yaml(cls, path: Path = BARBELL_CONFIG_PATH) -> "BarbellConfig":
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     b = raw.get("barbell") or {}
     sb = b.get("safe_bucket") or {}
-    rb = b.get("risk_bucket") or {}
+    core = b.get("core_bucket") or {}
+    spec = b.get("speculative_bucket") or {}
     return cls(
       enable_barbell_allocation=bool(b.get("enable_barbell_allocation", False)),
       enable_barbell_validation=bool(b.get("enable_barbell_validation", False)),
       enable_antifragility_tests=bool(b.get("enable_antifragility_tests", False)),
       safe_min=float(sb.get("min_weight", 0.0)),
       safe_max=float(sb.get("max_weight", 1.0)),
-      risk_max=float(rb.get("max_weight", 1.0)),
+      risk_max=float((b.get("risk_bucket") or {}).get("max_weight", 1.0)),
       safe_symbols=list(sb.get("symbols") or []),
-      risk_symbols=list(rb.get("symbols") or []),
+      core_symbols=list(core.get("symbols") or []),
+      speculative_symbols=list(spec.get("symbols") or []),
+      core_max=float(core.get("max_weight", 0.0)),
+      core_max_per=float(core.get("max_per_position", 0.0)),
+      spec_max=float(spec.get("max_weight", 0.0)),
+      spec_max_per=float(spec.get("max_per_position", 0.0)),
+      risk_symbols=list((core.get("symbols") or []) + (spec.get("symbols") or [])),
     )
 
 
@@ -71,20 +84,23 @@ class BarbellConstraint:
 
   def bucket_weights(self, weights: Dict[str, float]) -> Tuple[float, float, float]:
     """
-    Compute (safe_weight, risk_weight, other_weight) given a mapping of
+    Compute (safe_weight, core_weight, speculative_weight, other_weight) given a mapping of
     symbol -> weight.
     """
     safe_set = set(self.cfg.safe_symbols)
-    risk_set = set(self.cfg.risk_symbols)
-    w_safe = w_risk = w_other = 0.0
+    core_set = set(self.cfg.core_symbols)
+    spec_set = set(self.cfg.speculative_symbols)
+    w_safe = w_core = w_spec = w_other = 0.0
     for symbol, w in weights.items():
       if symbol in safe_set:
         w_safe += float(w)
-      elif symbol in risk_set:
-        w_risk += float(w)
+      elif symbol in core_set:
+        w_core += float(w)
+      elif symbol in spec_set:
+        w_spec += float(w)
       else:
         w_other += float(w)
-    return w_safe, w_risk, w_other
+    return w_safe, w_core, w_spec, w_other
 
   def project_to_feasible(self, weights: Dict[str, float]) -> Dict[str, float]:
     """
@@ -97,20 +113,39 @@ class BarbellConstraint:
       return dict(weights)
 
     safe_set = set(self.cfg.safe_symbols)
-    risk_set = set(self.cfg.risk_symbols)
+    core_set = set(self.cfg.core_symbols)
+    spec_set = set(self.cfg.speculative_symbols)
+    risk_set = set(self.cfg.risk_symbols or (list(core_set) + list(spec_set)))
     # Copy to avoid mutating caller input.
     w = dict(weights)
 
     total = float(sum(w.values()) or 1.0)
-    safe, risk, other = self.bucket_weights(w)
+    safe, core, spec, other = self.bucket_weights(w)
 
-    # Enforce risk_max: scale down risk bucket proportionally if needed.
+    # Enforce risk_max: scale down core+spec proportionally if needed.
+    risk = core + spec
     if risk > self.cfg.risk_max:
       scale = self.cfg.risk_max / max(risk, 1e-12)
-      for s in risk_set:
+      for s in list(core_set | spec_set):
         if s in w:
           w[s] *= scale
-      safe, risk, other = self.bucket_weights(w)
+      safe, core, spec, other = self.bucket_weights(w)
+      risk = core + spec
+
+    # Enforce per-bucket caps.
+    if core > self.cfg.core_max > 0:
+      scale = self.cfg.core_max / max(core, 1e-12)
+      for s in core_set:
+        if s in w:
+          w[s] *= scale
+    if spec > self.cfg.spec_max > 0:
+      scale = self.cfg.spec_max / max(spec, 1e-12)
+      for s in spec_set:
+        if s in w:
+          w[s] *= scale
+    # Recompute after bucket caps.
+    safe, core, spec, other = self.bucket_weights(w)
+    risk = core + spec
 
     # Enforce safe_min: if safe too small, scale up safe bucket and scale down
     # risk+other to compensate.
@@ -139,4 +174,3 @@ class BarbellConstraint:
         w[s] *= scale
 
     return w
-

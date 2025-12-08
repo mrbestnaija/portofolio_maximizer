@@ -30,6 +30,15 @@ from etl.database_manager import DatabaseManager
 logger = logging.getLogger(__name__)
 
 
+def _infer_asset_class_from_ticker(ticker: str) -> str:
+    """Best-effort asset class hint based on ticker string."""
+    sym = (ticker or "").upper()
+    # Simple crypto heuristic: common "-USD" pairs and bare symbols.
+    if sym.endswith("-USD") or sym in {"BTC", "ETH", "SOL"}:
+        return "crypto"
+    return "equity"
+
+
 @dataclass
 class Trade:
     """Trade execution details"""
@@ -45,6 +54,14 @@ class Trade:
     signal_id: Optional[int] = None
     realized_pnl: float = 0.0
     realized_pnl_pct: Optional[float] = None
+    # Optional instrument metadata for options/derivatives (kept inert until
+    # options_trading.enabled + feature flags are active).
+    asset_class: str = "equity"
+    instrument_type: str = "spot"
+    underlying_ticker: Optional[str] = None
+    strike: Optional[float] = None
+    expiry: Optional[str] = None
+    multiplier: float = 1.0
     
     def __post_init__(self):
         if self.trade_id is None:
@@ -96,7 +113,7 @@ class PaperTradingEngine:
                  initial_capital: float = 10000.0,
                  slippage_pct: float = 0.001,
                  transaction_cost_pct: float = 0.001,
-                 db_path: str = "data/portfolio_maximizer.db",
+                 db_path: str = None,
                  database_manager: Optional[DatabaseManager] = None,
                  signal_validator: Optional[SignalValidator] = None):
         """
@@ -521,6 +538,11 @@ class PaperTradingEngine:
                         - trade.transaction_cost
                     )
                     realized_pct = (prior_entry - trade.entry_price) / prior_entry
+            # Instrument metadata – currently spot/crypto only, but the Trade
+            # dataclass allows options/synthetic extensions once feature flags
+            # are enabled.
+            asset_class = trade.asset_class or _infer_asset_class_from_ticker(trade.ticker)
+            instrument_type = trade.instrument_type or "spot"
 
             self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
@@ -534,6 +556,12 @@ class PaperTradingEngine:
                 realized_pnl=realized_pnl if realized_pct is not None else None,
                 realized_pnl_pct=realized_pct,
                 holding_period_days=None,
+                asset_class=asset_class,
+                instrument_type=instrument_type,
+                underlying_ticker=trade.underlying_ticker,
+                strike=trade.strike,
+                expiry=trade.expiry,
+                multiplier=trade.multiplier,
             )
             
             logger.debug("Trade stored in database: %s", trade.trade_id)

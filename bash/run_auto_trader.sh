@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
 TRADER_SCRIPT="$ROOT_DIR/scripts/run_auto_trader.py"
 LOG_DIR="$ROOT_DIR/logs/auto_runs"
+RUN_LABEL="${RUN_LABEL:-}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python interpreter not found at $PYTHON_BIN" >&2
@@ -22,7 +23,7 @@ fi
 mkdir -p "$LOG_DIR"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_FILE="$LOG_DIR/auto_trader_${RUN_STAMP}.log"
+LOG_FILE="$LOG_DIR/auto_trader_${RUN_STAMP}${RUN_LABEL:+_${RUN_LABEL}}.log"
 
 TICKERS="${TICKERS:-AAPL,MSFT}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-180}"

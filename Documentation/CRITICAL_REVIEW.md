@@ -97,6 +97,15 @@
 - **Brutal / CLI integration** – `scripts/summarize_quant_validation.py` and `scripts/check_forecast_audits.py` ingest this config to surface ticker‑level PF/WR/AnnRet alerts and RMSE violations with human‑readable CLI tables, making forecaster health visible in every brutal run.
 - **Hyperopt / strategy optimizer gating** – `bash/run_post_eval.sh` (hyperopt scoring) and `scripts/run_strategy_optimization.py` (evaluation_fn) now apply these thresholds: candidates from regimes where the TS ensemble fails PF/WR or RMSE checks have their `total_return` score driven to zero, so “profitable regimes” in hyperopt must come from statistically and economically healthy TS periods.
 
+### ✅ 2025-12-07 TS Model Candidates & Institutional-Grade Search
+- `etl/database_manager.py` maintains a dedicated `ts_model_candidates` table for time-series hyper-parameter search results, keyed by `(ticker, regime, candidate_name)` with JSON-encoded configs/metrics, stability scores, and scalar scores.
+- `scripts/run_ts_model_search.py` runs rolling-window CV for a compact SARIMAX/SAMOSSA grid over selected tickers, then:
+  - Aggregates RMSE/sMAPE/tracking error/directional accuracy per candidate via `RollingWindowValidator`.
+  - Computes fold-level RMSE stability metrics (coefficient-of-variation mapped to [0, 1]) so unstable candidates are penalised.
+  - Applies a Diebold–Mariano-style test (via `etl/statistical_tests.diebold_mariano`) against a baseline candidate to quantify whether apparent improvements are statistically meaningful.
+  - Persists all results into `ts_model_candidates` for subsequent dashboards and research.
+- `scripts/build_automation_dashboard.py` consolidates hyper-parameter search artefacts (TS sweeps, transaction costs, sleeve promotions, config proposals, and best cached strategy configs) into `visualizations/dashboard_automation.json`, providing a single, institutional-grade “what should change next?” snapshot for humans and agents.
+
 ---
 
 ## Detailed Quantitative Analysis Highlights
@@ -232,6 +241,6 @@ Risk management upgrades expected to reduce tail risk ~30% and improve confidenc
 2. Correct Kelly criterion in `ai_llm/signal_validator.py` and add statistical backtests (30-day rolling, bootstrap CI).
 3. Stand up statistical testing toolkit and integrate into CI pipeline.
 4. Launch stress-testing and regime-detection initiatives per roadmap.
-5. Execute Phase 5 (TS Forecaster Evaluation & Brutal Harness) before modifying core TS models (orders, features, MSSA/SAMOSSA internals); current evidence shows the primary gaps are in **gating, monitoring, and data sufficiency**, not fundamental model inability.
+5. Execute Phase 5 (TS Forecaster Evaluation & Brutal Harness) before modifying core TS models (orders, features, MSSA/SAMOSSA internals); current evidence shows the primary gaps are in **gating, monitoring, and data sufficiency**, not fundamental model inability. As of the 2025‑12‑07 deltas above, the core tooling (numeric invariants, quant validation, TS model search, and automation dashboard) is now aligned with institutional-grade expectations; remaining work is primarily in tightening thresholds and completing the higher-order hyperopt loop described in `OPTIMIZATION_IMPLEMENTATION_PLAN.md`.
 
 **Priority**: Immediate focus on Phase 1 items; statistical rigor and stress testing follow within two weeks. Maintain documentation updates in `implementation_checkpoint.md` after each milestone.

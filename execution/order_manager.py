@@ -43,6 +43,14 @@ from risk.real_time_risk_manager import RealTimeRiskManager, RiskReport
 logger = logging.getLogger(__name__)
 
 
+def _infer_asset_class_from_ticker(ticker: str) -> str:
+    """Best-effort asset class hint based on ticker string."""
+    sym = (ticker or "").upper()
+    if sym.endswith("-USD") or sym in {"BTC", "ETH", "SOL"}:
+        return "crypto"
+    return "equity"
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -375,6 +383,18 @@ class OrderManager:
 
         executed_price = placement.avg_price or request.current_price
         total_value = executed_price * placement.filled_volume
+        # Allow upstream signal metadata to tag asset_class / instrument_type /
+        # option fields when options_trading is enabled. For current spot-only
+        # flows this remains a no-op and falls back to ticker heuristics.
+        meta = request.metadata or {}
+        raw_asset_class = meta.get("asset_class")
+        asset_class = (raw_asset_class or _infer_asset_class_from_ticker(request.ticker)).lower()
+        instrument_type = (meta.get("instrument_type") or "spot").lower()
+        underlying_ticker = meta.get("underlying_ticker")
+        strike = meta.get("strike")
+        expiry = meta.get("expiry")
+        multiplier = meta.get("multiplier") or 1.0
+
         self.db_manager.save_trade_execution(
             ticker=request.ticker,
             trade_date=datetime.utcnow(),
@@ -384,6 +404,12 @@ class OrderManager:
             total_value=total_value,
             commission=0.0,
             signal_id=request.signal_id,
+            asset_class=asset_class,
+            instrument_type=instrument_type,
+            underlying_ticker=underlying_ticker,
+            strike=strike,
+            expiry=expiry,
+            multiplier=multiplier,
         )
 
     def _increment_trade_counter(self) -> None:

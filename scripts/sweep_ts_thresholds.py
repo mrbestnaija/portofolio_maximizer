@@ -58,6 +58,7 @@ class GridPointResult:
     win_rate: float
     profit_factor: float
     total_profit: float
+    annualized_pnl: float
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -68,6 +69,7 @@ class GridPointResult:
             "win_rate": self.win_rate,
             "profit_factor": self.profit_factor,
             "total_profit": self.total_profit,
+            "annualized_pnl": self.annualized_pnl,
         }
 
 
@@ -122,14 +124,26 @@ def _load_ticker_trades(
     return [dict(row) for row in rows]
 
 
-def _summarise_trades(trades: Iterable[Dict[str, Any]]) -> Tuple[int, float, float, float]:
+def _summarise_trades(
+    trades: Iterable[Dict[str, Any]],
+    window_start: datetime,
+    window_end: datetime,
+) -> Tuple[int, float, float, float, float]:
     total_trades = 0
     winning = 0
     gross_profit = 0.0
     gross_loss = 0.0
+    first_trade_date: Optional[datetime] = None
 
     for row in trades:
         pnl = float(row.get("realized_pnl") or 0.0)
+        td = row.get("trade_date")
+        if td:
+            try:
+                dt = datetime.fromisoformat(str(td))
+                first_trade_date = dt if first_trade_date is None else min(first_trade_date, dt)
+            except Exception:
+                pass
         total_trades += 1
         if pnl > 0:
             winning += 1
@@ -138,7 +152,7 @@ def _summarise_trades(trades: Iterable[Dict[str, Any]]) -> Tuple[int, float, flo
             gross_loss += abs(pnl)
 
     if total_trades == 0:
-        return 0, 0.0, 0.0, 0.0
+        return 0, 0.0, 0.0, 0.0, 0.0
 
     win_rate = winning / total_trades
     if gross_loss > 0:
@@ -146,7 +160,52 @@ def _summarise_trades(trades: Iterable[Dict[str, Any]]) -> Tuple[int, float, flo
     else:
         profit_factor = float("inf") if gross_profit > 0 else 0.0
     total_profit = gross_profit - gross_loss
-    return total_trades, win_rate, profit_factor, total_profit
+    # Annualise realised PnL over the observed window to stabilise selection.
+    window_start = first_trade_date or window_start
+    span_days = max((window_end - window_start).days, 1)
+    annualized_pnl = total_profit * (365.0 / span_days)
+    return total_trades, win_rate, profit_factor, total_profit, annualized_pnl
+
+
+def _select_best_by_rules(
+    results: List[GridPointResult],
+    min_trades: int,
+    min_profit_factor: float,
+    min_win_rate: float,
+) -> Dict[str, Dict[str, Any]]:
+    by_ticker: Dict[str, List[GridPointResult]] = {}
+    for row in results:
+        by_ticker.setdefault(row.ticker, []).append(row)
+
+    selection: Dict[str, Dict[str, Any]] = {}
+    for ticker, rows in by_ticker.items():
+        candidates = [
+            r
+            for r in rows
+            if r.total_trades >= int(min_trades)
+            and r.profit_factor >= float(min_profit_factor)
+            and r.win_rate >= float(min_win_rate)
+        ]
+        if not candidates:
+            continue
+        best = max(
+            candidates,
+            key=lambda r: (
+                r.annualized_pnl,
+                r.total_profit,
+                r.profit_factor,
+            ),
+        )
+        selection[ticker] = {
+            "confidence_threshold": best.confidence_threshold,
+            "min_expected_return": best.min_expected_return,
+            "total_trades": best.total_trades,
+            "win_rate": best.win_rate,
+            "profit_factor": best.profit_factor,
+            "annualized_pnl": best.annualized_pnl,
+            "total_profit": best.total_profit,
+        }
+    return selection
 
 
 @click.command()
@@ -187,6 +246,18 @@ def _summarise_trades(trades: Iterable[Dict[str, Any]]) -> Tuple[int, float, flo
     help="Minimum number of trades required for a gridpoint to be considered.",
 )
 @click.option(
+    "--selection-min-profit-factor",
+    default=1.1,
+    show_default=True,
+    help="Minimum profit factor required for a gridpoint to qualify for selection.",
+)
+@click.option(
+    "--selection-min-win-rate",
+    default=0.5,
+    show_default=True,
+    help="Minimum win rate required for a gridpoint to qualify for selection.",
+)
+@click.option(
     "--output",
     default="logs/automation/ts_threshold_sweep.json",
     show_default=True,
@@ -204,6 +275,8 @@ def main(
     grid_min_return: str,
     lookback_days: int,
     min_trades: int,
+    selection_min_profit_factor: float,
+    selection_min_win_rate: float,
     output: str,
     verbose: bool,
 ) -> None:
@@ -221,10 +294,12 @@ def main(
     if not confidences or not min_returns:
         raise SystemExit("Grid parameters are empty; please provide at least one value for each axis.")
 
-    end = datetime.utcnow().date()
-    start = end - timedelta(days=int(lookback_days))
-    start_iso = start.isoformat()
-    end_iso = end.isoformat()
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=int(lookback_days))
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    start_dt = datetime.fromisoformat(start_iso)
+    end_dt = datetime.fromisoformat(end_iso)
 
     results: List[GridPointResult] = []
     with DatabaseManager(db_path=db_path) as db:
@@ -246,7 +321,9 @@ def main(
                     # be used to filter here. For now, we treat all trades
                     # for the ticker as one sleeve and attach the gridpoint
                     # parameters purely as labels.
-                    total_trades, win_rate, profit_factor, total_profit = _summarise_trades(trades)
+                    total_trades, win_rate, profit_factor, total_profit, annualized_pnl = _summarise_trades(
+                        trades, start_dt, end_dt
+                    )
                     if total_trades < int(min_trades):
                         continue
                     results.append(
@@ -258,8 +335,16 @@ def main(
                             win_rate=win_rate,
                             profit_factor=profit_factor,
                             total_profit=total_profit,
+                            annualized_pnl=annualized_pnl,
                         )
                     )
+
+    selection = _select_best_by_rules(
+        results=results,
+        min_trades=min_trades,
+        min_profit_factor=selection_min_profit_factor,
+        min_win_rate=selection_min_win_rate,
+    )
 
     payload = {
         "meta": {
@@ -269,8 +354,13 @@ def main(
             "min_trades": min_trades,
             "grid_confidence": confidences,
             "grid_min_return": min_returns,
+            "window_start": start_iso,
+            "window_end": end_iso,
+            "selection_min_profit_factor": selection_min_profit_factor,
+            "selection_min_win_rate": selection_min_win_rate,
         },
         "results": [r.to_dict() for r in results],
+        "selection": selection,
     }
 
     out_path = Path(output)
@@ -281,4 +371,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-

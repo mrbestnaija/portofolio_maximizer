@@ -39,8 +39,12 @@ Key tasks (first positional argument):
 - `nightly_backfill` – Signal validation backfill (stub until modernised).
 - `monitoring` – LLM/pipeline health + latency monitoring.
 - `env_sanity` – Environment validation before trading hours.
+- `ts_threshold_sweep` – TS threshold sweep over realised trades; writes JSON to `logs/automation/`.
+- `transaction_costs` – Transaction cost estimation grouped by ticker/asset class to `logs/automation/`.
+- `auto_trader_core` – Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP; stops once ≥30 total and ≥10 per-ticker closed trades).
 - `ticker_discovery_stub` – Placeholder for future Phase 5.2 ticker discovery.
 - `optimizer_stub` – Placeholder for future Phase 5.3 optimizer pipeline.
+- `weekly_sleeve_maintenance` – Sleeve summary + promotion/demotion plan writer (see `bash/weekly_sleeve_maintenance.sh`).
 
 The script automatically:
 
@@ -73,6 +77,11 @@ Assuming the repo lives at `/opt/portfolio_maximizer_v45`:
   bash/bash/production_cron.sh auto_trader --config config/pipeline_config.yml \
   >> logs/cron/auto_trader.out 2>&1
 
+# 2b. Core ticker accumulation loop (halts once targets hit: ≥30 total, ≥10 per core ticker)
+*/60 7-20 * * 1-5 cd /opt/portfolio_maximizer_v45 && \
+  CRON_CORE_TICKERS="AAPL,MSFT,GC=F,COOP" \
+  bash/bash/production_cron.sh auto_trader_core >> logs/cron/auto_trader_core.out 2>&1
+
 # 3. Nightly signal validation backfill (stub, see Section 5)
 5 2 * * * cd /opt/portfolio_maximizer_v45 && \
   bash/bash/production_cron.sh nightly_backfill >> logs/cron/nightly_backfill.out 2>&1
@@ -92,6 +101,18 @@ Assuming the repo lives at `/opt/portfolio_maximizer_v45`:
 # 7. Weekly optimizer stub (Phase 5.3+)
 30 3 * * 1 cd /opt/portfolio_maximizer_v45 && \
   bash/bash/production_cron.sh optimizer_stub >> logs/cron/optimizer_stub.out 2>&1
+
+# 8. Weekly TS threshold sweep (uses realised trades in trade_executions)
+0 4 * * 1 cd /opt/portfolio_maximizer_v45 && \
+  bash/bash/production_cron.sh ts_threshold_sweep >> logs/cron/ts_threshold_sweep.out 2>&1
+
+# 9. Monthly transaction cost estimation (per asset class)
+15 4 1 * * cd /opt/portfolio_maximizer_v45 && \
+  bash/bash/production_cron.sh transaction_costs >> logs/cron/transaction_costs.out 2>&1
+
+# 10. Weekly sleeve summary + promotion/demotion recommendations
+0 5 * * 1 cd /opt/portfolio_maximizer_v45 && \
+  bash/bash/weekly_sleeve_maintenance.sh >> logs/cron/sleeve_maintenance.out 2>&1
 ```
 
 You can edit the schedule and paths to match your deployment environment.
@@ -126,6 +147,18 @@ Drives the “Autonomous Profit Engine” loop described in:
 Typical cron usage is every N minutes during market hours, as a
 stateless trigger into the auto‑trader, which internally respects
 the configured risk and validation gates.
+
+### 4.2b `auto_trader_core`
+
+Same as `auto_trader` but with defaults targeted at the core tickers (`AAPL,MSFT,GC=F,COOP`) and a built‑in trade-count gate:
+
+- Skips execution once **both** conditions are met in `trade_executions`:
+  - Total closed trades ≥ `CRON_CORE_TOTAL_TARGET` (default: 30)
+  - Per-core-ticker closed trades ≥ `CRON_CORE_PER_TICKER_TARGET` (default: 10)
+- Env overrides:
+  - `CRON_CORE_TICKERS` (comma list)
+  - `CRON_CORE_DB_PATH` (default: `data/portfolio_maximizer.db`)
+  - `CRON_CORE_TOTAL_TARGET`, `CRON_CORE_PER_TICKER_TARGET`
 
 ### 4.3 `nightly_backfill` (stub)
 
@@ -200,41 +233,147 @@ keep their cron entries in place while implementation progresses.
 
 ## 6. Quant Threshold Sweeps & Cost Estimation
 
-Two read-only helpers can be wired into cron to keep TS thresholds and friction assumptions grounded in recent data:
+Two read-only helpers are now exposed through the cron multiplexer to keep TS thresholds and friction assumptions grounded in recent data:
 
-- `scripts/sweep_ts_thresholds.py` – summarises realised performance over a grid of `(confidence_threshold, min_expected_return)` values per ticker.
-- `scripts/estimate_transaction_costs.py` – estimates commission / transaction costs by ticker or simple asset class buckets.
+- `scripts/sweep_ts_thresholds.py` – summarises realised performance over a grid of `(confidence_threshold, min_expected_return)` values per ticker (task: `ts_threshold_sweep`).
+- `scripts/estimate_transaction_costs.py` – estimates commission / transaction costs by ticker or simple asset class buckets (task: `transaction_costs`).
 
-Example entries (adjust paths/schedules as needed):
+Env overrides for these tasks:
 
-```cron
-# 8. Weekly TS threshold sweep (uses realised trades in trade_executions)
-0 4 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  simpleTrader_env/bin/python scripts/sweep_ts_thresholds.py \
-    --lookback-days 365 \
-    --grid-confidence "0.50,0.55,0.60" \
-    --grid-min-return "0.001,0.002,0.003" \
-    --min-trades 10 \
-    --output logs/automation/ts_threshold_sweep.json \
-    >> logs/cron/ts_threshold_sweep.out 2>&1
+```bash
+# TS sweep overrides (defaults: 365-day lookback, 0.50/0.55/0.60 confidence grid, 0.001/0.002/0.003 min_return grid)
+CRON_TS_SWEEP_TICKERS="AAPL,MSFT,GC=F,COOP" \
+CRON_TS_SWEEP_CONFIDENCE="0.50,0.55,0.60,0.65" \
+CRON_TS_SWEEP_MIN_RETURN="0.001,0.002,0.003,0.004" \
+CRON_TS_SWEEP_MIN_TRADES=10 \
+CRON_TS_SWEEP_OUTPUT="logs/automation/ts_threshold_sweep.json" \
+  bash/bash/production_cron.sh ts_threshold_sweep
 
-# 9. Monthly transaction cost estimation (per asset class)
-15 4 1 * * cd /opt/portfolio_maximizer_v45 && \
-  simpleTrader_env/bin/python scripts/estimate_transaction_costs.py \
-    --lookback-days 365 \
-    --grouping asset_class \
-    --min-trades 5 \
-    --output logs/automation/transaction_costs.json \
-    >> logs/cron/transaction_costs.out 2>&1
+# Transaction cost overrides (defaults: 365-day lookback, asset_class grouping, min_trades=5)
+CRON_COST_AS_OF="2025-12-05" \
+CRON_COST_GROUPING="asset_class" \
+CRON_COST_MIN_TRADES=5 \
+CRON_COST_OUTPUT="logs/automation/transaction_costs.json" \
+  bash/bash/production_cron.sh transaction_costs
 ```
 
 Both scripts:
 - Only read from the existing SQLite database; they do not modify configs.
 - Emit machine-readable JSON under `logs/automation/` for use by higher-level tooling (e.g., a proposal → config diff helper or notebooks).
 
+Helper to run the full chain (costs + TS sweep + config proposals) manually:
+
+```bash
+bash/bash/run_ts_sweep_and_proposals.sh
+
+# Optional overrides
+SWEEP_TICKERS="AAPL,MSFT,GC=F,COOP" \
+SWEEP_SEL_MIN_PF=1.2 \
+SWEEP_SEL_MIN_WR=0.55 \
+COST_GROUPING="asset_class" \
+PROPOSALS_OUTPUT="logs/automation/config_proposals.json" \
+  bash/bash/run_ts_sweep_and_proposals.sh
+```
+
+### 6.1 Automation Dashboard Glue
+
+To surface a unified “what should we change next?” view for humans and agents:
+
+- `scripts/build_automation_dashboard.py`
+  - Reads (when present):
+    - `logs/automation/ts_threshold_sweep.json`
+    - `logs/automation/transaction_costs.json`
+    - `logs/automation/sleeve_summary.json`
+    - `logs/automation/sleeve_promotion_plan.json`
+    - `logs/automation/config_proposals.json`
+    - best cached strategy config from `strategy_configs` (via `DatabaseManager`)
+  - Writes:
+    - `visualizations/dashboard_automation.json`
+  - This file is read-only with respect to configs; it consolidates evidence for:
+    - TS threshold tuning,
+    - friction assumptions,
+    - sleeve promotion/demotion,
+    - higher-order strategy optimization output.
+
+Example cron wiring (run after the other automation tasks have completed):
+
+```bash
+0 6 * * 1-5 cd /path/to/portfolio_maximizer_v45 && \
+  "${PYTHON_BIN:-python}" scripts/build_automation_dashboard.py \
+    --db-path "data/portfolio_maximizer.db" \
+    --output "visualizations/dashboard_automation.json"
+```
+
+**Diagnostics caution**: `scripts/liquidate_open_trades.py`/`bash/force_close_and_sweep.sh` are evidence-gathering utilities that force-close trades with synthetic mark-to-market PnL. They are NOT suitable for real PnL reporting; use only to unblock sweeps in diagnostic workflows.
+
 ---
 
-## 7. Quick Start Checklist
+## 7. TS Model Search & Config Proposals
+
+Time-series model search and configuration proposals are intentionally **decoupled** from the main cron loop. They are heavier, research-grade jobs that should normally be run:
+
+- On demand (manual CLI) when you are actively evaluating TS models, or
+- As low-frequency cron jobs (e.g., weekly) during research cycles.
+
+### 7.1 Manual Invocations
+
+Run a compact TS model search for a handful of tickers, persisting candidates into `ts_model_candidates`:
+
+```bash
+cd /opt/portfolio_maximizer_v45
+
+# Example: rolling CV over a small SARIMAX/SAMOSSA grid for core tickers
+simpleTrader_env/bin/python scripts/run_ts_model_search.py \
+  --tickers "AAPL,MSFT,GC=F,COOP" \
+  --lookback-days 730 \
+  --horizon 5 \
+  --step-size 20 \
+  --max-folds 8 \
+  --use-profiles \
+  --db-path "data/portfolio_maximizer.db"
+
+# Summarise best candidates per (ticker, regime)
+simpleTrader_env/bin/python scripts/summarize_ts_candidates.py \
+  --db-path "data/portfolio_maximizer.db" \
+  --output "logs/automation/ts_model_candidates_summary.json"
+
+# Generate advisory config proposals driven by stability + DM p-values
+simpleTrader_env/bin/python scripts/generate_ts_model_config_proposals.py \
+  --db-path "data/portfolio_maximizer.db" \
+  --min-stability 0.4 \
+  --max-dm-pvalue 0.10 \
+  --output "logs/automation/ts_model_config_proposals.json"
+```
+
+Semantics:
+
+- All three scripts are **read-only** with respect to configs; they write only to:
+  - `ts_model_candidates` (SQLite table),
+  - `logs/automation/ts_model_candidates_summary.json`,
+  - `logs/automation/ts_model_config_proposals.json`.
+- Any changes to `config/model_profiles.yml` or future TS override configs remain **human-reviewed**; proposals are advisory only.
+
+### 7.2 Example Weekly Cron Wiring (Research Environment)
+
+For a research/staging environment (not production), you may add a low-frequency cron block such as:
+
+```cron
+# Weekly TS model search + proposals (research-only)
+0 2 * * 1 cd /opt/portfolio_maximizer_v45 && \
+  bash/bash/production_cron.sh ts_model_search >> logs/cron/ts_model_search.out 2>&1
+```
+
+Where `ts_model_search` is a small wrapper task in `bash/production_cron.sh` that:
+
+1. Calls `scripts/run_ts_model_search.py` with your preferred ticker list and CV settings.
+2. Calls `scripts/summarize_ts_candidates.py` to refresh `ts_model_candidates_summary.json`.
+3. Calls `scripts/generate_ts_model_config_proposals.py` to refresh `ts_model_config_proposals.json`.
+
+This keeps TS model search aligned with the same cron/automation patterns as threshold sweeps and cost estimation, while preserving a clear separation between **evidence generation** and **config changes**.
+
+---
+
+## 8. Quick Start Checklist
 
 1. Ensure `simpleTrader_env` exists and is up to date:
    - `python3 -m venv simpleTrader_env`

@@ -722,6 +722,48 @@ class MonteCarloSimulator:
 
 ---
 
+## ✅ Forecaster & Hyper‑Parameter Institutionalisation – Sequenced TODO
+
+> **Objective**: Lift the TS forecaster + hyper‑parameter stack from “good research grade” to **institutional‑grade**, tightly coupled to brutal tests, numeric invariants, and quant validation automation.
+
+1. **Higher‑Order TS Hyper‑Opt & Regime Backtesting**
+   - [ ] Extend `run_strategy_optimization.py` / `run_post_eval.sh` to drive a higher‑order grid over model configs (SARIMAX orders, SAMOSSA window/n_components, MSSA‑RL settings) per ticker.
+   - [ ] Reuse `TIME_SERIES_CV` infrastructure to run walk‑forward CV per ticker and per regime (using existing MSSA‑RL / realised‑vol regime tags).
+   - [ ] Persist `(ticker, regime, model_config, CV_metrics)` into a small `ts_model_candidates` table for later analysis and dashboards.
+
+2. **Regime‑ and Sleeve‑Aware Model Profiles**
+   - [ ] Add a config section/file (e.g. `config/model_profiles.yml`) that defines model profiles keyed by `(sleeve, asset_class, regime)`.
+   - [ ] For each profile, specify constrained SARIMAX grids, SAMOSSA parameters, and MSSA‑RL toggles consistent with `QUANT_TIME_SERIES_STACK.md`.
+   - [ ] Add a thin router in `TimeSeriesForecaster` that selects a profile based on regime diagnostics and sleeve (safe/core/spec/crypto from `config/barbell.yml`).
+
+3. **Statistical Model‑Selection Tests**
+   - [ ] Introduce or extend `etl/statistical_tests.py` to include Diebold–Mariano / variance‑ratio style tests comparing candidate models against a baseline.
+   - [ ] Require the chosen hyper‑param configuration to be **stable across CV folds** (no single‑fold “winner by noise”); fail brutal tests when stability criteria are violated.
+   - [ ] Wire these tests into numeric/scaling invariant suites so model selection is validated alongside existing invariants.
+
+4. **Unified TS Automation Dashboard**
+   - [x] Create `scripts/build_automation_dashboard.py` that consolidates:
+       - TS threshold sweeps (`logs/automation/ts_threshold_sweep.json`),
+       - Transaction cost estimates (`logs/automation/transaction_costs.json`),
+       - Sleeve promotion/demotion plans (`logs/automation/sleeve_promotion_plan.json`),
+       - TS model/hyper‑opt summaries (from `ts_model_candidates` or a JSON export).
+   - [x] Emit a single `visualizations/dashboard_automation.json` snapshot referenced from `CRON_AUTOMATION.md` and brutal/monitoring scripts.
+
+5. **Quant Validation Threshold Re‑Calibration**
+   - [ ] Use distributions from the hyper‑opt / CV runs to recalibrate `config/forecaster_monitoring.yml`:
+       - Separate **research** vs **production** thresholds for `min_profit_factor`, `min_win_rate`, `min_pass_rate`, and `max_negative_expected_profit_fraction`.
+       - Ensure `scripts/check_quant_validation_health.py` and `scripts/summarize_quant_validation.py` consume these calibrated thresholds consistently.
+   - [ ] Update `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and `Documentation/CRITICAL_REVIEW.md` with the new institutional‑grade criteria and clearly document how CI/brutal gates enforce them.
+
+6. **TS Model Candidate Inspection**
+   - [x] Add `scripts/summarize_ts_candidates.py` to:
+       - Read `ts_model_candidates` from the SQLite store,
+       - Aggregate best candidates per `(ticker, regime)` by score,
+       - Print a compact table (ticker, regime, candidate, score, stability, DM vs baseline) and optionally emit a JSON summary.
+   - [ ] Wire this helper into research notebooks and the automation/dashboard layer so institutional-grade TS model choices are always backed by a transparent, inspectable trail.
+
+---
+
 ## 📊 IMPLEMENTATION TIMELINE
 
 ### Week 1: Mathematical Foundation

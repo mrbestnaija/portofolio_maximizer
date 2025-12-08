@@ -50,9 +50,11 @@ except Exception:  # pragma: no cover - optional path
 logger = logging.getLogger(__name__)
 AI_COMPANION_CONFIG_PATH = ROOT_PATH / "config" / "ai_companion.yml"
 DASHBOARD_DATA_PATH = ROOT_PATH / "visualizations" / "dashboard_data.json"
-MIN_LOOKBACK_DAYS = 180
-MIN_SERIES_POINTS = 90
+MIN_LOOKBACK_DAYS = 365
+MIN_SERIES_POINTS = 120
 MIN_QUALITY_SCORE = 0.50
+EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
+_NO_TRADE_WINDOWS = None
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -76,6 +78,95 @@ def _initialize_llm_generator(model: str) -> Optional[LLMSignalGenerator]:
     except OllamaConnectionError as err:
         logger.warning("LLM fallback disabled: %s", err)
         return None
+
+
+def _asset_class(ticker: str) -> str:
+    t = (ticker or "").upper()
+    if t.endswith("=X"):
+        return "FX"
+    if t.endswith("-USD") or t in {"BTC", "ETH"}:
+        return "CRYPTO"
+    if "^" in t:
+        return "INDEX"
+    return "US_EQUITY"
+
+
+def _get_no_trade_windows() -> dict:
+    global _NO_TRADE_WINDOWS
+    if _NO_TRADE_WINDOWS is not None:
+        return _NO_TRADE_WINDOWS
+    cfg_path = ROOT_PATH / "config" / "signal_routing_config.yml"
+    try:
+        raw = yaml.safe_load(cfg_path.read_text()) or {}
+        sr = raw.get("signal_routing") or {}
+        exec_cfg = sr.get("execution") or {}
+        _NO_TRADE_WINDOWS = exec_cfg.get("no_trade_windows") or {}
+    except Exception:
+        _NO_TRADE_WINDOWS = {}
+    return _NO_TRADE_WINDOWS
+
+
+def _in_no_trade_window(ticker: str) -> bool:
+    windows = _get_no_trade_windows()
+    asset_class = _asset_class(ticker)
+    slots = windows.get(asset_class) or []
+    if not slots:
+        return False
+    now_time = datetime.now(UTC).time()
+    for slot in slots:
+        try:
+            start_s, end_s = slot.split("-")
+            start_h, start_m = [int(x) for x in start_s.split(":")]
+            end_h, end_m = [int(x) for x in end_s.split(":")]
+            start = now_time.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            end = now_time.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            if start <= now_time < end:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _compute_mid_price(frame: pd.DataFrame) -> Optional[float]:
+    """Best-effort mid-price using bid/ask -> high/low -> close."""
+    if frame is None or frame.empty:
+        return None
+    last = frame.iloc[-1]
+    try:
+        bid = last.get("Bid")
+        ask = last.get("Ask")
+        if bid is not None and ask is not None and pd.notna(bid) and pd.notna(ask):
+            return float((float(bid) + float(ask)) / 2.0)
+    except Exception:
+        pass
+    try:
+        high = last.get("High")
+        low = last.get("Low")
+        if high is not None and low is not None and pd.notna(high) and pd.notna(low):
+            return float((float(high) + float(low)) / 2.0)
+    except Exception:
+        pass
+    try:
+        close = last.get("Close")
+        if close is not None and pd.notna(close):
+            return float(close)
+    except Exception:
+        pass
+    return None
+
+
+def _log_execution_event(run_id: str, cycle: int, record: Dict[str, Any]) -> None:
+    """Append a compact execution/skip event for slippage + no-trade audits."""
+    payload = dict(record or {})
+    payload.setdefault("run_id", run_id)
+    payload.setdefault("cycle", cycle)
+    payload.setdefault("logged_at", datetime.now(UTC).isoformat())
+    try:
+        EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with EXECUTION_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        logger.debug("Unable to log execution event for %s", record.get("ticker"))
 
 
 def _llm_signals_ready_for_trading(
@@ -254,6 +345,7 @@ def _execute_signal(
     market_data: pd.DataFrame,
     quality: Optional[Dict[str, Any]] = None,
     data_source: Optional[str] = None,
+    mid_price: Optional[float] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -263,6 +355,7 @@ def _execute_signal(
         market_data=market_data,
         quality=quality,
         data_source=data_source,
+        mid_price=mid_price,
     )
 
     primary = bundle.primary_signal
@@ -277,6 +370,7 @@ def _execute_signal(
         result.status,
     )
 
+    mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
     if result.status != "EXECUTED":
         return {
             "ticker": ticker,
@@ -285,18 +379,26 @@ def _execute_signal(
             "warnings": result.validation_warnings,
             "quality": quality,
             "data_source": data_source,
+            "mid_price": mid_px,
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
     realized_pnl_pct = getattr(result.trade, "realized_pnl_pct", None)
     executed_at = result.trade.timestamp.isoformat() if result.trade else None
+    entry_price = result.trade.entry_price if result.trade else current_price
+    mid_slippage_bp = None
+    if mid_px not in (None, 0, 0.0):
+        try:
+            mid_slippage_bp = ((entry_price - float(mid_px)) / float(mid_px)) * 1e4
+        except Exception:
+            mid_slippage_bp = None
 
     return {
         "ticker": ticker,
         "status": result.status,
         "shares": result.trade.shares if result.trade else 0,
         "action": result.trade.action if result.trade else primary.get("action", "HOLD"),
-        "entry_price": result.trade.entry_price if result.trade else current_price,
+        "entry_price": entry_price,
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
         "signal_confidence": primary.get("confidence"),
@@ -306,6 +408,8 @@ def _execute_signal(
         "timestamp": executed_at,
         "realized_pnl": realized_pnl,
         "realized_pnl_pct": realized_pnl_pct,
+        "mid_price": mid_px,
+        "mid_slippage_bp": mid_slippage_bp,
     }
 
 
@@ -759,6 +863,23 @@ def main(
                 price_map[ticker] = float(ticker_frame["Close"].iloc[-1])
             except Exception:
                 price_map[ticker] = None
+            mid_price = _compute_mid_price(ticker_frame)
+
+            if _in_no_trade_window(ticker):
+                window_slots = _get_no_trade_windows().get(_asset_class(ticker)) or []
+                skip_report = {
+                    "ticker": ticker,
+                    "status": "SKIPPED_NO_TRADE_WINDOW",
+                    "reason": "no_trade_window",
+                    "window_slots": window_slots,
+                    "quality": quality,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+                cycle_results.append(skip_report)
+                recent_signals.append(skip_report)
+                _log_execution_event(run_id, cycle, skip_report)
+                continue
 
             if not _validate_market_window(data_validator, ticker_frame):
                 logger.warning("Validation rejected %s window; skipping.", ticker)
@@ -782,15 +903,19 @@ def main(
                 market_data=ticker_frame,
                 quality=quality,
                 data_source=data_source,
+                mid_price=mid_price,
             )
 
             if execution_report:
                 execution_report["quality"] = quality
                 execution_report["data_source"] = data_source
+                if execution_report.get("mid_price") is None and mid_price is not None:
+                    execution_report["mid_price"] = mid_price
                 cycle_results.append(execution_report)
                 recent_signals.append(execution_report)
                 if execution_report.get("status") == "EXECUTED":
                     executed_signals.append(execution_report)
+                _log_execution_event(run_id, cycle, execution_report)
 
         if price_map:
             trading_engine.mark_to_market({k: v for k, v in price_map.items() if v is not None})

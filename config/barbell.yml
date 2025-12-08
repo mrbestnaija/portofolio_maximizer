@@ -15,20 +15,28 @@ barbell:
       - "IEF"
     min_weight: 0.75
     max_weight: 0.95
+    max_per_position: 0.50
+    description: "Cash/Treasury ballast; primary capital reserve."
 
-  risk_bucket:
+  core_bucket:
     symbols:
-      # Core spot risk instruments and underlyings for options tail bets.
-      - "AAPL"
       - "MSFT"
-      - "SPY"
-      - "QQQ"
+      - "CL=F"
+      - "MTN"
+    max_weight: 0.20
+    max_per_position: 0.10
+    description: "Core, high-liquidity names used in TS routing overrides."
+
+  speculative_bucket:
+    symbols:
+      - "AAPL"
       - "BTC-USD"
-    max_weight: 0.25
+    max_weight: 0.10
+    max_per_position: 0.05
+    description: "Frontier/experimental sleeves; throttle sizing until evidence improves."
 
   # Per-market caps for nested barbell constraints (DM vs EM/NGX, crypto).
   market_caps:
     ngx_equity_max: 0.05
     crypto_max: 0.10
     em_equity_max: 0.10
-

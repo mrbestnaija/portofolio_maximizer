@@ -1,11 +1,13 @@
 # UPDATED TO-DO LIST: Portfolio Maximizer - Current Implementation Status
 
-## CURRENT PROJECT STATUS: PARTIALLY BLOCKED – 2025-11-15 brutal run issues largely remediated; higher-order hyperopt + validator/backfill work still in progress
+## CURRENT PROJECT STATUS: PARTIALLY BLOCKED – 2025-11-15 brutal run issues largely remediated; higher-order hyperopt + validator/backfill work still in progress (TS model candidates + institutional-grade search scaffolding now in place)
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
 **Recent Achievements**:
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
 - 2025-12-03 Delta (diagnostic mode + invariants): DIAGNOSTIC_MODE/TS/EXECUTION toggles relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off) and make PaperTradingEngine permissive (>=1 share) while bypassing LLM latency guards in diagnostics; volume_ma_ratio now guards zero/NaN volume. Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts). Reduced-universe diagnostic run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
+- 2025-12-07: GPU-parallel, energy-aware runner checklist added (`Documentation/GPU_PARALLEL_RUNNER_CHECKLIST.md`) plus a shard-per-GPU orchestration stub (`bash/run_gpu_parallel.sh`) and a trade-count-aware rebuild helper (`bash/auto_rebuild_and_sweep.sh`) to rebuild evidence only when needed.
+- 2025-12-07 Delta (DB recovery + power-aware rebuild): Restored the latest good eval snapshot to `data/portfolio_maximizer.db` after corruption (preserved corrupt copy), re-tightened per-ticker TS thresholds (CL=F 0.55/0.005, AAPL 0.65/0.010) with high-notional names removed from diagnostics, disabled LLM fallback/redundancy for faster sampling, and added `bash/auto_rebuild_and_sweep.sh` to rebuild trade history only when realised trades are below target, then refresh slippage and TS sweeps.
 - Remote Sync (2025-11-06): Pipeline entry point refactoring, data persistence auditing, LLM graceful failure, comprehensive documentation updates ⭐ NEW
 - Phase 4.6: Platform-agnostic architecture
 - Phase 4.7: Configuration-driven CV
@@ -47,6 +49,11 @@
   - Stochastic, non-convex search uses a bandit-style explore/exploit policy (30% explore / 70% exploit by default, dynamically adjusted per trial) and logs trials to `logs/hyperopt/hyperopt_<RUN_ID>.log`.
   - Hyperopt candidate ranges are tightened using historic quant-validation metrics for profitable tickers (e.g., AAPL, COOP, GC=F, EURUSD=X), and the best configuration per run is re-executed as `<RUN_ID>_best` with metrics surfaced in `visualizations/dashboard_data.json`.
   - `bash/run_end_to_end.sh` and `bash/run_auto_trader.sh` honour `HYPEROPT_ROUNDS>0` by delegating to `bash/run_post_eval.sh`, making higher-order hyperopt the default orchestration mode when enabled.
+  - 2025-12-07 TS model search scaffold:
+    - `ts_model_candidates` table in `etl/database_manager.py` stores per-(ticker, regime, candidate_name) CV metrics, stability, and scalar scores.
+    - `scripts/run_ts_model_search.py` runs rolling-window CV for compact SARIMAX/SAMOSSA grids and records candidates into `ts_model_candidates`.
+    - `etl/statistical_tests.py` provides Diebold–Mariano-style comparison and rank stability helpers so candidate selection is statistically grounded.
+    - `scripts/build_automation_dashboard.py` consolidates TS sweeps, transaction costs, sleeve promotion plans, config proposals, and best strategy/TS model candidates into `visualizations/dashboard_automation.json` for institutional-grade review.
 - `bash/comprehensive_brutal_test.sh` (Nov 12) run: profit-critical + ETL suites passed, but `tests/etl/test_data_validator.py` is missing and the Time Series block timed out with a `Broken pipe`, so TS/LLM regression coverage remains outstanding. *(Nov 16 update: the script now defaults to **Time Series-first** execution�LLM tests only run when `BRUTAL_ENABLE_LLM=1`, keeping the brutal gate aligned with `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`.)*
 
 ## Architecture Overview
@@ -218,8 +225,8 @@ scripts/analyze_dataset.py
 - `config/forecasting_config.yml` tunes the SARIMAX/GARCH/SAMOSSA ensemble parameters consumed by `forcester_ts/forecaster.py`.
 - `config/llm_config.yml` lists the Ollama models, latency guardrails, and token-throughput failover policies enforced by `ai_llm/ollama_client.py`.
 - `config/signal_routing_config.yml` centralizes the TS-first, LLM-fallback feature flags shared by `scripts/run_etl_pipeline.py` and `scripts/run_auto_trader.py`.
-- `config/quant_success_config.yml` encodes the per-signal Sharpe/Sortino/VaR thresholds that gate Time Series signals before routing/execution.
-- `config/forecaster_monitoring.yml` plus `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` define the GREEN/YELLOW/RED quant validation thresholds used by `scripts/summarize_quant_validation.py` (per-ticker) and `scripts/check_quant_validation_health.py` (global), including the hard RED CI gate at `max_fail_fraction=0.90`.
+- `config/quant_success_config.yml` encodes the per-signal thresholds (Sharpe/Sortino/drawdown, min_expected_profit) that gate Time Series signals before routing/execution and feed quant validation logs (`logs/signals/quant_validation.jsonl`).
+- `config/forecaster_monitoring.yml` plus `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` define the GREEN/YELLOW/RED quant validation thresholds used by `scripts/summarize_quant_validation.py` (per-ticker) and `scripts/check_quant_validation_health.py` (global), including the hard RED CI gate at `max_fail_fraction=0.90`. Higher-order automation around these thresholds is tracked in `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`.
 - `config/ai_companion.yml` lists the Tier-1 knowledge base + dependency guardrails that automation launchers consume before invoking SARIMAX/SAMOSSA workloads.
 - `config/ctrader_config.yml` captures demo/live endpoints plus per-signal risk caps for the cTrader order manager.
 
@@ -472,12 +479,19 @@ portfolio_maximizer_v45/
 |       |-- test_ctrader_client.py
 |       `-- test_order_manager.py
 `-- Documentation/                   # ? PHASE 4.8-5.6 - 25+ files ? UPDATED
-    |-- implementation_checkpoint.md
+    |-- implementation_checkpoint.md                # High-level status checkpoint
+    |-- TIME_SERIES_FORECASTING_IMPLEMENTATION.md   # TS-first architecture details
+    |-- QUANT_VALIDATION_MONITORING_POLICY.md       # GREEN/YELLOW/RED quant gates
+    |-- QUANT_VALIDATION_AUTOMATION_TODO.md         # Quant automation & TS threshold sweeps
+    |-- MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md  # MTM / liquidation roadmap (diagnostic)
+    |-- NAV_RISK_BUDGET_ARCH.md                     # NAV-centric barbell architecture
+    |-- NAV_BAR_BELL_TODO.md                        # Barbell/NAV integration TODOs
+    |-- BARBELL_OPTIONS_MIGRATION.md                # Options/derivatives migration plan
+    |-- RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md   # Research log & publication outline
     |-- REFACTORING_IMPLEMENTATION_COMPLETE.md
     |-- REFACTORING_STATUS.md
     |-- TESTING_IMPLEMENTATION_SUMMARY.md
     |-- INTEGRATION_TESTING_COMPLETE.md
-    |-- TIME_SERIES_FORECASTING_IMPLEMENTATION.md
     |-- CHECKPOINTING_AND_LOGGING.md
     |-- IMPLEMENTATION_SUMMARY_CHECKPOINTING.md
     |-- CV_CONFIGURATION_GUIDE.md
@@ -500,6 +514,19 @@ portfolio_maximizer_v45/
 - ✅ **Multi-source**: DataSourceManager (Phase 4.6) - Extend for ticker discovery
 - ✅ **Platform-Agnostic**: BaseExtractor pattern - Consistent interface across sources
 - ✅ **Config-Driven**: Zero hard-coded defaults - Full YAML + CLI control
+
+### Heuristics, Full Models, and ML Calibration (Conceptual Stack)
+
+- **Heuristics (fast, transparent)**:
+  - Quant validation tiers (GREEN/YELLOW/RED) from `config/forecaster_monitoring.yml` + `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` + `scripts/check_quant_validation_health.py` / `scripts/summarize_quant_validation.py`.
+  - MVS-style summaries from `DatabaseManager.get_performance_summary()` surfaced by `bash/run_pipeline_live.sh` / `bash/run_end_to_end.sh`.
+  - Barbell quant gates and simple NAV guards in `risk/barbell_policy.py`, `Documentation/NAV_RISK_BUDGET_ARCH.md`, `Documentation/NAV_BAR_BELL_TODO.md`.
+- **Full models (official NAV/risk)**:
+  - TS ensemble (`forcester_ts/*`, `etl/time_series_forecaster.py`) + portfolio math (`etl/portfolio_math.py`) + auto trader / backtesting pipelines (`scripts/run_auto_trader.py`, `scripts/run_etl_pipeline.py`, `scripts/run_strategy_optimization.py`).
+  - These are the source of truth for official NAV calculations, drawdown metrics, and PnL-based research conclusions.
+- **ML calibrators (future, regime-aware)**:
+  - Higher-order hyper-parameter and bandit-style search around thresholds (see `Documentation/STOCHASTIC_PNL_OPTIMIZATION.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`).
+  - Future ML components should learn **when to tighten/loosen heuristics** (e.g., regime-aware `min_expected_return` bands) based on full-model outcomes, not replace the TS ensemble or portfolio math directly.
 
 ### Build on Production Foundation:
 ```

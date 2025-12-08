@@ -29,9 +29,43 @@
 - Runtime: Python 3.10-3.12 inside `simpleTrader_env`, NumPy, pandas, SciPy.
  - Time-series libraries: statsmodels (SARIMAX), arch (GARCH), and in-repo SAMOSSA/MSSA-RL implementations.
  - TS governance: treat **SAMOSSA** as the primary Time Series baseline for regression metrics and ensemble comparisons; use SARIMAX only as a secondary candidate/fallback when SAMOSSA metrics are missing.
+- Vectorization: default to **NumPy/pandas vectorized operations** for all numerical work on arrays/DataFrames (no row-by-row Python loops, `.iterrows()` or per-element `.apply()` in hot paths). Any non-vectorized implementation in ETL, analysis, forecasting, or portfolio math must be justified in comments and kept outside performance-critical code paths.
 - Optional GPU assist: CuPy only when MSSA/SARIMAX workloads hit >70% CPU during brutal runs on <=8 GB GPUs. Escalate before introducing Tier-2 RAPIDS/torch stacks.
 - Automation: Reuse the YAML/JSON snippets from `QUANT_TIME_SERIES_STACK.md` under `config/ai_companion.yml` so autonomous agents inherit the same guardrails automatically.
 - NAV & Barbell: Treat `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` as the canonical references for **TS-first, NAV-centric barbell wiring** (TS core signals as primary, LLM as capped fallback, options/derivatives strictly feature-flagged). Do not re-implement allocation logic ad hoc; route changes through these docs and `config/barbell.yml`/`risk/barbell_policy.py`.
+- Quant validation & automation: When touching thresholds or quant gates, read `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` first, and prefer updating configs + automation helpers (`scripts/sweep_ts_thresholds.py`, `scripts/estimate_transaction_costs.py`, `scripts/generate_config_proposals.py`) over baking constants into code.
+- MTM & liquidation: Treat `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` and the `scripts/liquidate_open_trades.py` contract as the canonical source for diagnostic mark-to-market behaviour; do not rely on this path for production PnL reporting.
+
+### Time-Series Hyper-Parameters & Model Search
+
+- Use `scripts/run_ts_model_search.py` + `ts_model_candidates` (see `etl/database_manager.py`) as the **canonical path** for exploring SARIMAX/SAMOSSA TS model candidates:
+  - Do not introduce ad-hoc per-script SARIMAX grids; instead, extend the candidate grid in the model search script and the config-driven profiles in `config/model_profiles.yml`.
+  - When comparing candidates, prefer the shared helpers in `etl/statistical_tests.py` (Diebold–Mariano-style tests, rank/stability metrics) instead of bespoke statistical code scattered across the repo.
+- When building or modifying dashboards, prefer reading `visualizations/dashboard_automation.json` (emitted by `scripts/build_automation_dashboard.py`) so automation decisions (TS sweeps, costs, sleeve promotions, TS model candidates) remain **centralised and institutional-grade**.
+
+### Heuristics vs Full Models vs ML Calibrators
+
+- Real-time heuristics:
+  - Use **lightweight, transparent heuristics** (e.g. quant validation pass/fail rates, simple MVS checks from `DatabaseManager.get_performance_summary()`, barbell gates) for:
+    - Live monitoring dashboards,
+    - Quick routing/guardrail decisions inside `scripts/run_auto_trader.py`,
+    - Early warning signals in CI/brutal runs.
+  - These should be cheap to compute, easy to explain, and always driven by config (no opaque state hidden in code).
+- Full models:
+  - Treat the **full TS ensemble + portfolio math** stack as the single source of truth for:
+    - Official NAV calculation,
+    - Risk reporting (drawdown, CVaR once implemented),
+    - Production-grade backtesting and hyper-parameter evaluation.
+  - Do not replace full-model outputs with heuristics in any place that feeds official reports or long-term research conclusions.
+- ML calibrators:
+  - Any future ML components (beyond TS baselines) should be used to **calibrate heuristics**, not to silently override full models:
+    - Example: learning regime-aware bands for `min_expected_return` / `min_expected_profit` based on recent performance.
+    - Example: predicting when a heuristic (e.g. simple pass-rate gate) is misaligned with full-model outcomes.
+  - Respect the phase gates and capital thresholds in this file: do not introduce new ML calibrators for risk/threshold tuning until:
+    - Spot-only TS stack is profitable over multiple regimes,
+    - Quant health (GREEN/YELLOW) is stable in brutal reports,
+    - A clear economic rationale for the calibrator has been written down.
+  - All ML calibrators must remain **configuration-driven, replaceable, and observable** (their decisions should be logged and comparable to the underlying heuristics and full models they calibrate).
 
 ## Pre-Development AI Instructions
 
@@ -266,6 +300,8 @@ This checklist is designed to prevent the architectural over-engineering and ana
 
 #### Phase 1-3: Core Testing Only
 **Maximum 200 lines of test code** - Don't spend more time testing than developing
+
+**Standing instruction**: Always build a unit test for every critical implementation path before shipping changes.
 
 ```python
 # test_core_functions.py - Essential tests only

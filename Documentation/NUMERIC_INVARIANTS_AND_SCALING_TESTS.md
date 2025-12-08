@@ -83,3 +83,11 @@ Recent changes (2025-12-04) added downstream **quant-success gating** and diagno
 
 - `models.time_series_signal_generator.TimeSeriesSignalGenerator` now attaches a quant-validation profile (driven by `config/quant_success_config.yml`) and demotes BUY/SELL to HOLD when `status == "FAIL"` outside diagnostic modes. This logic sits on top of the numeric invariants described above.
 - Diagnostic runs (`DIAGNOSTIC_MODE`/`TS_DIAGNOSTIC_MODE`) still relax thresholds and disable quant validation so scaling invariants can be exercised without profit-factor/win-rate gates interfering. Production tests should run with these toggles off to observe the full effect of quant gating on realised PnL.
+
+For how these gates are monitored and tuned over time, see:
+
+- `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` for GREEN/YELLOW/RED tiers and CI/brutal behaviour.
+- `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` for automation around TS threshold sweeps, transaction cost calibration, and config proposals.
+- `Documentation/OPTIMIZATION_IMPLEMENTATION_PLAN.md` (Phase 4) for institutional-grade TS hyper-parameter search using:
+  - `scripts/run_ts_model_search.py` (rolling-window CV over small SARIMAX/SAMOSSA grids, writing to `ts_model_candidates`), and
+  - `etl/statistical_tests.py` (Diebold–Mariano-style tests and rank stability helpers) to ensure candidate selection is statistically robust, not just numerically stable.
