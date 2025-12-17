@@ -4,6 +4,10 @@
 
 The `comprehensive_brutal_test.sh` script provides exhaustive, multi-hour testing of the entire Portfolio Maximizer project. It tests all stages, components, data sources, and configurations with multiple iterations to ensure robust operation.
 
+### Synthetic input for brutal/offline runs
+- Generate reproducible synthetic datasets with `scripts/generate_synthetic_dataset.py` (manifest + dataset_id under `data/synthetic/<dataset_id>/`) and validate them via `scripts/validate_synthetic_dataset.py`.
+- Set `ENABLE_SYNTHETIC_PROVIDER=1` and either `SYNTHETIC_DATASET_PATH` or `SYNTHETIC_DATASET_ID` before invoking `bash/comprehensive_brutal_test.sh` to force the adapter to read the persisted dataset instead of regenerating in-process. Keep live trading disabled; promotion to live data requires GREEN/acceptable YELLOW quant health per `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`.
+
 ### 🚨 2025-11-15 Brutal Run Findings (blocking)
 - `logs/pipeline_run.log:16932-17729` plus `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` prove the SQLite store is corrupted (“rowid … out of order”, “row … missing from index”), so every writer in `etl/database_manager.py:689`/`:1213` now raises `database disk image is malformed`. The brutal suite currently exercises a broken database.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show the time-series stage repeatedly failing with `ValueError: The truth value of a DatetimeIndex is ambiguous` after the MSSA serialization block in `scripts/run_etl_pipeline.py:1755-1764` evaluates `change_points or []`. Because the exception fires after the “Saved forecast …” messages, the suite still logs IDs 871‑960 and then reports “Generated forecasts for 0 ticker(s)”.

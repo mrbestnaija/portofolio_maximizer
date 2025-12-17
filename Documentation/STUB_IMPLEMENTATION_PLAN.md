@@ -14,6 +14,12 @@
 - Dashboard JSON emission hardened (ISO timestamps) to stop serialization warnings during live runs.
 - Barbell integration tracked via `BARBELL_INTEGRATION_TODO.md`; future stub replacements around portfolio math, paper trading, and NGX/frontier exposure must respect safe/risk buckets and tail-aware evaluation (Sortino/Omega/CVaR + scenarios).
 
+### 2025-12-17 Delta (synthetic-first pre-production)
+- Free-tier liquidity gaps (commodities/illiquid classes) keep pre-production in **synthetic-first** mode. Use `config/data_sources_config.yml` provider `synthetic` + `etl/synthetic_extractor.py`, `scripts/generate_synthetic_dataset.py`, `scripts/validate_synthetic_dataset.py`, and `bash/run_gpu_parallel.sh MODE=synthetic` to generate/validate persisted datasets for brutal/regression runs.
+- Isolation rules: `ENABLE_SYNTHETIC_PROVIDER=1`/`SYNTHETIC_ONLY=1` for tests; remove synthetic flags and point `PORTFOLIO_DB_PATH` back to production before live. Synthetic outputs must not enter live trading, dashboards, or training once validation ends (`AGENT_INSTRUCTION.md`).
+- Logging/retention: synthetic generation/validation append to `logs/automation/synthetic_runs.log` with auto-prune at 14 days via `scripts/prune_synthetic_logs.py`, aligning with `CHECKPOINTING_AND_LOGGING.md`, `QUANT_VALIDATION_MONITORING_POLICY.md`, and `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`.
+- Pipeline readiness: `scripts/run_etl_pipeline.py --execution-mode synthetic --data-source synthetic` now loads persisted datasets via `SYNTHETIC_DATASET_ID`/`SYNTHETIC_DATASET_PATH`, logs `dataset_id`/`generator_version` in `PipelineLogger`, and falls back to deterministic in-process generation if none is provided.
+
 ### Nov 12, 2025 Update
 - Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
 - Checkpoint/metadata utilities are stable on Windows thanks to Path.replace, unblocking future stub work that writes checkpoints repeatedly.

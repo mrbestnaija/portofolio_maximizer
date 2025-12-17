@@ -6,22 +6,49 @@
 #   bash/git_sync.sh feature/branch  # sync specific branch
 #
 # Safety:
-# - Aborts if the worktree is dirty (uncommitted changes).
+# - Auto-stashes any dirty worktree before syncing (including untracked files); restores on the original branch.
 # - Uses pull --rebase to keep history linear.
 
 set -euo pipefail
 
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
+START_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+STASHED=0
+RESTORED=0
+
+restore_stash() {
+  if [[ $STASHED -eq 1 && $RESTORED -eq 0 ]]; then
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$current_branch" != "$START_BRANCH" ]]; then
+      echo "Stash created on $START_BRANCH. Skipping auto-restore to avoid applying changes onto $current_branch." >&2
+      echo "Recover manually: git checkout $START_BRANCH && git stash pop" >&2
+      return
+    fi
+
+    echo "Restoring stashed changes..."
+    if git stash pop --quiet; then
+      echo "Restored stashed changes."
+    else
+      echo "Failed to reapply stash. Your changes remain stashed. Run 'git stash pop' manually." >&2
+    fi
+    RESTORED=1
+  fi
+}
+
+trap restore_stash EXIT
 
 if [[ -z "$BRANCH" ]]; then
   echo "Unable to determine branch. Pass explicitly: bash/git_sync.sh my-branch" >&2
   exit 1
 fi
 
-# Ensure clean worktree
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "Worktree is dirty. Commit or stash changes before syncing." >&2
-  exit 1
+# Auto-clean dirty worktree by stashing everything (including untracked)
+if [[ -n "$(git status --porcelain)" ]]; then
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  echo "Worktree is dirty. Auto-stashing changes before sync ($ts)..."
+  git stash push -u -m "git_sync autostash $ts" >/dev/null
+  STASHED=1
 fi
 
 echo "Syncing branch: $BRANCH"
@@ -37,5 +64,9 @@ git pull --rebase origin "$BRANCH"
 
 # Push
 git push origin "$BRANCH"
+
+# If we stashed, bring the changes back before exiting
+restore_stash
+trap - EXIT
 
 echo "Sync complete for $BRANCH"

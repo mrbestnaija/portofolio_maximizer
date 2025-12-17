@@ -90,7 +90,22 @@ class DataSourceManager:
             List of enabled provider configurations, sorted by priority (ascending)
         """
         providers = self.config.get('providers', [])
-        enabled = [p for p in providers if p.get('enabled', False)]
+        enabled = []
+        enable_synthetic_env = os.getenv("ENABLE_SYNTHETIC_PROVIDER") or os.getenv("ENABLE_SYNTHETIC_DATA_SOURCE")
+        synthetic_only = os.getenv("SYNTHETIC_ONLY")
+
+        for provider in providers:
+            is_enabled = provider.get('enabled', False)
+            if synthetic_only:
+                if provider.get('name') == 'synthetic':
+                    enabled.append({**provider, "enabled": True, "priority": 1})
+                continue
+
+            if enable_synthetic_env and provider.get('name') == 'synthetic':
+                # Allow synthetic provider toggling via env for smoke/regression runs
+                is_enabled = True
+            if is_enabled:
+                enabled.append(provider)
 
         # Sort by priority (lower number = higher priority)
         enabled.sort(key=lambda p: p.get('priority', 999))

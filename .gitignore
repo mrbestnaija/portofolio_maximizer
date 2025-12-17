@@ -76,12 +76,23 @@ data/processed/*.parquet
 data/training/*.parquet
 data/validation/*.parquet
 data/testing/*.parquet
+data/synthetic/
+models/synthetic/
 *.csv
 .data/
 data/cache/
 data/temp/
 data/ideas/
 data/external/
+data/portfolio_optimizer/
+data/portfolio_optimizer/*
+data/portfolio_optimizer/*/*
+data/portfolio_optimizer/*/*/*
+data/portfolio_optimizer/*/*/*/*
+data/portfolio_optimizer/*/*/*/*/*
+data/portfolio_optimizer/*/*/*/*/*/*
+data/portfolio_optimizer/*/*/*/*/*/*/*
+data/portfolio_optimizer/*/*/*/*/*/*/*/*
 
 
 

@@ -126,6 +126,26 @@ PY
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
     ;;
 
+  synthetic_refresh)
+    # Generate a synthetic dataset (config-driven) for offline regression/smoke tests.
+    SYN_CONFIG="${CRON_SYNTHETIC_CONFIG:-config/synthetic_data_config.yml}"
+    SYN_TICKERS="${CRON_SYNTHETIC_TICKERS:-AAPL,MSFT}"
+    SYN_OUTPUT_ROOT="${CRON_SYNTHETIC_OUTPUT_ROOT:-}"
+    export ENABLE_SYNTHETIC_PROVIDER=1
+    run_with_logging "synthetic_refresh: generate_synthetic_dataset.py" \
+      "${PYTHON_BIN}" scripts/generate_synthetic_dataset.py \
+        --config "${SYN_CONFIG}" \
+        --tickers "${SYN_TICKERS}" \
+        ${SYN_OUTPUT_ROOT:+--output-root "${SYN_OUTPUT_ROOT}"}
+    # Validate latest synthetic dataset if present
+    LATEST_DATASET_DIR=$(ls -dt ${SYN_OUTPUT_ROOT:-data/synthetic}/* 2>/dev/null | head -n 1 || true)
+    if [[ -n "${LATEST_DATASET_DIR}" ]]; then
+      PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" run_with_logging "synthetic_refresh: validate_synthetic_dataset.py" \
+        "${PYTHON_BIN}" scripts/validate_synthetic_dataset.py \
+          --dataset-path "${LATEST_DATASET_DIR}"
+    fi
+    ;;
+
   ts_threshold_sweep)
     # Weekly/monthly TS threshold sweep to grow evidence for per-ticker settings.
     sweep_args=()
@@ -235,6 +255,7 @@ Tasks:
   ts_threshold_sweep   Sweep TS thresholds over realised trades (logs/automation JSON).
   transaction_costs    Estimate transaction costs grouped by ticker/asset class.
   auto_trader_core     Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP).
+  synthetic_refresh    Generate synthetic dataset artifacts for offline regression.
 
 Cron examples and production guidance:
   See Documentation/CRON_AUTOMATION.md.

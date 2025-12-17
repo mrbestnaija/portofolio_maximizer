@@ -5,6 +5,7 @@
 **Status**: 🔴 **PARTIALLY BLOCKED – 2025-11-15 brutal run exposed regressions; structural issues fixed and brutal harness green, global quant validation still RED**  
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
 **Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
+**Sentiment overlays**: Planned but dormant until profitability beats benchmarks and quant gates clear; see `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` and `config/sentiment.yml` (disabled, strict gating) for future integration notes.
 
 ### 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard is bypassed in diagnostics and `volume_ma_ratio` now guards zero/NaN volume.

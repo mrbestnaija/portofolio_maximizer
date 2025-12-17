@@ -25,6 +25,7 @@ Refer to `Documentation/integration_fix_plan.md` for the authoritative fix track
 - LLM monitoring & Ollama timing: `ai_llm/ollama_client.py` uses `time.perf_counter()` for throughput measurement and passes the low-token-rate model-switch test; `scripts/monitor_llm_system.py` imports only `get_performance_summary` / `save_risk_assessment`, fixing the previous `llm_db_manager` ImportError and allowing the monitoring suite to complete.
 - Brutal gates: the brutal harness still enforces structural checks (database present, required tables, minimum Time Series signals per ticker), but profitability validation for synthetic runs now reports `profitability_status` / `profitability_reasons` as JSON and exits successfully even when demo thresholds are not met.
 - ETL validator coverage: `tests/etl/test_data_validator.py` has been restored (price positivity, volume non-negativity, missing-data warnings), so the ETL unit stage in `bash/comprehensive_brutal_test.sh` no longer flags a missing validator test file.
+- Synthetic data integration: `scripts/run_etl_pipeline.py` now loads persisted synthetic datasets automatically when `SYNTHETIC_DATASET_PATH`/`SYNTHETIC_DATASET_ID` are set in synthetic mode, and `bash/run_synthetic_smoke.sh` exercises a synthetic-only provider path. `scripts/validate_synthetic_dataset.py` emits JSON validation reports under `logs/automation/` to keep synthetic regression artifacts auditable.
 
 ---
 

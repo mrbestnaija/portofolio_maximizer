@@ -45,6 +45,7 @@ Key tasks (first positional argument):
 - `ticker_discovery_stub` – Placeholder for future Phase 5.2 ticker discovery.
 - `optimizer_stub` – Placeholder for future Phase 5.3 optimizer pipeline.
 - `weekly_sleeve_maintenance` – Sleeve summary + promotion/demotion plan writer (see `bash/weekly_sleeve_maintenance.sh`).
+- `synthetic_refresh` – Generate a synthetic dataset (config-driven) for offline regression/smoke testing; respects `CRON_SYNTHETIC_*` env overrides.
 
 The script automatically:
 
@@ -113,6 +114,12 @@ Assuming the repo lives at `/opt/portfolio_maximizer_v45`:
 # 10. Weekly sleeve summary + promotion/demotion recommendations
 0 5 * * 1 cd /opt/portfolio_maximizer_v45 && \
   bash/bash/weekly_sleeve_maintenance.sh >> logs/cron/sleeve_maintenance.out 2>&1
+
+# 11. Synthetic dataset refresh (offline regression)
+0 1 * * 1 cd /opt/portfolio_maximizer_v45 && \
+  CRON_SYNTHETIC_CONFIG="config/synthetic_data_config.yml" \
+  CRON_SYNTHETIC_TICKERS="AAPL,MSFT" \
+  bash/bash/production_cron.sh synthetic_refresh >> logs/cron/synthetic_refresh.out 2>&1
 ```
 
 You can edit the schedule and paths to match your deployment environment.
@@ -210,6 +217,12 @@ Per `Documentation/arch_tree.md`:
 
 Both stubs currently just write a one‑line log entry so you can safely
 keep their cron entries in place while implementation progresses.
+
+### 4.7 `synthetic_refresh`
+
+- Generates a synthetic dataset via `scripts/generate_synthetic_dataset.py` (respects `CRON_SYNTHETIC_CONFIG`, `CRON_SYNTHETIC_TICKERS`, `CRON_SYNTHETIC_OUTPUT_ROOT`) and immediately validates it with `scripts/validate_synthetic_dataset.py`.
+- Produces `data/synthetic/<dataset_id>/<ticker>.parquet` + `manifest.json` and a validation report under `logs/automation/`.
+- Enablement is synthetic‑first only; keep live trading disabled. Promotion of synthetic outputs to live cron tasks requires GREEN/acceptable YELLOW quant health per `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and the sequencing rules in `Documentation/NEXT_TO_DO_SEQUENCED.md`.
 
 ---
 

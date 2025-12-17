@@ -35,6 +35,7 @@
 - NAV & Barbell: Treat `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` as the canonical references for **TS-first, NAV-centric barbell wiring** (TS core signals as primary, LLM as capped fallback, options/derivatives strictly feature-flagged). Do not re-implement allocation logic ad hoc; route changes through these docs and `config/barbell.yml`/`risk/barbell_policy.py`.
 - Quant validation & automation: When touching thresholds or quant gates, read `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` first, and prefer updating configs + automation helpers (`scripts/sweep_ts_thresholds.py`, `scripts/estimate_transaction_costs.py`, `scripts/generate_config_proposals.py`) over baking constants into code.
 - MTM & liquidation: Treat `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` and the `scripts/liquidate_open_trades.py` contract as the canonical source for diagnostic mark-to-market behaviour; do not rely on this path for production PnL reporting.
+- Synthetic data isolation: Synthetic datasets are strictly for pre-production/brutal validation. After that phase, disable `ENABLE_SYNTHETIC_PROVIDER`/`SYNTHETIC_ONLY`, drop `--data-source synthetic`/`--execution-mode synthetic` flags from production runners, point `PORTFOLIO_DB_PATH` back to the production DB, and ensure training/scoring/export paths reject synthetic-sourced rows. Live trading, dashboards, and model training must never consume synthetic data.
 
 ### Time-Series Hyper-Parameters & Model Search
 
@@ -106,7 +107,7 @@ MANDATORY: Before suggesting any code or architecture:
 ### Before ANY Development Session
 - [x] **Previous phase 100% complete?** Phase 4.5 complete (CV implementation)
 - [ ] **Profitable strategy proven?** Awaiting Phase 5 (Portfolio Optimization)
-- [ ] **Working execution system?** Data pipeline operational, execution pending
+- [x] **Working execution system?** Data pipeline + execution loop implemented (auto-trader + PaperTradingEngine/cTrader demo); live trading remains gated by quant health
 - [x] **Budget constraints respected?** Free tier data sources only
 - [ ] **Stack alignment locked?** Tier-1 stack from `QUANT_TIME_SERIES_STACK.md` confirmed as the only dependency delta; deviations documented + approved.
 

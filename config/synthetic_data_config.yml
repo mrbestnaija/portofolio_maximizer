@@ -1,0 +1,71 @@
+# Synthetic Data Generator (Phase 0 scaffolding)
+# Backward-compatible defaults mirror the legacy generate_synthetic_ohlcv helper.
+
+synthetic:
+  generator_version: "v1"  # v0 = legacy; v1 = config-driven core generators + regimes
+  dataset_id_strategy: "hash"  # hash | timestamped_hash
+  seed: 123
+
+  # Date range and frequency for synthetic OHLCV
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  frequency: "B"  # Business days; future phases may add intraday (1min,5min) support
+
+  # Tickers to synthesize (aligned with legacy defaults)
+  tickers:
+    - "AAPL"
+    - "MSFT"
+
+  market_condition: "efficient"  # efficient | inefficient | mixed
+  regimes:
+    enabled: true
+    names: ["low_vol", "high_vol"]
+    transition_matrix:
+      - [0.9, 0.1]
+      - [0.2, 0.8]
+    params:
+      low_vol:
+        drift: 0.0004
+        vol: 0.01
+        jump_intensity: 0.0
+        jump_mean: 0.0
+        jump_std: 0.0
+      high_vol:
+        drift: -0.0002
+        vol: 0.03
+        jump_intensity: 0.02
+        jump_mean: -0.02
+        jump_std: 0.05
+
+  correlation:
+    mode: "static"  # static | factor | rolling
+    target_matrix:  # optional; defaults to identity if empty
+      - [1.0, 0.4]
+      - [0.4, 1.0]
+
+  price_model: "hybrid"  # gbm | ou | jump_diffusion | heston | hybrid
+  volatility_model: "none"  # none | garch | stochastic_vol
+  jump_diffusion:
+    enabled: true
+    intensity: 0.01
+    jump_mean: 0.0
+    jump_std: 0.03
+
+  persistence:
+    output_root: "data/synthetic"
+    partitioning: "by_ticker"  # by_ticker | combined
+    keep_last: 3  # rotation target; enforcement will arrive with DVC wiring
+
+  validation:
+    enabled: true
+    checks:
+      - schema
+      - monotonic_index
+      - ohlcv_sanity
+      - non_negative_prices
+
+  # Future: DVC/local remote wiring (Phase 8)
+  versioning:
+    enabled: false
+    remote_name: "localstore"
+    remote_url: ""  # optional local path when enabled

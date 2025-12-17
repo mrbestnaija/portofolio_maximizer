@@ -30,6 +30,12 @@ data_sources:
       priority: 4
       config_file: "config/ctrader_config.yml"
 
+    - name: "synthetic"
+      type: "market_data"
+      enabled: true  # Enabled (lowest priority) so --data-source synthetic is available for offline/regression runs
+      priority: 99
+      config_file: "config/synthetic_data_config.yml"
+
   # Data source selection strategy
   selection_strategy:
     mode: "fallback"  # Options: priority, fallback, parallel, custom
@@ -120,6 +126,7 @@ data_sources:
       alpha_vantage: "etl.alpha_vantage_extractor.AlphaVantageExtractor"
       finnhub: "etl.finnhub_extractor.FinnhubExtractor"
       ctrader: "etl.ctrader_extractor.CTraderExtractor"
+      synthetic: "etl.synthetic_extractor.SyntheticExtractor"
       # Deprecated adapters removed during v4.5 cleanup
 
     # Adapter loading strategy

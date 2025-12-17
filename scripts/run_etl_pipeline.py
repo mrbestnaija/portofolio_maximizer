@@ -28,6 +28,7 @@ import yaml
 import logging
 import warnings
 import os
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -332,7 +333,19 @@ def generate_synthetic_ohlcv(tickers: List[str], start_date: str,
         }, index=date_index)
         df_t.index.name = 'Date'
         frames.append(df_t)
-    return pd.concat(frames).sort_index()
+    data = pd.concat(frames).sort_index()
+    payload = {
+        "tickers": tickers,
+        "start": str(start_date),
+        "end": str(end_date),
+        "seed": seed,
+        "generator_version": "v0",
+    }
+    dataset_id = f"syn_{hashlib.sha1(json.dumps(payload, sort_keys=True).encode('utf-8')).hexdigest()[:12]}"  # nosec B303
+    data.attrs["dataset_id"] = dataset_id
+    data.attrs["generator_version"] = "v0"
+    data.attrs["source"] = "synthetic"
+    return data
 
 
 def _extract_price_matrix(data: pd.DataFrame, price_field: str, tickers: Sequence[str]) -> pd.DataFrame:
@@ -1108,7 +1121,9 @@ def execute_pipeline(
         'tickers': ticker_list,
         'start_date': start,
         'end_date': end,
-        'use_cv': use_cv
+        'use_cv': use_cv,
+        'execution_mode': execution_mode,
+        'synthetic_dataset_env': os.getenv("SYNTHETIC_DATASET_ID") or os.getenv("SYNTHETIC_DATASET_PATH"),
     })
 
     # Initialize data source manager (platform-agnostic)
@@ -1139,9 +1154,34 @@ def execute_pipeline(
 
     # Prepare synthetic data up-front when explicitly requested
     precomputed_raw_data: Optional[pd.DataFrame] = None
+    synthetic_dataset_id: Optional[str] = None
+    synthetic_generator_version: Optional[str] = None
+    dataset_id_current: Optional[str] = None
+    generator_version_current: Optional[str] = None
     if execution_mode == 'synthetic':
-        logger.info("Synthetic mode: precomputing deterministic OHLCV data (offline)")
-        precomputed_raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
+        syn_dataset_path = os.getenv("SYNTHETIC_DATASET_PATH")
+        syn_dataset_id = os.getenv("SYNTHETIC_DATASET_ID")
+        if syn_dataset_path or syn_dataset_id:
+            try:
+                from etl.synthetic_extractor import SyntheticExtractor
+
+                syn_extractor = SyntheticExtractor()
+                precomputed_raw_data = syn_extractor.extract_ohlcv(ticker_list, start, end)
+                synthetic_dataset_id = precomputed_raw_data.attrs.get("dataset_id")
+                synthetic_generator_version = precomputed_raw_data.attrs.get("generator_version")
+                dataset_id_current = synthetic_dataset_id
+                generator_version_current = synthetic_generator_version
+                logger.info("Synthetic mode: loaded persisted synthetic dataset (%s)", synthetic_dataset_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Failed to load persisted synthetic dataset (%s); falling back to generator", exc)
+                precomputed_raw_data = None
+        if precomputed_raw_data is None:
+            logger.info("Synthetic mode: precomputing deterministic OHLCV data (offline)")
+            precomputed_raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
+            synthetic_dataset_id = precomputed_raw_data.attrs.get("dataset_id")
+            synthetic_generator_version = precomputed_raw_data.attrs.get("generator_version")
+            dataset_id_current = synthetic_dataset_id
+            generator_version_current = synthetic_generator_version
 
     # Execute pipeline stages
     logger.info("=" * 70)
@@ -1201,6 +1241,24 @@ def execute_pipeline(
 
                 logger.info(f"OK Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
                 logger.info(f"  Source: {extraction_source}")
+                dataset_id = raw_data.attrs.get("dataset_id")
+                generator_version = raw_data.attrs.get("generator_version")
+                if dataset_id:
+                    logger.info("  Synthetic dataset_id: %s (generator_version=%s)", dataset_id, generator_version or "n/a")
+                    dataset_id_current = dataset_id
+                    generator_version_current = generator_version
+                pipeline_log.log_event(
+                    'data_extraction',
+                    pipeline_id,
+                    metadata={
+                        "source": extraction_source,
+                        "rows": len(raw_data),
+                        "tickers": ticker_list,
+                        "dataset_id": dataset_id,
+                        "generator_version": generator_version,
+                        "execution_mode": execution_mode,
+                    },
+                )
 
                 if synthetic_fallback:
                     pipeline_log.log_event(
@@ -2479,7 +2537,11 @@ def execute_pipeline(
     logger.info("=" * 70)
 
     # Log pipeline completion
-    pipeline_log.log_event('pipeline_complete', pipeline_id, status='success')
+    pipeline_log.log_event('pipeline_complete', pipeline_id, status='success', metadata={
+        "execution_mode": execution_mode,
+        "dataset_id": dataset_id_current,
+        "generator_version": generator_version_current,
+    })
 
     # Cleanup old logs and checkpoints
     pipeline_log.cleanup_old_logs()

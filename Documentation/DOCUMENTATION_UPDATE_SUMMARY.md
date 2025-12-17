@@ -31,7 +31,13 @@
   - `Documentation/CRITICAL_REVIEW.md` – added “2025-11-26 TS Regression Governance Update” describing SAMOSSA baseline, directional accuracy, and the ensemble-vs-baseline brutal gate.
   - `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md` – extended “Regression Metrics & Backtesting” to include directional accuracy and referenced `scripts/compare_forecast_models.py`; cross-linked to NAV/barbell docs.
   - `Documentation/NAV_RISK_BUDGET_ARCH.md` – one-page architecture diagram for TS core → buckets → NAV allocator → barbell shell → orders, with LLM as capped fallback.
-  - Agent-facing guides (`AGENT_INSTRUCTION.md`, `AGENT_DEV_CHECKLIST.md`, roadmap/checkpoint docs) now point to the NAV/barbell docs as the **single source of truth** for TS-first risk wiring.
+- Agent-facing guides (`AGENT_INSTRUCTION.md`, `AGENT_DEV_CHECKLIST.md`, roadmap/checkpoint docs) now point to the NAV/barbell docs as the **single source of truth** for TS-first risk wiring.
+
+## 2025-11-30 – Sentiment overlay (profit-gated) scaffolding
+
+- Added `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` describing profit-gated sentiment ingestion/feature fusion, phased rollout (offline → shadow → limited impact → opt-in), and safeguards (burst/disagreement clamps, missing-data passthrough).
+- Created `config/sentiment.yml` (disabled by default) and `tests/sentiment/test_sentiment_config_scaffold.py` to enforce strict gating (Sharpe ≥ 1.1, drawdown ≤ 0.22, PnL > 0 for 90/180d) until profitability clears the benchmark.
+- Cross-referenced in `Documentation/arch_tree.md`, `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, and `Documentation/implementation_checkpoint.md` for tracking without enabling runtime hooks yet.
 
 ---
 
@@ -71,4 +77,3 @@ For detailed historical context on the refactor, see the earlier snapshot docs:
 - `TESTING_IMPLEMENTATION_SUMMARY.md`
 - `INTEGRATION_TESTING_COMPLETE.md`
 - `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`
-

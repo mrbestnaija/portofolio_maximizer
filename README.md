@@ -602,6 +602,22 @@ pip install pytest pytest-cov black flake8
 pytest tests/ --cov=etl
 ```
 
+### Client-only sync (GitHub as source of truth)
+
+For follower/client PCs where GitHub `master` is the definitive source and local changes should never push upstream, use the guarded sync helper:
+
+```bash
+# Sync current branch from GitHub (auto-stash dirty worktrees)
+bash/git_syn_to_local.sh
+
+# Sync a specific branch from GitHub
+bash/git_syn_to_local.sh master
+```
+
+- Lives at `bash/git_syn_to_local.sh` (run from repo root).
+- Auto-stashes uncommitted work, fetches, rebases, and restores the stash when safe.
+- Never pushes; warns if local-only commits exist so you can reconcile from the master PC.
+
 ---
 
 ## 📄 License
@@ -691,3 +707,4 @@ For questions or issues:
 **Status**: Production Ready ✅
 **Version**: 3.0
 **Last Updated**: 2025-12-04
+
