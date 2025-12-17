@@ -67,7 +67,7 @@ local_database.db
 *.joblib
 *.h5
 *.model
-models/
+
 checkpoints/
 
 # Data files (cached/generated - keep structure)
@@ -151,4 +151,4 @@ settings.local.json
 # Logs and logging
 logs/*.log
 logging/
-logs/   
+ 

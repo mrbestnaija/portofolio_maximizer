@@ -36,6 +36,11 @@ All tasks from `REMOTE_SYN_UPDATE.md` have been successfully implemented to enha
 
 ---
 
+### Standing Instruction (2025-12-17)
+- Always run **all tests** inside the `simpleTrader_env` virtual environment with **all dependencies preinstalled**. This avoids PEP 668/system Python conflicts observed during synthetic runs and keeps CI/local behaviour aligned. Treat this as the default test posture for remote/synthetic and live validation flows.
+
+---
+
 ### 2. Pipeline Entry Point ✅
 
 **Changes Made**:

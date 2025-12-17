@@ -25,7 +25,8 @@ if [[ -n "${START_DATE}" ]]; then GEN_CMD+=("--start" "${START_DATE}"); fi
 if [[ -n "${END_DATE}" ]]; then GEN_CMD+=("--end" "${END_DATE}"); fi
 if [[ -n "${OUTPUT_ROOT}" ]]; then GEN_CMD+=("--output-root" "${OUTPUT_ROOT}"); fi
 
-DATASET_ID="$("${GEN_CMD[@]}" | tee /dev/tty | awk '/Synthetic dataset generated:/ {print $NF}' | tail -n1)"
+# Generator prints the dataset_id on its last line; capture the final non-empty token.
+DATASET_ID="$("${GEN_CMD[@]}" | tee /dev/tty | awk 'NF {last=$NF} END {print last}')"
 
 if [[ -z "${DATASET_ID}" ]]; then
   echo "Failed to parse dataset_id from generator output; aborting." >&2

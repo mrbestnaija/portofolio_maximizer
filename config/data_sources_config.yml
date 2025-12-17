@@ -4,37 +4,37 @@
 data_sources:
   # Available data source providers
   providers:
+    - name: "synthetic"
+      type: "market_data"
+      enabled: true  # Enabled as default provider for pre-production/testing
+      priority: 1
+      config_file: "config/synthetic_data_config.yml"
+
     - name: "yfinance"
       type: "market_data"
       enabled: true
-      priority: 1  # Primary historical/live data source
+      priority: 2  # Secondary live provider
       config_file: "config/yfinance_config.yml"
 
     - name: "alpha_vantage"
       type: "market_data"
       enabled: true  # Enable when API key is configured in .env
-      priority: 2
+      priority: 3
       config_file: "config/alpha_vantage_config.yml"
       credentials_env: "ALPHA_VANTAGE_API_KEY"
 
     - name: "finnhub"
       type: "market_data"
       enabled: true  # Enable when API key is configured in .env
-      priority: 3
+      priority: 4
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
     - name: "ctrader"
       type: "market_data"
       enabled: true  # cTrader Open API OHLCV source (demo-first per ctrader_config.yml)
-      priority: 4
+      priority: 5
       config_file: "config/ctrader_config.yml"
-
-    - name: "synthetic"
-      type: "market_data"
-      enabled: true  # Enabled (lowest priority) so --data-source synthetic is available for offline/regression runs
-      priority: 99
-      config_file: "config/synthetic_data_config.yml"
 
   # Data source selection strategy
   selection_strategy:

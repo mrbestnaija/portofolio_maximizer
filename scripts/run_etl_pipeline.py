@@ -982,6 +982,9 @@ def execute_pipeline(
     refresh_ticker_universe: bool = False,
     include_frontier_tickers: bool = False,
     db_path: Optional[str] = None,
+    synthetic_dataset_id: Optional[str] = None,
+    synthetic_dataset_path: Optional[str] = None,
+    synthetic_config: Optional[str] = None,
     logger_instance: Optional[logging.Logger] = None,
 ) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
@@ -1017,6 +1020,14 @@ def execute_pipeline(
         logger = logger_instance
     if verbose:
         logger.debug("Verbose logging enabled")
+
+    # Apply synthetic overrides (env bridge)
+    if synthetic_dataset_id:
+        os.environ["SYNTHETIC_DATASET_ID"] = synthetic_dataset_id
+    if synthetic_dataset_path:
+        os.environ["SYNTHETIC_DATASET_PATH"] = synthetic_dataset_path
+    if synthetic_config:
+        os.environ["SYNTHETIC_CONFIG_PATH"] = synthetic_config
 
     # Load pipeline configuration and derived settings
     pipeline_config = _load_pipeline_config_safe(config)
@@ -1294,7 +1305,12 @@ def execute_pipeline(
                     pipeline_id=pipeline_id,
                     stage=stage_name,
                     data=raw_data,
-                    metadata={'tickers': ticker_list, 'rows': len(raw_data)}
+                    metadata={
+                        'tickers': ticker_list,
+                        'rows': len(raw_data),
+                        'dataset_id': dataset_id_current,
+                        'generator_version': generator_version_current,
+                    }
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
@@ -1382,7 +1398,12 @@ def execute_pipeline(
                     pipeline_id=pipeline_id,
                     stage=stage_name,
                     data=processed,
-                    metadata={'analyses': llm_analyses, 'tickers': ticker_list}
+                    metadata={
+                        'analyses': llm_analyses,
+                        'tickers': ticker_list,
+                        'dataset_id': dataset_id_current,
+                        'generator_version': generator_version_current,
+                    }
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
@@ -1658,7 +1679,13 @@ def execute_pipeline(
                     pipeline_id=pipeline_id,
                     stage=stage_name,
                     data=processed,
-                    metadata={'signals': llm_signals, 'analyses': llm_analyses, 'validations': llm_signal_validations}
+                    metadata={
+                        'signals': llm_signals,
+                        'analyses': llm_analyses,
+                        'validations': llm_signal_validations,
+                        'dataset_id': dataset_id_current,
+                        'generator_version': generator_version_current,
+                    }
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
                 if signal_tracker:
@@ -1706,7 +1733,13 @@ def execute_pipeline(
                     pipeline_id=pipeline_id,
                     stage=stage_name,
                     data=processed,
-                    metadata={'risks': llm_risks, 'signals': llm_signals, 'analyses': llm_analyses}
+                    metadata={
+                        'risks': llm_risks,
+                        'signals': llm_signals,
+                        'analyses': llm_analyses,
+                        'dataset_id': dataset_id_current,
+                        'generator_version': generator_version_current,
+                    }
                 )
                 pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
@@ -2044,7 +2077,11 @@ def execute_pipeline(
                         pipeline_id=pipeline_id,
                         stage=stage_name,
                         data=processed,
-                        metadata={'forecasts': forecasts}
+                        metadata={
+                            'forecasts': forecasts,
+                            'dataset_id': dataset_id_current,
+                            'generator_version': generator_version_current,
+                        }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
                     
@@ -2167,7 +2204,12 @@ def execute_pipeline(
                         pipeline_id=pipeline_id,
                         stage=stage_name,
                         data=processed,
-                        metadata={'signals': ts_signals, 'forecasts': forecasts}
+                        metadata={
+                            'signals': ts_signals,
+                            'forecasts': forecasts,
+                            'dataset_id': dataset_id_current,
+                            'generator_version': generator_version_current,
+                        }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
                     
@@ -2267,7 +2309,9 @@ def execute_pipeline(
                                 'primary': v.primary_signal if v and v.primary_signal else None,
                                 'fallback': v.fallback_signal if v and v.fallback_signal else None
                             } for k, v in routed_bundles.items() if v},
-                            'routing_stats': routing_stats
+                            'routing_stats': routing_stats,
+                            'dataset_id': dataset_id_current,
+                            'generator_version': generator_version_current,
                         }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
@@ -2468,6 +2512,8 @@ def execute_pipeline(
                             'execution_mode': execution_mode,
                             'pipeline_id': pipeline_id,
                             'split_strategy': 'cross_validation',
+                            'dataset_id': dataset_id_current,
+                            'generator_version': generator_version_current,
                         },
                         run_id=pipeline_id
                     )
@@ -2492,6 +2538,8 @@ def execute_pipeline(
                                 'execution_mode': execution_mode,
                                 'pipeline_id': pipeline_id,
                                 'split_strategy': 'simple',
+                                'dataset_id': dataset_id_current,
+                                'generator_version': generator_version_current,
                             },
                             run_id=pipeline_id
                         )
@@ -2600,11 +2648,28 @@ def execute_pipeline(
         'to multi-ticker runs.'
     ),
 )
+@click.option(
+    '--synthetic-dataset-id',
+    default=None,
+    help='Optional synthetic dataset_id to load (persists across runs). Sets SYNTHETIC_DATASET_ID.',
+)
+@click.option(
+    '--synthetic-dataset-path',
+    default=None,
+    help='Optional synthetic dataset path to load (persists across runs). Sets SYNTHETIC_DATASET_PATH.',
+)
+@click.option(
+    '--synthetic-config',
+    default=None,
+    help='Optional synthetic config path override (passed to SyntheticExtractor). Sets SYNTHETIC_CONFIG_PATH.',
+)
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
                 use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
                 enable_llm: bool, llm_model: str, dry_run: bool,
                 execution_mode: str, db_path: Optional[str], use_ticker_discovery: bool,
-                refresh_ticker_universe: bool, include_frontier_tickers: bool) -> None:
+                refresh_ticker_universe: bool, include_frontier_tickers: bool,
+                synthetic_dataset_id: Optional[str], synthetic_dataset_path: Optional[str],
+                synthetic_config: Optional[str]) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
 
     Data Splitting Strategy:
@@ -2650,6 +2715,9 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         use_ticker_discovery=use_ticker_discovery,
         refresh_ticker_universe=refresh_ticker_universe,
         include_frontier_tickers=include_frontier_tickers,
+        synthetic_dataset_id=synthetic_dataset_id,
+        synthetic_dataset_path=synthetic_dataset_path,
+        synthetic_config=synthetic_config,
     )
 
 
