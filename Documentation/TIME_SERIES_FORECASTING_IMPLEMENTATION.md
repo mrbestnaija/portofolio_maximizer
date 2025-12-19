@@ -6,20 +6,29 @@
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
 **Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
 **Sentiment overlays**: Planned but dormant until profitability beats benchmarks and quant gates clear; see `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` and `config/sentiment.yml` (disabled, strict gating) for future integration notes.
-**Recent changes (2025-12-08)**: Synthetic mode now ships event/market-hours/microstructure defaults with a `latest` dataset pointer (`scripts/generate_synthetic_dataset.py` writes `data/synthetic/latest.json`), pipeline/backtests honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback, and the GAN stub trainer/runner (`scripts/train_gan_stub.py`, `bash/run_gan_stub.sh`) can consume persisted synthetic parquet for minimal training when torch is present.
+**Recent changes (2025-12-19)**: Synthetic mode adds profiles, t-copula/tail-scale shocks, macro events, intraday seasonality, txn-cost proxies, richer features/calibration persistence, and a refreshed `latest` pointer (`syn_6c850a7d0b99`), while pipeline/backtests continue to honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback. A cache/log sanitizer (`scripts/sanitize_cache_and_logs.py` + cron `sanitize_caches`) keeps artifacts under a 14-day retention by default.
 
-### Synthetic event/microstructure refresh (2025-12-08)
-- `config/synthetic_data_config.yml` carries defaults for flash crash/vol spike/gap risk/bear drift events, regime/correlation plumbing, market-hours day/hour weights, and microstructure knobs (spread/slippage/micro_vol). Spread/Slippage columns are emitted by `etl/synthetic_extractor.py` for downstream feature builders.
-- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes manifests/parquet plus `data/synthetic/latest.json`, so `SYNTHETIC_DATASET_ID=latest` maps to `syn_682c415bb89c` for pipeline/backtests without manual path edits.
+### Forecasting + ETL statistical hardening (2025-12-19)
+- SARIMAX: fixed log-transform inversion when a positivity shift is applied (invert: `exp(.) - shift`) and made Jarque–Bera diagnostics compatible with newer return shapes.
+- Ensemble: one-sided variance screening (does not reward higher tracking error), minimum component weight pruning, and row-wise convex blending under misaligned/partial model forecasts.
+- MSSA-RL: replaced stub “CUSUM” with standardized CUSUM mean-shift detection (Page 1954) for change-point scoring.
+- Provenance: `primary_model` added to the ensemble bundle/metadata so downstream signal logic can attribute the dominant contributor deterministically.
+- ETL correctness: synthetic/live isolation via `execution_mode`, per-ticker slicing through the pipeline, leak-free normalization (fit on training only post-split), and date-boundary splitting when multi-ticker frames share timestamps.
+- Verified via: `python3 -m pytest -q tests/forcester_ts/test_ensemble_and_scaling_invariants.py tests/etl/test_time_series_forecaster.py tests/integration/test_time_series_signal_integration.py tests/models/test_time_series_signal_generator.py tests/etl/test_data_source_manager.py tests/etl/test_preprocessor.py tests/etl/test_data_storage.py tests/etl/test_synthetic_microstructure.py`.
+
+### Synthetic event/microstructure refresh (2025-12-19)
+- `config/synthetic_data_config.yml` now includes profile overrides (`config/synthetic_data_profiles.yml`), t-copula/tail-scale shocks, macro regime-change events, intraday seasonality, and size-aware slippage + txn-cost proxies; microstructure outputs now include `TxnCostBps` and `ImpactBps`.
+- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes parquet/manifest, features (SMA/vol/RSI/MACD/Bollinger/zscores), calibration stats (optional real-data reference), and refreshes `data/synthetic/latest.json` so `SYNTHETIC_DATASET_ID=latest` maps to `syn_6c850a7d0b99`.
+- `etl/synthetic_extractor.py` honours `SYNTHETIC_PROFILE`/`SYNTHETIC_CONFIG_PATH`, supports t-copula shocks, and records events/regimes/txn-cost columns for downstream feature builders and manifests.
 
 ### GPU defaults and PIPELINE_DEVICE (2025-12-08)
 - `scripts/run_etl_pipeline.py`, `scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`, and `scripts/train_gan_stub.py` now accept `--prefer-gpu/--no-prefer-gpu`, auto-detect CUDA (torch/cupy) when available, and set `PIPELINE_DEVICE` accordingly, falling back to CPU silently.
 - GAN stub runner (`bash/run_gan_stub.sh`) inherits the same env so synthetic GAN experiments and TS/backtest flows stay aligned on device choice and logging.
 
 ### Broader refresh (timelines, phase statuses, run IDs)
-- Timeline: Phase 1/2 synthetic generators (GBM/OU/Jump/Heston + regimes/correlation + events + market-hours + microstructure) are live; Phase 2 macro event library/calibration remains open; GPU auto-detect is wired across TS pipeline/backtests/GAN stub.
-- Phase status: Synthetic path is green with Spread/Slippage outputs; GPU preference defaults to CUDA when available, CPU otherwise; GAN stub is optional and torch-gated for quick experiments.
-- Run IDs: `data/synthetic/latest.json` → `syn_682c415bb89c` (events+microstructure+seasonality); legacy baselines `syn_fc8a37128efc` (events enabled) and `syn_714ae868f78b` (pre-events). Latest synthetic smoke invoked via `bash/run_synthetic_latest.sh` with `SYNTHETIC_DATASET_ID=latest`.
+- Timeline: Phase 1/2 synthetic generators (GBM/OU/Jump/Heston + regimes/correlation + events + market-hours + microstructure) are live; profile/tail shocks + feature/calibration persistence landed; ML generator remains optional/disabled by default; GPU auto-detect is wired across TS pipeline/backtests/GAN stub.
+- Phase status: Synthetic path is green with Spread/Slippage/TxnCost/Impact outputs; GPU preference defaults to CUDA when available, CPU otherwise; GAN stub is optional and torch-gated for quick experiments.
+- Run IDs: `data/synthetic/latest.json` → `syn_6c850a7d0b99` (profiles + copula + features/calibration); earlier baselines include `syn_682c415bb89c`, `syn_fc8a37128efc`, and `syn_714ae868f78b`. Latest synthetic smoke invoked via `scripts/brutal_synthetic_smoke.py` / `scripts/run_etl_pipeline.py --execution-mode synthetic`.
 
 ### 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard is bypassed in diagnostics and `volume_ma_ratio` now guards zero/NaN volume.

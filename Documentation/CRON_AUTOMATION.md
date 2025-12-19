@@ -224,6 +224,15 @@ keep their cron entries in place while implementation progresses.
 - Produces `data/synthetic/<dataset_id>/<ticker>.parquet` + `manifest.json` and a validation report under `logs/automation/`.
 - Enablement is synthetic‑first only; keep live trading disabled. Promotion of synthetic outputs to live cron tasks requires GREEN/acceptable YELLOW quant health per `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md` and the sequencing rules in `Documentation/NEXT_TO_DO_SEQUENCED.md`.
 
+### 4.8 `sanitize_caches`
+
+- Prunes cached data/log artifacts older than `CRON_SANITIZE_RETENTION` (default: 14 days).
+- Invokes `scripts/sanitize_cache_and_logs.py`, targeting common data/log paths while skipping DVC stores by default.
+- Override targets/patterns with:
+  - `CRON_SANITIZE_DATA_DIRS` (comma-separated)
+  - `CRON_SANITIZE_LOG_DIRS` (comma-separated)
+  - `CRON_SANITIZE_PATTERNS` (comma-separated glob patterns)
+
 ---
 
 ## 5. Safety & Operational Notes

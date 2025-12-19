@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
+import pandas as pd
+from pathlib import Path
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 if str(ROOT_PATH) not in __import__("sys").modules["sys"].path:
@@ -157,48 +159,53 @@ def _compute_group_stats(records: Dict[str, List[Dict[str, Any]]]) -> List[CostS
     return stats
 
 
+def _compute_from_synthetic(dataset_path: str, grouping: str) -> Dict[str, Any]:
+    path = Path(dataset_path)
+    if path.name == "latest.json" and path.exists():
+        try:
+            payload = json.loads(path.read_text())
+            dataset_path = payload.get("dataset_path") or dataset_path
+            path = Path(dataset_path)
+        except Exception:
+            pass
+    frames: List[pd.DataFrame] = []
+    if path.is_dir():
+        frames = [pd.read_parquet(pq) for pq in path.glob("*.parquet")]
+    elif path.suffix == ".parquet":
+        frames = [pd.read_parquet(path)]
+    if not frames:
+        return {}
+    df = pd.concat(frames).sort_index()
+    if "TxnCostBps" not in df.columns:
+        return {}
+    stats = []
+    for grp, df_g in df.groupby("ticker" if grouping == "ticker" else None):
+        if df_g.empty:
+            continue
+        txn = df_g["TxnCostBps"].dropna().astype(float)
+        impact = df_g["ImpactBps"].dropna().astype(float) if "ImpactBps" in df_g.columns else pd.Series(dtype=float)
+        stats.append(
+            {
+                "group": grp if grouping == "ticker" else "synthetic",
+                "trades": int(len(txn)),
+                "txn_cost_median_bps": float(txn.median()) if len(txn) else 0.0,
+                "txn_cost_mean_bps": float(txn.mean()) if len(txn) else 0.0,
+                "impact_median_bps": float(impact.median()) if len(impact) else 0.0,
+                "impact_mean_bps": float(impact.mean()) if len(impact) else 0.0,
+            }
+        )
+    return {"grouping": grouping, "stats": stats}
+
+
 @click.command()
-@click.option(
-    "--db-path",
-    default="data/portfolio_maximizer.db",
-    show_default=True,
-    help="SQLite database path used by the trading engine.",
-)
-@click.option(
-    "--lookback-days",
-    default=365,
-    show_default=True,
-    help="Number of days to look back from --as-of for trade samples.",
-)
-@click.option(
-    "--as-of",
-    default=None,
-    help="Reference date in YYYY-MM-DD (default: today UTC).",
-)
-@click.option(
-    "--grouping",
-    type=click.Choice(["ticker", "asset_class"], case_sensitive=False),
-    default="asset_class",
-    show_default=True,
-    help="Grouping mode for cost statistics.",
-)
-@click.option(
-    "--min-trades",
-    default=5,
-    show_default=True,
-    help="Minimum trades per group required to emit stats.",
-)
-@click.option(
-    "--output",
-    default="logs/automation/transaction_costs.json",
-    show_default=True,
-    help="Path to write JSON summary (directories are created as needed).",
-)
-@click.option(
-    "--verbose",
-    is_flag=True,
-    help="Enable debug logging.",
-)
+@click.option("--db-path", default="data/portfolio_maximizer.db", show_default=True, help="SQLite database path used by the trading engine.")
+@click.option("--lookback-days", default=365, show_default=True, help="Number of days to look back from --as-of for trade samples.")
+@click.option("--as-of", default=None, help="Reference date in YYYY-MM-DD (default: today UTC).")
+@click.option("--grouping", type=click.Choice(["ticker", "asset_class"], case_sensitive=False), default="asset_class", show_default=True, help="Grouping mode for cost statistics.")
+@click.option("--min-trades", default=5, show_default=True, help="Minimum trades per group required to emit stats.")
+@click.option("--output", default="logs/automation/transaction_costs.json", show_default=True, help="Path to write JSON summary (directories are created as needed).")
+@click.option("--verbose", is_flag=True, help="Enable debug logging.")
+@click.option("--synthetic-dataset-path", default=None, help="Optional synthetic dataset path/latest.json to derive txn cost proxies.")
 def main(
     db_path: str,
     lookback_days: int,
@@ -207,6 +214,7 @@ def main(
     min_trades: int,
     output: str,
     verbose: bool,
+    synthetic_dataset_path: Optional[str],
 ) -> None:
     """
     Estimate transaction cost statistics from realised trades.
@@ -225,29 +233,17 @@ def main(
     start_iso = start.isoformat()
     end_iso = ref_date.isoformat()
 
+    synthetic_stats = _compute_from_synthetic(synthetic_dataset_path, grouping) if synthetic_dataset_path else {}
+
     with DatabaseManager(db_path=db_path) as db:
         rows = _load_trades(db, start_iso, end_iso)
-        if not rows:
-            logger.info("No realised trades found in window %s -> %s", start_iso, end_iso)
-            return
-
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for row in rows:
             key = _group_key(str(row.get("ticker") or ""), grouping.lower())
             grouped[key].append(row)
 
-        # Filter by minimum trade count and compute stats.
         filtered = {g: recs for g, recs in grouped.items() if len(recs) >= int(min_trades)}
-        if not filtered:
-            logger.info(
-                "All groups have fewer than %s trades in window %s -> %s; nothing to report.",
-                min_trades,
-                start_iso,
-                end_iso,
-            )
-            return
-
-        stats = _compute_group_stats(filtered)
+        stats = _compute_group_stats(filtered) if filtered else []
 
     payload = {
         "meta": {
@@ -259,6 +255,7 @@ def main(
             "min_trades": min_trades,
         },
         "groups": [s.to_dict() for s in stats],
+        "synthetic": synthetic_stats,
     }
 
     out_path = Path(output)
@@ -273,4 +270,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-

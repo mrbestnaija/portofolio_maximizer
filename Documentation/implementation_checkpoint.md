@@ -6,20 +6,27 @@
 
 ---
 
-**Recent changes (2025-12-08)**: Synthetic generator now emits event/regime/market-hours/microstructure fields by default with Spread/Slippage columns and a `latest` pointer (syn_682c415bb89c) for pipeline consumption; GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) flows through pipeline/backtests/GAN stub with CUDA auto-detect + CPU fallback; `scripts/train_gan_stub.py` + `bash/run_gan_stub.sh` can optionally train a minimal GAN on persisted synthetic parquet when torch is available.
+**Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
-### Synthetic event/microstructure refresh (2025-12-08)
+### Forecasting + ETL statistical hardening (2025-12-19)
+- SARIMAX: fixed log-transform inversion when a positivity shift is applied and made Jarque–Bera diagnostics robust to statsmodels return-shape changes.
+- Ensemble: one-sided variance screening, minimum component weight pruning, and row-wise convex blending under partial/misaligned model outputs; `primary_model` now carried in ensemble metadata for deterministic attribution.
+- MSSA-RL: standardized CUSUM mean-shift detection (Page 1954) replaces the previous outlier-threshold stub.
+- ETL: synthetic/live isolation via `execution_mode`, per-ticker slicing in pipeline stages, leak-free normalization (fit on training only post-split), and date-boundary splitting when multi-ticker frames share timestamps.
+- Verified via: `python3 -m pytest -q tests/forcester_ts/test_ensemble_and_scaling_invariants.py tests/etl/test_time_series_forecaster.py tests/integration/test_time_series_signal_integration.py tests/models/test_time_series_signal_generator.py tests/etl/test_data_source_manager.py tests/etl/test_preprocessor.py tests/etl/test_data_storage.py tests/etl/test_synthetic_microstructure.py`.
+
+### Synthetic event/microstructure refresh (2025-12-19)
 - Default config now activates flash crash, vol spike, gap risk, and bear drift hooks with regime/correlation wiring, market-hours seasonality weights, and microstructure parameters (spread/slippage/micro_vol) so regenerated datasets surface Spread/Slippage columns out of the box.
-- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes parquet/manifest plus `data/synthetic/latest.json` so synthetic runs can target `SYNTHETIC_DATASET_ID=latest` (current: `syn_682c415bb89c`) without path edits; `etl/synthetic_extractor.py` consumes both env-based id/path hints.
+- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes parquet/manifest, features, calibration stats, and `data/synthetic/latest.json` so synthetic runs can target `SYNTHETIC_DATASET_ID=latest` (current: `syn_6c850a7d0b99`) without path edits; `etl/synthetic_extractor.py` consumes config/profile/env overrides.
 
 ### GPU defaults and PIPELINE_DEVICE (2025-12-08)
 - Pipeline/backtest entry points (`scripts/run_etl_pipeline.py`, `scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`) accept `--prefer-gpu/--no-prefer-gpu`, auto-detect CUDA (torch/cupy) when available, set `PIPELINE_DEVICE` accordingly, and log the chosen device while falling back to CPU silently.
 - GAN stub runner (`bash/run_gan_stub.sh` → `scripts/train_gan_stub.py`) inherits the same device logic so synthetic GAN experiments align with TS/backtest device choices and checkpoint under `models/synthetic/gan_stub`.
 
 ### Broader refresh (timelines, phase statuses, run IDs)
-- Timeline: Phase 1/2 synthetic event/regime plus market-hours/microstructure hooks are shipped; Phase 2 macro event library + calibration sweeps are still open; GPU preference wiring now spans pipeline/backtests/GAN stub.
-- Phase status: Synthetic runs are green with Spread/Slippage outputs and `latest` pointer; GPU auto-detect defaults to CUDA, falls back to CPU quietly; GAN stub remains optional/torch-dependent for quick training loops.
-- Run IDs: `data/synthetic/latest.json` → `syn_682c415bb89c` (events+microstructure+seasonality); earlier baselines `syn_fc8a37128efc` (events) and `syn_714ae868f78b` (pre-events) remain for regression comparison. Latest smoke executed via `bash/run_synthetic_latest.sh` with `SYNTHETIC_DATASET_ID=latest`.
+- Timeline: Phase 1/2 synthetic event/regime plus market-hours/microstructure hooks are shipped; tail/corr profiles + feature/calibration persistence landed; ML generator remains optional/disabled by default; GPU preference wiring spans pipeline/backtests/GAN stub.
+- Phase status: Synthetic runs are green with Spread/Slippage/TxnCost/Impact outputs and `latest` pointer; GPU auto-detect defaults to CUDA, falls back to CPU quietly; GAN stub remains optional/torch-dependent for quick training loops.
+- Run IDs: `data/synthetic/latest.json` → `syn_6c850a7d0b99` (profiles + copula + features/calibration); earlier baselines `syn_682c415bb89c`, `syn_fc8a37128efc`, and `syn_714ae868f78b` remain for regression comparison. Latest smoke executed via `scripts/brutal_synthetic_smoke.py` (with PYTHONPATH set) / `scripts/run_etl_pipeline.py --execution-mode synthetic`.
 
 ### 2025-12-04 Delta (TS/LLM guardrails + MVS reporting + quant monitoring)
 - Time Series signals now honour a **quant-success hard gate**: `models/time_series_signal_generator.TimeSeriesSignalGenerator` attaches a `quant_profile` sourced from `config/quant_success_config.yml` and demotes BUY/SELL actions to HOLD when `status == "FAIL"` outside diagnostic modes, while logging full context to `logs/signals/quant_validation.jsonl`. This keeps paper trading aligned with the same profit_factor/win_rate/expected_profit thresholds used in brutal and dashboards.

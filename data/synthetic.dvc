@@ -1,0 +1,6 @@
+outs:
+- md5: 715ab4c85218e2e870388aa7f7b91a80.dir
+  size: 1045969
+  nfiles: 16
+  hash: md5
+  path: synthetic

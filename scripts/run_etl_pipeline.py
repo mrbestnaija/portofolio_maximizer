@@ -400,7 +400,8 @@ def _slice_ticker_dataframe(data: Optional[pd.DataFrame], ticker: str) -> pd.Dat
         return pd.DataFrame()
 
     if 'ticker' in data.columns:
-        return data[data['ticker'] == ticker].copy()
+        mask = data['ticker'].astype(str).str.upper().str.strip() == str(ticker).upper().strip()
+        return data.loc[mask].copy()
 
     if isinstance(data.index, pd.MultiIndex):
         for level in range(data.index.nlevels):
@@ -1162,7 +1163,8 @@ def execute_pipeline(
     try:
         data_source_manager = DataSourceManager(
             config_path='config/data_sources_config.yml',
-            storage=storage
+            storage=storage,
+            execution_mode=execution_mode,
         )
         logger.info(f"OK Data source manager initialized")
         logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
@@ -1184,12 +1186,21 @@ def execute_pipeline(
     
     logger.info(f"OK Stage execution order (config-driven): {', '.join(stage_names)}")
 
+    # Load preprocessing config once (missing handling + leak-free normalization)
+    try:
+        preprocessing_config_data = load_config("config/preprocessing_config.yml")
+        preprocessing_cfg = preprocessing_config_data.get("preprocessing", {}) or {}
+    except Exception as exc:  # pragma: no cover - config optional
+        logger.warning("Failed to load preprocessing config: %s", exc)
+        preprocessing_cfg = {}
+
     # Prepare synthetic data up-front when explicitly requested
     precomputed_raw_data: Optional[pd.DataFrame] = None
     synthetic_dataset_id: Optional[str] = None
     synthetic_generator_version: Optional[str] = None
     dataset_id_current: Optional[str] = None
     generator_version_current: Optional[str] = None
+    processed_raw: Optional[pd.DataFrame] = None
     if execution_mode == 'synthetic':
         syn_dataset_path = os.getenv("SYNTHETIC_DATASET_PATH")
         syn_dataset_id = os.getenv("SYNTHETIC_DATASET_ID")
@@ -1273,6 +1284,17 @@ def execute_pipeline(
 
                 logger.info(f"OK Extracted {len(raw_data)} rows from {len(ticker_list)} ticker(s)")
                 logger.info(f"  Source: {extraction_source}")
+                if (
+                    extraction_source
+                    and str(extraction_source).lower().startswith("synthetic")
+                    and execution_mode != "synthetic"
+                ):
+                    logger.warning(
+                        "Synthetic data was used while execution_mode=%s; ensure this run is isolated "
+                        "(db_path=%s) and is not consumed by live trading/training.",
+                        execution_mode,
+                        resolved_db_path,
+                    )
                 dataset_id = raw_data.attrs.get("dataset_id")
                 generator_version = raw_data.attrs.get("generator_version")
                 if dataset_id:
@@ -1352,17 +1374,35 @@ def execute_pipeline(
 
             elif stage_name == 'data_preprocessing':
                 # Stage 3: Data Preprocessing
-                logger.info("Preprocessing data (missing data + normalization)...")
+                logger.info("Preprocessing data (missing data; normalization deferred)...")
                 processor = Preprocessor()
 
-                # Handle missing values
-                filled = processor.handle_missing(raw_data)
-                logger.debug(f"  Missing data handled")
+                missing_cfg = (preprocessing_cfg.get("missing_data") or {}) if isinstance(preprocessing_cfg, dict) else {}
+                missing_method = str(missing_cfg.get("strategy", "forward") or "forward").lower()
+                if execution_mode != "synthetic" and missing_method != "forward":
+                    logger.warning(
+                        "Non-causal missing_data.strategy=%s with execution_mode=%s; overriding to 'forward' to avoid lookahead.",
+                        missing_method,
+                        execution_mode,
+                    )
+                    missing_method = "forward"
 
-                # Normalize (returns tuple: data, stats)
-                normalized, stats = processor.normalize(filled)
-                processed = normalized
-                logger.debug(f"  Normalization complete (mu=0, sigma^2=1)")
+                # Handle missing values
+                filled = processor.handle_missing(raw_data, method=missing_method)
+                processed_raw = filled
+                processed = filled
+                logger.debug("  Missing data handled (method=%s)", missing_method)
+
+                normalization_cfg = (
+                    (preprocessing_cfg.get("normalization") or {}) if isinstance(preprocessing_cfg, dict) else {}
+                )
+                normalize_enabled = bool(normalization_cfg.get("enabled", True))
+                normalize_method = str(normalization_cfg.get("method", "zscore") or "zscore").lower()
+                if normalize_enabled and normalize_method not in {"", "none"}:
+                    logger.info(
+                        "Normalization enabled (method=%s) but will be applied post-split in data_storage to prevent leakage.",
+                        normalize_method,
+                    )
 
                 # Save processed data with run metadata
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1374,6 +1414,8 @@ def execute_pipeline(
                         'data_source': extraction_source,
                         'execution_mode': execution_mode,
                         'pipeline_id': pipeline_id,
+                        'missing_method': missing_method,
+                        'normalized': False,
                     },
                     run_id=pipeline_id
                 )
@@ -1387,7 +1429,7 @@ def execute_pipeline(
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data
-                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        ticker_data = _slice_ticker_dataframe(processed, ticker)
                         
                         # Run LLM analysis with timing
                         start_time = time.time()
@@ -1445,7 +1487,7 @@ def execute_pipeline(
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data and analysis
-                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        ticker_data = _slice_ticker_dataframe(processed, ticker)
                         market_analysis = llm_analyses.get(ticker, {})
                         
                         # Generate signal with timing
@@ -1723,7 +1765,7 @@ def execute_pipeline(
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data
-                        ticker_data = processed.xs(ticker, level=0) if isinstance(processed.index, pd.MultiIndex) else processed
+                        ticker_data = _slice_ticker_dataframe(processed, ticker)
                         
                         # Assess risk with timing
                         start_time = time.time()
@@ -2158,10 +2200,7 @@ def execute_pipeline(
                     for ticker in ticker_list:
                         try:
                             # Get ticker-specific data for current price
-                            if isinstance(processed.index, pd.MultiIndex):
-                                ticker_data = processed.xs(ticker, level=0)
-                            else:
-                                ticker_data = processed
+                            ticker_data = _slice_ticker_dataframe(processed, ticker)
                             
                             # Extract current price
                             if 'Close' in ticker_data.columns:
@@ -2275,10 +2314,7 @@ def execute_pipeline(
                     for ticker in ticker_list:
                         try:
                             # Get ticker-specific data
-                            if isinstance(processed.index, pd.MultiIndex):
-                                ticker_data = processed.xs(ticker, level=0)
-                            else:
-                                ticker_data = processed
+                            ticker_data = _slice_ticker_dataframe(processed, ticker)
                             
                             current_price = current_prices.get(ticker, 0.0)
                             if current_price == 0.0:
@@ -2353,10 +2389,14 @@ def execute_pipeline(
                 logger.info(f"  Split strategy: {'CV' if use_cv else 'Simple'}")
                 drift_records: List[Dict[str, Any]] = []
 
+                split_input = processed_raw if processed_raw is not None and not processed_raw.empty else processed
+                if split_input is None or split_input.empty:
+                    raise ValueError("No processed data available for splitting/storage")
+
                 # Perform split using configuration-driven parameters
                 if use_cv:
                     splits = storage.train_validation_test_split(
-                        processed,
+                        split_input,
                         use_cv=True,
                         n_splits=n_splits,
                         test_size=test_size,
@@ -2365,7 +2405,7 @@ def execute_pipeline(
                     )
                 else:
                     splits = storage.train_validation_test_split(
-                        processed,
+                        split_input,
                         train_ratio=train_ratio,
                         val_ratio=val_ratio,
                         use_cv=False
@@ -2386,149 +2426,155 @@ def execute_pipeline(
                         summary.kurtosis,
                     )
 
-                if use_cv and splits.get('cv_folds'):
-                    for fold in splits['cv_folds']:
-                        tr = fold['train']
-                        va = fold['validation']
+                if use_cv:
+                    cv_folds = list(splits.get('cv_folds') or [])
+                    for fold in cv_folds:
+                        fold_id = fold.get('fold_id')
+                        tr = fold.get('train', pd.DataFrame())
+                        va = fold.get('validation', pd.DataFrame())
                         if not validate_non_overlap(tr.index, va.index):
-                            logger.warning("Overlap detected in CV fold %s", fold['fold_id'])
-                    _log_split_stats(f"cv{fold['fold_id']}_train", tr)
-                    _log_split_stats(f"cv{fold['fold_id']}_val", va)
-                    drift = drift_metrics(tr, va)
-                    drift_records.append(
-                        {
-                            "split": f"cv{fold['fold_id']}_train_val",
-                            "psi": drift["psi"],
-                            "mean_delta": drift["mean_delta"],
-                            "std_delta": drift["std_delta"],
-                            "vol_psi": drift["vol_psi"],
-                            "vol_delta": drift["vol_delta"],
-                            "volatility_ratio": drift.get("volatility_ratio"),
-                        }
+                            logger.warning("Overlap detected in CV fold %s", fold_id)
+                        _log_split_stats(f"cv{fold_id}_train", tr)
+                        _log_split_stats(f"cv{fold_id}_val", va)
+                        drift = drift_metrics(tr, va)
+                        drift_records.append(
+                            {
+                                "split": f"cv{fold_id}_train_val",
+                                "psi": drift["psi"],
+                                "mean_delta": drift["mean_delta"],
+                                "std_delta": drift["std_delta"],
+                                "vol_psi": drift["vol_psi"],
+                                "vol_delta": drift["vol_delta"],
+                                "volatility_ratio": drift.get("volatility_ratio"),
+                            }
+                        )
+                        try:
+                            db_manager.save_split_drift(
+                                run_id=pipeline_id,
+                                ticker=None,
+                                split_name=f"cv_fold_{fold_id}",
+                                metrics=drift,
+                            )
+                        except Exception:
+                            logger.debug("Skipping drift persistence for CV fold %s", fold_id)
+                        if drift["psi"] > 0.2 or drift["vol_psi"] > 0.2:
+                            logger.warning(
+                                "Drift detected in CV fold %s (psi=%.3f vol_psi=%.3f)",
+                                fold_id,
+                                drift["psi"],
+                                drift["vol_psi"],
+                            )
+                        else:
+                            logger.info(
+                                "CV fold %s drift psi=%.3f vol_psi=%.3f (OK)",
+                                fold_id,
+                                drift["psi"],
+                                drift["vol_psi"],
+                            )
+                        try:
+                            db_manager.save_latency_metrics(
+                                ticker="CV",
+                                run_id=pipeline_id,
+                                stage=f"cv_fold_{fold_id}",
+                                ts_ms=None,
+                                llm_ms=None,
+                            )
+                        except Exception:
+                            logger.debug("Skipping latency metrics persistence for CV fold %s", fold_id)
+
+                    test_df = splits.get('testing')
+                    if test_df is not None and not test_df.empty:
+                        _log_split_stats("test", test_df)
+                else:
+                    tr = splits.get('training', pd.DataFrame())
+                    va = splits.get('validation', pd.DataFrame())
+                    te = splits.get('testing', pd.DataFrame())
+                    if not validate_non_overlap(tr.index, va.index):
+                        logger.warning("Overlap detected between train and val")
+                    if not validate_non_overlap(tr.index, te.index):
+                        logger.warning("Overlap detected between train and test")
+                    _log_split_stats("train", tr)
+                    _log_split_stats("val", va)
+                    _log_split_stats("test", te)
+                    drift_tv = drift_metrics(tr, va)
+                    drift_tt = drift_metrics(tr, te)
+                    drift_records.extend(
+                        [
+                            {
+                                "split": "train_val",
+                                "psi": drift_tv["psi"],
+                                "mean_delta": drift_tv["mean_delta"],
+                                "std_delta": drift_tv["std_delta"],
+                                "vol_psi": drift_tv["vol_psi"],
+                                "vol_delta": drift_tv["vol_delta"],
+                                "volatility_ratio": drift_tv.get("volatility_ratio"),
+                            },
+                            {
+                                "split": "train_test",
+                                "psi": drift_tt["psi"],
+                                "mean_delta": drift_tt["mean_delta"],
+                                "std_delta": drift_tt["std_delta"],
+                                "vol_psi": drift_tt["vol_psi"],
+                                "vol_delta": drift_tt["vol_delta"],
+                                "volatility_ratio": drift_tt.get("volatility_ratio"),
+                            },
+                        ]
                     )
                     try:
                         db_manager.save_split_drift(
                             run_id=pipeline_id,
                             ticker=None,
-                            split_name=f"cv_fold_{fold['fold_id']}",
-                            metrics=drift,
+                            split_name="train_val",
+                            metrics=drift_tv,
                         )
-                    except Exception:
-                        logger.debug("Skipping drift persistence for CV fold %s", fold['fold_id'])
-                    if drift["psi"] > 0.2 or drift["vol_psi"] > 0.2:
-                        logger.warning(
-                            "Drift detected in CV fold %s (psi=%.3f vol_psi=%.3f)",
-                            fold['fold_id'],
-                            drift["psi"],
-                            drift["vol_psi"],
-                        )
-                    else:
-                        logger.info(
-                            "CV fold %s drift psi=%.3f vol_psi=%.3f (OK)",
-                            fold['fold_id'],
-                            drift["psi"],
-                            drift["vol_psi"],
-                        )
-                    try:
-                        db_manager.save_latency_metrics(
-                            ticker="CV",
+                        db_manager.save_split_drift(
                             run_id=pipeline_id,
-                            stage=f"cv_fold_{fold['fold_id']}",
-                            ts_ms=None,
-                            llm_ms=None,
+                            ticker=None,
+                            split_name="train_test",
+                            metrics=drift_tt,
                         )
                     except Exception:
-                        logger.debug("Skipping latency metrics persistence for CV fold %s", fold['fold_id'])
-                test_df = splits.get('testing')
-                if test_df is not None and not test_df.empty:
-                    _log_split_stats("test", test_df)
-            else:
-                tr = splits.get('training', pd.DataFrame())
-                va = splits.get('validation', pd.DataFrame())
-                te = splits.get('testing', pd.DataFrame())
-                if not validate_non_overlap(tr.index, va.index):
-                    logger.warning("Overlap detected between train and val")
-                if not validate_non_overlap(tr.index, te.index):
-                    logger.warning("Overlap detected between train and test")
-                _log_split_stats("train", tr)
-                _log_split_stats("val", va)
-                _log_split_stats("test", te)
-                drift_tv = drift_metrics(tr, va)
-                drift_tt = drift_metrics(tr, te)
-                drift_records.extend(
-                    [
-                        {
-                            "split": "train_val",
-                            "psi": drift_tv["psi"],
-                            "mean_delta": drift_tv["mean_delta"],
-                            "std_delta": drift_tv["std_delta"],
-                            "vol_psi": drift_tv["vol_psi"],
-                            "vol_delta": drift_tv["vol_delta"],
-                            "volatility_ratio": drift_tv.get("volatility_ratio"),
-                        },
-                        {
-                            "split": "train_test",
-                            "psi": drift_tt["psi"],
-                            "mean_delta": drift_tt["mean_delta"],
-                            "std_delta": drift_tt["std_delta"],
-                            "vol_psi": drift_tt["vol_psi"],
-                            "vol_delta": drift_tt["vol_delta"],
-                            "volatility_ratio": drift_tt.get("volatility_ratio"),
-                        },
-                    ]
-                )
-                try:
-                    db_manager.save_split_drift(
-                        run_id=pipeline_id,
-                        ticker=None,
-                        split_name="train_val",
-                        metrics=drift_tv,
-                    )
-                    db_manager.save_split_drift(
-                        run_id=pipeline_id,
-                        ticker=None,
-                        split_name="train_test",
-                        metrics=drift_tt,
-                    )
-                except Exception:
-                    logger.debug("Skipping drift persistence for holdout splits")
-                if drift_tv["psi"] > 0.2 or drift_tv["vol_psi"] > 0.2:
-                    logger.warning("Train/Val drift psi=%.3f vol_psi=%.3f", drift_tv["psi"], drift_tv["vol_psi"])
-                if drift_tt["psi"] > 0.2 or drift_tt["vol_psi"] > 0.2:
-                    logger.warning("Train/Test drift psi=%.3f vol_psi=%.3f", drift_tt["psi"], drift_tt["vol_psi"])
+                        logger.debug("Skipping drift persistence for holdout splits")
+                    if drift_tv["psi"] > 0.2 or drift_tv["vol_psi"] > 0.2:
+                        logger.warning("Train/Val drift psi=%.3f vol_psi=%.3f", drift_tv["psi"], drift_tv["vol_psi"])
+                    if drift_tt["psi"] > 0.2 or drift_tt["vol_psi"] > 0.2:
+                        logger.warning("Train/Test drift psi=%.3f vol_psi=%.3f", drift_tt["psi"], drift_tt["vol_psi"])
 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
                 if use_cv:
-                    # Save CV folds with run metadata
-                    for fold in splits['cv_folds']:
-                        fold_id = fold['fold_id']
+                    # Save CV folds with run metadata (raw/filled)
+                    cv_folds = list(splits.get('cv_folds') or [])
+                    for fold in cv_folds:
+                        fold_id = fold.get('fold_id')
                         fold_metadata = {
                             'data_source': extraction_source,
                             'execution_mode': execution_mode,
                             'pipeline_id': pipeline_id,
                             'fold_id': fold_id,
                             'split_strategy': 'cross_validation',
+                            'normalized': False,
                         }
                         storage.save(
-                            fold['train'], 
+                            fold.get('train', pd.DataFrame()),
                             'training',
                             f'fold{fold_id}_train_{timestamp}',
                             metadata=fold_metadata,
                             run_id=pipeline_id
                         )
                         storage.save(
-                            fold['validation'], 
+                            fold.get('validation', pd.DataFrame()),
                             'validation',
                             f'fold{fold_id}_val_{timestamp}',
                             metadata=fold_metadata,
                             run_id=pipeline_id
                         )
 
-                    # Save isolated test set
+                    # Save isolated test set (raw/filled)
+                    test_frame = splits.get('testing', pd.DataFrame())
                     storage.save(
-                        splits['testing'], 
-                        'testing', 
+                        test_frame,
+                        'testing',
                         f'test_{timestamp}',
                         metadata={
                             'data_source': extraction_source,
@@ -2537,23 +2583,24 @@ def execute_pipeline(
                             'split_strategy': 'cross_validation',
                             'dataset_id': dataset_id_current,
                             'generator_version': generator_version_current,
+                            'normalized': False,
                         },
                         run_id=pipeline_id
                     )
 
                     # Calculate summary statistics
-                    avg_train_size = sum(len(f['train']) for f in splits['cv_folds']) / len(splits['cv_folds'])
-                    avg_val_size = sum(len(f['validation']) for f in splits['cv_folds']) / len(splits['cv_folds'])
-
-                    logger.info("Saved %s CV folds + 1 test set", len(splits['cv_folds']))
-                    logger.info("  - Train size (avg): %.0f rows", avg_train_size)
-                    logger.info("  - Val size (avg): %.0f rows", avg_val_size)
-                    logger.info("  - Test size: %s rows", len(splits['testing']))
+                    if cv_folds:
+                        avg_train_size = sum(len(f.get('train', pd.DataFrame())) for f in cv_folds) / len(cv_folds)
+                        avg_val_size = sum(len(f.get('validation', pd.DataFrame())) for f in cv_folds) / len(cv_folds)
+                        logger.info("Saved %s CV folds + 1 test set", len(cv_folds))
+                        logger.info("  - Train size (avg): %.0f rows", avg_train_size)
+                        logger.info("  - Val size (avg): %.0f rows", avg_val_size)
+                        logger.info("  - Test size: %s rows", len(test_frame))
                 else:
-                    # Simple split (backward compatible) with run metadata
+                    # Simple split (backward compatible) with run metadata (raw/filled)
                     for split_name, split_data in splits.items():
                         storage.save(
-                            split_data, 
+                            split_data,
                             split_name,
                             f'{split_name}_{timestamp}',
                             metadata={
@@ -2563,14 +2610,190 @@ def execute_pipeline(
                                 'split_strategy': 'simple',
                                 'dataset_id': dataset_id_current,
                                 'generator_version': generator_version_current,
+                                'normalized': False,
                             },
                             run_id=pipeline_id
                         )
 
                     logger.info("Saved simple split:")
-                    logger.info("  - Training: %s rows (70%)", len(splits['training']))
-                    logger.info("  - Validation: %s rows (15%)", len(splits['validation']))
-                    logger.info("  - Testing: %s rows (15%)", len(splits['testing']))
+                    logger.info("  - Training: %s rows (70%)", len(splits.get('training', pd.DataFrame())))
+                    logger.info("  - Validation: %s rows (15%)", len(splits.get('validation', pd.DataFrame())))
+                    logger.info("  - Testing: %s rows (15%)", len(splits.get('testing', pd.DataFrame())))
+
+                # Apply normalization post-split using training-only stats (prevents leakage)
+                normalization_cfg = (
+                    (preprocessing_cfg.get("normalization") or {}) if isinstance(preprocessing_cfg, dict) else {}
+                )
+                normalize_enabled = bool(normalization_cfg.get("enabled", True))
+                normalize_method = str(normalization_cfg.get("method", "zscore") or "zscore").lower()
+                if normalize_enabled and normalize_method not in {"", "none"}:
+                    column_selection = normalization_cfg.get("column_selection", {}) or {}
+                    numeric_only = bool(column_selection.get("numeric_only", True))
+                    exclude_cols = {str(c).lower() for c in (column_selection.get("exclude_columns") or [])}
+                    include_cols = column_selection.get("include_columns")
+
+                    if include_cols:
+                        columns_to_norm = [
+                            c for c in include_cols if c in split_input.columns and str(c).lower() not in exclude_cols
+                        ]
+                    else:
+                        candidates = (
+                            split_input.select_dtypes(include=[np.number]).columns.tolist()
+                            if numeric_only
+                            else split_input.columns.tolist()
+                        )
+                        columns_to_norm = [c for c in candidates if str(c).lower() not in exclude_cols]
+
+                    processor = Preprocessor()
+                    stats_payload: Dict[str, Any] = {
+                        "run_id": pipeline_id,
+                        "generated_at": datetime.now().isoformat(),
+                        "method": normalize_method,
+                        "columns": columns_to_norm,
+                        "splits": {},
+                    }
+
+                    if use_cv:
+                        cv_folds = list(splits.get('cv_folds') or [])
+                        stats_payload["splits"]["cv_folds"] = {}
+                        for fold in cv_folds:
+                            fold_id = fold.get("fold_id")
+                            train_raw = fold.get("train", pd.DataFrame())
+                            val_raw = fold.get("validation", pd.DataFrame())
+                            train_norm, fold_stats = processor.normalize(
+                                train_raw,
+                                method=normalize_method,
+                                columns=columns_to_norm,
+                            )
+                            val_norm = processor.apply_normalization(
+                                val_raw,
+                                stats=fold_stats,
+                                method=normalize_method,
+                                columns=columns_to_norm,
+                            )
+                            stats_payload["splits"]["cv_folds"][str(fold_id)] = fold_stats
+
+                            fold_metadata = {
+                                'data_source': extraction_source,
+                                'execution_mode': execution_mode,
+                                'pipeline_id': pipeline_id,
+                                'fold_id': fold_id,
+                                'split_strategy': 'cross_validation',
+                                'normalized': True,
+                                'normalization_fit': 'fold_train',
+                            }
+                            storage.save(
+                                train_norm,
+                                'training',
+                                f'fold{fold_id}_train_norm_{timestamp}',
+                                metadata=fold_metadata,
+                                run_id=pipeline_id
+                            )
+                            storage.save(
+                                val_norm,
+                                'validation',
+                                f'fold{fold_id}_val_norm_{timestamp}',
+                                metadata=fold_metadata,
+                                run_id=pipeline_id
+                            )
+
+                        test_raw = splits.get("testing", pd.DataFrame())
+                        fit_frame = split_input
+                        if test_raw is not None and not test_raw.empty and len(split_input) > len(test_raw):
+                            fit_frame = split_input.iloc[:-len(test_raw)]
+                        _, test_fit_stats = processor.normalize(
+                            fit_frame,
+                            method=normalize_method,
+                            columns=columns_to_norm,
+                        )
+                        stats_payload["splits"]["test_fit"] = test_fit_stats
+                        test_norm = processor.apply_normalization(
+                            test_raw,
+                            stats=test_fit_stats,
+                            method=normalize_method,
+                            columns=columns_to_norm,
+                        )
+                        storage.save(
+                            test_norm,
+                            'testing',
+                            f'test_norm_{timestamp}',
+                            metadata={
+                                'data_source': extraction_source,
+                                'execution_mode': execution_mode,
+                                'pipeline_id': pipeline_id,
+                                'split_strategy': 'cross_validation',
+                                'dataset_id': dataset_id_current,
+                                'generator_version': generator_version_current,
+                                'normalized': True,
+                                'normalization_fit': 'pre_test_window',
+                            },
+                            run_id=pipeline_id
+                        )
+                    else:
+                        tr_raw = splits.get("training", pd.DataFrame())
+                        va_raw = splits.get("validation", pd.DataFrame())
+                        te_raw = splits.get("testing", pd.DataFrame())
+                        tr_norm, train_stats = processor.normalize(
+                            tr_raw,
+                            method=normalize_method,
+                            columns=columns_to_norm,
+                        )
+                        va_norm = processor.apply_normalization(
+                            va_raw,
+                            stats=train_stats,
+                            method=normalize_method,
+                            columns=columns_to_norm,
+                        )
+                        te_norm = processor.apply_normalization(
+                            te_raw,
+                            stats=train_stats,
+                            method=normalize_method,
+                            columns=columns_to_norm,
+                        )
+                        stats_payload["splits"]["training_fit"] = train_stats
+
+                        meta_common = {
+                            'data_source': extraction_source,
+                            'execution_mode': execution_mode,
+                            'pipeline_id': pipeline_id,
+                            'split_strategy': 'simple',
+                            'dataset_id': dataset_id_current,
+                            'generator_version': generator_version_current,
+                            'normalized': True,
+                            'normalization_fit': 'training_only',
+                        }
+                        storage.save(
+                            tr_norm,
+                            'training',
+                            f'training_norm_{timestamp}',
+                            metadata=meta_common,
+                            run_id=pipeline_id,
+                        )
+                        storage.save(
+                            va_norm,
+                            'validation',
+                            f'validation_norm_{timestamp}',
+                            metadata=meta_common,
+                            run_id=pipeline_id,
+                        )
+                        storage.save(
+                            te_norm,
+                            'testing',
+                            f'testing_norm_{timestamp}',
+                            metadata=meta_common,
+                            run_id=pipeline_id,
+                        )
+
+                    if bool(normalization_cfg.get("store_stats", True)):
+                        stats_path_raw = normalization_cfg.get("stats_path")
+                        if stats_path_raw:
+                            stats_path = Path(str(stats_path_raw))
+                            if stats_path.suffix.lower() == ".json":
+                                stats_path = stats_path.with_name(f"{stats_path.stem}_{pipeline_id}.json")
+                            stats_path.parent.mkdir(parents=True, exist_ok=True)
+                            with stats_path.open("w", encoding="utf-8") as handle:
+                                json.dump(stats_payload, handle, indent=2, default=str)
+                            logger.info("Saved normalization stats: %s", stats_path)
 
                 _emit_split_drift_json(Path("visualizations") / "split_drift_latest.json", pipeline_id, drift_records)
 

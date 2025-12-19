@@ -102,13 +102,31 @@ class MSSARLForecaster:
         return recon
 
     def _cusum_change_points(self, residuals: pd.Series) -> pd.DatetimeIndex:
-        threshold = self.config.change_point_threshold * residuals.std()
-        if threshold == 0:
+        cleaned = residuals.dropna()
+        if cleaned.empty:
             return pd.DatetimeIndex([])
 
-        cusum = residuals.cumsum()
-        cp_mask = np.abs(cusum - cusum.shift(1).fillna(0)) > threshold
-        return residuals.index[cp_mask]
+        std = float(cleaned.std(ddof=0))
+        if std <= 0 or not np.isfinite(std):
+            return pd.DatetimeIndex([])
+
+        # Standardized one-sided CUSUM on residual mean shifts.
+        # Reference: Page (1954) CUSUM tests for parameter changes.
+        threshold = float(self.config.change_point_threshold)
+        centered = (cleaned - float(cleaned.mean())) / (std + 1e-12)
+
+        pos_sum = 0.0
+        neg_sum = 0.0
+        change_points = []
+        for ts, value in zip(centered.index, centered.to_numpy()):
+            pos_sum = max(0.0, pos_sum + float(value))
+            neg_sum = min(0.0, neg_sum + float(value))
+            if pos_sum > threshold or neg_sum < -threshold:
+                change_points.append(ts)
+                pos_sum = 0.0
+                neg_sum = 0.0
+
+        return pd.DatetimeIndex(change_points)
 
     def _update_q_table(self, variance_ratio: float, state: int, action: int) -> None:
         key = (state, action)

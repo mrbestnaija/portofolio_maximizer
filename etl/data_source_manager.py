@@ -40,8 +40,12 @@ class DataSourceManager:
         active_extractor: Currently active data source extractor
     """
 
-    def __init__(self, config_path: str = 'config/data_sources_config.yml',
-                 storage=None):
+    def __init__(
+        self,
+        config_path: str = 'config/data_sources_config.yml',
+        storage=None,
+        execution_mode: str = "auto",
+    ):
         """Initialize data source manager.
 
         Args:
@@ -54,6 +58,10 @@ class DataSourceManager:
         """
         self.config_path = Path(config_path)
         self.storage = storage
+        self.execution_mode = str(execution_mode or "auto").lower()
+        if self.execution_mode not in {"auto", "live", "synthetic"}:
+            logger.warning("Unknown execution_mode=%s; defaulting to 'auto'", execution_mode)
+            self.execution_mode = "auto"
         self.config = self._load_config()
         self.extractors: Dict[str, BaseExtractor] = {}
         self.active_extractor: Optional[BaseExtractor] = None
@@ -90,19 +98,30 @@ class DataSourceManager:
             List of enabled provider configurations, sorted by priority (ascending)
         """
         providers = self.config.get('providers', [])
-        enabled = []
+        enabled: List[Dict[str, Any]] = []
         enable_synthetic_env = os.getenv("ENABLE_SYNTHETIC_PROVIDER") or os.getenv("ENABLE_SYNTHETIC_DATA_SOURCE")
         synthetic_only = os.getenv("SYNTHETIC_ONLY")
 
+        # Institutional guardrail: synthetic data must never be consumed implicitly during
+        # live/auto runs. It is only admitted when explicitly requested (execution_mode=synthetic
+        # or SYNTHETIC_ONLY) or when ENABLE_SYNTHETIC_PROVIDER is set for smoke/regression runs.
+        synthetic_gate = bool(synthetic_only or self.execution_mode == "synthetic" or enable_synthetic_env)
+
         for provider in providers:
-            is_enabled = provider.get('enabled', False)
-            if synthetic_only:
-                if provider.get('name') == 'synthetic':
+            name = str(provider.get('name') or "")
+            if not name:
+                continue
+
+            if synthetic_only or self.execution_mode == "synthetic":
+                if name == 'synthetic':
                     enabled.append({**provider, "enabled": True, "priority": 1})
                 continue
 
-            if enable_synthetic_env and provider.get('name') == 'synthetic':
-                # Allow synthetic provider toggling via env for smoke/regression runs
+            if name == "synthetic" and not synthetic_gate:
+                continue
+
+            is_enabled = provider.get('enabled', False)
+            if name == "synthetic" and enable_synthetic_env:
                 is_enabled = True
             if is_enabled:
                 enabled.append(provider)
@@ -110,9 +129,26 @@ class DataSourceManager:
         # Sort by priority (lower number = higher priority)
         enabled.sort(key=lambda p: p.get('priority', 999))
 
-        logger.info(f"Found {len(enabled)} enabled providers: "
-                   f"{', '.join(p['name'] for p in enabled)}")
+        logger.info(
+            "Found %s enabled providers: %s",
+            len(enabled),
+            ", ".join(str(p.get("name")) for p in enabled if p.get("name")),
+        )
         return enabled
+
+    def _resolve_provider_config_path(self, provider_config: Dict[str, Any]) -> Optional[str]:
+        """Resolve config path for a provider, allowing env overrides.
+
+        Env precedence:
+        - <NAME>_CONFIG_PATH (generic)
+        - SYNTHETIC_CONFIG_PATH (synthetic-specific convenience)
+        Falls back to provider-configured config_file when present.
+        """
+        name = provider_config.get("name", "")
+        env_override = os.getenv(f"{name.upper()}_CONFIG_PATH") if name else None
+        if name == "synthetic":
+            env_override = os.getenv("SYNTHETIC_CONFIG_PATH") or env_override
+        return env_override or provider_config.get("config_file")
 
     def _instantiate_extractor(self, provider_config: Dict[str, Any]) -> Optional[BaseExtractor]:
         """Dynamically instantiate data source extractor.
@@ -124,6 +160,10 @@ class DataSourceManager:
             Instantiated extractor instance or None on failure
         """
         name = provider_config['name']
+        config_path = self._resolve_provider_config_path(provider_config)
+        base_kwargs: Dict[str, Any] = {"name": name, "storage": self.storage}
+        if config_path:
+            base_kwargs["config_path"] = config_path
 
         try:
             # Get adapter class path from config
@@ -157,17 +197,10 @@ class DataSourceManager:
                     return None
 
                 # Instantiate with API key
-                extractor = extractor_class(
-                    name=name,
-                    api_key=api_key,
-                    storage=self.storage
-                )
+                extractor = extractor_class(api_key=api_key, **base_kwargs)
             else:
                 # Instantiate without API key (e.g., yfinance)
-                extractor = extractor_class(
-                    name=name,
-                    storage=self.storage
-                )
+                extractor = extractor_class(**base_kwargs)
 
             logger.info(f"OK Instantiated {name} extractor")
             return extractor
@@ -226,7 +259,14 @@ class DataSourceManager:
         elif mode == 'parallel':
             # Future: Load all sources for parallel fetching
             logger.warning("Parallel mode not yet implemented, falling back to priority mode")
-            self._initialize_extractors()  # Recursively call with default mode
+            primary = enabled_providers[0]
+            extractor = self._instantiate_extractor(primary)
+            if extractor:
+                self.extractors[primary['name']] = extractor
+                self.active_extractor = extractor
+                logger.info(f"OK Using primary data source: {primary['name']}")
+            else:
+                raise RuntimeError(f"Failed to initialize primary source: {primary['name']}")
 
         else:
             raise ValueError(f"Unknown selection mode: {mode}")

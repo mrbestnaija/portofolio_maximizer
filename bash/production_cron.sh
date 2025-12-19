@@ -146,6 +146,16 @@ PY
     fi
     ;;
 
+  sanitize_caches)
+    RETENTION="${CRON_SANITIZE_RETENTION:-14}"
+    PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}" run_with_logging "sanitize_cache_and_logs" \
+      "${PYTHON_BIN}" scripts/sanitize_cache_and_logs.py \
+        --retention-days "${RETENTION}" \
+        ${CRON_SANITIZE_DATA_DIRS:+--data-dirs "${CRON_SANITIZE_DATA_DIRS}"} \
+        ${CRON_SANITIZE_LOG_DIRS:+--log-dirs "${CRON_SANITIZE_LOG_DIRS}"} \
+        ${CRON_SANITIZE_PATTERNS:+--patterns "${CRON_SANITIZE_PATTERNS}"}
+    ;;
+
   ts_threshold_sweep)
     # Weekly/monthly TS threshold sweep to grow evidence for per-ticker settings.
     sweep_args=()

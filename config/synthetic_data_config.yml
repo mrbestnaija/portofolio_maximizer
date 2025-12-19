@@ -17,6 +17,7 @@ synthetic:
     - "MSFT"
 
   market_condition: "efficient"  # efficient | inefficient | mixed
+  profile: ""  # optional profile name from synthetic_data_profiles.yml
   regimes:
     enabled: true
     names: ["low_vol", "high_vol"]
@@ -38,7 +39,8 @@ synthetic:
         jump_std: 0.05
 
   correlation:
-    mode: "static"  # static | factor | rolling
+    mode: "static"  # static | factor | rolling | t_copula
+    copula_df: 6
     target_matrix:  # optional; defaults to identity if empty
       - [1.0, 0.4]
       - [0.4, 1.0]
@@ -73,6 +75,11 @@ synthetic:
       prob: 0.001
       impact_pct: 0.05
       vol_multiplier: 3.0
+    macro_regime_change:
+      enabled: true
+      prob: 0.0005
+      drift_shift: -0.0005
+      vol_multiplier: 1.5
 
   persistence:
     output_root: "data/synthetic"
@@ -86,6 +93,17 @@ synthetic:
       - monotonic_index
       - ohlcv_sanity
       - non_negative_prices
+
+  features:
+    enabled: true
+    sma_windows: [5, 20]
+    vol_windows: [10]
+    return_horizons: [1, 5]
+    rsi_windows: [14]
+    macd: {fast: 12, slow: 26, signal: 9}
+    bollinger: {window: 20, num_std: 2}
+    zscore_windows: [20]
+    factor_exposures: ["market"]
 
   # Future: DVC/local remote wiring (Phase 8)
   versioning:
@@ -101,6 +119,14 @@ synthetic:
         "2": 1.05  # Wednesday
         "3": 1.1   # Thursday
         "4": 0.9   # Friday
+      hour_weights:
+        "9": 0.8
+        "10": 1.1
+        "11": 1.05
+        "12": 0.9
+        "13": 1.1
+        "14": 1.2
+        "15": 0.85
 
   microstructure:
     spread:
@@ -110,6 +136,7 @@ synthetic:
     slippage:
       bps: 3.0
       shock_beta: 10.0
+      size_beta: 0.1
     depth:
       base: 1000000.0
       vol_beta: 15.0
@@ -122,3 +149,13 @@ synthetic:
   calibration:
     drift_multiplier: 1.0
     vol_multiplier: 1.0
+    emit_stats: true
+    source_path: ""  # optional parquet/csv for real-data calibration
+
+  ml_generator:
+    enabled: false
+    backend: "timegan"  # timegan | diffusion | gan_stub
+    checkpoint_dir: "models/synthetic/timegan_stub"
+    train_epochs: 0
+    batch_size: 64
+    seq_len: 32

@@ -580,6 +580,13 @@ class TimeSeriesForecaster:
         if not blended:
             return None
 
+        primary_model = None
+        if weights:
+            try:
+                primary_model = max(weights.items(), key=lambda item: item[1])[0].upper()
+            except Exception:  # pragma: no cover - defensive
+                primary_model = None
+
         forecast_bundle = {
             "forecast": blended["forecast"],
             "lower_ci": blended.get("lower_ci"),
@@ -587,11 +594,13 @@ class TimeSeriesForecaster:
             "weights": weights,
             "confidence": confidence,
             "selection_score": score,
+            "primary_model": primary_model,
         }
         metadata = {
             "weights": weights,
             "confidence": confidence,
             "selection_score": score,
+            "primary_model": primary_model,
         }
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
 

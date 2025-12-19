@@ -42,6 +42,19 @@ class EnsembleCoordinator:
         self.selected_weights: Dict[str, float] = {}
         self.selection_score: float = 0.0
 
+    def _apply_minimum_component_weight(self, weights: Dict[str, float]) -> Dict[str, float]:
+        minimum = max(float(self.config.minimum_component_weight), 0.0)
+        if minimum <= 0.0 or not weights:
+            return weights
+
+        pruned = {model: weight for model, weight in weights.items() if weight >= minimum}
+        if not pruned:
+            # If everything gets pruned, keep the strongest component so callers
+            # get a deterministic fallback rather than an empty selection.
+            top_model = max(weights.items(), key=lambda item: item[1])[0]
+            return {top_model: 1.0}
+        return self._normalize(pruned)
+
     def select_weights(
         self,
         model_confidence: Dict[str, float],
@@ -67,6 +80,7 @@ class EnsembleCoordinator:
                 normalized = self._normalize(scaled)
                 if not normalized:
                     continue
+            normalized = self._apply_minimum_component_weight(normalized)
 
             score = sum(
                 normalized.get(model, 0.0) * model_confidence.get(model, 0.0)
@@ -102,10 +116,18 @@ class EnsembleCoordinator:
             return None
 
         combined_df = pd.DataFrame(contributing)
-        weights = pd.Series(self.selected_weights)
-        aligned_weights = weights[combined_df.columns]
+        weights = pd.Series(self.selected_weights, dtype=float)
+        aligned_weights = weights.reindex(combined_df.columns).fillna(0.0)
 
-        forecast = combined_df.mul(aligned_weights, axis=1).sum(axis=1)
+        def _rowwise_blend(df: pd.DataFrame) -> pd.Series:
+            available = df.notna()
+            effective_weights = available.mul(aligned_weights, axis=1)
+            weight_sum = effective_weights.sum(axis=1)
+            normalized_weights = effective_weights.div(weight_sum.replace(0.0, np.nan), axis=0)
+            blended = df.mul(normalized_weights, axis=1).sum(axis=1)
+            return blended.dropna()
+
+        forecast = _rowwise_blend(combined_df)
 
         def _blend_ci(bounds: Dict[str, Optional[pd.Series]]) -> Optional[pd.Series]:
             series_map = {
@@ -114,8 +136,8 @@ class EnsembleCoordinator:
             }
             if not series_map:
                 return None
-            df = pd.DataFrame(series_map)
-            return df.mul(aligned_weights[df.columns], axis=1).sum(axis=1)
+            df = pd.DataFrame(series_map).reindex(forecast.index)
+            return _rowwise_blend(df)
 
         lower = _blend_ci(lower_bounds)
         upper = _blend_ci(upper_bounds)
@@ -185,17 +207,19 @@ def derive_model_confidence(
         base_te = baseline.get("tracking_error")
         n = metrics.get("n_observations")
         base_n = baseline.get("n_observations")
-        if not all([te, base_te, n, base_n]):
+        if te is None or base_te is None or n is None or base_n is None:
             return None
         te = float(te)
         base_te = float(base_te)
+        if te > base_te:
+            # One-sided screening: do not reward models with higher residual variance
+            # than the baseline.
+            return 0.0
         f_stat = (te**2 + EPSILON) / (base_te**2 + EPSILON)
         dfn = max(int(n) - 1, 1)
         dfd = max(int(base_n) - 1, 1)
-        if f_stat <= 1:
-            p_value = scipy_stats.f.cdf(f_stat, dfn, dfd)
-        else:
-            p_value = 1 - scipy_stats.f.cdf(f_stat, dfn, dfd)
+        # One-sided p-value for variance reduction (H1: sigma_model^2 < sigma_baseline^2).
+        p_value = float(scipy_stats.f.cdf(f_stat, dfn, dfd))
         return float(np.clip(1.0 - p_value, 0.0, 1.0))
 
     def _change_point_boost(summary: Dict[str, Any]) -> Optional[float]:

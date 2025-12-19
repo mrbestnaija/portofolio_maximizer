@@ -22,6 +22,12 @@ import pandas as pd
 import yaml
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
+from etl.synthetic_data.config import load_synthetic_config
+from etl.synthetic_data.correlation import copula_shocks, target_correlation, ensure_psd
+from etl.synthetic_data.microstructure import simulate_microstructure
+from etl.synthetic_data.seasonality import seasonality_multiplier
+from etl.synthetic_data.events import apply_events
+from etl.synthetic_data.ml_backend import maybe_apply_ml_backend
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +56,13 @@ class SyntheticConfig:
     market_hours: Dict[str, Any] = field(default_factory=dict)
     microstructure: Dict[str, Any] = field(default_factory=dict)
     calibration: Dict[str, Any] = field(default_factory=dict)
+    features: Dict[str, Any] = field(default_factory=dict)
     persistence_root: Path = Path("data/synthetic")
     partitioning: str = "by_ticker"
     keep_last: int = 3
+    profile: Optional[str] = None
+    profiles_path: Optional[Path] = None
+    ml_generator: Dict[str, Any] = field(default_factory=dict)
     validation_checks: Sequence[str] = (
         "schema",
         "monotonic_index",
@@ -70,14 +80,19 @@ class SyntheticExtractor(BaseExtractor):
     def __init__(
         self,
         name: str = "synthetic",
-        config_path: str = "config/synthetic_data_config.yml",
+        config_path: Optional[str] = None,
+        profiles_path: Optional[str] = None,
         timeout: int = 30,
         cache_hours: int = 24,
         storage=None,
         **kwargs,
     ):
         super().__init__(name=name, timeout=timeout, cache_hours=cache_hours, storage=storage, **kwargs)
-        self.config_path = Path(config_path)
+        env_config_path = os.getenv("SYNTHETIC_CONFIG_PATH")
+        resolved_config_path = env_config_path or config_path or "config/synthetic_data_config.yml"
+        self.config_path = Path(resolved_config_path)
+        self.profiles_path = Path(profiles_path) if profiles_path else None
+        self.profile_override = os.getenv("SYNTHETIC_PROFILE")
         self.config = self._load_config()
         self.dataset_id_override = os.getenv("SYNTHETIC_DATASET_ID")
         dataset_path_env = os.getenv("SYNTHETIC_DATASET_PATH")
@@ -96,6 +111,21 @@ class SyntheticExtractor(BaseExtractor):
         data = self._load_persisted_dataset(tickers_resolved)
         dataset_id = None
 
+        if data is not None and isinstance(data.index, pd.DatetimeIndex):
+            start_ts = pd.Timestamp(start)
+            end_ts = pd.Timestamp(end)
+            data = data.sort_index()
+            data = data.loc[(data.index >= start_ts) & (data.index <= end_ts)]
+            if "ticker" in data.columns:
+                data = data.loc[data["ticker"].astype(str).isin(tickers_resolved)]
+            if data.empty:
+                logger.warning(
+                    "Persisted synthetic dataset did not satisfy requested range/tickers; regenerating (%s..%s)",
+                    start,
+                    end,
+                )
+                data = None
+
         if data is None:
             if self.config.generator_version == "v0":
                 data = self._generate_v0(tickers_resolved, start, end, self.config.frequency, self.config.seed)
@@ -112,7 +142,13 @@ class SyntheticExtractor(BaseExtractor):
         if self.config.partitioning == "by_ticker":
             # Ensure ticker column exists for downstream slicing
             if "ticker" not in data.columns:
-                data["ticker"] = np.repeat(tickers_resolved[0], len(data))
+                if len(tickers_resolved) == 1:
+                    data["ticker"] = np.repeat(tickers_resolved[0], len(data))
+                else:
+                    raise ValueError(
+                        "Synthetic dataset missing ticker column for multi-ticker run; regenerate or "
+                        "ensure per-ticker parquet files include ticker metadata."
+                    )
 
         return data
 
@@ -229,16 +265,8 @@ class SyntheticExtractor(BaseExtractor):
     # --- Helpers ---
 
     def _load_config(self) -> SyntheticConfig:
-        if not self.config_path.exists():
-            logger.warning("Synthetic config not found at %s; using defaults", self.config_path)
-            return SyntheticConfig(raw={})
-
-        try:
-            cfg = yaml.safe_load(self.config_path.read_text()) or {}
-            root = cfg.get("synthetic", {}) or {}
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Failed to load synthetic config (%s); using defaults", exc)
-            return SyntheticConfig(raw={})
+        cfg = load_synthetic_config(self.config_path, profiles_path=self.profiles_path, profile_name=self.profile_override)
+        root = cfg.get("synthetic", {}) or {}
 
         regimes_cfg = root.get("regimes", {}) or {}
         correlation_cfg = root.get("correlation", {}) or {}
@@ -247,6 +275,8 @@ class SyntheticExtractor(BaseExtractor):
         market_cfg = root.get("market_hours", {}) or {}
         micro_cfg = root.get("microstructure", {}) or {}
         calib_cfg = root.get("calibration", {}) or {}
+        features_cfg = root.get("features", {}) or {}
+        ml_cfg = root.get("ml_generator", {}) or {}
 
         return SyntheticConfig(
             generator_version=str(root.get("generator_version", "v0")),
@@ -275,6 +305,8 @@ class SyntheticExtractor(BaseExtractor):
             market_hours=market_cfg,
             microstructure=micro_cfg,
             calibration=calib_cfg,
+            features=features_cfg,
+            ml_generator=ml_cfg,
             persistence_root=Path(root.get("persistence", {}).get("output_root", "data/synthetic")),
             partitioning=str(root.get("persistence", {}).get("partitioning", "by_ticker")),
             keep_last=int(root.get("persistence", {}).get("keep_last", 3)),
@@ -282,6 +314,8 @@ class SyntheticExtractor(BaseExtractor):
             raw=root,
             dataset_id_override=os.getenv("SYNTHETIC_DATASET_ID"),
             dataset_path_override=Path(os.getenv("SYNTHETIC_DATASET_PATH")) if os.getenv("SYNTHETIC_DATASET_PATH") else None,
+            profile=root.get("profile") or self.profile_override,
+            profiles_path=self.profiles_path,
         )
 
     def _resolve_dates(self, start_date: Optional[str], end_date: Optional[str]) -> (str, str):
@@ -323,7 +357,10 @@ class SyntheticExtractor(BaseExtractor):
             for ticker in tickers:
                 candidate = base_path / f"{ticker}.parquet"
                 if candidate.exists():
-                    frames.append(pd.read_parquet(candidate))
+                    frame = pd.read_parquet(candidate)
+                    frame = frame.copy()
+                    frame["ticker"] = ticker
+                    frames.append(frame)
         else:
             combined = base_path / "combined.parquet"
             if combined.exists():
@@ -387,7 +424,7 @@ class SyntheticExtractor(BaseExtractor):
         corr_matrix = self._prepare_correlation_matrix(correlation_cfg, len(tickers))
 
         n = len(date_index)
-        shocks = rng_global.multivariate_normal(np.zeros(len(tickers)), corr_matrix, size=n)
+        shocks = self._generate_shocks(rng_global, corr_matrix, len(tickers), n, correlation_cfg)
         regime_states = (
             self._simulate_regimes(rng_global, n, self.config.regime_names, np.array(self.config.regime_transition))
             if self.config.regimes_enabled
@@ -416,6 +453,8 @@ class SyntheticExtractor(BaseExtractor):
                     "Slippage": micro.get("slippage"),
                     "Depth": micro.get("depth"),
                     "OrderImbalance": micro.get("order_imbalance"),
+                    "TxnCostBps": micro.get("txn_cost_bps"),
+                    "ImpactBps": micro.get("impact_bps"),
                     "Adj Close": prices["close"],
                     "ticker": ticker,
                 },
@@ -427,6 +466,8 @@ class SyntheticExtractor(BaseExtractor):
         data = pd.concat(frames).sort_index()
         data.attrs["regimes_used"] = sorted(set(regime_states))
         data.attrs["correlation_mode"] = self.config.correlation_mode
+        data.attrs["events"] = self.config.event_library or {}
+        data = maybe_apply_ml_backend(data, self.config.ml_generator or {})
         return data
 
     def _simulate_regimes(self, rng: np.random.Generator, n: int, names: Sequence[str], transition: np.ndarray) -> List[str]:
@@ -460,6 +501,8 @@ class SyntheticExtractor(BaseExtractor):
         slippage_arr = np.zeros(n)
         depth_arr = np.zeros(n)
         imbalance_arr = np.zeros(n)
+        txn_cost_arr = np.zeros(n)
+        impact_arr = np.zeros(n)
 
         base_drift = {"efficient": 0.0005, "mixed": 0.0003, "inefficient": -0.0001}.get(
             self.config.market_condition, 0.0005
@@ -531,7 +574,7 @@ class SyntheticExtractor(BaseExtractor):
                 price = max(price * (1 + ret), 1e-6)
                 inst_vol = max(abs(ret), vol)
 
-            price, inst_vol = self._apply_event_impacts(
+            price, inst_vol, _ = self._apply_event_impacts(
                 rng=rng_global,
                 index=i,
                 price=price,
@@ -544,14 +587,24 @@ class SyntheticExtractor(BaseExtractor):
             inst_vol = inst_vol * vol_multiplier
             volume_scale = vol_multiplier
 
-            spread_arr[i], slippage_arr[i], depth_arr[i], imbalance_arr[i] = self._simulate_microstructure(
+            (
+                spread_arr[i],
+                slippage_arr[i],
+                depth_arr[i],
+                imbalance_arr[i],
+                txn_cost_bps,
+                impact_bps,
+            ) = self._simulate_microstructure(
                 price=price,
                 inst_vol=inst_vol,
                 shock=shocks[i],
                 regime=regime,
                 micro_cfg=micro_cfg,
                 rng=rng_global,
+                order_size=1.0,
             )
+            txn_cost_arr[i] = txn_cost_bps
+            impact_arr[i] = impact_bps
 
             open_price = price * (1 + rng_global.normal(0, 0.002))
             high_price = max(open_price, price) * (1 + abs(rng_global.normal(0, 0.003 + inst_vol * 0.1)))
@@ -571,6 +624,8 @@ class SyntheticExtractor(BaseExtractor):
             "slippage": slippage_arr,
             "depth": depth_arr,
             "order_imbalance": imbalance_arr,
+            "txn_cost_bps": txn_cost_arr,
+            "impact_bps": impact_arr,
         }
         return {"open": open_arr, "high": high_arr, "low": low_arr, "close": close_arr}, volume_arr, micro
 
@@ -581,56 +636,17 @@ class SyntheticExtractor(BaseExtractor):
         price: float,
         inst_vol: float,
         base_drift: float,
-    ) -> Tuple[float, float]:
-        """
-        Apply crisis/event library shocks to the current price/vol state.
-
-        Events are simple, deterministic-probability hooks to model:
-        - flash crashes (down moves with vol spike)
-        - volatility spikes
-        - gap risk (up/down jumps)
-        - bear run drift shifts
-        """
-        cfg = self.config.event_library or {}
-
-        flash_cfg = cfg.get("flash_crash", {})
-        if flash_cfg.get("enabled") and rng.random() < float(flash_cfg.get("prob", 0.0)):
-            impact = float(flash_cfg.get("impact_pct", 0.08))
-            price = max(price * (1 - abs(impact)), 1e-6)
-            inst_vol = inst_vol * (1 + abs(impact) * 5)
-
-        vol_cfg = cfg.get("vol_spike", {})
-        if vol_cfg.get("enabled") and rng.random() < float(vol_cfg.get("prob", 0.0)):
-            multiplier = float(vol_cfg.get("multiplier", 2.5))
-            inst_vol = inst_vol * max(multiplier, 1.0)
-
-        gap_cfg = cfg.get("gap_risk", {})
-        if gap_cfg.get("enabled") and rng.random() < float(gap_cfg.get("prob", 0.0)):
-            impact = float(gap_cfg.get("impact_pct", 0.03))
-            direction = -1 if rng.random() < 0.6 else 1
-            price = max(price * (1 + direction * impact), 1e-6)
-            inst_vol = inst_vol * (1 + abs(impact) * 3)
-
-        bear_cfg = cfg.get("bear_run", {})
-        if bear_cfg.get("enabled") and rng.random() < float(bear_cfg.get("prob", 0.0)):
-            drift_shift = float(bear_cfg.get("drift_shift", -0.001))
-            price = max(price * (1 + drift_shift), 1e-6)
-
-        liquidity_cfg = cfg.get("liquidity_shock", {})
-        if liquidity_cfg.get("enabled") and rng.random() < float(liquidity_cfg.get("prob", 0.0)):
-            impact = float(liquidity_cfg.get("impact_pct", 0.05))
-            price = max(price * (1 - abs(impact)), 1e-6)
-            inst_vol = inst_vol * float(liquidity_cfg.get("vol_multiplier", 3.0))
-
-        return price, inst_vol
+    ) -> Tuple[float, float, Optional[str]]:
+        fired = None
+        try:
+            price, inst_vol, fired = apply_events(self.config.event_library or {}, rng, index, price, inst_vol, base_drift)
+        except Exception:
+            fired = None
+        return price, inst_vol, fired
 
     def _seasonality_multiplier(self, ts: pd.Timestamp) -> float:
         season_cfg = self.config.market_hours.get("seasonality") if self.config.market_hours else {}
-        if not season_cfg:
-            return 1.0
-        dow = ts.dayofweek
-        weights = season_cfg.get("day_weights", {})
-        return float(weights.get(str(dow), 1.0))
+        return seasonality_multiplier(ts, season_cfg)
 
     def _simulate_microstructure(
         self,
@@ -640,60 +656,20 @@ class SyntheticExtractor(BaseExtractor):
         regime: str,
         micro_cfg: Dict[str, Any],
         rng: np.random.Generator,
-    ) -> Tuple[float, float, float, float]:
-        spread_cfg = micro_cfg.get("spread", {})
-        slippage_cfg = micro_cfg.get("slippage", {})
-        depth_cfg = micro_cfg.get("depth", {})
-        imbalance_cfg = micro_cfg.get("order_flow", {})
-        base_spread_bps = float(spread_cfg.get("bps", 5.0))
-        vol_beta = float(spread_cfg.get("vol_beta", 20.0))
-        regime_spread = float(spread_cfg.get("regime_widen", 1.5 if "high" in regime else 1.0))
-        spread = price * (base_spread_bps / 10_000.0) * (1 + vol_beta * inst_vol) * regime_spread
-
-        base_slip_bps = float(slippage_cfg.get("bps", 3.0))
-        shock_beta = float(slippage_cfg.get("shock_beta", 10.0))
-        slippage = price * (base_slip_bps / 10_000.0) * (1 + shock_beta * abs(shock))
-        base_depth = float(depth_cfg.get("base", 1_000_000.0))
-        depth_vol_beta = float(depth_cfg.get("vol_beta", 15.0))
-        min_depth = float(depth_cfg.get("min_depth", 50_000.0))
-        depth = max(base_depth * (1 - depth_vol_beta * inst_vol), min_depth)
-
-        imbalance_sigma = float(imbalance_cfg.get("sigma", 0.15))
-        shock_beta_imb = float(imbalance_cfg.get("shock_beta", 0.8))
-        regime_bias = float(imbalance_cfg.get("regime_bias", -0.1 if "high" in regime else 0.0))
-        order_imbalance = rng.normal(regime_bias, imbalance_sigma) + shock_beta_imb * shock
-        return spread, slippage, depth, order_imbalance
+        order_size: float = 1.0,
+    ) -> Tuple[float, float, float, float, float, float]:
+        return simulate_microstructure(price, inst_vol, shock, regime, micro_cfg, rng, order_size)
 
     def _prepare_correlation_matrix(self, cfg: Dict[str, Any], n_assets: int) -> np.ndarray:
-        mode = str(cfg.get("mode", "static"))
-        target = cfg.get("target_matrix") or []
-        if mode == "factor":
-            strength = float(cfg.get("factor_strength", 0.4))
-            strength = float(np.clip(strength, -0.95, 0.95))
-            mat = np.full((n_assets, n_assets), strength)
-            np.fill_diagonal(mat, 1.0)
-            return self._ensure_psd(mat, n_assets)
+        return target_correlation(cfg, n_assets)
 
-        if mode == "rolling":
-            jitter = float(cfg.get("jitter", 0.01))
-            base = np.array(target, dtype=float) if target else np.eye(n_assets)
-            mat = base + np.eye(n_assets) * jitter
-            return self._ensure_psd(mat, n_assets)
-
-        if not target:
-            return np.eye(n_assets)
-        mat = np.array(target, dtype=float)
-        return self._ensure_psd(mat, n_assets)
-
-    def _ensure_psd(self, matrix: np.ndarray, n_assets: int) -> np.ndarray:
-        if matrix.shape != (n_assets, n_assets):
-            return np.eye(n_assets)
-        try:
-            np.linalg.cholesky(matrix)
-            return matrix
-        except np.linalg.LinAlgError:
-            eps = 1e-4
-            return matrix + np.eye(n_assets) * eps
+    def _generate_shocks(self, rng: np.random.Generator, corr_matrix: np.ndarray, n_assets: int, n: int, correlation_cfg: Dict[str, Any]) -> np.ndarray:
+        mode = str(correlation_cfg.get("mode", "static"))
+        if mode == "t_copula":
+            df = float(correlation_cfg.get("copula_df", 6.0))
+            tail_scale = float(correlation_cfg.get("tail_scale", 1.5))
+            return copula_shocks(rng, corr_matrix, n=n, df=df) * tail_scale
+        return rng.multivariate_normal(np.zeros(n_assets), corr_matrix, size=n)
 
     def _generate_v0(self, tickers: Sequence[str], start: str, end: str, frequency: str, seed: int) -> pd.DataFrame:
         date_index = pd.date_range(start=pd.Timestamp(start), end=pd.Timestamp(end), freq=frequency)

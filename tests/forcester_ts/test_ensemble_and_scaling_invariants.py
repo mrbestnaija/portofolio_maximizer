@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from forcester_ts.ensemble import EnsembleConfig, EnsembleCoordinator
+from forcester_ts.ensemble import derive_model_confidence
 from forcester_ts.forecaster import TimeSeriesForecaster
 from forcester_ts.samossa import SAMOSSAForecaster
 from forcester_ts.garch import GARCHForecaster
@@ -272,3 +273,99 @@ def test_sarimax_forecast_rescaling_inverse_of_scale_factor():
     assert diagnostics["residual_mean"] == pytest.approx(expected_resid.mean(), rel=1e-9, abs=1e-9)
     assert diagnostics["residual_std"] == pytest.approx(expected_resid.std(), rel=1e-9, abs=1e-9)
 
+
+def test_sarimax_log_transform_with_shift_is_inverted_on_forecast():
+    # Build a SARIMAXForecaster without invoking __init__ so we can bypass statsmodels.
+    forecaster = object.__new__(SARIMAXForecaster)  # type: ignore[misc]
+
+    forecaster.best_order = (1, 0, 1)
+    forecaster.best_seasonal_order = (0, 0, 0, 0)
+    forecaster._scale_factor = 1.0
+    forecaster.log_transform = True
+    forecaster._series_transform = "log"
+    forecaster._log_shift = 10.0
+
+    idx = pd.date_range("2025-01-01", periods=3, freq="D")
+    mean_log = pd.Series(np.log([110.0, 120.0, 130.0]), index=idx)
+    lower_log = pd.Series(np.log([105.0, 115.0, 125.0]), index=idx)
+    upper_log = pd.Series(np.log([115.0, 125.0, 135.0]), index=idx)
+    resid_log = pd.Series([0.1, -0.2, 0.3], index=idx)
+
+    forecaster.fitted_model = DummySARIMAXFittedModel(
+        mean=mean_log,
+        lower=lower_log,
+        upper=upper_log,
+        resid=resid_log,
+    )
+
+    result = forecaster.forecast(steps=3)
+    pd.testing.assert_series_equal(
+        result["forecast"],
+        pd.Series([100.0, 110.0, 120.0], index=idx),
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_series_equal(
+        result["lower_ci"],
+        pd.Series([95.0, 105.0, 115.0], index=idx, name="lower_ci"),
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    pd.testing.assert_series_equal(
+        result["upper_ci"],
+        pd.Series([105.0, 115.0, 125.0], index=idx, name="upper_ci"),
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_ensemble_prunes_weights_below_minimum_component_weight():
+    cfg = EnsembleConfig(
+        enabled=True,
+        confidence_scaling=False,
+        candidate_weights=[{"sarimax": 0.96, "samossa": 0.04}],
+        minimum_component_weight=0.05,
+    )
+    coord = EnsembleCoordinator(cfg)
+    weights, _ = coord.select_weights({"sarimax": 1.0, "samossa": 1.0})
+    assert set(weights.keys()) == {"sarimax"}
+    assert weights["sarimax"] == pytest.approx(1.0)
+
+
+def test_ensemble_blend_renormalizes_weights_when_series_missing():
+    coord = EnsembleCoordinator(EnsembleConfig(enabled=True))
+    coord.selected_weights = {"sarimax": 0.5, "samossa": 0.5}
+
+    idx = pd.date_range("2025-01-01", periods=3, freq="D")
+    sarimax = pd.Series([1.0, 2.0], index=idx[:2])
+    samossa = pd.Series([10.0, 20.0], index=idx[1:])
+
+    blended = coord.blend_forecasts(
+        model_series={"sarimax": sarimax, "samossa": samossa},
+        lower_bounds={},
+        upper_bounds={},
+    )
+    assert blended is not None
+    forecast = blended["forecast"]
+    assert forecast.loc[idx[0]] == pytest.approx(1.0)
+    assert forecast.loc[idx[1]] == pytest.approx(6.0)
+    assert forecast.loc[idx[2]] == pytest.approx(20.0)
+
+
+def test_model_confidence_variance_screening_does_not_reward_higher_variance():
+    summaries = {
+        "samossa": {
+            "regression_metrics": {"tracking_error": 0.1, "n_observations": 100},
+        },
+        # Tracking error worse than baseline, but baseline variance term is strong.
+        # Variance screening should not let this dominate confidence.
+        "mssa_rl": {
+            "baseline_variance": 0.05,
+            "regression_metrics": {"tracking_error": 0.2, "n_observations": 100},
+        },
+    }
+    confidence = derive_model_confidence(summaries)
+    assert confidence["mssa_rl"] < confidence["samossa"]

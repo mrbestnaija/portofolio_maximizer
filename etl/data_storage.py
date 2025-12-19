@@ -223,6 +223,17 @@ class DataStorage:
 
         # Sort by timestamp (vectorized)
         data = data.sort_index()
+        has_duplicate_index = bool(getattr(data.index, "has_duplicates", False))
+
+        def _unique_dates(frame: pd.DataFrame) -> pd.DatetimeIndex:
+            idx = frame.index
+            if not isinstance(idx, pd.DatetimeIndex):
+                return pd.DatetimeIndex([])
+            unique = pd.DatetimeIndex(pd.unique(idx))
+            return unique.sort_values()
+
+        def _empty_like(frame: pd.DataFrame) -> pd.DataFrame:
+            return frame.iloc[0:0].copy()
 
         if use_cv:
             if not 0 < test_size < 1:
@@ -231,6 +242,89 @@ class DataStorage:
                 raise ValueError("gap must be non-negative when using cross-validation")
             if n_splits < 2:
                 raise ValueError("n_splits must be at least 2 for cross-validation")
+
+            if has_duplicate_index:
+                # Multi-asset frames commonly share dates across tickers. When the index contains
+                # duplicates, use date-based splits (not row-count splits) so train/val/test are
+                # separated by time boundaries and do not overlap by date.
+                dates = _unique_dates(data)
+                n_dates = len(dates)
+                if n_dates == 0:
+                    empty = _empty_like(data)
+                    return {
+                        "cv_folds": [],
+                        "testing": empty,
+                        "n_splits": n_splits,
+                        "split_type": "cross_validation",
+                        "train": empty,
+                        "validation": empty,
+                        "test": empty,
+                        "training": empty,
+                        "testing": empty,
+                    }
+
+                test_start = int(n_dates * (1 - test_size))
+                test_start = max(1, min(test_start, n_dates))
+                test_dates = dates[test_start:]
+                cv_size = test_start
+                fold_size = cv_size // (n_splits + 1)
+
+                fold_splits = []
+                for fold_id in range(n_splits):
+                    val_start = (fold_id + 1) * fold_size
+                    val_end = min(val_start + fold_size, cv_size)
+                    if expanding_window:
+                        train_start = 0
+                        train_end = val_start
+                    else:
+                        train_start = max(0, val_start - fold_size)
+                        train_end = val_start
+
+                    if gap > 0:
+                        train_end = max(train_start, train_end - gap)
+
+                    if train_end <= train_start or val_end <= val_start:
+                        continue
+
+                    train_dates = dates[train_start:train_end]
+                    val_dates = dates[val_start:val_end]
+                    train_df = data.loc[data.index.isin(train_dates)].copy()
+                    val_df = data.loc[data.index.isin(val_dates)].copy()
+
+                    if train_df.empty or val_df.empty:
+                        continue
+
+                    fold_splits.append(
+                        {
+                            "fold_id": fold_id,
+                            "train": train_df,
+                            "validation": val_df,
+                        }
+                    )
+
+                test_df = data.loc[data.index.isin(test_dates)].copy()
+                result: Dict[str, Any] = {
+                    "cv_folds": fold_splits,
+                    "testing": test_df,
+                    "n_splits": n_splits,
+                    "split_type": "cross_validation",
+                }
+                if fold_splits:
+                    result["train"] = fold_splits[0]["train"]
+                    result["validation"] = fold_splits[0]["validation"]
+                else:
+                    result["train"] = _empty_like(data)
+                    result["validation"] = _empty_like(data)
+                result["test"] = test_df
+                result["training"] = result["train"]
+                result["testing"] = result["test"]
+                logger.info(
+                    "CV Split (date-based): %s folds, unique_dates=%s, test_rows=%s",
+                    len(fold_splits),
+                    n_dates,
+                    len(test_df),
+                )
+                return result
 
             # Use k-fold cross-validation (NEW FEATURE)
             cv_splitter = TimeSeriesCrossValidator(
@@ -278,6 +372,52 @@ class DataStorage:
 
         else:
             # Simple chronological split (DEFAULT - BACKWARD COMPATIBLE)
+            if has_duplicate_index:
+                dates = _unique_dates(data)
+                n_dates = len(dates)
+                if n_dates == 0:
+                    splits = SplitResult(
+                        {
+                            "training": _empty_like(data),
+                            "validation": _empty_like(data),
+                            "testing": _empty_like(data),
+                        }
+                    )
+                    logger.info("Split (date-based): empty dataset")
+                    return splits
+
+                train_end = int(n_dates * train_ratio)
+                val_end = int(n_dates * (train_ratio + val_ratio))
+                train_end = max(1, min(train_end, n_dates))
+                val_end = max(train_end, min(val_end, n_dates))
+
+                train_cutoff = dates[train_end - 1]
+                val_cutoff = dates[val_end - 1] if val_end > 0 else train_cutoff
+
+                training_data = data.loc[data.index <= train_cutoff].copy()
+                validation_data = (
+                    data.loc[(data.index > train_cutoff) & (data.index <= val_cutoff)].copy()
+                    if val_end > train_end
+                    else _empty_like(data)
+                )
+                testing_data = data.loc[data.index > val_cutoff].copy() if val_end < n_dates else _empty_like(data)
+
+                splits = SplitResult(
+                    {
+                        "training": training_data,
+                        "validation": validation_data,
+                        "testing": testing_data,
+                    }
+                )
+                logger.info(
+                    "Split (date-based): unique_dates=%s train=%s val=%s test=%s",
+                    n_dates,
+                    len(splits["training"]),
+                    len(splits["validation"]),
+                    len(splits["testing"]),
+                )
+                return splits
+
             n = len(data)
             train_end = int(n * train_ratio)
             val_end = int(n * (train_ratio + val_ratio))

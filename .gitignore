@@ -49,6 +49,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+*.log.*
 
 # Database files
 *.db
@@ -93,6 +94,7 @@ data/portfolio_optimizer/*/*/*/*/*
 data/portfolio_optimizer/*/*/*/*/*/*
 data/portfolio_optimizer/*/*/*/*/*/*/*
 data/portfolio_optimizer/*/*/*/*/*/*/*/*
+data/dvcstore/
 
 
 
@@ -150,5 +152,7 @@ settings.local.json
 
 # Logs and logging
 logs/*.log
+logs/events/
+logs/events/*
 logging/
  

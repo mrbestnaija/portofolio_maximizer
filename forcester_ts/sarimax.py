@@ -686,6 +686,9 @@ class SARIMAXForecaster:
         if self.log_transform and self._series_transform == "log":
             forecast_mean = forecast_mean.apply(np.exp)
             conf_int = conf_int.apply(np.exp)
+            if self._log_shift is not None:
+                forecast_mean = forecast_mean - self._log_shift
+                conf_int = conf_int - self._log_shift
 
         diagnostics = {
             "ljung_box_pvalue": None,
@@ -706,8 +709,11 @@ class SARIMAXForecaster:
 
         if len(residuals) > 5:
             try:
-                _, jb_pvalue = jarque_bera(residuals)
-                diagnostics["jarque_bera_pvalue"] = float(jb_pvalue)
+                jb_result = jarque_bera(residuals)
+                jb_pvalue = None
+                if isinstance(jb_result, (tuple, list)) and len(jb_result) >= 2:
+                    jb_pvalue = jb_result[1]
+                diagnostics["jarque_bera_pvalue"] = float(jb_pvalue) if jb_pvalue is not None else None
             except Exception as exc:  # pragma: no cover
                 logger.warning("Jarque-Bera test failed: %s", exc)
                 diagnostics["jarque_bera_pvalue"] = None

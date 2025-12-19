@@ -133,6 +133,7 @@ def main(
         "inputs": {
             "ts_threshold_sweep": ts_sweep,
             "transaction_costs": costs,
+            "transaction_costs_synthetic": (costs or {}).get("synthetic") if costs else None,
             "ts_model_candidates_summary": ts_candidates,
             "sleeve_summary": sleeve_summary,
             "sleeve_promotion_plan": sleeve_plan,
