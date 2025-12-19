@@ -81,6 +81,10 @@ def _ensure_utc_datetime(value: Any) -> datetime:
 
 
 sqlite3.register_adapter(datetime, lambda val: _ensure_utc_datetime(val).isoformat())
+sqlite3.register_adapter(date, lambda val: _ensure_utc_datetime(val).isoformat())
+sqlite3.register_adapter(
+    pd.Timestamp, lambda val: _ensure_utc_datetime(val.to_pydatetime()).isoformat()
+)
 sqlite3.register_converter("TIMESTAMP", lambda raw: _ensure_utc_datetime(raw))
 sqlite3.register_converter("DATETIME", lambda raw: _ensure_utc_datetime(raw))
 sqlite3.register_converter("DATE", lambda raw: _ensure_utc_datetime(raw).date())
@@ -286,14 +290,7 @@ def backfill_pending_signals(
             signal_id = row["id"]
             ticker = row["ticker"]
             raw_date = row["signal_date"]
-            if isinstance(raw_date, datetime):
-                signal_date = raw_date
-            else:
-                raw_str = str(raw_date)
-                try:
-                    signal_date = datetime.fromisoformat(raw_str)
-                except ValueError:
-                    signal_date = datetime.strptime(raw_str, "%Y-%m-%d")
+            signal_date = _ensure_utc_datetime(raw_date)
 
             market_data = load_market_data(db.conn, ticker, signal_date, lookback_days)
             if market_data.empty or len(market_data) < 5:
@@ -352,7 +349,11 @@ def backfill_pending_signals(
 
             signals_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
             for row in recent_signals:
-                timestamp_source = row["signal_timestamp"] if "signal_timestamp" in row.keys() and row["signal_timestamp"] else row["signal_date"]
+                timestamp_source = (
+                    row["signal_timestamp"]
+                    if "signal_timestamp" in row.keys() and row["signal_timestamp"]
+                    else row["signal_date"]
+                )
                 timestamp_iso = _ensure_utc_datetime(timestamp_source).isoformat()
                 signals_by_ticker.setdefault(row["ticker"], []).append(
                     {
@@ -368,9 +369,7 @@ def backfill_pending_signals(
             for ticker, signals in signals_by_ticker.items():
                 if not signals:
                     continue
-                last_date = max(
-                    _ensure_utc_datetime(sig["signal_timestamp"]) for sig in signals
-                )
+                last_date = max(_ensure_utc_datetime(sig["signal_timestamp"]) for sig in signals)
                 price_df = load_market_data(db.conn, ticker, last_date, backtest_days * 2)
                 if price_df.empty:
                     continue

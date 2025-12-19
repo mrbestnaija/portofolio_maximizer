@@ -350,12 +350,22 @@ class LLMSignalBacktester:
 @click.option('--capital', default=100000.0, help='Initial capital (default: $100,000)')
 @click.option('--output', default='backtest_results.json', help='Output results file')
 @click.option('--verbose', is_flag=True, help='Verbose logging')
-def main(signals: str, data: str, capital: float, output: str, verbose: bool):
+@click.option('--prefer-gpu/--no-prefer-gpu', default=True, help='Prefer GPU when available (cuda/mps).')
+def main(signals: str, data: str, capital: float, output: str, verbose: bool, prefer_gpu: bool):
     """Execute LLM signal backtest and generate validation report."""
-    
+
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+    device = "cpu"
+    try:
+        from scripts.run_etl_pipeline import _detect_device  # reuse detector
+
+        device = _detect_device(prefer_gpu=prefer_gpu)
+    except Exception:
+        device = "cpu"
+    os.environ["PIPELINE_DEVICE"] = device
+    logger.info("LLM backtest device: %s (prefer_gpu=%s)", device, prefer_gpu)
+
     logger.info("=" * 80)
     logger.info("LLM SIGNAL BACKTESTING FRAMEWORK")
     logger.info("=" * 80)

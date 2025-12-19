@@ -13,6 +13,21 @@
 
 set -euo pipefail
 
+# Optional: load credentials and repo hints from .env (never commit .env)
+if [[ -f ".env" ]]; then
+  set -a
+  source .env
+  set +a
+fi
+
+# Optional: set git identity from env
+if [[ -n "${GIT_USER_NAME:-}" ]]; then
+  git config user.name "$GIT_USER_NAME"
+fi
+if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
+  git config user.email "$GIT_USER_EMAIL"
+fi
+
 # Configuration
 REMOTE="origin"
 BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
@@ -20,6 +35,11 @@ START_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 STASHED=0
 RESTORED=0
 CONFLICT_DETECTED=0
+
+# Optional: update origin URL with token if provided (HTTPS only)
+if [[ -n "${GitHub_Username:-}" && -n "${GitHub_TOKEN:-}" && -n "${GitHub_Repo:-}" ]]; then
+  git remote set-url origin "https://${GitHub_Username}:${GitHub_TOKEN}@github.com/${GitHub_Username}/${GitHub_Repo}.git"
+fi
 
 # Colors for output
 RED='\033[0;31m'

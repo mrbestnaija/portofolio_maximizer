@@ -1,6 +1,6 @@
 # Institutional Synthetic Data Generator (High‑Dimensional) – TODO
 
-**Last updated**: 2025-12-16  
+**Last updated**: 2025-12-18  
 **Scope**: Add an institutional-grade, config-driven synthetic data generation pipeline (high-dimensional, multi-asset) as a first-class local data source for testing/regression/training runs, with persistence + versioning (DVC), rigorous validation, and cron-based refresh—while preserving backward compatibility.
 
 This roadmap is aligned with:
@@ -32,10 +32,16 @@ Default data sources are currently inadequate for exercising the full TS/LLM pip
 - **Progress 2025-12-17 (synthetic smoke set)**: Generated dataset `syn_1dcce391f1ea` via `scripts/generate_synthetic_dataset.py --tickers AAPL,MSFT` and validated it (`logs/automation/synthetic_validation_syn_1dcce391f1ea.json`, passed=true, rows=2088). To lock pipelines/brutal runs to this dataset, export `ENABLE_SYNTHETIC_PROVIDER=1` and either `SYNTHETIC_DATASET_PATH=data/synthetic/syn_1dcce391f1ea` or `SYNTHETIC_DATASET_ID=syn_1dcce391f1ea` alongside `--execution-mode synthetic --data-source synthetic`; cron `synthetic_refresh` will pick up `CRON_SYNTHETIC_*` overrides when scheduled.
 - **Progress 2025-12-17 (GPU-parallel synthetic runner)**: `bash/run_gpu_parallel.sh` now defaults to `MODE=synthetic` for parallel dataset generation/validation shards (env-driven: `SYN_CONFIG`, `SYN_OUTPUT_ROOT`, `SYN_VALIDATE`, `GPU_LIST`, `SHARD*`). Uses `ENABLE_SYNTHETIC_PROVIDER=1`/`SYNTHETIC_ONLY=1`, writes manifests under `data/synthetic/`, and keeps DB/LLM off to avoid production pollution. Switch `MODE=auto_trader` to restore prior behaviour.
 - **Progress 2025-12-17 (synthetic run logging + retention)**: Synthetic generation/validation scripts now append JSONL events to `logs/automation/synthetic_runs.log` and auto-prune synthetic logs/reports older than 14 days via `scripts/prune_synthetic_logs.py` (invoked on each run). Aligns with log hygiene/retention guidance from `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `QUANT_VALIDATION_MONITORING_POLICY.md`, and `CHECKPOINTING_AND_LOGGING.md`.
+- **Progress 2025-12-18 (latest pointer)**: `scripts/generate_synthetic_dataset.py` now writes `data/synthetic/latest.json` with the newest dataset_id/path/manifest; `etl/synthetic_extractor.py` accepts `SYNTHETIC_DATASET_ID=latest` (or `SYNTHETIC_DATASET_PATH=.../latest.json`) to load the pointer for automation.
+- **Progress 2025-12-18 (visual + TS stack green)**: Synthetic pipeline now runs end-to-end with SARIMAX/MSSA/GARCH enabled and visualization deps (`matplotlib`, `seaborn`) installed; persisted dataset `syn_714ae868f78b` is the latest pointer target.
+- **Progress 2025-12-18 (GPU default runner)**: `bash/run_gpu_parallel.sh` auto-detects available GPUs (falls back to CPU) and wires synthetic/auto-trader shards to prefer CUDA when present, keeping synthetic-first isolation by default.
+- **Progress 2025-12-18 (GAN stub wiring)**: Added `scripts/train_gan_stub.py` + `bash/run_gan_stub.sh` that honor `PIPELINE_DEVICE` for future TimeGAN/diffusion training; currently a device-aware no-op consuming persisted synthetic data.
 - **Context (liquidity gaps)**: Synthetic-first pre-production remains mandatory because free-tier data sources lack depth for commodity/illiquid classes. All testing/regression must use persisted synthetic datasets until quant health on live data turns GREEN; align with `NAV_RISK_BUDGET_ARCH.md`, `NAV_BAR_BELL_TODO.md`, `BARBELL_OPTIONS_MIGRATION.md`, `MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md`, and `OPTIMIZATION_IMPLEMENTATION_PLAN.md` to keep risk gates intact while using synthetic inputs.
-- **Progress 2025-12-17 (pipeline smoke, dataset_id propagation)**: `scripts/run_etl_pipeline.py --execution-mode synthetic --data-source synthetic` exercised with `SYNTHETIC_DATASET_ID=syn_1dcce391f1ea`; pipeline logged dataset_id/generator_version in `pipeline_events` and checkpoints. Time-series stages warned about missing `sklearn` (dependency pending), but extraction/validation/preprocessing/storage completed with synthetic data and recorded metadata.
+- **Progress 2025-12-19 (microstructure validation)**: Synthetic extractor now validates microstructure channels (`Spread`, `Slippage`, `Depth`, `OrderImbalance`) for non-negative/finite values, and unit tests assert these columns exist when microstructure is enabled. Config `config/synthetic_data_config.yml` retains depth/order-flow knobs plus liquidity shock events to emulate illiquid markets.
+- **Progress 2025-12-17 (pipeline smoke, dataset_id propagation)**: `scripts/run_etl_pipeline.py --execution-mode synthetic --data-source synthetic` exercised with `SYNTHETIC_DATASET_ID=syn_1dcce391f1ea`; pipeline logged dataset_id/generator_version in `pipeline_events` and checkpoints. Latest smoke (`pipeline_20251217_220920`) completed end-to-end on syn_1dcce391f1ea after restoring `numpy`/`scipy`/`pyarrow`; warnings were limited to CV fold overlap/drift and missing viz deps (`kiwisolver`) while time-series/validation/storage/signals/routing all passed.
 - **Progress 2025-12-17 (CLI synthetic selection)**: `scripts/run_etl_pipeline.py` now accepts `--synthetic-dataset-id`, `--synthetic-dataset-path`, and `--synthetic-config` CLI options (bridge to env), enabling persisted synthetic dataset selection without manual env exports.
 - **Progress 2025-12-17 (synthetic default provider)**: `config/data_sources_config.yml` now prioritizes the `synthetic` provider (priority=1) so synthetic is the default source for all runs unless explicitly overridden; live providers remain enabled as lower-priority fallbacks.
+- **Progress 2025-12-19 (Phase 2/3 hooks)**: Synthetic generator now emits liquidity-proxy channels (Depth, OrderImbalance) and a `liquidity_shock` event in `event_library`, plus configurable microstructure depth/imbalance knobs in `config/synthetic_data_config.yml` to better exercise illiquid classes and spread/impact logic without live feeds.
 
 ---
 
@@ -72,7 +78,7 @@ Default data sources are currently inadequate for exercising the full TS/LLM pip
   - microstructure proxies (spread, slippage, liquidity, order flow) as optional side channels,
   - high-dimensional features (indicators + latent factors),
   - ML-based generator (TimeGAN-style) as an optional backend.
-- [ ] Synthetic datasets are persisted to `data/synthetic/` as partitioned parquet + manifest, optionally tracked with DVC; “latest” dataset pointer is maintained for automation.
+- [x] Synthetic datasets are persisted to `data/synthetic/` as partitioned parquet + manifest, optionally tracked with DVC; “latest” dataset pointer is maintained for automation.
 - [ ] Cron task refreshes synthetic datasets and runs validation (stat checks + smoke pipeline), producing audit artifacts under `logs/automation/` and `logs/forecast_audits/`.
 
 ---
@@ -160,24 +166,24 @@ Default data sources are currently inadequate for exercising the full TS/LLM pip
 
 ### Phase 1 — Core Market Simulation Models (Institutional Baseline)
 
-- [ ] Implement core generators (each is a pluggable component selected by config):
-  - [ ] **GBM** (lognormal prices; drift/vol per asset)
-  - [ ] **Ornstein–Uhlenbeck** (mean reversion, commodity/rates proxy)
-  - [ ] **Jump Diffusion (Merton)** (Poisson jumps + jump size distribution)
-  - [ ] **Stochastic Volatility (Heston-like)** (vol process + leverage correlation)
+- [x] Implement core generators (each is a pluggable component selected by config):
+  - [x] **GBM** (lognormal prices; drift/vol per asset)
+  - [x] **Ornstein–Uhlenbeck** (mean reversion, commodity/rates proxy)
+  - [x] **Jump Diffusion (Merton)** (Poisson jumps + jump size distribution)
+  - [x] **Stochastic Volatility (Heston-like)** (vol process + leverage correlation)
   - [ ] Optional: **agent-based micro model** stub (for future; keep behind feature flag)
-- [ ] Implement **regime switching**:
-  - [ ] Markov chain over regimes (low/high vol; trend/mean-revert; liquidity regimes)
-  - [ ] Regime-conditioned parameters for drift/vol/jump intensity/spread
-- [ ] Implement **multi-asset dependence**:
-  - [ ] Static correlation via Cholesky on Gaussian shocks (baseline)
-  - [ ] Factor model (latent market/sector/commodity factors)
+- [x] Implement **regime switching**:
+  - [x] Markov chain over regimes (low/high vol; trend/mean-revert; liquidity regimes)
+  - [x] Regime-conditioned parameters for drift/vol/jump intensity/spread
+- [x] Implement **multi-asset dependence**:
+  - [x] Static correlation via Cholesky on Gaussian shocks (baseline)
+  - [x] Factor model (latent market/sector/commodity factors)
   - [ ] Optional: copula-based dependence for tail correlation (advanced)
 
 ### Phase 2 — Crises, Shocks, and Market Sessions
 
 - [ ] Add event library with configurable intensity:
-  - [ ] flash crash, prolonged bear market, volatility spike + mean reversion, gap risk
+  - [x] flash crash, volatility spike, gap risk, bear-drift shift (baseline hooks implemented)
   - [ ] macro regime changes (rates up/down; commodity shock)
 - [ ] Market hours/sessions model:
   - [ ] intraday seasonality for volume/spread/vol (if frequency < daily)
@@ -355,8 +361,9 @@ Tests:
 
 - [ ] `scripts/run_etl_pipeline.py` end-to-end in synthetic mode using:
   - [ ] in-process generator (legacy, v0)
-  - [ ] persisted dataset (`--synthetic-dataset <id>`)
-  - [ ] `--data-source synthetic` via DataSourceManager adapter
+  - [x] persisted dataset (`--synthetic-dataset <id>`)
+  - [x] `--data-source synthetic` via DataSourceManager adapter
+- Note: `pipeline_20251217_220920` ran end-to-end on `syn_1dcce391f1ea` with the synthetic provider; viz deps (`kiwisolver`) are still absent.
 - [ ] Brutal harness integration:
   - [ ] Add a brutal stage that validates generator invariants and runs a short pipeline smoke test (align with `Documentation/BRUTAL_TEST_README.md`).
 - [ ] Cron smoke:

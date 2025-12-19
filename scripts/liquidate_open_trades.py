@@ -93,6 +93,16 @@ def _fetch_vendor_prices(tickers: Dict[str, float]) -> Dict[str, float]:
     return prices
 
 
+def _fetch_prices(tickers: Dict[str, float]) -> Dict[str, float]:
+    """
+    Public-facing price fetcher to allow test monkeypatching.
+
+    Defaults to the vendor helper but can be overridden in tests to supply
+    deterministic spot prices without network calls.
+    """
+    return _fetch_vendor_prices(tickers)
+
+
 def _load_last_close_from_db(conn: sqlite3.Connection, tickers: List[str]) -> Dict[str, float]:
     """Load latest close price per ticker from the local OHLCV table, if present."""
     if not tickers:
@@ -132,7 +142,7 @@ def _build_spot_price_map(conn: sqlite3.Connection, trades: List[TradeRow]) -> D
     tickers = list(base_tickers.keys())
     from_db = _load_last_close_from_db(conn, tickers)
     remaining = {t: base_tickers[t] for t in tickers if t not in from_db}
-    from_vendor = _fetch_vendor_prices(remaining)
+    from_vendor = _fetch_prices(remaining)
 
     prices: Dict[str, float] = {}
     for t in tickers:

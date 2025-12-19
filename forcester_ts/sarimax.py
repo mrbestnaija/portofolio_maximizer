@@ -700,15 +700,17 @@ class SARIMAXForecaster:
                     residuals, lags=min(10, len(residuals) // 4), return_df=True
                 )
                 diagnostics["ljung_box_pvalue"] = float(lb_df["lb_pvalue"].iloc[-1])
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Ljung-Box test failed: %s", exc)
+                diagnostics["ljung_box_pvalue"] = None
 
         if len(residuals) > 5:
             try:
                 _, jb_pvalue = jarque_bera(residuals)
                 diagnostics["jarque_bera_pvalue"] = float(jb_pvalue)
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Jarque-Bera test failed: %s", exc)
+                diagnostics["jarque_bera_pvalue"] = None
 
         forecast_ci = conf_int.rename(
             columns={

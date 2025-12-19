@@ -39,6 +39,14 @@
 - Created `config/sentiment.yml` (disabled by default) and `tests/sentiment/test_sentiment_config_scaffold.py` to enforce strict gating (Sharpe ≥ 1.1, drawdown ≤ 0.22, PnL > 0 for 90/180d) until profitability clears the benchmark.
 - Cross-referenced in `Documentation/arch_tree.md`, `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, and `Documentation/implementation_checkpoint.md` for tracking without enabling runtime hooks yet.
 
+## 2025-12-19 – Monetization guardrails + synthetic-first policy
+
+- New `Documentation/MONITIZATION.md` centralizes the monetization gate (READY/EXPERIMENTAL/BLOCKED thresholds), synthetic-first pre-prod requirement, and usage-tracking expectations from `REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+- CLIs noted: `python -m tools.check_monetization_gate --window 365`, `python -m tools.push_daily_signals --config config/monetization.yml`, `python -m tools.monetization_reality_check`.
+- Reinforces that alerts/reports remain blocked when gate says BLOCKED and that pre-prod stays synthetic until quant health turns GREEN/YELLOW on live data.
+- Synthetic generator Phase 2/3 hooks landed: `config/synthetic_data_config.yml` gains microstructure depth/order-imbalance knobs and liquidity shock events; `etl/synthetic_extractor.py` now emits Depth/OrderImbalance channels to better emulate illiquid markets without live feeds.
+- Monetization gate currently unblocked with synthetic trades/metrics; swap in real pipeline/auto-trader runs ASAP. If switching DBs (e.g., `data/test_database.db`), call the gate with `--db-path ...` and ensure performance_metrics are populated in that store first.
+
 ---
 
 ## 2025-11-24 – Frontier Universe & Data-Source-Aware Tickers

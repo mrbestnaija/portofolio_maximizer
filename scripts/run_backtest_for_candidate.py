@@ -101,6 +101,12 @@ def _load_quant_guardrails(path: Optional[Path]) -> Dict[str, Any]:
     is_flag=True,
     help="Enable debug logging.",
 )
+@click.option(
+    "--prefer-gpu/--no-prefer-gpu",
+    default=True,
+    show_default=True,
+    help="Prefer GPU when available; sets PIPELINE_DEVICE for downstream components.",
+)
 def main(
     db_path: str,
     regime: str,
@@ -108,6 +114,7 @@ def main(
     candidate_json: Optional[str],
     quant_config_path: str,
     verbose: bool,
+    prefer_gpu: bool,
 ) -> None:
     """Run an offline evaluation for a single candidate over a regime window.
 
@@ -150,6 +157,16 @@ def main(
 
     if candidate_json:
         logger.info("Candidate params (opaque JSON): %s", candidate_json)
+
+    # Set device hint for downstream components/backtests
+    try:
+        from scripts.run_etl_pipeline import _detect_device
+
+        device = _detect_device(prefer_gpu=prefer_gpu)
+    except Exception:
+        device = "cpu"
+    __import__("os").environ["PIPELINE_DEVICE"] = device
+    logger.info("Candidate backtest device: %s (prefer_gpu=%s)", device, prefer_gpu)
 
 
 if __name__ == "__main__":

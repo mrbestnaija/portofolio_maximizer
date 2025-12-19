@@ -6,6 +6,20 @@
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
 **Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
 **Sentiment overlays**: Planned but dormant until profitability beats benchmarks and quant gates clear; see `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` and `config/sentiment.yml` (disabled, strict gating) for future integration notes.
+**Recent changes (2025-12-08)**: Synthetic mode now ships event/market-hours/microstructure defaults with a `latest` dataset pointer (`scripts/generate_synthetic_dataset.py` writes `data/synthetic/latest.json`), pipeline/backtests honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback, and the GAN stub trainer/runner (`scripts/train_gan_stub.py`, `bash/run_gan_stub.sh`) can consume persisted synthetic parquet for minimal training when torch is present.
+
+### Synthetic event/microstructure refresh (2025-12-08)
+- `config/synthetic_data_config.yml` carries defaults for flash crash/vol spike/gap risk/bear drift events, regime/correlation plumbing, market-hours day/hour weights, and microstructure knobs (spread/slippage/micro_vol). Spread/Slippage columns are emitted by `etl/synthetic_extractor.py` for downstream feature builders.
+- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes manifests/parquet plus `data/synthetic/latest.json`, so `SYNTHETIC_DATASET_ID=latest` maps to `syn_682c415bb89c` for pipeline/backtests without manual path edits.
+
+### GPU defaults and PIPELINE_DEVICE (2025-12-08)
+- `scripts/run_etl_pipeline.py`, `scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`, and `scripts/train_gan_stub.py` now accept `--prefer-gpu/--no-prefer-gpu`, auto-detect CUDA (torch/cupy) when available, and set `PIPELINE_DEVICE` accordingly, falling back to CPU silently.
+- GAN stub runner (`bash/run_gan_stub.sh`) inherits the same env so synthetic GAN experiments and TS/backtest flows stay aligned on device choice and logging.
+
+### Broader refresh (timelines, phase statuses, run IDs)
+- Timeline: Phase 1/2 synthetic generators (GBM/OU/Jump/Heston + regimes/correlation + events + market-hours + microstructure) are live; Phase 2 macro event library/calibration remains open; GPU auto-detect is wired across TS pipeline/backtests/GAN stub.
+- Phase status: Synthetic path is green with Spread/Slippage outputs; GPU preference defaults to CUDA when available, CPU otherwise; GAN stub is optional and torch-gated for quick experiments.
+- Run IDs: `data/synthetic/latest.json` → `syn_682c415bb89c` (events+microstructure+seasonality); legacy baselines `syn_fc8a37128efc` (events enabled) and `syn_714ae868f78b` (pre-events). Latest synthetic smoke invoked via `bash/run_synthetic_latest.sh` with `SYNTHETIC_DATASET_ID=latest`.
 
 ### 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard is bypassed in diagnostics and `volume_ma_ratio` now guards zero/NaN volume.

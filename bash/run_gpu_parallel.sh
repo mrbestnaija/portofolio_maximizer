@@ -23,8 +23,24 @@ fi
 # Mode selection
 MODE="${MODE:-synthetic}"  # synthetic | auto_trader
 
+detect_gpus() {
+  if [[ -n "${GPU_LIST:-}" ]]; then
+    echo "${GPU_LIST}"
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local ids
+    ids=$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | tr '\n' ' ' | xargs)
+    if [[ -n "${ids}" ]]; then
+      echo "${ids}"
+      return
+    fi
+  fi
+  echo "cpu"
+}
+
 # Shared defaults (override via env)
-GPU_LIST=(${GPU_LIST:-0})  # GPUs to use (round-robin if shards > GPUs)
+GPU_LIST=($(detect_gpus))  # GPUs to use (round-robin if shards > GPUs); falls back to cpu
 # Shard tickers by liquidity; defaults favour liquid names for efficiency.
 TICKER_SHARDS=(
   "${SHARD1:-AAPL,MSFT}"
@@ -86,7 +102,7 @@ run_shard_synthetic() {
   local log_file="logs/automation/${run_label}.log"
   echo "[synthetic][${run_label}] generating (GPU $gpu) -> ${dataset_id}" | tee -a "${log_file}"
 
-  CUDA_VISIBLE_DEVICES="$gpu" \
+  CUDA_VISIBLE_DEVICES="${gpu/cpu/}" \
   ENABLE_SYNTHETIC_PROVIDER=1 \
   SYNTHETIC_ONLY=1 \
   PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" \
@@ -103,7 +119,7 @@ run_shard_synthetic() {
   local dataset_path="${SYN_OUTPUT_ROOT}/${dataset_id}"
   if [[ "${SYN_VALIDATE}" == "1" ]]; then
     echo "[synthetic][${run_label}] validating ${dataset_path}" | tee -a "${log_file}"
-    CUDA_VISIBLE_DEVICES="$gpu" \
+    CUDA_VISIBLE_DEVICES="${gpu/cpu/}" \
     PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}" \
     ENABLE_SYNTHETIC_PROVIDER=1 \
     SYNTHETIC_ONLY=1 \
@@ -128,7 +144,7 @@ run_shard() {
     return 0
   fi
   echo "[shard $shard] launching on GPU $gpu (current trades=$count)"
-  CUDA_VISIBLE_DEVICES="$gpu" \
+  CUDA_VISIBLE_DEVICES="${gpu/cpu/}" \
   DIAGNOSTIC_MODE="$diag" \
   TS_DIAGNOSTIC_MODE="$diag" \
   EXECUTION_DIAGNOSTIC_MODE="$diag" \

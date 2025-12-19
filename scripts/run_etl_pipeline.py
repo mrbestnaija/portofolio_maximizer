@@ -166,6 +166,22 @@ def _setup_logging(verbose: bool = False) -> logging.Logger:
 logger = logging.getLogger(__name__)
 
 
+def _detect_device(prefer_gpu: bool = True) -> str:
+    """Detect best available device (cuda/mps/cpu) with optional GPU preference."""
+    if not prefer_gpu:
+        return "cpu"
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():  # type: ignore[attr-defined]
+            return "mps"
+    except Exception:
+        return "cpu"
+    return "cpu"
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load and validate pipeline configuration.
 
@@ -986,6 +1002,7 @@ def execute_pipeline(
     synthetic_dataset_path: Optional[str] = None,
     synthetic_config: Optional[str] = None,
     logger_instance: Optional[logging.Logger] = None,
+    prefer_gpu: bool = True,
 ) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
     
@@ -1020,6 +1037,10 @@ def execute_pipeline(
         logger = logger_instance
     if verbose:
         logger.debug("Verbose logging enabled")
+
+    device = _detect_device(prefer_gpu=prefer_gpu)
+    os.environ["PIPELINE_DEVICE"] = device
+    logger.info("Device selection: %s (prefer_gpu=%s)", device, prefer_gpu)
 
     # Apply synthetic overrides (env bridge)
     if synthetic_dataset_id:
@@ -1103,7 +1124,7 @@ def execute_pipeline(
     # Initialize LLM component handles
     llm_client = llm_components.client
     market_analyzer = llm_components.market_analyzer
-    signal_generator = llm_components.signal_generator
+    llm_signal_generator = llm_components.signal_generator
     risk_assessor = llm_components.risk_assessor
     signal_validator = llm_components.signal_validator
 
@@ -1429,7 +1450,9 @@ def execute_pipeline(
                         
                         # Generate signal with timing
                         start_time = time.time()
-                        signal = signal_generator.generate_signal(ticker_data, ticker, market_analysis)
+                        if llm_signal_generator is None:
+                            raise RuntimeError("LLM signal generator unavailable; check LLM initialization")
+                        signal = llm_signal_generator.generate_signal(ticker_data, ticker, market_analysis)
                         latency = time.time() - start_time
                         validation_status = 'pending'
                         validation_entry: Dict[str, Any] = {}
@@ -2116,7 +2139,7 @@ def execute_pipeline(
                                 logger.warning("Failed to load signal routing config: %s", exc)
                     
                     # Initialize signal generator
-                    signal_generator = TimeSeriesSignalGenerator(
+                    ts_signal_generator = TimeSeriesSignalGenerator(
                         confidence_threshold=float(ts_signal_cfg.get('confidence_threshold', 0.55)),
                         min_expected_return=float(ts_signal_cfg.get('min_expected_return', 0.003)),
                         max_risk_score=float(ts_signal_cfg.get('max_risk_score', 0.7)),
@@ -2158,7 +2181,7 @@ def execute_pipeline(
                                 continue
                             
                             # Generate signal
-                            signal = signal_generator.generate_signal(
+                            signal = ts_signal_generator.generate_signal(
                                 forecast_bundle=forecast_bundle,
                                 current_price=current_price,
                                 ticker=ticker,
@@ -2236,7 +2259,7 @@ def execute_pipeline(
                     router = SignalRouter(
                         config=signal_routing_cfg,
                         time_series_generator=None,  # Already generated signals
-                        llm_generator=signal_generator if enable_llm and 'signal_generator' in locals() else None
+                        llm_generator=llm_signal_generator if enable_llm and llm_signal_generator is not None else None
                     )
                     
                     # Get Time Series signals from previous stage
@@ -2663,9 +2686,14 @@ def execute_pipeline(
     default=None,
     help='Optional synthetic config path override (passed to SyntheticExtractor). Sets SYNTHETIC_CONFIG_PATH.',
 )
+@click.option(
+    '--prefer-gpu/--no-prefer-gpu',
+    default=True,
+    help='Attempt to use GPU (cuda/mps) when available; fallback to CPU automatically.',
+)
 def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: str,
                 use_cv: bool, n_splits: int, test_size: float, gap: int, verbose: bool,
-                enable_llm: bool, llm_model: str, dry_run: bool,
+                enable_llm: bool, llm_model: str, dry_run: bool, prefer_gpu: bool,
                 execution_mode: str, db_path: Optional[str], use_ticker_discovery: bool,
                 refresh_ticker_universe: bool, include_frontier_tickers: bool,
                 synthetic_dataset_id: Optional[str], synthetic_dataset_path: Optional[str],
@@ -2711,6 +2739,7 @@ def run_pipeline(config: str, data_source: str, tickers: str, start: str, end: s
         llm_model=llm_model,
         dry_run=dry_run,
         execution_mode=execution_mode,
+        prefer_gpu=prefer_gpu,
         db_path=db_path,
         use_ticker_discovery=use_ticker_discovery,
         refresh_ticker_universe=refresh_ticker_universe,

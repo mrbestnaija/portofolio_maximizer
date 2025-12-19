@@ -34,6 +34,7 @@ This guide provides comprehensive information about the enhanced error monitorin
 - The visualization hook was hardened (`etl/visualizer.py`), eliminating the `autofmt_xdate(axis=…)` alert and restoring dashboard evidence this guide references.
 - KPSS and SARIMAX fallback chatter has been demoted to INFO by guards in `forcester_ts/forecaster.py` and `forcester_ts/sarimax.py`, reducing noise in `pipeline_events`.
 - Outstanding alert: keep watching for the UTC deprecation warnings from `scripts/backfill_signal_validation.py` until its timezone overhaul lands.
+- ✅ 2025-12-19: `scripts/backfill_signal_validation.py` now registers timezone-aware adapters (datetime/date/pandas.Timestamp) and normalizes timestamps, removing the Python 3.12 UTC deprecation warnings. Mark the alert as resolved once monitoring runs stay clean.
 - Data-focused instrumentation (`forcester_ts/instrumentation.py`) now records dataset shape/frequency/statistics every run, and the comprehensive dashboard prints the summary directly on the figure—monitoring teams can open `logs/forecast_audits/*.json` to inspect the exact data profile that triggered an alert.
 - Nov 18 update: the same database manager now rebuilds a fresh SQLite store automatically when “database disk image is malformed” occurs mid-run, so alerting can focus on the timestamp of the self-heal rather than hundreds of repeated write failures.
 

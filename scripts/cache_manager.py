@@ -99,8 +99,8 @@ class CacheManager:
             for file_path in path.rglob('*'):
                 if file_path.is_file():
                     total_size += file_path.stat().st_size
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Error calculating directory size for {path}: {e}")
         return total_size
     
     def validate_critical_files(self) -> Dict[str, any]:

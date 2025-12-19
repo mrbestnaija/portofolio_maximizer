@@ -51,6 +51,29 @@ synthetic:
     jump_mean: 0.0
     jump_std: 0.03
 
+  event_library:
+    flash_crash:
+      enabled: true
+      prob: 0.0005
+      impact_pct: 0.08
+    vol_spike:
+      enabled: true
+      prob: 0.001
+      multiplier: 2.5
+    gap_risk:
+      enabled: true
+      prob: 0.0015
+      impact_pct: 0.03
+    bear_run:
+      enabled: true
+      prob: 0.0008
+      drift_shift: -0.001
+    liquidity_shock:
+      enabled: true
+      prob: 0.001
+      impact_pct: 0.05
+      vol_multiplier: 3.0
+
   persistence:
     output_root: "data/synthetic"
     partitioning: "by_ticker"  # by_ticker | combined
@@ -69,3 +92,33 @@ synthetic:
     enabled: false
     remote_name: "localstore"
     remote_url: ""  # optional local path when enabled
+
+  market_hours:
+    seasonality:
+      day_weights:
+        "0": 1.0   # Monday
+        "1": 0.95  # Tuesday
+        "2": 1.05  # Wednesday
+        "3": 1.1   # Thursday
+        "4": 0.9   # Friday
+
+  microstructure:
+    spread:
+      bps: 5.0
+      vol_beta: 20.0
+      regime_widen: 1.5
+    slippage:
+      bps: 3.0
+      shock_beta: 10.0
+    depth:
+      base: 1000000.0
+      vol_beta: 15.0
+      min_depth: 50000.0
+    order_flow:
+      sigma: 0.15
+      shock_beta: 0.8
+      regime_bias: -0.1
+
+  calibration:
+    drift_multiplier: 1.0
+    vol_multiplier: 1.0

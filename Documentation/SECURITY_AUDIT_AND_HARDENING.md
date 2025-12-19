@@ -71,6 +71,11 @@ This portfolio management system has **good foundational security** (API keys pr
 - **Location**: Entire application
 - **Priority**: **P0 - BLOCKER**
 
+**Next actions (must-do)**
+- Select an auth pattern (JWT/OAuth2) and add an auth gateway in front of any API/UI endpoints before enabling SaaS.
+- Add RBAC roles (admin/read-only/automation) and enforce per-endpoint permissions.
+- Introduce session management and rotation policies; reject requests without auth tokens.
+
 **Current State**:
 ```python
 # No authentication checks anywhere
@@ -91,6 +96,9 @@ This portfolio management system has **good foundational security** (API keys pr
 - **Location**: `data/portfolio_maximizer.db`
 - **Priority**: **P0 - BLOCKER**
 
+**Next actions**
+- Evaluate SQLCipher for SQLite or migrate to PostgreSQL with disk-level encryption; manage keys via env/secret store.
+
 **Current State**:
 ```python
 # SQLite database stored in plaintext
@@ -109,6 +117,10 @@ self.conn = sqlite3.connect(str(self.db_path))
 - **Impact**: API key theft, credential exposure
 - **Location**: All HTTP/API communications
 - **Priority**: **P0 - BLOCKER**
+
+**Next actions**
+- Terminate TLS via reverse proxy (nginx/traefik) and enforce HTTPS-only endpoints.
+- Pin certificates for API clients where feasible; disable plain HTTP listeners.
 
 **Current State**:
 ```yaml
@@ -134,6 +146,10 @@ command: >
 - **Impact**: Service unavailability, cost overruns
 - **Location**: All API endpoints (if any), LLM calls
 - **Priority**: **P1 - HIGH**
+
+**Next actions**
+- Add token-bucket/rolling-window rate limiting middleware to any exposed HTTP endpoints and LLM proxy calls.
+- Configure per-user/IP quotas and alerting on sustained breaches.
 
 **Current State**:
 - Rate limiting exists for external APIs (Alpha Vantage, Finnhub)

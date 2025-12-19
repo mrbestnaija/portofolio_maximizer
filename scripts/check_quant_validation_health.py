@@ -269,7 +269,9 @@ def main() -> None:
             "Health check WARNING: metrics in warning band but below hard CI gate "
             "(treat as research / needs attention)."
         )
-        raise SystemExit(0)
+        # Advisory-only: return cleanly so callers embedding main() do not have to
+        # special-case a SystemExit(0).
+        return
 
     print("Health check OK: quant validation within configured limits.")
 

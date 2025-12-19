@@ -55,3 +55,29 @@ class TestDataValidator:
         assert report["passed"] is True
         assert any("missing data" in warn for warn in report["warnings"])
 
+    def test_validate_dataframe_with_custom_price_columns(self):
+        df = pd.DataFrame({"Price": [1.0, 0.0, 2.0]})
+
+        report = self.validator.validate_dataframe(df, price_columns=["Price"])
+
+        assert report["passed"] is False
+        assert any("Price" in err for err in report["errors"])
+
+    def test_validate_ohlcv_statistics_exposed_for_clean_data(self):
+        df = pd.DataFrame(
+            {
+                "Open": [10.0, 10.5, 11.0],
+                "High": [10.5, 11.0, 11.5],
+                "Low": [9.5, 10.0, 10.5],
+                "Close": [10.2, 10.8, 11.1],
+                "Volume": [1000, 1200, 900],
+            }
+        )
+
+        report = self.validator.validate_ohlcv(df)
+
+        assert report["passed"] is True
+        assert report["errors"] == []
+        missing_stats = report["statistics"].get("missing_ratio", {})
+        assert set(missing_stats.keys()) == set(df.columns)
+        assert all(value == 0 for value in missing_stats.values())

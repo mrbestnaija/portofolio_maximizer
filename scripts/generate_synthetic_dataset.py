@@ -57,6 +57,35 @@ def append_run_log(entry: dict, log_dir: Path = Path("logs/automation")) -> None
         logger.warning("Failed to append synthetic run log: %s", exc)
 
 
+def write_latest_pointer(
+    dataset_id: str,
+    dataset_dir: Path,
+    manifest_path: Path,
+    cfg: SyntheticConfig,
+    config_path: Path,
+    tickers: List[str],
+    start: str,
+    end: str,
+) -> Path:
+    """Persist a latest-dataset pointer for automation."""
+    payload = {
+        "dataset_id": dataset_id,
+        "dataset_path": str(dataset_dir),
+        "manifest_path": str(manifest_path),
+        "generator_version": cfg.generator_version,
+        "config_hash": compute_config_hash(config_path),
+        "tickers": tickers,
+        "start_date": start,
+        "end_date": end,
+        "frequency": cfg.frequency,
+        "seed": cfg.seed,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    pointer_path = cfg.persistence_root / "latest.json"
+    pointer_path.write_text(json.dumps(payload, indent=2))
+    return pointer_path
+
+
 def prune_logs(retention_days: int = 14, log_dir: Path = Path("logs/automation")) -> None:
     """Invoke pruning script to enforce retention."""
     try:
@@ -156,6 +185,16 @@ def main() -> None:
 
     manifest_path = dataset_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    latest_pointer = write_latest_pointer(
+        dataset_id=dataset_id,
+        dataset_dir=dataset_dir,
+        manifest_path=manifest_path,
+        cfg=cfg,
+        config_path=Path(args.config),
+        tickers=tickers,
+        start=start,
+        end=end,
+    )
 
     append_run_log(
         {
@@ -163,6 +202,7 @@ def main() -> None:
             "dataset_id": dataset_id,
             "dataset_path": str(dataset_dir),
             "manifest_path": str(manifest_path),
+            "latest_pointer": str(latest_pointer),
             "rows": manifest["rows"],
             "tickers": tickers,
             "start_date": start,

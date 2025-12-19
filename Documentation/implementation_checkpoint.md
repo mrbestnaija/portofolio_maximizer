@@ -6,6 +6,21 @@
 
 ---
 
+**Recent changes (2025-12-08)**: Synthetic generator now emits event/regime/market-hours/microstructure fields by default with Spread/Slippage columns and a `latest` pointer (syn_682c415bb89c) for pipeline consumption; GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) flows through pipeline/backtests/GAN stub with CUDA auto-detect + CPU fallback; `scripts/train_gan_stub.py` + `bash/run_gan_stub.sh` can optionally train a minimal GAN on persisted synthetic parquet when torch is available.
+
+### Synthetic event/microstructure refresh (2025-12-08)
+- Default config now activates flash crash, vol spike, gap risk, and bear drift hooks with regime/correlation wiring, market-hours seasonality weights, and microstructure parameters (spread/slippage/micro_vol) so regenerated datasets surface Spread/Slippage columns out of the box.
+- `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes parquet/manifest plus `data/synthetic/latest.json` so synthetic runs can target `SYNTHETIC_DATASET_ID=latest` (current: `syn_682c415bb89c`) without path edits; `etl/synthetic_extractor.py` consumes both env-based id/path hints.
+
+### GPU defaults and PIPELINE_DEVICE (2025-12-08)
+- Pipeline/backtest entry points (`scripts/run_etl_pipeline.py`, `scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`) accept `--prefer-gpu/--no-prefer-gpu`, auto-detect CUDA (torch/cupy) when available, set `PIPELINE_DEVICE` accordingly, and log the chosen device while falling back to CPU silently.
+- GAN stub runner (`bash/run_gan_stub.sh` → `scripts/train_gan_stub.py`) inherits the same device logic so synthetic GAN experiments align with TS/backtest device choices and checkpoint under `models/synthetic/gan_stub`.
+
+### Broader refresh (timelines, phase statuses, run IDs)
+- Timeline: Phase 1/2 synthetic event/regime plus market-hours/microstructure hooks are shipped; Phase 2 macro event library + calibration sweeps are still open; GPU preference wiring now spans pipeline/backtests/GAN stub.
+- Phase status: Synthetic runs are green with Spread/Slippage outputs and `latest` pointer; GPU auto-detect defaults to CUDA, falls back to CPU quietly; GAN stub remains optional/torch-dependent for quick training loops.
+- Run IDs: `data/synthetic/latest.json` → `syn_682c415bb89c` (events+microstructure+seasonality); earlier baselines `syn_fc8a37128efc` (events) and `syn_714ae868f78b` (pre-events) remain for regression comparison. Latest smoke executed via `bash/run_synthetic_latest.sh` with `SYNTHETIC_DATASET_ID=latest`.
+
 ### 2025-12-04 Delta (TS/LLM guardrails + MVS reporting + quant monitoring)
 - Time Series signals now honour a **quant-success hard gate**: `models/time_series_signal_generator.TimeSeriesSignalGenerator` attaches a `quant_profile` sourced from `config/quant_success_config.yml` and demotes BUY/SELL actions to HOLD when `status == "FAIL"` outside diagnostic modes, while logging full context to `logs/signals/quant_validation.jsonl`. This keeps paper trading aligned with the same profit_factor/win_rate/expected_profit thresholds used in brutal and dashboards.
 - Automated trading now has a **live LLM readiness check**: `scripts/run_auto_trader.py` only enables LLM fallback when `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise). Diagnostic runs still bypass this gate so LLM behaviour can be explored without changing production readiness.

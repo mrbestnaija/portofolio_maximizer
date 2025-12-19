@@ -18,7 +18,7 @@ constitutes an acceptable test outcome.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Sequence, Tuple, Any
+from typing import Dict, Sequence, Tuple, Any, Optional
 
 import numpy as np
 from scipy import stats
@@ -158,63 +158,138 @@ def rank_stability_score(
     return avg_ranks, float(stability)
 
 
+@dataclass
+class BootstrapIntervals:
+    """Container for bootstrap confidence intervals."""
+
+    sharpe_ratio: Tuple[float, float]
+    max_drawdown: Tuple[float, float]
+    samples: int
+    confidence_level: float
+
+
 class StatisticalTestSuite:
     """Convenience wrapper exposing common validation tests."""
 
+    def _clean_series(self, values: Sequence[float] | None) -> np.ndarray:
+        if values is None:
+            return np.array([], dtype=float)
+        arr = np.asarray(values, dtype=float)
+        return arr[~np.isnan(arr)]
+
     def test_strategy_significance(
-        self, pnl_series: Sequence[float], benchmark_series: Sequence[float] | None = None
+        self,
+        pnl_series: Sequence[float],
+        benchmark_series: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
-        import numpy as np
-        if pnl_series is None:
-            return {"p_value": 1.0, "t_stat": 0.0, "better_model": None}
-        x = np.asarray(pnl_series, dtype=float)
-        x = x[~np.isnan(x)]
+        """
+        Basic significance test with information ratio.
+
+        - With a benchmark: Diebold–Mariano on diff, plus information ratio.
+        - Without a benchmark: one-sample t-test vs 0.
+        """
+        x = self._clean_series(pnl_series)
         if benchmark_series is not None:
-            y = np.asarray(benchmark_series, dtype=float)
-            y = y[~np.isnan(y)]
+            y = self._clean_series(benchmark_series)
             m = min(len(x), len(y))
             if m < 3:
-                return {"p_value": 1.0, "t_stat": 0.0, "better_model": None}
-            res = diebold_mariano(x[:m], y[:m])
-            return {"p_value": res.p_value, "t_stat": res.statistic, "better_model": res.better_model}
+                return {"p_value": 1.0, "t_stat": 0.0, "information_ratio": 0.0, "significant": False}
+            diff = x[:m] - y[:m]
+            ir = float(diff.mean() / (diff.std() or 1e-12))
+            res = diebold_mariano(diff, np.zeros_like(diff))
+            return {
+                "p_value": res.p_value,
+                "t_stat": res.statistic,
+                "information_ratio": ir,
+                "significant": res.p_value < 0.05,
+            }
+
         if len(x) < 3:
-            return {"p_value": 1.0, "t_stat": 0.0, "better_model": None}
+            return {"p_value": 1.0, "t_stat": 0.0, "information_ratio": 0.0, "significant": False}
         t_stat, p_val = stats.ttest_1samp(x, 0.0, nan_policy="omit")
-        return {"p_value": float(p_val), "t_stat": float(t_stat), "better_model": None}
+        ir = float(x.mean() / (x.std() or 1e-12))
+        return {"p_value": float(p_val), "t_stat": float(t_stat), "information_ratio": ir, "significant": p_val < 0.05}
 
-    def test_autocorrelation(self, returns: Sequence[float]) -> Dict[str, Any]:
-        import numpy as np
-        if returns is None:
-            return {"ljung_box_p": 1.0}
-        r = np.asarray(returns, dtype=float)
-        r = r[~np.isnan(r)]
-        if len(r) < 5:
-            return {"ljung_box_p": 1.0}
-        # Simple 1-lag Ljung-Box analogue
-        acf1 = np.corrcoef(r[:-1], r[1:])[0, 1]
+    def test_autocorrelation(self, returns: Sequence[float], lags: int = 1) -> Dict[str, Any]:
+        """
+        Return Ljung–Box style statistic/p-value plus Durbin–Watson.
+        """
+        r = self._clean_series(returns)
+        if len(r) < max(lags + 1, 3):
+            return {"ljung_box_stat": 0.0, "ljung_box_p_value": 1.0, "durbin_watson": 0.0}
+
+        acf_vals = []
+        for lag in range(1, max(2, lags + 1)):
+            corr = float(np.corrcoef(r[:-lag], r[lag:])[0, 1])
+            if np.isnan(corr):
+                corr = 0.0
+            acf_vals.append(corr)
+
         n = len(r)
-        q = n * (n + 2) * (acf1**2) / max(n - 1, 1)
-        p_val = 1 - stats.chi2.cdf(q, df=1)
-        return {"ljung_box_p": float(p_val)}
+        lb_stat = n * (n + 2) * sum((acf_vals[k - 1] ** 2) / max(n - k, 1) for k in range(1, len(acf_vals) + 1))
+        lb_p = 1 - stats.chi2.cdf(lb_stat, df=len(acf_vals))
 
-    def bootstrap_validation(self, returns: Sequence[float], n_bootstrap: int = 200) -> Dict[str, Any]:
-        import numpy as np
-        if returns is None:
-            return {"sharpe_ci": (0.0, 0.0)}
-        r = np.asarray(returns, dtype=float)
-        r = r[~np.isnan(r)]
+        # Durbin–Watson
+        diff = np.diff(r)
+        dw = float(np.sum(diff * diff) / (np.sum(r * r) or 1e-12))
+
+        return {"ljung_box_stat": float(lb_stat), "ljung_box_p_value": float(lb_p), "durbin_watson": dw}
+
+    def bootstrap_validation(
+        self,
+        returns: Sequence[float],
+        n_bootstrap: int = 200,
+        confidence_level: float = 0.95,
+        random_state: Optional[int] = None,
+    ) -> BootstrapIntervals:
+        """
+        Bootstrap Sharpe ratio and max drawdown intervals.
+        """
+        r = self._clean_series(returns)
         if len(r) < 3:
-            return {"sharpe_ci": (0.0, 0.0)}
-        boot = []
+            return BootstrapIntervals(
+                sharpe_ratio=(0.0, 0.0),
+                max_drawdown=(0.0, 0.0),
+                samples=int(n_bootstrap),
+                confidence_level=float(confidence_level),
+            )
+
+        rng = np.random.default_rng(random_state)
+        sharpes = []
+        drawdowns = []
         for _ in range(int(n_bootstrap)):
-            sample = np.random.choice(r, size=len(r), replace=True)
-            mean = sample.mean()
-            std = sample.std() or 1e-12
-            boot.append(mean / std)
-        boot = sorted(boot)
-        lo = boot[int(0.025 * len(boot))]
-        hi = boot[int(0.975 * len(boot))]
-        return {"sharpe_ci": (float(lo), float(hi))}
+            sample = rng.choice(r, size=len(r), replace=True)
+            mu = float(sample.mean())
+            sigma = float(sample.std() or 1e-12)
+            sharpes.append(mu / sigma)
+            drawdowns.append(self._max_drawdown(sample))
+
+        alpha = max(min((1.0 - confidence_level) / 2.0, 0.499), 0.0)
+        lo_q = alpha
+        hi_q = 1 - alpha
+        sr_low, sr_high = np.quantile(sharpes, [lo_q, hi_q])
+        dd_low, dd_high = np.quantile(drawdowns, [lo_q, hi_q])
+
+        return BootstrapIntervals(
+            sharpe_ratio=(float(sr_low), float(sr_high)),
+            max_drawdown=(float(dd_low), float(dd_high)),
+            samples=int(n_bootstrap),
+            confidence_level=float(confidence_level),
+        )
+
+    @staticmethod
+    def _max_drawdown(returns: np.ndarray) -> float:
+        """Compute max drawdown on cumulative return path."""
+        curve = np.cumprod(1 + returns)
+        peak = np.maximum.accumulate(curve)
+        drawdowns = curve / peak - 1.0
+        return float(drawdowns.min()) if drawdowns.size else 0.0
 
 
-__all__ = ["DieboldMarianoResult", "diebold_mariano", "rank_stability_score", "StatisticalTestSuite"]
+__all__ = [
+    "DieboldMarianoResult",
+    "diebold_mariano",
+    "rank_stability_score",
+    "BootstrapIntervals",
+    "StatisticalTestSuite",
+]

@@ -143,6 +143,7 @@ REQUIRED FOR EVERY CODE SUGGESTION:
 ```
 
 ### Code Review Checklist (Every Session)
+- Never delete files without explicit user permission (no `rm`/`unlink` without approval).
 - [ ] **Line count under phase limit?** Count actual lines, not estimates
 - [ ] **Dependencies verified working?** Test imports and data access
 - [ ] **Error handling included?** Network failures, missing data, calculation errors

@@ -11,6 +11,7 @@ max_risk_score).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, List, Optional, Sequence
@@ -74,6 +75,8 @@ def backtest_candidate(
     div_pen = float(candidate_params.get("diversification_penalty", 0.0) or 0.0)
     kelly_cap = float(candidate_params.get("sizing_kelly_fraction_cap", 0.0) or 0.0)
     sizing_factor = max(0.0, min(2.0, (1.0 - div_pen) * (1.0 + kelly_cap / 10.0)))
+    device = os.getenv("PIPELINE_DEVICE", "cpu")
+    logger.info("Candidate backtest device: %s", device)
 
     equity_curve: List[float] = []
     pnl_events: List[float] = []

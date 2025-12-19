@@ -19,6 +19,15 @@
 - Isolation rules: `ENABLE_SYNTHETIC_PROVIDER=1`/`SYNTHETIC_ONLY=1` for tests; remove synthetic flags and point `PORTFOLIO_DB_PATH` back to production before live. Synthetic outputs must not enter live trading, dashboards, or training once validation ends (`AGENT_INSTRUCTION.md`).
 - Logging/retention: synthetic generation/validation append to `logs/automation/synthetic_runs.log` with auto-prune at 14 days via `scripts/prune_synthetic_logs.py`, aligning with `CHECKPOINTING_AND_LOGGING.md`, `QUANT_VALIDATION_MONITORING_POLICY.md`, and `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`.
 - Pipeline readiness: `scripts/run_etl_pipeline.py --execution-mode synthetic --data-source synthetic` now loads persisted datasets via `SYNTHETIC_DATASET_ID`/`SYNTHETIC_DATASET_PATH`, logs `dataset_id`/`generator_version` in `PipelineLogger`, and falls back to deterministic in-process generation if none is provided.
+- Smoke verification 2025-12-17: `pipeline_20251217_220920` ran end-to-end on `syn_1dcce391f1ea` using the synthetic provider after refreshing `numpy`/`scipy`/`pyarrow`; only warnings were CV fold overlap/drift and missing viz deps (`kiwisolver`), no stage failures.
+
+### 2025-12-18 Delta (dashboard snapshot)
+- Implemented a performance dashboard snapshot generator in `monitoring/performance_dashboard.py`. It computes trade + risk metrics from `DatabaseManager`, emits JSON/CSV artifacts, and surfaces basic alerts for data quality, drawdown, and latency. Web UI + scheduled refresh remain pending.
+- Stub wiring additions:
+  - Added deployment helper `deployment/production_deploy.py` (env/API validation, health check, dashboard snapshot hook).
+  - Added disaster recovery helper `recovery/disaster_recovery.py` (data-source failover, broker/risk mitigations, model fallback).
+  - Added TS utilities: `etl/time_series_feature_builder.py`, `models/time_series_runner.py`, and `analysis/time_series_validation.py`.
+  - Minor hardening: SARIMAX diagnostics now log instead of pass; cache manager warns on dir size errors.
 
 ### Nov 12, 2025 Update
 - Time Series signal generator refactor is exercised via logs/ts_signal_demo.json; stubs for router/broker now depend on these BUY/SELL payloads rather than HOLD placeholders.
@@ -144,9 +153,9 @@ new cTrader client to `RealTimeRiskManager` and `DatabaseManager`, enforces the
 
 ---
 
-### 3. **Production Performance Dashboard** ❌ NOT IMPLEMENTED
-**Location**: `monitoring/performance_dashboard.py` (MISSING)  
-**Status**: Referenced in documentation but file does not exist  
+### 3. **Production Performance Dashboard** 🟡 PARTIAL
+**Location**: `monitoring/performance_dashboard.py`  
+**Status**: Snapshot generator implemented (JSON/CSV export + alerts); web UI and scheduler pending  
 **Priority**: HIGH - Required for monitoring
 
 **Required Implementation**:
@@ -209,14 +218,14 @@ class PerformanceDashboard:
 - [ ] Metrics updating every 1 minute
 - [ ] Historical charts (30-day, 90-day, 1-year)
 - [ ] Alert visualization
-- [ ] Export to CSV/JSON
+- [x] Export to CSV/JSON
 - [ ] Web interface accessible
 
 ---
 
-### 4. **Production Deployment Pipeline** ❌ NOT IMPLEMENTED
-**Location**: `deployment/production_deploy.py` (MISSING)  
-**Status**: Referenced in documentation but file does not exist  
+### 4. **Production Deployment Pipeline** 🟡 PARTIAL
+**Location**: `deployment/production_deploy.py`  
+**Status**: Deploy helper added (env/API key validation, health check, dashboard emit hooks); monitoring/rollback remain  
 **Priority**: HIGH - Required for production deployment
 
 **Required Implementation**:
@@ -274,9 +283,9 @@ class ProductionDeployer:
 
 ---
 
-### 5. **Disaster Recovery System** ❌ NOT IMPLEMENTED
-**Location**: `recovery/disaster_recovery.py` (MISSING)  
-**Status**: Referenced in documentation but file does not exist  
+### 5. **Disaster Recovery System** 🟡 PARTIAL
+**Location**: `recovery/disaster_recovery.py`  
+**Status**: Implemented failover hooks (data source switch, model fallback, broker/risk mitigation); needs deeper integration tests  
 **Priority**: HIGH - Required for production reliability
 
 **Required Implementation**:
@@ -405,9 +414,9 @@ def _execute_automatic_action(self, action: str, positions: Dict[str, int]):
 
 ---
 
-### 7. **Time-Series Feature Builder** ❌ NOT IMPLEMENTED
-**Location**: `etl/time_series_feature_builder.py` (MISSING)  
-**Status**: Referenced in Phase B documentation but not implemented  
+### 7. **Time-Series Feature Builder** 🟡 PARTIAL
+**Location**: `etl/time_series_feature_builder.py`  
+**Status**: Implemented lags/returns/rolling stats/seasonal decomposition; persistence to parquet; DB wiring optional  
 **Priority**: MEDIUM - Required for advanced ML models
 
 **Required Implementation**:
@@ -464,18 +473,18 @@ class TimeSeriesFeatureBuilder:
 - `etl/database_manager.py` for feature store
 
 **Success Criteria**:
-- [ ] Lag features created
-- [ ] Seasonal decomposition working
-- [ ] Holiday effects included
-- [ ] Rolling statistics calculated
+- [x] Lag features created
+- [x] Seasonal decomposition working
+- [x] Holiday effects included
+- [x] Rolling statistics calculated
 - [ ] Features persisted to database
 - [ ] Integration with SAMOSSA/SARIMAX
 
 ---
 
-### 8. **Parallel Model Runner** ❌ NOT IMPLEMENTED
-**Location**: `models/time_series_runner.py` (MISSING)  
-**Status**: Referenced in Phase B documentation but not implemented  
+### 8. **Parallel Model Runner** 🟡 PARTIAL
+**Location**: `models/time_series_runner.py`  
+**Status**: Implemented async runner with SARIMAX/GARCH/LLM hooks; normalization + provenance light; full error handling still needed  
 **Priority**: MEDIUM - Required for parallel model execution
 
 **Required Implementation**:
@@ -568,7 +577,7 @@ class TimeSeriesRunner:
 - `asyncio` for parallel execution
 
 **Success Criteria**:
-- [ ] Parallel execution working
+- [x] Parallel execution working
 - [ ] All models execute concurrently
 - [ ] Unified signal schema output
 - [ ] Provenance metadata attached
@@ -577,9 +586,9 @@ class TimeSeriesRunner:
 
 ---
 
-### 10. **Time-Series Validation Framework** ❌ NOT IMPLEMENTED
-**Location**: `analysis/time_series_validation.py` (MISSING)  
-**Status**: Referenced in Phase B documentation but not implemented  
+### 10. **Time-Series Validation Framework** 🟡 PARTIAL
+**Location**: `analysis/time_series_validation.py`  
+**Status**: Walk-forward CV scaffold added with MAE/RMSE/profit factor metrics; persistence to logs/automation/time_series_validation.json  
 **Priority**: MEDIUM - Required for model evaluation
 
 **Required Implementation**:
@@ -652,8 +661,8 @@ class TimeSeriesValidation:
   - The framework should orchestrate and report on these **full-model evaluations** (TS ensemble + portfolio metrics), not replace the underlying forecaster or quant success helper.
 
 **Success Criteria**:
-- [ ] Walk-forward validation working
-- [ ] Profit factor calculated
+- [x] Walk-forward validation working
+- [x] Profit factor calculated
 - [ ] Statistical tests implemented
 - [ ] Results persisted to database
 - [ ] Integration with dashboards
@@ -662,9 +671,9 @@ class TimeSeriesValidation:
 
 ## 🔧 MINOR INCOMPLETE ITEMS (Low Priority)
 
-### 11. **Exception Handlers with Pass** 🟡 MINOR
+### 11. **Exception Handlers with Pass** 🟢 DONE
 **Location**: `forcester_ts/sarimax.py` (Lines 227, 234)  
-**Status**: Exception handlers silently pass - should log  
+**Status**: Exception handlers now log warnings and preserve diagnostics  
 **Priority**: LOW - Should log exceptions
 
 **Current State**:
@@ -701,9 +710,9 @@ except Exception as e:  # pragma: no cover
 
 ---
 
-### 12. **Cache Manager - Exception Handler** 🟡 MINOR
+### 12. **Cache Manager - Exception Handler** 🟢 DONE
 **Location**: `scripts/cache_manager.py` (Line 103)  
-**Status**: Exception handler silently passes  
+**Status**: Exception handler now logs warnings on directory size errors  
 **Priority**: LOW - Should log exceptions
 
 **Current State**:
