@@ -5,6 +5,7 @@
 **Recent changes (2025-12-19)**: Synthetic stack upgraded with profiles + copula/tail shocks + richer features/calibration + txn-cost microstructure (TxnCostBps/ImpactBps) and persisted features/calibration artifacts; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (manifest + features + calibration). Forecasting/ETL statistical hardening landed (SARIMAX shift-safe backtransform, ensemble variance screening + row-wise convex blending, MSSA-RL standardized CUSUM, synthetic/live isolation, leak-free post-split normalization). GPU preference wiring remains in place (`PIPELINE_DEVICE` auto-detects CUDA with CPU fallback). Added cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`) and cron hook `sanitize_caches` to keep artifacts within 14-day retention by default.
 **Recent Achievements**:
 - 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque–Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
+- 2025-12-19 Delta (signal/strategy PnL hardening): TimeSeriesSignalGenerator now honors per-ticker routing thresholds, estimates symmetric round-trip friction (microstructure or bid/ask) for net-edge gating, fixes CI uncertainty ratios, and makes quant validation direction-consistent (net expected profit + BUY/SELL return polarity). SignalRouter now emits `risk_level` and SignalValidator now consumes TS decision_context for transaction-cost feasibility. Tests: `tests/models/test_time_series_signal_generator.py`, `tests/models/test_signal_router.py`, `tests/integration/test_time_series_signal_integration.py`, `tests/execution/test_paper_trading_engine.py`, `tests/ai_llm/test_signal_validator.py`.
 - 2025-11-30 Sentiment overlay plan captured (`Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md`); `config/sentiment.yml` remains disabled with strict gating and `tests/sentiment/test_sentiment_config_scaffold.py` guarding activation until profitability beats the benchmark.
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
@@ -618,8 +619,8 @@ Enhanced Portfolio Pipeline (OPTIMIZER READY)
 ### API Key Integration:
 ```python
 # .env - ADD NEW KEYS (maintain existing structure) # remove secret credential to dot environment 
-ALPHA_VANTAGE_API_KEY='UFJ93EBWE29IE2RR'
-FINNHUB_API_KEY='d3f4cb1r01qh40fgqdjgd3f4cb1r01qh40fgqdk0'
+ALPHA_VANTAGE_API_KEY='your_alpha_vantage_key_here'
+FINNHUB_API_KEY='your_finnhub_key_here'
 # Existing YFINANCE_API_KEY (if any) remains
 ```
 
@@ -658,3 +659,4 @@ FINNHUB_API_KEY='d3f4cb1r01qh40fgqdjgd3f4cb1r01qh40fgqdk0'
 
 - Hotfix 2025-11-23: ETL data_storage UnboundLocalError resolved (removed nested pandas imports); ASCII-only logging enforced in DataSourceManager to prevent cp1252 errors; CV drift metrics persisted and dashboard JSON emission extended.
 - Strategy optimization layer: etl/strategy_optimizer.py and scripts/run_strategy_optimization.py (config/strategy_optimization_config.yml) implement stochastic, regime-aware PnL tuning without hardcoded strategies; see Documentation/STOCHASTIC_PNL_OPTIMIZATION.md for design.
+

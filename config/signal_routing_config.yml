@@ -21,6 +21,19 @@ signal_routing:
     min_expected_return: 0.003  # Production baseline (re-tighten after research)
     max_risk_score: 0.7         # Maximum risk score (70%)
     use_volatility_filter: true # Filter signals based on volatility
+    # Cost/uncertainty gating for Time Series signals.
+    # - default_roundtrip_cost_bps is a *prior* used only when bid/ask or synthetic microstructure
+    #   columns (TxnCostBps/ImpactBps) are unavailable. Values are basis points of notional.
+    # - min_signal_to_noise is an optional CI-based SNR gate (0 disables).
+    cost_model:
+      default_roundtrip_cost_bps:
+        US_EQUITY: 10.0
+        INTL_EQUITY: 15.0
+        FX: 5.0
+        CRYPTO: 25.0
+        INDEX: 10.0
+        UNKNOWN: 10.0
+      min_signal_to_noise: 0.0
     # Production per-ticker overrides (aligned to proposals after review).
     per_ticker:
       "CL=F":
@@ -38,17 +51,6 @@ signal_routing:
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.
-
-  # Diagnostic friction buffers from automation proposals (review before promotion).
-  friction_buffers:
-    US_EQUITY:
-      min_expected_return: 1.414298901677343
-      friction_buffer: 1.414298901677343
-      median_commission: 1.4135921056245309
-    FX:
-      min_expected_return: 0.7889130820614366
-      friction_buffer: 0.7889130820614366
-      median_commission: 0.7885188226501116
   
   # Fallback triggers
   ts_fallback_triggers:

@@ -175,6 +175,108 @@ class TestSignalValidator:
         )
         assert isinstance(is_valid, bool)
         assert isinstance(warnings, list)
+
+    def test_transaction_cost_validation_prefers_decision_context_over_market_drift(self, validator):
+        """Decision context edge should override negative market drift proxies."""
+        dates = pd.date_range(start='2025-01-01', periods=100, freq='D')
+        # Negative drift market window that would otherwise fail cost feasibility.
+        prices = 100 * np.exp(-0.002 * np.arange(100))
+        market_data = pd.DataFrame({'Close': prices}, index=dates)
+
+        signal = {
+            'action': 'BUY',
+            'confidence': 0.6,
+            'risk_level': 'medium',
+            'provenance': {
+                'decision_context': {
+                    'gross_trade_return': 0.01,
+                    'roundtrip_cost_fraction': 0.002,
+                    'net_trade_return': 0.008,
+                }
+            }
+        }
+
+        is_valid, warnings = validator._validate_transaction_costs(
+            signal, market_data, portfolio_value=10000.0
+        )
+
+        assert is_valid is True
+        assert warnings == []
+
+    def test_transaction_cost_validation_uses_forecast_horizon_for_holding_period(self, validator):
+        """forecast_horizon should influence holding-period drift estimate when needed."""
+        dates = pd.date_range(start='2025-01-01', periods=100, freq='D')
+        # Constant small positive daily drift: 1bp/day in log terms.
+        prices = 100 * np.exp(0.0001 * np.arange(100))
+        market_data = pd.DataFrame({'Close': prices}, index=dates)
+
+        short_horizon_signal = {
+            'action': 'BUY',
+            'confidence': 0.6,
+            'risk_level': 'medium',
+        }
+        long_horizon_signal = {
+            'action': 'BUY',
+            'confidence': 0.6,
+            'risk_level': 'medium',
+            'forecast_horizon': 60,
+        }
+
+        _, warnings_short = validator._validate_transaction_costs(
+            short_horizon_signal, market_data, portfolio_value=10000.0
+        )
+        _, warnings_long = validator._validate_transaction_costs(
+            long_horizon_signal, market_data, portfolio_value=10000.0
+        )
+
+        assert warnings_short, "Expected a cost-feasibility warning for the default 30-day horizon"
+        assert warnings_long == [], "Expected forecast_horizon to clear the cost-feasibility warning"
+
+    def test_portfolio_concentration_validation_rejects_adding_to_overweight_position(self, validator):
+        """Portfolio snapshot should enforce a simple single-name concentration guard."""
+        dates = pd.date_range(start="2025-01-01", periods=50, freq="D")
+        prices = pd.Series(100.0, index=dates)
+        market_data = pd.DataFrame({"Close": prices})
+
+        portfolio_state = {
+            "cash": 0.0,
+            "positions": {"TEST": 500},  # ~$50k notional @ $100
+            "entry_prices": {"TEST": 100.0},
+        }
+        signal = {"ticker": "TEST", "action": "BUY", "confidence": 0.7, "risk_level": "medium"}
+
+        is_valid, warnings = validator._validate_correlation(
+            signal,
+            market_data,
+            portfolio_state=portfolio_state,
+            portfolio_value=50_000.0,
+        )
+
+        assert is_valid is False
+        assert any("Concentration limit breached" in w for w in warnings)
+
+    def test_portfolio_concentration_validation_allows_reducing_exposure(self, validator):
+        """Selling down an existing long should not be blocked by concentration checks."""
+        dates = pd.date_range(start="2025-01-01", periods=50, freq="D")
+        prices = pd.Series(100.0, index=dates)
+        market_data = pd.DataFrame({"Close": prices})
+
+        portfolio_state = {
+            "cash": 0.0,
+            "positions": {"TEST": 500},
+            "entry_prices": {"TEST": 100.0},
+        }
+        signal = {"ticker": "TEST", "action": "SELL", "confidence": 0.7, "risk_level": "medium"}
+
+        is_valid, warnings = validator._validate_correlation(
+            signal,
+            market_data,
+            portfolio_state=portfolio_state,
+            portfolio_value=50_000.0,
+        )
+
+        assert is_valid is True
+        assert warnings == []
     
     def test_backtest_signal_quality(self, validator):
         """Test signal quality backtesting"""

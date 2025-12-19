@@ -170,11 +170,27 @@ class PaperTradingEngine:
         logger.info(f"Executing %s signal for %s", action, ticker)
         # Step 1: Validate signal (diagnostic toggle via env DIAGNOSTIC_MODE/EXECUTION_DIAGNOSTIC_MODE)
         diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
-        validation = self.signal_validator.validate_llm_signal(
-            signal,
-            market_data,
-            self._current_portfolio_value()
-        )
+        portfolio_snapshot = {
+            "cash": float(self.portfolio.cash),
+            "positions": dict(self.portfolio.positions),
+            "entry_prices": dict(self.portfolio.entry_prices),
+            "total_value": float(self.portfolio.total_value),
+        }
+        try:
+            validation = self.signal_validator.validate_llm_signal(
+                signal,
+                market_data,
+                self._current_portfolio_value(),
+                portfolio_state=portfolio_snapshot,
+            )
+        except TypeError:
+            # Backward compatibility: tests and alternate validators may not accept
+            # the portfolio_state kwarg yet.
+            validation = self.signal_validator.validate_llm_signal(
+                signal,
+                market_data,
+                self._current_portfolio_value(),
+            )
         if (not validation.is_valid or validation.recommendation == 'REJECT') and not diag_mode:
             logger.warning("Signal rejected: %s", validation.warnings)
             return ExecutionResult(

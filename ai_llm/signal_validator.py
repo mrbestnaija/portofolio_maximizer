@@ -15,6 +15,7 @@ Per AGENT_INSTRUCTION.md:
 - Must beat buy-and-hold baseline
 """
 
+import json
 import logging
 import os
 from typing import Dict, Any, List, Optional, Tuple
@@ -162,10 +163,13 @@ class SignalValidator:
         
         logger.info(f"Signal Validator initialized with min_confidence={min_confidence}")
     
-    def validate_llm_signal(self, 
-                           signal: Dict[str, Any], 
-                           market_data: pd.DataFrame,
-                           portfolio_value: float = 10000.0) -> ValidationResult:
+    def validate_llm_signal(
+        self,
+        signal: Dict[str, Any],
+        market_data: pd.DataFrame,
+        portfolio_value: float = 10000.0,
+        portfolio_state: Optional[Dict[str, Any]] = None,
+    ) -> ValidationResult:
         """
         5-layer validation before signal execution.
         
@@ -173,6 +177,8 @@ class SignalValidator:
             signal: LLM signal dict with action, confidence, reasoning, risk_level
             market_data: Recent OHLCV data for validation
             portfolio_value: Current portfolio value for position sizing
+            portfolio_state: Optional snapshot with keys like cash/positions/entry_prices
+                (used for concentration/correlation checks when available).
             
         Returns:
             ValidationResult with validation status and warnings
@@ -211,8 +217,13 @@ class SignalValidator:
         layer_results['position_sizing'] = position_valid
         warnings.extend(position_warnings)
         
-        # Layer 4: Portfolio correlation (simplified without full portfolio)
-        correlation_valid, corr_warnings = self._validate_correlation(signal, market_data)
+        # Layer 4: Portfolio correlation / concentration impact.
+        correlation_valid, corr_warnings = self._validate_correlation(
+            signal,
+            market_data,
+            portfolio_state=portfolio_state,
+            portfolio_value=portfolio_value,
+        )
         layer_results['correlation'] = correlation_valid
         warnings.extend(corr_warnings)
         
@@ -361,24 +372,162 @@ class SignalValidator:
         
         return is_valid, warnings
     
-    def _validate_correlation(self, 
-                             signal: Dict[str, Any], 
-                             market_data: pd.DataFrame) -> tuple[bool, List[str]]:
-        """Layer 4: Portfolio correlation impact (simplified)"""
-        warnings = []
-        
-        # Without full portfolio data, check for excessive concentration
-        action = signal.get('action', 'HOLD').upper()
-        
-        # Basic diversification check
-        if action == 'BUY':
-            # Would add: check correlation with existing holdings
-            # For now: basic validation
-            warnings.append("NOTICE: Full portfolio correlation check requires portfolio data")
-        
-        # Always pass this layer for now (requires full portfolio integration)
+    def _validate_correlation(
+        self,
+        signal: Dict[str, Any],
+        market_data: pd.DataFrame,
+        *,
+        portfolio_state: Optional[Dict[str, Any]] = None,
+        portfolio_value: Optional[float] = None,
+    ) -> tuple[bool, List[str]]:
+        """Layer 4: Portfolio impact (concentration + correlation when possible)."""
+        warnings: List[str] = []
+
+        action = str(signal.get("action", "HOLD")).upper()
+        if action == "HOLD":
+            return True, warnings
+
+        if not isinstance(portfolio_state, dict):
+            if action == "BUY":
+                warnings.append("NOTICE: Full portfolio correlation check requires portfolio data")
+            return True, warnings
+
+        positions_raw = portfolio_state.get("positions")
+        if not isinstance(positions_raw, dict) or not positions_raw:
+            if action == "BUY":
+                warnings.append("NOTICE: Portfolio snapshot missing positions; correlation check limited")
+            return True, warnings
+
+        entry_prices_raw = portfolio_state.get("entry_prices") or {}
+        entry_prices: Dict[str, Any]
+        if isinstance(entry_prices_raw, dict):
+            entry_prices = entry_prices_raw
+        else:
+            entry_prices = {}
+
+        def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return default
+            if not np.isfinite(parsed):
+                return default
+            return float(parsed)
+
+        def _infer_asset_class(ticker: str) -> str:
+            sym = (ticker or "").upper()
+            if sym.endswith("=X"):
+                return "FX"
+            if sym.endswith("-USD") or sym in {"BTC", "ETH", "SOL"}:
+                return "CRYPTO"
+            if "^" in sym:
+                return "INDEX"
+            if any(sym.endswith(suffix) for suffix in (".NS", ".TW", ".L")):
+                return "INTL_EQUITY"
+            return "US_EQUITY"
+
+        def _lookup(mapping: Dict[str, Any], key: str, default: Any = None) -> Any:
+            if key in mapping:
+                return mapping[key]
+            upper = key.upper()
+            if upper in mapping:
+                return mapping[upper]
+            lower = key.lower()
+            if lower in mapping:
+                return mapping[lower]
+            return default
+
+        ticker_raw = signal.get("ticker")
+        ticker = str(ticker_raw).strip() if ticker_raw is not None else ""
+        if not ticker:
+            if action == "BUY":
+                warnings.append("NOTICE: Missing ticker; portfolio impact check limited")
+            return True, warnings
+
+        positions: Dict[str, Any] = positions_raw
+        current_shares = _safe_float(_lookup(positions, ticker, 0.0), default=0.0) or 0.0
+
+        # Use the most current price we have for the active symbol.
+        price_est = _safe_float(signal.get("entry_price"))
+        if (price_est is None or price_est <= 0.0) and isinstance(market_data, pd.DataFrame) and not market_data.empty:
+            if "Close" in market_data.columns:
+                price_est = _safe_float(market_data["Close"].iloc[-1])
+        if price_est is None or price_est <= 0.0:
+            price_est = _safe_float(_lookup(entry_prices, ticker, None))
+        if price_est is None or price_est <= 0.0:
+            if action == "BUY":
+                warnings.append("NOTICE: Missing price context; portfolio impact check limited")
+            return True, warnings
+
+        cash = _safe_float(portfolio_state.get("cash"), default=0.0) or 0.0
+
+        # Estimate equity and gross exposure from the snapshot (entry prices are a best-effort proxy).
+        equity_est = cash
+        gross_exposure = 0.0
+        asset_exposure: Dict[str, float] = {}
+        ticker_upper = ticker.upper()
+        for sym, shares_raw in positions.items():
+            shares = _safe_float(shares_raw, default=0.0) or 0.0
+            if shares == 0.0:
+                continue
+            sym_str = str(sym).strip()
+            if not sym_str:
+                continue
+            sym_upper = sym_str.upper()
+            price = _safe_float(_lookup(entry_prices, sym_str, None))
+            if sym_upper == ticker_upper:
+                price = price_est
+            if price is None or price <= 0.0:
+                continue
+            value = shares * price
+            equity_est += value
+            exposure = abs(value)
+            gross_exposure += exposure
+            bucket = _infer_asset_class(sym_upper)
+            asset_exposure[bucket] = asset_exposure.get(bucket, 0.0) + exposure
+
+        equity_base = _safe_float(portfolio_value)
+        if equity_base is None or equity_base <= 0.0:
+            equity_base = equity_est if equity_est > 0.0 else max(abs(equity_est), abs(cash), 1.0)
+
+        # Concentration checks (correlation requires multi-asset history, so we treat this as
+        # the "portfolio impact" gate until that context is wired through).
+        increases_exposure = (action == "BUY" and current_shares >= 0.0) or (
+            action == "SELL" and current_shares <= 0.0
+        )
+        if not increases_exposure:
+            return True, warnings
+
+        single_name_weight = abs(current_shares * price_est) / equity_base if equity_base > 0 else 0.0
+        gross_leverage = gross_exposure / equity_base if equity_base > 0 else 0.0
+
+        warn_single_name = 0.10
+        max_single_name = 0.20
+        warn_gross_leverage = 1.20
+        max_gross_leverage = 1.50
+
         is_valid = True
-        
+        if single_name_weight >= warn_single_name:
+            warnings.append(
+                f"Concentration warning: {ticker_upper} is already ~{single_name_weight:.1%} of equity"
+            )
+        if single_name_weight >= max_single_name:
+            warnings.append(
+                f"Concentration limit breached: {ticker_upper} exceeds {max_single_name:.0%} of equity"
+            )
+            is_valid = False
+
+        if gross_leverage >= warn_gross_leverage:
+            warnings.append(f"High gross exposure: ~{gross_leverage:.2f}x equity")
+        if gross_leverage >= max_gross_leverage:
+            warnings.append(f"Gross exposure exceeds cap: {max_gross_leverage:.2f}x equity")
+            is_valid = False
+
+        asset_class = _infer_asset_class(ticker_upper)
+        asset_weight = asset_exposure.get(asset_class, 0.0) / equity_base if equity_base > 0 else 0.0
+        if asset_weight >= 0.90:
+            warnings.append(f"High {asset_class} concentration: ~{asset_weight:.1%} of gross exposure")
+
         return is_valid, warnings
     
     def _validate_transaction_costs(self, 
@@ -391,34 +540,95 @@ class SignalValidator:
         if diag_mode:
             return True, []
         warnings = []
-        
-        close = market_data['Close'].values
-        current_price = close[-1]
-        
-        # Calculate expected return
-        returns = np.diff(np.log(close))
-        expected_daily_return = np.mean(returns) if len(returns) > 0 else 0
-        
-        # Holding period estimate (days)
-        risk_level = signal.get('risk_level', 'medium')
-        holding_period = {'low': 60, 'medium': 30, 'high': 10}.get(risk_level, 30)
-        
-        expected_return = expected_daily_return * holding_period
-        
-        # Round-trip transaction cost
-        total_transaction_cost = 2 * self.transaction_cost  # Entry + Exit
-        
-        # Check if expected return > transaction costs
-        if expected_return < total_transaction_cost * 2:  # 2x transaction costs minimum
+
+        def _safe_float(value: Any) -> Optional[float]:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not np.isfinite(parsed):
+                return None
+            return float(parsed)
+
+        # Prefer signal-provided decision context (Time Series signals) over
+        # unconditional historical averages (LLM signals may not include it).
+        provenance_raw = signal.get("provenance")
+        provenance: Dict[str, Any] = {}
+        if isinstance(provenance_raw, dict):
+            provenance = provenance_raw
+        elif isinstance(provenance_raw, str) and provenance_raw.strip():
+            try:
+                parsed = json.loads(provenance_raw)
+                if isinstance(parsed, dict):
+                    provenance = parsed
+            except Exception:
+                provenance = {}
+
+        decision_context_raw = provenance.get("decision_context")
+        decision_context: Dict[str, Any] = {}
+        if isinstance(decision_context_raw, dict):
+            decision_context = decision_context_raw
+        elif isinstance(decision_context_raw, str) and decision_context_raw.strip():
+            try:
+                parsed = json.loads(decision_context_raw)
+                if isinstance(parsed, dict):
+                    decision_context = parsed
+            except Exception:
+                decision_context = {}
+
+        exec_friction = provenance.get("execution_friction")
+        if not isinstance(exec_friction, dict):
+            exec_friction = {}
+
+        gross_trade_return = _safe_float(decision_context.get("gross_trade_return"))
+        if gross_trade_return is None:
+            expected_return_signal = _safe_float(signal.get("expected_return"))
+            if expected_return_signal is not None:
+                gross_trade_return = abs(expected_return_signal)
+
+        # Engine-level configured commission proxy (per-side) -> round-trip fraction.
+        engine_roundtrip_cost = 2.0 * float(self.transaction_cost)
+
+        estimated_roundtrip_cost = _safe_float(decision_context.get("roundtrip_cost_fraction"))
+        if estimated_roundtrip_cost is None:
+            estimated_roundtrip_cost = _safe_float(exec_friction.get("roundtrip_cost_fraction"))
+
+        if estimated_roundtrip_cost is None:
+            effective_roundtrip_cost = engine_roundtrip_cost
+        else:
+            effective_roundtrip_cost = max(engine_roundtrip_cost, max(0.0, estimated_roundtrip_cost))
+
+        # Fallback: infer expected return from historical drift only when we have
+        # no signal-provided edge.
+        if gross_trade_return is None:
+            close = market_data['Close'].values
+            returns = np.diff(np.log(close))
+            expected_daily_return = float(np.mean(returns)) if len(returns) > 0 else 0.0
+
+            risk_level = signal.get('risk_level', 'medium')
+            horizon_raw = signal.get("forecast_horizon") or signal.get("horizon")
+            holding_period = None
+            try:
+                holding_period = int(horizon_raw) if horizon_raw is not None else None
+            except (TypeError, ValueError):
+                holding_period = None
+            if holding_period is None or holding_period <= 0:
+                holding_period = {'low': 60, 'medium': 30, 'high': 10, 'extreme': 5}.get(risk_level, 30)
+            holding_period = max(1, min(int(holding_period), 90))
+
+            expected_return = expected_daily_return * holding_period
+            gross_trade_return = abs(float(expected_return))
+
+        # Check if expected edge clears costs with a modest cushion.
+        if gross_trade_return < effective_roundtrip_cost * 2.0:  # 2x round-trip costs minimum
             warnings.append(
-                f"Expected return ({expected_return:.2%}) barely exceeds "
-                f"transaction costs ({total_transaction_cost:.2%})"
+                f"Expected edge ({gross_trade_return:.2%}) < 2x round-trip costs ({effective_roundtrip_cost:.2%})"
             )
         
         # For very small positions, costs matter more
         confidence = signal.get('confidence', 0.5)
         position_value = portfolio_value * self.max_position_size * confidence
-        transaction_cost_dollars = position_value * total_transaction_cost
+        transaction_cost_dollars = position_value * effective_roundtrip_cost
         
         if transaction_cost_dollars > position_value * 0.02:  # Costs > 2% of position
             warnings.append(f"Transaction costs too high relative to position size")

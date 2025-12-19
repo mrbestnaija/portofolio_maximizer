@@ -80,6 +80,8 @@ class SignalRouter:
             min_expected_return=float(ts_cfg.get("min_expected_return", 0.003)),
             max_risk_score=float(ts_cfg.get("max_risk_score", 0.7)),
             use_volatility_filter=bool(ts_cfg.get("use_volatility_filter", True)),
+            per_ticker_thresholds=ts_cfg.get("per_ticker") if isinstance(ts_cfg.get("per_ticker"), dict) else None,
+            cost_model=ts_cfg.get("cost_model") if isinstance(ts_cfg.get("cost_model"), dict) else None,
         )
         self.llm_generator = llm_generator  # Optional, only if LLM fallback enabled
         
@@ -304,6 +306,20 @@ class SignalRouter:
     
     def _signal_to_dict(self, signal: TimeSeriesSignal) -> Dict[str, Any]:
         """Convert TimeSeriesSignal to dict for compatibility"""
+        risk_level = "medium"
+        try:
+            rs = float(signal.risk_score)
+            if rs <= 0.40:
+                risk_level = "low"
+            elif rs <= 0.60:
+                risk_level = "medium"
+            elif rs <= 0.80:
+                risk_level = "high"
+            else:
+                risk_level = "extreme"
+        except Exception:
+            risk_level = "medium"
+
         return {
             'ticker': signal.ticker,
             'action': signal.action,
@@ -316,6 +332,7 @@ class SignalRouter:
             'forecast_horizon': signal.forecast_horizon,
             'expected_return': signal.expected_return,
             'risk_score': signal.risk_score,
+            'risk_level': risk_level,
             'reasoning': signal.reasoning,
             'provenance': signal.provenance,
             'signal_type': signal.signal_type,

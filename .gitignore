@@ -1,10 +1,12 @@
 # Sensitive files and credentials
 .env
+.simpleTrader_env
 *.env
 *.key
 *.pem
 *.p12
 .env.*
+!.env.template
 config/secrets/
 credentials/
 keys/

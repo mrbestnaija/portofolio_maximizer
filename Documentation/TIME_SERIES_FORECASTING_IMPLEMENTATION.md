@@ -16,6 +16,19 @@
 - ETL correctness: synthetic/live isolation via `execution_mode`, per-ticker slicing through the pipeline, leak-free normalization (fit on training only post-split), and date-boundary splitting when multi-ticker frames share timestamps.
 - Verified via: `python3 -m pytest -q tests/forcester_ts/test_ensemble_and_scaling_invariants.py tests/etl/test_time_series_forecaster.py tests/integration/test_time_series_signal_integration.py tests/models/test_time_series_signal_generator.py tests/etl/test_data_source_manager.py tests/etl/test_preprocessor.py tests/etl/test_data_storage.py tests/etl/test_synthetic_microstructure.py`.
 
+### Signal/Strategy PnL hardening (2025-12-19)
+- `models/time_series_signal_generator.TimeSeriesSignalGenerator` now:
+  - Applies per-ticker routing overrides from `config/signal_routing_config.yml` (previously ignored).
+  - Estimates symmetric round-trip friction from synthetic microstructure (`TxnCostBps`/`ImpactBps`) or bid/ask spreads and uses the net edge for gating (SELL no longer “benefits” from costs).
+  - Makes CI-based uncertainty ratios dimensionally consistent and supports optional signal-to-noise gating via `time_series.cost_model.min_signal_to_noise`.
+  - Uses MSSA-RL change-point recency as a regime-uncertainty penalty (nudges risk/confidence).
+  - Computes quant-success expected_profit from net trade return and evaluates historical metrics directionally for BUY vs SELL.
+- `models/signal_router.SignalRouter` now emits `risk_level` derived from `risk_score` for execution-layer validation/sizing.
+- `ai_llm.signal_validator.SignalValidator` transaction-cost feasibility now prefers TS `provenance.decision_context` (net edge + round-trip cost) over historical drift proxies, and uses `forecast_horizon` as the holding-period fallback when no explicit edge is provided.
+- Config wiring: `signal_routing.time_series.cost_model` is now present in `config/signal_routing_config.yml` (default_roundtrip_cost_bps + min_signal_to_noise), replacing the previous `friction_buffers` proposal artifacts.
+- Portfolio impact: validator layer 4 now consumes a portfolio snapshot (wired from `execution.paper_trading_engine.PaperTradingEngine`) and enforces basic single-name concentration + gross exposure guards when trades would increase exposure.
+- Verified via: `python3 -m pytest -q tests/models/test_time_series_signal_generator.py tests/models/test_signal_router.py tests/integration/test_time_series_signal_integration.py tests/execution/test_paper_trading_engine.py tests/ai_llm/test_signal_validator.py`.
+
 ### Synthetic event/microstructure refresh (2025-12-19)
 - `config/synthetic_data_config.yml` now includes profile overrides (`config/synthetic_data_profiles.yml`), t-copula/tail-scale shocks, macro regime-change events, intraday seasonality, and size-aware slippage + txn-cost proxies; microstructure outputs now include `TxnCostBps` and `ImpactBps`.
 - `scripts/generate_synthetic_dataset.py --config config/synthetic_data_config.yml` writes parquet/manifest, features (SMA/vol/RSI/MACD/Bollinger/zscores), calibration stats (optional real-data reference), and refreshes `data/synthetic/latest.json` so `SYNTHETIC_DATASET_ID=latest` maps to `syn_6c850a7d0b99`.

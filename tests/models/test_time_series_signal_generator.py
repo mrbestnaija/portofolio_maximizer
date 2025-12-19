@@ -311,6 +311,94 @@ class TestTimeSeriesSignalGenerator:
         
         # Agreeing models should have higher confidence
         assert signal_agreeing.confidence >= signal_disagreeing.confidence
+
+    def test_per_ticker_threshold_override_blocks_trade(self):
+        """Per-ticker thresholds should override global routing thresholds."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.55,
+            min_expected_return=0.003,
+            max_risk_score=0.7,
+            per_ticker_thresholds={
+                "AAPL": {"min_expected_return": 0.01},
+            },
+            quant_validation_config={"enabled": False},
+        )
+
+        forecast = pd.Series([100.4, 100.4, 100.4])
+        forecast_bundle = {
+            "horizon": 30,
+            "ensemble_forecast": {"forecast": forecast},
+            "sarimax_forecast": {"forecast": forecast},
+            "samossa_forecast": {"forecast": forecast},
+            "volatility_forecast": {"volatility": 0.10},
+        }
+
+        market_data = pd.DataFrame(
+            {
+                "Close": [100.0, 100.0, 100.0],
+                "TxnCostBps": [0.0, 0.0, 0.0],
+                "ImpactBps": [0.0, 0.0, 0.0],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+
+        aapl_signal = generator.generate_signal(
+            forecast_bundle=forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=market_data,
+        )
+        msft_signal = generator.generate_signal(
+            forecast_bundle=forecast_bundle,
+            current_price=100.0,
+            ticker="MSFT",
+            market_data=market_data,
+        )
+
+        assert aapl_signal.action == "HOLD"
+        assert msft_signal.action == "BUY"
+
+    def test_roundtrip_friction_is_symmetric_for_sell(self):
+        """Trading frictions should dampen SELL expected returns, not amplify them."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.55,
+            min_expected_return=0.003,
+            max_risk_score=0.7,
+            quant_validation_config={"enabled": False},
+        )
+
+        forecast = pd.Series([99.6, 99.6, 99.6])
+        forecast_bundle = {
+            "horizon": 30,
+            "ensemble_forecast": {"forecast": forecast},
+            "sarimax_forecast": {"forecast": forecast},
+            "samossa_forecast": {"forecast": forecast},
+            "volatility_forecast": {"volatility": 0.10},
+        }
+
+        market_data = pd.DataFrame(
+            {
+                "Close": [100.0, 100.0, 100.0],
+                "TxnCostBps": [5.0, 5.0, 5.0],  # 5bp per-side -> 10bp round-trip
+                "ImpactBps": [0.0, 0.0, 0.0],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=market_data,
+        )
+
+        ctx = signal.provenance.get("decision_context") or {}
+        assert signal.action == "SELL"
+        assert ctx.get("roundtrip_cost_bps") == pytest.approx(10.0)
+        assert ctx.get("expected_return") == pytest.approx(-0.004)
+        assert ctx.get("expected_return_net") == pytest.approx(-0.003)
+        # Net should be closer to zero than gross for SELL signals.
+        assert ctx["expected_return_net"] > ctx["expected_return"]
     
     def test_hold_signal_on_error(self, signal_generator):
         """Test HOLD signal returned on error"""

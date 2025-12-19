@@ -631,7 +631,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 **Bestman Ezekwu Enock**
 
 - GitHub: [@mrbestnaija](https://github.com/mrbestnaija)
-- Email: 234-7042437712.181@zohomail.com
+- Public contact: See Support section
 
 ---
 
@@ -696,9 +696,7 @@ For questions or issues:
 1. **Check Documentation**: `Documentation/` directory
 2. **Search Issues**: [GitHub Issues](https://github.com/mrbestnaija/portofolio_maximizer/issues)
 3. **Open New Issue**: Provide reproducible example
-4. **Email**: csgtmalice@protonmail.ch
-5. **Phone**: +2347042437712(Whatsapp Only)
-6. **Discord**: https://discord.gg/FVzV66Hb
+4. **Public contact email**: csgtmalice@protonmail.ch
 
 ---
 

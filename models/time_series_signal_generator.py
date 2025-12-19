@@ -78,7 +78,9 @@ class TimeSeriesSignalGenerator:
                  max_risk_score: float = 0.7,
                  use_volatility_filter: bool = True,
                  quant_validation_config: Optional[Dict[str, Any]] = None,
-                 quant_validation_config_path: Optional[str] = None):
+                 quant_validation_config_path: Optional[str] = None,
+                 per_ticker_thresholds: Optional[Dict[str, Dict[str, Any]]] = None,
+                 cost_model: Optional[Dict[str, Any]] = None):
         """
         Initialize Time Series signal generator.
         
@@ -103,6 +105,28 @@ class TimeSeriesSignalGenerator:
         self.min_expected_return = min_expected_return
         self.max_risk_score = max_risk_score
         self.use_volatility_filter = use_volatility_filter
+        self._diag_mode = diag_mode
+        self._per_ticker_thresholds = per_ticker_thresholds or {}
+        self._cost_model = cost_model or {}
+        self._default_roundtrip_cost_bps = {
+            "US_EQUITY": 10.0,
+            "INTL_EQUITY": 15.0,
+            "FX": 5.0,
+            "CRYPTO": 25.0,
+            "INDEX": 10.0,
+            "UNKNOWN": 10.0,
+        }
+        overrides = self._cost_model.get("default_roundtrip_cost_bps")
+        if isinstance(overrides, dict):
+            for key, value in overrides.items():
+                try:
+                    self._default_roundtrip_cost_bps[str(key).upper()] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        try:
+            self._min_signal_to_noise = float(self._cost_model.get("min_signal_to_noise", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self._min_signal_to_noise = 0.0
         self._quant_validation_config_path = (
             Path(quant_validation_config_path).expanduser()
             if quant_validation_config_path
@@ -212,11 +236,20 @@ class TimeSeriesSignalGenerator:
                 )
                 expected_return = float(np.clip(expected_return, -0.1, 0.1))
 
-            # Account for trading frictions (slippage + fees). The buffer is
-            # intentionally modest so profitable TS regimes with 0.1–0.3% moves
-            # are not all suppressed before validation.
-            friction_buffer = 0.0005
-            net_expected_return = expected_return - friction_buffer
+            thresholds = self._resolve_thresholds_for_ticker(ticker)
+            confidence_threshold = thresholds["confidence_threshold"]
+            min_expected_return = thresholds["min_expected_return"]
+            max_risk_score = thresholds["max_risk_score"]
+
+            friction = self._estimate_roundtrip_friction(
+                ticker=ticker,
+                market_data=market_data,
+            )
+            roundtrip_cost = float(friction["roundtrip_cost_fraction"])
+            gross_trade_return = abs(expected_return)
+            net_trade_return = max(0.0, gross_trade_return - roundtrip_cost)
+            direction = float(np.sign(expected_return))
+            net_expected_return = float(direction * net_trade_return) if direction != 0 else 0.0
             
             # Extract volatility for risk assessment (ensure scalar)
             volatility_forecast = forecast_bundle.get('volatility_forecast') or {}
@@ -224,6 +257,17 @@ class TimeSeriesSignalGenerator:
                 volatility = self._to_scalar(volatility_forecast.get('volatility'))
             else:
                 volatility = self._to_scalar(volatility_forecast)
+
+            lower_ci, upper_ci = self._extract_ci_bounds(ensemble_forecast)
+            snr = self._estimate_signal_to_noise(
+                current_price=current_price,
+                expected_return=expected_return,
+                lower_ci=lower_ci,
+                upper_ci=upper_ci,
+            )
+            if snr is not None and self._min_signal_to_noise > 0 and snr < self._min_signal_to_noise:
+                net_trade_return = 0.0
+                net_expected_return = 0.0
             
             # Calculate confidence score
             confidence = self._calculate_confidence(
@@ -231,6 +275,12 @@ class TimeSeriesSignalGenerator:
                 expected_return,
                 volatility
             )
+            if snr is not None:
+                # Soft calibration: uncertain forecasts should downweight confidence.
+                if snr < 0.5:
+                    confidence = max(0.0, confidence - 0.10)
+                elif snr > 2.0:
+                    confidence = min(1.0, confidence + 0.05)
             
             # Calculate risk score
             risk_score = self._calculate_risk_score(
@@ -238,12 +288,29 @@ class TimeSeriesSignalGenerator:
                 volatility,
                 forecast_bundle
             )
+
+            if snr is not None and snr < 0.5:
+                risk_score = min(1.0, risk_score + 0.10)
+
+            change_point_info = self._summarize_recent_change_points(
+                forecast_bundle=forecast_bundle,
+                market_data=market_data,
+            )
+            if change_point_info:
+                # Treat fresh change-points as elevated regime uncertainty.
+                recent_days = change_point_info.get("recent_change_point_days")
+                if isinstance(recent_days, int) and recent_days <= 10:
+                    risk_score = min(1.0, risk_score + 0.10)
+                    confidence = max(0.0, confidence - 0.05)
             
-            # Determine action (conservative: require net return to clear friction buffer)
             action = self._determine_action(
-                net_expected_return,
-                confidence,
-                risk_score
+                expected_return=expected_return,
+                net_trade_return=net_trade_return,
+                confidence=confidence,
+                risk_score=risk_score,
+                confidence_threshold=confidence_threshold,
+                min_expected_return=min_expected_return,
+                max_risk_score=max_risk_score,
             )
             
             # Calculate target and stop loss
@@ -257,7 +324,9 @@ class TimeSeriesSignalGenerator:
             # Build reasoning
             reasoning = self._build_reasoning(
                 action,
-                net_expected_return,
+                expected_return,
+                net_trade_return,
+                float(friction.get("roundtrip_cost_bps", roundtrip_cost * 1e4)),
                 confidence,
                 risk_score,
                 forecast_bundle
@@ -265,31 +334,29 @@ class TimeSeriesSignalGenerator:
             
             # Extract provenance metadata
             provenance = self._extract_provenance(forecast_bundle)
-            
-            # Extract confidence intervals (handle Series or scalar)
-            lower_ci_raw = ensemble_forecast.get('lower_ci')
-            upper_ci_raw = ensemble_forecast.get('upper_ci')
-            
-            # Convert Series to scalar if needed (use first value)
-            if isinstance(lower_ci_raw, pd.Series) and len(lower_ci_raw) > 0:
-                lower_ci = float(lower_ci_raw.iloc[0])
-            elif lower_ci_raw is not None:
-                lower_ci = float(lower_ci_raw) if not isinstance(lower_ci_raw, pd.Series) else None
-            else:
-                lower_ci = None
-                
-            if isinstance(upper_ci_raw, pd.Series) and len(upper_ci_raw) > 0:
-                upper_ci = float(upper_ci_raw.iloc[0])
-            elif upper_ci_raw is not None:
-                upper_ci = float(upper_ci_raw) if not isinstance(upper_ci_raw, pd.Series) else None
-            else:
-                upper_ci = None
+
+            provenance["execution_friction"] = friction
+            provenance["thresholds"] = {
+                "confidence_threshold": confidence_threshold,
+                "min_expected_return": min_expected_return,
+                "max_risk_score": max_risk_score,
+            }
+            if snr is not None:
+                provenance["decision_context_snr"] = snr
+            if change_point_info:
+                provenance["mssa_rl_change_points"] = change_point_info
             
             provenance['decision_context'] = {
                 'expected_return': expected_return,
+                'expected_return_net': net_expected_return,
+                'gross_trade_return': gross_trade_return,
+                'net_trade_return': net_trade_return,
+                'roundtrip_cost_fraction': roundtrip_cost,
+                'roundtrip_cost_bps': float(friction.get("roundtrip_cost_bps", roundtrip_cost * 1e4)),
                 'confidence': confidence,
                 'risk_score': risk_score,
                 'volatility': volatility,
+                'signal_to_noise': snr,
             }
 
             signal = TimeSeriesSignal(
@@ -412,6 +479,223 @@ class TimeSeriesSignalGenerator:
         if isinstance(value, (np.generic, float, int)):
             return float(value)
         return None
+
+    def _resolve_thresholds_for_ticker(self, ticker: str) -> Dict[str, Any]:
+        """Resolve per-ticker overrides for routing thresholds."""
+        thresholds = {
+            "confidence_threshold": float(self.confidence_threshold),
+            "min_expected_return": float(self.min_expected_return),
+            "max_risk_score": float(self.max_risk_score),
+        }
+        if self._diag_mode:
+            return thresholds
+
+        key = (ticker or "").strip()
+        if not key:
+            return thresholds
+
+        raw = self._per_ticker_thresholds.get(key) or self._per_ticker_thresholds.get(key.upper())
+        if not isinstance(raw, dict):
+            return thresholds
+
+        for field, cast in (
+            ("confidence_threshold", float),
+            ("min_expected_return", float),
+            ("max_risk_score", float),
+        ):
+            if field in raw:
+                try:
+                    thresholds[field] = cast(raw[field])
+                except (TypeError, ValueError):
+                    continue
+        return thresholds
+
+    @staticmethod
+    def _infer_asset_class(ticker: str) -> str:
+        """Infer a coarse asset-class for cost defaults and routing diagnostics."""
+        sym = (ticker or "").upper()
+        if sym.endswith("=X"):
+            return "FX"
+        if sym.endswith("-USD") or sym in {"BTC", "ETH", "SOL"}:
+            return "CRYPTO"
+        if "^" in sym:
+            return "INDEX"
+        if any(sym.endswith(suffix) for suffix in (".NS", ".TW", ".L")):
+            return "INTL_EQUITY"
+        return "US_EQUITY"
+
+    def _estimate_roundtrip_friction(
+        self,
+        *,
+        ticker: str,
+        market_data: Optional[pd.DataFrame],
+    ) -> Dict[str, Any]:
+        """
+        Estimate round-trip friction as a fraction of notional.
+
+        Preference order:
+        1) Synthetic microstructure columns (TxnCostBps, ImpactBps) when present.
+        2) Bid/Ask spread when present.
+        3) Asset-class default bps.
+        """
+        asset_class = self._infer_asset_class(ticker)
+        default_bps = float(self._default_roundtrip_cost_bps.get(asset_class, self._default_roundtrip_cost_bps["UNKNOWN"]))
+
+        if market_data is None or market_data.empty:
+            return {
+                "source": "default",
+                "asset_class": asset_class,
+                "roundtrip_cost_bps": default_bps,
+                "roundtrip_cost_fraction": default_bps / 1e4,
+            }
+
+        last = market_data.iloc[-1]
+
+        txn_bps = None
+        impact_bps = 0.0
+        if "TxnCostBps" in market_data.columns:
+            try:
+                txn_val = float(last.get("TxnCostBps"))
+                if np.isfinite(txn_val):
+                    txn_bps = txn_val
+            except Exception:
+                txn_bps = None
+        if txn_bps is not None and "ImpactBps" in market_data.columns:
+            try:
+                impact_val = float(last.get("ImpactBps"))
+                if np.isfinite(impact_val):
+                    impact_bps = impact_val
+            except Exception:
+                impact_bps = 0.0
+
+        if txn_bps is not None:
+            per_side_bps = max(0.0, float(txn_bps) + float(impact_bps))
+            roundtrip_bps = 2.0 * per_side_bps
+            return {
+                "source": "microstructure",
+                "asset_class": asset_class,
+                "txn_cost_bps": float(txn_bps),
+                "impact_bps": float(impact_bps),
+                "roundtrip_cost_bps": float(roundtrip_bps),
+                "roundtrip_cost_fraction": float(roundtrip_bps) / 1e4,
+            }
+
+        # Bid/Ask spread proxy when available.
+        bid = last.get("Bid") if hasattr(last, "get") else None
+        ask = last.get("Ask") if hasattr(last, "get") else None
+        try:
+            bid_f = float(bid) if bid is not None and pd.notna(bid) else None
+            ask_f = float(ask) if ask is not None and pd.notna(ask) else None
+        except Exception:
+            bid_f = None
+            ask_f = None
+
+        if bid_f is not None and ask_f is not None and bid_f > 0 and ask_f > bid_f:
+            mid = 0.5 * (bid_f + ask_f)
+            spread = ask_f - bid_f
+            spread_bps = (spread / mid) * 1e4 if mid > 0 else default_bps
+            roundtrip_bps = max(spread_bps, default_bps)
+            return {
+                "source": "bid_ask",
+                "asset_class": asset_class,
+                "bid": bid_f,
+                "ask": ask_f,
+                "spread_bps": float(spread_bps),
+                "roundtrip_cost_bps": float(roundtrip_bps),
+                "roundtrip_cost_fraction": float(roundtrip_bps) / 1e4,
+            }
+
+        return {
+            "source": "default",
+            "asset_class": asset_class,
+            "roundtrip_cost_bps": default_bps,
+            "roundtrip_cost_fraction": default_bps / 1e4,
+        }
+
+    def _extract_ci_bounds(self, forecast_payload: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
+        if not forecast_payload:
+            return None, None
+        lower_ci = self._to_scalar(forecast_payload.get("lower_ci"))
+        upper_ci = self._to_scalar(forecast_payload.get("upper_ci"))
+        if lower_ci is None or upper_ci is None:
+            return lower_ci, upper_ci
+        if not np.isfinite(lower_ci) or not np.isfinite(upper_ci):
+            return None, None
+        return float(lower_ci), float(upper_ci)
+
+    @staticmethod
+    def _estimate_signal_to_noise(
+        *,
+        current_price: float,
+        expected_return: float,
+        lower_ci: Optional[float],
+        upper_ci: Optional[float],
+        z_value: float = 1.96,
+    ) -> Optional[float]:
+        """Estimate signal-to-noise ratio using CI-implied sigma (approximate)."""
+        if lower_ci is None or upper_ci is None:
+            return None
+        if current_price <= 0:
+            return None
+        width = float(upper_ci) - float(lower_ci)
+        if not np.isfinite(width) or width <= 0:
+            return None
+        sigma_price = (width / 2.0) / max(z_value, 1e-6)
+        sigma_return = sigma_price / float(current_price)
+        if sigma_return <= 0 or not np.isfinite(sigma_return):
+            return None
+        return float(abs(expected_return) / sigma_return)
+
+    @staticmethod
+    def _summarize_recent_change_points(
+        *,
+        forecast_bundle: Dict[str, Any],
+        market_data: Optional[pd.DataFrame],
+    ) -> Optional[Dict[str, Any]]:
+        """Summarize MSSA-RL change-point recency for risk adjustments."""
+        payload = forecast_bundle.get("mssa_rl_forecast")
+        if not isinstance(payload, dict) or not payload:
+            return None
+        change_points = payload.get("change_points")
+        if change_points is None:
+            return None
+        if market_data is None or market_data.empty:
+            return None
+        try:
+            end_ts = pd.to_datetime(market_data.index[-1])
+        except Exception:
+            return None
+
+        cps: List[pd.Timestamp] = []
+        if isinstance(change_points, pd.DatetimeIndex):
+            cps = [pd.to_datetime(ts) for ts in change_points.to_list()]
+        elif isinstance(change_points, list):
+            for item in change_points:
+                try:
+                    cps.append(pd.to_datetime(item))
+                except Exception:
+                    continue
+        else:
+            try:
+                cps = [pd.to_datetime(change_points)]
+            except Exception:
+                cps = []
+
+        cps = [ts for ts in cps if ts is not None and pd.notna(ts)]
+        if not cps:
+            return {"count": 0, "recent_change_point_days": None}
+
+        last_cp = max(cps)
+        try:
+            recent_days = int(abs((end_ts - last_cp).days))
+        except Exception:
+            recent_days = None
+
+        return {
+            "count": int(len(cps)),
+            "last_change_point": str(last_cp),
+            "recent_change_point_days": recent_days,
+        }
     
     def _calculate_confidence(self,
                               forecast_bundle: Dict[str, Any],
@@ -538,25 +822,17 @@ class TimeSeriesSignalGenerator:
         # Factor 2: Confidence interval width (wider = riskier)
         ensemble_forecast = self._resolve_primary_forecast(forecast_bundle)
         if ensemble_forecast:
-            lower_ci_raw = ensemble_forecast.get('lower_ci')
-            upper_ci_raw = ensemble_forecast.get('upper_ci')
-            
-            # Extract scalar values from Series if needed
-            if isinstance(lower_ci_raw, pd.Series) and len(lower_ci_raw) > 0:
-                lower_ci = float(lower_ci_raw.iloc[0])
-            else:
-                lower_ci = float(lower_ci_raw) if lower_ci_raw is not None and not isinstance(lower_ci_raw, pd.Series) else None
-                
-            if isinstance(upper_ci_raw, pd.Series) and len(upper_ci_raw) > 0:
-                upper_ci = float(upper_ci_raw.iloc[0])
-            else:
-                upper_ci = float(upper_ci_raw) if upper_ci_raw is not None and not isinstance(upper_ci_raw, pd.Series) else None
-            
-            if lower_ci is not None and upper_ci is not None:
-                ci_width = (upper_ci - lower_ci) / abs(expected_return) if expected_return != 0 else 1.0
-                if ci_width > 0.5:  # Wide confidence interval
+            lower_ci, upper_ci = self._extract_ci_bounds(ensemble_forecast)
+            forecast_price = self._extract_forecast_value(ensemble_forecast)
+
+            if lower_ci is not None and upper_ci is not None and forecast_price is not None:
+                ci_width_price = float(upper_ci - lower_ci)
+                # Convert to a dimensionless uncertainty ratio: CI width relative to expected move.
+                denom = abs(float(expected_return)) * max(float(forecast_price) / max(1.0 + float(expected_return), 1e-6), 1e-6)
+                uncertainty_ratio = ci_width_price / denom if denom > 0 else float("inf")
+                if uncertainty_ratio > 2.0:
                     risk += 0.2
-                elif ci_width < 0.2:  # Narrow confidence interval
+                elif uncertainty_ratio < 0.75:
                     risk -= 0.1
         
         # Factor 3: Expected return magnitude (smaller moves = riskier relative to reward)
@@ -568,8 +844,12 @@ class TimeSeriesSignalGenerator:
     
     def _determine_action(self,
                          expected_return: float,
+                         net_trade_return: float,
                          confidence: float,
-                         risk_score: float) -> str:
+                         risk_score: float,
+                         confidence_threshold: float,
+                         min_expected_return: float,
+                         max_risk_score: float) -> str:
         """
         Determine trading action based on forecast and risk metrics.
         
@@ -577,22 +857,22 @@ class TimeSeriesSignalGenerator:
             'BUY', 'SELL', or 'HOLD'
         """
         # Must meet minimum thresholds
-        if confidence < self.confidence_threshold:
+        if confidence < confidence_threshold:
             return 'HOLD'
-        
-        if abs(expected_return) < self.min_expected_return:
+
+        # net_trade_return is always non-negative and already clears estimated friction.
+        if net_trade_return < min_expected_return:
             return 'HOLD'
-        
-        if risk_score > self.max_risk_score:
+
+        if risk_score > max_risk_score:
             return 'HOLD'
         
         # Determine direction
-        if expected_return > self.min_expected_return:
+        if expected_return > 0:
             return 'BUY'
-        elif expected_return < -self.min_expected_return:
+        if expected_return < 0:
             return 'SELL'
-        else:
-            return 'HOLD'
+        return 'HOLD'
     
     def _calculate_targets(self,
                           current_price: float,
@@ -627,6 +907,8 @@ class TimeSeriesSignalGenerator:
     def _build_reasoning(self,
                         action: str,
                         expected_return: float,
+                        net_trade_return: float,
+                        roundtrip_cost_bps: float,
                         confidence: float,
                         risk_score: float,
                         forecast_bundle: Dict[str, Any]) -> str:
@@ -635,7 +917,8 @@ class TimeSeriesSignalGenerator:
         
         reasoning = (
             f"Time Series {model_type} forecast indicates {action} signal. "
-            f"Expected return: {expected_return:.2%}, "
+            f"Gross move: {expected_return:.2%}, "
+            f"Net edge: {net_trade_return:.2%} (est cost: {roundtrip_cost_bps:.1f}bp), "
             f"Confidence: {confidence:.1%}, "
             f"Risk score: {risk_score:.1%}. "
         )
@@ -728,9 +1011,16 @@ class TimeSeriesSignalGenerator:
         if log_returns.size < 2:
             return None
 
+        action = str(getattr(signal, "action", None) or "HOLD").upper()
+        if action == "SELL":
+            direction = -1.0
+        else:
+            direction = 1.0
+        strategy_returns = log_returns * direction
+
         try:
             metrics = calculate_enhanced_portfolio_metrics(
-                returns=log_returns.reshape(-1, 1),
+                returns=strategy_returns.reshape(-1, 1),
                 weights=np.array([1.0]),
                 risk_free_rate=float(config.get('risk_free_rate', DEFAULT_RISK_FREE_RATE)),
             )
@@ -741,7 +1031,7 @@ class TimeSeriesSignalGenerator:
         bootstrap_cfg = config.get('bootstrap', {})
         try:
             bootstrap_stats = bootstrap_confidence_intervals(
-                returns=log_returns,
+                returns=strategy_returns,
                 n_bootstrap=int(bootstrap_cfg.get('n_samples', 500)),
                 confidence_level=float(bootstrap_cfg.get('confidence_level', 0.95)),
             )
@@ -758,11 +1048,11 @@ class TimeSeriesSignalGenerator:
             if bench_returns.size >= log_returns.size:
                 benchmark_slice = bench_returns[-log_returns.size:]
                 try:
-                    significance = test_strategy_significance(log_returns, benchmark_slice)
+                    significance = test_strategy_significance(strategy_returns, benchmark_slice * direction)
                 except ValueError:
                     significance = None
 
-        performance_snapshot = self._calculate_return_based_performance(log_returns)
+        performance_snapshot = self._calculate_return_based_performance(strategy_returns)
 
         # Allow per-ticker overrides for success criteria so that
         # higher-volatility or structurally weaker assets (e.g. crypto,
@@ -779,7 +1069,12 @@ class TimeSeriesSignalGenerator:
         allocation = min(max(float(signal.confidence or 0.0), 0.05), 1.0)
         safe_price = request_safe_price(signal.entry_price)
         position_value = capital_base * allocation
-        expected_profit = position_value * float(signal.expected_return or 0.0)
+        ctx = (signal.provenance or {}).get("decision_context") or {}
+        try:
+            net_trade_return = float(ctx.get("net_trade_return"))
+        except (TypeError, ValueError):
+            net_trade_return = max(0.0, abs(float(signal.expected_return or 0.0)))
+        expected_profit = position_value * net_trade_return
         criteria = self._evaluate_success_criteria(
             criteria_cfg=criteria_cfg,
             metrics=metrics,

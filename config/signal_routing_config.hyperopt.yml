@@ -11,6 +11,15 @@ signal_routing:
     min_expected_return: 0.002
     max_risk_score: 0.7
     use_volatility_filter: true
+    cost_model:
+      default_roundtrip_cost_bps:
+        US_EQUITY: 10.0
+        INTL_EQUITY: 15.0
+        FX: 5.0
+        CRYPTO: 25.0
+        INDEX: 10.0
+        UNKNOWN: 10.0
+      min_signal_to_noise: 0.0
   ts_fallback_triggers:
   - forecast_unavailable
   - confidence_below_threshold
