@@ -13,10 +13,16 @@
 
 set -euo pipefail
 
-# Optional: load credentials and repo hints from .env (never commit .env)
+# Optional: load credentials and repo hints from .env (never commit .env).
+# Strips BOM, comments, blanks, and CRLF.
 if [[ -f ".env" ]]; then
   set -a
-  source .env
+  source <(
+    cat .env \
+    | tr -d '\r' \
+    | sed $'1s/^\xEF\xBB\xBF//' \
+    | grep -Ev '^[[:space:]]*($|#)'
+  )
   set +a
 fi
 
@@ -36,9 +42,13 @@ STASHED=0
 RESTORED=0
 CONFLICT_DETECTED=0
 
-# Optional: update origin URL with token if provided (HTTPS only)
-if [[ -n "${GitHub_Username:-}" && -n "${GitHub_TOKEN:-}" && -n "${GitHub_Repo:-}" ]]; then
-  git remote set-url origin "https://${GitHub_Username}:${GitHub_TOKEN}@github.com/${GitHub_Username}/${GitHub_Repo}.git"
+# Optional: update origin URL with token if explicitly enabled (HTTPS only)
+if [[ "${GIT_USE_ENV_REMOTE:-0}" == "1" ]]; then
+  if [[ -n "${GitHub_Username:-}" && -n "${GitHub_TOKEN:-}" && -n "${GitHub_Repo:-}" && ! "${GitHub_TOKEN}" =~ xxx ]]; then
+    git remote set-url origin "https://${GitHub_Username}:${GitHub_TOKEN}@github.com/${GitHub_Username}/${GitHub_Repo}.git"
+  else
+    echo -e "${YELLOW}GIT_USE_ENV_REMOTE=1 set but GitHub creds missing/placeholder; skipping remote override.${NC}"
+  fi
 fi
 
 # Colors for output
