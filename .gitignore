@@ -20,7 +20,8 @@ secrets/
 
 # Virtual environments
 portfolio_env/
-# simpleTrader_env/    # Uncomment if using simpleTrader
+simpleTrader_env/
+simpleTrader/
 portfolio-optimizer/
 venv/
 env/
