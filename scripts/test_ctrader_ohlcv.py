@@ -23,7 +23,7 @@ config/data_sources_config.yml.
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -32,6 +32,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+UTC = timezone.utc
 
 from execution.ctrader_client import (  # noqa: E402
     CTraderClient,
@@ -145,4 +147,3 @@ def main(argv: List[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

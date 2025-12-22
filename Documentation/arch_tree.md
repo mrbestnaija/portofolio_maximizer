@@ -237,7 +237,7 @@ scripts/analyze_dataset.py
 2. Patch `scripts/run_etl_pipeline.py:1755-1764` to pull `change_points` once, detect `None`, and convert concrete iterables to `list` before serialising so pandas never gets coerced to `bool`. Re-run `python scripts/run_etl_pipeline.py --stage time_series_forecasting` to confirm AAPL/MSFT retain usable forecasts.
 3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` (dashboard loader) and capture a fresh PNG to prove visualization works again.
 4. Replace the PeriodDtype round-trip with `Series.asfreq()` (or a resample) inside `forcester_ts/forecaster.py`, tighten the SARIMAX order grid via config, and add regression tests so the FutureWarning/ConvergenceWarning spam ceases.
-5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(datetime.UTC)`) and register sqlite adapters before the scheduled nightly job runs again.
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(timezone.utc)`) and register sqlite adapters before the scheduled nightly job runs again.
 
 ### Config Inventory (Nov 2025; updated Dec 2025)
 - `config/pipeline_config.yml` defines the default stage planner ordering that both the ETL pipeline and autonomous trader invoke.

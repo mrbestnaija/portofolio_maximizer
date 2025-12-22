@@ -1,6 +1,6 @@
 # Portfolio Maximizer – Autonomous Profit Engine
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/mrbestnaija/portofolio_maximizer)
 
@@ -106,7 +106,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.10-3.12
 - pip package manager
 - Virtual environment (recommended)
 - **Ollama** (optional, for LLM features): Local LLM server for market analysis and signal generation
@@ -684,7 +684,7 @@ pip install -r requirements.txt --force-reinstall
 # Run specific failing test with verbose output
 
 # Check Python version
-python --version  # Should be 3.12+
+python --version  # Should be 3.10+
 ```
 
 ---

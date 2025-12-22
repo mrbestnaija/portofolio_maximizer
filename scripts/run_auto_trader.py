@@ -16,7 +16,7 @@ import os
 import site
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
@@ -55,6 +55,8 @@ MIN_SERIES_POINTS = 120
 MIN_QUALITY_SCORE = 0.50
 EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
 _NO_TRADE_WINDOWS = None
+
+UTC = timezone.utc
 
 
 def _configure_logging(verbose: bool) -> None:
