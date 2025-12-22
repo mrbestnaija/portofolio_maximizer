@@ -266,7 +266,11 @@ ollama list
 # If not found, start Ollama
 ollama serve
 
-# Or run tests without LLM
+# Unit tests run without Ollama; the live integration suite requires Ollama.
+pytest tests/ai_llm/ -v
+RUN_OLLAMA_TESTS=1 pytest tests/ai_llm/test_integration_full.py -v
+
+# Or run the pipeline without LLM
 python scripts/run_etl_pipeline.py --tickers AAPL
 # (without --enable-llm flag)
 ```

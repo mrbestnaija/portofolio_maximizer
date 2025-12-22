@@ -92,12 +92,14 @@ ETL Pipeline Flow (Enhanced):
 ## Configuration
 
 ### Enable/Disable LLM
-```yaml
-# config/pipeline_config.yml
-stages:
-  - name: "llm_market_analysis"
-    enabled: true  # Set false to disable
-    required: true  # Pipeline fails if Ollama unavailable
+LLM integration is optional. On CPU-only machines (no Ollama), the pipeline runs TS-only and disables LLM components automatically.
+
+```bash
+# Enable LLM (requires Ollama running)
+python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm
+
+# Disable LLM (default)
+python scripts/run_etl_pipeline.py --tickers AAPL
 ```
 
 ### Model Selection
@@ -117,7 +119,7 @@ llm:
 from ai_llm import OllamaClient, LLMMarketAnalyzer
 from etl import YFinanceExtractor, DataStorage
 
-# Initialize (fails fast if Ollama unavailable)
+# Initialize (requires Ollama running; raises OllamaConnectionError if unavailable)
 client = OllamaClient()
 analyzer = LLMMarketAnalyzer(client)
 
@@ -164,8 +166,11 @@ print(f"Concerns: {assessment['concerns']}")
 
 ### Unit Tests
 ```bash
-# Run LLM tests (requires Ollama running)
+# Run LLM unit tests (Ollama optional; live integration tests are skipped if Ollama is unavailable)
 pytest tests/ai_llm/ -v
+
+# Run live Ollama integration suite (requires Ollama running)
+RUN_OLLAMA_TESTS=1 pytest tests/ai_llm/test_integration_full.py -v
 
 # Test coverage
 pytest tests/ai_llm/ --cov=ai_llm --cov-report=term

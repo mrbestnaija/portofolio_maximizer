@@ -4,7 +4,7 @@ Line Count: ~120 lines (within 500-line phase limit)
 Cost: $0/month (local GPU)
 
 Validates Ollama availability before any LLM operations.
-Pipeline fails immediately if Ollama is not running (per requirement 3b).
+Callers may catch OllamaConnectionError to run without LLM features.
 """
 
 import os
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaConnectionError(Exception):
-    """Raised when Ollama server is unavailable - pipeline must stop"""
+    """Raised when Ollama server is unavailable (callers may disable LLM features)."""
     pass
 
 

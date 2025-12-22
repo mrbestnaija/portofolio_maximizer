@@ -4,10 +4,42 @@ Quick LLM Integration Test
 Tests Ollama service, OllamaClient, and MarketAnalyzer
 """
 
+import os
 import sys
 import traceback
-import pandas as pd
 from datetime import datetime
+
+import pandas as pd
+import pytest
+import requests
+
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+def _skip_if_ollama_unavailable() -> None:
+    """Skip Ollama integration tests when Ollama is unavailable.
+
+    Set `RUN_OLLAMA_TESTS=1` to force running (and failing) these tests.
+    """
+    if os.getenv("RUN_OLLAMA_TESTS", "0") == "1":
+        return
+
+    try:
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=2)
+        response.raise_for_status()
+        models = response.json().get("models", [])
+        if not models:
+            pytest.skip(
+                f"Ollama reachable at {OLLAMA_HOST} but no models are available. "
+                "Run `ollama pull <model>` before rerunning."
+            )
+    except Exception as exc:
+        pytest.skip(
+            f"Ollama not available at {OLLAMA_HOST}: {exc}. "
+            "Start Ollama with `ollama serve`, or set RUN_OLLAMA_TESTS=1 to require it."
+        )
+
 
 def test_imports():
     """Test 1: Import all LLM modules"""
@@ -46,6 +78,8 @@ def test_imports():
 
 def test_ollama_client():
     """Test 2: OllamaClient basic functionality"""
+    _skip_if_ollama_unavailable()
+
     print("\n" + "="*60)
     print("2️⃣  Testing OllamaClient")
     print("="*60)
@@ -63,7 +97,7 @@ def test_ollama_client():
         
         if not health:
             print("   ⚠️  Warning: Health check returned False")
-            assert False, f"OllamaClient initialization failed: {e}"
+            assert False, "OllamaClient health check returned False"
         
         # Test passed
     except Exception as e:
@@ -74,6 +108,8 @@ def test_ollama_client():
 
 def test_basic_generation():
     """Test 3: Basic LLM generation"""
+    _skip_if_ollama_unavailable()
+
     print("\n" + "="*60)
     print("3️⃣  Testing Basic LLM Generation")
     print("="*60)
@@ -100,6 +136,8 @@ def test_basic_generation():
 
 def test_market_analyzer():
     """Test 4: LLMMarketAnalyzer functionality"""
+    _skip_if_ollama_unavailable()
+
     print("\n" + "="*60)
     print("4️⃣  Testing LLMMarketAnalyzer")
     print("="*60)
@@ -139,6 +177,8 @@ def test_market_analyzer():
 
 def test_signal_generator():
     """Test 5: LLMSignalGenerator functionality"""
+    _skip_if_ollama_unavailable()
+
     print("\n" + "="*60)
     print("5️⃣  Testing LLMSignalGenerator")
     print("="*60)
@@ -186,6 +226,8 @@ def test_signal_generator():
 
 def test_risk_assessor():
     """Test 6: LLMRiskAssessor functionality"""
+    _skip_if_ollama_unavailable()
+
     print("\n" + "="*60)
     print("6️⃣  Testing LLMRiskAssessor")
     print("="*60)
@@ -269,4 +311,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
