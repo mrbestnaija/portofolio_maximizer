@@ -90,9 +90,8 @@ def test_generate_signal_routing_overrides(tmp_path: Path) -> None:
         "transaction_costs": [
             {
                 "group": "US_EQUITY",
-                "suggested_min_expected_return": 1.0,
-                "suggested_friction_buffer": 1.0,
-                "median_commission": 0.9,
+                "roundtrip_cost_median_bps": 10.0,
+                "suggested_roundtrip_cost_bps": 12.5,
             }
         ],
     }

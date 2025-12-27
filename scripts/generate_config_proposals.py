@@ -18,8 +18,9 @@ Design goals:
 CURRENT SCOPE (SCAFFOLD):
 - Picks, per ticker, the gridpoint with the highest total_profit that
   also satisfies simple PF / win_rate / min_trades constraints.
-- Derives friction-aware minimum expected return suggestions per
-  asset class from transaction cost medians.
+- Derives default round-trip cost priors (bps) per asset class from
+  transaction cost medians so configs can be updated via
+  signal_routing.time_series.cost_model.default_roundtrip_cost_bps.
 """
 
 from __future__ import annotations
@@ -74,16 +75,24 @@ class TickerProposal:
 @dataclass
 class CostProposal:
     group: str
-    suggested_min_expected_return: float
-    median_commission: float
-    suggested_friction_buffer: float
+    trades: int
+    roundtrip_cost_median_bps: float
+    suggested_roundtrip_cost_bps: float
+    commission_median: float = 0.0
+    commission_median_bps: float = 0.0
+    slippage_median_bps: float = 0.0
+    total_cost_median_bps: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "group": self.group,
-            "suggested_min_expected_return": self.suggested_min_expected_return,
-            "median_commission": self.median_commission,
-            "suggested_friction_buffer": self.suggested_friction_buffer,
+            "trades": self.trades,
+            "roundtrip_cost_median_bps": self.roundtrip_cost_median_bps,
+            "suggested_roundtrip_cost_bps": self.suggested_roundtrip_cost_bps,
+            "commission_median": self.commission_median,
+            "commission_median_bps": self.commission_median_bps,
+            "slippage_median_bps": self.slippage_median_bps,
+            "total_cost_median_bps": self.total_cost_median_bps,
         }
 
 
@@ -173,19 +182,34 @@ def _derive_cost_proposals(
     proposals: List[CostProposal] = []
     for row in groups:
         group = str(row.get("group") or "UNKNOWN")
-        median_commission = float(row.get("commission_median") or 0.0)
-        # Interpret commission as an absolute cost per trade in the account
-        # currency. A more precise implementation could normalise by trade
-        # notional; for now we apply a simple multipler.
-        bump = buffer_bps / 10_000.0
-        suggested_min_expected_return = max(0.0, median_commission * (1.0 + bump))
-        suggested_friction_buffer = suggested_min_expected_return
+        trades = int(row.get("trades") or 0)
+        commission_median = float(row.get("commission_median") or 0.0)
+        commission_median_bps = float(row.get("commission_median_bps") or 0.0)
+        slippage_median_bps = float(row.get("slippage_median_bps") or 0.0)
+        total_cost_median_bps = float(row.get("total_cost_median_bps") or 0.0)
+
+        roundtrip_cost_median_bps = row.get("roundtrip_cost_median_bps")
+        if roundtrip_cost_median_bps is None:
+            if total_cost_median_bps:
+                roundtrip_cost_median_bps = 2.0 * total_cost_median_bps
+            elif commission_median_bps:
+                roundtrip_cost_median_bps = 2.0 * commission_median_bps
+            else:
+                roundtrip_cost_median_bps = 0.0
+        roundtrip_cost_median_bps = float(roundtrip_cost_median_bps or 0.0)
+
+        # Apply a small additional safety buffer in bps.
+        suggested_roundtrip_cost_bps = max(0.0, roundtrip_cost_median_bps + float(buffer_bps or 0.0))
         proposals.append(
             CostProposal(
                 group=group,
-                suggested_min_expected_return=suggested_min_expected_return,
-                median_commission=median_commission,
-                suggested_friction_buffer=suggested_friction_buffer,
+                trades=trades,
+                roundtrip_cost_median_bps=roundtrip_cost_median_bps,
+                suggested_roundtrip_cost_bps=suggested_roundtrip_cost_bps,
+                commission_median=commission_median,
+                commission_median_bps=commission_median_bps,
+                slippage_median_bps=slippage_median_bps,
+                total_cost_median_bps=total_cost_median_bps,
             )
         )
     return proposals
@@ -284,6 +308,7 @@ def main(
         "notes": [
             "This file is a proposal only. No configs were modified.",
             "Use these values to craft edits to config/signal_routing_config.yml "
+            "(signal_routing.time_series.per_ticker + cost_model.default_roundtrip_cost_bps) "
             "and config/quant_success_config.yml after manual review.",
         ],
     }

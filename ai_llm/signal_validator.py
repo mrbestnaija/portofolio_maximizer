@@ -385,6 +385,51 @@ class SignalValidator:
             adjusted_confidence *= max(0.0, 1 - 0.15 * failed_layers)
         if warnings:
             adjusted_confidence *= max(0.0, 1 - 0.05 * len(warnings))
+        # Optional edge-aware adjustment for Time Series provenance.
+        edge_ratio = None
+        provenance_raw = signal.get("provenance")
+        provenance: Dict[str, Any] = {}
+        if isinstance(provenance_raw, dict):
+            provenance = provenance_raw
+        elif isinstance(provenance_raw, str) and provenance_raw.strip():
+            try:
+                parsed = json.loads(provenance_raw)
+                if isinstance(parsed, dict):
+                    provenance = parsed
+            except Exception:
+                provenance = {}
+        decision_context = provenance.get("decision_context") if isinstance(provenance.get("decision_context"), dict) else {}
+        if decision_context:
+            try:
+                net_trade_return = float(decision_context.get("net_trade_return"))
+            except (TypeError, ValueError):
+                net_trade_return = None
+            try:
+                roundtrip_cost_bps = float(decision_context.get("roundtrip_cost_bps"))
+            except (TypeError, ValueError):
+                roundtrip_cost_bps = None
+            if roundtrip_cost_bps in (None, 0.0):
+                try:
+                    roundtrip_cost_fraction = float(decision_context.get("roundtrip_cost_fraction"))
+                except (TypeError, ValueError):
+                    roundtrip_cost_fraction = None
+                roundtrip_cost_bps = roundtrip_cost_fraction * 1e4 if roundtrip_cost_fraction else None
+
+            if (
+                net_trade_return is not None
+                and roundtrip_cost_bps is not None
+                and np.isfinite(net_trade_return)
+                and np.isfinite(roundtrip_cost_bps)
+                and roundtrip_cost_bps > 0
+            ):
+                edge_ratio = (net_trade_return * 1e4) / roundtrip_cost_bps
+
+        if edge_ratio is not None:
+            if edge_ratio < 0.5:
+                adjusted_confidence *= 0.85
+            elif edge_ratio > 3.0:
+                adjusted_confidence = min(1.0, adjusted_confidence * 1.05)
+
         adjusted_confidence = max(0.0, min(adjusted_confidence, 1.0))
         
         is_valid = layers_passed and adjusted_confidence >= self.min_confidence
@@ -665,6 +710,35 @@ class SignalValidator:
         if asset_weight >= 0.90:
             warnings.append(f"High {asset_class} concentration: ~{asset_weight:.1%} of gross exposure")
 
+        # Optional: pairwise return correlations when pre-computed by the execution engine.
+        corr_snapshot = portfolio_state.get("correlation_snapshot")
+        if isinstance(corr_snapshot, dict):
+            corr_map = corr_snapshot.get("correlations")
+            if isinstance(corr_map, dict) and corr_map:
+                warn_corr = 0.75
+                max_corr = 0.90
+                worst_sym = None
+                worst_corr = 0.0
+                for sym, value in corr_map.items():
+                    corr_val = _safe_float(value)
+                    if corr_val is None:
+                        continue
+                    abs_corr = abs(corr_val)
+                    if abs_corr > abs(worst_corr):
+                        worst_corr = corr_val
+                        worst_sym = str(sym).upper()
+                if worst_sym is not None and abs(worst_corr) >= warn_corr:
+                    warnings.append(
+                        f"Correlation warning: {ticker_upper} vs {worst_sym} ~{worst_corr:+.2f} "
+                        f"(n={corr_snapshot.get('observations')})"
+                    )
+                if worst_sym is not None and abs(worst_corr) >= max_corr:
+                    warnings.append(
+                        f"Correlation limit breached: {ticker_upper} too correlated with {worst_sym} "
+                        f"(abs corr {abs(worst_corr):.2f} >= {max_corr:.2f})"
+                    )
+                    is_valid = False
+
         return is_valid, warnings
     
     def _validate_transaction_costs(self, 
@@ -723,6 +797,8 @@ class SignalValidator:
             if expected_return_signal is not None:
                 gross_trade_return = abs(expected_return_signal)
 
+        net_trade_return = _safe_float(decision_context.get("net_trade_return"))
+
         # Engine-level configured commission proxy (per-side) -> round-trip fraction.
         engine_roundtrip_cost = 2.0 * float(self.transaction_cost)
 
@@ -735,9 +811,15 @@ class SignalValidator:
         else:
             effective_roundtrip_cost = max(engine_roundtrip_cost, max(0.0, estimated_roundtrip_cost))
 
+        roundtrip_cost_bps = _safe_float(decision_context.get("roundtrip_cost_bps"))
+        if roundtrip_cost_bps is None:
+            roundtrip_cost_bps = _safe_float(exec_friction.get("roundtrip_cost_bps"))
+        if roundtrip_cost_bps is None:
+            roundtrip_cost_bps = max(0.0, effective_roundtrip_cost) * 1e4
+
         # Fallback: infer expected return from historical drift only when we have
         # no signal-provided edge.
-        if gross_trade_return is None:
+        if gross_trade_return is None and net_trade_return is None:
             context = self._market_context(market_data)
             expected_daily_return = float(context.get("expected_daily_return", 0.0))
 
@@ -756,9 +838,23 @@ class SignalValidator:
             gross_trade_return = abs(float(expected_return))
 
         # Check if expected edge clears costs with a modest cushion.
-        if gross_trade_return < effective_roundtrip_cost * 2.0:  # 2x round-trip costs minimum
+        edge_ratio = None
+        if net_trade_return is not None and roundtrip_cost_bps:
+            edge_ratio = (max(0.0, net_trade_return) * 1e4) / roundtrip_cost_bps if roundtrip_cost_bps > 0 else None
+        elif gross_trade_return is not None and effective_roundtrip_cost:
+            net_est = max(0.0, gross_trade_return - max(0.0, effective_roundtrip_cost))
+            cost_bps = max(0.0, effective_roundtrip_cost) * 1e4
+            edge_ratio = (net_est * 1e4) / cost_bps if cost_bps > 0 else None
+
+        if edge_ratio is None:
+            if gross_trade_return is not None and gross_trade_return < effective_roundtrip_cost * 2.0:  # 2x costs min
+                warnings.append(
+                    f"Expected edge ({gross_trade_return:.2%}) < 2x round-trip costs ({effective_roundtrip_cost:.2%})"
+                )
+        elif edge_ratio < 1.0:
             warnings.append(
-                f"Expected edge ({gross_trade_return:.2%}) < 2x round-trip costs ({effective_roundtrip_cost:.2%})"
+                f"Edge/cost ratio low: {edge_ratio:.2f}x (net edge ~{max(0.0, (net_trade_return or 0.0)):.2%}, "
+                f"round-trip cost ~{max(0.0, effective_roundtrip_cost):.2%})"
             )
         
         # For very small positions, costs matter more

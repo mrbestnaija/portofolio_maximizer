@@ -651,6 +651,8 @@ class DatabaseManager:
                 price REAL NOT NULL,
                 total_value REAL NOT NULL,
                 commission REAL DEFAULT 0,
+                mid_price REAL,
+                mid_slippage_bps REAL,
                 signal_id INTEGER,
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
@@ -671,6 +673,10 @@ class DatabaseManager:
         self.cursor.execute("PRAGMA table_info(trade_executions)")
         trade_cols = {row["name"] for row in self.cursor.fetchall()}
         # Add new columns one by one to avoid destructive migrations.
+        if "mid_price" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN mid_price REAL")
+        if "mid_slippage_bps" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN mid_slippage_bps REAL")
         if "asset_class" not in trade_cols:
             self.cursor.execute(
                 "ALTER TABLE trade_executions ADD COLUMN asset_class TEXT DEFAULT 'equity'"
@@ -1761,6 +1767,8 @@ class DatabaseManager:
         price: float,
         total_value: float,
         commission: float = 0.0,
+        mid_price: Optional[float] = None,
+        mid_slippage_bps: Optional[float] = None,
         signal_id: Optional[int] = None,
         realized_pnl: Optional[float] = None,
         realized_pnl_pct: Optional[float] = None,
@@ -1784,10 +1792,10 @@ class DatabaseManager:
                     """
                     INSERT INTO trade_executions
                     (ticker, trade_date, action, shares, price, total_value,
-                     commission, signal_id, realized_pnl, realized_pnl_pct,
+                     commission, mid_price, mid_slippage_bps, signal_id, realized_pnl, realized_pnl_pct,
                      holding_period_days, asset_class, instrument_type,
                      underlying_ticker, strike, expiry, multiplier)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -1797,6 +1805,8 @@ class DatabaseManager:
                         float(price),
                         float(total_value),
                         float(commission),
+                        mid_price,
+                        mid_slippage_bps,
                         signal_id,
                         realized_pnl,
                         realized_pnl_pct,

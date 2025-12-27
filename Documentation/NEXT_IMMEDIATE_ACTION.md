@@ -1,10 +1,14 @@
 # Next Immediate Action: Test Execution & Validation
 **Last Updated**: 2025-12-27  
-**Status**: 🟡 **GATED – Live/paper profitability evidence still required (paper-window MVS now PASS)**
+**Status**: 🟡 **GATED – Recent-window MVS still FAIL despite full-history PASS**
 
 ## 2025-12-27 Update (Verified)
 - Installed `arch==8.0.0` so GARCH runs via the `arch` backend in full environments (EWMA fallback remains when `arch` is absent).
 - Pytest stability: `pytest.ini` pins temp dirs under `/tmp` for WSL permission consistency and sets `pythonpath=.` to prevent `ModuleNotFoundError` when running single test modules.
+- TS execution validation: `ai_llm/signal_validator.py` now prefers Time Series provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks for cost feasibility.
+- Portfolio risk checks: concentration caps are enforced and optional correlation warnings/blocks are supported when `PaperTradingEngine` can precompute correlations from stored OHLCV.
+- Position lifecycle: `PaperTradingEngine` now supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger).
+- Fill telemetry: `trade_executions` now stores `mid_price` + `mid_slippage_bps` for bps-accurate transaction cost priors (`scripts/estimate_transaction_costs.py`).
 
 ## 2025-12-26 Update (Verified)
 - **MVS PASS (paper-window replay)** achieved with `scripts/run_mvs_paper_window.py` (≥30 realised trades, positive PnL, WR/PF thresholds). Report: `reports/mvs_paper_window_20251226_183023.md`.
@@ -12,8 +16,10 @@
 - WSL SQLite reliability: `DatabaseManager` now cleans stale `*-wal`/`*-shm` artifacts on `/mnt/*` paths and refreshes/reconciles mirrors to avoid stale/unsynced state.
 
 **Immediate focus now**
-1. Re-run `bash/run_end_to_end.sh` in real paper/live windows until ≥30 realised trades are achieved (not just replay) and confirm MVS stays PASS.
-2. Keep quant-validation health GREEN/YELLOW while increasing trade count (avoid “all HOLD” regimes).
+1. Drive **recent-window MVS PASS** (≥30 realised trades) on real paper/live runs (`bash/run_end_to_end.sh` / `scripts/run_auto_trader.py`), not just replay history.
+2. Use the new lifecycle exits to stabilize PnL and increase realised trade count (stop/target/time exits should reduce “stuck holds”).
+3. Calibrate `signal_routing.time_series.cost_model.default_roundtrip_cost_bps` using `scripts/estimate_transaction_costs.py` → `scripts/generate_config_proposals.py`.
+4. Refresh quant-health classification using the same recent window used for MVS (do not rely on full-history PASS alone).
 
 ## 2025-12-25 Update (Verified)
 - Former 2025-11-15 engineering blockers (SQLite corruption recovery, MSSA change-point ambiguity, Matplotlib dashboard crashes, SARIMAX warning floods, backfill timestamp hygiene) are resolved in-code.

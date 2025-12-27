@@ -84,3 +84,11 @@ Notes:
 - `PaperTradingEngine` now prefers `signal_timestamp` when present, so replayed trades have historical `trade_date` values (window filters work as expected).
 - `SignalValidator` no longer blocks **risk-reducing exits** (SELL closing a long / BUY covering a short), so liquidation and time-based exits are not prevented by trend/regime guardrails.
 - A Markdown artifact is written under `reports/` (example: `reports/mvs_paper_window_20251226_183023.md`).
+
+## 5. What Changed for MVS PASS Reliability (Recent)
+
+To drive MVS PASS on *recent paper/live windows* (not just full-history or replay), the system now includes:
+
+- **Stop/target/time exits**: `execution/paper_trading_engine.PaperTradingEngine` stores `stop_loss`, `target_price`, and `forecast_horizon` when opening a position and can close positions even when the incoming signal is `HOLD` (lifecycle exit triggers).
+- **Edge-aware cost validation**: `ai_llm/signal_validator.SignalValidator` prefers TS provenance (`signal.provenance.decision_context.net_trade_return` + `roundtrip_cost_*`) for transaction-cost feasibility; it falls back to drift *only* when no edge context is available.
+- **bps-accurate cost priors**: `trade_executions` now persists `mid_price` and `mid_slippage_bps` so `scripts/estimate_transaction_costs.py` can emit bps cost stats (commission + mid-slippage) and propose round-trip cost priors for `signal_routing.time_series.cost_model.default_roundtrip_cost_bps`.

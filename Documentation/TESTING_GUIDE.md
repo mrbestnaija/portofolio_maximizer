@@ -25,6 +25,8 @@
 ### Dec 27, 2025 Dependency Verification (WSL/Python 3.10)
 - Installed `arch==8.0.0` (GARCH uses the `arch` backend when available; EWMA fallback remains for minimal environments).
 - `pytest.ini` now pins pytest temp dirs under `/tmp` for WSL permission stability and sets `pythonpath=.` so `pytest tests/...` works without requiring `python -m`.
+- Focused regression run (diagnostics + validator + paper trading + order manager + DB schema) passes (`31 passed`):
+  - `pytest -q tests/test_diagnostic_tools.py tests/ai_llm/test_signal_validator.py tests/execution/test_paper_trading_engine.py tests/execution/test_order_manager.py tests/etl/test_database_manager_schema.py`
 
 
 ---

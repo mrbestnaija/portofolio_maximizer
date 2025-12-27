@@ -57,6 +57,18 @@ class CostStats:
     commission_median: float
     commission_mean: float
     commission_p95: float
+    commission_median_bps: float
+    commission_mean_bps: float
+    commission_p95_bps: float
+    slippage_median_bps: float
+    slippage_mean_bps: float
+    slippage_p95_bps: float
+    total_cost_median_bps: float
+    total_cost_mean_bps: float
+    total_cost_p95_bps: float
+    roundtrip_cost_median_bps: float
+    roundtrip_cost_mean_bps: float
+    roundtrip_cost_p95_bps: float
     pnl_median: float
     pnl_mean: float
 
@@ -67,6 +79,18 @@ class CostStats:
             "commission_median": self.commission_median,
             "commission_mean": self.commission_mean,
             "commission_p95": self.commission_p95,
+            "commission_median_bps": self.commission_median_bps,
+            "commission_mean_bps": self.commission_mean_bps,
+            "commission_p95_bps": self.commission_p95_bps,
+            "slippage_median_bps": self.slippage_median_bps,
+            "slippage_mean_bps": self.slippage_mean_bps,
+            "slippage_p95_bps": self.slippage_p95_bps,
+            "total_cost_median_bps": self.total_cost_median_bps,
+            "total_cost_mean_bps": self.total_cost_mean_bps,
+            "total_cost_p95_bps": self.total_cost_p95_bps,
+            "roundtrip_cost_median_bps": self.roundtrip_cost_median_bps,
+            "roundtrip_cost_mean_bps": self.roundtrip_cost_mean_bps,
+            "roundtrip_cost_p95_bps": self.roundtrip_cost_p95_bps,
             "pnl_median": self.pnl_median,
             "pnl_mean": self.pnl_mean,
         }
@@ -111,9 +135,8 @@ def _load_trades(
     end_date: Optional[str],
 ) -> List[Dict[str, Any]]:
     query = """
-        SELECT ticker, trade_date, commission, realized_pnl
+        SELECT ticker, trade_date, commission, total_value, price, mid_price, mid_slippage_bps, realized_pnl
         FROM trade_executions
-        WHERE realized_pnl IS NOT NULL
     """
     params: List[Any] = []
     if start_date:
@@ -133,18 +156,53 @@ def _compute_group_stats(records: Dict[str, List[Dict[str, Any]]]) -> List[CostS
     stats: List[CostStats] = []
     for group, rows in records.items():
         commissions: List[float] = []
+        commissions_bps: List[float] = []
+        slippages_bps: List[float] = []
+        total_costs_bps: List[float] = []
         pnls: List[float] = []
         for row in rows:
             commission = float(row.get("commission") or 0.0)
-            pnl = float(row.get("realized_pnl") or 0.0)
             commissions.append(commission)
-            pnls.append(pnl)
+            total_value = float(row.get("total_value") or 0.0)
+            commission_bps = (commission / total_value) * 1e4 if total_value > 0 else 0.0
+            commissions_bps.append(commission_bps)
+
+            slippage_bps = row.get("mid_slippage_bps")
+            if slippage_bps is None:
+                mid_price = row.get("mid_price")
+                price = row.get("price")
+                try:
+                    mid_f = float(mid_price) if mid_price is not None else None
+                    px_f = float(price) if price is not None else None
+                except (TypeError, ValueError):
+                    mid_f = None
+                    px_f = None
+                if mid_f and px_f and mid_f > 0:
+                    slippage_bps = ((px_f - mid_f) / mid_f) * 1e4
+            try:
+                slippage_bps_f = float(slippage_bps) if slippage_bps is not None else 0.0
+            except (TypeError, ValueError):
+                slippage_bps_f = 0.0
+            slippage_abs = abs(slippage_bps_f)
+            slippages_bps.append(slippage_abs)
+
+            total_cost_bps = commission_bps + slippage_abs
+            total_costs_bps.append(total_cost_bps)
+
+            pnl_raw = row.get("realized_pnl")
+            if pnl_raw is not None:
+                pnls.append(float(pnl_raw or 0.0))
 
         trades = len(rows)
         if trades == 0:
             continue
         commission_mean = sum(commissions) / trades if trades else 0.0
-        pnl_mean = sum(pnls) / trades if trades else 0.0
+        commission_mean_bps = sum(commissions_bps) / trades if trades else 0.0
+        slippage_mean_bps = sum(slippages_bps) / trades if trades else 0.0
+        total_cost_mean_bps = sum(total_costs_bps) / trades if trades else 0.0
+        pnl_count = len(pnls)
+        pnl_mean = sum(pnls) / pnl_count if pnl_count else 0.0
+        roundtrip_cost_mean_bps = 2.0 * total_cost_mean_bps
         stats.append(
             CostStats(
                 group=group,
@@ -152,6 +210,18 @@ def _compute_group_stats(records: Dict[str, List[Dict[str, Any]]]) -> List[CostS
                 commission_median=_percentile(commissions, 50.0),
                 commission_mean=commission_mean,
                 commission_p95=_percentile(commissions, 95.0),
+                commission_median_bps=_percentile(commissions_bps, 50.0),
+                commission_mean_bps=commission_mean_bps,
+                commission_p95_bps=_percentile(commissions_bps, 95.0),
+                slippage_median_bps=_percentile(slippages_bps, 50.0),
+                slippage_mean_bps=slippage_mean_bps,
+                slippage_p95_bps=_percentile(slippages_bps, 95.0),
+                total_cost_median_bps=_percentile(total_costs_bps, 50.0),
+                total_cost_mean_bps=total_cost_mean_bps,
+                total_cost_p95_bps=_percentile(total_costs_bps, 95.0),
+                roundtrip_cost_median_bps=2.0 * _percentile(total_costs_bps, 50.0),
+                roundtrip_cost_mean_bps=roundtrip_cost_mean_bps,
+                roundtrip_cost_p95_bps=2.0 * _percentile(total_costs_bps, 95.0),
                 pnl_median=_percentile(pnls, 50.0),
                 pnl_mean=pnl_mean,
             )

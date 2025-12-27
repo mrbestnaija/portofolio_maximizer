@@ -37,13 +37,20 @@ def main(proposals_path: str, output: str) -> None:
         raise SystemExit(f"Proposals file not found: {proposals_path}")
     payload: Dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
 
-    overrides: Dict[str, Any] = {"time_series": {}, "friction_buffers": {}}
+    overrides: Dict[str, Any] = {
+        "signal_routing": {
+            "time_series": {
+                "per_ticker": {},
+                "cost_model": {"default_roundtrip_cost_bps": {}},
+            }
+        }
+    }
 
     for entry in payload.get("time_series_thresholds") or []:
         ticker = str(entry.get("ticker") or "").strip()
         if not ticker:
             continue
-        overrides["time_series"][ticker] = {
+        overrides["signal_routing"]["time_series"]["per_ticker"][ticker] = {
             "confidence_threshold": entry.get("confidence_threshold"),
             "min_expected_return": entry.get("min_expected_return"),
             "evidence": {
@@ -58,11 +65,16 @@ def main(proposals_path: str, output: str) -> None:
         group = str(entry.get("group") or "").strip()
         if not group:
             continue
-        overrides["friction_buffers"][group] = {
-            "min_expected_return": entry.get("suggested_min_expected_return"),
-            "friction_buffer": entry.get("suggested_friction_buffer"),
-            "median_commission": entry.get("median_commission"),
-        }
+        bps = entry.get("suggested_roundtrip_cost_bps")
+        if bps is None:
+            bps = entry.get("roundtrip_cost_median_bps")
+        try:
+            bps_f = float(bps)
+        except (TypeError, ValueError):
+            bps_f = None
+        if bps_f is None:
+            continue
+        overrides["signal_routing"]["time_series"]["cost_model"]["default_roundtrip_cost_bps"][group] = bps_f
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
