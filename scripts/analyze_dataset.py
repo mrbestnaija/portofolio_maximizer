@@ -12,10 +12,13 @@ from pathlib import Path
 import click
 import logging
 import json
+import os
 from typing import Optional
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 from etl.time_series_analyzer import TimeSeriesDatasetAnalyzer
 from etl.visualizer import TimeSeriesVisualizer

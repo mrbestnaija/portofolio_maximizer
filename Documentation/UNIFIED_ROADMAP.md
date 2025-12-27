@@ -1,6 +1,7 @@
 ﻿# UNIFIED ROADMAP: Portfolio Maximizer v45
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+> **Current verified snapshot (2025-12-26):** `Documentation/PROJECT_STATUS.md` (engineering unblocked; paper-window MVS now PASS, live/paper still gated).
 
 **Production-Ready Autonomous Profit Machine**
 

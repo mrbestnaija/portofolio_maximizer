@@ -47,6 +47,18 @@
 - Synthetic generator Phase 2/3 hooks landed: `config/synthetic_data_config.yml` gains microstructure depth/order-imbalance knobs and liquidity shock events; `etl/synthetic_extractor.py` now emits Depth/OrderImbalance channels to better emulate illiquid markets without live feeds.
 - Monetization gate currently unblocked with synthetic trades/metrics; swap in real pipeline/auto-trader runs ASAP. If switching DBs (e.g., `data/test_database.db`), call the gate with `--db-path ...` and ensure performance_metrics are populated in that store first.
 
+## 2025-12-25 – Verification Snapshot + Status Reconcile
+
+- Added `Documentation/PROJECT_STATUS.md` as the canonical “what is verified right now” snapshot (compile + focused pytest run).
+- Updated integration/testing docs to remove stale “BLOCKED (2025-11-15)” framing now that the structural fixes are in place; remaining gating is profitability/quant-health evidence on live/paper data.
+
+## 2025-12-26 – MVS Paper Window PASS + Exit/DB Hardening
+
+- Added `scripts/run_mvs_paper_window.py` (deterministic replay runner) to quickly generate ≥30 **realised** trades from stored OHLCV for MVS validation.
+- Verified **MVS PASS** on the 365‑day replay window; report artifact: `reports/mvs_paper_window_20251226_183023.md`.
+- Exit safety: `ai_llm/signal_validator.SignalValidator` now treats exposure‑reducing exits as always executable (won’t block liquidation/time exits with trend/regime guardrails).
+- WSL SQLite reliability: `etl/database_manager.DatabaseManager` now cleans stale `*-wal`/`*-shm` artifacts on `/mnt/*` paths and refreshes mirrors defensively to avoid stale/unsynced state.
+
 ---
 
 ## 2025-11-24 – Frontier Universe & Data-Source-Aware Tickers

@@ -35,9 +35,13 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
 import logging
+import os
 from scipy import stats
 from statsmodels.tsa.stattools import adfuller, acf, pacf
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 

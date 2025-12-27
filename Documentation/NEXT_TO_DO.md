@@ -1,13 +1,17 @@
-﻿I'll update the `next-to-do.md` file with comprehensive ML modeling and optimization integration while maintaining the production-ready status and existing architecture.
+﻿# UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
 
-```markdown
-# UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
+> **Current verified snapshot (2025-12-26)**: `Documentation/PROJECT_STATUS.md` (engineering unblocked; **paper-window MVS now PASS**, live/paper still gated).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
-## CURRENT PROJECT STATUS: 🔴 BLOCKED (Updated Nov 15, 2025 brutal run)
+## CURRENT PROJECT STATUS: 🟡 GATED (live/paper profitability evidence) – engineering unblocked
 **Infrastructure in place**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration  
 **Recent Achievements**:
+
+### ✅ 2025-12-26 Delta (MVS PASS – paper window replay)
+- Added `scripts/run_mvs_paper_window.py` to replay stored OHLCV through `PaperTradingEngine` and rapidly generate ≥30 **realised** trades for MVS evaluation.
+- Verified **MVS PASS** on a 365‑day paper window (AAPL/MSFT/GOOGL): 31 realised trades, +$15.18 total profit, 51.6% win rate, 1.28 profit factor. Report: `reports/mvs_paper_window_20251226_183023.md`.
+- Exit safety: `SignalValidator` no longer blocks exposure-reducing exits (SELL closing a long / BUY covering a short), so liquidation/time exits are executable under guardrails.
 
 ### 🔄 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
@@ -62,7 +66,7 @@
   - Phased rollout (O1–O4) with brutal-suite gates for each phase.
 - Pipeline stage planner now forces Time Series forecasting/signal routing before any LLM work; LLM stages run strictly as fallback after the router.
 
-**⚠️ STATUS ALERT**: Documentation is ahead of execution. Core Phase-A tasks (signal validation integration, enhanced portfolio math promotion, statistical tooling, paper trading) remain unshipped. Profitability metrics cannot yet be evaluated because the database holds incomplete signal records and no paper trades.
+**⚠️ STATUS ALERT**: Documentation is ahead of execution in some areas, but paper-trading evidence now exists (MVS PASS via paper-window replay). The remaining gate is sustained **live/paper** evidence (≥30 realised trades in real time) plus acceptable quant-validation health.
 
 ### 2025-11-12 Update
 - ✅ `forcester_ts/` is the canonical forecasting stack; `TimeSeriesSignalGenerator` now handles GARCH volatility series safely and stamps HOLD provenance timestamps. Tests: `pytest tests/models/test_time_series_signal_generator.py -q` + targeted integration smoke.
@@ -532,7 +536,7 @@ Model Prediction → Strategy Execution → Performance Analysis → Feature Ref
 ### *Critical Safeguards:*
 - ✅ **Existing ETL pipeline remains unchanged** - ML is additive
 - ✅ **Rule-based strategies remain operational** - Fallback option
-- ✅ **All existing tests continue passing** - 121 tests (100%)
+- ✅ Focused verification suite passes (124 tests; see `Documentation/PROJECT_STATUS.md`)
 - ✅ **Configuration-driven ML deployment** - Can disable via config
 - ✅ **Gradual rollout capability** - Start with paper trading
 
@@ -731,7 +735,7 @@ def document_time_series_rollout():
 ### ⚡ **Backward Compatibility**
 - Existing ETL pipeline remains **unchanged**
 - Rule-based strategies remain **operational** 
-- All 121 tests continue **passing**
+- Focused verification suite passes (124 tests; see `Documentation/PROJECT_STATUS.md`)
 - Configuration-driven deployment
 
 The updated architecture makes ML the **central quantitative engine** while maintaining all existing production capabilities and adding sophisticated forecasting, risk management, and adaptive strategy optimization.

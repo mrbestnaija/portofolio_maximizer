@@ -1,7 +1,11 @@
 # Feature Implementation Verification Report
 
-**Date**: 2025-01-27  
-**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run uncovered regressions**
+**Last Verified**: 2025-12-26  
+**Status**: 🟡 **GATED – Engineering evidence is green; paper-window MVS now PASS; live/paper evidence still required**
+
+See `Documentation/PROJECT_STATUS.md` for the current verification snapshot and the remaining gates.
+
+> **2025-12-26 note**: The “2025-11-15 Brutal Run Findings” section below is retained for historical context; the engineering blockers described there have been remediated (SQLite mirror + WAL/SHM hygiene, MSSA change-point handling, headless Matplotlib). The remaining gate is sustained live/paper profitability evidence and quant-health.
 
 ### 🚨 2025-11-15 Brutal Run Findings (blocking)
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` both report `database disk image is malformed` with dozens of “rowid … out of order / missing from index” errors, so feature evidence backed by SQLite rows is presently untrustworthy. All writers in `etl/database_manager.py:689` and `:1213` now fail.

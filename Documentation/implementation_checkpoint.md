@@ -6,6 +6,8 @@
 
 ---
 
+**Verification (2025-12-25)**: Core packages compile cleanly and a focused integration test run passes (124 tests; integration + TS/LLM validation + execution + visualization). Canonical snapshot: `Documentation/PROJECT_STATUS.md`.
+
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
 ### Forecasting + ETL statistical hardening (2025-12-19)

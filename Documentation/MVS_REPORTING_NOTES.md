@@ -40,12 +40,12 @@ Examples:
 ```bash
 # Last 90 days only
 export MVS_WINDOW_DAYS=90
-bash/bash/run_end_to_end.sh
+bash/run_end_to_end.sh
 
 # Explicit calendar range
 export MVS_START_DATE=2025-01-01
 export MVS_END_DATE=2025-12-31
-bash/bash/run_pipeline_live.sh
+bash/run_pipeline_live.sh
 ```
 
 The printed `Window` line will show the exact range used.
@@ -65,3 +65,22 @@ MVS summaries are purely reporting; they do **not** gate execution by themselves
 - `scripts/run_auto_trader.py` (LLM readiness gate).
 
 Use the MVS outputs as a concise “should we trust this configuration yet?” signal, aligned with the quantitative success criteria.
+
+## 4. Fast MVS Paper Window Replay (Deterministic)
+
+When you need to quickly generate ≥30 **realised** trades for MVS validation (without waiting weeks of wall-clock paper trading), use:
+
+```bash
+python scripts/run_mvs_paper_window.py \
+  --tickers AAPL,MSFT,GOOGL \
+  --window-days 365 \
+  --max-holding-days 2 \
+  --entry-momentum-threshold 0.003 \
+  --reset-window-trades
+```
+
+Notes:
+- The runner replays OHLCV already stored in `ohlcv_data` and executes via `PaperTradingEngine`, so rows land in `trade_executions`.
+- `PaperTradingEngine` now prefers `signal_timestamp` when present, so replayed trades have historical `trade_date` values (window filters work as expected).
+- `SignalValidator` no longer blocks **risk-reducing exits** (SELL closing a long / BUY covering a short), so liquidation and time-based exits are not prevented by trend/regime guardrails.
+- A Markdown artifact is written under `reports/` (example: `reports/mvs_paper_window_20251226_183023.md`).

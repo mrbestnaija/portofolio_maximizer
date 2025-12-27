@@ -238,13 +238,28 @@ class PaperTradingEngine:
         transaction_cost = transaction_value * self.transaction_cost_pct
         
         # Step 6: Create trade object
+        # Prefer signal-provided timestamps when replaying historical windows so
+        # trade_date reflects the simulated session instead of "now".
+        trade_timestamp = datetime.now()
+        signal_timestamp = signal.get("signal_timestamp") or signal.get("timestamp")
+        if signal_timestamp is not None:
+            if isinstance(signal_timestamp, datetime):
+                trade_timestamp = signal_timestamp
+            else:
+                try:
+                    parsed = pd.to_datetime(signal_timestamp, errors="coerce")
+                    if parsed is not pd.NaT:
+                        trade_timestamp = parsed.to_pydatetime()
+                except Exception:
+                    trade_timestamp = datetime.now()
+
         trade = Trade(
             ticker=ticker,
             action=action,
             shares=position_size,
             entry_price=entry_price,
             transaction_cost=transaction_cost,
-            timestamp=datetime.now(),
+            timestamp=trade_timestamp,
             is_paper_trade=True,
             slippage=abs(entry_price - current_price) / current_price,
             signal_id=signal.get('signal_id'),
@@ -352,15 +367,23 @@ class PaperTradingEngine:
                 cap_shares = max(1, int(remaining_capacity / current_price))
                 shares = min(desired, cap_shares)
             elif current_position > 0:
-                shares = min(current_position, desired)
+                # Closing a long: always allow at least 1 share so exits are
+                # possible even when the 1% sizing cap falls below the share price.
+                shares = min(current_position, max(1, desired))
             else:
                 shares = desired
         else:
             desired = max(0, int(position_value / current_price))
             if current_position < 0:
-                shares = min(abs(current_position), desired)
+                # Covering a short: always allow at least 1 share so exits are
+                # possible even when the sizing cap falls below the share price.
+                shares = min(abs(current_position), max(1, desired))
             else:
                 shares = desired
+                # Opening a new long: avoid zero-share trades for higher-priced
+                # tickers when a single share still fits inside the risk cap.
+                if current_position == 0 and shares == 0 and current_price <= max_position_value:
+                    shares = 1
 
         return max(1, shares) if diag_mode else max(0, shares)
 

@@ -11,6 +11,7 @@ execution into a single continuously running workflow.
 from __future__ import annotations
 
 from pathlib import Path
+import atexit
 import logging
 import os
 import site
@@ -23,6 +24,9 @@ import click
 import pandas as pd
 import yaml
 import json
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import matplotlib.pyplot as plt
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
@@ -759,6 +763,10 @@ def main(
     data_validator = DataValidator()
     preprocessor = Preprocessor()
     trading_engine = PaperTradingEngine(initial_capital=initial_capital)
+    # Ensure the WSL SQLite mirror (if used) is synchronized back to the
+    # Windows-mount database even when this script exits without an explicit
+    # close (e.g., Ctrl+C, exceptions).
+    atexit.register(trading_engine.db_manager.close)
 
     llm_generator: Optional[LLMSignalGenerator]
     if enable_llm and _llm_signals_ready_for_trading():
@@ -1166,6 +1174,12 @@ def main(
             logger.debug("Skipping latency persistence for %s", ticker)
     if final_summary["positions"]:
         logger.info("Open positions: %s", final_summary["positions"])
+
+    # Close to flush + sync any WSL mirror back to the canonical DB path.
+    try:
+        trading_engine.db_manager.close()
+    except Exception:
+        logger.debug("Unable to close trading database cleanly", exc_info=True)
 
 
 if __name__ == "__main__":

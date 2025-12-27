@@ -27,7 +27,9 @@
   - `scripts/update_regime_state.py` computes per-ticker regime state (exploration vs exploitation, green/red/neutral) from realised PnL.
   - `execution/paper_trading_engine.PaperTradingEngine` consults `config/regime_state.yml` to scale per-trade risk (micro-sizing in exploration/red regimes, modest uplift in green regimes) without altering global guardrails.
 
-## 📊 CURRENT PROJECT STATUS: 🔴 BLOCKED (2025-11-15 brutal run regression)
+## 📊 CURRENT PROJECT STATUS: 🟡 GATED (profitability/quant-health) – engineering unblocked
+
+> **Current verified snapshot (2025-12-26)**: `Documentation/PROJECT_STATUS.md` (paper-window MVS now PASS; live/paper still gated)
 
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing + LLM Integration
 

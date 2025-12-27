@@ -15,6 +15,7 @@ Usage:
 
 import sys
 import logging
+import os
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -22,6 +23,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 import click
 import json
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 

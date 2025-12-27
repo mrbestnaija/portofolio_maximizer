@@ -9,9 +9,13 @@ import os
 import pytest
 import logging
 import pandas as pd
+import sys
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import patch, MagicMock
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from etl.database_manager import DatabaseManager
 from etl.data_source_manager import DataSourceManager

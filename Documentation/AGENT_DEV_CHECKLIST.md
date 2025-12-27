@@ -30,7 +30,7 @@
 ### Next Phase: 5 - Portfolio Optimization
 - **Focus**: Markowitz mean-variance optimization, risk parity
 - **Prerequisites**: ? All data infrastructure complete
-- **Status**: **BLOCKED** until `Documentation/integration_fix_plan.md` and `Documentation/INTEGRATION_TESTING_COMPLETE.md` both confirm a successful brutal run.
+- **Status**: **GATED** by profitability/quant-health evidence; structural integration fixes are verified (see `Documentation/PROJECT_STATUS.md`). Run a fresh brutal run to refresh quant-health classification and capture artifacts.
 
 ## Pre-Development AI Instructions
 

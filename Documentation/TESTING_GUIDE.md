@@ -9,6 +9,23 @@
 - Earlier pipeline dry-runs hit the Ollama latency regression (brutal suite failed only in `tests/ai_llm/test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low`); this test now passes under `simpleTrader_env` and should be treated as a regression guard for future latency changes.
 - logs/ts_signal_demo.json is the new smoke artifact proving BUY/SELL signals can be generated outside the test harness.
 
+### Dec 25, 2025 Verification (WSL/Python 3.10)
+- `python -m compileall` succeeds on core packages (no syntax/import regressions).
+- Focused pytest run covering integration + TS/LLM validation + execution + visualization now passes (**124 tests**).
+- Headless plotting is stable (core analysis/visualization modules default Matplotlib to a non-GUI backend).
+- See `Documentation/PROJECT_STATUS.md` for the exact reproducible commands and current gating items.
+
+### Dec 26, 2025 Verification (MVS paper-window PASS + exit safety)
+- Added a fast paper-window replay runner: `scripts/run_mvs_paper_window.py`.
+- Verified **MVS PASS** on a 365‑day paper window replay (≥30 realised trades, positive PnL, WR/PF thresholds); see `reports/mvs_paper_window_20251226_183023.md`.
+- Exit safety: `SignalValidator` now treats exposure‑reducing exits as always executable (won’t block liquidation with trend/regime warnings).
+- Targeted regression tests still pass (`29 passed`):
+  - `pytest -q tests/ai_llm/test_signal_validator.py tests/execution/test_paper_trading_engine.py tests/etl/test_data_storage.py`
+
+### Dec 27, 2025 Dependency Verification (WSL/Python 3.10)
+- Installed `arch==8.0.0` (GARCH uses the `arch` backend when available; EWMA fallback remains for minimal environments).
+- `pytest.ini` now pins pytest temp dirs under `/tmp` for WSL permission stability and sets `pythonpath=.` so `pytest tests/...` works without requiring `python -m`.
+
 
 ---
 
@@ -38,11 +55,21 @@ Focus: Business logic that loses money if broken
 
 ---
 
+## 🧰 **Environment Setup (One-Time)**
+
+```bash
+# From repo root
+python -m pip install -r requirements.txt
+
+# If you want full GARCH via arch (recommended for production fidelity):
+python -m pip install "arch==8.0.0"
+```
+
 ## 🚀 **Quick Start - Run All Tests**
 
 ### **Option 1: Bash Script (Recommended)**
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <repo_root>
 
 # Activate environment
 source simpleTrader_env/bin/activate

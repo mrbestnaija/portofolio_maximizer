@@ -1,6 +1,8 @@
 # Time Series as Default Signal Generator - Implementation Status
-**Date**: 2025-11-06  
-**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run regressions**
+**Last Verified**: 2025-12-25  
+**Status**: 🟢 **VERIFIED – TS-first routing refactor is in place (profitability/quant-health remains gated)**
+
+See `Documentation/PROJECT_STATUS.md` for the current verified test snapshot and next steps.
 
 ### Nov 12, 2025 Snapshot
 - Signal generator hardened (pandas-safe payload handling + provenance decision context); see logs/ts_signal_demo.json for real BUY/SELL output.

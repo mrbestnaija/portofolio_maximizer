@@ -1,7 +1,11 @@
 from datetime import datetime
+import sys
+from pathlib import Path
 from typing import List
 
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from execution.paper_trading_engine import ExecutionResult, PaperTradingEngine, Trade
 from etl.database_manager import DatabaseManager

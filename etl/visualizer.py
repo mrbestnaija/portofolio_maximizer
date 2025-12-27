@@ -28,6 +28,10 @@ References:
 - Wickham: ggplot2: Elegant Graphics for Data Analysis
 """
 
+import os
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -578,7 +582,7 @@ class TimeSeriesVisualizer:
         ax4 = fig.add_subplot(gs[1, 2])
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", category=PendingDeprecationWarning)
-            ax4.boxplot(series, patch_artist=True, orientation="vertical")
+            ax4.boxplot(series, patch_artist=True, vert=True)
         log_warning_records(caught, "TimeSeriesVisualizer.boxplot_vertical")
         ax4.set_title('Box Plot', fontsize=11, fontweight='bold')
         ax4.grid(True, alpha=0.3, axis='y')

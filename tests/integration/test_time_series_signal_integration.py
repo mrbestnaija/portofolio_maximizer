@@ -29,7 +29,7 @@ from models.signal_router import SignalRouter
 from models.signal_adapter import SignalAdapter
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def sample_price_series():
     """Create realistic price series for forecasting"""
     dates = pd.date_range(start='2023-01-01', periods=180, freq='D')
@@ -41,6 +41,29 @@ def sample_price_series():
     prices = 100 * (1 + trend + noise)
     
     return pd.Series(prices, index=dates, name='Close')
+
+
+@pytest.fixture(scope="session")
+def ts_forecast_bundle(sample_price_series):
+    """Compute a single forecast bundle for all integration tests.
+
+    This keeps the integration suite runtime bounded (SARIMAX auto-select and
+    multi-model ensembles are exercised elsewhere).
+    """
+    forecaster = TimeSeriesForecaster(
+        sarimax_config={
+            "enabled": True,
+            "auto_select": False,
+            "manual_order": (1, 1, 1),
+        },
+        garch_config={"enabled": False},
+        samossa_config={"enabled": False},
+        mssa_rl_config={"enabled": False},
+        ensemble_config={"enabled": False},
+    )
+    returns = sample_price_series.pct_change().dropna()
+    forecaster.fit(sample_price_series, returns_series=returns)
+    return forecaster.forecast(steps=30)
 
 
 @pytest.fixture
@@ -99,20 +122,9 @@ def ts_signal_generator(ts_routing_config):
 class TestTimeSeriesForecastingToSignalIntegration:
     """Test integration: Forecasting -> Signal Generation"""
     
-    def test_forecast_to_signal_flow(self, sample_price_series, ts_signal_generator):
+    def test_forecast_to_signal_flow(self, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test complete flow from forecast to signal"""
-        # Step 1: Generate forecast
-        forecaster = TimeSeriesForecaster(
-            sarimax_config={'enabled': True, 'auto_select': True},
-            garch_config={'enabled': True}
-        )
-        
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        
-        forecast_bundle = forecaster.forecast(steps=30)
-        
-        # Step 2: Generate signal from forecast
+        forecast_bundle = ts_forecast_bundle
         current_price = float(sample_price_series.iloc[-1])
         
         signal = ts_signal_generator.generate_signal(
@@ -130,18 +142,9 @@ class TestTimeSeriesForecastingToSignalIntegration:
         assert signal.entry_price == current_price
         assert signal.signal_type == 'TIME_SERIES'
     
-    def test_signal_generation_with_ensemble_forecast(self, sample_price_series, ts_signal_generator):
+    def test_signal_generation_with_ensemble_forecast(self, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test signal generation uses ensemble forecast"""
-        forecaster = TimeSeriesForecaster(
-            sarimax_config={'enabled': True},
-            samossa_config={'enabled': True, 'window_length': 40, 'n_components': 6},
-            garch_config={'enabled': True}
-        )
-        
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         # Verify ensemble forecast exists
         assert 'ensemble_forecast' in forecast_bundle or 'mean_forecast' in forecast_bundle
@@ -162,13 +165,9 @@ class TestTimeSeriesForecastingToSignalIntegration:
 class TestSignalRoutingIntegration:
     """Test integration: Signal Routing"""
     
-    def test_time_series_primary_routing(self, sample_price_series, ts_signal_generator):
+    def test_time_series_primary_routing(self, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test Time Series signals routed as primary"""
-        # Generate forecast and signal
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         
@@ -225,13 +224,9 @@ class TestSignalRoutingIntegration:
 class TestDatabasePersistenceIntegration:
     """Test integration: Database Persistence"""
     
-    def test_save_time_series_signal_to_database(self, test_database, sample_price_series, ts_signal_generator):
+    def test_save_time_series_signal_to_database(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test saving Time Series signal to unified trading_signals table"""
-        # Generate forecast and signal
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         signal = ts_signal_generator.generate_signal(
@@ -274,12 +269,9 @@ class TestDatabasePersistenceIntegration:
         assert abs(row['confidence'] - signal.confidence) < 0.01
         assert abs(row['entry_price'] - signal.entry_price) < 0.01
     
-    def test_save_multiple_signals_same_ticker(self, test_database, sample_price_series, ts_signal_generator):
+    def test_save_multiple_signals_same_ticker(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test saving multiple signals for same ticker (should update, not duplicate)"""
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         signal = ts_signal_generator.generate_signal(
@@ -324,13 +316,9 @@ class TestDatabasePersistenceIntegration:
         row = test_database.cursor.fetchone()
         assert row['action'] == 'SELL'
     
-    def test_save_llm_and_ts_signals_separately(self, test_database, sample_price_series, ts_signal_generator):
+    def test_save_llm_and_ts_signals_separately(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test saving both LLM and Time Series signals (different sources)"""
-        # Time Series signal
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         ts_signal = ts_signal_generator.generate_signal(
@@ -389,13 +377,9 @@ class TestDatabasePersistenceIntegration:
 class TestEndToEndPipelineIntegration:
     """Test complete end-to-end pipeline integration"""
     
-    def test_full_pipeline_forecast_to_database(self, test_database, sample_price_series, ts_signal_generator):
+    def test_full_pipeline_forecast_to_database(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test complete pipeline: Forecast -> Signal -> Database"""
-        # Step 1: Forecasting
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         # Step 2: Signal Generation
         current_price = float(sample_price_series.iloc[-1])
@@ -434,13 +418,9 @@ class TestEndToEndPipelineIntegration:
         assert row['ticker'] == 'TEST'
         assert row['source'] == 'TIME_SERIES'
     
-    def test_pipeline_with_signal_routing(self, test_database, sample_price_series, ts_signal_generator):
+    def test_pipeline_with_signal_routing(self, test_database, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test pipeline with signal routing"""
-        # Generate forecast
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         
@@ -481,12 +461,9 @@ class TestEndToEndPipelineIntegration:
 class TestSignalValidationIntegration:
     """Test signal validation in integration context"""
     
-    def test_signal_adapter_validation(self, sample_price_series, ts_signal_generator):
+    def test_signal_adapter_validation(self, sample_price_series, ts_forecast_bundle, ts_signal_generator):
         """Test signal validation through adapter"""
-        forecaster = TimeSeriesForecaster()
-        returns = sample_price_series.pct_change().dropna()
-        forecaster.fit(sample_price_series, returns_series=returns)
-        forecast_bundle = forecaster.forecast(steps=30)
+        forecast_bundle = ts_forecast_bundle
         
         current_price = float(sample_price_series.iloc[-1])
         signal = ts_signal_generator.generate_signal(

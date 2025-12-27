@@ -1,4 +1,4 @@
-                                                                                                      """Simple time-series validation framework with walk-forward CV."""
+"""Simple time-series validation framework with walk-forward CV."""
 
 from __future__ import annotations
 

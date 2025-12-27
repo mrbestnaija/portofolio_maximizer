@@ -162,6 +162,138 @@ class SignalValidator:
         self._stat_suite = StatisticalTestSuite()
         
         logger.info(f"Signal Validator initialized with min_confidence={min_confidence}")
+
+    @staticmethod
+    def _is_exit_trade(signal: Dict[str, Any], portfolio_state: Optional[Dict[str, Any]]) -> bool:
+        """
+        Return True when the signal reduces an existing exposure (i.e., closing).
+
+        This is used to avoid blocking risk-reducing exits due to trend/regime
+        warnings meant for opening/adding exposure.
+        """
+        if not isinstance(portfolio_state, dict):
+            return False
+        action = str(signal.get("action", "HOLD")).upper()
+        if action not in {"BUY", "SELL"}:
+            return False
+
+        ticker_raw = signal.get("ticker")
+        ticker = str(ticker_raw).strip() if ticker_raw is not None else ""
+        if not ticker:
+            return False
+
+        positions = portfolio_state.get("positions")
+        if not isinstance(positions, dict) or not positions:
+            return False
+
+        # Best-effort lookup with common casings.
+        shares_raw = positions.get(ticker)
+        if shares_raw is None:
+            shares_raw = positions.get(ticker.upper())
+        if shares_raw is None:
+            shares_raw = positions.get(ticker.lower())
+        try:
+            current_shares = float(shares_raw or 0.0)
+        except (TypeError, ValueError):
+            current_shares = 0.0
+
+        # SELL reduces an existing long; BUY reduces an existing short.
+        if action == "SELL" and current_shares > 0:
+            return True
+        if action == "BUY" and current_shares < 0:
+            return True
+        return False
+
+    @staticmethod
+    def _fingerprint_market_data(market_data: pd.DataFrame) -> Tuple[int, Any, float, float]:
+        """Fast-ish fingerprint used to invalidate cached market context."""
+        length = int(len(market_data))
+        last_index = None
+        if length:
+            try:
+                last_index = market_data.index[-1]
+            except Exception:
+                last_index = None
+
+        first_close = float("nan")
+        last_close = float("nan")
+        close_series = market_data.get("Close")
+        if isinstance(close_series, pd.Series) and not close_series.empty:
+            try:
+                first_close = float(close_series.iloc[0])
+                last_close = float(close_series.iloc[-1])
+            except Exception:
+                first_close = float("nan")
+                last_close = float("nan")
+
+        return (length, last_index, first_close, last_close)
+
+    def _market_context(self, market_data: pd.DataFrame) -> Dict[str, Any]:
+        """Compute/cache derived market features used across validation layers."""
+        fingerprint = self._fingerprint_market_data(market_data)
+        cache_key = "_portfolio_maximizer_signal_validator_ctx"
+        cached = None
+        if isinstance(getattr(market_data, "attrs", None), dict):
+            cached = market_data.attrs.get(cache_key)
+        if isinstance(cached, dict) and cached.get("fingerprint") == fingerprint:
+            return cached
+
+        close_series = market_data["Close"]
+        close_values = close_series.to_numpy(dtype=float, copy=False)
+        if close_values.size:
+            current_price = float(close_values[-1])
+        else:
+            current_price = float("nan")
+
+        if close_values.size >= 20:
+            sma_20 = float(np.mean(close_values[-20:]))
+        else:
+            sma_20 = current_price
+
+        if close_values.size >= 50:
+            sma_50 = float(np.mean(close_values[-50:]))
+        else:
+            sma_50 = sma_20
+
+        if close_values.size >= 2:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                log_returns = np.diff(np.log(close_values))
+        else:
+            log_returns = np.array([], dtype=float)
+
+        if log_returns.size:
+            expected_daily_return = float(np.mean(log_returns))
+            volatility_annualised = float(np.std(log_returns) * np.sqrt(252))
+        else:
+            expected_daily_return = 0.0
+            volatility_annualised = 0.0
+
+        rolling_vol = close_series.rolling(20).std()
+        rolling_last = rolling_vol.iloc[-1] if len(rolling_vol) else np.nan
+        if pd.notna(rolling_last):
+            vol_percentile = float((rolling_last > rolling_vol).mean())
+        else:
+            vol_percentile = 0.0
+
+        context: Dict[str, Any] = {
+            "close_values": close_values,
+            "current_price": current_price,
+            "sma_20": sma_20,
+            "sma_50": sma_50,
+            "log_returns": log_returns,
+            "expected_daily_return": expected_daily_return,
+            "volatility_annualised": volatility_annualised,
+            "vol_percentile": vol_percentile,
+            "regime_info": detect_market_regime(close_series),
+            "fingerprint": fingerprint,
+        }
+
+        if isinstance(getattr(market_data, "attrs", None), dict):
+            try:
+                market_data.attrs[cache_key] = context
+            except Exception:
+                pass
+        return context
     
     def validate_llm_signal(
         self,
@@ -199,14 +331,20 @@ class SignalValidator:
 
         confidence = _clamp_confidence(signal.get('confidence', 0.5))
         signal['confidence'] = confidence
+
+        exit_trade = self._is_exit_trade(signal, portfolio_state)
         
         # Layer 1: Statistical validation
         stats_valid, stats_warnings = self._validate_statistics(signal, market_data)
+        if exit_trade:
+            stats_valid = True
         layer_results['statistical'] = stats_valid
         warnings.extend(stats_warnings)
         
         # Layer 2: Market regime alignment
         regime_valid, regime_warnings = self._validate_regime(signal, market_data)
+        if exit_trade:
+            regime_valid = True
         layer_results['regime'] = regime_valid
         warnings.extend(regime_warnings)
         
@@ -214,6 +352,8 @@ class SignalValidator:
         position_valid, position_warnings = self._validate_position_size(
             signal, market_data, portfolio_value
         )
+        if exit_trade:
+            position_valid = True
         layer_results['position_sizing'] = position_valid
         warnings.extend(position_warnings)
         
@@ -231,6 +371,8 @@ class SignalValidator:
         cost_valid, cost_warnings = self._validate_transaction_costs(
             signal, market_data, portfolio_value
         )
+        if exit_trade:
+            cost_valid = True
         layer_results['transaction_costs'] = cost_valid
         warnings.extend(cost_warnings)
         
@@ -246,6 +388,9 @@ class SignalValidator:
         adjusted_confidence = max(0.0, min(adjusted_confidence, 1.0))
         
         is_valid = layers_passed and adjusted_confidence >= self.min_confidence
+        if exit_trade and action in {"BUY", "SELL"}:
+            # Never block risk-reducing exits due to entry-oriented guardrails.
+            is_valid = True
         
         # Generate recommendation
         if is_valid:
@@ -254,6 +399,8 @@ class SignalValidator:
             recommendation = 'MONITOR'
         else:
             recommendation = 'REJECT'
+        if exit_trade and action in {"BUY", "SELL"}:
+            recommendation = "EXECUTE"
         
         return ValidationResult(
             is_valid=is_valid,
@@ -268,13 +415,11 @@ class SignalValidator:
                             market_data: pd.DataFrame) -> tuple[bool, List[str]]:
         """Layer 1: Statistical validation (trend, volatility)"""
         warnings = []
-        
-        close = market_data['Close'].values
-        
-        # Trend validation
-        sma_20 = pd.Series(close).rolling(20).mean().iloc[-1]
-        sma_50 = pd.Series(close).rolling(50).mean().iloc[-1] if len(close) >= 50 else sma_20
-        current_price = close[-1]
+
+        context = self._market_context(market_data)
+        sma_20 = context["sma_20"]
+        sma_50 = context["sma_50"]
+        current_price = context["current_price"]
         
         action = signal.get('action', 'HOLD').upper()
         
@@ -290,13 +435,7 @@ class SignalValidator:
             if sma_20 > sma_50:
                 warnings.append("SELL signal in uptrend (SMA(20) > SMA(50))")
         
-        # Volatility check
-        returns = np.diff(np.log(close))
-        volatility = np.std(returns) * np.sqrt(252)
-        
-        # Historical volatility percentile
-        rolling_vol = pd.Series(close).rolling(20).std()
-        vol_percentile = (rolling_vol.iloc[-1] > rolling_vol).mean()
+        vol_percentile = context["vol_percentile"]
         
         if vol_percentile > self.max_volatility_percentile:
             warnings.append(f"High volatility: {vol_percentile:.1%} percentile")
@@ -311,11 +450,9 @@ class SignalValidator:
                         market_data: pd.DataFrame) -> tuple[bool, List[str]]:
         """Layer 2: Market regime alignment"""
         warnings = []
-        
-        close = market_data['Close']
-        regime_info = detect_market_regime(close)
+
+        regime_info = self._market_context(market_data)["regime_info"]
         regime = regime_info.get('current_regime', 'sideways_normal')
-        volatility = regime_info.get('volatility', np.std(np.diff(np.log(close))) * np.sqrt(252))
         
         action = signal.get('action', 'HOLD')
         risk_level = signal.get('risk_level', 'medium')
@@ -339,9 +476,9 @@ class SignalValidator:
                                 portfolio_value: float) -> tuple[bool, List[str]]:
         """Layer 3: Risk-adjusted position sizing (Kelly criterion)"""
         warnings = []
-        
-        close = market_data['Close'].values
-        returns = np.diff(np.log(close))
+
+        context = self._market_context(market_data)
+        returns = context["log_returns"]
         
         confidence = signal.get('confidence', 0.5)
         
@@ -364,7 +501,7 @@ class SignalValidator:
             warnings.append(f"Low confidence signal suggests smaller position")
         
         # Volatility adjustment
-        volatility = np.std(returns) * np.sqrt(252)
+        volatility = context["volatility_annualised"]
         if volatility > 0.4:  # High volatility
             warnings.append(f"High volatility ({volatility:.1%}) - reduce position size")
         
@@ -601,9 +738,8 @@ class SignalValidator:
         # Fallback: infer expected return from historical drift only when we have
         # no signal-provided edge.
         if gross_trade_return is None:
-            close = market_data['Close'].values
-            returns = np.diff(np.log(close))
-            expected_daily_return = float(np.mean(returns)) if len(returns) > 0 else 0.0
+            context = self._market_context(market_data)
+            expected_daily_return = float(context.get("expected_daily_return", 0.0))
 
             risk_level = signal.get('risk_level', 'medium')
             horizon_raw = signal.get("forecast_horizon") or signal.get("horizon")

@@ -201,6 +201,11 @@ class DatabaseManager:
             "timeout": self._busy_timeout_ms / 1000.0,
         }
         if self._should_skip_wal(self.db_path):
+            # Defensive: stale WAL/SHM artifacts on Windows mounts can confuse
+            # integrity checks and tooling that opens the canonical DB directly.
+            # Since we operate against a POSIX mirror in DELETE mode, WAL is not
+            # expected on the /mnt path.
+            self._cleanup_wal_artifacts(target=self.db_path)
             if self._mirror_path and self._mirror_path.exists():
                 logger.debug(
                     "Reusing existing SQLite mirror at %s for %s",
@@ -352,6 +357,76 @@ class DatabaseManager:
         tmp_root.mkdir(parents=True, exist_ok=True)
         mirror_path = self._mirror_path or (tmp_root / f"{self.db_path.name}.wsl")
 
+        def _quick_check(candidate: Path) -> bool:
+            """Return True when PRAGMA quick_check reports ok for the candidate DB."""
+            try:
+                conn = sqlite3.connect(str(candidate), timeout=1.0)
+                cur = conn.cursor()
+                cur.execute("PRAGMA quick_check(1)")
+                row = cur.fetchone()
+                conn.close()
+                return bool(row and row[0] == "ok")
+            except Exception:
+                return False
+
+        try:
+            source_stat = self.db_path.stat() if self.db_path.exists() else None
+        except OSError:
+            source_stat = None
+
+        if mirror_path.exists():
+            mirror_ok = _quick_check(mirror_path)
+            if not mirror_ok:
+                logger.warning(
+                    "Existing SQLite mirror %s failed quick_check; rebuilding from %s.",
+                    mirror_path,
+                    self.db_path,
+                )
+                try:
+                    mirror_path.unlink()
+                except OSError:
+                    logger.debug("Unable to remove unhealthy SQLite mirror %s", mirror_path)
+
+            refreshed = False
+            if source_stat is not None and mirror_path.exists():
+                try:
+                    mirror_stat = mirror_path.stat()
+                except OSError:
+                    mirror_stat = None
+
+                if mirror_stat is not None and mirror_stat.st_mtime < source_stat.st_mtime:
+                    if _quick_check(self.db_path):
+                        try:
+                            shutil.copy2(self.db_path, mirror_path)
+                            refreshed = True
+                            logger.info(
+                                "Refreshed SQLite mirror %s from %s (source newer).",
+                                mirror_path,
+                                self.db_path,
+                            )
+                        except OSError as exc:
+                            logger.error(
+                                "Failed to refresh SQLite mirror %s from %s: %s",
+                                mirror_path,
+                                self.db_path,
+                                exc,
+                            )
+                    else:
+                        # Keep the existing mirror as a recovery path when the
+                        # Windows-mount DB has been corrupted.
+                        logger.warning(
+                            "SQLite database %s failed quick_check; continuing with existing mirror %s.",
+                            self.db_path,
+                            mirror_path,
+                        )
+
+            if not refreshed and mirror_path.exists():
+                logger.debug(
+                    "Continuing to use existing SQLite mirror %s for %s.",
+                    mirror_path,
+                    self.db_path,
+                )
+
         if not mirror_path.exists():
             try:
                 if self.db_path.exists():
@@ -366,12 +441,6 @@ class DatabaseManager:
             except OSError as exc:
                 logger.error("Failed to stage mirror database at %s: %s", mirror_path, exc)
                 raise
-        else:
-            logger.debug(
-                "Continuing to use existing SQLite mirror %s for %s.",
-                mirror_path,
-                self.db_path,
-            )
 
         self._mirror_path = mirror_path
         # Mirrors stay in DELETE journal mode for compatibility.
@@ -397,6 +466,9 @@ class DatabaseManager:
             return
         try:
             shutil.copy2(self._mirror_path, self.db_path)
+            # Remove any stale WAL/SHM artifacts on the canonical path; mirror
+            # syncs a single consistent DB file.
+            self._cleanup_wal_artifacts(target=self.db_path)
             logger.info("Synchronized mirror database %s back to %s", self._mirror_path, self.db_path)
         except OSError as exc:
             logger.error("Failed to synchronize mirror database %s: %s", self._mirror_path, exc)

@@ -1,6 +1,26 @@
 # Next Immediate Action: Test Execution & Validation
-**Date**: 2025-11-06  
-**Status**: 🔴 **BLOCKED – 2025-11-15 brutal run regressions**
+**Last Updated**: 2025-12-27  
+**Status**: 🟡 **GATED – Live/paper profitability evidence still required (paper-window MVS now PASS)**
+
+## 2025-12-27 Update (Verified)
+- Installed `arch==8.0.0` so GARCH runs via the `arch` backend in full environments (EWMA fallback remains when `arch` is absent).
+- Pytest stability: `pytest.ini` pins temp dirs under `/tmp` for WSL permission consistency and sets `pythonpath=.` to prevent `ModuleNotFoundError` when running single test modules.
+
+## 2025-12-26 Update (Verified)
+- **MVS PASS (paper-window replay)** achieved with `scripts/run_mvs_paper_window.py` (≥30 realised trades, positive PnL, WR/PF thresholds). Report: `reports/mvs_paper_window_20251226_183023.md`.
+- Exit safety: `SignalValidator` now treats exposure-reducing exits (SELL closing a long / BUY covering a short) as always executable, so liquidation/time exits are not blocked by trend/regime guardrails.
+- WSL SQLite reliability: `DatabaseManager` now cleans stale `*-wal`/`*-shm` artifacts on `/mnt/*` paths and refreshes/reconciles mirrors to avoid stale/unsynced state.
+
+**Immediate focus now**
+1. Re-run `bash/run_end_to_end.sh` in real paper/live windows until ≥30 realised trades are achieved (not just replay) and confirm MVS stays PASS.
+2. Keep quant-validation health GREEN/YELLOW while increasing trade count (avoid “all HOLD” regimes).
+
+## 2025-12-25 Update (Verified)
+- Former 2025-11-15 engineering blockers (SQLite corruption recovery, MSSA change-point ambiguity, Matplotlib dashboard crashes, SARIMAX warning floods, backfill timestamp hygiene) are resolved in-code.
+- Integration + profit-critical verification now passes; see `Documentation/PROJECT_STATUS.md` and `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
+- Immediate focus shifts from “make it run” to “make it profitable”: drive MVS PASS and quant-validation health GREEN/YELLOW on paper/live windows.
+
+> The remaining sections below retain the original 2025-11-15 blocker write-up for historical context.
 
 ---
 
