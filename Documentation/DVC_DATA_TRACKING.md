@@ -62,6 +62,14 @@ Set in `.env` (template in `.env.template`):
 
 On first push/pull to the Drive remote, DVC will prompt for authentication and store the token locally (typically in `.dvc/config.local`).
 
+#### WSL note (browser launch)
+
+On WSL, `xdg-open` may not be available. If DVC prints an auth URL but cannot open a browser, run the push with a Windows-browser launcher:
+
+```bash
+BROWSER="python scripts/open_url_windows.py" dvc push -r gdrive_logs logs/automation.dvc logs/signals.dvc
+```
+
 ## Monthly Log Recycling (Operational Runbook)
 
 ### End-of-month snapshot (store logs remotely)
@@ -127,4 +135,3 @@ dvc pull -r gdrive_logs
   - truncation + optional cache GC,
   - and structured retention policies.
 - Add CI guardrails to prevent accidentally committing `logs/**` directly to Git again.
-
