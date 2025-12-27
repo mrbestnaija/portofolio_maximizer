@@ -1,0 +1,6 @@
+outs:
+- md5: b4f2186bd47e47bf82fff94da1b363b2.dir
+  size: 232951
+  nfiles: 2
+  hash: md5
+  path: automation

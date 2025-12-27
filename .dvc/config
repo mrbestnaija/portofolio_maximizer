@@ -2,3 +2,5 @@
     remote = localstore
 ['remote "localstore"']
     url = ../data/dvcstore
+['remote "gdrive_logs"']
+    url = gdrive://1VHYgx_YZ6HVJAjtOxVNLBEzkPJZpc2G0
