@@ -162,13 +162,13 @@ This section is a structured log template for specific experiments. Fill it with
   - Adjust thresholds?
   - Schedule additional runs for robustness?
 
-Populate this section with one entry per important run, using identifiers that can be cross‑linked to logs and DB snapshots.
+Populate this section with one entry per important run, using identifiers that can be cross‐linked to logs and DB snapshots.
 
 ---
 
 ## 6. Reproducibility & Environment
 
-To target graduate‑level publication standards, every major result should be reproducible with:
+To target graduate‐level publication standards, every major result should be reproducible with:
 
 - **Environment specification**:
   - Python version and OS (see `SYSTEM_STATUS_2025-10-22.md` for examples).
@@ -177,17 +177,26 @@ To target graduate‑level publication standards, every major result should be r
 - **Data provenance**:
   - Ticker list, data sources (yfinance / Alpha Vantage / Finnhub).
   - Date ranges and cache state (whether runs used cached or live data).
-  - Seeds and randomness where applicable (for hyper‑opt and RL components).
+  - Seeds and randomness where applicable (for hyper‐opt and RL components).
 - **Command logs**:
-  - CLI invocations (ETL, auto‑trader, hyper‑opt).
-  - Cron schedule snippets for long‑running experiments (see `CRON_AUTOMATION.md`).
+  - CLI invocations (ETL, auto‐trader, hyper‐opt).
+  - Cron schedule snippets for long‐running experiments (see `CRON_AUTOMATION.md`).
 - **Artifacts**:
   - Plots under `visualizations/`.
   - Dashboard JSON snapshots under `visualizations/dashboard_data.json`.
   - Quant validation logs under `logs/signals/quant_validation.jsonl`.
-  - Hyper‑opt logs under `logs/hyperopt/`.
+  - Hyper‐opt logs under `logs/hyperopt/`.
 
-### 6.1 MTM Pricing Policy Assumptions
+### 6.1 Research‐grade reproducibility checklist (MIT / Google Scholar expectations)
+
+- **Traceable inputs**: Pin dataset snapshots by SHA256 and log acquisition dates; keep DOI/URL for any external benchmarks. Store hashes in `logs/artifacts_manifest.jsonl`.
+- **Deterministic runs**: Record `PYTHONHASHSEED`, RNG seeds, and sampler seeds for hyper‐opt and RL. Prefer immutable config overrides over ad hoc flags.
+- **Config immutability**: Attach commit SHA + config hashes (`quant_success_config.yml`, `signal_routing_config.yml`, `forecaster_monitoring.yml`) to every experiment entry (see Section 5).
+- **Executable notebooks / scripts**: For each reported figure/table, keep a runnable script or notebook under `reproducibility/` that regenerates it from the logged artifacts.
+- **External reviewability**: Include a short “Methods at a glance” appendix summarizing assumptions, constraints, and any deviations from preregistered hypotheses.
+- **Archiving plan**: For publishable results, prepare a replication bundle (configs, logs, plots, and minimal sample data) suitable for Zenodo/Dataverse deposit.
+
+### 6.2 MTM Pricing Policy Assumptions
 
 For all current experiments that rely on `scripts/liquidate_open_trades.py` to close out open trades synthetically:
 

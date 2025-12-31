@@ -37,6 +37,14 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - Improved `etl/yfinance_extractor.py` error handling by dropping recursive session patches and guarding log-return metrics against short or zero-valued series.
 - Reused a persistent `requests.Session` inside `ai_llm/ollama_client.py`, exposing a `close()` helper to trim LLM handshake latency and release sockets cleanly.
 
+## Academic Rigor & Reproducibility (MIT-style)
+
+- **Traceable artifacts**: Log config + commit hashes alongside experiment IDs; keep hashes for data snapshots and generated plots (`logs/artifacts_manifest.jsonl` when present).
+- **Deterministic runs**: Set and record seeds (`PYTHONHASHSEED`, RNG, hyper-opt samplers, RL) for every reported experiment; prefer config overrides over ad hoc flags.
+- **Executable evidence**: Each figure/table used for publication should have a runnable script/notebook (target: `reproducibility/` folder) that regenerates it from logged artifacts.
+- **Transparency**: Document MTM assumptions, cost models, and cron wiring in experiment notes; link back to `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` for the publication plan and replication checklist.
+- **Archiving plan**: Package replication bundles (configs, logs, plots, minimal sample data) for Zenodo/Dataverse deposit before submitting any paper/thesis.
+
 ---
 
 ## 📋 Table of Contents
