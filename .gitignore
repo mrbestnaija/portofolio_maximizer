@@ -98,6 +98,24 @@ data/portfolio_optimizer/*/*/*/*/*/*
 data/portfolio_optimizer/*/*/*/*/*/*/*
 data/portfolio_optimizer/*/*/*/*/*/*/*/*
 data/dvcstore/
+data/checkpoints/
+data/checkpoints/*
+data/checkpoints/*/*
+data/checkpoints/*/*/*
+data/checkpoints/*/*/*/*
+data/checkpoints/*/*/*/*/*
+data/checkpoints/*/*/*/*/*/*
+data/checkpoints/*/*/*/*/*/*/*
+data/checkpoints/*/*/*/*/*/*/*/*
+data/dvcstore/*
+data/synthetic/*
+data/processed/*
+data/raw/*
+data/training/*
+data/validation/**
+data/testing/*
+
+
 
 
 
@@ -161,6 +179,7 @@ logging/
 logs/archive/*
 logs/automation/*
 logs/signals/*
+
  
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/ 

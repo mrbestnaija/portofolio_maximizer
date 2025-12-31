@@ -8,6 +8,8 @@
 
 **Verification (2025-12-25)**: Core packages compile cleanly and a focused integration test run passes (124 tests; integration + TS/LLM validation + execution + visualization). Canonical snapshot: `Documentation/PROJECT_STATUS.md`.
 
+**Verification (2025-12-28)**: `bash/comprehensive_brutal_test.sh` now finishes end-to-end (profit-critical, ETL units, TS forecasting, signal routing, integration, LLM, security, pipeline execution with CV/frontier training). Stage summary logs reside under `logs/brutal/results_20251228_224751/` and the report/stage_summary.csv is writable/writeable, while the pipeline DB backup is stored at `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak`. The nightly validation wrapper `schedule_backfill.bat` is now registered in Windows Task Scheduler (`PortfolioMaximizer_BackfillSignals` at 02:00 daily) so `scripts/backfill_signal_validation.py` evidence stays fresh before any synthetic/live scaling.
+
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
 ### Forecasting + ETL statistical hardening (2025-12-19)
@@ -115,7 +117,7 @@
 
 ## New Capabilities (2025-11-09)
 - **Monitoring & Latency Benchmarking**: `scripts/monitor_llm_system.py` now logs latency benchmarks to `logs/latency_benchmark.json`, surfaces `llm_signal_backtests` summaries, and saves full JSON reports (IDs 7â9) so dashboards can validate Time Series + LLM health in one place.
-- **Nightly Validation Helper**: `schedule_backfill.bat` automates validator replays/nightly backfills using the authorised `simpleTrader_env` environment; Task Scheduler registration (02:00 daily) is the remaining ops step.
+- **Nightly Validation Helper**: `schedule_backfill.bat` automates validator replays/nightly backfills using the authorised `simpleTrader_env` environment; Task Scheduler registration (02:00 daily) is the remaining ops step, and the `PortfolioMaximizer_BackfillSignals` job now points directly at the script.
 - **Time Series Signal Generator Hardening**: Volatility forecasts are converted to scalars and HOLD provenance timestamps recorded, eliminating the `The truth value of a Series is ambiguous` crash during integration/monitoring runs. Regression tests executed: `pytest tests/models/test_time_series_signal_generator.py -q` and `pytest tests/integration/test_time_series_signal_integration.py::TestTimeSeriesForecastingToSignalIntegration::test_forecast_to_signal_flow -vv`.
 - **Environment Standardisation**: `simpleTrader_env/` (Python 3.12) is the sole supported virtual environment across Windows + WSL; all other virtual environments were removed to prevent drift.
 
@@ -150,7 +152,7 @@
 ## New Capabilities (2025-11-05)
 - **SAMOSSA Forecasting Integration**: `etl/time_series_forecaster.py` now includes a production-ready `SAMOSSAForecaster`, `config/forecasting_config.yml` exposes tunable SAMOSSA parameters, and `scripts/run_etl_pipeline.py` persists SAMOSSA forecasts via `DatabaseManager.save_forecast` (model_type=`'SAMOSSA'`).
 - **LLM Signal Metrics Pipeline**: LLM stages persist signal timestamps, realised returns, and backtest diagnostics; `llm_signal_backtests` aggregates reports while per-signal metrics update via `DatabaseManager.update_signal_performance`. Validated by `tests/etl/test_database_manager_schema.py` and surfaced via `scripts/monitor_llm_system.py`.
-- **Nightly Validation Automation**: Added `schedule_backfill.bat` wrapper for Windows Task Scheduler (sample command in `NEXT_TO_DO.md`) to run `scripts/backfill_signal_validation.py` nightly with portfolio/backtest defaults.
+- **Nightly Validation Automation**: Added `schedule_backfill.bat` wrapper for Windows Task Scheduler (sample command in `NEXT_TO_DO.md`) to run `scripts/backfill_signal_validation.py` nightly with portfolio/backtest defaults. The `PortfolioMaximizer_BackfillSignals` job (02:00 daily) now points directly at the script so the reminder from `Documentation/NEXT_TO_DO.md:111` is resolved.
 - **Risk-Level Schema Migration**: `ai_llm/llm_database_integration.py` auto-migrates `llm_risk_assessments` to include `risk_level` with `'extreme'` support, normalises legacy rows, and persists canonical values through `LLMRiskAssessment` helpers.
 - **Signal Tracker Integration**: `scripts/run_etl_pipeline.py` now registers every LLM decision with `LLMSignalTracker` and records validator outputs via the new `record_validator_result`/`flush` APIs, ensuring dashboards see live counts and statuses.
 - **Regression Guardrails**: `tests/ai_llm/test_llm_enhancements.py::test_risk_assessment_extreme_persisted` and `tests/scripts/test_track_llm_signals.py` run under `python -m pytest tests/ai_llm/test_llm_enhancements.py tests/scripts/test_track_llm_signals.py`, locking the database migration and tracker wiring in CI.

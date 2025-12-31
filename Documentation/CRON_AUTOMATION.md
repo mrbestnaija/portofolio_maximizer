@@ -167,13 +167,11 @@ Same as `auto_trader` but with defaults targeted at the core tickers (`AAPL,MSFT
   - `CRON_CORE_DB_PATH` (default: `data/portfolio_maximizer.db`)
   - `CRON_CORE_TOTAL_TARGET`, `CRON_CORE_PER_TICKER_TARGET`
 
-### 4.3 `nightly_backfill` (stub)
-
-Intended to support:
+### 4.3 `nightly_backfill`
 
 - `Documentation/implementation_checkpoint.md` – nightly signal validation backfill.
-- `scripts/backfill_signal_validation.py` – currently under modernization to use
-  timezone‑aware timestamps and updated SQLite adapters.
+- `scripts/backfill_signal_validation.py` – executed via Task Scheduler (`PortfolioMaximizer_BackfillSignals`) and available for manual runs.
+- Manual trigger: `bash/run_backfill.sh` (uses `simpleTrader_env/bin/python3` when present, logs to `logs/automation/backfill_<timestamp>.log`).
 
 Current behaviour:
 
