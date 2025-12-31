@@ -1,13 +1,14 @@
 @echo off
 @echo off
 REM Lightweight scheduled-task wrapper.
-REM Default: nightly TS forecaster audit/health check.
-REM Optional: trigger auto_trader_core via WSL to build TS evidence.
+REM Default: trigger auto_trader_core via WSL to build TS evidence.
+REM Optional: fallback to nightly TS forecaster audit/health check.
 
 set SCRIPT_DIR=%~dp0
 set PYTHON_BIN=%SCRIPT_DIR%simpleTrader_env\Scripts\python.exe
 set AUDIT_SCRIPT=%SCRIPT_DIR%scripts\check_forecast_audits.py
 set TASK=%1
+if "%TASK%"=="" set TASK=auto_trader_core
 
 if /I "%TASK%"=="auto_trader_core" (
   REM Use WSL to call the cron multiplexer for core tickers (halts after targets).

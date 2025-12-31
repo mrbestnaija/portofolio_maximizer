@@ -83,30 +83,14 @@ data/testing/*.parquet
 data/synthetic/
 models/synthetic/
 *.csv
-.data/
+data/
 data/cache/
 data/temp/
 data/ideas/
 data/external/
 data/portfolio_optimizer/
-data/portfolio_optimizer/*
-data/portfolio_optimizer/*/*
-data/portfolio_optimizer/*/*/*
-data/portfolio_optimizer/*/*/*/*
-data/portfolio_optimizer/*/*/*/*/*
-data/portfolio_optimizer/*/*/*/*/*/*
-data/portfolio_optimizer/*/*/*/*/*/*/*
-data/portfolio_optimizer/*/*/*/*/*/*/*/*
 data/dvcstore/
 data/checkpoints/
-data/checkpoints/*
-data/checkpoints/*/*
-data/checkpoints/*/*/*
-data/checkpoints/*/*/*/*
-data/checkpoints/*/*/*/*/*
-data/checkpoints/*/*/*/*/*/*
-data/checkpoints/*/*/*/*/*/*/*
-data/checkpoints/*/*/*/*/*/*/*/*
 data/dvcstore/*
 data/synthetic/*
 data/processed/*
@@ -125,6 +109,10 @@ data/testing/*
 !data/training/.gitkeep
 !data/validation/.gitkeep
 !data/testing/.gitkeep
+!data/checkpoints/.gitkeep
+!data/ideas/.gitkeep
+!data/dvcstore/.gitkeep
+!data/synthetic/.gitkeep
 
 # Visualizations (generated)
 visualizations/*.png
