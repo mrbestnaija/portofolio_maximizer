@@ -2,11 +2,11 @@
 
 **Status**: Draft research log  
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading  
-**Last updated**: 2025-11-20  
+**Last updated**: 2025-12-30  
 
 This document tracks the Portfolio Maximizer project as a scientific research artefact rather than only as a codebase. It is meant to evolve into the backbone of a Master’s‑level thesis or journal submission, with clear hypotheses, methods, experiments, and reproducible evidence.
 
-It complements the implementation‑focused documents in `Documentation/` (e.g. `QUANTIFIABLE_SUCCESS_CRITERIA.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `SYSTEM_STATUS_2025-10-22.md`) by giving a single, publication‑oriented view.
+It complements the implementation-focused documents in `Documentation/` (e.g. `QUANTIFIABLE_SUCCESS_CRITERIA.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `SYSTEM_STATUS_2025-10-22.md`) by giving a single, publication-oriented view. For current system status and verification evidence, see `Documentation/arch_tree.md` and `Documentation/implementation_checkpoint.md`.
 
 ---
 
@@ -14,19 +14,21 @@ It complements the implementation‑focused documents in `Documentation/` (e.g. 
 
 **Primary research question**
 
-- Can a fully automated, configuration‑driven trading stack built on standard market data (yfinance, Alpha Vantage, Finnhub) and modern TS/LLM models achieve **statistically significant, positive risk‑adjusted returns** after realistic transaction costs across multiple asset classes?
+- Under realistic transaction costs and execution constraints, do time-series forecasting ensembles (SARIMAX/SAMOSSA/GARCH/MSSA-RL) deliver statistically significant improvements in forecast accuracy and net risk-adjusted performance relative to mature baselines (random walk, ARIMA, historical mean/volatility) across liquid and frontier markets?
 
 **Secondary questions**
 
-- How do **Time Series ensemble signals** (SARIMAX/SAMOSSA/GARCH/MSSA‑RL) compare to an LLM‑driven fallback, when both are fed identical OHLCV histories, under the same risk and execution constraints?
-- Does a **barbell risk architecture** (safe vs risk buckets with hard budget constraints) reduce tail risk (max drawdown, CVaR) without destroying expected PnL?
-- Can **higher‑order hyper‑parameter optimization** (bandit‑style search over evaluation windows, TS thresholds, and quant success criteria) find robust configurations that generalise beyond the calibration window?
+- Does forecast combination (ensemble + convex blending) yield more stable out-of-sample performance than single-model signals across regime shifts (trend vs mean-reversion, low vs high volatility)?
+- How much incremental value, if any, does an LLM fallback add once TS signals are quant-validated and cost-aware, and does it avoid degrading performance when capped as a fallback?
+- Does cost-aware signal gating (quant validation + microstructure-based transaction cost model) reduce turnover and tail risk compared with ungated TS signals without materially lowering net returns?
+- Are predictability and signal durability meaningfully different in frontier markets vs developed markets after controlling for liquidity and transaction costs?
 
 **Working hypotheses**
 
-1. A properly validated TS ensemble with quant‐gated execution (profit factor / win rate / expected profit constraints) can generate **positive annualised Sharpe > 0** and **profit factor > 1.1** over sufficiently long horizons in liquid equities and FX.
-2. LLM‑only signals, even with backtests and guardrails, will remain **research‑grade** unless they pass the same quant validation thresholds as TS signals; treating LLMs as a capped fallback is safer than giving them primary control.
-3. A bandit‑like hyper‑parameter search that optimises higher‑order knobs (e.g. `time_series.min_expected_return`, `quant_validation.min_expected_profit`) will outperform static, hand‑tuned configurations on held‑out regimes when evaluated under identical cost assumptions.
+1. Forecast combination reduces forecast error (RMSE/sMAPE) relative to any single model and to random-walk baselines, with improvements that are statistically significant under standard forecast comparison tests (e.g., Diebold-Mariano or MCS).
+2. Cost-aware quant gating lowers turnover and drawdown while maintaining or improving net risk-adjusted performance (profit factor, win rate) versus ungated TS signals, especially in high-vol regimes.
+3. Frontier markets exhibit higher raw predictability but weaker net performance after realistic costs unless liquidity-adjusted cost models and stricter gating are applied.
+4. LLM-only signals do not consistently outperform the TS ensemble out-of-sample; when capped as a fallback, they are non-degrading and occasionally additive rather than primary.
 
 Each hypothesis will need explicit acceptance/rejection based on the experiments in Section 5.
 

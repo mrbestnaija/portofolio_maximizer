@@ -5,28 +5,13 @@
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
 
 **Date**: October 14, 2025  
-**Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions pending  
+**Status**: 🟢 UNBLOCKED – 2025-12-28 brutal run green  
 **Priority**: **CRITICAL** - Required for institutional-grade production
 
 ---
+**Status note (2025-12-28)**: The brutal suite completes end-to-end and the earlier 2025-11-15 blockers are resolved. Use `Documentation/arch_tree.md` and `Documentation/implementation_checkpoint.md` for the canonical verification trail.
 
-### 🚨 2025-11-15 Brutal Run Findings (blocking)
-- `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite datastore is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so no optimization evidence can be trusted until the file is rebuilt and `DatabaseManager._connect` handles this error the same way it already handles `"disk i/o error"`.
-- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` show Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`, leaving Stage 8 empty.
-- The visualization hook immediately fails with `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), so the dashboards cited later in this plan are missing.
-- Pandas/statsmodels warning spam remains unresolved (`forcester_ts/forecaster.py:128-136` uses a deprecated Period round-trip; `_select_best_order` in `forcester_ts/sarimax.py:136-183` retains unconverged grids).
-- `scripts/backfill_signal_validation.py:281-292` still uses `datetime.utcnow()` and sqlite’s default converters, triggering Python 3.12 deprecation warnings (`logs/backfill_signal_validation.log:15-22`).
-
-**Blocking actions before resuming this plan**
-1. Recover/rebuild `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the disk-I/O recovery path.
-2. Fix the MSSA `change_points` block (cast to list without boolean coercion), rerun the forecasting stage, and confirm Stage 8 receives forecasts.
-3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are produced.
-4. Replace the deprecated Period coercion and tighten the SARIMAX grid to quell warning spam (all warnings now archived in `logs/warnings/warning_events.log` via `etl/warning_recorder.py` for troubleshooting).
-5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before running nightly validation.
-
-> ✅ **2025-11-16 update**: Actions 1‑4 are complete (see `logs/pipeline_run.log:22237-22986`). The optimization plan remains blocked only on the validator modernization in item 5.
-> ✅ **2025-11-18 update**: `etl/database_manager.py` now backs up malformed SQLite stores mid-stream and rebuilds them automatically, so brutal/test runs no longer emit hundreds of identical “database disk image is malformed” errors before operators intervene.
-> 📊 Telemetry note: `forcester_ts/instrumentation.py` now records dataset diagnostics and benchmark metrics (RMSE, sMAPE, tracking error) per model with JSON audits under `logs/forecast_audits/`. Use these artifacts to quantify optimization impact.
+> 📊 Telemetry note: `forcester_ts/instrumentation.py` records dataset diagnostics and benchmark metrics (RMSE, sMAPE, tracking error) per model with JSON audits under `logs/forecast_audits/`. Use these artifacts to quantify optimization impact.
 
 ## 📊 EXECUTIVE SUMMARY
 
@@ -720,6 +705,33 @@ class MonteCarloSimulator:
 ### 4.4 Advanced Reporting Dashboard
 **New File**: `reports/advanced_dashboard.py`
 
+### 4.5 Intraday / LOB Execution Research (NEW)
+**Scope**: Bring execution modeling in line with production-grade microstructure practices.
+
+**Research items**
+- **TWAP/VWAP scheduling**: add order slicing profiles with participation-rate caps and time-bucket scheduling.
+- **Queue modeling**: simple queue position and fill-probability model using top-of-book sizes, spread, and short-term volatility.
+- **Market-impact curves**: empirical impact curve (e.g., square-root or power-law) calibrated on synthetic/realized slippage; tie to notional and volatility.
+- **Execution policy backtests**: compare MARKET vs limit/TWAP/VWAP on synthetic and real OHLCV with microstructure columns (Spread/Slippage/TxnCost/Impact).
+- **Cost model integration**: feed execution cost estimates into `signal_routing.time_series.cost_model` and paper-trading slippage modeling.
+
+**Execution benchmarks (short)**
+- **Arrival price vs VWAP/TWAP**: measure average implementation shortfall vs arrival price and VWAP/TWAP; target <= 15 bps for liquid equities, <= 35 bps for frontier baskets, and <= 25 bps for major FX.
+- **Slippage bps targets**: median slippage <= 10 bps (liquid equities), <= 25 bps (frontier), <= 15 bps (FX) under matched notional buckets.
+- **Fill quality**: limit/TWAP/VWAP fill rates >= 85% with no more than 1.5x baseline impact vs market orders.
+
+**Mapped experiment IDs**
+- `EXP_EXEC_2025_001`: MARKET vs TWAP (arrival price + VWAP slippage) on AAPL/MSFT/GOOGL, 2020-2024.
+- `EXP_EXEC_2025_002`: MARKET vs VWAP on frontier basket with synthetic microstructure (Spread/TxnCost/Impact columns).
+- `EXP_EXEC_2025_003`: Queue model vs naive limit orders on top-of-book simulation; measure fill rate and adverse selection.
+- `EXP_EXEC_2025_004`: Impact-curve calibration from paper-trading executions; validate against realized slippage buckets.
+
+**Planned artifacts**
+- `execution/execution_scheduler.py` (order slicing policies)
+- `execution/market_impact_model.py` (impact curves + calibration)
+- `tests/execution/test_execution_scheduler.py`
+- `tests/execution/test_market_impact_model.py`
+
 ---
 
 ## ✅ Forecaster & Hyper‑Parameter Institutionalisation – Sequenced TODO
@@ -791,6 +803,7 @@ class MonteCarloSimulator:
 - [ ] Regulatory compliance metrics
 - [ ] Advanced reporting dashboard
 - [ ] Real-time risk monitoring enhancements
+- [ ] Intraday/LOB execution research (TWAP/VWAP, queue modeling, market-impact curves)
 
 ---
 
@@ -813,6 +826,7 @@ class MonteCarloSimulator:
 - [ ] **Regulatory compliance** metrics
 - [ ] **Real-time** risk monitoring
 - [ ] **Automated** stress testing
+- [ ] **Execution quality** controls (TWAP/VWAP scheduling + impact curves)
 
 ---
 

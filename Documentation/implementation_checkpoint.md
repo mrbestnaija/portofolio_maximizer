@@ -1,14 +1,28 @@
 # Implementation Checkpoint Document
-**Version**: 7.1
-**Date**: 2025-12-04 (Updated)
+**Version**: 7.2
+**Date**: 2025-12-28 (Updated)
 **Project**: Portfolio Maximizer
 **Phase**: ETL Foundation + Analysis + Visualization + Caching + Cross-Validation + Multi-Source Architecture + Checkpointing & Logging + Local LLM Integration + Profit-Critical Testing + Ollama Health Check Fix + Error Monitoring + Performance Optimization + Statistical Validation Toolkit + Paper Trading Engine + Remote Synchronization Enhancements + Time Series Signal Generation Refactoring
 
 ---
 
+**Status snapshot (2025-12-28)**:
+- Engineering/integration unblocked; comprehensive brutal run green (see verification below).
+- Canonical status: `Documentation/PROJECT_STATUS.md`.
+- Architecture/status map: `Documentation/arch_tree.md`.
+- Research framing/questions: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`.
+- Integration evidence: `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
+- Historical remediation tracker: `Documentation/integration_fix_plan.md`.
+
 **Verification (2025-12-25)**: Core packages compile cleanly and a focused integration test run passes (124 tests; integration + TS/LLM validation + execution + visualization). Canonical snapshot: `Documentation/PROJECT_STATUS.md`.
 
-**Verification (2025-12-28)**: `bash/comprehensive_brutal_test.sh` now finishes end-to-end (profit-critical, ETL units, TS forecasting, signal routing, integration, LLM, security, pipeline execution with CV/frontier training). Stage summary logs reside under `logs/brutal/results_20251228_224751/` and the report/stage_summary.csv is writable/writeable, while the pipeline DB backup is stored at `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak`. The nightly validation wrapper `schedule_backfill.bat` is now registered in Windows Task Scheduler (`PortfolioMaximizer_BackfillSignals` at 02:00 daily) so `scripts/backfill_signal_validation.py` evidence stays fresh before any synthetic/live scaling.
+**Verification (2025-12-28)**: `bash/comprehensive_brutal_test.sh` completes end-to-end (profit-critical, ETL units, Time Series forecasting, signal routing, integration, LLM, security, pipeline execution with CV/frontier training). Evidence bundle:
+- `logs/brutal/results_20251228_224751/test.log` (suite summary)
+- `logs/brutal/results_20251228_224751/logs/` (per-suite logs)
+- `logs/brutal/results_20251228_224751/stage_summary.csv` (timing summary)
+- `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak` (pipeline DB snapshot)
+Suite coverage (from `test.log`): profit-critical (profit calculation accuracy + profit factor + report generation), ETL unit tests (98), Time Series forecasting (37), signal routing (26), integration (30), LLM (67), security (13), and pipeline execution (4 runs).
+The nightly validation wrapper `schedule_backfill.bat` is registered in Windows Task Scheduler (`PortfolioMaximizer_BackfillSignals` at 02:00 daily) so `scripts/backfill_signal_validation.py` evidence stays fresh before any synthetic/live scaling.
 
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
@@ -56,22 +70,23 @@
 - Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts).
 - Diagnostic reduced-universe run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
 
-### ð¨ 2025-11-15 Brutal Run Findings (blocking)
+### 2025-11-15 Brutal Run Findings (historical; resolved by 2025-12-28)
+Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
 - `bash/comprehensive_brutal_test.sh` previously reported `tests/ai_llm/test_ollama_client.py::TestOllamaGeneration::test_generate_switches_model_when_token_rate_low` as the lone failure; `ai_llm/ollama_client.py` now passes this test under `simpleTrader_env`, so brutal runs should treat it as a regression guard rather than an expected failure.
 
 
-**Blocking actions**
+**Blocking actions (historical; closed by 2025-12-28)**
 1. Rebuild/recover `data/portfolio_maximizer.db` and update `DatabaseManager._connect` so `"database disk image is malformed"` triggers the same reset/mirror branch we already use for `"disk i/o error"`.
 2. Patch the MSSA `change_points` handling (copy to list instead of boolean short-circuit), rerun `python scripts/run_etl_pipeline.py --stage time_series_forecasting`, and confirm Stage 8 receives forecasts.
 3. Drop the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` so dashboard artefacts are generated again.
 4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (Novâ¯18 update: frequency hints are now stored instead of forced, the SARIMAX grid enforces a data-per-parameter budget, and the warning recorder in `logs/warnings/warning_events.log` only captures genuinely new ConvergenceWarnings).
-5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document. This remains the primary blocker for declaring the brutal suite green.
+5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document. This was the primary blocker for declaring the brutal suite green.
 
 > **2025-11-19 remediation note**  
-> Items 14 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. This checkpoint remains BLOCKED until `scripts/backfill_signal_validation.py` is modernised and `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run; treat `Documentation/integration_fix_plan.md` as the canonical source for remediation progress.
+> Items 1-4 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. The remaining backfill modernization is complete and the brutal suite is green as of 2025-12-28; treat `Documentation/integration_fix_plan.md` as the historical remediation tracker.
 
 
-> **Documentation hygiene:** The sections below capture the last green build (2025-11-06). Follow `Documentation/integration_fix_plan.md` for canonical remediation steps and only refresh this checkpoint after `Documentation/INTEGRATION_TESTING_COMPLETE.md` records a successful brutal run.
+> **Documentation hygiene:** The sections below capture the 2025-11-06 baseline and earlier milestones. For current status, use `Documentation/PROJECT_STATUS.md` and `Documentation/arch_tree.md`.
 
 
 ## Executive Highlights (2025-11-14)

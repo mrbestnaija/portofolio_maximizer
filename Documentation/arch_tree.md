@@ -1,11 +1,18 @@
 # UPDATED TO-DO LIST: Portfolio Maximizer - Current Implementation Status
 
-## CURRENT PROJECT STATUS: PARTIALLY BLOCKED – 2025-11-15 brutal run issues largely remediated; higher-order hyperopt + validator/backfill work still in progress (TS model candidates + institutional-grade search scaffolding now in place)
+## CURRENT PROJECT STATUS: UNBLOCKED - comprehensive brutal run green (2025-12-28); integration/pipeline verification complete
+**Status references (canonical)**:
+- `Documentation/PROJECT_STATUS.md` (current engineering + MVS snapshot)
+- `Documentation/implementation_checkpoint.md` (chronological log + verification evidence)
+- `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` (research questions + hypotheses)
+- `Documentation/INTEGRATION_TESTING_COMPLETE.md` (integration test evidence)
+- `logs/brutal/results_20251228_224751/test.log` (brutal suite summary)
+- `logs/brutal/results_20251228_224751/stage_summary.csv` (timing summary)
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
 **Recent changes (2025-12-19)**: Synthetic stack upgraded with profiles + copula/tail shocks + richer features/calibration + txn-cost microstructure (TxnCostBps/ImpactBps) and persisted features/calibration artifacts; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (manifest + features + calibration). Forecasting/ETL statistical hardening landed (SARIMAX shift-safe backtransform, ensemble variance screening + row-wise convex blending, MSSA-RL standardized CUSUM, synthetic/live isolation, leak-free post-split normalization). GPU preference wiring remains in place (`PIPELINE_DEVICE` auto-detects CUDA with CPU fallback). Added cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`) and cron hook `sanitize_caches` to keep artifacts within 14-day retention by default.
 **Recent Achievements**:
 - 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque–Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
-- 2025-12-28 Delta (full brutal verification + nightly backfill automation): `bash/comprehensive_brutal_test.sh` now completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, time-series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Logs/report artifacts are available under `logs/brutal/results_20251228_224751/`, the stage summary CSV was patched to stay writable, and the DB snapshot now lands at `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak`. Windows Task Scheduler job `PortfolioMaximizer_BackfillSignals` (runs `schedule_backfill.bat` at 02:00 daily) keeps `scripts/backfill_signal_validation.py` evidence fresh before synthetic/live scaling as requested in `Documentation/NEXT_TO_DO.md:111`.
+- 2025-12-28 Delta (comprehensive brutal verification + nightly backfill automation): `bash/comprehensive_brutal_test.sh` completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, Time Series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Evidence lives under `logs/brutal/results_20251228_224751/` (`test.log`, per-suite logs in `logs/`, and `stage_summary.csv`); DB snapshot: `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak`. Suite counts from `test.log`: ETL (98), Time Series (37), signal routing (26), integration (30), LLM (67), security (13), plus profit-critical and pipeline execution (4 runs). Windows Task Scheduler job `PortfolioMaximizer_BackfillSignals` (runs `schedule_backfill.bat` at 02:00 daily) keeps `scripts/backfill_signal_validation.py` evidence fresh before synthetic/live scaling as requested in `Documentation/NEXT_TO_DO.md:111`.
 - 2025-11-30 Sentiment overlay plan captured (`Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md`); `config/sentiment.yml` remains disabled with strict gating and `tests/sentiment/test_sentiment_config_scaffold.py` guarding activation until profitability beats the benchmark.
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
@@ -31,12 +38,12 @@
 - Week 5.7: Dashboard pipeline emits forecast/signal PNGs via `etl/dashboard_loader.py` + `TimeSeriesVisualizer.plot_forecast_dashboard` (Nov 06, 2025) ⭐ NEW
 - Week 5.7: Token-throughput failover auto-selects faster Ollama models when tokens/sec degrade (`ai_llm/ollama_client.py`, Nov 12, 2025) ⭐ NEW
 - Week 5.8: Time Series Signal Generation Refactoring IMPLEMENTED (Nov 06, 2025) ⭐ NEW - **ROBUST TESTING REQUIRED**
-  - Time Series ensemble is DEFAULT signal generator (models/time_series_signal_generator.py) - **TESTING REQUIRED**
-  - Signal Router routes TS primary + LLM fallback (models/signal_router.py) - **TESTING REQUIRED**
-  - Unified signal interface for backward compatibility (models/signal_adapter.py) - **TESTING REQUIRED**
-  - Unified trading_signals database table - **TESTING REQUIRED**
+  - Time Series ensemble is DEFAULT signal generator (models/time_series_signal_generator.py) - TESTING COMPLETE (2025-12-28)
+  - Signal Router routes TS primary + LLM fallback (models/signal_router.py) - TESTING COMPLETE (2025-12-28)
+  - Unified signal interface for backward compatibility (models/signal_adapter.py) - TESTING COMPLETE (2025-12-28)
+  - Unified trading_signals database table - TESTING COMPLETE (2025-12-28)
   - Regression metrics (RMSE / sMAPE / tracking error) persisted to SQLite feed the router + dashboards (forecester_ts/forecaster.py, DatabaseManager.save_forecast regression_metrics column) - **LIVE**
-  - Complete pipeline integration with 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**
+  - Complete pipeline integration with 50 tests written (38 unit + 12 integration) - VALIDATED (2025-12-28 brutal run)
 - Week 5.9: Monitoring + Nightly Backfill Instrumentation (Nov 09, 2025) ⭐ NEW
   - `scripts/monitor_llm_system.py` logs latency benchmarks (`logs/latency_benchmark.json`), emits `llm_signal_backtests` summaries, and saves JSON run reports for dashboards.
   - `schedule_backfill.bat` replays validator jobs nightly; register via Windows Task Scheduler (02:00 daily) to keep Time Series + LLM metrics fresh.
@@ -73,7 +80,7 @@
     - `scripts/run_ts_model_search.py` runs rolling-window CV for compact SARIMAX/SAMOSSA grids and records candidates into `ts_model_candidates`.
     - `etl/statistical_tests.py` provides Diebold–Mariano-style comparison and rank stability helpers so candidate selection is statistically grounded.
     - `scripts/build_automation_dashboard.py` consolidates TS sweeps, transaction costs, sleeve promotion plans, config proposals, and best strategy/TS model candidates into `visualizations/dashboard_automation.json` for institutional-grade review.
-- `bash/comprehensive_brutal_test.sh` (Nov 12) run: profit-critical + ETL suites passed, but `tests/etl/test_data_validator.py` is missing and the Time Series block timed out with a `Broken pipe`, so TS/LLM regression coverage remains outstanding. *(Nov 16 update: the script now defaults to **Time Series-first** execution�LLM tests only run when `BRUTAL_ENABLE_LLM=1`, keeping the brutal gate aligned with `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`.)*
+- Historical note: the 2025-11-12 brutal run timed out in the Time Series block and flagged a missing validator test; this is resolved and superseded by the 2025-12-28 run (see `logs/brutal/results_20251228_224751/test.log`). *(The script defaults to Time Series-first execution; set `BRUTAL_ENABLE_LLM=1` only when you need the legacy LLM fallback stage.)*
 
 ## Architecture Overview
 
@@ -223,21 +230,21 @@ scripts/analyze_dataset.py
 - 200+ tests (100% passing) + enhanced risk/optimisation coverage + LLM integration tests + error monitoring tests
 
 
-### ?? 2025-11-15 Brutal Run Regression (blocking)
+### 2025-11-15 Brutal Run Regression (historical; resolved by 2025-12-28)
+Status: resolved; kept for audit context. Current evidence is in `logs/brutal/results_20251228_224751/test.log`.
 - `logs/pipeline_run.log:16932-17729` and a direct `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` call reported `database disk image is malformed`, �rowid � out of order,� and �row � missing from index� for dozens of pages. Every OHLCV/forecast write in `etl/database_manager.py:689` and `:1213` is now rejected, so the project is running against a corrupted primary datastore.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, �` capture the same `ValueError: The truth value of a DatetimeIndex is ambiguous` after inserting ~90 SARIMAX/SAMOSSA/MSSA rows per ticker. The culprit is the `change_points = mssa_result.get('change_points') or []` branch inside `scripts/run_etl_pipeline.py:1755-1764`. Because the exception fires after the DB writes, the code logs �Saved forecast �� and then overwrites the ticker entry with an `error`, so downstream stages see �No valid forecast available.�
 - Immediately after the failed stage, the visualization hook raises `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (`logs/pipeline_run.log:2626, 2981, �`), so the dashboard export promised in this document is also broken.
-- The earlier hardening notes in `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md` (lines 9-24) claimed the DatetimeIndex ambiguity was resolved, yet the brutal log proves the regression remains. We also continue to emit pandas/statsmodels warnings because `forcester_ts/forecaster.py:128-136` still does a deprecated Period round-trip and `_select_best_order` in `forcester_ts/sarimax.py:136-183` keeps unconverged combinations in the search space. *(2025-11-18 update: the forecaster now stores frequency hints instead of forcing a `PeriodIndex`, rescales series before fitting, and limits the SARIMAX grid once repeated non-convergences appear; any residual warnings still land in `logs/warnings/warning_events.log` for review.)*
-- `scripts/backfill_signal_validation.py:281-292` still calls `datetime.utcnow()` and relies on sqlite3�s default converters, producing the deprecation warnings documented in `logs/backfill_signal_validation.log:15-22`.
-- **2025-11-19 remediation note**: Database corruption, MSSA change-point ambiguity, the Matplotlib `axis=` crash, and SARIMAX warning storms now have concrete fixes in `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, and `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py`. Synthetic/brutal pipelines write into `data/test_database.db` via `PORTFOLIO_DB_PATH`, keeping `data/portfolio_maximizer.db` reserved for production. The remaining gating item for lifting the global BLOCKED flag is modernising `scripts/backfill_signal_validation.py` per `Documentation/integration_fix_plan.md` and validating a fresh brutal run.
+- The earlier DatetimeIndex ambiguity and SARIMAX warning storm have been resolved; the 2025-12-28 brutal run shows the Time Series stage completes cleanly, and any residual warnings are routed to `logs/warnings/warning_events.log` for review.
+- `scripts/backfill_signal_validation.py` now uses timezone-aware timestamps and sqlite adapters; the prior Python 3.12 deprecation warnings are cleared.
+- **2025-11-19 remediation note**: Database corruption, MSSA change-point ambiguity, the Matplotlib `axis=` crash, and SARIMAX warning storms have concrete fixes in `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, and `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py`. Synthetic/brutal pipelines write into `data/test_database.db` via `PORTFOLIO_DB_PATH`, keeping `data/portfolio_maximizer.db` reserved for production. The gating items are closed as of the 2025-12-28 brutal run; see `logs/brutal/results_20251228_224751/test.log`.
 - `forcester_ts/instrumentation.py` (Nov 16) records fit/forecast telemetry, dataset snapshots (shape, missingness, frequency), ensemble weights, and benchmarking metrics (RMSE / sMAPE / tracking error). Configure `ensemble_kwargs.audit_log_dir` or set `TS_FORECAST_AUDIT_DIR` to emit JSON audits under `logs/forecast_audits/`, satisfying the interpretable-AI requirement from `AGENT_DEV_CHECKLIST.md`.
 
-**Required actions before claiming production readiness**
-1. Back up `data/portfolio_maximizer.db`, run `sqlite3 � ".recover"` (or start from a clean file), and teach `DatabaseManager._connect` to handle `"database disk image is malformed"` the same way we already handle `"disk i/o error"` (reset connection or operate off a POSIX mirror) so corruption is detected immediately.
-2. Patch `scripts/run_etl_pipeline.py:1755-1764` to pull `change_points` once, detect `None`, and convert concrete iterables to `list` before serialising so pandas never gets coerced to `bool`. Re-run `python scripts/run_etl_pipeline.py --stage time_series_forecasting` to confirm AAPL/MSFT retain usable forecasts.
-3. Remove the unsupported `axis=` argument when calling `FigureBase.autofmt_xdate()` (dashboard loader) and capture a fresh PNG to prove visualization works again.
-4. Replace the PeriodDtype round-trip with `Series.asfreq()` (or a resample) inside `forcester_ts/forecaster.py`, tighten the SARIMAX order grid via config, and add regression tests so the FutureWarning/ConvergenceWarning spam ceases.
-5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps (`datetime.now(timezone.utc)`) and register sqlite adapters before the scheduled nightly job runs again.
+**Current gating actions (post-2025-12-28)**
+1. Drive recent-window MVS PASS on paper/live runs (>=30 realized trades, positive PnL, WR/PF thresholds) using `bash/run_end_to_end.sh` or `scripts/run_auto_trader.py` as tracked in `Documentation/PROJECT_STATUS.md`.
+2. Calibrate `signal_routing.time_series.cost_model.default_roundtrip_cost_bps` with `scripts/estimate_transaction_costs.py` and `scripts/generate_config_proposals.py` before promoting new routing configs.
+3. Validate candidate thresholds/configs with `backtesting/candidate_simulator.py` walk-forward tests to avoid lookahead bias.
+4. Archive fresh brutal/end-to-end artifacts under `logs/` and refresh quant-health classification for the latest window.
 
 ### Config Inventory (Nov 2025; updated Dec 2025)
 - `config/pipeline_config.yml` defines the default stage planner ordering that both the ETL pipeline and autonomous trader invoke.
@@ -250,17 +257,22 @@ scripts/analyze_dataset.py
 - `config/ctrader_config.yml` captures demo/live endpoints plus per-signal risk caps for the cTrader order manager.
 
 ### Artifact & Log Inventory (Nov 2025; updated Dec 2025)
-- `bash/comprehensive_brutal_test.sh` orchestrates the profit-critical, ETL, TS/LLM, and execution suites; the most recent run (2025-11-12) persisted its reports under `logs/brutal/` alongside the console summary. *(Set `BRUTAL_ENABLE_LLM=1` if you need the legacy LLM fallback stage�otherwise the script only exercises the forecaster stack.)*
-- Recent brutal runs (for example `logs/brutal/results_20251204_190220/`) use TS-first defaults (`BRUTAL_ENABLE_LLM=0`, frontier stage without `--enable-llm`) and, when quant logs are present, call `scripts/check_quant_validation_health.py` to write the global GREEN/YELLOW/RED quant health classification into `final_report.md`.
+- `bash/comprehensive_brutal_test.sh` orchestrates the profit-critical, ETL, TS/LLM, and execution suites; the most recent run (2025-12-28) lives in `logs/brutal/results_20251228_224751/` with `test.log`, per-suite logs under `logs/`, `stage_summary.csv`, and `artifacts/test_database.db.bak`. *(Set `BRUTAL_ENABLE_LLM=1` if you need the legacy LLM fallback stage; otherwise the script exercises the forecaster stack.)*
+- Recent brutal runs (for example `logs/brutal/results_20251228_224751/`) use TS-first defaults and, when quant logs are present, call `scripts/check_quant_validation_health.py` to write the global GREEN/YELLOW/RED quant health classification into `final_report.md`.
 - `logs/brutal/results_*/artifacts/portfolio_maximizer.db.bak`, `.bak-shm`, and `test_database.db` capture SQLite snapshots from brutal runs so validation teams can diff executions before enabling brokers.
 - `logs/signals/quant_validation.jsonl` retains the quant-success audit rows that the brutal and dry-run scripts surface immediately after stage timings, keeping the TS-first + LLM-fallback contract observable.
 
-### ⚠️ Validation Status (Nov 12, 2025)
-- `bash/comprehensive_brutal_test.sh` execution summary:
-  - Profit-critical functions, profit-factor, and LLM profit-report suites: ? PASS.
-  - ETL suites (`test_data_storage`, `test_preprocessor`, `test_time_series_cv`, `test_data_source_manager`, `test_checkpoint_manager`): ? PASS (92 tests) but `tests/etl/test_data_validator.py` not found (needs restoration).
-  - Time Series forecasting / router suites: ? NOT RUN � script timed out with `Broken pipe` output before those stages, so no TS-first regression coverage exists yet.
-- `logs/errors/errors.log` (Nov 02–07) still reports blocking runtime issues: `DataStorage.train_validation_test_split()` TypeError (unexpected `test_size`), zero-fold CV `ZeroDivisionError`, SQLite `disk I/O error` during OHLCV persistence/migrations, and missing `pyarrow`/`fastparquet` to serialize checkpoints. These must be cleared before rerunning ETL or the autonomous loop on live data.
+### Validation Status (2025-12-28)
+- `bash/comprehensive_brutal_test.sh` execution summary (see `logs/brutal/results_20251228_224751/test.log`):
+  - Profit-critical suites: PASS (profit calculation accuracy + profit factor + report generation).
+  - ETL suites: PASS (98 tests).
+  - Time Series forecasting: PASS (37 tests).
+  - Signal routing: PASS (26 tests).
+  - Integration suites: PASS (30 tests).
+  - LLM suites: PASS (67 tests).
+  - Security suites: PASS (13 tests).
+  - Pipeline execution: PASS (4 runs: basic synthetic, CV, Time Series forecasting, frontier multi-ticker + LLM).
+- Historical error-log items from early Nov have been remediated; current validation evidence is captured in the 2025-12-28 brutal run logs.
 
 ---
 
