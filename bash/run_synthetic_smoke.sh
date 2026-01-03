@@ -4,14 +4,16 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/bin/python"
-export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "Python interpreter not found at ${PYTHON_BIN}" >&2
-  exit 1
-fi
+# shellcheck source=bash/lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+
+PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
+pmx_require_executable "${PYTHON_BIN}"
+
+export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 
 CONFIG_PATH="${CONFIG_PATH:-config/synthetic_data_config.yml}"
 TICKERS="${TICKERS:-AAPL,MSFT}"
@@ -38,13 +40,16 @@ export SYNTHETIC_DATASET_ID="${DATASET_ID}"
 # Constrain DataSourceManager to synthetic only for this smoke.
 export SYNTHETIC_ONLY=1
 
+PIPELINE_START="${START_DATE:-2020-01-01}"
+PIPELINE_END="${END_DATE:-2024-01-01}"
+
+# Preserve historical behaviour: synthetic smoke does NOT enable LLM by default.
+ENABLE_LLM="${ENABLE_LLM:-0}"
+INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-0}"
+
 echo "Running pipeline with synthetic provider (dataset_id=${DATASET_ID})..."
-"${PYTHON_BIN}" scripts/run_etl_pipeline.py \
-  --tickers "${TICKERS}" \
-  --execution-mode synthetic \
-  --data-source synthetic \
-  --config "config/pipeline_config.yml" \
-  --start "${START_DATE:-2020-01-01}" \
-  --end "${END_DATE:-2024-01-01}"
+TICKERS="${TICKERS}" START_DATE="${PIPELINE_START}" END_DATE="${PIPELINE_END}" \
+  ENABLE_LLM="${ENABLE_LLM}" INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS}" \
+  bash "${SCRIPT_DIR}/run_pipeline.sh" --mode synthetic --data-source synthetic --config "config/pipeline_config.yml" "$@"
 
 echo "Synthetic pipeline smoke test completed."

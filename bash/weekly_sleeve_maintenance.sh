@@ -8,13 +8,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ -x "${ROOT_DIR}/simpleTrader_env/bin/python" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/bin/python"
-elif [[ -x "${ROOT_DIR}/simpleTrader_env/Scripts/python.exe" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/Scripts/python.exe"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python}"
-fi
+# shellcheck source=bash/lib/common.sh
+source "${ROOT_DIR}/bash/lib/common.sh"
+
+PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
 
 DB_PATH="${DB_PATH:-data/portfolio_maximizer.db}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"

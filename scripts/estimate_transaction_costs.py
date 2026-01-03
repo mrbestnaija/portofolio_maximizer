@@ -25,13 +25,12 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import pandas as pd
-from pathlib import Path
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 if str(ROOT_PATH) not in __import__("sys").modules["sys"].path:
@@ -137,6 +136,7 @@ def _load_trades(
     query = """
         SELECT ticker, trade_date, commission, total_value, price, mid_price, mid_slippage_bps, realized_pnl
         FROM trade_executions
+        WHERE 1=1
     """
     params: List[Any] = []
     if start_date:
@@ -298,7 +298,7 @@ def main(
     if as_of:
         ref_date = datetime.fromisoformat(as_of).date()
     else:
-        ref_date = datetime.utcnow().date()
+        ref_date = datetime.now(timezone.utc).date()
     start = ref_date - timedelta(days=int(lookback_days))
     start_iso = start.isoformat()
     end_iso = ref_date.isoformat()
@@ -317,7 +317,7 @@ def main(
 
     payload = {
         "meta": {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "db_path": db_path,
             "as_of": ref_date.isoformat(),
             "lookback_days": lookback_days,

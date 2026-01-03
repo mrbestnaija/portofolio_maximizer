@@ -6,11 +6,12 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-PY_BIN="${PYTHON_BIN:-}"
-if [[ -z "$PY_BIN" && -x "simpleTrader_env/bin/python3" ]]; then
-  PY_BIN="simpleTrader_env/bin/python3"
-fi
-PY_BIN="${PY_BIN:-python3}"
+# shellcheck source=bash/lib/common.sh
+source "${PROJECT_ROOT}/bash/lib/common.sh"
+
+PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}")"
+
+pmx_require_file "scripts/backfill_signal_validation.py"
 
 LOG_DIR="${LOG_DIR:-logs/automation}"
 mkdir -p "$LOG_DIR"
@@ -18,4 +19,4 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/backfill_${STAMP}.log"
 
 echo "[INFO] $(date -Is) starting backfill -> $LOG_FILE"
-"$PY_BIN" scripts/backfill_signal_validation.py "$@" | tee "$LOG_FILE"
+"${PYTHON_BIN}" scripts/backfill_signal_validation.py "$@" | tee "$LOG_FILE"

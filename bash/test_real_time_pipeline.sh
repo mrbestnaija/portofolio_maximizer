@@ -1,213 +1,127 @@
-#!/bin/bash
-# Real-Time Pipeline Testing Script
-# Tests actual pipeline execution with Qwen 14B model
+#!/usr/bin/env bash
+# Legacy real-time pipeline smoke runner (non-destructive).
+#
+# This script is kept for backward compatibility with documentation references.
+# Prefer the canonical entrypoints:
+# - `bash/run_pipeline.sh` (live/auto/synthetic/dry-run)
+# - `bash/comprehensive_brutal_test.sh` (full evidence bundle)
+#
+# What this does:
+# - Runs a minimal live-mode pipeline on a single ticker into an isolated DB.
+# - Runs a minimal synthetic-mode pipeline (optionally with frontier tickers) into an isolated DB.
+# - Optionally emits an LLM report artifact for the live DB.
+#
+# Env knobs:
+#   RT_ENABLE_LLM=0|1
+#   RT_LIVE_TICKERS="AAPL"
+#   RT_LIVE_START_DATE="2020-01-01"
+#   RT_LIVE_END_DATE="$(date +%Y-%m-%d)"
+#   RT_SYNTH_TICKERS="AAPL,MSFT,GOOGL"
+#   RT_SYNTH_START_DATE="2020-01-01"
+#   RT_SYNTH_END_DATE="2024-01-01"
+#   RT_INCLUDE_FRONTIER=0|1
+#   RT_REFRESH_SYNTHETIC=0|1
+#   RT_SYNTHETIC_DATASET_ID="latest"
 
-set -e
+set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$PROJECT_ROOT"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
+
+# shellcheck source=bash/lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+
+PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
+pmx_require_executable "${PYTHON_BIN}"
+
+RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
+ARTIFACT_DIR="logs/automation/real_time_pipeline_${RUN_STAMP}"
+mkdir -p "${ARTIFACT_DIR}"
+
+RT_ENABLE_LLM="${RT_ENABLE_LLM:-0}"
+
+LIVE_DB_PATH="data/test_real_time_pipeline_live_${RUN_STAMP}.db"
+SYN_DB_PATH="data/test_real_time_pipeline_synth_${RUN_STAMP}.db"
+
+check_db_tables() {
+  local db_path="$1"
+  "${PYTHON_BIN}" - <<'PY' "${db_path}"
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+if not db_path.exists():
+    raise SystemExit(f"db missing: {db_path}")
+
+conn = sqlite3.connect(str(db_path))
+try:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+    table_count = int(cur.fetchone()[0] or 0)
+finally:
+    conn.close()
+
+print(f"[DB] {db_path} tables={table_count}")
+PY
+}
 
 echo "=========================================="
-echo "REAL-TIME PIPELINE TESTING"
+echo "REAL-TIME PIPELINE SMOKE"
 echo "=========================================="
-echo "Testing optimized system with:"
-echo "  - Qwen 14B Chat model"
-echo "  - SQLite database persistence"
-echo "  - Profit tracking"
-echo "  - LLM report generation"
+echo "Artifacts: ${ARTIFACT_DIR}"
+echo "DB (live) : ${LIVE_DB_PATH}"
+echo "DB (synth): ${SYN_DB_PATH}"
+echo "LLM       : ${RT_ENABLE_LLM}"
 echo ""
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_success() { echo -e "${GREEN}✓${NC} $1"; }
-print_error() { echo -e "${RED}✗${NC} $1"; }
-print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
-print_info() { echo -e "${BLUE}ℹ${NC} $1"; }
-
-# 1. Environment setup
-echo "1. Setting up environment..."
-if [ -f "simpleTrader_env/bin/activate" ]; then
-    source simpleTrader_env/bin/activate
-    print_success "Virtual environment activated"
+echo "== [0/3] Optional synthetic refresh =="
+if [[ "${RT_REFRESH_SYNTHETIC}" == "1" ]]; then
+  echo "Refreshing synthetic dataset via production_cron.sh synthetic_refresh..."
+  bash bash/production_cron.sh synthetic_refresh
 else
-    print_error "Virtual environment not found"
-    exit 1
+  echo "(skipped; set RT_REFRESH_SYNTHETIC=1 to regenerate)"
 fi
 
-# 2. Check Ollama
 echo ""
-echo "2. Checking Ollama service..."
-if command -v ollama &> /dev/null; then
-    print_success "Ollama CLI found"
-    
-    # Check if qwen model is available
-    if ollama list | grep -q "qwen:14b-chat-q4_K_M"; then
-        print_success "Qwen 14B model available"
-    else
-        print_warning "Qwen 14B model not found - pipeline will use fallback"
-        print_info "To install: ollama pull qwen:14b-chat-q4_K_M"
-    fi
+echo "== [1/3] Live-mode pipeline (isolated DB) =="
+RT_LIVE_TICKERS="${RT_LIVE_TICKERS:-AAPL}"
+RT_LIVE_START_DATE="${RT_LIVE_START_DATE:-2020-01-01}"
+RT_LIVE_END_DATE="${RT_LIVE_END_DATE:-$(date +%Y-%m-%d)}"
+TICKERS="${RT_LIVE_TICKERS}" START_DATE="${RT_LIVE_START_DATE}" END_DATE="${RT_LIVE_END_DATE}" \
+  ENABLE_LLM="${RT_ENABLE_LLM}" INCLUDE_FRONTIER_TICKERS=0 \
+  bash "${SCRIPT_DIR}/run_pipeline.sh" --mode live --db-path "${LIVE_DB_PATH}"
+check_db_tables "${LIVE_DB_PATH}"
+
+echo ""
+echo "== [2/3] Synthetic-mode pipeline (isolated DB) =="
+RT_SYNTH_TICKERS="${RT_SYNTH_TICKERS:-AAPL,MSFT,GOOGL}"
+RT_INCLUDE_FRONTIER="${RT_INCLUDE_FRONTIER:-1}"
+RT_SYNTHETIC_DATASET_ID="${RT_SYNTHETIC_DATASET_ID:-latest}"
+RT_SYNTH_START_DATE="${RT_SYNTH_START_DATE:-2020-01-01}"
+RT_SYNTH_END_DATE="${RT_SYNTH_END_DATE:-2024-01-01}"
+
+export ENABLE_SYNTHETIC_PROVIDER=1
+export SYNTHETIC_ONLY=1
+export SYNTHETIC_DATASET_ID="${RT_SYNTHETIC_DATASET_ID}"
+
+TICKERS="${RT_SYNTH_TICKERS}" START_DATE="${RT_SYNTH_START_DATE}" END_DATE="${RT_SYNTH_END_DATE}" \
+  ENABLE_LLM="${RT_ENABLE_LLM}" INCLUDE_FRONTIER_TICKERS="${RT_INCLUDE_FRONTIER}" \
+  bash "${SCRIPT_DIR}/run_pipeline.sh" --mode synthetic --data-source synthetic --db-path "${SYN_DB_PATH}"
+check_db_tables "${SYN_DB_PATH}"
+
+echo ""
+echo "== [3/3] Optional LLM report artifact (live DB) =="
+if [[ "${RT_ENABLE_LLM}" == "1" ]]; then
+  PORTFOLIO_DB_PATH="${LIVE_DB_PATH}" "${PYTHON_BIN}" scripts/generate_llm_report.py \
+    --period all \
+    --format json \
+    --output "${ARTIFACT_DIR}/llm_report_live.json" || true
+  echo "LLM report: ${ARTIFACT_DIR}/llm_report_live.json"
 else
-    print_warning "Ollama not found - LLM features will be disabled"
+  echo "(skipped; set RT_ENABLE_LLM=1 to generate)"
 fi
 
-# 3. Test database initialization
 echo ""
-echo "3. Testing database initialization..."
-python3 -c "from etl.database_manager import DatabaseManager; db = DatabaseManager('data/test_init.db'); print('✓ Database initialized'); db.close()"
-if [ $? -eq 0 ]; then
-    print_success "Database initialization works"
-    rm -f data/test_init.db
-else
-    print_error "Database initialization failed"
-    exit 1
-fi
-
-# 4. Run pipeline with single ticker (fast test)
-echo ""
-echo "4. Testing pipeline with single ticker (AAPL)..."
-print_info "Running: python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm"
-echo ""
-
-python3 scripts/run_etl_pipeline.py --tickers AAPL --enable-llm --verbose
-
-if [ $? -eq 0 ]; then
-    print_success "Pipeline execution: SUCCESSFUL"
-else
-    print_error "Pipeline execution: FAILED"
-    exit 1
-fi
-
-# 5. Verify database was created
-echo ""
-echo "5. Verifying database creation..."
-if [ -f "data/portfolio_maximizer.db" ]; then
-    print_success "Database file created"
-    
-    # Check tables
-    table_count=$(sqlite3 data/portfolio_maximizer.db "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo "0")
-    if [ "$table_count" -ge 7 ]; then
-        print_success "All 7 tables created"
-    else
-        print_warning "Expected 7 tables, found $table_count"
-    fi
-else
-    print_error "Database not created"
-    exit 1
-fi
-
-# 6. Test database queries
-echo ""
-echo "6. Testing database queries..."
-
-echo "   Query 1: OHLCV data count"
-ohlcv_count=$(sqlite3 data/portfolio_maximizer.db "SELECT COUNT(*) FROM ohlcv_data;" 2>/dev/null || echo "0")
-print_info "   OHLCV rows: $ohlcv_count"
-
-echo "   Query 2: LLM analyses count"
-analysis_count=$(sqlite3 data/portfolio_maximizer.db "SELECT COUNT(*) FROM llm_analyses;" 2>/dev/null || echo "0")
-print_info "   LLM analyses: $analysis_count"
-
-echo "   Query 3: LLM signals count"
-signal_count=$(sqlite3 data/portfolio_maximizer.db "SELECT COUNT(*) FROM llm_signals;" 2>/dev/null || echo "0")
-print_info "   LLM signals: $signal_count"
-
-if [ "$ohlcv_count" -gt 0 ]; then
-    print_success "Database queries: WORKING"
-else
-    print_warning "No data in database - check pipeline"
-fi
-
-# 7. Test report generation (text format)
-echo ""
-echo "7. Testing report generation (text format)..."
-print_info "Running: python scripts/generate_llm_report.py --format text"
-echo ""
-
-python3 scripts/generate_llm_report.py --format text > /tmp/test_report.txt 2>&1
-
-if [ $? -eq 0 ]; then
-    print_success "Text report generation: SUCCESSFUL"
-    echo ""
-    print_info "Report preview (first 20 lines):"
-    echo "---"
-    head -20 /tmp/test_report.txt
-    echo "---"
-else
-    print_warning "Report generation had issues (may be due to no trade data)"
-fi
-
-# 8. Test report generation (JSON format)
-echo ""
-echo "8. Testing report generation (JSON format)..."
-print_info "Running: python scripts/generate_llm_report.py --format json"
-
-python3 scripts/generate_llm_report.py --format json > metrics.json 2>&1
-
-if [ $? -eq 0 ] && [ -f "metrics.json" ]; then
-    print_success "JSON report generation: SUCCESSFUL"
-    
-    # Validate JSON
-    if python3 -c "import json; json.load(open('metrics.json'))" 2>/dev/null; then
-        print_success "JSON is valid"
-    else
-        print_warning "JSON may be invalid"
-    fi
-else
-    print_warning "JSON report generation had issues"
-fi
-
-# 9. Test report generation (HTML format)
-echo ""
-echo "9. Testing report generation (HTML format)..."
-print_info "Running: python scripts/generate_llm_report.py --format html --output dashboard.html"
-
-python3 scripts/generate_llm_report.py --format html --output dashboard.html 2>&1
-
-if [ $? -eq 0 ] && [ -f "dashboard.html" ]; then
-    print_success "HTML report generation: SUCCESSFUL"
-    print_info "Dashboard saved to: dashboard.html"
-else
-    print_warning "HTML report generation had issues"
-fi
-
-# 10. Run multi-ticker test (frontier markets included via synthetic payload)
-echo ""
-echo "10. Testing pipeline with global + frontier tickers (synthetic run)..."
-print_info "Running: python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --execution-mode synthetic --enable-llm --verbose"
-echo ""
-
-python3 scripts/run_etl_pipeline.py --tickers AAPL,MSFT,GOOGL --include-frontier-tickers --execution-mode synthetic --enable-llm --verbose
-
-if [ $? -eq 0 ]; then
-    print_success "Multi-ticker pipeline (with frontier coverage): SUCCESSFUL"
-else
-    print_warning "Multi-ticker pipeline had issues"
-fi
-
-# Summary
-echo ""
-echo "=========================================="
-echo "REAL-TIME TESTING COMPLETE"
-echo "=========================================="
-echo ""
-echo "Test Results:"
-echo "  ✓ Environment setup"
-echo "  ✓ Database initialization"
-echo "  ✓ Single-ticker pipeline"
-echo "  ✓ Multi-ticker pipeline"
-echo "  ✓ Database persistence"
-echo "  ✓ Text report generation"
-echo "  ✓ JSON report generation"
-echo "  ✓ HTML report generation"
-echo ""
-echo "Database: data/portfolio_maximizer.db"
-echo "Reports: metrics.json, dashboard.html"
-echo ""
-echo "Status: SYSTEM OPERATIONAL ✓"
-echo "=========================================="
+echo "Smoke complete."

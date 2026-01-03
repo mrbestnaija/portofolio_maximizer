@@ -7,27 +7,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
-VENV_DIR="${PROJECT_ROOT}/simpleTrader_env"
+# shellcheck source=bash/lib/common.sh
+source "${PROJECT_ROOT}/bash/lib/common.sh"
 
-detect_python() {
-  if [[ -x "${VENV_DIR}/bin/python" ]]; then
-    echo "${VENV_DIR}/bin/python"
-  elif [[ -x "${VENV_DIR}/Scripts/python.exe" ]]; then
-    echo "${VENV_DIR}/Scripts/python.exe"
-  elif command -v python3 >/dev/null 2>&1; then
-    echo "python3"
-  elif command -v python >/dev/null 2>&1; then
-    echo "python"
-  else
-    echo ""
-  fi
-}
-
-PYTHON_BIN="$(detect_python)"
-if [[ -z "${PYTHON_BIN}" ]]; then
-  echo "[SWEEP] ERROR: No Python interpreter found. Ensure simpleTrader_env exists or python3 is on PATH." >&2
-  exit 1
-fi
+PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}")"
 
 # Sweep parameters (env-overridable)
 SWEEP_TICKERS="${SWEEP_TICKERS:-}"

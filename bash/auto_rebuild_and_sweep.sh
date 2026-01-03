@@ -7,6 +7,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+# shellcheck source=bash/lib/common.sh
+source "${ROOT_DIR}/bash/lib/common.sh"
+
+# Prefer project venv for consistency
+PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
+
 # Configurable knobs
 TARGET_TRADES="${TARGET_TRADES:-30}"            # Minimum realised trades to skip trading loop
 TICKERS="${TICKERS:-MTN,CL=F,AAPL,MSFT}"        # Low-notional set to conserve capital
@@ -14,15 +20,6 @@ CYCLES="${CYCLES:-6}"                           # Short diagnostic cycles
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"
 INITIAL_CAPITAL="${INITIAL_CAPITAL:-25000}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-10}"
-
-# Prefer project venv for consistency
-if [[ -x "${ROOT_DIR}/simpleTrader_env/bin/python" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/bin/python"
-elif [[ -x "${ROOT_DIR}/simpleTrader_env/Scripts/python.exe" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/Scripts/python.exe"
-else
-  PYTHON_BIN="python"
-fi
 
 trade_count() {
   "${PYTHON_BIN}" - <<'PY'

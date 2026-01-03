@@ -5,13 +5,21 @@ set -euo pipefail
 # 1) ETL with CV drift checks on mixed/uncorrelated basket.
 # 2) Auto-trader backtest pass to populate dashboard/metrics.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=bash/lib/common.sh
+source "${SCRIPT_DIR}/lib/common.sh"
+cd "${PROJECT_ROOT}"
+
+PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}")"
+
 TICKERS=${TICKERS:-"AAPL,MSFT,CL=F,GC=F,BTC-USD,EURUSD=X"}
 START=${START:-"2024-11-15"}
 END=${END:-"2025-11-23"}
 RUN_ID="eval_$(date +%Y%m%d_%H%M%S)"
 
 # Enable forecast audit logging for interpretable TS evaluation (forecester_ts/instrumentation.py).
-export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-logs/forecast_audits}"
+export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-${PROJECT_ROOT}/logs/forecast_audits}"
 
 # Higher-order hyper-parameter exploration defaults (30/70 explore/exploit)
 HYPEROPT_ROUNDS=${HYPEROPT_ROUNDS:-0}
@@ -25,7 +33,11 @@ DEFAULT_LOOKBACK_DAYS=${DEFAULT_LOOKBACK_DAYS:-14}
 WINDOW_CANDIDATES=()
 for days in "${DEFAULT_LOOKBACK_DAYS}" 30 60 90; do
   # Prefer GNU date (-d), fall back to BSD date (-v); on failure, use START.
-  start_candidate="$(date -d \"${END} -${days} days\" +%Y-%m-%d 2>/dev/null || date -j -v -\"${days}\"d -f \"%Y-%m-%d\" \"${END}\" +\"%Y-%m-%d\" 2>/dev/null || echo \"${START}\")"
+  start_candidate="$(
+    date -d "${END} -${days} days" +%Y-%m-%d 2>/dev/null \
+      || date -j -v -"${days}"d -f "%Y-%m-%d" "${END}" +"%Y-%m-%d" 2>/dev/null \
+      || echo "${START}"
+  )"
   WINDOW_CANDIDATES+=("${start_candidate}:${END}")
 done
 WINDOW_CANDIDATES+=("${START}:${END}")
@@ -47,7 +59,7 @@ SIGNAL_CFG_HYPER="config/signal_routing_config.hyperopt.yml"
 write_quant_override() {
   local target=$1
   local min_profit=$2
-  python3 - <<'PY' "$QUANT_CFG_BASE" "$target" "$min_profit"
+  "${PYTHON_BIN}" - <<'PY' "$QUANT_CFG_BASE" "$target" "$min_profit"
 import sys, yaml, pathlib
 base, target, min_profit = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), float(sys.argv[3])
 payload = yaml.safe_load(base.read_text()) or {}
@@ -62,7 +74,7 @@ PY
 write_signal_override() {
   local target=$1
   local min_return=$2
-  python3 - <<'PY' "$SIGNAL_CFG_BASE" "$target" "$min_return"
+  "${PYTHON_BIN}" - <<'PY' "$SIGNAL_CFG_BASE" "$target" "$min_return"
 import sys, yaml, pathlib
 base, target, min_return = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), float(sys.argv[3])
 payload = yaml.safe_load(base.read_text()) or {}
@@ -76,7 +88,7 @@ PY
 
 score_db_total_profit() {
   local db_path=$1
-  python3 - <<'PY' "$db_path"
+  "${PYTHON_BIN}" - <<'PY' "$db_path"
 import sys
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -173,7 +185,7 @@ run_stack() {
   export SIGNAL_ROUTING_CONFIG_PATH="${SIGNAL_CFG_HYPER}"
 
   echo "== [${run_id}] ETL + CV Drift (start=${start_date}, end=${end_date}) ==" >&2
-  python3 scripts/run_etl_pipeline.py \
+  "${PYTHON_BIN}" scripts/run_etl_pipeline.py \
     --tickers "${TICKERS}" \
     --use-cv --n-splits 5 \
     --start "${start_date}" --end "${end_date}" \
@@ -181,7 +193,7 @@ run_stack() {
     --db-path "${db_path}" >&2
 
   echo "== [${run_id}] Backtest / Auto-trader (min_return=${min_return}) ==" >&2
-  python3 scripts/run_auto_trader.py \
+  PORTFOLIO_DB_PATH="${db_path}" "${PYTHON_BIN}" scripts/run_auto_trader.py \
     --tickers "${TICKERS}" \
     --lookback-days 120 \
     --forecast-horizon 14 \
@@ -192,7 +204,7 @@ run_stack() {
     --include-frontier-tickers >&2
 
   echo "== [${run_id}] Stochastic Strategy Optimization (default regime) ==" >&2
-  python3 scripts/run_strategy_optimization.py \
+  "${PYTHON_BIN}" scripts/run_strategy_optimization.py \
     --config-path config/strategy_optimization_config.yml \
     --db-path "${db_path}" \
     --n-candidates 32 \
