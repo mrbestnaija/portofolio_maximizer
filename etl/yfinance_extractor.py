@@ -19,6 +19,12 @@ from datetime import datetime, timedelta
 import logging
 import time
 from functools import wraps
+from pathlib import Path
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover
+    yaml = None
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
 
@@ -64,7 +70,9 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0, max_delay:
 
 @retry_with_backoff(max_retries=3, base_delay=2.0, max_delay=30.0)
 def fetch_ticker_data(ticker: str, start_date: datetime, end_date: datetime,
-                      timeout: int = 30) -> pd.DataFrame:
+                      timeout: int = 30,
+                      interval: Optional[str] = None,
+                      auto_adjust: bool = False) -> pd.DataFrame:
     """Fetch OHLCV data for single ticker with robust network error handling.
 
     Args:
@@ -77,14 +85,17 @@ def fetch_ticker_data(ticker: str, start_date: datetime, end_date: datetime,
         DataFrame with OHLCV data or empty DataFrame on failure
     """
     try:
-        data = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            progress=False,
-            timeout=timeout,
-            auto_adjust=False,
-        )
+        download_kwargs: Dict[str, Any] = {
+            "start": start_date,
+            "end": end_date,
+            "progress": False,
+            "timeout": timeout,
+            "auto_adjust": auto_adjust,
+        }
+        if interval:
+            download_kwargs["interval"] = interval
+
+        data = yf.download(ticker, **download_kwargs)
 
         if data.empty:
             logger.warning(f"No data returned for {ticker}")
@@ -197,7 +208,7 @@ class YFinanceExtractor(BaseExtractor):
     def __init__(self, name: str = 'yfinance', timeout: int = 30,
                  rate_limit_delay: float = 0.5, retention_years: int = 10,
                  cleanup_days: int = 7, cache_hours: int = 24, storage=None,
-                 failure_backoff_hours: int = 6, **kwargs):
+                 failure_backoff_hours: int = 6, config_path: Optional[str] = None, **kwargs):
         """Initialize Yahoo Finance extractor.
 
         Args:
@@ -210,6 +221,43 @@ class YFinanceExtractor(BaseExtractor):
             storage: DataStorage instance for cache operations (optional)
             **kwargs: Additional parameters (for BaseExtractor compatibility)
         """
+        resolved_config_path = config_path or kwargs.pop("config_path", None)
+        self.config_path = Path(resolved_config_path) if resolved_config_path else None
+        self.config: Dict[str, Any] = self._load_config(self.config_path) if self.config_path else {}
+
+        # Apply config-driven defaults (fall back to constructor args when missing).
+        self.interval = self._get_config_value(("extraction", "data", "interval"))
+        self.auto_adjust = bool(self._get_config_value(("extraction", "data", "auto_adjust"), False) or False)
+
+        cache_hours = int(self._get_config_value(("extraction", "cache", "cache_hours"), cache_hours) or cache_hours)
+        timeout = int(self._get_config_value(("extraction", "network", "timeout_seconds"), timeout) or timeout)
+
+        self.cache_tolerance_days = int(
+            self._get_config_value(("extraction", "cache", "tolerance_days"), 3) or 3
+        )
+        self.min_rows_required = int(
+            self._get_config_value(("extraction", "quality_checks", "min_rows_required"), 10) or 10
+        )
+        cleanup_days = int(
+            self._get_config_value(("extraction", "cache", "retention_days"), cleanup_days) or cleanup_days
+        )
+        self.auto_cleanup_cache = bool(
+            self._get_config_value(("extraction", "cache", "auto_cleanup"), False) or False
+        )
+
+        enabled_rate_limit = self._get_config_value(("extraction", "rate_limiting", "enabled"), True)
+        configured_delay = self._get_config_value(("extraction", "rate_limiting", "delay_between_tickers"))
+        rpm = self._get_config_value(("extraction", "rate_limiting", "requests_per_minute"))
+        if not enabled_rate_limit:
+            configured_delay = 0
+            rpm = None
+
+        rate_limit_delay = self._resolve_rate_limit_delay(
+            default_delay=rate_limit_delay,
+            configured_delay=configured_delay,
+            requests_per_minute=rpm,
+        )
+
         # Initialize parent class
         super().__init__(name=name, timeout=timeout, cache_hours=cache_hours,
                         storage=storage, **kwargs)
@@ -263,6 +311,61 @@ class YFinanceExtractor(BaseExtractor):
 
         return meta
 
+    @staticmethod
+    def _load_config(config_path: Optional[Path]) -> Dict[str, Any]:
+        """Load the provider YAML config file (if available)."""
+        if not config_path:
+            return {}
+        if yaml is None:
+            logger.debug("pyyaml unavailable; skipping yfinance config load from %s", config_path)
+            return {}
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle) or {}
+            return loaded if isinstance(loaded, dict) else {}
+        except FileNotFoundError:
+            logger.warning("YFinance config file not found: %s", config_path)
+            return {}
+        except Exception as exc:
+            logger.warning("Failed to load yfinance config from %s: %s", config_path, exc)
+            return {}
+
+    def _get_config_value(self, path: Tuple[str, ...], default: Any = None) -> Any:
+        node: Any = self.config
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                return default
+            node = node.get(key)
+        return default if node is None else node
+
+    @staticmethod
+    def _resolve_rate_limit_delay(
+        default_delay: float,
+        configured_delay: Any,
+        requests_per_minute: Any,
+    ) -> float:
+        delay = default_delay
+        if configured_delay is not None:
+            try:
+                delay = float(configured_delay)
+            except Exception:
+                delay = default_delay
+
+        min_delay_from_rpm: Optional[float] = None
+        if requests_per_minute is not None:
+            try:
+                rpm = float(requests_per_minute)
+                if rpm > 0:
+                    min_delay_from_rpm = 60.0 / rpm
+            except Exception:
+                min_delay_from_rpm = None
+
+        if min_delay_from_rpm is not None:
+            delay = max(delay, min_delay_from_rpm)
+
+        return max(0.0, delay)
+
     def _record_cache_event(self, ticker: str, status: str, rows: int = 0) -> None:
         """Capture cache status for diagnostics."""
         self._cache_events[ticker] = {"status": status, "rows": rows}
@@ -314,9 +417,8 @@ class YFinanceExtractor(BaseExtractor):
             cached_data = pd.read_parquet(latest_file)
             cache_start, cache_end = cached_data.index.min(), cached_data.index.max()
 
-            # Coverage check with 3-day tolerance for non-trading days (weekends, holidays)
-            # Allow cache if it covers requested range ±3 days
-            tolerance = timedelta(days=3)
+            # Coverage check with tolerance for non-trading days (weekends, holidays)
+            tolerance = timedelta(days=self.cache_tolerance_days)
             start_ok = cache_start <= start_date + tolerance
             end_ok = cache_end >= end_date - tolerance
 
@@ -452,7 +554,14 @@ class YFinanceExtractor(BaseExtractor):
                     continue
 
                 # Cache MISS: fetch from network
-                data = fetch_ticker_data(ticker, start, end, timeout=self.timeout)
+                data = fetch_ticker_data(
+                    ticker,
+                    start,
+                    end,
+                    timeout=self.timeout,
+                    interval=self.interval,
+                    auto_adjust=self.auto_adjust,
+                )
                 cache_misses += 1
                 if not data.empty:
                     data['ticker'] = ticker
@@ -531,6 +640,12 @@ class YFinanceExtractor(BaseExtractor):
         combined = self._flatten_multiindex(combined)
         combined = self._standardize_columns(combined)
 
+        if self.storage and self.auto_cleanup_cache and self.cleanup_days > 0:
+            try:
+                self.storage.cleanup_old_files('raw', retention_days=self.cleanup_days)
+            except Exception as exc:
+                logger.debug("Auto-cleanup skipped: %s", exc)
+
         return combined
 
     def validate_data(self, data: pd.DataFrame) -> Dict[str, Any]:
@@ -561,6 +676,8 @@ class YFinanceExtractor(BaseExtractor):
 
         # Calculate missing data rate
         total_rows = len(data)
+        if self.min_rows_required and total_rows < self.min_rows_required:
+            warnings.append(f"Low observation count: {total_rows} < {self.min_rows_required}")
         total_cells = total_rows * len(data.columns)
         missing_cells = data.isnull().sum().sum()
         missing_rate = missing_cells / total_cells if total_cells > 0 else 1.0

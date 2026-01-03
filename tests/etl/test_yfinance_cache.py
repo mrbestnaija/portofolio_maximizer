@@ -110,7 +110,7 @@ class TestCacheIntegration:
     def test_auto_caching_on_fetch(self, temp_storage, monkeypatch):
         """New data should be automatically cached after fetch."""
         # Mock fetch_ticker_data to avoid real network calls
-        def mock_fetch(ticker, start, end, timeout):
+        def mock_fetch(ticker, start, end, timeout, **kwargs):
             dates = pd.date_range(start, end, freq='D')
             return pd.DataFrame({
                 'Open': np.random.uniform(100, 200, len(dates)),
@@ -139,7 +139,7 @@ class TestCacheIntegration:
         temp_storage.save(sample_ohlcv_data, 'raw', 'AAPL')
 
         # Mock fetch for MSFT (cache miss)
-        def mock_fetch(ticker, start, end, timeout):
+        def mock_fetch(ticker, start, end, timeout, **kwargs):
             if ticker == 'MSFT':
                 dates = pd.date_range(start, end, freq='D')
                 return pd.DataFrame({
@@ -171,7 +171,7 @@ class TestCacheIntegration:
         # Track fetch calls
         fetch_calls = []
 
-        def mock_fetch(ticker, start, end, timeout):
+        def mock_fetch(ticker, start, end, timeout, **kwargs):
             fetch_calls.append(ticker)
             return pd.DataFrame()
 
@@ -189,7 +189,7 @@ class TestCacheIntegration:
         """Delisted/missing tickers should be skipped after first failure while others proceed."""
         fetch_calls = []
 
-        def mock_fetch(ticker, start, end, timeout):
+        def mock_fetch(ticker, start, end, timeout, **kwargs):
             fetch_calls.append(ticker)
             if ticker == 'DELISTED':
                 return pd.DataFrame()  # simulate yfinance returning nothing
