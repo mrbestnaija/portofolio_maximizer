@@ -14,4 +14,4 @@ export CRON_CORE_PER_TICKER_TARGET="${CRON_CORE_PER_TICKER_TARGET:-10}"
 
 echo "[CORE] Starting auto_trader_core (tickers=${CRON_CORE_TICKERS})"
 ./bash/production_cron.sh auto_trader_core "$@"
-echo "[CORE] Complete. Check logs/cron/auto_trader_core*.out for details."
+echo "[CORE] Complete. Check logs/cron/auto_trader_core_*.log for details."

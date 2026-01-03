@@ -81,55 +81,55 @@ Assuming the repo lives at `/opt/portfolio_maximizer_v45`:
 
 # 1. Daily ETL refresh (pre‑market)
 15 5 * * 1-5 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh daily_etl >> logs/cron/daily_etl.out 2>&1
+  bash/production_cron.sh daily_etl >> logs/cron/daily_etl.out 2>&1
 
 # 2. Autonomous paper trader loop (every 30 minutes during market hours)
 */30 7-20 * * 1-5 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh auto_trader --config config/pipeline_config.yml \
+  bash/production_cron.sh auto_trader --config config/pipeline_config.yml \
   >> logs/cron/auto_trader.out 2>&1
 
 # 2b. Core ticker accumulation loop (halts once targets hit: ≥30 total, ≥10 per core ticker)
 */60 7-20 * * 1-5 cd /opt/portfolio_maximizer_v45 && \
   CRON_CORE_TICKERS="AAPL,MSFT,GC=F,COOP" \
-  bash/bash/production_cron.sh auto_trader_core >> logs/cron/auto_trader_core.out 2>&1
+  bash/production_cron.sh auto_trader_core >> logs/cron/auto_trader_core.out 2>&1
 
 # 3. Nightly signal validation backfill (stub, see Section 5)
 5 2 * * * cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh nightly_backfill >> logs/cron/nightly_backfill.out 2>&1
+  bash/production_cron.sh nightly_backfill >> logs/cron/nightly_backfill.out 2>&1
 
 # 4. Hourly monitoring & latency checks
 5 * * * * cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh monitoring >> logs/cron/monitoring.out 2>&1
+  bash/production_cron.sh monitoring >> logs/cron/monitoring.out 2>&1
 
 # 5. Pre‑open environment sanity check
 0 5 * * 1-5 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh env_sanity >> logs/cron/env_sanity.out 2>&1
+  bash/production_cron.sh env_sanity >> logs/cron/env_sanity.out 2>&1
 
 # 6. Weekly ticker discovery stub (Phase 5.2+)
 0 3 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh ticker_discovery_stub >> logs/cron/ticker_discovery.out 2>&1
+  bash/production_cron.sh ticker_discovery_stub >> logs/cron/ticker_discovery.out 2>&1
 
 # 7. Weekly optimizer stub (Phase 5.3+)
 30 3 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh optimizer_stub >> logs/cron/optimizer_stub.out 2>&1
+  bash/production_cron.sh optimizer_stub >> logs/cron/optimizer_stub.out 2>&1
 
 # 8. Weekly TS threshold sweep (uses realised trades in trade_executions)
 0 4 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh ts_threshold_sweep >> logs/cron/ts_threshold_sweep.out 2>&1
+  bash/production_cron.sh ts_threshold_sweep >> logs/cron/ts_threshold_sweep.out 2>&1
 
 # 9. Monthly transaction cost estimation (per asset class)
 15 4 1 * * cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh transaction_costs >> logs/cron/transaction_costs.out 2>&1
+  bash/production_cron.sh transaction_costs >> logs/cron/transaction_costs.out 2>&1
 
 # 10. Weekly sleeve summary + promotion/demotion recommendations
 0 5 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/weekly_sleeve_maintenance.sh >> logs/cron/sleeve_maintenance.out 2>&1
+  bash/weekly_sleeve_maintenance.sh >> logs/cron/sleeve_maintenance.out 2>&1
 
 # 11. Synthetic dataset refresh (offline regression)
 0 1 * * 1 cd /opt/portfolio_maximizer_v45 && \
   CRON_SYNTHETIC_CONFIG="config/synthetic_data_config.yml" \
   CRON_SYNTHETIC_TICKERS="AAPL,MSFT" \
-  bash/bash/production_cron.sh synthetic_refresh >> logs/cron/synthetic_refresh.out 2>&1
+  bash/production_cron.sh synthetic_refresh >> logs/cron/synthetic_refresh.out 2>&1
 ```
 
 You can edit the schedule and paths to match your deployment environment.
@@ -255,7 +255,7 @@ keep their cron entries in place while implementation progresses.
   - Profit‑critical tests are green (`tests/integration/test_profit_critical_functions.py`).
   - LLM performance tests are passing and latency within budget.
 - **Brutal test suite**: For periodic deep validation, use:
-  - `bash/bash/comprehensive_brutal_test.sh` (manual or via a separate cron).
+  - `bash/comprehensive_brutal_test.sh` (manual or via a separate cron).
   - This is intentionally not wired into the default production cron
     because it can run for hours and is best treated as a maintenance job.
 
@@ -277,14 +277,14 @@ CRON_TS_SWEEP_CONFIDENCE="0.50,0.55,0.60,0.65" \
 CRON_TS_SWEEP_MIN_RETURN="0.001,0.002,0.003,0.004" \
 CRON_TS_SWEEP_MIN_TRADES=10 \
 CRON_TS_SWEEP_OUTPUT="logs/automation/ts_threshold_sweep.json" \
-  bash/bash/production_cron.sh ts_threshold_sweep
+  bash/production_cron.sh ts_threshold_sweep
 
 # Transaction cost overrides (defaults: 365-day lookback, asset_class grouping, min_trades=5)
 CRON_COST_AS_OF="2025-12-05" \
 CRON_COST_GROUPING="asset_class" \
 CRON_COST_MIN_TRADES=5 \
 CRON_COST_OUTPUT="logs/automation/transaction_costs.json" \
-  bash/bash/production_cron.sh transaction_costs
+  bash/production_cron.sh transaction_costs
 ```
 
 Both scripts:
@@ -294,7 +294,7 @@ Both scripts:
 Helper to run the full chain (costs + TS sweep + config proposals) manually:
 
 ```bash
-bash/bash/run_ts_sweep_and_proposals.sh
+bash/run_ts_sweep_and_proposals.sh
 
 # Optional overrides
 SWEEP_TICKERS="AAPL,MSFT,GC=F,COOP" \
@@ -302,7 +302,7 @@ SWEEP_SEL_MIN_PF=1.2 \
 SWEEP_SEL_MIN_WR=0.55 \
 COST_GROUPING="asset_class" \
 PROPOSALS_OUTPUT="logs/automation/config_proposals.json" \
-  bash/bash/run_ts_sweep_and_proposals.sh
+  bash/run_ts_sweep_and_proposals.sh
 ```
 
 ### 6.1 Automation Dashboard Glue
@@ -390,7 +390,7 @@ For a research/staging environment (not production), you may add a low-frequency
 ```cron
 # Weekly TS model search + proposals (research-only)
 0 2 * * 1 cd /opt/portfolio_maximizer_v45 && \
-  bash/bash/production_cron.sh ts_model_search >> logs/cron/ts_model_search.out 2>&1
+  bash/production_cron.sh ts_model_search >> logs/cron/ts_model_search.out 2>&1
 ```
 
 Where `ts_model_search` is a small wrapper task in `bash/production_cron.sh` that:
@@ -413,8 +413,8 @@ This keeps TS model search aligned with the same cron/automation patterns as thr
    - `scripts/run_auto_trader.py`
    - `scripts/monitor_llm_system.py` (optional but recommended)
 3. Test manually:
-   - `bash/bash/production_cron.sh daily_etl`
-   - `bash/bash/production_cron.sh auto_trader --dry-run` (if supported)
+   - `bash/production_cron.sh daily_etl`
+   - `bash/production_cron.sh auto_trader --dry-run` (if supported)
 4. Install crontab entries from Section 3, adjusting paths and schedules.
 5. Monitor:
    - `logs/cron/*.log` for cron‑level output.

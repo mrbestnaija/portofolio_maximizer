@@ -6,7 +6,7 @@
 # virtual environment (simpleTrader_env).
 #
 # Usage (from project root):
-#   bash/bash/production_cron.sh <task> [extra args...]
+#   bash/production_cron.sh <task> [extra args...]
 # Typical cron examples are documented in Documentation/CRON_AUTOMATION.md.
 
 set -euo pipefail
@@ -193,7 +193,7 @@ PY
   weekly_sleeve_maintenance)
     # Weekly sleeve summary + promotion/demotion recommendations.
     run_with_logging "weekly_sleeve_maintenance: summarize + promotion plan" \
-      bash/bash/weekly_sleeve_maintenance.sh
+      bash/weekly_sleeve_maintenance.sh
     ;;
 
   nightly_backfill)
@@ -252,7 +252,7 @@ PY
 production_cron.sh – Portfolio Maximizer v45 cron multiplexer
 
 Usage:
-  bash/bash/production_cron.sh <task> [extra args...]
+  bash/production_cron.sh <task> [extra args...]
 
 Tasks:
   daily_etl            Run full ETL pipeline once (default live mode).

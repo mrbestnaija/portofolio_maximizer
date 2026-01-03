@@ -13,7 +13,7 @@ if "%TASK%"=="" set TASK=auto_trader_core
 if /I "%TASK%"=="auto_trader_core" (
   REM Use WSL to call the cron multiplexer for core tickers (halts after targets).
   where wsl >nul 2>&1 || (echo [ERROR] WSL not found; cannot run auto_trader_core & exit /b 1)
-  wsl bash -lc "cd \"$(wslpath -a \"%SCRIPT_DIR%\")\" && bash/bash/production_cron.sh auto_trader_core"
+  wsl --cd "%SCRIPT_DIR%" bash -lc "bash/production_cron.sh auto_trader_core"
   exit /b %ERRORLEVEL%
 )
 
