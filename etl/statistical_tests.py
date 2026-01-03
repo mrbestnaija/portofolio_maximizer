@@ -52,10 +52,10 @@ def diebold_mariano(
 
     Notes
     -----
-    This uses a plain t-test on the loss differential as a pragmatic,
-    dependency-light approximation. For institutional use, callers may
-    replace this with a full Newey–West implementation while keeping
-    the same interface.
+    Uses a Diebold–Mariano style test with a Newey–West variance
+    estimator on the loss differential. Lag order defaults to
+    floor(sqrt(T)), which is a common small-sample heuristic and keeps
+    the interface unchanged.
     """
     x = np.asarray(e1, dtype=float)
     y = np.asarray(e2, dtype=float)
@@ -74,8 +74,21 @@ def diebold_mariano(
         return DieboldMarianoResult(statistic=0.0, p_value=1.0, better_model=None)
 
     mean_d = float(np.mean(d))
-    std_d = float(np.std(d, ddof=1)) or 1e-12
-    t_stat = mean_d / (std_d / np.sqrt(d.size))
+
+    # Newey–West variance estimate for the loss differential.
+    n = d.size
+    lag = max(0, int(np.floor(np.sqrt(n))))
+    centered = d - mean_d
+    gamma0 = float(np.sum(centered * centered) / n)
+    nw_var = gamma0
+    if lag > 0 and gamma0 > 0:
+        for l in range(1, lag + 1):
+            weight = 1.0 - l / (lag + 1)
+            cov = float(np.sum(centered[l:] * centered[:-l]) / n)
+            nw_var += 2.0 * weight * cov
+    nw_var = max(nw_var, 1e-12)
+    se = np.sqrt(nw_var / n)
+    t_stat = mean_d / se
 
     if alternative == "two-sided":
         p_val = 2 * (1 - stats.t.cdf(abs(t_stat), df=d.size - 1))

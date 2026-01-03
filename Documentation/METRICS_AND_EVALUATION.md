@@ -131,17 +131,18 @@ Choose `ε` explicitly to avoid division by zero.
 
 ## 6. Statistical Comparisons (Model Selection)
 
-### 6.1 Diebold–Mariano-style test (pragmatic)
+### 6.1 Diebold–Mariano (Newey–West variance)
 
-`etl.statistical_tests.diebold_mariano()` is a dependency-light approximation:
+`etl.statistical_tests.diebold_mariano()`:
 
-- Define loss differential `d_t = L(e1_t) - L(e2_t)` (squared or absolute loss).
-- Compute a t-statistic on `d_t` and a p-value under a t distribution.
+- Defines loss differential `d_t = L(e1_t) - L(e2_t)` (squared or absolute loss).
+- Uses a Newey–West variance estimator on `d_t` with lag `floor(sqrt(T))`.
+- Computes a t-statistic and p-value under a t distribution.
 
-Notes:
+Reporting guidance:
 
-- This is “DM-style”, not a full Newey–West DM implementation.
-- For institutional publication: you may swap in a Newey–West variance estimate while keeping the same interface and report both the method and assumptions.
+- State the loss used (squared/absolute) and the lag heuristic (default `floor(sqrt(T))`).
+- Note that assumptions are small-sample NW; if you change lag selection, report it alongside the result.
 
 ### 6.2 Rank stability (cross-validation robustness)
 
@@ -161,4 +162,3 @@ For institutional-grade reporting, always report at least:
 - a hold-out or walk-forward evaluation window (CV protocol).
 
 When results disagree across windows, treat the discrepancy as the primary research signal (regime dependence, costs, gating strictness), not as something to average away.
-
