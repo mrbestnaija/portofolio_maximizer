@@ -6,6 +6,15 @@
 
 ---
 
+## How To Use This Document (Future-Proof)
+
+This file is a chronological engineering/evidence ledger. Use it to trace *what changed* and *what evidence exists*, not as the canonical “current status”.
+
+- Canonical current snapshot + reproducible verification commands: `Documentation/PROJECT_STATUS.md`
+- Institutional documentation/evidence standards: `Documentation/CORE_PROJECT_DOCUMENTATION.md`
+- Metric definitions (math): `Documentation/METRICS_AND_EVALUATION.md`
+- Research framing and experimental protocols: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`
+
 **Status snapshot (2025-12-28)**:
 - Engineering/integration unblocked; comprehensive brutal run green (see verification below).
 - Canonical status: `Documentation/PROJECT_STATUS.md`.

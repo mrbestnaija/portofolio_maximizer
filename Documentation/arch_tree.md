@@ -1,4 +1,15 @@
-# UPDATED TO-DO LIST: Portfolio Maximizer - Current Implementation Status
+# Architecture Tree & Documentation Map (Portfolio Maximizer)
+
+**Purpose**: Provide a navigable map of the repository (modules, workflows, and evidence artifacts) and point to the canonical “source of truth” documents.
+
+If you are looking for:
+
+- **How to verify the system right now**: `Documentation/PROJECT_STATUS.md`
+- **Institutional-grade documentation standards (what counts as evidence)**: `Documentation/CORE_PROJECT_DOCUMENTATION.md`
+- **Metric definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
+- **Research framing (questions, hypotheses, protocols)**: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`
+
+This file is best read as a *map* (what exists and where it lives), not as the canonical status snapshot.
 
 ## CURRENT PROJECT STATUS: UNBLOCKED - comprehensive brutal run green (2025-12-28); integration/pipeline verification complete
 **Status references (canonical)**:

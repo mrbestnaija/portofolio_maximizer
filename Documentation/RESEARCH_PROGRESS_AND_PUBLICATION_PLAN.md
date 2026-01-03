@@ -25,6 +25,8 @@ This file is the research-facing single source of truth for turning the codebase
 - Implementation and verification: `Documentation/implementation_checkpoint.md`
 - Architecture and operational map: `Documentation/arch_tree.md`
 - Automation wiring: `Documentation/CRON_AUTOMATION.md`
+- Evidence standards (institutional): `Documentation/CORE_PROJECT_DOCUMENTATION.md`
+- Metric definitions (math): `Documentation/METRICS_AND_EVALUATION.md`
 
 **Operational evidence-generation entry points**
 

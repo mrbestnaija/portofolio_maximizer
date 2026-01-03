@@ -1,6 +1,6 @@
-# Production Cron Automation – Portfolio Maximizer v45
+# Production Cron Automation - Portfolio Maximizer v45
 
-**Last updated**: 2025-11-19  
+**Last updated**: 2026-01-03  
 **Scope**: Linux/Unix cron wiring for production‑style automation, aligned with:
 - `Documentation/arch_tree.md`
 - `Documentation/TIME_SERIES_FORECASTING_IMPLEMENTATION.md`
@@ -10,6 +10,16 @@ This document describes how to schedule the core ETL/trading/monitoring
 tasks using a single entrypoint script: `bash/production_cron.sh`.
 
 ---
+
+## 0. Windows / WSL Equivalent (Evidence Freshness)
+
+For Windows hosts, the recommended operational equivalent to cron is:
+
+- Windows Task Scheduler calls `schedule_backfill.bat` (repo root).
+- `schedule_backfill.bat` defaults to `auto_trader_core` and invokes WSL:
+  - `bash/production_cron.sh auto_trader_core`
+
+This keeps time-series evidence building (core tickers + gating) reproducible on Windows while still using the Linux-style cron multiplexer as the single entry point.
 
 ## 1. Design Principles
 

@@ -539,10 +539,15 @@ pytest tests/ -v --tb=short
 
 Comprehensive documentation is available in the `Documentation/` directory:
 
+- **[Core Documentation (Institutional)](Documentation/CORE_PROJECT_DOCUMENTATION.md)**: Canonical docs, evidence standards, and verification ladder
+- **[Metrics & Evaluation](Documentation/METRICS_AND_EVALUATION.md)**: Unambiguous metric definitions (PF/WR/Sharpe/DM-style tests)
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
 - **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
 - **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
+- **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status
+- **[Research Plan](Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md)**: Research questions, protocols, and reproducibility checklist
+- **[Cron Automation](Documentation/CRON_AUTOMATION.md)**: Production-style scheduling + evidence freshness wiring
 
 ---
 

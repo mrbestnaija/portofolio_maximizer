@@ -1,18 +1,21 @@
-# Project Status – Portfolio Maximizer
+# Project Status - Portfolio Maximizer
 
 **Last verified**: 2025-12-27  
 **Dependency sanity check**: 2025-12-27  
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
+**Document updated**: 2026-01-03  
+
+**Metric definitions (canonical)**: `Documentation/METRICS_AND_EVALUATION.md` (implementations in `etl/database_manager.py`, `etl/portfolio_math.py`, `etl/statistical_tests.py`).
 
 ## Verified Now
 
-- ✅ Code compiles cleanly (`python -m compileall` on core packages)
-- ✅ Focused test run passes (signal validator + paper trading engine + DB schema + diagnostics): **31 tests**
-- ✅ Time Series execution validation now prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
-- ✅ Portfolio impact checks now include concentration caps + optional correlation warnings (when the engine can precompute correlations from stored OHLCV)
-- ✅ Position lifecycle management now supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
-- ✅ Trade execution telemetry now persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
-- ✅ Dependency note: `arch==8.0.0` enables full GARCH; if missing, `forcester_ts.garch.GARCHForecaster` falls back to EWMA for test/dev continuity
+- Code compiles cleanly (`python -m compileall` on core packages)
+- Focused test run passes (signal validator + paper trading engine + DB schema + diagnostics): **31 tests**
+- Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
+- Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
+- Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
+- Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
+- Dependency note: `arch==8.0.0` enables full GARCH; if missing, `forcester_ts.garch.GARCHForecaster` falls back to EWMA for test/dev continuity
 
 ### Verification Commands (Repro)
 
