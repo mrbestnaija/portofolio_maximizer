@@ -2,11 +2,35 @@
 
 **Status**: Draft research log  
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading  
-**Last updated**: 2025-12-30  
+**Last updated**: 2026-01-03  
 
 This document tracks the Portfolio Maximizer project as a scientific research artefact rather than only as a codebase. It is meant to evolve into the backbone of a Master’s‑level thesis or journal submission, with clear hypotheses, methods, experiments, and reproducible evidence.
 
 It complements the implementation-focused documents in `Documentation/` (e.g. `QUANTIFIABLE_SUCCESS_CRITERIA.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `SYSTEM_STATUS_2025-10-22.md`) by giving a single, publication-oriented view. For current system status and verification evidence, see `Documentation/arch_tree.md` and `Documentation/implementation_checkpoint.md`.
+
+---
+
+## 0. How To Use This Document (Context + Rigor)
+
+This file is the research-facing single source of truth for turning the codebase into publishable evidence: clear hypotheses, pre-declared evaluation protocols, reproducible artifacts, and auditable assumptions.
+
+**What counts as evidence in this repo**
+
+- Immutable provenance: Git commit SHA + config snapshots + environment snapshot (`requirements.txt`, Python version, OS).
+- Re-runnable commands: CLI invocations that regenerate metrics, tables, and plots from logged artifacts.
+- Traceable outputs: logs/reports under `logs/` and dashboards/plots under `visualizations/`.
+
+**Where to find current system status**
+
+- Implementation and verification: `Documentation/implementation_checkpoint.md`
+- Architecture and operational map: `Documentation/arch_tree.md`
+- Automation wiring: `Documentation/CRON_AUTOMATION.md`
+
+**Operational evidence-generation entry points**
+
+- TS evidence runs: `bash/production_cron.sh auto_trader_core` (Windows wrapper: `schedule_backfill.bat`, defaults to `auto_trader_core`).
+- Quant validation summaries: `scripts/summarize_quant_validation.py` (reads `logs/signals/quant_validation.jsonl` when present).
+- Forecast audit/health checks: `scripts/check_forecast_audits.py` (writes/reads `logs/forecast_audits/`).
 
 ---
 
@@ -29,7 +53,7 @@ It complements the implementation-focused documents in `Documentation/` (e.g. `Q
 2. Cost-aware quant gating lowers turnover and drawdown while maintaining or improving net risk-adjusted performance (profit factor, win rate) versus ungated TS signals, especially in high-vol regimes.
 3. Frontier markets exhibit higher raw predictability but weaker net performance after realistic costs unless liquidity-adjusted cost models and stricter gating are applied.
 4. LLM-only signals do not consistently outperform the TS ensemble out-of-sample; when capped as a fallback, they are non-degrading and occasionally additive rather than primary.
-
+  
 Each hypothesis will need explicit acceptance/rejection based on the experiments in Section 5.
 
 ---
@@ -85,6 +109,10 @@ The **canonical experiment entry points** are:
   - Typical windows: 3–5 years (e.g. 2020‑01‑01 to 2024‑01‑01) for TS training; shorter rolling windows for live runs.
 
 ### 3.2 Evaluation Protocols
+
+- **Recency-bias guardrails**:
+  - Pre-declare evaluation windows (or window-selection rules) before running experiments.
+  - Report results across multiple non-overlapping regimes (e.g., bull/bear, low/high vol), not only the most recent period.
 
 - **Backtesting / TS experiments**:
   - Walk‑forward or blocked CV via ETL pipeline and TS ensemble.
@@ -153,7 +181,10 @@ This section is a structured log template for specific experiments. Fill it with
     - `python scripts/run_etl_pipeline.py ...`  
     - `python scripts/run_auto_trader.py --tickers AAPL,MSFT ...`  
   - Config hashes: `analysis_config.yml`, `quant_success_config.yml`, `signal_routing_config.yml`.  
+  - Repo commit: `git rev-parse HEAD` (and branch name if not `master`).  
+  - Randomness controls: `PYTHONHASHSEED`, RNG seeds (Python/NumPy), and any hyperopt/RL sampler seeds.  
   - Data snapshot: location of raw and training parquet files.  
+  - Evidence pointers: paths to the exact `logs/` report(s), quant validation JSONL slice(s), and any DB snapshot used for metrics.  
 - **Results (key metrics)**:
   - Total trades, win rate, profit factor, annualised return, max drawdown.
   - Quant validation: PASS/FAIL counts, tiers by ticker (`scripts/summarize_quant_validation.py` output).  
