@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Client PC Git Sync Script - GitHub as Source of Truth
+# Safe pull/rebase helper (remote -> local) for master-first workflows.
 #
 # Usage:
-#   bash/git_syn_to_local.sh                 # sync current branch from GitHub
-#   bash/git_syn_to_local.sh branch-name     # sync specific branch from GitHub
+#   bash/git_syn_to_local.sh              # sync master from GitHub
+#   bash/git_syn_to_local.sh branch-name  # sync specific branch from GitHub
 #
 # Safety:
 # - Auto-stashes any dirty worktree before syncing
@@ -36,7 +36,7 @@ fi
 
 # Configuration
 REMOTE="origin"
-BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
+BRANCH="${1:-master}"
 START_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 STASHED=0
 RESTORED=0

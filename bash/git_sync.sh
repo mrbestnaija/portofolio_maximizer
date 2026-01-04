@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Lightweight Git sync helper following Documentation/GIT_WORKFLOW.md
+# Commit + push helper (master-first) following Documentation/GIT_WORKFLOW.md
 #
 # Usage:
-#   bash/git_sync.sh                 # pull --rebase and push current branch
-#   bash/git_sync.sh feature/branch  # sync specific branch
+#   bash/git_sync.sh "commit message" [branch]
+#   bash/git_sync.sh                  # auto message, current branch
 #
-# Safety:
-# - Auto-stashes any dirty worktree before syncing (including untracked files); restores on the original branch.
-# - Uses pull --rebase to keep history linear.
+# Behavior:
+# - Adds all changes, commits with the provided message (or an auto-generated one),
+#   rebases on origin/<branch>, then pushes to origin/<branch>.
+# - Defaults to the current branch; pass a branch explicitly to target another.
 
 set -euo pipefail
 
@@ -41,62 +42,39 @@ if [[ "${GIT_USE_ENV_REMOTE:-0}" == "1" ]]; then
   fi
 fi
 
-BRANCH="${1:-$(git rev-parse --abbrev-ref HEAD)}"
-START_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-STASHED=0
-RESTORED=0
+BRANCH_DEFAULT="$(git rev-parse --abbrev-ref HEAD)"
+COMMIT_MSG="${1:-}"
+BRANCH="${2:-${BRANCH_DEFAULT}}"
 
-restore_stash() {
-  if [[ $STASHED -eq 1 && $RESTORED -eq 0 ]]; then
-    local current_branch
-    current_branch=$(git rev-parse --abbrev-ref HEAD)
-    if [[ "$current_branch" != "$START_BRANCH" ]]; then
-      echo "Stash created on $START_BRANCH. Skipping auto-restore to avoid applying changes onto $current_branch." >&2
-      echo "Recover manually: git checkout $START_BRANCH && git stash pop" >&2
-      return
-    fi
-
-    echo "Restoring stashed changes..."
-    if git stash pop --quiet; then
-      echo "Restored stashed changes."
-    else
-      echo "Failed to reapply stash. Your changes remain stashed. Run 'git stash pop' manually." >&2
-    fi
-    RESTORED=1
-  fi
-}
-
-trap restore_stash EXIT
-
-if [[ -z "$BRANCH" ]]; then
-  echo "Unable to determine branch. Pass explicitly: bash/git_sync.sh my-branch" >&2
+if [[ -z "${BRANCH}" ]]; then
+  echo "Unable to determine branch. Pass explicitly: bash/git_sync.sh \"msg\" my-branch" >&2
   exit 1
 fi
 
-# Auto-clean dirty worktree by stashing everything (including untracked)
-if [[ -n "$(git status --porcelain)" ]]; then
+if [[ -z "${COMMIT_MSG}" ]]; then
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  echo "Worktree is dirty. Auto-stashing changes before sync ($ts)..."
-  git stash push -u -m "git_sync autostash $ts" >/dev/null
-  STASHED=1
+  COMMIT_MSG="chore: sync ${BRANCH} @ ${ts}"
 fi
 
-echo "Syncing branch: $BRANCH"
+git checkout "${BRANCH}"
 
-# Fetch and rebase
-git fetch origin "$BRANCH" || {
-  echo "Fetch failed for origin/$BRANCH" >&2
-  exit 1
-}
+# Ensure there is something to commit
+if [[ -z "$(git status --porcelain)" ]]; then
+  echo "No changes to commit; ${BRANCH} is clean."
+  exit 0
+fi
 
-git checkout "$BRANCH"
-git pull --rebase origin "$BRANCH"
+echo "Staging changes..."
+git add -A
 
-# Push
-git push origin "$BRANCH"
+echo "Committing..."
+git commit -m "${COMMIT_MSG}"
 
-# If we stashed, bring the changes back before exiting
-restore_stash
-trap - EXIT
+echo "Fetching and rebasing onto origin/${BRANCH}..."
+git fetch origin "${BRANCH}"
+git rebase origin/"${BRANCH}"
 
-echo "Sync complete for $BRANCH"
+echo "Pushing to origin/${BRANCH}..."
+git push origin "${BRANCH}"
+
+echo "Sync complete for ${BRANCH}"
