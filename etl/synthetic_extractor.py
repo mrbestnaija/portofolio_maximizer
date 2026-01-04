@@ -204,6 +204,13 @@ class SyntheticExtractor(BaseExtractor):
                 errors.append(f"Non-positive values in {field}")
                 break
 
+        if "Bid" in data.columns and (data["Bid"] <= 0).any():
+            errors.append("Non-positive values in Bid")
+        if "Ask" in data.columns and (data["Ask"] <= 0).any():
+            errors.append("Non-positive values in Ask")
+        if "Bid" in data.columns and "Ask" in data.columns and (data["Ask"] < data["Bid"]).any():
+            errors.append("Ask < Bid detected")
+
         # Microstructure sanity when present
         micro_fields = {
             "Spread": lambda s: (s < 0).any(),
@@ -450,6 +457,8 @@ class SyntheticExtractor(BaseExtractor):
                     "Close": prices["close"],
                     "Volume": volume,
                     "Spread": micro.get("spread"),
+                    "Bid": prices["close"] - micro.get("spread"),
+                    "Ask": prices["close"] + micro.get("spread"),
                     "Slippage": micro.get("slippage"),
                     "Depth": micro.get("depth"),
                     "OrderImbalance": micro.get("order_imbalance"),

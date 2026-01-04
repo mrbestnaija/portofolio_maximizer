@@ -654,6 +654,11 @@ class DatabaseManager:
                 mid_price REAL,
                 mid_slippage_bps REAL,
                 signal_id INTEGER,
+                data_source TEXT,
+                execution_mode TEXT,
+                synthetic_dataset_id TEXT,
+                synthetic_generator_version TEXT,
+                run_id TEXT,
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
                 holding_period_days INTEGER,
@@ -697,6 +702,27 @@ class DatabaseManager:
             self.cursor.execute(
                 "ALTER TABLE trade_executions ADD COLUMN multiplier REAL DEFAULT 1.0"
             )
+        if "data_source" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN data_source TEXT")
+        if "execution_mode" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN execution_mode TEXT")
+        if "synthetic_dataset_id" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN synthetic_dataset_id TEXT")
+        if "synthetic_generator_version" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN synthetic_generator_version TEXT")
+        if "run_id" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN run_id TEXT")
+
+        # Database metadata for provenance + governance flags.
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS db_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
         # Synthetic legs for synthetic/structured trades (Phase 4 – MTM plan).
         self.cursor.execute(
@@ -1770,6 +1796,11 @@ class DatabaseManager:
         mid_price: Optional[float] = None,
         mid_slippage_bps: Optional[float] = None,
         signal_id: Optional[int] = None,
+        data_source: Optional[str] = None,
+        execution_mode: Optional[str] = None,
+        synthetic_dataset_id: Optional[str] = None,
+        synthetic_generator_version: Optional[str] = None,
+        run_id: Optional[str] = None,
         realized_pnl: Optional[float] = None,
         realized_pnl_pct: Optional[float] = None,
         holding_period_days: Optional[int] = None,
@@ -1792,10 +1823,12 @@ class DatabaseManager:
                     """
                     INSERT INTO trade_executions
                     (ticker, trade_date, action, shares, price, total_value,
-                     commission, mid_price, mid_slippage_bps, signal_id, realized_pnl, realized_pnl_pct,
+                     commission, mid_price, mid_slippage_bps, signal_id,
+                     data_source, execution_mode, synthetic_dataset_id, synthetic_generator_version, run_id,
+                     realized_pnl, realized_pnl_pct,
                      holding_period_days, asset_class, instrument_type,
                      underlying_ticker, strike, expiry, multiplier)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -1808,6 +1841,11 @@ class DatabaseManager:
                         mid_price,
                         mid_slippage_bps,
                         signal_id,
+                        data_source,
+                        execution_mode,
+                        synthetic_dataset_id,
+                        synthetic_generator_version,
+                        run_id,
                         realized_pnl,
                         realized_pnl_pct,
                         holding_period_days,
@@ -1826,6 +1864,123 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save trade execution: %s", safe_error)
             return -1
+
+    # ------------------------------------------------------------------
+    # DB provenance / governance helpers
+    # ------------------------------------------------------------------
+
+    def set_metadata(self, key: str, value: Any) -> bool:
+        """Persist a small metadata key/value for the active database."""
+        try:
+            if not isinstance(key, str) or not key.strip():
+                return False
+            stored = value if isinstance(value, str) else json.dumps(value, default=str)
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO db_metadata (key, value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value = excluded.value,
+                      updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (key.strip(), stored),
+                )
+            return True
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.debug("Failed to set db metadata %s: %s", key, safe_error)
+            return False
+
+    def get_metadata(self, key: str) -> Optional[str]:
+        """Return a stored metadata value or None."""
+        try:
+            if not isinstance(key, str) or not key.strip():
+                return None
+            self.cursor.execute("SELECT value FROM db_metadata WHERE key = ?", (key.strip(),))
+            row = self.cursor.fetchone()
+            if not row:
+                return None
+            return row["value"]
+        except Exception:
+            return None
+
+    def record_run_provenance(
+        self,
+        *,
+        run_id: str,
+        execution_mode: Optional[str] = None,
+        data_source: Optional[str] = None,
+        synthetic_dataset_id: Optional[str] = None,
+        synthetic_generator_version: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> None:
+        """Stamp the DB with the most recent pipeline/trading provenance."""
+        payload = {
+            "run_id": run_id,
+            "execution_mode": execution_mode,
+            "data_source": data_source,
+            "synthetic_dataset_id": synthetic_dataset_id,
+            "synthetic_generator_version": synthetic_generator_version,
+            "note": note,
+            "db_path": str(self.db_path),
+            "recorded_at": datetime.utcnow().isoformat() + "Z",
+        }
+        self.set_metadata("last_run_provenance", payload)
+        if (execution_mode or "").lower() == "synthetic" or (data_source or "").lower() == "synthetic":
+            self.set_metadata("profitability_proof", "false")
+            self.set_metadata("profitability_proof_reason", "synthetic_data")
+
+    def get_data_provenance_summary(self) -> Dict[str, Any]:
+        """Summarize whether the DB contains synthetic artifacts (for labeling)."""
+        sources: Dict[str, int] = {}
+        trade_sources: Dict[str, int] = {}
+        synthetic_dataset_ids: List[str] = []
+
+        try:
+            self.cursor.execute("SELECT source, COUNT(*) AS n FROM ohlcv_data GROUP BY source")
+            for row in self.cursor.fetchall():
+                src = str(row["source"] or "")
+                if src:
+                    sources[src] = int(row["n"] or 0)
+        except Exception:
+            sources = {}
+
+        try:
+            self.cursor.execute("SELECT data_source, COUNT(*) AS n FROM trade_executions GROUP BY data_source")
+            for row in self.cursor.fetchall():
+                src = str(row["data_source"] or "")
+                if src:
+                    trade_sources[src] = int(row["n"] or 0)
+        except Exception:
+            trade_sources = {}
+
+        try:
+            self.cursor.execute(
+                """
+                SELECT DISTINCT synthetic_dataset_id
+                FROM trade_executions
+                WHERE synthetic_dataset_id IS NOT NULL AND synthetic_dataset_id != ''
+                ORDER BY synthetic_dataset_id
+                """
+            )
+            synthetic_dataset_ids = [str(r[0]) for r in self.cursor.fetchall() if r and r[0]]
+        except Exception:
+            synthetic_dataset_ids = []
+
+        has_synthetic = bool(sources.get("synthetic") or trade_sources.get("synthetic") or synthetic_dataset_ids)
+        origin = "synthetic" if has_synthetic else "live"
+        if has_synthetic and len([s for s in sources if s and s != "synthetic"]) > 0:
+            origin = "mixed"
+
+        return {
+            "origin": origin,
+            "ohlcv_sources": sources,
+            "trade_sources": trade_sources,
+            "synthetic_dataset_ids": synthetic_dataset_ids,
+            "profitability_proof": self.get_metadata("profitability_proof"),
+            "profitability_proof_reason": self.get_metadata("profitability_proof_reason"),
+        }
 
     def save_latency_metrics(
         self,

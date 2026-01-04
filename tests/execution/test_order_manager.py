@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List
 
+import pandas as pd
+
 from execution.ctrader_client import (
     AccountSnapshot,
     CTraderClientConfig,
@@ -139,3 +141,32 @@ def test_order_manager_blocks_when_risk_status_not_healthy():
     assert result.status == "REJECTED"
     assert "risk_status" in result.pre_trade.reasons
     assert not client.placed_orders
+
+
+def test_order_manager_persists_provenance_and_mid_slippage():
+    manager, client, db = _build_manager()
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence_score": 0.9,
+        "current_price": 100.0,
+        "signal_id": 99,
+        "data_source": "synthetic",
+        "execution_mode": "synthetic",
+        "synthetic_dataset_id": "syn_test",
+        "synthetic_generator_version": "v1",
+        "run_id": "run_prov",
+    }
+
+    market_data = pd.DataFrame({"Bid": [99.0], "Ask": [101.0], "Close": [100.0]})
+    result = manager.submit_signal(signal, market_data=market_data)
+
+    assert result.status == "EXECUTED"
+    call = db.calls[-1]
+    assert call["data_source"] == "synthetic"
+    assert call["execution_mode"] == "synthetic"
+    assert call["synthetic_dataset_id"] == "syn_test"
+    assert call["synthetic_generator_version"] == "v1"
+    assert call["run_id"] == "run_prov"
+    assert call["mid_price"] == 100.0
+    assert call["mid_slippage_bps"] is not None

@@ -63,7 +63,11 @@ class LLMSystemMonitor:
     def initialize_ollama_client(self):
         """Initialize Ollama client for monitoring"""
         try:
-            self.ollama_client = OllamaClient()
+            use_case = os.getenv("LLM_MONITOR_USE_CASE", "fast")
+            self.ollama_client = OllamaClient(
+                optimizer=performance_optimizer,
+                optimize_use_case=use_case,
+            )
             logger.info("✅ Ollama client initialized successfully")
             return True
         except Exception as e:
@@ -316,6 +320,58 @@ class LLMSystemMonitor:
             "summary": summary,
         }
 
+    def _bootstrap_llm_signal_backtests(self, limit: int = 5, lookback_days: int = 30) -> bool:
+        """Best-effort backfill of llm_signal_backtests using existing llm_signals + stored OHLCV."""
+        fallback = self._summarise_signals_directly(limit)
+        if not fallback:
+            return False
+
+        summary = fallback.get("summary") or {}
+        tickers = summary.get("tickers") or []
+        if not tickers:
+            return False
+
+        try:
+            from ai_llm.signal_validator import SignalValidator
+        except Exception as exc:
+            logger.debug("SignalValidator unavailable; cannot bootstrap backtests (%s)", exc)
+            return False
+
+        validator = SignalValidator(min_confidence=0.0)
+        seeded = 0
+        start_date = (datetime.now() - timedelta(days=max(lookback_days, 1) + 60)).strftime("%Y-%m-%d")
+
+        for ticker in tickers[: min(3, len(tickers))]:
+            try:
+                recent_rows = self.db_manager.fetch_recent_signals(
+                    ticker,
+                    reference_timestamp=datetime.now(),
+                    lookback_days=lookback_days,
+                    limit=250,
+                )
+                if not recent_rows:
+                    continue
+
+                ohlcv = self.db_manager.load_ohlcv([ticker], start_date=start_date)
+                if ohlcv.empty:
+                    continue
+
+                ticker_slice = ohlcv[ohlcv["ticker"] == ticker]
+                if ticker_slice.empty or "close" not in ticker_slice.columns:
+                    continue
+
+                prices = pd.DataFrame({"Close": ticker_slice["close"].astype(float)}, index=ticker_slice.index)
+                report = validator.backtest_signal_quality(recent_rows, prices, lookback_days=lookback_days)
+                self.db_manager.save_signal_backtest_summary(ticker, lookback_days, report)
+                seeded += 1
+            except Exception as exc:
+                logger.debug("Unable to bootstrap backtest metrics for %s: %s", ticker, exc)
+
+        if seeded:
+            logger.info("✅ Bootstrapped %s llm_signal_backtests row(s) from llm_signals", seeded)
+
+        return seeded > 0
+
     def collect_signal_backtest_metrics(self, limit: int = 5):
         """Surface aggregated metrics from llm_signal_backtests for dashboards."""
         logger.info("🔍 Collecting signal backtest metrics...")
@@ -340,6 +396,29 @@ class LLMSystemMonitor:
                 (limit,),
             )
             rows = cursor.fetchall()
+            if not rows:
+                # Attempt to populate summaries when the table is empty but llm_signals exist.
+                if self._bootstrap_llm_signal_backtests(limit=limit):
+                    cursor.execute(
+                        """
+                        SELECT
+                            ticker,
+                            generated_at,
+                            lookback_days,
+                            signals_analyzed,
+                            hit_rate,
+                            profit_factor,
+                            sharpe_ratio,
+                            information_ratio,
+                            statistically_significant
+                        FROM llm_signal_backtests
+                        ORDER BY generated_at DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    )
+                    rows = cursor.fetchall()
+
             if not rows:
                 fallback = self._summarise_signals_directly(limit)
                 if fallback:

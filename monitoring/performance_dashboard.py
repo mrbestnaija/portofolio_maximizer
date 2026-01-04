@@ -6,7 +6,7 @@ import argparse
 import csv
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +25,7 @@ class DashboardSnapshot:
     charts: Dict[str, Any]
     alerts: List[str]
     generated_at: str
+    provenance: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -32,6 +33,7 @@ class DashboardSnapshot:
             "charts": self.charts,
             "alerts": self.alerts,
             "generated_at": self.generated_at,
+            "provenance": self.provenance,
         }
 
 
@@ -51,6 +53,7 @@ class PerformanceDashboard:
         start_date = (now - timedelta(days=lookback_days)).date().isoformat()
 
         with DatabaseManager(db_path=self.db_path) as db:
+            provenance = db.get_data_provenance_summary()
             performance = db.get_performance_summary(start_date=start_date)
             equity_curve = db.get_equity_curve(start_date=start_date)
             pnl_history = self._fetch_realized_pnl_history(db, limit=equity_limit, start_date=start_date)
@@ -78,7 +81,9 @@ class PerformanceDashboard:
             "var_95": portfolio_metrics.get("var_95"),
             "data_quality_score": quality_summary.get("avg_quality"),
             "avg_latency_ms": latency_summary.get("avg_total_ms"),
+            "data_origin": provenance.get("origin"),
         }
+        metrics["profitability_proof"] = bool(metrics.get("data_origin") == "live")
 
         charts = {
             "equity_curve": equity_curve,
@@ -87,7 +92,18 @@ class PerformanceDashboard:
         }
 
         alerts = self._build_alerts(metrics, quality_summary, latency_summary)
-        return DashboardSnapshot(metrics=metrics, charts=charts, alerts=alerts, generated_at=now.isoformat())
+        origin = metrics.get("data_origin")
+        if origin in {"synthetic", "mixed"}:
+            alerts.insert(0, "Synthetic data present: metrics are NOT profitability proof artifacts")
+            metrics["profitability_proof"] = False
+
+        return DashboardSnapshot(
+            metrics=metrics,
+            charts=charts,
+            alerts=alerts,
+            generated_at=now.isoformat(),
+            provenance=provenance or {},
+        )
 
     def save_snapshot(self, snapshot: DashboardSnapshot, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)

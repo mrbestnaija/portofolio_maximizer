@@ -1,7 +1,7 @@
 """Environment validation for portfolio management system.
 
 Mathematical Foundation:
-- Linear algebra: O(n²) covariance matrix computations
+- Linear algebra: O(n^2) covariance matrix computations
 - Statistical ops: Normal distribution CDF for Sharpe ratio calculations
 - Time series: Vectorized log returns r_t = ln(P_t/P_{t-1})
 
@@ -11,6 +11,7 @@ Success Criteria:
 - yfinance can fetch 5+ years SPY data
 - Statistical functions accurate to 1e-10
 """
+import os
 import sys
 import time
 import numpy as np
@@ -18,6 +19,30 @@ import pandas as pd
 import scipy.stats as stats
 import yfinance as yf
 from datetime import datetime, timedelta
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
+
+
+def validate_ctrader_credentials():
+    """Validate that cTrader credentials are available via env/.env without printing secrets."""
+    required_any = {
+        "username": ["USERNAME_CTRADER", "CTRADER_USERNAME", "EMAIL_CTRADER", "CTRADER_EMAIL"],
+        "password": ["PASSWORD_CTRADER", "CTRADER_PASSWORD"],
+        "application_id": ["APPLICATION_NAME_CTRADER", "CTRADER_APPLICATION_ID", "CTRADER_APP_ID"],
+    }
+
+    missing_groups = []
+    for label, keys in required_any.items():
+        if not any((os.getenv(k) or "").strip() for k in keys):
+            missing_groups.append(f"{label} ({'/'.join(keys)})")
+
+    return len(missing_groups) == 0, missing_groups
 
 def validate_libraries():
     """Validate core scientific computing libraries."""
@@ -69,5 +94,12 @@ if __name__ == '__main__':
 
     stat_ok, checks = validate_statistics()
     print(f"\n4. Statistics: {'PASS' if stat_ok else 'FAIL'}")
+
+    ctrader_ok, ctrader_missing = validate_ctrader_credentials()
+    print(f"\n5. cTrader credentials: {'PASS' if ctrader_ok else 'WARN'}")
+    if not ctrader_ok:
+        print("   Missing:")
+        for item in ctrader_missing:
+            print(f"   - {item}")
 
     sys.exit(0 if all([lib_ok, vec_ok, yf_ok, stat_ok]) else 1)

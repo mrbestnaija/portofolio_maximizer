@@ -32,6 +32,24 @@ def make_market_data(close_price: float = 100.0) -> pd.DataFrame:
     return pd.DataFrame({"Close": prices})
 
 
+def make_microstructure_market_data(
+    *,
+    mid_price: float = 100.0,
+    half_spread: float = 0.10,
+    depth_notional: float = 200.0,
+    txn_cost_bps: float = 10.0,
+    points: int = 5,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Close": [mid_price] * points,
+            "Spread": [half_spread] * points,
+            "Depth": [depth_notional] * points,
+            "TxnCostBps": [txn_cost_bps] * points,
+        }
+    )
+
+
 def test_execute_signal_rejected_when_validation_fails():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(False, "REJECT", 0.2, ["low_confidence"]))
@@ -149,5 +167,28 @@ def test_regime_state_risk_multiplier_scales_position_size(tmp_path, monkeypatch
     )
 
     assert pos_size_exploration < pos_size_neutral
+
+    db.close()
+
+
+def test_lob_execution_price_moves_with_order_size():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=100_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    market_data = make_microstructure_market_data()
+    buy_small = engine._simulate_entry_price(100.0, "BUY", 1, market_data=market_data)
+    buy_large = engine._simulate_entry_price(100.0, "BUY", 25, market_data=market_data)
+    assert buy_large >= buy_small
+
+    sell_small = engine._simulate_entry_price(100.0, "SELL", 1, market_data=market_data)
+    sell_large = engine._simulate_entry_price(100.0, "SELL", 25, market_data=market_data)
+    assert sell_large <= sell_small
 
     db.close()

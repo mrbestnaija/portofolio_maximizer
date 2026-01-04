@@ -26,6 +26,7 @@ from datetime import date, datetime
 from typing import Any, Dict, Optional
 
 import logging
+import os
 
 import pandas as pd
 
@@ -74,6 +75,12 @@ class OrderRequest:
     confidence: float
     current_price: float
     signal_id: Optional[int] = None
+    mid_price: Optional[float] = None
+    data_source: Optional[str] = None
+    execution_mode: Optional[str] = None
+    synthetic_dataset_id: Optional[str] = None
+    synthetic_generator_version: Optional[str] = None
+    run_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -230,12 +237,36 @@ class OrderManager:
         action = (signal.get("action") or "HOLD").strip().upper()
         confidence = float(signal.get("confidence_score", signal.get("confidence", 0)))
         price = signal.get("current_price") or signal.get("price")
+        data_source = signal.get("data_source")
+        execution_mode = signal.get("execution_mode") or os.getenv("EXECUTION_MODE")
+        synthetic_dataset_id = signal.get("synthetic_dataset_id") or os.getenv("SYNTHETIC_DATASET_ID")
+        synthetic_generator_version = signal.get("synthetic_generator_version") or signal.get("generator_version")
+        run_id = signal.get("run_id") or os.getenv("RUN_ID")
+        mid_price = signal.get("mid_price")
 
         if not price and market_data is not None and not market_data.empty:
             try:
                 price = float(market_data["Close"].iloc[-1])
             except Exception:  # pragma: no cover - best effort fallback
                 price = None
+        if mid_price is None and market_data is not None and not market_data.empty:
+            try:
+                last = market_data.iloc[-1]
+                bid = last.get("Bid") if hasattr(last, "get") else None
+                ask = last.get("Ask") if hasattr(last, "get") else None
+                if bid is not None and ask is not None and pd.notna(bid) and pd.notna(ask) and float(ask) > float(bid) > 0:
+                    mid_price = (float(bid) + float(ask)) / 2.0
+                else:
+                    high = last.get("High") if hasattr(last, "get") else None
+                    low = last.get("Low") if hasattr(last, "get") else None
+                    if high is not None and low is not None and pd.notna(high) and pd.notna(low):
+                        mid_price = (float(high) + float(low)) / 2.0
+                    else:
+                        close = last.get("Close") if hasattr(last, "get") else None
+                        if close is not None and pd.notna(close):
+                            mid_price = float(close)
+            except Exception:  # pragma: no cover - best effort
+                mid_price = None
 
         if not ticker or action not in {"BUY", "SELL"} or not price:
             return None
@@ -262,6 +293,12 @@ class OrderManager:
             confidence=confidence,
             current_price=float(price),
             signal_id=signal_id,
+            mid_price=mid_price,
+            data_source=data_source,
+            execution_mode=execution_mode,
+            synthetic_dataset_id=synthetic_dataset_id,
+            synthetic_generator_version=synthetic_generator_version,
+            run_id=run_id,
             metadata={k: v for k, v in signal.items() if k not in {"ticker", "symbol", "action"}},
         )
 
@@ -383,6 +420,13 @@ class OrderManager:
 
         executed_price = placement.avg_price or request.current_price
         total_value = executed_price * placement.filled_volume
+        mid_price = placement.mid_price if placement.mid_price is not None else request.mid_price
+        mid_slippage_bps = None
+        try:
+            if mid_price and mid_price > 0 and executed_price is not None:
+                mid_slippage_bps = ((executed_price - mid_price) / mid_price) * 1e4
+        except Exception:
+            mid_slippage_bps = None
         # Allow upstream signal metadata to tag asset_class / instrument_type /
         # option fields when options_trading is enabled. For current spot-only
         # flows this remains a no-op and falls back to ticker heuristics.
@@ -394,6 +438,11 @@ class OrderManager:
         strike = meta.get("strike")
         expiry = meta.get("expiry")
         multiplier = meta.get("multiplier") or 1.0
+        data_source = request.data_source or meta.get("data_source")
+        execution_mode = request.execution_mode or meta.get("execution_mode") or os.getenv("EXECUTION_MODE")
+        synthetic_dataset_id = request.synthetic_dataset_id or meta.get("synthetic_dataset_id") or os.getenv("SYNTHETIC_DATASET_ID")
+        synthetic_generator_version = request.synthetic_generator_version or meta.get("synthetic_generator_version") or meta.get("generator_version")
+        run_id = request.run_id or meta.get("run_id") or os.getenv("RUN_ID")
 
         self.db_manager.save_trade_execution(
             ticker=request.ticker,
@@ -404,6 +453,13 @@ class OrderManager:
             total_value=total_value,
             commission=0.0,
             signal_id=request.signal_id,
+            data_source=data_source,
+            execution_mode=execution_mode,
+            synthetic_dataset_id=synthetic_dataset_id,
+            synthetic_generator_version=synthetic_generator_version,
+            run_id=run_id,
+            mid_price=mid_price,
+            mid_slippage_bps=mid_slippage_bps,
             asset_class=asset_class,
             instrument_type=instrument_type,
             underlying_ticker=underlying_ticker,

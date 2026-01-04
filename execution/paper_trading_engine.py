@@ -26,6 +26,7 @@ import pandas as pd
 
 from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
+from execution.lob_simulator import LOBConfig, simulate_market_order_fill
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,11 @@ class Trade:
     exit_reason: Optional[str] = None
     mid_price: Optional[float] = None
     mid_slippage_bps: Optional[float] = None
+    data_source: Optional[str] = None
+    execution_mode: Optional[str] = None
+    synthetic_dataset_id: Optional[str] = None
+    synthetic_generator_version: Optional[str] = None
+    run_id: Optional[str] = None
     # Optional instrument metadata for options/derivatives (kept inert until
     # options_trading.enabled + feature flags are active).
     asset_class: str = "equity"
@@ -142,6 +148,8 @@ class PaperTradingEngine:
         # Initialize components
         self.db_manager = database_manager or DatabaseManager(db_path)
         self.signal_validator = signal_validator or SignalValidator()
+        self._lob_config: Optional[LOBConfig] = None
+        self._lob_enabled: Optional[bool] = None
         
         # Initialize portfolio
         self.portfolio = Portfolio(cash=initial_capital, total_value=initial_capital)
@@ -170,6 +178,11 @@ class PaperTradingEngine:
         ticker = signal.get('ticker', 'UNKNOWN')
         action = signal.get('action', 'HOLD').upper()
         current_position = self.portfolio.positions.get(ticker, 0)
+        data_source = signal.get("data_source")
+        run_id = signal.get("run_id") or os.getenv("RUN_ID")
+        execution_mode = signal.get("execution_mode") or os.getenv("EXECUTION_MODE")
+        synthetic_dataset_id = signal.get("synthetic_dataset_id") or os.getenv("SYNTHETIC_DATASET_ID")
+        synthetic_generator_version = signal.get("synthetic_generator_version") or signal.get("generator_version")
 
         # Prefer signal-provided timestamps when replaying historical windows so
         # trade_date reflects the simulated session instead of "now".
@@ -338,9 +351,12 @@ class PaperTradingEngine:
                 reason=f"Insufficient cash (need ${required_capital:,.2f})"
             )
         
-        # Step 4: Simulate entry price with slippage
+        # Step 4: Simulate entry price with slippage/market impact.
         entry_price = self._simulate_entry_price(
-            float(current_price or 0.0), action, position_size
+            float(current_price or 0.0),
+            action,
+            position_size,
+            market_data=market_data,
         )
         
         # Step 5: Calculate transaction costs
@@ -368,6 +384,11 @@ class PaperTradingEngine:
             target_price=signal.get("target_price"),
             forecast_horizon=forecast_horizon,
             exit_reason=signal.get("exit_reason") if forced_exit_reason else None,
+            data_source=data_source,
+            execution_mode=execution_mode,
+            synthetic_dataset_id=synthetic_dataset_id,
+            synthetic_generator_version=synthetic_generator_version,
+            run_id=run_id,
         )
         mid_price_hint = signal.get("mid_price_hint")
         try:
@@ -556,10 +577,59 @@ class PaperTradingEngine:
             return 1.2
         return 1.0
     
-    def _simulate_entry_price(self, 
-                             market_price: float, 
-                             action: str, 
-                             shares: int) -> float:
+    def _load_lob_config(self) -> Optional[LOBConfig]:
+        if self._lob_enabled is False:
+            return None
+        if self._lob_config is not None:
+            return self._lob_config
+
+        from pathlib import Path
+        import yaml  # local import to keep dependency optional for minimal runs
+
+        cfg_path = Path(__file__).resolve().parent.parent / "config" / "execution_cost_model.yml"
+        if not cfg_path.exists():
+            self._lob_enabled = True
+            self._lob_config = LOBConfig()
+            return self._lob_config
+
+        try:
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            model_cfg = raw.get("execution_cost_model") or {}
+            lob_cfg = model_cfg.get("lob") or {}
+            enabled = bool(lob_cfg.get("enabled", True))
+            self._lob_enabled = enabled
+            if not enabled:
+                return None
+            self._lob_config = LOBConfig(
+                levels=int(lob_cfg.get("levels", 10)),
+                tick_size_bps=float(lob_cfg.get("tick_size_bps", 1.0)),
+                alpha=float(lob_cfg.get("alpha", 0.8)),
+                max_exhaust_levels=int(lob_cfg.get("max_exhaust_levels", 25)),
+            )
+            return self._lob_config
+        except Exception:
+            self._lob_enabled = True
+            self._lob_config = LOBConfig()
+            return self._lob_config
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if out != out:  # NaN
+            return None
+        return out
+
+    def _simulate_entry_price(
+        self,
+        market_price: float,
+        action: str,
+        shares: int,
+        *,
+        market_data: Optional[pd.DataFrame] = None,
+    ) -> float:
         """
         Simulate realistic entry price with slippage and market impact.
         
@@ -571,25 +641,58 @@ class PaperTradingEngine:
         Returns:
             Simulated entry price
         """
-        # Base slippage (0.1%)
-        base_slippage = self.slippage_pct
-        
-        # Additional market impact for large orders
-        # Assume 0.01% additional slippage per $10,000 of order value
-        order_value = shares * market_price
-        market_impact = (order_value / 10000) * 0.0001
-        
+        side = action.upper()
+        shares_f = float(shares or 0)
+        market_px = float(market_price or 0.0)
+        if market_data is not None and isinstance(market_data, pd.DataFrame) and not market_data.empty:
+            try:
+                last = market_data.iloc[-1]
+            except Exception:
+                last = None
+
+            if last is not None:
+                bid = last.get("Bid") if hasattr(last, "get") else None
+                ask = last.get("Ask") if hasattr(last, "get") else None
+                bid_f = self._safe_float(bid)
+                ask_f = self._safe_float(ask)
+                if bid_f is not None and ask_f is not None and bid_f > 0 and ask_f > bid_f:
+                    mid = 0.5 * (bid_f + ask_f)
+                    half_spread = 0.5 * (ask_f - bid_f)
+                else:
+                    close = last.get("Close") if hasattr(last, "get") else None
+                    mid = self._safe_float(close) or market_px
+                    spread_val = last.get("Spread") if hasattr(last, "get") else None
+                    half_spread = self._safe_float(spread_val) or 0.0
+
+                depth_val = last.get("Depth") if hasattr(last, "get") else None
+                depth_notional = self._safe_float(depth_val) or 0.0
+
+                txn_cost_bps_val = last.get("TxnCostBps") if hasattr(last, "get") else None
+                txn_cost_bps = self._safe_float(txn_cost_bps_val)
+                baseline_total_cost = (mid * txn_cost_bps / 1e4) if txn_cost_bps is not None else (mid * self.slippage_pct)
+                baseline_slippage = max(0.0, baseline_total_cost - half_spread)
+
+                lob_cfg = self._load_lob_config()
+                if lob_cfg is not None and shares_f > 0 and mid > 0 and depth_notional > 0:
+                    fill = simulate_market_order_fill(
+                        side=side if side in {"BUY", "SELL"} else "BUY",
+                        mid_price=mid,
+                        half_spread=half_spread,
+                        depth_notional=depth_notional,
+                        shares=shares_f,
+                        baseline_slippage=baseline_slippage,
+                        config=lob_cfg,
+                    )
+                    return float(fill.vwap_price)
+
+        # Fallback: percentage-based slippage + simple market impact
+        base_slippage = float(self.slippage_pct or 0.0)
+        order_value = shares_f * market_px
+        market_impact = (order_value / 10000.0) * 0.0001 if order_value > 0 else 0.0
         total_slippage = base_slippage + market_impact
-        
-        # Apply slippage direction
-        if action == 'BUY':
-            # Buy at higher price
-            entry_price = market_price * (1 + total_slippage)
-        else:  # SELL
-            # Sell at lower price
-            entry_price = market_price * (1 - total_slippage)
-        
-        return entry_price
+        if side == 'BUY':
+            return market_px * (1 + total_slippage)
+        return market_px * (1 - total_slippage)
     
     def _update_portfolio(self, trade: Trade, portfolio: Portfolio) -> Portfolio:
         """
@@ -820,6 +923,11 @@ class PaperTradingEngine:
                 total_value=trade.shares * trade.entry_price,
                 commission=trade.transaction_cost,
                 signal_id=trade.signal_id,
+                data_source=trade.data_source,
+                execution_mode=trade.execution_mode,
+                synthetic_dataset_id=trade.synthetic_dataset_id,
+                synthetic_generator_version=trade.synthetic_generator_version,
+                run_id=trade.run_id,
                 realized_pnl=realized_pnl if realized_pct is not None else None,
                 realized_pnl_pct=realized_pct,
                 holding_period_days=holding_period_days,

@@ -352,6 +352,10 @@ def _execute_signal(
     quality: Optional[Dict[str, Any]] = None,
     data_source: Optional[str] = None,
     mid_price: Optional[float] = None,
+    run_id: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    synthetic_dataset_id: Optional[str] = None,
+    synthetic_generator_version: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -369,7 +373,17 @@ def _execute_signal(
         logger.info("No actionable signal produced for %s", ticker)
         return None
 
-    result = trading_engine.execute_signal(primary, market_data)
+    primary_payload = dict(primary)
+    if run_id:
+        primary_payload["run_id"] = run_id
+    if execution_mode:
+        primary_payload["execution_mode"] = execution_mode
+    if synthetic_dataset_id:
+        primary_payload["synthetic_dataset_id"] = synthetic_dataset_id
+    if synthetic_generator_version:
+        primary_payload["synthetic_generator_version"] = synthetic_generator_version
+
+    result = trading_engine.execute_signal(primary_payload, market_data)
     logger.info(
         "Execution result for %s: %s",
         ticker,
@@ -818,6 +832,24 @@ def main(
                 time.sleep(sleep_seconds)
             continue
 
+        window_dataset_id = raw_window.attrs.get("dataset_id") if hasattr(raw_window, "attrs") else None
+        window_generator_version = raw_window.attrs.get("generator_version") if hasattr(raw_window, "attrs") else None
+        active_source = data_source_manager.get_active_source()
+        synthetic_only = str(os.getenv("SYNTHETIC_ONLY") or "").strip() == "1"
+        effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
+        if cycle == 1:
+            try:
+                trading_engine.db_manager.record_run_provenance(
+                    run_id=run_id,
+                    execution_mode=effective_execution_mode,
+                    data_source=active_source,
+                    synthetic_dataset_id=window_dataset_id,
+                    synthetic_generator_version=window_generator_version,
+                    note="auto_trader",
+                )
+            except Exception:
+                logger.debug("Failed to record run provenance", exc_info=True)
+
         cycle_results = []
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
@@ -914,6 +946,10 @@ def main(
                 quality=quality,
                 data_source=data_source,
                 mid_price=mid_price,
+                run_id=run_id,
+                execution_mode=effective_execution_mode,
+                synthetic_dataset_id=window_dataset_id,
+                synthetic_generator_version=window_generator_version,
             )
 
             if execution_report:

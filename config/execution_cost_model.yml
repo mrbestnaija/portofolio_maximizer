@@ -1,0 +1,11 @@
+# Execution cost model configuration (paper trading / simulation).
+# Keeps execution realism configurable and auditable.
+
+execution_cost_model:
+  lob:
+    enabled: true
+    levels: 10
+    tick_size_bps: 1.0
+    alpha: 0.8
+    max_exhaust_levels: 25
+

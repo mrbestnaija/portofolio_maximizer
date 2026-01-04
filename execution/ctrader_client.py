@@ -169,13 +169,24 @@ class CTraderClientConfig:
 
         overrides = overrides or {}
 
-        username = overrides.get("username") or _env_value("USERNAME_CTRADER")
+        username = (
+            overrides.get("username")
+            or _env_value("USERNAME_CTRADER")
+            or _env_value("CTRADER_USERNAME")
+        )
         if not username:
-            username = _env_value("EMAIL_CTRADER")
+            username = _env_value("EMAIL_CTRADER") or _env_value("CTRADER_EMAIL")
 
-        password = overrides.get("password") or _env_value("PASSWORD_CTRADER")
-        application_id = overrides.get("application_id") or _env_value(
-            "APPLICATION_NAME_CTRADER"
+        password = (
+            overrides.get("password")
+            or _env_value("PASSWORD_CTRADER")
+            or _env_value("CTRADER_PASSWORD")
+        )
+        application_id = (
+            overrides.get("application_id")
+            or _env_value("APPLICATION_NAME_CTRADER")
+            or _env_value("CTRADER_APPLICATION_ID")
+            or _env_value("CTRADER_APP_ID")
         )
         application_secret = overrides.get("application_secret") or _env_value(
             "CTRADER_APPLICATION_SECRET"
@@ -193,11 +204,11 @@ class CTraderClientConfig:
 
         missing = []
         if not username:
-            missing.append("USERNAME_CTRADER")
+            missing.append("USERNAME_CTRADER/CTRADER_USERNAME")
         if not password:
-            missing.append("PASSWORD_CTRADER")
+            missing.append("PASSWORD_CTRADER/CTRADER_PASSWORD")
         if not application_id:
-            missing.append("APPLICATION_NAME_CTRADER")
+            missing.append("APPLICATION_NAME_CTRADER/CTRADER_APPLICATION_ID")
 
         if missing:
             raise CTraderAuthError(
@@ -242,6 +253,8 @@ class OrderPlacement:
     filled_volume: float
     avg_price: Optional[float]
     submitted_at: datetime
+    mid_price: Optional[float] = None
+    mid_slippage_bps: Optional[float] = None
     raw_response: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -570,6 +583,8 @@ class CTraderClient:
             filled_volume=filled,
             avg_price=float(avg_price) if avg_price is not None else None,
             submitted_at=submitted_at,
+            mid_price=None,
+            mid_slippage_bps=None,
             raw_response=payload,
         )
 

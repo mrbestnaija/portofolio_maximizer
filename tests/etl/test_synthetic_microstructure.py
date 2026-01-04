@@ -14,7 +14,7 @@ def test_microstructure_channels_present() -> None:
         end_date="2024-01-10",
     )
     assert not data.empty
-    for col in ["Spread", "Slippage", "Depth", "OrderImbalance"]:
+    for col in ["Spread", "Bid", "Ask", "Slippage", "Depth", "OrderImbalance"]:
         assert col in data.columns
     # Ensure reasonable numeric content
     assert pd.api.types.is_numeric_dtype(data["Depth"])

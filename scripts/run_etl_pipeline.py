@@ -1169,6 +1169,16 @@ def execute_pipeline(
         logger.info(f"OK Data source manager initialized")
         logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
         logger.info(f"  Active source: {data_source_manager.get_active_source()}")
+        try:
+            db_manager.record_run_provenance(
+                run_id=pipeline_id,
+                execution_mode=execution_mode,
+                data_source=data_source_manager.get_active_source(),
+                synthetic_dataset_id=os.getenv("SYNTHETIC_DATASET_ID") or os.getenv("SYNTHETIC_DATASET_PATH"),
+                note="etl_pipeline_start",
+            )
+        except Exception:
+            logger.debug("Failed to record pipeline provenance", exc_info=True)
     except Exception as e:
         logger.error(f"Failed to initialize data source manager: {e}")
         logger.error("Pipeline cannot continue without data source")
@@ -1215,6 +1225,17 @@ def execute_pipeline(
                 dataset_id_current = synthetic_dataset_id
                 generator_version_current = synthetic_generator_version
                 logger.info("Synthetic mode: loaded persisted synthetic dataset (%s)", synthetic_dataset_id)
+                try:
+                    db_manager.record_run_provenance(
+                        run_id=pipeline_id,
+                        execution_mode=execution_mode,
+                        data_source="synthetic",
+                        synthetic_dataset_id=synthetic_dataset_id,
+                        synthetic_generator_version=synthetic_generator_version,
+                        note="etl_pipeline_loaded_synthetic_dataset",
+                    )
+                except Exception:
+                    logger.debug("Failed to record synthetic dataset provenance", exc_info=True)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Failed to load persisted synthetic dataset (%s); falling back to generator", exc)
                 precomputed_raw_data = None
