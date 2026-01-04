@@ -26,10 +26,7 @@ from ai_llm.signal_quality_validator import (
     Signal,
     SignalDirection,
 )
-from ai_llm.llm_database_integration import (
-    get_performance_summary,
-    save_risk_assessment,
-)
+from ai_llm.llm_database_integration import LLMDatabaseManager, LLMRiskAssessment
 from ai_llm.performance_optimizer import performance_optimizer, optimize_model_selection
 from ai_llm.ollama_client import OllamaClient
 from etl.database_manager import DatabaseManager
@@ -61,6 +58,7 @@ class LLMSystemMonitor:
         self.ollama_client = None
         self.monitoring_results = {}
         self.db_manager = DatabaseManager()
+        self.llm_db_manager = LLMDatabaseManager(db_path=str(self.db_manager.db_path))
         
     def initialize_ollama_client(self):
         """Initialize Ollama client for monitoring"""
@@ -168,7 +166,7 @@ class LLMSystemMonitor:
         
         try:
             # Get recent signals from database
-            recent_signals = llm_db_manager.get_recent_signals(hours=24)
+            recent_signals = self.llm_db_manager.get_recent_signals(hours=24)
             
             if not recent_signals:
                 cursor = self.db_manager.cursor
@@ -405,18 +403,22 @@ class LLMSystemMonitor:
         
         try:
             # Test saving a risk assessment
-            test_assessment_id = save_risk_assessment(
+            assessment = LLMRiskAssessment(
+                id=None,
                 portfolio_id="test_portfolio_001",
+                risk_level="medium",
                 risk_score=0.3,
                 risk_factors=["High volatility", "Market uncertainty"],
                 recommendations=["Reduce position size", "Add hedging"],
                 model_used="qwen:14b-chat-q4_K_M",
+                timestamp=datetime.now(),
+                market_conditions={"volatility": 0.25, "trend": "bearish"},
                 confidence=0.85,
-                market_conditions={"volatility": 0.25, "trend": "bearish"}
             )
+            test_assessment_id = self.llm_db_manager.save_risk_assessment(assessment)
             
             # Verify the assessment was saved
-            recent_assessments = llm_db_manager.get_recent_risk_assessments(hours=1)
+            recent_assessments = self.llm_db_manager.get_recent_risk_assessments(hours=1)
             saved_assessment = next((a for a in recent_assessments if a.id == test_assessment_id), None)
             
             if saved_assessment:

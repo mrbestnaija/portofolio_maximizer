@@ -34,7 +34,7 @@ preprocessing:
     enabled: true
     method: "zscore"  # Options: zscore, minmax, robust, none
 
-    # Z-score normalization (¼=0, Ã²=1)
+    # Z-score normalization (mean=0, std=1)
     zscore:
       with_mean: true  # Center data to mean=0
       with_std: true  # Scale to std=1
@@ -96,7 +96,7 @@ preprocessing:
     zscore:
       threshold: 3.0  # |z| > 3 considered outlier
       action: "cap"  # Options: cap, remove, flag, none
-      cap_at: "threshold"  # Cap at ±threshold * Ã
+      cap_at: "threshold"  # Cap at Â±threshold * Ãƒ
 
     # IQR method
     iqr:
@@ -153,7 +153,7 @@ preprocessing:
 
 # Mathematical formulas used
 formulas:
-  zscore: "z = (x - ¼) / Ã"
+  zscore: "z = (x - Â¼) / Ãƒ"
   minmax: "x_scaled = (x - x_min) / (x_max - x_min)"
   robust: "x_scaled = (x - median) / IQR"
   log_returns: "r_t = ln(P_t / P_{t-1})"

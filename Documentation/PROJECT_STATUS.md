@@ -1,7 +1,7 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified**: 2025-12-27  
-**Dependency sanity check**: 2025-12-27  
+**Last verified**: 2026-01-03  
+**Dependency sanity check**: 2026-01-03  
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
 **Document updated**: 2026-01-03  
 
@@ -11,6 +11,7 @@
 
 - Code compiles cleanly (`python -m compileall` on core packages)
 - Focused test run passes (signal validator + paper trading engine + DB schema + diagnostics): **31 tests**
+- Brutal harness completes end-to-end with quant-validation health GREEN (see `logs/brutal/results_20260103_220403/reports/final_report.md`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
 - Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
@@ -30,6 +31,22 @@ pytest -q \
   tests/execution/test_order_manager.py \
   tests/etl/test_database_manager_schema.py
 ```
+
+### Brutal Run Snapshot (2026-01-03)
+
+Artifact bundle:
+- `logs/brutal/results_20260103_220403/reports/final_report.md`
+- `logs/brutal/results_20260103_220403/test.log`
+- `logs/brutal/results_20260103_220403/logs/pipeline_execution.log`
+
+Headline outcomes:
+- 42/42 stages PASSED (pass rate 100%)
+- Quant validation health (global): GREEN
+- Pipeline execution ran in SYNTHETIC mode (by design for brutal validation)
+
+Notable warnings (do not fail the suite, but matter for production readiness):
+- `logs/brutal/results_20260103_220403/logs/monitoring_run.log`: monitoring summary reported `overall_status=DEGRADED` (latency above 5s benchmark, and signal-backtest inputs missing)
+- `logs/brutal/results_20260103_220403/logs/profitability_validation.log`: profitability status WARNING (expected-return below threshold; no realised PnL in the test DB)
 
 ### MVS Snapshot (Verified from DB)
 

@@ -13,7 +13,7 @@ extraction:
     enabled: true
     cache_hours: 24  # Cache validity in hours
     storage_path: "data/raw"  # Cache storage location
-    tolerance_days: 3  # ±3 days tolerance for non-trading days
+    tolerance_days: 3  # +/-3 days tolerance for non-trading days
     auto_cleanup: true
     retention_days: 365  # Keep cached data for 1 year
 

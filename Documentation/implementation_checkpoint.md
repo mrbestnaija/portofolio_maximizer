@@ -33,6 +33,11 @@ This file is a chronological engineering/evidence ledger. Use it to trace *what 
 Suite coverage (from `test.log`): profit-critical (profit calculation accuracy + profit factor + report generation), ETL unit tests (98), Time Series forecasting (37), signal routing (26), integration (30), LLM (67), security (13), and pipeline execution (4 runs).
 The nightly validation wrapper `schedule_backfill.bat` is registered in Windows Task Scheduler (`PortfolioMaximizer_BackfillSignals` at 02:00 daily) so `scripts/backfill_signal_validation.py` evidence stays fresh before any synthetic/live scaling.
 
+**Verification (2026-01-03)**: A subsequent brutal run completes with global quant-validation health GREEN. Evidence bundle:
+- `logs/brutal/results_20260103_220403/reports/final_report.md` (42/42 stages passed; quant health GREEN)
+- `logs/brutal/results_20260103_220403/logs/pipeline_execution.log` (synthetic pipeline run; checkpoint + DB mirror sync)
+- `logs/brutal/results_20260103_220403/logs/monitoring_run.log` (monitoring reported DEGRADED due to latency benchmark + missing backtest inputs)
+
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
 ### Forecasting + ETL statistical hardening (2025-12-19)
