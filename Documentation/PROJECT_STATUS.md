@@ -1,7 +1,7 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified**: 2026-01-03  
-**Dependency sanity check**: 2026-01-03  
+**Last verified**: 2026-01-04  
+**Dependency sanity check**: 2026-01-04  
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
 **Document updated**: 2026-01-03  
 
@@ -12,6 +12,7 @@
 - Code compiles cleanly (`python -m compileall` on core packages)
 - Focused test run passes (signal validator + paper trading engine + DB schema + diagnostics): **31 tests**
 - Brutal harness completes end-to-end with quant-validation health GREEN (see `logs/brutal/results_20260103_220403/reports/final_report.md`)
+- LLM monitoring script no longer errors on missing `llm_db_manager` (see `scripts/monitor_llm_system.py`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
 - Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
@@ -47,6 +48,11 @@ Headline outcomes:
 Notable warnings (do not fail the suite, but matter for production readiness):
 - `logs/brutal/results_20260103_220403/logs/monitoring_run.log`: monitoring summary reported `overall_status=DEGRADED` (latency above 5s benchmark, and signal-backtest inputs missing)
 - `logs/brutal/results_20260103_220403/logs/profitability_validation.log`: profitability status WARNING (expected-return below threshold; no realised PnL in the test DB)
+
+### Operational Notes (2026-01-04)
+
+- `bash/repo_cleanup.sh` requires LF line endings; `.gitattributes` now enforces `eol=lf` for `*.sh` to avoid `pipefail\\r` errors on Windows checkouts.
+- WSL is the stable runtime for full test runs and monitoring in this environment; Windows `python` is not available via PATH on this machine.
 
 ### MVS Snapshot (Verified from DB)
 
