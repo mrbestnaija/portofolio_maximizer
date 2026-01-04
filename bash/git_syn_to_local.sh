@@ -13,18 +13,74 @@
 
 set -euo pipefail
 
+ASKPASS_FILE=""
+
+pmx_load_env_file() {
+  local env_path="${1:-.env}"
+  [[ -f "${env_path}" ]] || return 0
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
+    [[ "${line}" =~ ^[[:space:]]*$ ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "${line}" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local value="${BASH_REMATCH[2]}"
+
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+
+      if [[ "${value}" =~ ^\".*\"$ ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${value}" =~ ^\'.*\'$ ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+
+      export "${key}=${value}"
+    fi
+  done < "${env_path}"
+}
+
+cleanup_askpass() {
+  if [[ -n "${ASKPASS_FILE}" && -f "${ASKPASS_FILE}" ]]; then
+    rm -f "${ASKPASS_FILE}"
+  fi
+}
+
+pmx_setup_git_askpass() {
+  if [[ "${GIT_USE_ENV_REMOTE:-0}" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${GitHub_Username:-}" || -z "${GitHub_TOKEN:-}" || -z "${GitHub_Repo:-}" || "${GitHub_TOKEN}" =~ xxx ]]; then
+    echo "GIT_USE_ENV_REMOTE=1 set but GitHub creds missing/placeholder; skipping askpass auth." >&2
+    return 0
+  fi
+
+  # Never persist tokens into git remotes. Use an ephemeral askpass helper instead.
+  umask 077
+  ASKPASS_FILE="$(mktemp -t pmx_git_askpass.XXXXXX)"
+  cat > "${ASKPASS_FILE}" <<'EOF'
+#!/usr/bin/env bash
+prompt="${1:-}"
+case "${prompt}" in
+  *Username*|*username*) printf '%s\n' "${GitHub_Username:-}" ;;
+  *Password*|*password*) printf '%s\n' "${GitHub_TOKEN:-}" ;;
+  *) printf '%s\n' "${GitHub_TOKEN:-}" ;;
+esac
+EOF
+  chmod 700 "${ASKPASS_FILE}"
+
+  export GIT_ASKPASS="${ASKPASS_FILE}"
+  export GIT_TERMINAL_PROMPT=0
+
+  git remote set-url origin "https://github.com/${GitHub_Username}/${GitHub_Repo}.git" >/dev/null 2>&1 || true
+}
+
 # Optional: load credentials and repo hints from .env (never commit .env).
-# Strips BOM, comments, blanks, and CRLF.
-if [[ -f ".env" ]]; then
-  set -a
-  source <(
-    cat .env \
-    | tr -d '\r' \
-    | sed $'1s/^\xEF\xBB\xBF//' \
-    | grep -Ev '^[[:space:]]*($|#)'
-  )
-  set +a
-fi
+pmx_load_env_file ".env"
 
 # Optional: set git identity from env
 if [[ -n "${GIT_USER_NAME:-}" ]]; then
@@ -42,14 +98,7 @@ STASHED=0
 RESTORED=0
 CONFLICT_DETECTED=0
 
-# Optional: update origin URL with token if explicitly enabled (HTTPS only)
-if [[ "${GIT_USE_ENV_REMOTE:-0}" == "1" ]]; then
-  if [[ -n "${GitHub_Username:-}" && -n "${GitHub_TOKEN:-}" && -n "${GitHub_Repo:-}" && ! "${GitHub_TOKEN}" =~ xxx ]]; then
-    git remote set-url origin "https://${GitHub_Username}:${GitHub_TOKEN}@github.com/${GitHub_Username}/${GitHub_Repo}.git"
-  else
-    echo -e "${YELLOW}GIT_USE_ENV_REMOTE=1 set but GitHub creds missing/placeholder; skipping remote override.${NC}"
-  fi
-fi
+pmx_setup_git_askpass
 
 # Colors for output
 RED='\033[0;31m'
@@ -86,8 +135,13 @@ restore_stash() {
   fi
 }
 
+cleanup_on_exit() {
+  cleanup_askpass
+  restore_stash
+}
+
 # Cleanup on exit
-trap restore_stash EXIT
+trap cleanup_on_exit EXIT
 
 # Validate branch
 if [[ -z "$BRANCH" ]]; then

@@ -117,8 +117,30 @@ def _load_env_pair() -> Dict[str, str]:
     return mapping
 
 
+def _read_secret_file(path: str) -> Optional[str]:
+    """Read a secret from a *_FILE path without logging secret values."""
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                return _sanitize_env_value(stripped)
+    except Exception:
+        return None
+
+    return None
+
+
 def _env_value(name: str) -> Optional[str]:
     """Lookup environment variables with .env fallback."""
+
+    file_path = os.getenv(f"{name}_FILE")
+    if file_path and Path(file_path).exists():
+        file_value = _read_secret_file(file_path)
+        if file_value:
+            return file_value
 
     value = os.getenv(name)
     if value:

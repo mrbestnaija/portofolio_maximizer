@@ -64,16 +64,17 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check for .env file
+    # Check for .env file (never commit .env; use .env.template as the safe source)
     if [ -f ".env" ]; then
         print_success ".env file found"
     else
-        print_warning ".env file not found. Creating from .env.example..."
-        if [ -f ".env.example" ]; then
-            cp .env.example .env
-            print_success "Created .env file from .env.example"
+        print_warning ".env file not found. Creating from .env.template..."
+        if [ -f ".env.template" ]; then
+            cp .env.template .env
+            print_success "Created .env file from .env.template"
+            print_warning "Fill in real credentials locally before running API-dependent features."
         else
-            print_warning "No .env.example found. API features may not work without API keys."
+            print_warning "No .env.template found. API features may not work without API keys."
         fi
     fi
 }

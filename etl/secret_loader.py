@@ -1,20 +1,100 @@
 """
 Secure secret loading utility.
 
-Supports loading secrets from:
-1. Docker secrets (production) - mounted at /run/secrets/<secret_name>
-2. Environment variables (development) - from .env file
-3. Fallback to direct environment variable lookup
-
-This provides secure secret management for both local development and Docker production.
+Security goals:
+- Never hardcode secrets.
+- Prefer Docker secrets via *_FILE where available.
+- Support local development via `.env` (git-ignored) without printing secret values.
+- Treat secrets as local-only data: no logging of secret values, no persistence to git remotes.
 """
 
+from __future__ import annotations
+
+import logging
 import os
 from pathlib import Path
-from typing import Optional
-import logging
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+_DOTENV_BOOTSTRAPPED = False
+
+
+def _truthy_env(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_env_file(path: Path) -> Dict[str, str]:
+    """Parse a minimal .env file safely (KEY=VALUE or KEY:VALUE)."""
+    mapping: Dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip().lstrip("\ufeff")
+        if not line or line.startswith("#"):
+            continue
+
+        delimiter = "=" if "=" in line else ":" if ":" in line else None
+        if not delimiter:
+            continue
+
+        key, value = line.split(delimiter, 1)
+        key = key.strip()
+        if not key or key in mapping:
+            continue
+
+        cleaned = value.strip().strip('"').strip("'")
+        if not cleaned:
+            continue
+        mapping[key] = cleaned
+
+    return mapping
+
+
+def bootstrap_dotenv() -> None:
+    """
+    Best-effort loading of `.env` for local development.
+
+    This is intentionally quiet and never logs secret values.
+
+    Disable with:
+    - CI=true/1
+    - PMX_DISABLE_DOTENV=true/1
+    """
+    global _DOTENV_BOOTSTRAPPED
+    if _DOTENV_BOOTSTRAPPED:
+        return
+    _DOTENV_BOOTSTRAPPED = True
+
+    if _truthy_env("CI") or _truthy_env("PMX_DISABLE_DOTENV"):
+        return
+
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    try:
+        from dotenv import dotenv_values  # type: ignore
+    except Exception:
+        dotenv_values = None
+
+    if dotenv_values:
+        try:
+            parsed = dotenv_values(env_path)  # type: ignore[arg-type]
+            for key, value in parsed.items():
+                if not key or not value:
+                    continue
+                os.environ.setdefault(key, str(value))
+            return
+        except Exception:
+            pass
+
+    # Fallback: minimal parsing (supports KEY=VALUE and KEY:'value' styles).
+    try:
+        parsed = _parse_env_file(env_path)
+        for key, value in parsed.items():
+            os.environ.setdefault(key, value)
+    except Exception:
+        return
 
 
 def load_secret(env_var_name: str, secret_file_env: Optional[str] = None) -> Optional[str]:
@@ -45,11 +125,13 @@ def load_secret(env_var_name: str, secret_file_env: Optional[str] = None) -> Opt
         >>> api_key = load_secret('ALPHA_VANTAGE_API_KEY')
         >>> # Reads from ALPHA_VANTAGE_API_KEY environment variable
     """
+    bootstrap_dotenv()
+
     # Determine secret file path
     if secret_file_env is None:
         secret_file_env = f"{env_var_name}_FILE"
-    
-    secret_file_path = os.getenv(secret_file_env)
+
+    secret_file_path = (os.getenv(secret_file_env) or "").strip() or None
     
     # Try Docker secret file first (production)
     if secret_file_path and Path(secret_file_path).exists():
@@ -59,19 +141,19 @@ def load_secret(env_var_name: str, secret_file_env: Optional[str] = None) -> Opt
                     stripped = raw_line.strip()
                     if not stripped or stripped.startswith('#'):
                         continue
-                    logger.debug(f"Loaded {env_var_name} from Docker secret: {secret_file_path}")
+                    logger.debug("Loaded %s from *_FILE path: %s", env_var_name, secret_file_path)
                     return stripped
-            logger.warning(f"Docker secret file {secret_file_path} is empty or contains only comments")
+            logger.warning("Secret file %s is empty or contains only comments", secret_file_path)
         except Exception as e:
-            logger.warning(f"Failed to read Docker secret file {secret_file_path}: {e}")
+            logger.warning("Failed to read secret file %s: %s", secret_file_path, e)
     
     # Fallback to environment variable (development/local)
-    secret = os.getenv(env_var_name)
+    secret = (os.getenv(env_var_name) or "").strip()
     if secret:
-        logger.debug(f"Loaded {env_var_name} from environment variable")
+        logger.debug("Loaded %s from environment variable", env_var_name)
         return secret
     
-    logger.debug(f"Secret {env_var_name} not found in Docker secrets or environment variables")
+    logger.debug("Secret %s not found in *_FILE path or environment variables", env_var_name)
     return None
 
 

@@ -24,12 +24,9 @@ import logging
 from typing import Dict, List, Generator, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from dotenv import load_dotenv
 
 from etl.alpha_vantage_extractor import AlphaVantageExtractor
 from etl.yfinance_extractor import YFinanceExtractor
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 

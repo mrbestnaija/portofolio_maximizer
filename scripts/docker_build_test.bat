@@ -59,10 +59,11 @@ REM Check for .env file
 if exist ".env" (
     echo [OK] .env file found
 ) else (
-    echo [WARNING] .env file not found. API features may not work without API keys.
-    if exist ".env.example" (
-        copy ".env.example" ".env" >nul
-        echo [OK] Created .env file from .env.example
+    echo [WARNING] .env file not found. Creating from .env.template...
+    if exist ".env.template" (
+        copy ".env.template" ".env" >nul
+        echo [OK] Created .env file from .env.template
+        echo [WARNING] Fill in real credentials locally before running API-dependent features.
     )
 )
 

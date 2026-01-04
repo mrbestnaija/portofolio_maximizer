@@ -64,16 +64,17 @@ function Check-Prerequisites {
         exit 1
     }
     
-    # Check for .env file
+    # Check for .env file (never commit .env; use .env.template as the safe source)
     if (Test-Path ".env") {
         Write-Success ".env file found"
     } else {
-        Write-Warning ".env file not found. Creating from .env.example..."
-        if (Test-Path ".env.example") {
-            Copy-Item ".env.example" ".env"
-            Write-Success "Created .env file from .env.example"
+        Write-Warning ".env file not found. Creating from .env.template..."
+        if (Test-Path ".env.template") {
+            Copy-Item ".env.template" ".env"
+            Write-Success "Created .env file from .env.template"
+            Write-Warning "Fill in real credentials locally before running API-dependent features."
         } else {
-            Write-Warning "No .env.example found. API features may not work without API keys."
+            Write-Warning "No .env.template found. API features may not work without API keys."
         }
     }
 }

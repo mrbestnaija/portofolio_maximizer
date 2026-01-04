@@ -26,12 +26,8 @@ import logging
 import yaml
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
-
-# Load environment variables
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
