@@ -273,6 +273,8 @@ class YFinanceExtractor(BaseExtractor):
         self._cache_events: Dict[str, Dict[str, Any]] = {}
         self.failure_backoff_hours = failure_backoff_hours
         self._recent_failures: Dict[str, datetime] = {}
+        # Reduce noise for known sentinel/fake tickers used in tests or housekeeping.
+        self._quiet_failure_tickers = {"DELISTED", "MISSING", "INVALID"}
 
     def _should_skip_ticker(self, ticker: str) -> bool:
         """Skip tickers that recently failed to reduce noisy retries."""
@@ -283,7 +285,8 @@ class YFinanceExtractor(BaseExtractor):
         elapsed = datetime.now() - failure_time
         if elapsed <= timedelta(hours=self.failure_backoff_hours):
             self._record_cache_event(ticker, "skipped", 0)
-            logger.warning(
+            log_fn = logger.info if ticker in self._quiet_failure_tickers else logger.warning
+            log_fn(
                 "Skipping %s: last failure %.1fh ago (backoff %sh)",
                 ticker,
                 elapsed.total_seconds() / 3600,
@@ -299,7 +302,8 @@ class YFinanceExtractor(BaseExtractor):
         """Mark ticker as failed to avoid noisy repeated downloads."""
         self._recent_failures[ticker] = datetime.now()
         self._record_cache_event(ticker, "failed", 0)
-        logger.warning("Marked %s as failed (reason: %s); will back off", ticker, reason)
+        log_fn = logger.info if ticker in self._quiet_failure_tickers else logger.warning
+        log_fn("Marked %s as failed (reason: %s); will back off", ticker, reason)
 
     def _load_cache_metadata(self, parquet_path) -> Dict[str, Any]:
         """Load metadata saved alongside cached parquet file."""
@@ -758,18 +762,32 @@ class YFinanceExtractor(BaseExtractor):
             partial_note = f" ({cache_partial_hits} partial)" if cache_partial_hits else ""
             logger.info(f"Cache performance: {cache_hits}/{total} hits ({hit_rate:.1%} hit rate){partial_note}")
 
+        quiet_failed = {t for t in failed_tickers if t in self._quiet_failure_tickers}
+        noisy_failed = {t for t in failed_tickers if t not in self._quiet_failure_tickers}
+
         if not all_data:
-            if failed_tickers:
+            if noisy_failed:
                 logger.warning(
                     "No data returned; failed tickers: %s",
-                    ", ".join(sorted(set(failed_tickers))),
+                    ", ".join(sorted(noisy_failed)),
+                )
+            if quiet_failed:
+                logger.info(
+                    "No data returned; skipped quiet tickers: %s",
+                    ", ".join(sorted(quiet_failed)),
                 )
             return pd.DataFrame()
         elif failed_tickers:
-            logger.warning(
-                "Partial success; failed tickers skipped: %s",
-                ", ".join(sorted(set(failed_tickers))),
-            )
+            if noisy_failed:
+                logger.warning(
+                    "Partial success; failed tickers skipped: %s",
+                    ", ".join(sorted(noisy_failed)),
+                )
+            if quiet_failed:
+                logger.info(
+                    "Partial success; skipped quiet tickers: %s",
+                    ", ".join(sorted(quiet_failed)),
+                )
 
         # Reset index before concat to avoid duplicate indices
         combined = pd.concat([df.reset_index() for df in all_data], ignore_index=True)
