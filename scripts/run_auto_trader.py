@@ -18,6 +18,7 @@ import re
 import site
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,6 +39,7 @@ if str(ROOT_PATH) not in sys.path:
 
 from etl.data_source_manager import DataSourceManager
 from etl.data_validator import DataValidator
+from etl.data_storage import DataStorage
 from etl.preprocessor import Preprocessor
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
@@ -64,6 +66,7 @@ EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
 RUN_SUMMARY_LOG_PATH = ROOT_PATH / "logs" / "automation" / "run_summary.jsonl"
 _NO_TRADE_WINDOWS = None
 DEFAULT_BAR_STATE_PATH = ROOT_PATH / "logs" / "automation" / "bar_state.json"
+PERFORMANCE_LOG_DIR = ROOT_PATH / "logs" / "performance"
 
 UTC = timezone.utc
 
@@ -523,6 +526,63 @@ def _effective_min_lookback_days(interval: Optional[str]) -> int:
     return MIN_LOOKBACK_DAYS_INTRADAY if _is_intraday_interval(interval) else MIN_LOOKBACK_DAYS_DAILY
 
 
+def _parse_int_env(name: str) -> Optional[int]:
+    """Return positive int from env if set; otherwise None."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        val = int(str(raw).strip())
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def _downcast_numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """
+    Downcast numeric columns to reduce memory footprint while preserving values.
+    Keeps datetime index intact; returns a new DataFrame.
+    """
+    if frame is None or frame.empty:
+        return frame
+    df = frame.copy()
+    for col in df.columns:
+        series = df[col]
+        if pd.api.types.is_integer_dtype(series):
+            df[col] = pd.to_numeric(series, downcast="integer")
+        elif pd.api.types.is_float_dtype(series):
+            df[col] = pd.to_numeric(series, downcast="float")
+    return df
+
+
+def _estimate_frame_mb(frame: pd.DataFrame) -> float:
+    if frame is None or frame.empty:
+        return 0.0
+    try:
+        return float(frame.memory_usage(deep=True).sum()) / 1_000_000.0
+    except Exception:
+        return 0.0
+
+
+def _write_performance_artifact(kind: str, payload: Dict[str, Any]) -> None:
+    """
+    Write a small JSON artifact when PERFORMANCE_MONITORING=1.
+    """
+    if str(os.getenv("PERFORMANCE_MONITORING") or "0") != "1":
+        return
+    try:
+        PERFORMANCE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        path = PERFORMANCE_LOG_DIR / f"{kind}_{ts}.json"
+        safe = dict(payload or {})
+        safe.setdefault("kind", kind)
+        safe.setdefault("timestamp", datetime.now(UTC).isoformat())
+        path.write_text(json.dumps(safe, indent=2, default=str), encoding="utf-8")
+        logger.info("Wrote performance artifact: %s", path)
+    except Exception:
+        logger.debug("Unable to write performance artifact %s", kind, exc_info=True)
+
+
 def _prepare_market_window(
     manager: DataSourceManager,
     tickers: List[str],
@@ -539,11 +599,31 @@ def _prepare_market_window(
         start_date,
         end_date,
     )
-    return manager.extract_ohlcv(
+    chunk_size = _parse_int_env("DATA_SOURCE_CHUNK_SIZE")
+    t0 = time.perf_counter()
+    window = manager.extract_ohlcv(
         tickers=tickers,
         start_date=start_date.strftime("%Y-%m-%d"),
         end_date=end_date.strftime("%Y-%m-%d"),
+        chunk_size=chunk_size,
     )
+    t1 = time.perf_counter()
+    before_mb = _estimate_frame_mb(window)
+    downcasted = _downcast_numeric_frame(window)
+    after_mb = _estimate_frame_mb(downcasted)
+    _write_performance_artifact(
+        "memory_profile",
+        {
+            "stage": "prepare_market_window",
+            "tickers": len(tickers),
+            "chunk_size": chunk_size,
+            "rows": int(len(window)) if isinstance(window, pd.DataFrame) else 0,
+            "fetch_seconds": t1 - t0,
+            "memory_before_mb": before_mb,
+            "memory_after_mb": after_mb,
+        },
+    )
+    return downcasted
 
 
 def _generate_time_series_forecast(
@@ -570,6 +650,43 @@ def _generate_time_series_forecast(
 
     current_price = float(close_series.iloc[-1])
     return forecast_bundle, current_price
+
+
+def _generate_forecasts_bulk(
+    frames_by_ticker: Dict[str, pd.DataFrame],
+    horizon: int,
+    *,
+    parallel: bool,
+    max_workers: Optional[int] = None,
+) -> Dict[str, Tuple[Optional[Dict], Optional[float]]]:
+    """
+    Generate forecasts for many tickers, optionally in parallel.
+    Returns a map {TICKER: (forecast_bundle, current_price)}.
+    """
+    tickers = list(frames_by_ticker.keys())
+    if not tickers:
+        return {}
+
+    if not parallel:
+        out: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
+        for symbol in tickers:
+            out[symbol] = _generate_time_series_forecast(frames_by_ticker[symbol], horizon)
+        return out
+
+    workers = max_workers or min(4, max(1, len(tickers)))
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_generate_time_series_forecast, frames_by_ticker[symbol], horizon): symbol
+            for symbol in tickers
+        }
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                out[symbol] = future.result()
+            except Exception:
+                out[symbol] = (None, None)
+    return out
 
 
 def _extract_forecast_scalar(payload: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -1155,7 +1272,11 @@ def main(
         os.environ["YFINANCE_INTERVAL"] = str(yfinance_interval).strip()
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-    data_source_manager = DataSourceManager()
+    enable_data_cache = _env_flag("ENABLE_DATA_CACHE")
+    if enable_data_cache is None:
+        enable_data_cache = False
+    storage = DataStorage() if enable_data_cache else None
+    data_source_manager = DataSourceManager(storage=storage)
     universe = resolve_ticker_universe(
         base_tickers=base_tickers,
         include_frontier=include_frontier_tickers,
@@ -1172,6 +1293,24 @@ def main(
         universe.active_source,
         ", ".join(ticker_list),
     )
+
+    # Optional cache warming (no-op unless ENABLE_DATA_CACHE=1 and warming is enabled).
+    warm_enabled = _env_flag("ENABLE_CACHE_WARMING")
+    warm_tickers_env = os.getenv("CACHE_WARM_TICKERS")
+    warm_top_n = _parse_int_env("CACHE_WARM_TOP_N")
+    warm_lookback = _parse_int_env("CACHE_WARM_LOOKBACK_DAYS") or 30
+    if enable_data_cache and (warm_enabled or warm_tickers_env):
+        if warm_tickers_env:
+            warm_list = [t.strip() for t in warm_tickers_env.split(",") if t.strip()]
+        elif warm_top_n:
+            warm_list = ticker_list[:warm_top_n]
+        else:
+            warm_list = ticker_list[: min(10, len(ticker_list))]
+        try:
+            logger.info("Cache warming enabled; warming %s tickers", len(warm_list))
+            _prepare_market_window(data_source_manager, warm_list, warm_lookback)
+        except Exception:
+            logger.debug("Cache warming failed; continuing without warmed cache", exc_info=True)
 
     # Optional barbell-aware quant gate: when barbell validation is enabled,
     # use aggregate quant_validation health to temporarily disable risk-bucket
@@ -1304,6 +1443,11 @@ def main(
     else:
         logger.warning("Bar-aware trading DISABLED; loop may trade repeatedly on the same bar.")
 
+    parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
+    if parallel_forecasts is None:
+        parallel_forecasts = _env_flag("ENABLE_PARALLEL_TICKERS") or False
+    parallel_workers = _parse_int_env("PARALLEL_TICKER_WORKERS")
+
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
         try:
@@ -1339,8 +1483,12 @@ def main(
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
         frames_by_ticker = _build_ticker_frame_map(raw_window, ticker_list)
+        forecast_inputs: Dict[str, pd.DataFrame] = {}
+        candidates: list[Dict[str, Any]] = []
+
         for ticker in ticker_list:
-            ticker_frame = frames_by_ticker.get(ticker.upper())
+            symbol = ticker.upper()
+            ticker_frame = frames_by_ticker.get(symbol)
             if ticker_frame is None or ticker_frame.empty:
                 logger.warning("No data for %s; skipping.", ticker)
                 continue
@@ -1431,6 +1579,40 @@ def main(
                 logger.warning("Validation rejected %s window; skipping.", ticker)
                 continue
 
+            candidates.append(
+                {
+                    "ticker": ticker,
+                    "symbol": symbol,
+                    "frame": ticker_frame,
+                    "quality": quality,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+            )
+            forecast_inputs[symbol] = ticker_frame
+
+        forecast_map: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
+        if parallel_forecasts and forecast_inputs:
+            logger.info(
+                "Parallel forecasting enabled for %s tickers (workers=%s)",
+                len(forecast_inputs),
+                parallel_workers or "auto",
+            )
+            forecast_map = _generate_forecasts_bulk(
+                forecast_inputs,
+                forecast_horizon,
+                parallel=True,
+                max_workers=parallel_workers,
+            )
+
+        for candidate in candidates:
+            ticker = candidate["ticker"]
+            symbol = candidate["symbol"]
+            ticker_frame = candidate["frame"]
+            quality = candidate["quality"]
+            data_source = candidate["data_source"]
+            mid_price = candidate["mid_price"]
+
             # Lagged evaluation of historical forecasts (best-effort).
             try:
                 updated = _backfill_forecast_regression_metrics(
@@ -1443,10 +1625,13 @@ def main(
             except Exception:
                 logger.debug("Skipping forecast regression backfill for %s", ticker, exc_info=True)
 
-            forecast_bundle, current_price = _generate_time_series_forecast(
-                ticker_frame,
-                forecast_horizon,
-            )
+            if forecast_map:
+                forecast_bundle, current_price = forecast_map.get(symbol, (None, None))
+            else:
+                forecast_bundle, current_price = _generate_time_series_forecast(
+                    ticker_frame,
+                    forecast_horizon,
+                )
 
             if not forecast_bundle or current_price is None:
                 logger.warning("Forecasting failed for %s; skipping.", ticker)

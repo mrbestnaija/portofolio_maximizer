@@ -370,6 +370,104 @@ class YFinanceExtractor(BaseExtractor):
 
         return max(0.0, delay)
 
+    def _effective_cache_hours(self) -> float:
+        """
+        Adjust cache TTL for market hours/weekends to avoid needless churn.
+        """
+        base = float(getattr(self, "cache_hours", 0) or 0)
+        now = datetime.utcnow()
+        weekday = now.weekday()
+        hour = now.hour
+        # US market hours approx 13:30-20:00 UTC; keep base TTL there, extend off-hours/weekends.
+        if weekday >= 5:
+            return max(base, base * 2 or 48.0)  # weekends: allow 48h+ if base missing
+        if hour < 12 or hour > 21:
+            return max(base, base * 1.5)
+        return base
+
+    def _write_cache_perf_artifact(self, *, tickers: List[str], start: datetime, end: datetime) -> None:
+        if str(os.getenv("CACHE_PERF_ARTIFACTS") or "0") != "1":
+            return
+        try:
+            out_dir = Path("logs") / "performance"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            payload = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "source": self.name,
+                "tickers": list(tickers),
+                "requested_start": start.isoformat(),
+                "requested_end": end.isoformat(),
+                "cache_hours": float(getattr(self, "cache_hours", 0) or 0),
+                "effective_cache_hours": float(self._effective_cache_hours()),
+                "events": dict(self._cache_events),
+            }
+            path = out_dir / f"cache_perf_{ts}.json"
+            path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            logger.info("Wrote cache perf artifact: %s", path)
+        except Exception:
+            logger.debug("Unable to write cache perf artifact", exc_info=True)
+
+    def _load_latest_cached_frame(self, ticker: str) -> Optional[pd.DataFrame]:
+        if not self.storage:
+            return None
+        try:
+            stage_path = self.storage.base_path / 'raw'
+            files = sorted(
+                stage_path.glob(f"*{ticker}*.parquet"),
+                key=lambda x: x.stat().st_mtime,
+                reverse=True,
+            )
+            if not files:
+                return None
+            return pd.read_parquet(files[0])
+        except Exception:
+            return None
+
+    def _maybe_fetch_tail_delta(
+        self,
+        ticker: str,
+        cached_data: pd.DataFrame,
+        end_date: datetime,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch missing tail bars when cache is partial and delta updates are allowed.
+        """
+        if cached_data is None or cached_data.empty:
+            return None
+        try:
+            last_ts = pd.to_datetime(cached_data.index.max())
+        except Exception:
+            return None
+
+        # Only fetch when we clearly lag the requested end.
+        if last_ts >= end_date:
+            return None
+
+        # Buffer by 1 day to cover boundary gaps.
+        start = last_ts - timedelta(days=1)
+        try:
+            delta_df = fetch_ticker_data(
+                ticker=ticker,
+                start_date=start,
+                end_date=end_date,
+                timeout=self.timeout,
+                interval=self.interval,
+                auto_adjust=self.auto_adjust,
+            )
+        except Exception:
+            return None
+
+        if delta_df is None or delta_df.empty:
+            return None
+
+        if isinstance(delta_df.columns, pd.MultiIndex):
+            delta_df.columns = delta_df.columns.get_level_values(0)
+        delta_df["ticker"] = ticker
+        combined = pd.concat([cached_data, delta_df])
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        return combined
+
     def _record_cache_event(self, ticker: str, status: str, rows: int = 0) -> None:
         """Capture cache status for diagnostics."""
         self._cache_events[ticker] = {"status": status, "rows": rows}
@@ -416,10 +514,25 @@ class YFinanceExtractor(BaseExtractor):
             file_age_seconds = max(0.0, time.time() - latest_file.stat().st_mtime)
             file_age = timedelta(seconds=file_age_seconds)
 
-            if file_age_seconds >= self.cache_hours * 3600:
-                logger.info(f"Cache MISS for {ticker}: expired (age: {file_age.total_seconds()/3600:.1f}h)")
-                self._record_cache_event(ticker, "miss", 0)
-                return None
+            effective_cache_hours = self._effective_cache_hours()
+            if file_age_seconds >= effective_cache_hours * 3600:
+                # With delta-refresh enabled, allow using stale cache as a base so
+                # we can fetch only the missing tail bars.
+                if str(os.getenv("ENABLE_CACHE_DELTAS") or "0") == "1":
+                    logger.info(
+                        "Cache STALE for %s (age %.1fh), allowing delta refresh base",
+                        ticker,
+                        file_age.total_seconds() / 3600,
+                    )
+                else:
+                    logger.info(
+                        "Cache MISS for %s: expired (age: %.1fh >= %.1fh effective TTL)",
+                        ticker,
+                        file_age.total_seconds() / 3600,
+                        effective_cache_hours,
+                    )
+                    self._record_cache_event(ticker, "miss", 0)
+                    return None
 
             # Load and validate coverage (vectorized boolean indexing)
             cached_data = pd.read_parquet(latest_file)
@@ -542,23 +655,37 @@ class YFinanceExtractor(BaseExtractor):
         failed_tickers: List[str] = []
 
         for i, ticker in enumerate(tickers):
+            t_cycle = time.perf_counter()
             try:
                 if self._should_skip_ticker(ticker):
                     failed_tickers.append(ticker)
                     continue
 
                 # Cache-first strategy: check local storage before network request
+                t_cache0 = time.perf_counter()
                 cached_data = self._check_cache(ticker, start, end)
+                t_cache1 = time.perf_counter()
                 event = self._cache_events.get(ticker, {})
                 coverage = event.get("status")
 
                 if cached_data is not None and not cached_data.empty:
-                    # Cache HIT: use local data
+                    # Cache HIT: use local data (optionally patched with tail delta)
+                    if str(os.getenv("ENABLE_CACHE_DELTAS") or "0") == "1":
+                        patched = self._maybe_fetch_tail_delta(ticker, cached_data, end)
+                        if patched is not None and not patched.empty:
+                            cached_data = patched
+                            coverage = "delta_refresh"
                     cached_data['ticker'] = ticker
                     all_data.append(cached_data)
                     cache_hits += 1
                     if coverage == "partial":
                         cache_partial_hits += 1
+                    self._cache_events.setdefault(ticker, {}).update(
+                        {
+                            "cache_check_ms": round((t_cache1 - t_cache0) * 1000.0, 3),
+                            "total_ms": round((time.perf_counter() - t_cycle) * 1000.0, 3),
+                        }
+                    )
                     continue
 
                 # Cache MISS: fetch from network
@@ -600,6 +727,13 @@ class YFinanceExtractor(BaseExtractor):
                 else:
                     failed_tickers.append(ticker)
                     self._mark_failure(ticker, "no data returned from yfinance")
+
+                self._cache_events.setdefault(ticker, {}).update(
+                    {
+                        "cache_check_ms": round((t_cache1 - t_cache0) * 1000.0, 3),
+                        "total_ms": round((time.perf_counter() - t_cycle) * 1000.0, 3),
+                    }
+                )
 
                 # Rate limiting (only for network requests)
                 if i < len(tickers) - 1:
@@ -654,6 +788,7 @@ class YFinanceExtractor(BaseExtractor):
             except Exception as exc:
                 logger.debug("Auto-cleanup skipped: %s", exc)
 
+        self._write_cache_perf_artifact(tickers=tickers, start=start, end=end)
         return combined
 
     def validate_data(self, data: pd.DataFrame) -> Dict[str, Any]:
