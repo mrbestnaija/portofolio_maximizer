@@ -31,13 +31,14 @@ class RunSummary:
     exec_log: Path
     counts: Dict[str, int]
     pairs: List[Tuple[str, str]]
+    elapsed_seconds: float
 
 
 def _read_execution_log(path: Path) -> RunSummary:
     counts: Dict[str, int] = {}
     pairs: List[Tuple[str, str]] = []
     if not path.exists():
-        return RunSummary(label=path.stem, exec_log=path, counts={}, pairs=[])
+        return RunSummary(label=path.stem, exec_log=path, counts={}, pairs=[], elapsed_seconds=0.0)
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -49,7 +50,7 @@ def _read_execution_log(path: Path) -> RunSummary:
         ticker = str(payload.get("ticker") or "UNKNOWN").upper()
         counts[status] = counts.get(status, 0) + 1
         pairs.append((ticker, status))
-    return RunSummary(label=path.stem, exec_log=path, counts=counts, pairs=pairs)
+    return RunSummary(label=path.stem, exec_log=path, counts=counts, pairs=pairs, elapsed_seconds=0.0)
 
 
 def _run_once(
@@ -110,7 +111,7 @@ def _run_once(
 
     summary = _read_execution_log(exec_log)
     summary.label = label
-    summary.counts["elapsed_seconds"] = round(elapsed, 4)
+    summary.elapsed_seconds = round(elapsed, 4)
     return summary
 
 
@@ -124,8 +125,8 @@ def _compare_outputs(seq: RunSummary, par: RunSummary) -> Dict[str, object]:
         "parallel_counts": par.counts,
         "sequential_pairs": seq_pairs,
         "parallel_pairs": par_pairs,
-        "sequential_elapsed_seconds": seq.counts.get("elapsed_seconds"),
-        "parallel_elapsed_seconds": par.counts.get("elapsed_seconds"),
+        "sequential_elapsed_seconds": seq.elapsed_seconds,
+        "parallel_elapsed_seconds": par.elapsed_seconds,
     }
 
 

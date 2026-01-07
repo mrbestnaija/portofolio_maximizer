@@ -32,6 +32,11 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 import matplotlib.pyplot as plt
 
+try:  # Optional GPU acceleration path (torch)
+    import torch  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    torch = None  # type: ignore
+
 ROOT_PATH = Path(__file__).resolve().parent.parent
 site.addsitedir(str(ROOT_PATH))
 if str(ROOT_PATH) not in sys.path:
@@ -69,6 +74,7 @@ DEFAULT_BAR_STATE_PATH = ROOT_PATH / "logs" / "automation" / "bar_state.json"
 PERFORMANCE_LOG_DIR = ROOT_PATH / "logs" / "performance"
 
 UTC = timezone.utc
+_GPU_PARALLEL_ENABLED: Optional[bool] = None
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -583,6 +589,27 @@ def _write_performance_artifact(kind: str, payload: Dict[str, Any]) -> None:
         logger.debug("Unable to write performance artifact %s", kind, exc_info=True)
 
 
+def _gpu_parallel_enabled() -> bool:
+    """Return True when torch+CUDA is available and GPU parallel is enabled."""
+    global _GPU_PARALLEL_ENABLED
+    if _GPU_PARALLEL_ENABLED is not None:
+        return _GPU_PARALLEL_ENABLED
+
+    enabled = _env_flag("ENABLE_GPU_PARALLEL")
+    if enabled is None:
+        enabled = True
+
+    if not enabled or torch is None:
+        _GPU_PARALLEL_ENABLED = False
+        return False
+
+    try:
+        _GPU_PARALLEL_ENABLED = bool(torch.cuda.is_available())
+    except Exception:
+        _GPU_PARALLEL_ENABLED = False
+    return _GPU_PARALLEL_ENABLED
+
+
 def _prepare_market_window(
     manager: DataSourceManager,
     tickers: List[str],
@@ -636,7 +663,16 @@ def _generate_time_series_forecast(
         return None, None
 
     close_series = price_frame["Close"].astype(float)
-    returns_series = close_series.pct_change().dropna()
+    clean_close = close_series.dropna()
+    if _gpu_parallel_enabled() and len(clean_close) > 1:
+        try:
+            values = torch.as_tensor(clean_close.to_numpy(dtype=float, copy=False), device="cuda")  # type: ignore
+            returns = (values[1:] / values[:-1]) - 1.0
+            returns_series = pd.Series(returns.detach().cpu().numpy(), index=clean_close.index[1:])
+        except Exception:
+            returns_series = clean_close.pct_change().dropna()
+    else:
+        returns_series = clean_close.pct_change().dropna()
 
     try:
         forecaster = TimeSeriesForecaster(
@@ -1593,11 +1629,17 @@ def main(
 
     parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
     if parallel_forecasts is None:
-        parallel_forecasts = _env_flag("ENABLE_PARALLEL_TICKERS") or False
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_forecasts = legacy_parallel if legacy_parallel is not None else True
     parallel_workers = _parse_int_env("PARALLEL_TICKER_WORKERS")
     parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
     if parallel_ticker_processing is None:
-        parallel_ticker_processing = False
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_ticker_processing = legacy_parallel if legacy_parallel is not None else True
+    if _gpu_parallel_enabled():
+        logger.info("GPU parallel path available (torch CUDA detected).")
+    else:
+        logger.info("GPU parallel path unavailable; using CPU threads.")
 
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)

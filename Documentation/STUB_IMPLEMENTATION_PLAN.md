@@ -5,8 +5,9 @@
 **Comprehensive Review and Replacement Strategy**
 
 **Date**: 2025-11-12  
-**Status**: 🔴 BLOCKED – 2025-11-15 brutal run regressions  
+**Status**: 🟢 UNBLOCKED – 2026-01-07 (see `Documentation/PROJECT_STATUS.md`)  
 **Priority**: HIGH - Complete all stubs before production deployment
+**Current status (2026-01-07)**: Core trading, TS wiring, and quant monitoring are implemented; remaining partial items are dashboard web UI/scheduling, MTM options pricing (Phase 3), NAV allocator/risk buckets, and demo-to-live promotion evidence.
 
 ### 🔄 2025-11-24 Delta (currency update)
 - New data-source-aware ticker resolver (`etl/data_universe.py`) wired into `scripts/run_auto_trader.py`; explicit + frontier remains default, provider discovery optional when no inputs.
@@ -69,6 +70,7 @@
 4. Replace the deprecated Period coercion + tighten SARIMAX order search to silence warnings and stabilise the forecasting core.
 5. Modernize `scripts/backfill_signal_validation.py` with timezone-aware timestamps + sqlite adapters before scheduling nightly backfills that exercise these stubs.
 - ✅ `2025-11-16` note: Fixes 1–4 are now complete (see `logs/pipeline_run.log:22237-22986` for the clean pipeline run). Remaining blocker for this plan is the validator modernization in item 5.
+- ✅ `2025-12-28` note: Brutal suite is green; this regression block is historical only (see `Documentation/PROJECT_STATUS.md`).
 
 ---
 
@@ -84,7 +86,7 @@ This document identifies all stub implementations, incomplete code, and placehol
 - ✅ UPDATE (Nov 8, 2025): The forecasting stubs around regression metrics, ensemble heuristics, and MSSA-RL GPU acceleration have been fully implemented (`forcester_ts/metrics.py`, `forcester_ts/ensemble.py`, `forcester_ts/mssa_rl.py`). No further action is required for those items; they now serve as references for future Phase B enhancements.
 - ✅ UPDATE (Nov 9, 2025): `models/time_series_signal_generator.py` is no longer a stub—volatility handling, provenance metadata, and regression coverage have been completed and verified via `pytest tests/models/test_time_series_signal_generator.py -q` plus the targeted integration smoke test. Remove it from the open-stub list; remaining signal-related stubs now focus on broker/paper-trading glue.
 - ✅ UPDATE (Nov 12, 2025): `models/signal_router.py` and the TS-first pipeline reordering are production code (see `Documentation/UNIFIED_ROADMAP.md`). Remove Signal Router from the open-stub list.
-- ⚠️ UPDATE (Nov 12, 2025): `bash/comprehensive_brutal_test.sh` highlighted new gaps—`tests/etl/test_data_validator.py` is missing, and the Time Series forecasting tests timed out with a `Broken pipe`. Section 13 documents these testing placeholders.
+- ✅ UPDATE (Dec 28, 2025): Missing validator test restored and brutal suite no longer fails with `Broken pipe` (see `Documentation/PROJECT_STATUS.md` for the latest brutal run evidence).
 - ✅ UPDATE (Nov 16, 2025): `forcester_ts/instrumentation.py` now emits dataset snapshots plus RMSE/sMAPE/tracking-error benchmarks for every forecast run, and `TimeSeriesVisualizer` renders those summaries on dashboards. Future stub replacements must consume `logs/forecast_audits/*.json` instead of inventing ad-hoc diagnostics.
 
 ---
@@ -745,10 +747,10 @@ def _get_dir_size(self, path: Path) -> int:
 
 ---
 
-### 13. **ETL Data Validator Test Suite Missing** ❌ NOT IMPLEMENTED
-**Location**: `tests/etl/test_data_validator.py` (MISSING)  
-**Status**: `bash/comprehensive_brutal_test.sh` (Nov 12, 2025) warns that this test file is absent, so the ETL suite skips all validator coverage.  
-**Priority**: MEDIUM - Required to keep QA parity with documented validation steps.
+### 13. **ETL Data Validator Test Suite** ✅ IMPLEMENTED
+**Location**: `tests/etl/test_data_validator.py`  
+**Status**: Restored and exercised; brutal suite no longer warns about missing validator tests (see `Documentation/PROJECT_STATUS.md`).  
+**Priority**: MEDIUM - Keep QA parity with documented validation steps.
 
 **Required Implementation**:
 ```python
@@ -773,12 +775,10 @@ class TestDataValidator:
 ```
 
 **Success Criteria**:
-- [ ] File restored under `tests/etl/`
-- [ ] Price positivity, volume non-negativity, and missing-data checks covered
-- [ ] Pytest suite (`bash/comprehensive_brutal_test.sh`) no longer emits WARN for missing validator tests
-- [ ] Added to CI to guard against future regressions
-
-**Test Impact**: Until this file is restored, the brutal suite halts before the Time Series forecasting block (Broken pipe timeout on Nov 12, 2025). Reinstating this test suite is the gating item before re-running the comprehensive tests and capturing TS/LLM regression evidence.
+- [x] File restored under `tests/etl/`
+- [x] Price positivity, volume non-negativity, and missing-data checks covered
+- [x] Brutal suite no longer emits WARN for missing validator tests
+- [x] Included in CI/brutal coverage
 
 ---
 

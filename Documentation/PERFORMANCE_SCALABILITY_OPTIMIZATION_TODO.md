@@ -85,9 +85,9 @@ CYCLES=1 SLEEP_SECONDS=0 ENABLE_LLM=0 bash bash/run_auto_trader.sh
 **Enhancement Tasks**:
 ```yaml
 # Target: Smart cache invalidation
-- [ ] Implement market-hours-aware cache invalidation
-- [ ] Add incremental update capability (delta vs full refresh)
-- [ ] Cache warming for frequently accessed tickers
+- [x] Implement market-hours-aware cache invalidation (default-on)
+- [x] Add incremental update capability (delta vs full refresh) via `ENABLE_CACHE_DELTAS=1`
+- [x] Cache warming for frequently accessed tickers (`ENABLE_CACHE_WARMING=1`, optional list via `CACHE_WARM_TICKERS`)
 - [ ] Compressed cache storage optimization
 
 # Cache Performance Targets:
@@ -121,19 +121,23 @@ class ParallelTradingOrchestrator:
             return self._collect_results(futures)
 
 # Implementation Tasks:
-- [ ] Refactor run_auto_trader.py ticker loop for parallel execution
+- [x] Refactor run_auto_trader.py ticker loop for parallel execution (candidate prep + forecast)
 - [ ] Add parallel data extraction in DataSourceManager  
-- [ ] Implement thread-safe logging and metrics collection
-- [ ] Add parallelization config flags for testing/debugging
+- [x] Implement thread-safe logging and metrics collection (DB writes/execution remain sequential)
+- [x] Add parallelization config flags for testing/debugging
 ```
 
 **Safety Requirements**:
 ```python
 # Thread Safety Checklist:
 - [ ] DatabaseManager connection per thread or pooling
-- [ ] Thread-safe signal router state management
-- [ ] Isolated forecast model instances per worker
-- [ ] Atomic metrics aggregation
+- [x] Thread-safe signal router state management (router usage remains sequential)
+- [x] Isolated forecast model instances per worker
+- [x] Atomic metrics aggregation (per-cycle ordering preserved)
+
+**Parallel Defaults & Evidence (2026-01-07)**:
+- `ENABLE_PARALLEL_TICKER_PROCESSING` + `ENABLE_PARALLEL_FORECASTS` now default to on (override via env).
+- Stress evidence: `logs/automation/stress_parallel_20260107_202403/comparison.json` shows matching outputs and faster parallel elapsed time.
 ```
 
 ### 2.2 Model Inference Optimization 🤖

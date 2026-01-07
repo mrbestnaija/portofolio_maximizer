@@ -12,19 +12,19 @@ If you are looking for:
 
 This file is best read as a *map* (what exists and where it lives), not as the canonical status snapshot.
 
-## CURRENT PROJECT STATUS: UNBLOCKED - comprehensive brutal run green (2025-12-28); integration/pipeline verification complete
+## CURRENT PROJECT STATUS: UNBLOCKED - brutal run green (2026-01-03); integration/pipeline verification complete
 **Status references (canonical)**:
 - `Documentation/PROJECT_STATUS.md` (current engineering + MVS snapshot)
 - `Documentation/implementation_checkpoint.md` (chronological log + verification evidence)
 - `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` (research questions + hypotheses)
 - `Documentation/INTEGRATION_TESTING_COMPLETE.md` (integration test evidence)
-- `logs/brutal/results_20251228_224751/test.log` (brutal suite summary)
-- `logs/brutal/results_20251228_224751/stage_summary.csv` (timing summary)
+- `logs/brutal/results_20260103_220403/test.log` (brutal suite summary)
+- `logs/brutal/results_20260103_220403/stage_summary.csv` (timing summary)
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
 **Recent changes (2025-12-19)**: Synthetic stack upgraded with profiles + copula/tail shocks + richer features/calibration + txn-cost microstructure (TxnCostBps/ImpactBps) and persisted features/calibration artifacts; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (manifest + features + calibration). Forecasting/ETL statistical hardening landed (SARIMAX shift-safe backtransform, ensemble variance screening + row-wise convex blending, MSSA-RL standardized CUSUM, synthetic/live isolation, leak-free post-split normalization). GPU preference wiring remains in place (`PIPELINE_DEVICE` auto-detects CUDA with CPU fallback). Added cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`) and cron hook `sanitize_caches` to keep artifacts within 14-day retention by default.
 **Recent Achievements**:
 - 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque–Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
-- 2025-12-28 Delta (comprehensive brutal verification + nightly backfill automation): `bash/comprehensive_brutal_test.sh` completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, Time Series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Evidence lives under `logs/brutal/results_20251228_224751/` (`test.log`, per-suite logs in `logs/`, and `stage_summary.csv`); DB snapshot: `logs/brutal/results_20251228_224751/artifacts/test_database.db.bak`. Suite counts from `test.log`: ETL (98), Time Series (37), signal routing (26), integration (30), LLM (67), security (13), plus profit-critical and pipeline execution (4 runs). Windows Task Scheduler job `PortfolioMaximizer_BackfillSignals` (runs `schedule_backfill.bat` at 02:00 daily) keeps `scripts/backfill_signal_validation.py` evidence fresh before synthetic/live scaling as requested in `Documentation/NEXT_TO_DO.md:111`.
+- 2026-01-03 Delta (comprehensive brutal verification): `bash/comprehensive_brutal_test.sh` completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, Time Series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Evidence lives under `logs/brutal/results_20260103_220403/` (`test.log`, per-suite logs in `logs/`, and `stage_summary.csv`); DB snapshot: `logs/brutal/results_20260103_220403/artifacts/test_database.db.bak`. Suite counts from `test.log`: ETL (98), Time Series (37), signal routing (26), integration (30), LLM (67), security (13), plus profit-critical and pipeline execution (4 runs).
 - 2025-11-30 Sentiment overlay plan captured (`Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md`); `config/sentiment.yml` remains disabled with strict gating and `tests/sentiment/test_sentiment_config_scaffold.py` guarding activation until profitability beats the benchmark.
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
@@ -429,8 +429,8 @@ portfolio_maximizer_v45/
 |   |-- base_extractor.py            # ? 280 lines - Abstract Factory (Phase 4.6)
 |   |-- data_source_manager.py       # ? 340 lines - Multi-source orchestration (Phase 4.6)
 |   |-- yfinance_extractor.py        # ? 498 lines - BaseExtractor impl (Phase 4.6)
-|   |-- alpha_vantage_extractor.py   # ? 140-line stub - Ready for API impl
-|   |-- finnhub_extractor.py         # ? 145-line stub - Ready for API impl
+|   |-- alpha_vantage_extractor.py   # ? Production ready (API keys required)
+|   |-- finnhub_extractor.py         # ? Production ready (API keys required)
 |   |-- data_validator.py            # ? 117 lines - Production ready
 |   |-- preprocessor.py              # ? 101 lines - Production ready
 |   |-- data_storage.py              # ? 210+ lines - Production ready (+CV/run metadata, Remote Sync 2025-11-06) ? UPDATED
@@ -446,11 +446,11 @@ portfolio_maximizer_v45/
 |       |-- alpha_vantage_loader.py  # ? Bulk ticker downloads
 |       |-- ticker_validator.py      # ? Validation service
 |       `-- ticker_universe.py       # ? Master list management
-|-- models/                          # ?? TIME SERIES SIGNAL GENERATION (Nov 6, 2025) - 800+ lines ? NEW - TESTING REQUIRED
-|   |-- __init__.py                  # ?? Package exports - TESTING REQUIRED
-|   |-- time_series_signal_generator.py # ?? 350 lines - Converts TS forecasts to trading signals (DEFAULT) - TESTING REQUIRED
-|   |-- signal_router.py             # ?? 250 lines - Routes TS primary + LLM fallback - TESTING REQUIRED
-|   `-- signal_adapter.py            # ?? 200 lines - Unified signal interface for backward compatibility - TESTING REQUIRED
+|-- models/                          # ?? TIME SERIES SIGNAL GENERATION (Nov 6, 2025) - 800+ lines ? TESTING COMPLETE (2025-12-28)
+|   |-- __init__.py                  # ?? Package exports - TESTING COMPLETE (2025-12-28)
+|   |-- time_series_signal_generator.py # ?? 350 lines - Converts TS forecasts to trading signals (DEFAULT) - TESTING COMPLETE (2025-12-28)
+|   |-- signal_router.py             # ?? 250 lines - Routes TS primary + LLM fallback - TESTING COMPLETE (2025-12-28)
+|   `-- signal_adapter.py            # ?? 200 lines - Unified signal interface for backward compatibility - TESTING COMPLETE (2025-12-28)
 |-- ai_llm/                          # ? PHASE 5.2-5.5 COMPLETE - 1,500+ lines ? UPDATED
 |   |-- ollama_client.py             # ? 440+ lines - Local LLM integration (Phase 5.5) + fast-mode latency tuning (Phase 5.6)
 |   |-- market_analyzer.py           # ? 180 lines - Market analysis (Phase 5.2)
@@ -503,7 +503,7 @@ portfolio_maximizer_v45/
 |   |-- training/                    # Training set
 |   |-- validation/                  # Validation set
 |   `-- testing/                     # Test set
-|-- tests/                           # ? PHASE 5.2-5.5 COMPLETE - 200+ tests ? UPDATED
+|-- tests/                           # ? PHASE 5.2-5.5 COMPLETE - 529 tests ? UPDATED
 |   |-- etl/                         # ? 121 tests - 100% passing
 |   |   |-- test_checkpoint_manager.py
 |   |   |-- test_data_source_manager.py
@@ -577,8 +577,8 @@ Phase 4.6: Multi-Source Architecture (COMPLETE ✅)
 ├── BaseExtractor (280 lines) - Abstract Factory pattern
 ├── DataSourceManager (340 lines) - Multi-source orchestration
 ├── YFinanceExtractor (498 lines) - BaseExtractor implementation
-├── Alpha Vantage stub (140 lines) - Ready for API
-└── Finnhub stub (145 lines) - Ready for API
+├── Alpha Vantage extractor - Production ready (API keys required)
+└── Finnhub extractor - Production ready (API keys required)
 
 Phase 4.7: Configuration-Driven CV (COMPLETE ✅)
 ├── Pipeline config enhanced - Zero hard-coded defaults
