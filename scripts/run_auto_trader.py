@@ -689,6 +689,83 @@ def _generate_forecasts_bulk(
     return out
 
 
+def _prepare_ticker_candidate(
+    *,
+    ticker: str,
+    frame: pd.DataFrame,
+    preprocessor: Preprocessor,
+) -> Dict[str, Any]:
+    """Compute quality, preprocess, and derive mid-price for a ticker frame."""
+    raw_frame = frame.copy()
+    quality = _compute_quality_metrics(raw_frame)
+    processed = _ensure_min_length(preprocessor.handle_missing(frame))
+    mid_price = _compute_mid_price(processed)
+    return {
+        "ticker": ticker,
+        "symbol": ticker.upper(),
+        "raw_frame": raw_frame,
+        "frame": processed,
+        "quality": quality,
+        "mid_price": mid_price,
+    }
+
+
+def _build_ticker_candidates(
+    entries: List[Dict[str, Any]],
+    *,
+    preprocessor: Preprocessor,
+    parallel: bool,
+    max_workers: Optional[int],
+) -> List[Dict[str, Any]]:
+    """
+    Prepare per-ticker candidates (quality + preprocessed frames), optionally in parallel.
+    Each entry should include {"ticker": str, "frame": DataFrame, "order": int, ...}.
+    """
+    if not entries:
+        return []
+
+    if not parallel:
+        out: List[Dict[str, Any]] = []
+        for entry in entries:
+            candidate = _prepare_ticker_candidate(
+                ticker=entry["ticker"],
+                frame=entry["frame"],
+                preprocessor=preprocessor,
+            )
+            candidate.update(entry)
+            out.append(candidate)
+        return sorted(out, key=lambda item: item["order"])
+
+    workers = max_workers or min(4, max(1, len(entries)))
+    out_map: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _prepare_ticker_candidate,
+                ticker=entry["ticker"],
+                frame=entry["frame"],
+                preprocessor=preprocessor,
+            ): entry
+            for entry in entries
+        }
+        for future in as_completed(futures):
+            entry = futures[future]
+            try:
+                candidate = future.result()
+            except Exception:
+                candidate = {
+                    "ticker": entry["ticker"],
+                    "symbol": entry["ticker"].upper(),
+                    "raw_frame": entry["frame"],
+                    "frame": entry["frame"],
+                    "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "mid_price": None,
+                }
+            candidate.update(entry)
+            out_map[entry["order"]] = candidate
+    return [out_map[idx] for idx in sorted(out_map)]
+
+
 def _extract_forecast_scalar(payload: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """Return (forecast_value, lower_ci, upper_ci) using horizon-end semantics when available."""
     if not isinstance(payload, dict) or not payload:
@@ -1447,6 +1524,9 @@ def main(
     if parallel_forecasts is None:
         parallel_forecasts = _env_flag("ENABLE_PARALLEL_TICKERS") or False
     parallel_workers = _parse_int_env("PARALLEL_TICKER_WORKERS")
+    parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
+    if parallel_ticker_processing is None:
+        parallel_ticker_processing = False
 
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
@@ -1483,10 +1563,9 @@ def main(
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
         frames_by_ticker = _build_ticker_frame_map(raw_window, ticker_list)
-        forecast_inputs: Dict[str, pd.DataFrame] = {}
-        candidates: list[Dict[str, Any]] = []
+        pre_entries: list[Dict[str, Any]] = []
 
-        for ticker in ticker_list:
+        for order, ticker in enumerate(ticker_list):
             symbol = ticker.upper()
             ticker_frame = frames_by_ticker.get(symbol)
             if ticker_frame is None or ticker_frame.empty:
@@ -1511,22 +1590,51 @@ def main(
                         _log_execution_event(run_id, cycle, skip_report)
                         continue
 
-            raw_frame = ticker_frame.copy()
-            quality = _compute_quality_metrics(raw_frame)
+            pre_entries.append(
+                {
+                    "ticker": ticker,
+                    "frame": ticker_frame,
+                    "order": order,
+                }
+            )
+
+        if parallel_ticker_processing and pre_entries:
+            logger.info(
+                "Parallel ticker processing enabled for %s tickers (workers=%s)",
+                len(pre_entries),
+                parallel_workers or "auto",
+            )
+
+        candidates = _build_ticker_candidates(
+            pre_entries,
+            preprocessor=preprocessor,
+            parallel=parallel_ticker_processing,
+            max_workers=parallel_workers,
+        )
+
+        forecast_inputs: Dict[str, pd.DataFrame] = {}
+        for candidate in candidates:
+            ticker = candidate["ticker"]
+            symbol = candidate["symbol"]
+            raw_frame = candidate["raw_frame"]
+            ticker_frame = candidate["frame"]
+            quality = candidate["quality"]
+            mid_price = candidate["mid_price"]
             try:
                 data_source = getattr(data_source_manager.active_extractor, "name", None)
             except Exception:
                 data_source = None
+
             try:
                 trading_engine.db_manager.save_quality_snapshot(
                     ticker=ticker,
                     window_start=raw_frame.index.min(),
                     window_end=raw_frame.index.max(),
-                    length=quality["length"],
-                    missing_pct=quality["missing_pct"],
-                    coverage=quality["coverage"],
-                    outlier_frac=quality["outlier_frac"],
-                    quality_score=quality["quality_score"],
+                    length=quality.get("length", 0),
+                    missing_pct=quality.get("missing_pct", 1.0),
+                    coverage=quality.get("coverage", 0.0),
+                    outlier_frac=quality.get("outlier_frac", 0.0),
+                    quality_score=quality.get("quality_score", 0.0),
                     source=data_source,
                 )
             except Exception:
@@ -1535,29 +1643,27 @@ def main(
             quality_records.append(
                 {
                     "ticker": ticker,
-                    "quality_score": quality["quality_score"],
-                    "missing_pct": quality["missing_pct"],
-                    "coverage": quality["coverage"],
-                    "outlier_frac": quality["outlier_frac"],
+                    "quality_score": quality.get("quality_score", 0.0),
+                    "missing_pct": quality.get("missing_pct", 1.0),
+                    "coverage": quality.get("coverage", 0.0),
+                    "outlier_frac": quality.get("outlier_frac", 0.0),
                     "source": data_source,
                 }
             )
 
-            if quality["quality_score"] < MIN_QUALITY_SCORE:
+            if quality.get("quality_score", 0.0) < MIN_QUALITY_SCORE:
                 logger.info(
                     "Quality gate blocked %s (score=%.2f < %.2f); skipping signal.",
                     ticker,
-                    quality["quality_score"],
+                    quality.get("quality_score", 0.0),
                     MIN_QUALITY_SCORE,
                 )
                 continue
 
-            ticker_frame = _ensure_min_length(preprocessor.handle_missing(ticker_frame))
             try:
                 price_map[ticker] = float(ticker_frame["Close"].iloc[-1])
             except Exception:
                 price_map[ticker] = None
-            mid_price = _compute_mid_price(ticker_frame)
 
             if _in_no_trade_window(ticker):
                 window_slots = _get_no_trade_windows().get(_asset_class(ticker)) or []
@@ -1579,16 +1685,7 @@ def main(
                 logger.warning("Validation rejected %s window; skipping.", ticker)
                 continue
 
-            candidates.append(
-                {
-                    "ticker": ticker,
-                    "symbol": symbol,
-                    "frame": ticker_frame,
-                    "quality": quality,
-                    "data_source": data_source,
-                    "mid_price": mid_price,
-                }
-            )
+            candidate["data_source"] = data_source
             forecast_inputs[symbol] = ticker_frame
 
         forecast_map: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
@@ -1610,7 +1707,7 @@ def main(
             symbol = candidate["symbol"]
             ticker_frame = candidate["frame"]
             quality = candidate["quality"]
-            data_source = candidate["data_source"]
+            data_source = candidate.get("data_source")
             mid_price = candidate["mid_price"]
 
             # Lagged evaluation of historical forecasts (best-effort).
