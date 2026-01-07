@@ -18,7 +18,7 @@ Mathematical Foundation:
 import os
 import yaml
 import logging 
-from typing import Dict, List, Optional, Any, Type
+from typing import Dict, List, Optional, Any, Type, Iterable
 from pathlib import Path
 import pandas as pd
 from importlib import import_module
@@ -271,8 +271,14 @@ class DataSourceManager:
         else:
             raise ValueError(f"Unknown selection mode: {mode}")
 
-    def extract_ohlcv(self, tickers: List[str], start_date: str,
-                      end_date: str, prefer_source: Optional[str] = None) -> pd.DataFrame:
+    def extract_ohlcv(
+        self,
+        tickers: List[str],
+        start_date: str,
+        end_date: str,
+        prefer_source: Optional[str] = None,
+        chunk_size: Optional[int] = None,
+    ) -> pd.DataFrame:
         """Extract OHLCV data using active source with optional failover.
 
         Args:
@@ -280,6 +286,9 @@ class DataSourceManager:
             start_date: Start date in 'YYYY-MM-DD' format
             end_date: End date in 'YYYY-MM-DD' format
             prefer_source: Optional preferred source name
+            chunk_size: Optional max tickers per batch to limit memory footprint;
+                when set and tickers exceed this size, extraction runs in batches
+                and concatenates results. Defaults to None (no chunking).
 
         Returns:
             DataFrame with OHLCV data
@@ -297,25 +306,50 @@ class DataSourceManager:
         else:
             extractor = self.active_extractor
 
-        # Attempt extraction
-        try:
-            data = extractor.extract_ohlcv(tickers, start_date, end_date)
+        effective_chunk = chunk_size
+        env_chunk = os.getenv("DATA_SOURCE_CHUNK_SIZE")
+        if effective_chunk is None and env_chunk and env_chunk.isdigit():
+            effective_chunk = int(env_chunk)
+        if effective_chunk is not None and effective_chunk <= 0:
+            effective_chunk = None
 
-            if data is None or data.empty:
-                raise RuntimeError(f"{extractor.name} returned empty data")
+        def _memory_mb(df: pd.DataFrame) -> float:
+            try:
+                return float(df.memory_usage(deep=True).sum()) / 1_000_000.0
+            except Exception:
+                return 0.0
 
-            logger.info(f"OK Successfully extracted {len(data)} rows from {extractor.name}")
-            return data
+        def _extract_batch(batch: Iterable[str]) -> pd.DataFrame:
+            try:
+                data = extractor.extract_ohlcv(list(batch), start_date, end_date)
+                if data is None or data.empty:
+                    raise RuntimeError(f"{extractor.name} returned empty data")
+                logger.info("OK Extracted %s rows from %s", len(data), extractor.name)
+                mem_mb = _memory_mb(data)
+                if mem_mb > 0:
+                    logger.debug("Batch memory usage approx %.1f MB (%s)", mem_mb, extractor.name)
+                return data
+            except Exception as e:
+                logger.error(f"FAIL Extraction failed from {extractor.name}: {e}")
+                if mode == 'fallback':
+                    return self._failover_extraction(list(batch), start_date, end_date,
+                                                    failed_source=extractor.name)
+                raise
 
-        except Exception as e:
-            logger.error(f"FAIL Extraction failed from {extractor.name}: {e}")
+        if effective_chunk and len(tickers) > effective_chunk:
+            all_frames: List[pd.DataFrame] = []
+            for idx, i in enumerate(range(0, len(tickers), effective_chunk)):
+                batch = tickers[i : i + effective_chunk]
+                logger.info("Chunked OHLCV extraction batch %s: %s", idx + 1, batch)
+                batch_df = _extract_batch(batch)
+                if batch_df is not None and not batch_df.empty:
+                    all_frames.append(batch_df)
+            if not all_frames:
+                return pd.DataFrame()
+            combined = pd.concat(all_frames, ignore_index=False)
+            return combined
 
-            # Attempt failover if enabled
-            if mode == 'fallback':
-                return self._failover_extraction(tickers, start_date, end_date,
-                                                failed_source=extractor.name)
-            else:
-                raise RuntimeError(f"Data extraction failed: {e}")
+        return _extract_batch(tickers)
 
     def _failover_extraction(self, tickers: List[str], start_date: str,
                             end_date: str, failed_source: str) -> pd.DataFrame:

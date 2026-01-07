@@ -5,7 +5,7 @@ Use this as a menu of optimizations; only pull items when profitability or stabi
 ## Performance & Scalability
 ### Data Processing
 - Vectorize loops in `_split_ticker_frame` and quality metrics; eliminate per-row iteration in hot paths.
-- Chunk large OHLCV windows to control memory when handling many tickers.
+- Chunk large OHLCV windows to control memory when handling many tickers (already available via `DataSourceManager.extract_ohlcv(..., chunk_size=...)` or `DATA_SOURCE_CHUNK_SIZE`).
 - Parallelize ticker processing across tickers (thread/process pools) with deterministic ordering and safe resource limits.
 - Add database connection pooling to reuse connections across calls.
 

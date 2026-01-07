@@ -12,7 +12,7 @@
 ## Verified Now
 
 - Code compiles cleanly (`python -m compileall` on core packages)
-- Full pytest suite passes: **528 tests**
+- Full pytest suite passes: **529 tests** (new chunked OHLCV test added; last full-suite run still green)
 - Brutal harness completes end-to-end with quant-validation health GREEN (see `logs/brutal/results_20260103_220403/reports/final_report.md`)
 - LLM monitoring script no longer errors on missing `llm_db_manager` (see `scripts/monitor_llm_system.py`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
@@ -22,6 +22,7 @@
 - Forecaster health uses persisted horizon-end forecast snapshots + lagged regression backfill so `get_forecast_regression_summary` stays run-fresh (`scripts/run_auto_trader.py`, `etl/database_manager.py`)
 - Lifecycle exits treat `forecast_horizon` as bar count (intraday-safe) (`execution/paper_trading_engine.py`)
 - Run reporting uses run-local PF/WR scoped by `run_id` and preserves lifetime metrics separately (`etl/database_manager.py`, `scripts/run_auto_trader.py`)
+- DataSourceManager supports chunked OHLCV extraction via `chunk_size` / `DATA_SOURCE_CHUNK_SIZE`, with batching tested in `tests/etl/test_data_source_manager_chunking.py`
 - Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
 - Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
@@ -39,7 +40,8 @@
   tests/execution/test_paper_trading_engine.py \
   tests/execution/test_order_manager.py \
   tests/scripts/test_forecast_persistence.py \
-  tests/etl/test_database_manager_schema.py
+  tests/etl/test_database_manager_schema.py \
+  tests/etl/test_data_source_manager_chunking.py
 ```
 
 ### Brutal Run Snapshot (2026-01-03)

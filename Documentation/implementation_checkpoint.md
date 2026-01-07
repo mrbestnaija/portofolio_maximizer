@@ -85,6 +85,10 @@ Changes: `scripts/run_auto_trader.py` persists horizon-end forecast snapshots pe
 - `./simpleTrader_env/bin/python scripts/compare_baseline_snapshots.py --a reports/baselines/20260107_055707_pre_phase10 --b reports/baselines/20260107_161604_post_phase10`
 Changes: Added run-scoped summarizer for `run_summary.jsonl` + `execution_log.jsonl`, baseline snapshot diff helper, and horizon-backtest capture in snapshots so Phase 10 feedback loops have first-class artefacts.
 
+**Verification (2026-01-07)**: DataSourceManager memory safety (chunked OHLCV). Focused checks:
+- `./simpleTrader_env/bin/python -m pytest -q tests/etl/test_data_source_manager_chunking.py`
+Changes: `etl.data_source_manager.DataSourceManager.extract_ohlcv` now accepts `chunk_size` (or `DATA_SOURCE_CHUNK_SIZE`) to batch ticker downloads, log per-batch memory, and concatenate results while preserving failover semantics.
+
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 
 ### Forecasting + ETL statistical hardening (2025-12-19)

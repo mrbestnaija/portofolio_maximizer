@@ -60,14 +60,13 @@ CYCLES=1 SLEEP_SECONDS=0 ENABLE_LLM=0 bash bash/run_auto_trader.sh
 **Priority**: HIGH - Scalability foundation
 
 **Current Issues**:
-- Large OHLCV windows loaded entirely into memory
-- No chunked processing for high-frequency data
+- Large OHLCV windows loaded entirely into memory; chunking support landed (2026-01-07) via `DataSourceManager.extract_ohlcv(..., chunk_size=...)` or `DATA_SOURCE_CHUNK_SIZE`, but defaults still pull full ticker lists unless configured per run.
 - Database connections not pooled
 
 **Implementation Tasks**:
 ```python
 # Target: Streaming data processing
-- [ ] Implement chunked OHLCV processing in DataSourceManager
+- [x] Implement chunked OHLCV processing in DataSourceManager (chunk_size param + DATA_SOURCE_CHUNK_SIZE; covered by tests/etl/test_data_source_manager_chunking.py)
 - [ ] Add memory usage monitoring to performance dashboard
 - [ ] Optimize DataFrame memory footprint using categorical dtypes
 - [ ] Implement connection pooling in DatabaseManager
