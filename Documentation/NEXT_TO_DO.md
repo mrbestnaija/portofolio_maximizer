@@ -1,6 +1,7 @@
 ﻿# UPDATED TO-DO LIST: Portfolio Maximizer v45 - ML Integration & Optimization
 
-> **Current verified snapshot (2025-12-26)**: `Documentation/PROJECT_STATUS.md` (engineering unblocked; **paper-window MVS now PASS**, live/paper still gated).
+> **Canonical current truth**: `Documentation/PROJECT_STATUS.md` (treat as source of record for implementation status).
+> **Verified as of**: 2025-12-26 (historical snapshot; items below may be stale—check `Documentation/PROJECT_STATUS.md` before acting).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
@@ -33,6 +34,7 @@
    - `Documentation/BARBELL_OPTIONS_MIGRATION.md` and `Documentation/BARBELL_INTEGRATION_TODO.md` updated to reflect the initial config/policy implementation and the feature-flag contract for future options/derivatives work.
 
 ### 🚨 2025-11-15 Brutal Run Findings (blocking)
+**Verified as of**: 2025-11-15 (historical; see `Documentation/PROJECT_STATUS.md` for current remediation status).
 - `logs/pipeline_run.log:16932-17729` and `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` confirmed the SQLite store is corrupted (`database disk image is malformed`, “rowid … out of order/missing from index”), so every persistence-dependent task in this list is blocked until the DB is rebuilt and `DatabaseManager._connect` handles this error like the existing disk-I/O branch.
 - `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, …` demonstrate Stage 7 failing on every ticker with `ValueError: The truth value of a DatetimeIndex is ambiguous` because `scripts/run_etl_pipeline.py:1755-1764` evaluates `mssa_result.get('change_points') or []`. As soon as ~90 forecast rows are inserted the stage logs “Generated forecasts for 0 ticker(s)”, so all downstream Time Series/LLM tasks stall.
 - The visualization hook subsequently throws `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (lines 2626, 2981, …), meaning the dashboards mentioned in this file cannot be produced right now.
@@ -69,13 +71,14 @@
 **⚠️ STATUS ALERT**: Documentation is ahead of execution in some areas, but paper-trading evidence now exists (MVS PASS via paper-window replay). The remaining gate is sustained **live/paper** evidence (≥30 realised trades in real time) plus acceptable quant-validation health.
 
 ### 2025-11-12 Update
+**Verified as of**: 2025-11-12 (historical; check `Documentation/PROJECT_STATUS.md` before treating these as current blockers).
 - ✅ `forcester_ts/` is the canonical forecasting stack; `TimeSeriesSignalGenerator` now handles GARCH volatility series safely and stamps HOLD provenance timestamps. Tests: `pytest tests/models/test_time_series_signal_generator.py -q` + targeted integration smoke.
 - ✅ `scripts/monitor_llm_system.py` emits latency benchmarks + `llm_signal_backtests` summaries; JSON reports live under `logs/`.
 - ✅ `schedule_backfill.bat` ships for nightly validator replays (Task Scheduler registration still required).
 - ⚠️ deepseek-coder:6.7b latency remains 15–38 s (goal <5 s); explore prompt slimming, alternate models, or streaming fallback before enabling paper trading.
 - ⚠️ SQLite occasionally returns `disk I/O error` when adding new `llm_signals` columns—rerun migration after closing DB handles; track in `SYSTEM_STATUS_2025-10-22.md`.
 - 🚧 Paper trading & broker wiring deferred until latency + nightly jobs stay green for 48 h.
-- ⚠️ ETL blockers found in `logs/errors/errors.log` (Nov 2–7):  
+- ⚠️ ETL blockers found in `logs/errors/errors.log` (Nov 2–7). **Verified as of**: 2025-11-07 (historical; resolve/retest against `Documentation/PROJECT_STATUS.md` before gating current runs).  
   - `DataStorage.train_validation_test_split()` raises `TypeError` when CV passes `test_size`.
   - `ZeroDivisionError` when CV returns zero folds (insufficient history).
   - `sqlite3.OperationalError: disk I/O error` during OHLCV persistence—database file or disk needs attention.
@@ -91,16 +94,18 @@
 - ⚠️ `scripts/backfill_signal_validation.py` now bootstraps `sys.path` for CLI invocations; production still needs a scheduled task pointing at `schedule_backfill.bat`.
 
 ### Implementation Gaps (Nov 6, 2025 snapshot)
+**Verified as of**: 2025-11-06 (historical; treat as a snapshot only and confirm against `Documentation/PROJECT_STATUS.md`).
 - ✅ LLM signal persistence now records `signal_type`, timestamps, and backtest metrics (`llm_signal_backtests` feeds dashboards).
 - ✅ 5-layer validator + statistical diagnostics execute inside the pipeline with regression coverage.
 - ✅ SAMOSSA + SARIMAX hybrid forecasts persist explained-variance diagnostics; RL/CUSUM promotion remains gated on profitability milestones.
 - ✅ `TimeSeriesForecaster.evaluate()` now computes RMSE / sMAPE / tracking-error for every model + ensemble; metrics are written to SQLite so dashboards and the ensemble grid-search can rely on realised performance instead of static heuristics.
 - ✅ Ensemble confidence scoring blends those metrics with AIC/EVR and variance-ratio tests, and MSSA-RL gains a CuPy-accelerated path (optional) plus change-point weighting so regime breaks are handled automatically.
 - ✅ Time Series ensemble is the **default signal generator** (per `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` / `Documentation/REFACTORING_STATUS.md`): `models/time_series_signal_generator.py` + `signal_router.py` route TS output first, with LLM retained solely for fallback/redundancy.
-- ⚠️ Paper trading engine, broker integration, stress testing, and regime detection remain outstanding.
+- ⚠️ Paper trading engine + broker wiring exist, but promotion/stress testing/regime detection remain outstanding. **Verified as of**: 2025-11-06 (historical; check `Documentation/PROJECT_STATUS.md` for current implementation status).
 - 🟡 Nightly validation wrapper `schedule_backfill.bat` is ready—needs Task Scheduler registration in production environments.
 
 ### Next Steps — Critical Gap Closure
+**Verified as of**: 2025-11-06 (historical; update priorities to match `Documentation/PROJECT_STATUS.md`).
 1. ✅ Confirmed `etl/portfolio_math.py` (enhanced engine) is the promoted dependency. Verification logged via automated tests and `scripts/run_etl_pipeline.py` portfolio metrics output.
 2. ✅ Repair the signal and risk persistence contract (Nov 5, 2025): `ai_llm/llm_database_integration.py` migrates `llm_risk_assessments` to accept `'extreme'` and new tests validate the schema (`python -m pytest tests/ai_llm/test_llm_enhancements.py::TestLLMDatabaseIntegration::test_risk_assessment_extreme_persisted`).
 3. ✅ Persist validator telemetry via LLMSignalTracker (Nov 5, 2025): `scripts/run_etl_pipeline.py` now registers each signal/decision with `LLMSignalTracker`, and `python -m pytest tests/scripts/test_track_llm_signals.py` locks the wiring in CI.

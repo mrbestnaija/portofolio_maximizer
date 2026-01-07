@@ -2,6 +2,7 @@
 
 **Last updated**: 2025-11-20  
 **Scope**: Enhancing `scripts/liquidate_open_trades.py` from a spot-only, yfinance-dependent helper into a configurable, asset-class-aware MTM tool that can support equities, crypto, options, and synthetic exposures under the barbell architecture.
+**Current status (2026-01-07)**: Phase 1 done; Phase 2 schema hints wired; synthetic legs implemented; options MTM (intrinsic/BS) and risk/reporting integration remain pending (see `Documentation/PROJECT_STATUS.md`).
 
 This plan is sequenced and intended to be kept in sync with the codebase. It builds on the design discussion captured in the prompt text and aligns with:
 

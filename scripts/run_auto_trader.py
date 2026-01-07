@@ -766,6 +766,77 @@ def _build_ticker_candidates(
     return [out_map[idx] for idx in sorted(out_map)]
 
 
+def _prepare_candidate_with_forecast(
+    *,
+    ticker: str,
+    frame: pd.DataFrame,
+    preprocessor: Preprocessor,
+    horizon: int,
+) -> Dict[str, Any]:
+    candidate = _prepare_ticker_candidate(ticker=ticker, frame=frame, preprocessor=preprocessor)
+    forecast_bundle, current_price = _generate_time_series_forecast(candidate["frame"], horizon)
+    candidate["forecast_bundle"] = forecast_bundle
+    candidate["current_price"] = current_price
+    return candidate
+
+
+def _build_candidates_with_forecasts(
+    entries: List[Dict[str, Any]],
+    *,
+    preprocessor: Preprocessor,
+    horizon: int,
+    parallel: bool,
+    max_workers: Optional[int],
+) -> List[Dict[str, Any]]:
+    if not entries:
+        return []
+
+    if not parallel:
+        out: List[Dict[str, Any]] = []
+        for entry in entries:
+            candidate = _prepare_candidate_with_forecast(
+                ticker=entry["ticker"],
+                frame=entry["frame"],
+                preprocessor=preprocessor,
+                horizon=horizon,
+            )
+            candidate.update(entry)
+            out.append(candidate)
+        return sorted(out, key=lambda item: item["order"])
+
+    workers = max_workers or min(4, max(1, len(entries)))
+    out_map: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _prepare_candidate_with_forecast,
+                ticker=entry["ticker"],
+                frame=entry["frame"],
+                preprocessor=preprocessor,
+                horizon=horizon,
+            ): entry
+            for entry in entries
+        }
+        for future in as_completed(futures):
+            entry = futures[future]
+            try:
+                candidate = future.result()
+            except Exception:
+                candidate = {
+                    "ticker": entry["ticker"],
+                    "symbol": entry["ticker"].upper(),
+                    "raw_frame": entry["frame"],
+                    "frame": entry["frame"],
+                    "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "mid_price": None,
+                    "forecast_bundle": None,
+                    "current_price": None,
+                }
+            candidate.update(entry)
+            out_map[entry["order"]] = candidate
+    return [out_map[idx] for idx in sorted(out_map)]
+
+
 def _extract_forecast_scalar(payload: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """Return (forecast_value, lower_ci, upper_ci) using horizon-end semantics when available."""
     if not isinstance(payload, dict) or not payload:
@@ -1605,12 +1676,27 @@ def main(
                 parallel_workers or "auto",
             )
 
-        candidates = _build_ticker_candidates(
-            pre_entries,
-            preprocessor=preprocessor,
-            parallel=parallel_ticker_processing,
-            max_workers=parallel_workers,
-        )
+        combined_parallel = bool(parallel_ticker_processing and parallel_forecasts)
+        if combined_parallel:
+            logger.info(
+                "Parallel pipeline enabled (candidates + forecasts) for %s tickers (workers=%s)",
+                len(pre_entries),
+                parallel_workers or "auto",
+            )
+            candidates = _build_candidates_with_forecasts(
+                pre_entries,
+                preprocessor=preprocessor,
+                horizon=forecast_horizon,
+                parallel=True,
+                max_workers=parallel_workers,
+            )
+        else:
+            candidates = _build_ticker_candidates(
+                pre_entries,
+                preprocessor=preprocessor,
+                parallel=parallel_ticker_processing,
+                max_workers=parallel_workers,
+            )
 
         forecast_inputs: Dict[str, pd.DataFrame] = {}
         for candidate in candidates:
@@ -1686,7 +1772,8 @@ def main(
                 continue
 
             candidate["data_source"] = data_source
-            forecast_inputs[symbol] = ticker_frame
+            if not combined_parallel:
+                forecast_inputs[symbol] = ticker_frame
 
         forecast_map: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
         if parallel_forecasts and forecast_inputs:
@@ -1722,7 +1809,10 @@ def main(
             except Exception:
                 logger.debug("Skipping forecast regression backfill for %s", ticker, exc_info=True)
 
-            if forecast_map:
+            if "forecast_bundle" in candidate:
+                forecast_bundle = candidate.get("forecast_bundle")
+                current_price = candidate.get("current_price")
+            elif forecast_map:
                 forecast_bundle, current_price = forecast_map.get(symbol, (None, None))
             else:
                 forecast_bundle, current_price = _generate_time_series_forecast(

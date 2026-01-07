@@ -2,6 +2,7 @@
 
 **Last updated**: 2025-11-20  
 **Scope**: Automating quant validation sample growth, TS threshold sweeps, cost calibration, and sleeve‑level promotion/demotion via cron and CLI helpers.
+**Current status (2026-01-07)**: Phases 1–5 are implemented; Phase 6 (dashboard glue + standardized outputs) remains pending (see `Documentation/PROJECT_STATUS.md`).
 
 This document turns the current quant‑validation findings into a concrete, automation‑friendly TODO list. All items are config‑ or script‑level only (no core architecture rewrites) and should be backed by stats/backtests before being made permanent.
 

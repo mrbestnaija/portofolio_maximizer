@@ -3,6 +3,7 @@
 **Version**: 0.1  
 **Scope**: Time-series forecaster / signal quant validation (`logs/signals/quant_validation.jsonl`) and brutal/CI health checks.  
 **Status**: Draft calibration memo – codifies current behaviour and outlines how to tighten it.
+**Current status (2026-01-07)**: Brutal suite quant health is GREEN; thresholds and scripts here remain the production monitoring source (see `Documentation/PROJECT_STATUS.md`).
 
 This document explains how the current quant validation monitoring thresholds work, how they map to GREEN / YELLOW / RED states, and how they should be interpreted in the context of Portfolio Maximizer’s “evidence before complexity” philosophy.
 

@@ -2,6 +2,8 @@
 
 ## 0. Scope & Principles
 
+**Current status (2026-01-07)**: Barbell policy exists (`config/barbell.yml`, `risk/barbell_policy.py`), but NAV tracking/allocator + risk buckets remain unimplemented (see `Documentation/PROJECT_STATUS.md`).
+
 - [ ] Treat **NAV as the central risk budget** for all sleeves (safe, TS core, ML, LLM, tail hedges, NGX/frontier).
 - [ ] Keep **Time Series (TS) forecasts as primary signal source**, with **LLM strictly as fallback/overlay**.
 - [ ] Preserve existing **Taleb barbell shell** (`config/barbell.yml`, `risk/barbell_policy.py`) and add NAV/risk-budget logic only as an *outer* layer.

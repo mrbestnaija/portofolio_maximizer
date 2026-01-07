@@ -1,6 +1,7 @@
 # Migrating From Spot Assets to Options/Derivatives for Barbell Strategy Use
 
 **Status**: Design + Initial Config/Policy (Phase O1 in progress)  
+**Current status (2026-01-07)**: Feature flags remain OFF by default; options/derivatives ETL + execution remain unimplemented (see `Documentation/PROJECT_STATUS.md`).
 **Scope**: Portfolio Maximizer v45 – migration path from pure spot (stocks/commodities) to options / derivative / synthetic exposures suitable for Taleb-style barbell strategies.
 
 This document describes how to extend the current spot‑only stack to:

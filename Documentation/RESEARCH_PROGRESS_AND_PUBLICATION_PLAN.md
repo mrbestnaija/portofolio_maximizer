@@ -3,6 +3,7 @@
 **Status**: Draft research log  
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading  
 **Last updated**: 2026-01-03  
+**Current status (2026-01-07)**: Engineering is unblocked, brutal suite is GREEN, but recent-window MVS is still FAIL; use `Documentation/PROJECT_STATUS.md` as the canonical status source.
 
 This document tracks the Portfolio Maximizer project as a scientific research artefact rather than only as a codebase. It is meant to evolve into the backbone of a Master’s‑level thesis or journal submission, with clear hypotheses, methods, experiments, and reproducible evidence.
 

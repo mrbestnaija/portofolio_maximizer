@@ -3,6 +3,8 @@
 
 **Date**: 2025-12-04 (Updated)  
 **Status**: 🔴 **PARTIALLY BLOCKED – 2025-11-15 brutal run exposed regressions; structural issues fixed and brutal harness green, global quant validation still RED**  
+**Verified as of**: 2025-12-04 (historical; treat `Documentation/PROJECT_STATUS.md` as the canonical current status).
+**Current status (2026-01-07)**: Core TS wiring is live (bar-aware loop, horizon-end targets, run-local reporting, forecast snapshot persistence); brutal suite is GREEN; live/paper evidence still gated on recent-window MVS (see `Documentation/PROJECT_STATUS.md`).
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
 **Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
 **Sentiment overlays**: Planned but dormant until profitability beats benchmarks and quant gates clear; see `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` and `config/sentiment.yml` (disabled, strict gating) for future integration notes.
