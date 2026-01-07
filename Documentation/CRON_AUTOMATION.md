@@ -57,6 +57,10 @@ Key tasks (first positional argument):
 - `weekly_sleeve_maintenance` – Sleeve summary + promotion/demotion plan writer (see `bash/weekly_sleeve_maintenance.sh`).
 - `synthetic_refresh` – Generate a synthetic dataset (config-driven) for offline regression/smoke testing; respects `CRON_SYNTHETIC_*` env overrides.
 
+### Provenance + dashboards
+
+- ETL and auto_trader runs now emit `logs/automation/db_provenance_<run>.json` (run_id, dataset_id, origin, generator_version) for auditability and dashboard badges. Dashboards with `data_origin=synthetic` or `mixed` are explicitly **not profitability proof artifacts**; use the badge to gate promotions.
+
 The script automatically:
 
 - Resolves `PROJECT_ROOT` from its own location.

@@ -860,6 +860,7 @@ class TimeSeriesVisualizer:
         forecasts: Dict[str, Dict[str, Optional[pd.Series]]],
         title: str,
         weights: Optional[Dict[str, float]] = None,
+        tail_points: int = 120,
     ) -> plt.Figure:
         """Visualise realised prices alongside multiple model forecasts."""
         fig, (ax_main, ax_resid) = plt.subplots(
@@ -867,6 +868,24 @@ class TimeSeriesVisualizer:
         )
 
         actual_series = actual_series.sort_index()
+        forecast_indices: list[pd.Index] = []
+        for payload in forecasts.values():
+            series = payload.get("forecast") if isinstance(payload, dict) else None
+            if isinstance(series, pd.Series) and not series.empty:
+                forecast_indices.append(series.index)
+
+        # Focus the plot on the region around the forecast horizon so traces are visible.
+        if forecast_indices:
+            earliest_forecast = min(idx.min() for idx in forecast_indices if len(idx))
+            latest_forecast = max(idx.max() for idx in forecast_indices if len(idx))
+            if len(actual_series) > 0:
+                # Tail window anchored before the first forecast point.
+                start_idx = max(0, len(actual_series) - tail_points)
+                if earliest_forecast in actual_series.index:
+                    start_idx = max(0, actual_series.index.get_loc(earliest_forecast, method="nearest") - tail_points // 2)
+                actual_series = actual_series.iloc[start_idx:]
+            ax_main.set_xlim(left=actual_series.index.min(), right=latest_forecast)
+
         ax_main.plot(actual_series.index, actual_series.values, label="Actual", color="black", linewidth=2)
 
         ensemble_series = None
@@ -905,6 +924,13 @@ class TimeSeriesVisualizer:
         ax_main.grid(True, alpha=0.3)
         ax_main.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
         self._rotate_date_labels(ax_main)
+
+        # Shade the forecast horizon to visually separate history from projection.
+        if forecast_indices:
+            horizon_end = max(idx.max() for idx in forecast_indices if len(idx))
+            last_actual_ts = actual_series.index.max()
+            if isinstance(last_actual_ts, (pd.Timestamp, datetime)):
+                ax_main.axvspan(last_actual_ts, horizon_end, color="lightgrey", alpha=0.15)
 
         residual_series = None
         if ensemble_series is not None:

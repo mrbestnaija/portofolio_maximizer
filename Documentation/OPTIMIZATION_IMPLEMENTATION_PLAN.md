@@ -13,6 +13,8 @@
 
 > 📊 Telemetry note: `forcester_ts/instrumentation.py` records dataset diagnostics and benchmark metrics (RMSE, sMAPE, tracking error) per model with JSON audits under `logs/forecast_audits/`. Use these artifacts to quantify optimization impact.
 
+**Project-wide sequencing (2026-01)**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the step-by-step plan to fix TS horizon alignment, execution cost realism, and run-local reporting before deeper optimization phases.
+
 ## 📊 EXECUTIVE SUMMARY
 
 ### Current State Assessment

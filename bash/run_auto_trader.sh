@@ -26,7 +26,7 @@ RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/auto_trader_${RUN_STAMP}${RUN_LABEL:+_${RUN_LABEL}}.log"
 
 TICKERS="${TICKERS:-AAPL,MSFT}"
-LOOKBACK_DAYS="${LOOKBACK_DAYS:-180}"
+LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"
 FORECAST_HORIZON="${FORECAST_HORIZON:-362}"
 INITIAL_CAPITAL="${INITIAL_CAPITAL:-25000}"
 CYCLES="${CYCLES:-10}"
@@ -36,14 +36,35 @@ LLM_MODEL="${LLM_MODEL:-deepseek-coder:6.7b-instruct-q4_K_M}"
 INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-0}"
 VERBOSE="${VERBOSE:-0}"
 HYPEROPT_ROUNDS="${HYPEROPT_ROUNDS:-0}"
+BACKTEST_LOOKBACK_DAYS="${BACKTEST_LOOKBACK_DAYS:-365}"
+BACKTEST_HORIZON="${BACKTEST_HORIZON:-10}"
+# Optional fast intraday smoke (set INTRADAY_SMOKE=1 to enable)
+INTRADAY_SMOKE="${INTRADAY_SMOKE:-0}"
+INTRADAY_INTERVAL="${INTRADAY_INTERVAL:-1h}"
+INTRADAY_FORECAST_HORIZON="${INTRADAY_FORECAST_HORIZON:-6}"
 
 if [[ "$HYPEROPT_ROUNDS" != "0" ]]; then
   echo "Hyperopt mode enabled via HYPEROPT_ROUNDS=$HYPEROPT_ROUNDS; delegating to bash/run_post_eval.sh"
   ROOT_DIR="$ROOT_DIR" HYPEROPT_ROUNDS="$HYPEROPT_ROUNDS" TICKERS="$TICKERS" \
     START="${START_DATE:-2018-01-01}" END="${END_DATE:-$(date +%Y-%m-%d)}" \
-    "$ROOT_DIR/bash/run_post_eval.sh"
+  "$ROOT_DIR/bash/run_post_eval.sh"
   exit 0
 fi
+
+# Best-effort liquidation of any open paper trades before a new run.
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/liquidate_open_trades.py" --db-path "$ROOT_DIR/data/portfolio_maximizer.db" --pricing-policy neutral >/dev/null 2>&1 || true
+set -e
+
+# Pre-flight horizon-consistent backtest (full 365d) to log expectations.
+BACKTEST_REPORT="$ROOT_DIR/reports/horizon_backtest_${RUN_STAMP}.json"
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/run_horizon_consistent_backtest.py" \
+  --tickers "$TICKERS" \
+  --lookback-days "$BACKTEST_LOOKBACK_DAYS" \
+  --forecast-horizon "$BACKTEST_HORIZON" \
+  --report-path "$BACKTEST_REPORT" >/dev/null 2>&1 || true
+set -e
 
 CMD=(
   "$PYTHON_BIN" "$TRADER_SCRIPT"
@@ -57,6 +78,10 @@ CMD=(
 
 if [[ "$ENABLE_LLM" == "1" ]]; then
   CMD+=(--enable-llm --llm-model "$LLM_MODEL")
+fi
+
+if [[ "$INTRADAY_SMOKE" == "1" ]]; then
+  CMD+=(--yfinance-interval "$INTRADAY_INTERVAL" --forecast-horizon "$INTRADAY_FORECAST_HORIZON" --cycles 3 --sleep-seconds 0)
 fi
 
 if [[ "$INCLUDE_FRONTIER_TICKERS" == "1" ]]; then

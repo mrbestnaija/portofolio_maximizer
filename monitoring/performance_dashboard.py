@@ -65,6 +65,14 @@ class PerformanceDashboard:
         signal_accuracy = self._calculate_signal_accuracy(signals)
         avg_confidence = self._average_confidence(signals)
 
+        last_run = provenance.get("last_run_provenance") if isinstance(provenance, dict) else None
+        active_run_id = last_run.get("run_id") if isinstance(last_run, dict) else None
+        active_dataset = None
+        generator_version = None
+        if isinstance(last_run, dict):
+            active_dataset = last_run.get("synthetic_dataset_id") or last_run.get("dataset_id")
+            generator_version = last_run.get("synthetic_generator_version")
+
         metrics = {
             "total_trades": int(performance.get("total_trades", 0) or 0),
             "win_rate": float(performance.get("win_rate", 0.0) or 0.0),
@@ -82,6 +90,9 @@ class PerformanceDashboard:
             "data_quality_score": quality_summary.get("avg_quality"),
             "avg_latency_ms": latency_summary.get("avg_total_ms"),
             "data_origin": provenance.get("origin"),
+            "active_run_id": active_run_id,
+            "active_dataset_id": active_dataset,
+            "synthetic_generator_version": generator_version,
         }
         metrics["profitability_proof"] = bool(metrics.get("data_origin") == "live")
 

@@ -170,3 +170,34 @@ def test_order_manager_persists_provenance_and_mid_slippage():
     assert call["run_id"] == "run_prov"
     assert call["mid_price"] == 100.0
     assert call["mid_slippage_bps"] is not None
+
+
+def test_order_manager_prefers_broker_mid_slippage():
+    class _FakeClientWithMid(_FakeCTraderClient):
+        def place_order(self, order: CTraderOrder) -> OrderPlacement:
+            self.placed_orders.append(order)
+            return OrderPlacement(
+                order_id="ORDER999",
+                status="FILLED",
+                filled_volume=order.volume,
+                avg_price=101.0,
+                submitted_at=datetime.utcnow(),
+                mid_price=100.0,
+                mid_slippage_bps=10.0,
+                raw_response={},
+            )
+
+    client = _FakeClientWithMid()
+    db = _FakeDB()
+    manager = OrderManager(
+        mode="demo",
+        client=client,
+        database_manager=db,
+        risk_manager=_FakeRiskManager(),
+    )
+    signal = {"ticker": "AAPL", "action": "BUY", "confidence_score": 0.9, "current_price": 100.0}
+    result = manager.submit_signal(signal)
+    assert result.status == "EXECUTED"
+    call = db.calls[-1]
+    assert call["mid_price"] == 100.0
+    assert call["mid_slippage_bps"] == 10.0

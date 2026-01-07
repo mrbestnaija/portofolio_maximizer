@@ -11,6 +11,8 @@ The goal is twofold:
 - Make the behaviour of `config/forecaster_monitoring.yml`, `scripts/check_quant_validation_health.py`, and `scripts/summarize_quant_validation.py` fully explicit.
 - Provide a roadmap for tightening thresholds from “research hygiene” to “production gates” as empirical data accumulates, and for wiring those tightened thresholds into automation (see `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` and the helper CLIs in `scripts/`).
 
+**Project-wide sequencing**: For the end-to-end optimization steps that connect quant validation to TS signal wiring, execution realism, and run-local reporting, see `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`.
+
 ---
 
 ## 1. Current Monitoring Configuration

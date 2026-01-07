@@ -219,3 +219,103 @@ def test_forecast_regression_metrics_column(tmp_path: Path):
         assert '"rmse": 0.5' in stored[0]
     finally:
         manager.close()
+
+
+def test_get_forecasts_and_update_regression_metrics(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast_query.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        combined_id = manager.save_forecast(
+            "AAPL",
+            "2025-11-09",
+            {
+                "model_type": "COMBINED",
+                "forecast_horizon": 2,
+                "forecast_value": 101.0,
+                "model_order": {},
+            },
+        )
+        sarimax_id = manager.save_forecast(
+            "AAPL",
+            "2025-11-09",
+            {
+                "model_type": "SARIMAX",
+                "forecast_horizon": 2,
+                "forecast_value": 100.0,
+                "model_order": {},
+            },
+        )
+        assert combined_id != -1
+        assert sarimax_id != -1
+
+        combined_rows = manager.get_forecasts("AAPL", model_types=["COMBINED"], limit=10)
+        assert len(combined_rows) == 1
+        assert combined_rows[0]["id"] == combined_id
+
+        updated = manager.update_forecast_regression_metrics(combined_id, {"rmse": 0.123, "smape": 0.5})
+        assert updated is True
+
+        refreshed = manager.get_forecasts("AAPL", model_types=["COMBINED"], limit=10)
+        assert len(refreshed) == 1
+        raw_metrics = refreshed[0].get("regression_metrics")
+        assert raw_metrics
+        assert '"rmse": 0.123' in raw_metrics
+    finally:
+        manager.close()
+
+
+def test_performance_summary_filters_by_run_id(tmp_path: Path):
+    db_path = tmp_path / "perf_summary.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        manager.save_trade_execution(
+            ticker="AAPL",
+            trade_date="2026-01-01",
+            action="SELL",
+            shares=1,
+            price=100.0,
+            total_value=100.0,
+            commission=0.0,
+            run_id="run1",
+            realized_pnl=10.0,
+            realized_pnl_pct=0.10,
+        )
+        manager.save_trade_execution(
+            ticker="AAPL",
+            trade_date="2026-01-01",
+            action="SELL",
+            shares=1,
+            price=99.0,
+            total_value=99.0,
+            commission=0.0,
+            run_id="run1",
+            realized_pnl=-5.0,
+            realized_pnl_pct=-0.05,
+        )
+        manager.save_trade_execution(
+            ticker="MSFT",
+            trade_date="2026-01-01",
+            action="SELL",
+            shares=1,
+            price=200.0,
+            total_value=200.0,
+            commission=0.0,
+            run_id="run2",
+            realized_pnl=20.0,
+            realized_pnl_pct=0.10,
+        )
+
+        run1 = manager.get_performance_summary(run_id="run1")
+        assert run1["total_trades"] == 2
+        assert run1["win_rate"] == 0.5
+        assert run1["profit_factor"] == 2.0
+
+        run2 = manager.get_performance_summary(run_id="run2")
+        assert run2["total_trades"] == 1
+        assert run2["win_rate"] == 1.0
+        assert run2["profit_factor"] == float("inf")
+
+        overall = manager.get_performance_summary()
+        assert overall["total_trades"] == 3
+    finally:
+        manager.close()

@@ -24,6 +24,26 @@
 ### Integration Recovery Tracker
 - Track and update pipeline remediation tasks in `Documentation/integration_fix_plan.md` before advancing Phase 5 work or refreshing `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
 
+## Auto-Portfolio Trader Remediation To-Do (Critical)
+
+1. **Initial setup & scoping**: Review the auto-portfolio trader stack (`config/yfinance_config.yml`, `models/time_series_signal_generator.py`, `execution/paper_trading_engine.py`, related configs). Define the fix scope (align execution with forecast horizon, realistic cost model, live metrics) and stage iterative updates/backtests to avoid system disruption.
+2. **Bar-aware trading loop**: Trigger trading only when a new daily bar arrives; if using intraday cadence, adjust lookback and add fallback logic. Test with a mock feed to confirm actions only fire on new bars or the intended intraday cadence.
+3. **Forecast horizon alignment**: Match forecast horizon targets in `models/time_series_signal_generator.py` with entry/exit logic and `max_holding_days`; backtest to prove horizon, holding period, and targets stay in sync.
+4. **Confidence calculation**: Refactor confidence to penalize weak/small edges and only inflate when signals are predictive and actionable. Compare confidence across models/regimes to ensure it discriminates rather than rewarding “safe” levels.
+5. **Diagnostics scoring**: Rework `_evaluate_diagnostics` around forecast error and realized performance; compare old vs new diagnostics on known data so scores only rise with true quality improvements.
+6. **Quant validation**: Gate on incremental edge (forecast error + performance uplift) and reduce bias toward always-long/short recent returns; validate in flat/down regimes so good models are not rejected unfairly.
+7. **Cost model alignment**: Update routing logic and the `models/time_series_signal_generator.py` cost model for realistic roundtrip costs (slippage, fees) and adjust slippage handling in `execution/paper_trading_engine.py`. Test trades with/without the updated model to see net profit impacts.
+8. **Execution simulation**: Add realistic LOB/depth-profile fallbacks for illiquid assets and refine slippage/execution cost calculations; keep paper-trading simulation consistent with the updated cost model and simulate illiquid names to measure slippage differences.
+9. **Reporting fixes**: Ensure `win_rate` and `profit_factor` reflect only trades from the live run (no historical bleed). Track and store real-time forecast regression metrics to monitor forecaster health.
+10. **Continuous testing & validation**: Add/refresh unit tests for confidence, horizon alignment, diagnostics scoring, and cost model; run iterative backtests per phase and maintain live monitoring for trades, confidence, execution costs, and portfolio performance.
+11. **Final optimization**: After fixes validate in backtests, enable the barbell strategy (if applicable) in simulated/live-like mode and monitor for discrepancies during simulated capital runs.
+12. **Documentation & reporting**: Document changes to horizons, execution modeling, diagnostics scoring, and cost handling; generate performance reports per phase vs baselines and update configs (`config/barbell.yml`, `execution/execution_config.yml`, etc.) to match new behaviour.
+13. **Final iteration & ongoing monitoring**: Conduct a full review for stability/performance and continue iterative updates based on live monitoring, backtesting, and user feedback.
+
+## Optimization & Hardening Backlog
+- Use `Documentation/OPTIMIZATION_OPTIONS.md` as the canonical backlog for performance, scalability, caching, architecture, reliability, observability, security, and resource optimizations (vectorization gaps, cache invalidation, config consolidation, circuit breakers, structured logging, secrets rotation).
+- Pull items only with profitability/stability justification and in alignment with the Core Directive and phase gates; prefer configuration-driven, incremental changes with targeted backtests over large refactors.
+
 ## Approved Time-Series Stack (Tier-1 default)
 - Canonical reference: `Documentation/QUANT_TIME_SERIES_STACK.md` (pin in every AI companion's context). Consider Tier-1 the only sanctioned dependency set until profitability + GPU budget gates unlock higher tiers.
 - Runtime: Python 3.10-3.12 inside `simpleTrader_env`, NumPy, pandas, SciPy.

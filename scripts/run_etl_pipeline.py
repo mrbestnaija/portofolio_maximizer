@@ -2858,6 +2858,37 @@ def execute_pipeline(
         "generator_version": generator_version_current,
     })
 
+    # Stamp DB with final provenance and emit audit artifact
+    try:
+        active_source = data_source_manager.get_active_source() if 'data_source_manager' in locals() else None
+        db_manager.record_run_provenance(
+            run_id=pipeline_id,
+            execution_mode=execution_mode,
+            data_source=active_source,
+            synthetic_dataset_id=dataset_id_current,
+            synthetic_generator_version=generator_version_current,
+            note="etl_pipeline_complete",
+        )
+    except Exception:
+        logger.debug("Failed to record pipeline provenance", exc_info=True)
+
+    try:
+        prov = db_manager.get_data_provenance_summary()
+        prov.update(
+            {
+                "run_id": pipeline_id,
+                "execution_mode": execution_mode,
+                "dataset_id": dataset_id_current,
+                "generator_version": generator_version_current,
+            }
+        )
+        artifact_path = Path("logs") / "automation" / f"db_provenance_{pipeline_id}.json"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps(prov, indent=2))
+        logger.info("Wrote DB provenance artifact: %s", artifact_path)
+    except Exception:
+        logger.debug("Failed to write DB provenance artifact", exc_info=True)
+
     # Cleanup old logs and checkpoints
     pipeline_log.cleanup_old_logs()
     checkpoint_manager.cleanup_old_checkpoints(retention_days=7)

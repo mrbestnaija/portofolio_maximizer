@@ -91,11 +91,12 @@ def sample_forecast_bundle():
 def sample_market_data():
     """Create sample market data for testing"""
     dates = pd.date_range(start='2023-01-01', periods=100, freq='D')
-    prices = 100 + np.cumsum(np.random.randn(100) * 0.5)
+    rng = np.random.default_rng(42)
+    prices = 100 + np.cumsum(rng.normal(0.0, 0.5, 100))
     
     return pd.DataFrame({
         'Close': prices,
-        'Volume': np.random.randint(1000000, 5000000, 100)
+        'Volume': rng.integers(1000000, 5000000, 100)
     }, index=dates)
 
 
@@ -231,6 +232,99 @@ class TestTimeSeriesSignalGenerator:
         
         # Strong forecast should have higher confidence
         assert signal.confidence >= 0.5
+
+    def test_confidence_penalizes_small_net_edge(self):
+        """Confidence should be lower when net edge is tiny after costs."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": False},
+        )
+
+        market_data = pd.DataFrame(
+            {
+                "Close": [100.0, 100.0, 100.0],
+                "TxnCostBps": [10.0, 10.0, 10.0],  # 20bp round-trip
+                "ImpactBps": [0.0, 0.0, 0.0],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+
+        small_edge = {
+            "horizon": 3,
+            "ensemble_forecast": {"forecast": pd.Series([100.1, 100.1, 100.2])},
+            "sarimax_forecast": {"forecast": pd.Series([100.1, 100.1, 100.2])},
+            "samossa_forecast": {"forecast": pd.Series([100.1, 100.1, 100.2])},
+            "volatility_forecast": {"volatility": 0.10},
+        }
+        large_edge = {
+            "horizon": 3,
+            "ensemble_forecast": {"forecast": pd.Series([101.0, 101.0, 101.5])},
+            "sarimax_forecast": {"forecast": pd.Series([101.0, 101.0, 101.5])},
+            "samossa_forecast": {"forecast": pd.Series([101.0, 101.0, 101.5])},
+            "volatility_forecast": {"volatility": 0.10},
+        }
+
+        sig_small = generator.generate_signal(
+            forecast_bundle=small_edge,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=market_data,
+        )
+        sig_large = generator.generate_signal(
+            forecast_bundle=large_edge,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=market_data,
+        )
+
+        assert sig_large.confidence > sig_small.confidence
+
+    def test_confidence_penalizes_wide_ci(self):
+        """Wider CIs (lower SNR) should reduce confidence versus narrow CIs."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": False},
+        )
+        idx = pd.date_range("2024-01-01", periods=3, freq="D")
+        forecast = pd.Series([110.0, 112.0, 115.0], index=idx)
+        narrow = {
+            "horizon": 3,
+            "ensemble_forecast": {
+                "forecast": forecast,
+                "lower_ci": pd.Series([109.8, 111.8, 114.8], index=idx),
+                "upper_ci": pd.Series([110.2, 112.2, 115.2], index=idx),
+            },
+            "volatility_forecast": {"volatility": 0.10},
+        }
+        wide = {
+            "horizon": 3,
+            "ensemble_forecast": {
+                "forecast": forecast,
+                "lower_ci": pd.Series([100.0, 100.0, 100.0], index=idx),
+                "upper_ci": pd.Series([130.0, 130.0, 130.0], index=idx),
+            },
+            "volatility_forecast": {"volatility": 0.10},
+        }
+        sig_narrow = generator.generate_signal(
+            forecast_bundle=narrow,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=None,
+        )
+        sig_wide = generator.generate_signal(
+            forecast_bundle=wide,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=None,
+        )
+
+        assert sig_narrow.confidence > sig_wide.confidence
     
     def test_risk_score_calculation(self, signal_generator, sample_forecast_bundle):
         """Test risk score calculation"""
@@ -247,7 +341,34 @@ class TestTimeSeriesSignalGenerator:
         
         # High volatility should increase risk score
         assert signal.risk_score >= 0.5
-    
+
+    def test_expected_return_uses_horizon_end_target(self):
+        """Expected return should be computed from the horizon-end forecast value (not step-1)."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+        )
+        forecast_series = pd.Series(
+            [101.0, 102.0, 103.0],
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        bundle = {
+            "horizon": 3,
+            "ensemble_forecast": {"forecast": forecast_series},
+            "volatility_forecast": {"volatility": 0.10},
+            "ensemble_metadata": {"primary_model": "ENSEMBLE"},
+        }
+
+        signal = generator.generate_signal(
+            forecast_bundle=bundle,
+            current_price=100.0,
+            ticker="TEST",
+            market_data=None,
+        )
+        assert signal.expected_return == pytest.approx(0.03)
+
     def test_target_and_stop_loss_calculation(self, signal_generator, sample_forecast_bundle):
         """Test target price and stop loss calculation"""
         signal = signal_generator.generate_signal(
@@ -531,6 +652,62 @@ class TestTimeSeriesSignalGenerator:
         assert 'status' in quant_profile
         assert quant_profile['criteria'], "Criteria should be evaluated"
 
+    def test_quant_validation_forecast_edge_mode_uses_cv_metrics(
+        self,
+        monkeypatch,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+        ts_routing_config,
+    ):
+        """forecast_edge mode should attach regression metrics and gate on them."""
+        cfg = copy.deepcopy(quant_validation_config)
+        cfg["validation_mode"] = "forecast_edge"
+        cfg["forecast_edge_cv"] = {
+            "min_train_size": 10,
+            "horizon": 5,
+            "step_size": 5,
+            "max_folds": 1,
+            "baseline_model": "samossa",
+        }
+        cfg["success_criteria"]["max_rmse_ratio_vs_baseline"] = 1.10
+        cfg["success_criteria"]["min_directional_accuracy"] = 0.55
+
+        import models.time_series_signal_generator as tsg_mod
+
+        def fake_run(self, price_series, returns_series=None):  # noqa: ARG001
+            return {
+                "aggregate_metrics": {
+                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
+                    "samossa": {"rmse": 1.0, "directional_accuracy": 0.55},
+                },
+                "fold_count": 1,
+                "horizon": 5,
+            }
+
+        monkeypatch.setattr(tsg_mod.RollingWindowValidator, "run", fake_run)
+
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=cfg,
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+
+        quant_profile = signal.provenance.get("quant_validation")
+        assert quant_profile is not None
+        assert quant_profile["forecast_edge"]["rmse_ratio_vs_baseline"] == pytest.approx(0.9)
+        assert quant_profile["forecast_edge"]["directional_accuracy"] == pytest.approx(0.60)
+        assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
+        assert quant_profile["criteria"]["directional_accuracy"] is True
+
     def test_quant_validation_failure_updates_reasoning(self,
                                                         sample_forecast_bundle,
                                                         sample_market_data,
@@ -650,6 +827,31 @@ class TestTimeSeriesSignalGenerator:
         btc_profile = btc_signal.provenance.get('quant_validation')
         assert btc_profile is not None
         assert btc_profile['status'] in ('FAIL', 'SKIPPED')
+
+    def test_lob_cost_model_used_when_depth_available(self):
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.1,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            cost_model={
+                "lob": {
+                    "enabled": True,
+                    "levels": 3,
+                    "tick_size_bps": 1.0,
+                    "alpha": 0.3,
+                    "max_exhaust_levels": 5,
+                    "default_order_value": 10000.0,
+                    "depth_profiles": {"US_EQUITY": {"depth_notional": 50000.0, "half_spread_bps": 1.0}},
+                }
+            },
+        )
+        market_data = pd.DataFrame({"Bid": [99.5], "Ask": [100.5], "Depth": [75000.0]})
+        friction = generator._estimate_roundtrip_friction(
+            ticker="AAPL",
+            market_data=market_data,
+        )
+        assert friction["roundtrip_cost_fraction"] >= 0
+        assert friction["source"] in {"lob_sim", "bid_ask"}
 
 
 class TestTimeSeriesSignal:

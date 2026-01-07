@@ -17,9 +17,9 @@ signal_routing:
 
   # Time Series signal generation thresholds (production defaults)
   time_series:
-    confidence_threshold: 0.55  # Production baseline
-    min_expected_return: 0.003  # Production baseline (re-tighten after research)
-    max_risk_score: 0.7         # Maximum risk score (70%)
+    confidence_threshold: 0.50  # Lowered from 0.55 to allow more trades through
+    min_expected_return: 0.001  # Lowered from 0.003 to align with cost model fixes
+    max_risk_score: 0.8         # Raised from 0.7 to allow higher volatility trades
     use_volatility_filter: true # Filter signals based on volatility
     # Cost/uncertainty gating for Time Series signals.
     # - default_roundtrip_cost_bps is a *prior* used only when bid/ask or synthetic microstructure
@@ -27,12 +27,12 @@ signal_routing:
     # - min_signal_to_noise is an optional CI-based SNR gate (0 disables).
     cost_model:
       default_roundtrip_cost_bps:
-        US_EQUITY: 10.0
-        INTL_EQUITY: 15.0
-        FX: 5.0
-        CRYPTO: 25.0
-        INDEX: 10.0
-        UNKNOWN: 10.0
+        US_EQUITY: 3.2  # Aligned to execution: 2x half_spread_bps (0.8*2=1.6) + impact buffer
+        INTL_EQUITY: 6.0  # Aligned to execution: 2x half_spread_bps (1.5*2=3) + impact buffer
+        FX: 2.0  # Aligned to execution: 2x half_spread_bps (0.2*2=0.4) + impact buffer
+        CRYPTO: 12.0  # Aligned to execution: 2x half_spread_bps (3.0*2=6) + impact buffer
+        INDEX: 2.0  # Aligned to execution: 2x half_spread_bps (0.5*2=1) + impact buffer
+        UNKNOWN: 5.0  # Conservative default
       min_signal_to_noise: 0.0
     # Production per-ticker overrides (aligned to proposals after review).
     per_ticker:
@@ -42,12 +42,13 @@ signal_routing:
       "MSFT":
         confidence_threshold: 0.50
         min_expected_return: 0.001
+        max_risk_score: 0.80
       "MTN":
         confidence_threshold: 0.50
         min_expected_return: 0.001
       "AAPL":
-        confidence_threshold: 0.65
-        min_expected_return: 0.010
+        confidence_threshold: 0.55
+        min_expected_return: 0.001
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.

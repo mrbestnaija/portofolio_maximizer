@@ -68,3 +68,18 @@ extraction:
     assert calls[0]["timeout"] == 99
     assert calls[0]["interval"] == "1wk"
 
+
+def test_yfinance_extractor_respects_env_interval_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "yfinance_config.yml"
+    config_path.write_text(
+        """
+extraction:
+  data:
+    interval: "1d"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("YFINANCE_INTERVAL", "1h")
+    extractor = YFinanceExtractor(storage=None, config_path=str(config_path))
+    assert extractor.interval == "1h"

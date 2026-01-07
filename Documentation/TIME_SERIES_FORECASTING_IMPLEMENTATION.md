@@ -6,6 +6,13 @@
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
 **Baseline**: SAMOSSA is the canonical Time Series baseline for regression metrics and ensemble comparisons; SARIMAX is retained as a secondary candidate/fallback when SAMOSSA metrics are unavailable.
 **Sentiment overlays**: Planned but dormant until profitability beats benchmarks and quant gates clear; see `Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md` and `config/sentiment.yml` (disabled, strict gating) for future integration notes.
+**Project-wide optimization roadmap (2026-01)**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the sequenced plan to make TS ↔ execution ↔ reporting horizon-consistent and bar-aware.
+**2026-01-06 (Roadmap Phase 2 + 3.1)**:
+- `scripts/run_auto_trader.py` is now bar-aware (skips repeated cycles on the same bar; optional persisted state via `--persist-bar-state`).
+- `models.time_series_signal_generator.TimeSeriesSignalGenerator` now uses the horizon-end forecast value (`forecast.iloc[-1]`) for `expected_return` and `target_price` (unit test added in `tests/models/test_time_series_signal_generator.py`).
+**2026-01-07 (Roadmap Phase 3.2 + 9.1)**:
+- `execution.paper_trading_engine.PaperTradingEngine` time-exit now treats `forecast_horizon` / `max_holding_days` as **bar count** (intraday-safe; daily unchanged).
+- `etl.database_manager.DatabaseManager.get_performance_summary` supports `run_id` filtering; `scripts/run_auto_trader.py` reports run-local PF/WR and keeps lifetime metrics under `profitability.lifetime`.
 **Recent changes (2025-12-19)**: Synthetic mode adds profiles, t-copula/tail-scale shocks, macro events, intraday seasonality, txn-cost proxies, richer features/calibration persistence, and a refreshed `latest` pointer (`syn_6c850a7d0b99`), while pipeline/backtests continue to honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback. A cache/log sanitizer (`scripts/sanitize_cache_and_logs.py` + cron `sanitize_caches`) keeps artifacts under a 14-day retention by default.
 
 ### Forecasting + ETL statistical hardening (2025-12-19)

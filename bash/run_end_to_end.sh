@@ -23,13 +23,15 @@ TRADER_LOG="$LOG_DIR/auto_trader_${RUN_STAMP}.log"
 TICKERS="${TICKERS:-AAPL,MSFT, GOOGL}"
 START_DATE="${START_DATE:-2015-01-01}" 
 END_DATE="${END_DATE:-2024-01-01}"
-LOOKBACK_DAYS="${LOOKBACK_DAYS:-180}"
+LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"
 FORECAST_HORIZON="${FORECAST_HORIZON:-10}"
 INITIAL_CAPITAL="${INITIAL_CAPITAL:-25000}"
 PIPELINE_EXECUTION_MODE="${PIPELINE_EXECUTION_MODE:-auto}"
 PIPELINE_USE_CV="${PIPELINE_USE_CV:-0}"
 ENABLE_LLM="${ENABLE_LLM:-0}"
 LLM_MODEL="${LLM_MODEL:-deepseek-coder:6.7b-instruct-q4_K_M}"
+BACKTEST_LOOKBACK_DAYS="${BACKTEST_LOOKBACK_DAYS:-365}"
+BACKTEST_HORIZON="${BACKTEST_HORIZON:-10}"
 
 echo "=== [1/3] Running ETL pipeline (${PIPELINE_EXECUTION_MODE}) ==="
 PIPE_CMD=(
@@ -68,6 +70,21 @@ if [[ "$HYPEROPT_ROUNDS" != "0" ]]; then
 fi
 
 echo "=== [2/3] Running Auto-Trader ==="
+# Best-effort liquidation of any open paper trades before a new run.
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/liquidate_open_trades.py" --db-path "$ROOT_DIR/data/portfolio_maximizer.db" --pricing-policy neutral >/dev/null 2>&1 || true
+set -e
+
+# Pre-flight horizon-consistent backtest (full 365d) to log expectations.
+BACKTEST_REPORT="$ROOT_DIR/reports/horizon_backtest_${RUN_STAMP}.json"
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/run_horizon_consistent_backtest.py" \
+  --tickers "$TICKERS" \
+  --lookback-days "$BACKTEST_LOOKBACK_DAYS" \
+  --forecast-horizon "$BACKTEST_HORIZON" \
+  --report-path "$BACKTEST_REPORT" >/dev/null 2>&1 || true
+set -e
+
 TRADER_CMD=(
   "$PYTHON_BIN" "$TRADER_SCRIPT"
   --tickers "$TICKERS"

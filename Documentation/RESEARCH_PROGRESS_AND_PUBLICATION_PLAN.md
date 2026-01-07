@@ -8,6 +8,8 @@ This document tracks the Portfolio Maximizer project as a scientific research ar
 
 It complements the implementation-focused documents in `Documentation/` (e.g. `QUANTIFIABLE_SUCCESS_CRITERIA.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `SYSTEM_STATUS_2025-10-22.md`) by giving a single, publication-oriented view. For current system status and verification evidence, see `Documentation/arch_tree.md` and `Documentation/implementation_checkpoint.md`.
 
+**Project-wide optimization roadmap (2026-01)**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the sequenced engineering plan that turns current “live/paper” runs into bar-aware, horizon-consistent experiments with auditable cost and performance metrics.
+
 ---
 
 ## 0. How To Use This Document (Context + Rigor)

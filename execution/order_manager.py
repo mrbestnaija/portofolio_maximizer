@@ -421,9 +421,9 @@ class OrderManager:
         executed_price = placement.avg_price or request.current_price
         total_value = executed_price * placement.filled_volume
         mid_price = placement.mid_price if placement.mid_price is not None else request.mid_price
-        mid_slippage_bps = None
+        mid_slippage_bps = placement.mid_slippage_bps
         try:
-            if mid_price and mid_price > 0 and executed_price is not None:
+            if mid_slippage_bps is None and mid_price and mid_price > 0 and executed_price is not None:
                 mid_slippage_bps = ((executed_price - mid_price) / mid_price) * 1e4
         except Exception:
             mid_slippage_bps = None

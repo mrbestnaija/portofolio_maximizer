@@ -11,6 +11,7 @@
 This file is a chronological engineering/evidence ledger. Use it to trace *what changed* and *what evidence exists*, not as the canonical “current status”.
 
 - Canonical current snapshot + reproducible verification commands: `Documentation/PROJECT_STATUS.md`
+- Sequenced TS ↔ execution ↔ reporting improvements (2026-01): `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`
 - Institutional documentation/evidence standards: `Documentation/CORE_PROJECT_DOCUMENTATION.md`
 - Metric definitions (math): `Documentation/METRICS_AND_EVALUATION.md`
 - Research framing and experimental protocols: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`
@@ -37,6 +38,52 @@ The nightly validation wrapper `schedule_backfill.bat` is registered in Windows 
 - `logs/brutal/results_20260103_220403/reports/final_report.md` (42/42 stages passed; quant health GREEN)
 - `logs/brutal/results_20260103_220403/logs/pipeline_execution.log` (synthetic pipeline run; checkpoint + DB mirror sync)
 - `logs/brutal/results_20260103_220403/logs/monitoring_run.log` (monitoring reported DEGRADED due to latency benchmark + missing backtest inputs)
+
+**Verification (2026-01-06)**: Roadmap Phase 2 + 3.1 commenced (bar-aware trader + horizon-end TS target). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py models/time_series_signal_generator.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_bar_aware_trading_loop.py tests/models/test_time_series_signal_generator.py tests/models/test_signal_router.py tests/execution/test_paper_trading_engine.py tests/integration/test_time_series_signal_integration.py`
+Changes: `scripts/run_auto_trader.py` now skips repeated cycles on the same bar (optional persisted bar-state); `models/time_series_signal_generator.py` uses horizon-end forecast value (`forecast.iloc[-1]`) for `expected_return` and `target_price`.
+
+**Verification (2026-01-07)**: Roadmap Phase 3.2 + 9.1 commenced (bar-count lifecycle exits + run-local reporting). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile execution/paper_trading_engine.py scripts/run_auto_trader.py etl/database_manager.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/execution/test_paper_trading_engine.py tests/etl/test_database_manager_schema.py`
+Changes: `execution.paper_trading_engine.PaperTradingEngine` time-exit now counts bars (intraday-safe) using `forecast_horizon`/`max_holding_days`; `etl.database_manager.DatabaseManager.get_performance_summary` accepts `run_id` and `scripts/run_auto_trader.py` reports run-local PF/WR while preserving lifetime metrics under `profitability.lifetime`.
+
+**Verification (2026-01-07)**: Roadmap Phase 1.1 commenced (baseline snapshot capture helper). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/capture_baseline_snapshot.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_capture_baseline_snapshot.py`
+Change: Added `scripts/capture_baseline_snapshot.py` to copy baseline configs/code and snapshot key artefacts (run_summary last record, execution_log tail, quant summary, dashboard JSON) under `reports/baselines/` with a manifest for phase-by-phase comparisons.
+
+**Verification (2026-01-07)**: Roadmap Phase 2.2 commenced (intraday interval override + interval-aware lookback windows). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py etl/yfinance_extractor.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_intraday_fallback_window.py tests/etl/test_yfinance_config_loading.py tests/scripts/test_bar_aware_trading_loop.py`
+Changes: `etl.yfinance_extractor.YFinanceExtractor` respects `YFINANCE_INTERVAL`; `scripts/run_auto_trader.py` accepts `--yfinance-interval` and `_prepare_market_window` uses a 30-day minimum lookback for intraday intervals instead of enforcing 365 days (prevents huge intraday fetch windows).
+
+**Verification (2026-01-07)**: Roadmap Phase 3.1 backtest step commenced (horizon-consistent walk-forward harness). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/run_horizon_consistent_backtest.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_horizon_consistent_backtest.py`
+Change: Added `scripts/run_horizon_consistent_backtest.py` (calls `backtesting.candidate_simulator.simulate_candidate`) to replay TS entry/exit/evaluation on a fixed historical window with horizon-consistent semantics and emit a JSON report under `reports/`.
+
+**Verification (2026-01-07)**: Roadmap Phase 4–6 commenced (confidence + diagnostics refactor; forecast-edge quant validation). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile models/time_series_signal_generator.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/models/test_time_series_signal_generator.py`
+Changes: `models/time_series_signal_generator.py` confidence now accounts for net edge after costs + CI/SNR and emits `provenance.diagnostics` (with optional `why_low_quality` when score is low); quant validation supports `validation_mode=forecast_edge` using rolling-window CV regression metrics and `config/quant_success_config.yml` now enables that mode with baseline/threshold wiring.
+
+**Verification (2026-01-07)**: Roadmap Phase 7–8 commenced (cost model alignment + deterministic LOB fallback). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile execution/paper_trading_engine.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/execution/test_paper_trading_engine.py`
+Changes: `execution/paper_trading_engine.py` now passes `asset_class` into `simulate_market_order_fill` and treats missing/zero Depth/Spread as `None` so LOB depth profiles can drive deterministic fills; transaction costs are no longer double-counted when synthetic microstructure `TxnCostBps` is present; default paper slippage/costs are tightened to align with bps-based routing priors.
+
+**Verification (2026-01-07)**: Roadmap Phase 9.2 commenced (persist forecast snapshots + regression backfill so forecaster health is run-fresh). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py etl/database_manager.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_forecast_persistence.py tests/etl/test_database_manager_schema.py`
+Changes: `scripts/run_auto_trader.py` persists horizon-end forecast snapshots per bar (ensemble/SAMOSSA/SARIMAX) via `DatabaseManager.save_forecast` and backfills per-row `regression_metrics` once realised prices are available; `etl/database_manager.py` adds forecast fetch/update helpers to support lagged evaluation so `get_forecast_regression_summary` is no longer stale across runs.
+
+**Verification (2026-01-07)**: Roadmap Phase 10 monitoring scaffolding (run summaries + baseline comparison). Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/summarize_latest_run.py scripts/compare_baseline_snapshots.py scripts/capture_baseline_snapshot.py`
+- `./simpleTrader_env/bin/python scripts/summarize_latest_run.py`
+- `./simpleTrader_env/bin/python scripts/compare_baseline_snapshots.py --a reports/baselines/20260107_055707_pre_phase10 --b reports/baselines/20260107_161604_post_phase10`
+Changes: Added run-scoped summarizer for `run_summary.jsonl` + `execution_log.jsonl`, baseline snapshot diff helper, and horizon-backtest capture in snapshots so Phase 10 feedback loops have first-class artefacts.
 
 **Recent changes (2025-12-19)**: Synthetic generator adds profile support, t-copula/tail-scale shocks, macro regime events, intraday seasonality, size-aware slippage/txn-cost outputs, and richer feature/calibration persistence; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (features + calibration). GPU preference plumbing (`PIPELINE_DEVICE`, `--prefer-gpu`) remains in place; cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`, cron `sanitize_caches`) enforces 14-day retention by default.
 

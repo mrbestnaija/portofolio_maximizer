@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 
 
 Side = Literal["BUY", "SELL"]
@@ -14,6 +14,9 @@ class LOBConfig:
     tick_size_bps: float = 1.0
     alpha: float = 0.8
     max_exhaust_levels: int = 25
+    default_order_value: float = 10_000.0
+    depth_profiles: Optional[Dict[str, Dict[str, float]]] = None
+    tail_depth_multiplier: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -32,22 +35,62 @@ class LOBFill:
         return ((self.vwap_price - self.mid_price) / self.mid_price) * 1e4
 
 
+def _resolve_profile(
+    cfg: LOBConfig,
+    asset_class: Optional[str],
+) -> Dict[str, float]:
+    if not cfg.depth_profiles or not asset_class:
+        return {}
+    key = asset_class.upper()
+    profile = cfg.depth_profiles.get(key) or cfg.depth_profiles.get(key.lower())
+    if not isinstance(profile, dict):
+        return {}
+    return {k: float(v) for k, v in profile.items() if v is not None}
+
+
 def simulate_market_order_fill(
     *,
     side: Side,
     mid_price: float,
-    half_spread: float,
-    depth_notional: float,
-    shares: float,
+    half_spread: Optional[float] = None,
+    depth_notional: Optional[float] = None,
+    shares: Optional[float] = None,
+    order_notional: Optional[float] = None,
     baseline_slippage: float = 0.0,
+    asset_class: Optional[str] = None,
     config: Optional[LOBConfig] = None,
 ) -> LOBFill:
     cfg = config or LOBConfig()
-    requested = float(shares or 0.0)
     mid = float(mid_price or 0.0)
-    if requested <= 0 or mid <= 0:
+    if mid <= 0:
         return LOBFill(
-            requested_shares=max(0.0, requested),
+            requested_shares=0.0,
+            vwap_price=mid,
+            mid_price=mid,
+            start_price=mid,
+            levels_consumed=0,
+            exhausted=False,
+        )
+
+    profile = _resolve_profile(cfg, asset_class)
+    resolved_half_spread = half_spread
+    if resolved_half_spread is None:
+        if "half_spread_bps" in profile:
+            resolved_half_spread = (mid * profile["half_spread_bps"]) / 1e4
+        else:
+            resolved_half_spread = 0.0
+    depth_total = float(depth_notional) if depth_notional is not None else float(profile.get("depth_notional", 0.0))
+
+    order_value = order_notional
+    if order_value is None and shares is not None:
+        order_value = float(shares) * mid
+    if order_value is None:
+        order_value = float(profile.get("order_value", cfg.default_order_value))
+
+    requested = float(shares) if shares is not None else float(order_value / mid) if mid > 0 else 0.0
+    if requested <= 0:
+        return LOBFill(
+            requested_shares=0.0,
             vwap_price=mid,
             mid_price=mid,
             start_price=mid,
@@ -62,7 +105,7 @@ def simulate_market_order_fill(
     if tick <= 0:
         tick = max(1e-9, mid * 1e-4)
 
-    half_spread_abs = abs(float(half_spread or 0.0))
+    half_spread_abs = abs(float(resolved_half_spread or 0.0))
     baseline_abs = abs(float(baseline_slippage or 0.0))
 
     if side == "BUY":
@@ -71,7 +114,6 @@ def simulate_market_order_fill(
         start_price = mid - half_spread_abs - baseline_abs
     start_price = max(start_price, tick)
 
-    depth_total = max(0.0, float(depth_notional or 0.0))
     if depth_total <= 0:
         return LOBFill(
             requested_shares=requested,
@@ -107,8 +149,8 @@ def simulate_market_order_fill(
 
     exhausted = remaining > 0
     if exhausted:
-        sweep_levels = max(levels, int(cfg.max_exhaust_levels))
-        px = start_price + sweep_levels * tick if side == "BUY" else max(tick, start_price - sweep_levels * tick)
+        tail_levels = max(levels, int(cfg.max_exhaust_levels * max(1.0, float(cfg.tail_depth_multiplier))))
+        px = start_price + tail_levels * tick if side == "BUY" else max(tick, start_price - tail_levels * tick)
         total_cost += remaining * px
         remaining = 0.0
         levels_consumed = max(levels_consumed, levels)

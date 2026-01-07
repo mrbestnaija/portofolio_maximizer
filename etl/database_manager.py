@@ -1973,6 +1973,14 @@ class DatabaseManager:
         if has_synthetic and len([s for s in sources if s and s != "synthetic"]) > 0:
             origin = "mixed"
 
+        last_run_provenance_raw = self.get_metadata("last_run_provenance")
+        last_run_provenance = None
+        if last_run_provenance_raw:
+            try:
+                last_run_provenance = json.loads(last_run_provenance_raw)
+            except Exception:
+                last_run_provenance = last_run_provenance_raw
+
         return {
             "origin": origin,
             "ohlcv_sources": sources,
@@ -1980,6 +1988,8 @@ class DatabaseManager:
             "synthetic_dataset_ids": synthetic_dataset_ids,
             "profitability_proof": self.get_metadata("profitability_proof"),
             "profitability_proof_reason": self.get_metadata("profitability_proof_reason"),
+            "last_run_provenance": last_run_provenance,
+            "db_path": str(self.db_path),
         }
 
     def save_latency_metrics(
@@ -2182,6 +2192,87 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save forecast: %s", safe_error)
             return -1
+
+    def get_forecasts(
+        self,
+        ticker: str,
+        *,
+        model_types: Optional[list[str]] = None,
+        limit: int = 200,
+    ) -> list[Dict[str, Any]]:
+        """Fetch stored forecast rows for a ticker (newest first by default)."""
+        ticker = str(ticker or "")
+        if not ticker:
+            return []
+        types = [str(t).upper() for t in (model_types or []) if t]
+        params: list[Any] = [ticker]
+        where = "ticker = ?"
+        if types:
+            placeholders = ", ".join(["?"] * len(types))
+            where += f" AND model_type IN ({placeholders})"
+            params.extend(types)
+        params.append(int(limit))
+        try:
+            cursor = self.cursor.execute(
+                f"""
+                SELECT id, ticker, forecast_date, model_type, forecast_horizon,
+                       forecast_value, regression_metrics
+                FROM time_series_forecasts
+                WHERE {where}
+                ORDER BY forecast_date DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as exc:  # pragma: no cover - defensive
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to fetch forecasts for %s: %s", ticker, safe_error)
+            return []
+
+    def update_forecast_regression_metrics(
+        self,
+        forecast_id: int,
+        regression_metrics: Dict[str, Any],
+    ) -> bool:
+        """Update regression_metrics for an existing forecast row."""
+        import json
+
+        try:
+            forecast_id_int = int(forecast_id)
+        except Exception:
+            return False
+        try:
+            payload = json.dumps(regression_metrics or {})
+        except Exception:
+            payload = json.dumps({})
+
+        def _execute_update() -> bool:
+            self.cursor.execute(
+                """
+                UPDATE time_series_forecasts
+                SET regression_metrics = ?
+                WHERE id = ?
+                """,
+                (payload, forecast_id_int),
+            )
+            self.conn.commit()
+            return True
+
+        try:
+            return _execute_update()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            if self._recover_sqlite_failure(exc, context="update_forecast_regression_metrics"):
+                try:
+                    return _execute_update()
+                except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc2:
+                    safe_error = sanitize_error(exc2)
+                    logger.error("Retry failed to update forecast metrics: %s", safe_error)
+                    return False
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to update forecast metrics: %s", safe_error)
+            return False
 
     # ------------------------------------------------------------------
     # Forecast monitoring helpers
@@ -2620,8 +2711,12 @@ class DatabaseManager:
             logger.error("Failed to load best strategy config: %s", safe_error)
             return None
     
-    def get_performance_summary(self, start_date: Optional[str] = None,
-                               end_date: Optional[str] = None) -> Dict:
+    def get_performance_summary(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> Dict:
         """
         Get quantifiable performance summary.
         
@@ -2646,6 +2741,9 @@ class DatabaseManager:
         """
         
         params = []
+        if run_id:
+            query += " AND run_id = ?"
+            params.append(run_id)
         if start_date:
             query += " AND trade_date >= ?"
             params.append(start_date)

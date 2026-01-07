@@ -8,6 +8,8 @@
 **Status**: Ready for Implementation  
 **Priority**: **CRITICAL** - Based on log analysis and system requirements
 
+**Note (2026-01)**: For the current, focused sequencing to fix TS ↔ execution ↔ reporting issues observed in live/paper runs (bar-aware loop, horizon consistency, confidence/diagnostics, quant gating, cost model alignment), follow `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`.
+
 ---
 
 ## 🔄 2025-12-03 Delta (diagnostic mode + invariants)

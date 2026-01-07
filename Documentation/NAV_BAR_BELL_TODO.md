@@ -7,6 +7,8 @@
 - [ ] Preserve existing **Taleb barbell shell** (`config/barbell.yml`, `risk/barbell_policy.py`) and add NAV/risk-budget logic only as an *outer* layer.
 - [ ] Avoid Medallion-style HFT; target **daily / multi-day horizons** with NAV-based scaling and modest gross leverage.
 
+**Project-wide sequencing**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the prerequisite TS horizon + execution realism + reporting fixes that should be completed before promoting NAV allocator work to production.
+
 ---
 
 ## 1. NAV Tracking & Exposure Surface

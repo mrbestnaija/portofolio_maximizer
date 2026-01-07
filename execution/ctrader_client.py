@@ -586,6 +586,17 @@ class CTraderClient:
         status = payload.get("status", "UNKNOWN")
         filled = float(payload.get("filledVolume", 0.0))
         avg_price = payload.get("averagePrice")
+        mid_price = payload.get("midPrice") or payload.get("mid_price")
+        bid_px = payload.get("bestBidPrice") or payload.get("bid")
+        ask_px = payload.get("bestAskPrice") or payload.get("ask")
+        try:
+            bid_f = float(bid_px) if bid_px is not None else None
+            ask_f = float(ask_px) if ask_px is not None else None
+        except Exception:
+            bid_f = None
+            ask_f = None
+        if mid_price is None and bid_f is not None and ask_f is not None and ask_f > bid_f > 0:
+            mid_price = (bid_f + ask_f) / 2.0
 
         if not order_id:
             raise CTraderOrderError("cTrader response missing order identifier")
@@ -599,14 +610,23 @@ class CTraderClient:
         )
 
         submitted_at = datetime.utcnow()
+        mid_slippage_bps = None
+        try:
+            if mid_price is not None and avg_price is not None:
+                mid_f = float(mid_price)
+                px_f = float(avg_price)
+                if mid_f > 0:
+                    mid_slippage_bps = ((px_f - mid_f) / mid_f) * 1e4
+        except Exception:
+            mid_slippage_bps = None
         return OrderPlacement(
             order_id=order_id,
             status=status,
             filled_volume=filled,
             avg_price=float(avg_price) if avg_price is not None else None,
             submitted_at=submitted_at,
-            mid_price=None,
-            mid_slippage_bps=None,
+            mid_price=float(mid_price) if mid_price is not None else None,
+            mid_slippage_bps=mid_slippage_bps,
             raw_response=payload,
         )
 

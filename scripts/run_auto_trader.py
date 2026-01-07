@@ -14,6 +14,7 @@ from pathlib import Path
 import atexit
 import logging
 import os
+import re
 import site
 import sys
 import time
@@ -21,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
+import numpy as np
 import pandas as pd
 import yaml
 import json
@@ -54,11 +56,14 @@ except Exception:  # pragma: no cover - optional path
 logger = logging.getLogger(__name__)
 AI_COMPANION_CONFIG_PATH = ROOT_PATH / "config" / "ai_companion.yml"
 DASHBOARD_DATA_PATH = ROOT_PATH / "visualizations" / "dashboard_data.json"
-MIN_LOOKBACK_DAYS = 365
+MIN_LOOKBACK_DAYS_DAILY = 365
+MIN_LOOKBACK_DAYS_INTRADAY = 30
 MIN_SERIES_POINTS = 120
 MIN_QUALITY_SCORE = 0.50
 EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
+RUN_SUMMARY_LOG_PATH = ROOT_PATH / "logs" / "automation" / "run_summary.jsonl"
 _NO_TRADE_WINDOWS = None
+DEFAULT_BAR_STATE_PATH = ROOT_PATH / "logs" / "automation" / "bar_state.json"
 
 UTC = timezone.utc
 
@@ -69,6 +74,108 @@ def _configure_logging(verbose: bool) -> None:
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+
+
+def _env_flag(name: str) -> Optional[bool]:
+    """Parse common truthy/falsey environment flags; returns None when unset."""
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    val = raw.strip().lower()
+    if val in {"1", "true", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """Return the last observed bar timestamp for a ticker frame."""
+    if frame is None or frame.empty:
+        return None
+    try:
+        idx = pd.DatetimeIndex(frame.index)
+        if idx.empty:
+            return None
+        return pd.Timestamp(idx[-1])
+    except Exception:
+        try:
+            ts = pd.to_datetime(frame.index[-1], errors="coerce")
+            return None if ts is pd.NaT else pd.Timestamp(ts)
+        except Exception:
+            return None
+
+
+def _format_bar_timestamp(ts: pd.Timestamp) -> str:
+    if ts is None or ts is pd.NaT:  # type: ignore[truthy-bool]
+        return ""
+    try:
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert(UTC)
+    except Exception:
+        pass
+    try:
+        return ts.to_pydatetime().isoformat()
+    except Exception:
+        return str(ts)
+
+
+class BarTimestampGate:
+    """Tracks last-seen bars per ticker to keep trading bar-aware."""
+
+    def __init__(self, *, state_path: Path = DEFAULT_BAR_STATE_PATH, persist: bool = False) -> None:
+        self.state_path = Path(state_path)
+        self.persist = bool(persist)
+        self._last_seen: Dict[str, str] = {}
+        if self.persist:
+            self._load()
+
+    def _load(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            raw = json.loads(self.state_path.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        payload = raw.get("tickers") if isinstance(raw.get("tickers"), dict) else raw
+        if not isinstance(payload, dict):
+            return
+        cleaned: Dict[str, str] = {}
+        for key, value in payload.items():
+            if not key:
+                continue
+            if isinstance(value, str) and value.strip():
+                cleaned[str(key).upper()] = value.strip()
+        self._last_seen = cleaned
+
+    def _save(self) -> None:
+        if not self.persist:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": datetime.now(UTC).isoformat(),
+                "tickers": dict(sorted(self._last_seen.items())),
+            }
+            self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            logger.debug("Unable to persist bar-state to %s", self.state_path, exc_info=True)
+
+    def check(self, ticker: str, bar_ts: pd.Timestamp) -> Tuple[bool, Optional[str], str]:
+        """
+        Return (is_new_bar, previous_bar_timestamp, current_bar_timestamp).
+        """
+        symbol = (ticker or "").upper()
+        current = _format_bar_timestamp(bar_ts)
+        previous = self._last_seen.get(symbol)
+        if previous == current and current:
+            return False, previous, current
+        if symbol and current:
+            self._last_seen[symbol] = current
+            self._save()
+        return True, previous, current
 
 
 def _initialize_llm_generator(model: str) -> Optional[LLMSignalGenerator]:
@@ -175,6 +282,98 @@ def _log_execution_event(run_id: str, cycle: int, record: Dict[str, Any]) -> Non
         logger.debug("Unable to log execution event for %s", record.get("ticker"))
 
 
+def _log_run_summary(record: Dict[str, Any]) -> None:
+    """Persist a single-line run summary for quick auditing and dashboards."""
+    payload = dict(record or {})
+    payload.setdefault("logged_at", datetime.now(UTC).isoformat())
+    try:
+        RUN_SUMMARY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with RUN_SUMMARY_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        logger.debug("Unable to append run summary log", exc_info=True)
+
+
+def _build_action_plan(
+    pnl_dollars: float,
+    profit_factor: float,
+    win_rate: float,
+    realized_trades: int,
+    cash_ratio: Optional[float],
+    forecaster_health: Dict[str, Any],
+    quant_health: Dict[str, Any],
+) -> list[str]:
+    """Translate profitability/liquidity/forecast health into next-step prompts."""
+    actions: list[str] = []
+
+    try:
+        realized_trades_n = int(realized_trades or 0)
+    except (TypeError, ValueError):
+        realized_trades_n = 0
+
+    if realized_trades_n <= 0:
+        # With no realized exits, profit_factor and win_rate are not meaningful yet.
+        if pnl_dollars < 0:
+            actions.append(
+                "PnL negative (cost/unrealized drag); tighten sizing and ensure exits trigger before judging edge."
+            )
+        else:
+            actions.append(
+                "No realized trades yet; extend run or trigger lifecycle exits before judging PF/WR."
+            )
+    else:
+        if pnl_dollars < 0 or (isinstance(profit_factor, (int, float)) and profit_factor < 1.0):
+            actions.append(
+                "Tighten position sizing and review signal thresholds; profitability below break-even."
+            )
+        elif isinstance(profit_factor, (int, float)) and profit_factor >= 1.2 and pnl_dollars > 0:
+            actions.append(
+                "Profitability trending positive; keep current risk budget and monitor for drift."
+            )
+
+    if cash_ratio is not None:
+        if cash_ratio < 0.10:
+            actions.append(
+                f"Liquidity low (cash ratio {cash_ratio:.1%}); trim/scale exits to free capital."
+            )
+        elif cash_ratio > 0.60 and pnl_dollars > 0:
+            actions.append(
+                f"High idle cash ({cash_ratio:.1%}); redeploy gradually if signals stay healthy."
+            )
+
+    status = forecaster_health.get("status") if isinstance(forecaster_health, dict) else {}
+    metrics = forecaster_health.get("metrics") if isinstance(forecaster_health, dict) else {}
+    thresholds = forecaster_health.get("thresholds") if isinstance(forecaster_health, dict) else {}
+    rmse = (metrics.get("rmse") or {}) if isinstance(metrics, dict) else {}
+
+    if isinstance(status, dict):
+        if status.get("profit_factor_ok") is False or status.get("win_rate_ok") is False:
+            actions.append(
+                "Forecast-driven hit-rate below target; rerun hyperopt or tighten quant validation."
+            )
+        if status.get("rmse_ok") is False:
+            ratio = rmse.get("ratio")
+            max_ratio = thresholds.get("rmse_ratio_max") if isinstance(thresholds, dict) else None
+            actions.append(
+                f"Model drift detected (RMSE ratio {ratio} > {max_ratio}); retrain or refresh features."
+            )
+
+    if isinstance(quant_health, dict):
+        fail_frac = quant_health.get("fail_fraction")
+        max_fail = quant_health.get("max_fail_fraction")
+        if isinstance(fail_frac, (int, float)) and isinstance(max_fail, (int, float)) and fail_frac > max_fail:
+            actions.append(
+                f"Quant validation failing {fail_frac:.2f}>{max_fail:.2f}; pause risky buckets until signals improve."
+            )
+
+    if not actions:
+        actions.append(
+            "Metrics within thresholds; continue current playbook and monitor dashboards."
+        )
+
+    return actions
+
+
 def _llm_signals_ready_for_trading(
     tracking_path: Path | None = None,
 ) -> bool:
@@ -244,23 +443,42 @@ def _llm_signals_ready_for_trading(
 
 def _split_ticker_frame(data: pd.DataFrame, ticker: str) -> Optional[pd.DataFrame]:
     """Extract a single ticker slice from combined OHLCV data."""
+    frames = _build_ticker_frame_map(data, [ticker])
+    return frames.get(ticker.upper())
+
+
+def _build_ticker_frame_map(data: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
+    """
+    Vectorized ticker slicing: build a map of {TICKER: frame} once per window to
+    avoid repeated per-ticker scans.
+    """
     if data is None or data.empty:
-        return None
+        return {}
+
+    tickers_norm = {t.upper() for t in tickers if t}
+    if not tickers_norm:
+        return {}
 
     ticker_col = "ticker" if "ticker" in data.columns else "Ticker" if "Ticker" in data.columns else None
     if ticker_col is None:
         logger.warning("Ticker column missing; cannot isolate %s", ticker)
-        return None
+        return {}
 
-    mask = data[ticker_col].astype(str).str.upper() == ticker.upper()
-    ticker_frame = data.loc[mask].copy()
-    if ticker_frame.empty:
-        return None
+    ticker_upper = data[ticker_col].astype(str).str.upper()
+    mask = ticker_upper.isin(tickers_norm)
+    if not bool(mask.any()):
+        return {}
 
-    ticker_frame.index = pd.to_datetime(ticker_frame.index)
-    ticker_frame.sort_index(inplace=True)
-    ticker_frame.drop(columns=[ticker_col], inplace=True, errors="ignore")
-    return ticker_frame
+    sliced = data.loc[mask].copy()
+    sliced.index = pd.to_datetime(sliced.index)
+    sliced["_TICKER_UPPER"] = ticker_upper[mask].values
+    sliced.sort_index(inplace=True)
+
+    frames: dict[str, pd.DataFrame] = {}
+    for symbol, frame in sliced.groupby("_TICKER_UPPER", sort=False):
+        trimmed = frame.drop(columns=[ticker_col, "_TICKER_UPPER"], errors="ignore")
+        frames[str(symbol).upper()] = trimmed
+    return frames
 
 
 def _ensure_min_length(frame: pd.DataFrame, min_points: int = MIN_SERIES_POINTS) -> pd.DataFrame:
@@ -290,6 +508,21 @@ def _ensure_min_length(frame: pd.DataFrame, min_points: int = MIN_SERIES_POINTS)
     return padded.tail(min_points)
 
 
+def _is_intraday_interval(interval: Optional[str]) -> bool:
+    if not interval:
+        return False
+    interval = str(interval).strip().lower()
+    # Treat minute/hour intervals as intraday. Everything with day/week/month
+    # semantics is treated as daily-or-slower.
+    return bool(re.match(r"^\\d+\\s*(m|h|min|hour|hours)$", interval)) or (
+        any(token in interval for token in ("m", "h")) and not any(token in interval for token in ("d", "wk", "mo"))
+    )
+
+
+def _effective_min_lookback_days(interval: Optional[str]) -> int:
+    return MIN_LOOKBACK_DAYS_INTRADAY if _is_intraday_interval(interval) else MIN_LOOKBACK_DAYS_DAILY
+
+
 def _prepare_market_window(
     manager: DataSourceManager,
     tickers: List[str],
@@ -297,8 +530,15 @@ def _prepare_market_window(
 ) -> pd.DataFrame:
     """Fetch the latest OHLCV window for all tickers."""
     end_date = datetime.now(UTC).date()
-    start_date = end_date - timedelta(days=max(lookback_days, MIN_LOOKBACK_DAYS))
-    logger.info("Fetching OHLCV window: %s -> %s", start_date, end_date)
+    interval = getattr(getattr(manager, "active_extractor", None), "interval", None)
+    min_lookback_days = _effective_min_lookback_days(interval)
+    start_date = end_date - timedelta(days=max(lookback_days, min_lookback_days))
+    logger.info(
+        "Fetching OHLCV window (interval=%s): %s -> %s",
+        interval or "unknown",
+        start_date,
+        end_date,
+    )
     return manager.extract_ohlcv(
         tickers=tickers,
         start_date=start_date.strftime("%Y-%m-%d"),
@@ -330,6 +570,187 @@ def _generate_time_series_forecast(
 
     current_price = float(close_series.iloc[-1])
     return forecast_bundle, current_price
+
+
+def _extract_forecast_scalar(payload: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return (forecast_value, lower_ci, upper_ci) using horizon-end semantics when available."""
+    if not isinstance(payload, dict) or not payload:
+        return None, None, None
+    series = payload.get("forecast")
+    forecast_value: Optional[float] = None
+    if isinstance(series, pd.Series) and not series.empty:
+        cleaned = series.dropna()
+        if not cleaned.empty:
+            try:
+                forecast_value = float(cleaned.iloc[-1])
+            except Exception:
+                forecast_value = None
+    elif isinstance(series, (int, float)):
+        forecast_value = float(series)
+
+    def _ci_val(key: str) -> Optional[float]:
+        val = payload.get(key)
+        if isinstance(val, pd.Series) and not val.empty:
+            cleaned = val.dropna()
+            if cleaned.empty:
+                return None
+            try:
+                return float(cleaned.iloc[-1])
+            except Exception:
+                return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        return None
+
+    return forecast_value, _ci_val("lower_ci"), _ci_val("upper_ci")
+
+
+def _persist_forecast_snapshots(
+    *,
+    db_manager: DatabaseManager,
+    ticker: str,
+    bar_ts: pd.Timestamp,
+    forecast_bundle: Dict[str, Any],
+) -> None:
+    """Persist horizon-end forecast snapshots so forecaster health is run-fresh."""
+    if not db_manager or not isinstance(forecast_bundle, dict) or not forecast_bundle:
+        return
+    forecast_date = bar_ts.date().isoformat() if hasattr(bar_ts, "date") else str(bar_ts)
+    horizon = int(forecast_bundle.get("horizon") or 0) or None
+
+    ensemble_payload = forecast_bundle.get("ensemble_forecast")
+    samossa_payload = forecast_bundle.get("samossa_forecast")
+    sarimax_payload = forecast_bundle.get("sarimax_forecast")
+
+    for model_type, payload in (
+        ("COMBINED", ensemble_payload),
+        ("SAMOSSA", samossa_payload),
+        ("SARIMAX", sarimax_payload),
+    ):
+        if not isinstance(payload, dict) or not payload:
+            continue
+        forecast_value, lower_ci, upper_ci = _extract_forecast_scalar(payload)
+        if forecast_value is None:
+            continue
+        forecast_data = {
+            "model_type": model_type,
+            "forecast_horizon": int(horizon or forecast_bundle.get("horizon") or 1),
+            "forecast_value": float(forecast_value),
+            "lower_ci": lower_ci,
+            "upper_ci": upper_ci,
+            "model_order": {},
+            "diagnostics": {
+                "ensemble_metadata": forecast_bundle.get("ensemble_metadata") or {},
+                "model_errors": forecast_bundle.get("model_errors") or {},
+            },
+            # regression_metrics will be populated via lagged evaluation.
+            "regression_metrics": forecast_bundle.get("regression_metrics", {}).get(model_type.lower())
+            if isinstance(forecast_bundle.get("regression_metrics"), dict)
+            else None,
+        }
+        try:
+            db_manager.save_forecast(ticker, forecast_date, forecast_data)
+        except Exception:
+            logger.debug("Failed to persist %s forecast snapshot for %s", model_type, ticker, exc_info=True)
+
+
+def _backfill_forecast_regression_metrics(
+    *,
+    db_manager: DatabaseManager,
+    ticker: str,
+    close_series: pd.Series,
+    model_types: Optional[List[str]] = None,
+    max_updates: int = 50,
+) -> int:
+    """
+    Best-effort lagged evaluation of stored horizon-end forecasts.
+
+    When realised prices for (forecast_date + horizon bars) are available in the
+    current close_series window, write a per-forecast regression_metrics payload
+    so forecaster_health is not stale.
+    """
+    if not db_manager or close_series is None or close_series.empty:
+        return 0
+    types = model_types or ["COMBINED", "SAMOSSA"]
+    rows = db_manager.get_forecasts(ticker, model_types=types, limit=500)  # type: ignore[arg-type]
+    if not rows:
+        return 0
+
+    idx = pd.to_datetime(close_series.index, errors="coerce")
+    normalized = pd.DatetimeIndex(idx).normalize()
+    pos_map: Dict[pd.Timestamp, int] = {}
+    for i, ts in enumerate(normalized):
+        if ts is pd.NaT:
+            continue
+        # Keep first occurrence for stability.
+        if ts not in pos_map:
+            pos_map[ts] = i
+
+    updates = 0
+    eps = 1e-9
+    for row in rows:
+        if updates >= int(max_updates):
+            break
+        raw_metrics = row.get("regression_metrics")
+        if isinstance(raw_metrics, str) and '"rmse"' in raw_metrics:
+            continue
+        try:
+            forecast_id = int(row.get("id") or 0)
+        except Exception:
+            continue
+        if forecast_id <= 0:
+            continue
+        try:
+            horizon = int(row.get("forecast_horizon") or 0)
+        except Exception:
+            continue
+        if horizon <= 0:
+            continue
+        try:
+            forecast_value = float(row.get("forecast_value"))
+        except Exception:
+            continue
+        forecast_date = row.get("forecast_date")
+        if not forecast_date:
+            continue
+        try:
+            anchor = pd.to_datetime(forecast_date, errors="coerce").normalize()
+        except Exception:
+            continue
+        if anchor is pd.NaT:
+            continue
+        pos = pos_map.get(anchor)
+        if pos is None:
+            continue
+        target_pos = pos + horizon
+        if target_pos >= len(close_series):
+            continue
+        try:
+            anchor_price = float(close_series.iloc[pos])
+            actual_target = float(close_series.iloc[target_pos])
+        except Exception:
+            continue
+
+        abs_err = abs(forecast_value - actual_target)
+        smape = 2.0 * abs_err / max(abs(actual_target) + abs(forecast_value), eps)
+        direction_pred = float(np.sign(forecast_value - anchor_price))
+        direction_real = float(np.sign(actual_target - anchor_price))
+        dir_acc = 1.0 if direction_pred == direction_real else 0.0
+        metrics = {
+            "rmse": abs_err,
+            "smape": smape,
+            "tracking_error": abs_err,
+            "directional_accuracy": dir_acc,
+            "n_observations": 1,
+            "evaluated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            if db_manager.update_forecast_regression_metrics(forecast_id, metrics):
+                updates += 1
+        except Exception:
+            continue
+
+    return updates
 
 
 def _validate_market_window(validator: DataValidator, data: pd.DataFrame) -> bool:
@@ -465,7 +886,10 @@ def _compute_quality_metrics(frame: pd.DataFrame) -> Dict[str, Any]:
 
     idx = pd.DatetimeIndex(frame.index)
     if len(idx) > 1:
-        inferred = pd.infer_freq(idx)
+        try:
+            inferred = pd.infer_freq(idx)
+        except ValueError:
+            inferred = None
         expected_len = len(pd.date_range(idx[0], idx[-1], freq=inferred or "B"))
         coverage = min(1.0, length / expected_len) if expected_len else 0.0
     else:
@@ -650,6 +1074,25 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     help="Delay between cycles when running continuously.",
 )
 @click.option(
+    "--bar-aware/--no-bar-aware",
+    default=True,
+    show_default=True,
+    help="Only generate/execute signals when a new bar timestamp is observed per ticker.",
+)
+@click.option(
+    "--persist-bar-state",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Persist last-seen bar timestamps for restart continuity.",
+)
+@click.option(
+    "--bar-state-path",
+    default=str(DEFAULT_BAR_STATE_PATH),
+    show_default=True,
+    help="Path to read/write persisted bar-state when enabled.",
+)
+@click.option(
     "--enable-llm",
     is_flag=True,
     default=True,
@@ -667,6 +1110,12 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     is_flag=True,
     help="Enable debug logging.",
 )
+@click.option(
+    "--yfinance-interval",
+    default=None,
+    show_default=False,
+    help="Optional override for yfinance interval (e.g., 1h, 30m, 1d).",
+)
 def main(
     tickers: str,
     include_frontier_tickers: bool,
@@ -675,15 +1124,35 @@ def main(
     initial_capital: float,
     cycles: int,
     sleep_seconds: int,
+    bar_aware: bool,
+    persist_bar_state: bool,
+    bar_state_path: str,
     enable_llm: bool,
     llm_model: str,
     verbose: bool,
+    yfinance_interval: Optional[str] = None,
 ) -> None:
     """Entry point for the automated profit engine."""
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_started_at = datetime.now(UTC)
+    run_id = run_started_at.strftime("%Y%m%d_%H%M%S")
     _configure_logging(verbose)
     companion_config = _load_ai_companion_config()
     _activate_ai_companion_guardrails(companion_config)
+
+    env_bar_aware = _env_flag("BAR_AWARE_TRADING")
+    if env_bar_aware is not None:
+        bar_aware = env_bar_aware
+    env_persist_bar = _env_flag("PERSIST_BAR_STATE")
+    if env_persist_bar is None:
+        env_persist_bar = _env_flag("BAR_AWARE_PERSIST")
+    if env_persist_bar is not None:
+        persist_bar_state = env_persist_bar
+    env_bar_state_path = os.getenv("BAR_STATE_PATH") or os.getenv("BAR_AWARE_STATE_PATH")
+    if env_bar_state_path:
+        bar_state_path = env_bar_state_path
+
+    if yfinance_interval:
+        os.environ["YFINANCE_INTERVAL"] = str(yfinance_interval).strip()
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
     data_source_manager = DataSourceManager()
@@ -821,6 +1290,19 @@ def main(
     equity_points: list[Dict[str, Any]] = [{"t": "start", "v": initial_capital}]
     executed_signals: list[Dict[str, Any]] = []
     quality_records: list[Dict[str, Any]] = []
+    last_dataset_id: Optional[str] = None
+    last_generator_version: Optional[str] = None
+    last_execution_mode: Optional[str] = None
+    bar_gate: Optional[BarTimestampGate] = None
+    if bar_aware:
+        bar_gate = BarTimestampGate(state_path=Path(bar_state_path), persist=persist_bar_state)
+        logger.info(
+            "Bar-aware trading ENABLED (persist=%s, state=%s)",
+            persist_bar_state,
+            Path(bar_state_path),
+        )
+    else:
+        logger.warning("Bar-aware trading DISABLED; loop may trade repeatedly on the same bar.")
 
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
@@ -837,6 +1319,9 @@ def main(
         active_source = data_source_manager.get_active_source()
         synthetic_only = str(os.getenv("SYNTHETIC_ONLY") or "").strip() == "1"
         effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
+        last_dataset_id = window_dataset_id or last_dataset_id
+        last_generator_version = window_generator_version or last_generator_version
+        last_execution_mode = effective_execution_mode
         if cycle == 1:
             try:
                 trading_engine.db_manager.record_run_provenance(
@@ -853,11 +1338,30 @@ def main(
         cycle_results = []
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
+        frames_by_ticker = _build_ticker_frame_map(raw_window, ticker_list)
         for ticker in ticker_list:
-            ticker_frame = _split_ticker_frame(raw_window, ticker)
+            ticker_frame = frames_by_ticker.get(ticker.upper())
             if ticker_frame is None or ticker_frame.empty:
                 logger.warning("No data for %s; skipping.", ticker)
                 continue
+
+            if bar_gate is not None:
+                bar_ts = _extract_last_bar_timestamp(ticker_frame)
+                if bar_ts is not None:
+                    is_new_bar, prev_bar, current_bar = bar_gate.check(ticker, bar_ts)
+                    if not is_new_bar:
+                        skip_report = {
+                            "ticker": ticker,
+                            "status": "SKIPPED_SAME_BAR",
+                            "reason": "same_bar",
+                            "bar_timestamp": current_bar,
+                            "last_processed_bar_timestamp": prev_bar,
+                            "data_source": getattr(data_source_manager.active_extractor, "name", None),
+                        }
+                        cycle_results.append(skip_report)
+                        recent_signals.append(skip_report)
+                        _log_execution_event(run_id, cycle, skip_report)
+                        continue
 
             raw_frame = ticker_frame.copy()
             quality = _compute_quality_metrics(raw_frame)
@@ -927,6 +1431,18 @@ def main(
                 logger.warning("Validation rejected %s window; skipping.", ticker)
                 continue
 
+            # Lagged evaluation of historical forecasts (best-effort).
+            try:
+                updated = _backfill_forecast_regression_metrics(
+                    db_manager=trading_engine.db_manager,
+                    ticker=ticker,
+                    close_series=ticker_frame["Close"].astype(float),
+                )
+                if updated:
+                    logger.debug("Updated %s forecast regression rows for %s", updated, ticker)
+            except Exception:
+                logger.debug("Skipping forecast regression backfill for %s", ticker, exc_info=True)
+
             forecast_bundle, current_price = _generate_time_series_forecast(
                 ticker_frame,
                 forecast_horizon,
@@ -935,6 +1451,19 @@ def main(
             if not forecast_bundle or current_price is None:
                 logger.warning("Forecasting failed for %s; skipping.", ticker)
                 continue
+
+            # Persist forecast snapshots so monitoring health uses fresh data.
+            try:
+                last_bar_ts = _extract_last_bar_timestamp(ticker_frame)
+                if last_bar_ts is not None:
+                    _persist_forecast_snapshots(
+                        db_manager=trading_engine.db_manager,
+                        ticker=ticker,
+                        bar_ts=last_bar_ts,
+                        forecast_bundle=forecast_bundle,
+                    )
+            except Exception:
+                logger.debug("Skipping forecast snapshot persistence for %s", ticker, exc_info=True)
 
             execution_report = _execute_signal(
                 router=signal_router,
@@ -1001,9 +1530,25 @@ def main(
             "or enabling LLM fallback for redundancy."
         )
 
-    perf_summary = trading_engine.get_performance_metrics()
-    win_rate = perf_summary.get("win_rate", 0.0)
-    profit_factor = perf_summary.get("profit_factor", 0.0)
+    run_perf = {}
+    lifetime_perf = {}
+    try:
+        run_perf = trading_engine.db_manager.get_performance_summary(run_id=run_id)
+        lifetime_perf = trading_engine.db_manager.get_performance_summary()
+    except Exception:
+        logger.debug("Skipping performance summary aggregation", exc_info=True)
+    try:
+        win_rate = float(run_perf.get("win_rate", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        win_rate = 0.0
+    try:
+        profit_factor = float(run_perf.get("profit_factor", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        profit_factor = 0.0
+    try:
+        realized_trades = int(run_perf.get("total_trades") or 0)
+    except (TypeError, ValueError):
+        realized_trades = 0
 
     # Compute forecaster health snapshot using shared monitoring thresholds so
     # dashboards, brutal CLIs, and hyperopt all speak the same language.
@@ -1196,6 +1741,73 @@ def main(
         pnl_pct=final_summary["pnl_pct"],
     )
 
+    cash_ratio = None
+    try:
+        total_val = float(final_summary.get("total_value", 0.0))
+        if total_val:
+            cash_ratio = float(final_summary.get("cash", 0.0)) / total_val
+    except Exception:
+        cash_ratio = None
+
+    run_completed_at = datetime.now(UTC)
+    action_plan = _build_action_plan(
+        pnl_dollars=float(final_summary.get("pnl_dollars", 0.0)),
+        profit_factor=float(profit_factor) if isinstance(profit_factor, (int, float)) else 0.0,
+        win_rate=float(win_rate) if isinstance(win_rate, (int, float)) else 0.0,
+        realized_trades=realized_trades,
+        cash_ratio=cash_ratio,
+        forecaster_health=forecaster_health,
+        quant_health=quant_health,
+    )
+    run_summary_record = {
+        "run_id": run_id,
+        "started_at": run_started_at.isoformat(),
+        "ended_at": run_completed_at.isoformat(),
+        "duration_seconds": (run_completed_at - run_started_at).total_seconds(),
+        "tickers": ticker_list,
+        "cycles": cycles,
+        "execution_mode": last_execution_mode,
+        "data_source": data_source_manager.get_active_source(),
+        "synthetic_dataset_id": last_dataset_id,
+        "synthetic_generator_version": last_generator_version,
+        "profitability": {
+            "pnl_dollars": final_summary["pnl_dollars"],
+            "pnl_pct": final_summary["pnl_pct"],
+            "profit_factor": profit_factor,
+            "win_rate": win_rate,
+            "realized_trades": realized_trades,
+            "trades": final_summary["trades"],
+            "lifetime": {
+                "profit_factor": lifetime_perf.get("profit_factor", 0.0) if isinstance(lifetime_perf, dict) else 0.0,
+                "win_rate": lifetime_perf.get("win_rate", 0.0) if isinstance(lifetime_perf, dict) else 0.0,
+                "total_trades": lifetime_perf.get("total_trades", 0) if isinstance(lifetime_perf, dict) else 0,
+                "total_profit": lifetime_perf.get("total_profit", 0.0) if isinstance(lifetime_perf, dict) else 0.0,
+            },
+        },
+        "liquidity": {
+            "cash": final_summary["cash"],
+            "total_value": final_summary["total_value"],
+            "cash_ratio": cash_ratio,
+            "open_positions": len(final_summary["positions"]),
+        },
+        "forecaster": {
+            "metrics": forecaster_health.get("metrics") if isinstance(forecaster_health, dict) else {},
+            "status": forecaster_health.get("status") if isinstance(forecaster_health, dict) else {},
+        },
+        "quant_validation": quant_health,
+        "next_actions": action_plan,
+    }
+    _log_run_summary(run_summary_record)
+    logger.info(
+        "Run summary: PnL $%.2f (%.2f%%) | PF %.2f | Win rate %.1f%% | Cash ratio %s",
+        final_summary["pnl_dollars"],
+        final_summary["pnl_pct"] * 100,
+        float(profit_factor) if isinstance(profit_factor, (int, float)) else 0.0,
+        float(win_rate) * 100 if isinstance(win_rate, (int, float)) else 0.0,
+        f"{cash_ratio:.1%}" if cash_ratio is not None else "n/a",
+    )
+    logger.info("Next actions: %s", " | ".join(action_plan))
+
     # Persist per-ticker latency metrics
     for ticker, lats in signal_router.ticker_latencies.items():
         try:
@@ -1210,6 +1822,35 @@ def main(
             logger.debug("Skipping latency persistence for %s", ticker)
     if final_summary["positions"]:
         logger.info("Open positions: %s", final_summary["positions"])
+
+    try:
+        trading_engine.db_manager.record_run_provenance(
+            run_id=run_id,
+            execution_mode=last_execution_mode,
+            data_source=data_source_manager.get_active_source(),
+            synthetic_dataset_id=last_dataset_id,
+            synthetic_generator_version=last_generator_version,
+            note="auto_trader_complete",
+        )
+    except Exception:
+        logger.debug("Failed to stamp run provenance for dashboard badge", exc_info=True)
+
+    try:
+        prov = trading_engine.db_manager.get_data_provenance_summary()
+        prov.update(
+            {
+                "run_id": run_id,
+                "execution_mode": last_execution_mode,
+                "dataset_id": last_dataset_id,
+                "generator_version": last_generator_version,
+            }
+        )
+        artifact = ROOT_PATH / "logs" / "automation" / f"db_provenance_{run_id}.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(json.dumps(prov, indent=2))
+        logger.info("Wrote DB provenance artifact: %s", artifact)
+    except Exception:
+        logger.debug("Failed to emit DB provenance artifact", exc_info=True)
 
     # Close to flush + sync any WSL mirror back to the canonical DB path.
     try:

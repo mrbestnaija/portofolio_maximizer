@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 from pathlib import Path
 from typing import List
@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from execution.paper_trading_engine import ExecutionResult, PaperTradingEngine, Trade
 from etl.database_manager import DatabaseManager
+from execution.lob_simulator import LOBConfig
 
 
 class DummyValidationResult:
@@ -48,6 +49,10 @@ def make_microstructure_market_data(
             "TxnCostBps": [txn_cost_bps] * points,
         }
     )
+
+
+def make_indexed_market_data(close_price: float, ts: datetime) -> pd.DataFrame:
+    return pd.DataFrame({"Close": [close_price]}, index=pd.DatetimeIndex([ts]))
 
 
 def test_execute_signal_rejected_when_validation_fails():
@@ -190,5 +195,76 @@ def test_lob_execution_price_moves_with_order_size():
     sell_small = engine._simulate_entry_price(100.0, "SELL", 1, market_data=market_data)
     sell_large = engine._simulate_entry_price(100.0, "SELL", 25, market_data=market_data)
     assert sell_large <= sell_small
+
+    db.close()
+
+
+def test_lob_fallback_uses_depth_profiles_when_depth_missing(monkeypatch):
+    """When Depth/Spread are missing, LOB simulator should fall back to configured profiles."""
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=100_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    lob_cfg = LOBConfig(
+        levels=5,
+        tick_size_bps=1.0,
+        alpha=0.3,
+        depth_profiles={
+            "US_EQUITY": {"depth_notional": 100000.0, "half_spread_bps": 0.5},
+            "CRYPTO": {"depth_notional": 30000.0, "half_spread_bps": 5.0},
+        },
+    )
+    monkeypatch.setattr(engine, "_load_lob_config", lambda: lob_cfg)
+
+    market_data = pd.DataFrame({"Close": [100.0]})
+
+    equity_buy = engine._simulate_entry_price(100.0, "BUY", 50, market_data=market_data, ticker="AAPL")
+    crypto_buy = engine._simulate_entry_price(100.0, "BUY", 50, market_data=market_data, ticker="BTC-USD")
+    assert crypto_buy > equity_buy
+
+    equity_sell = engine._simulate_entry_price(100.0, "SELL", 50, market_data=market_data, ticker="AAPL")
+    crypto_sell = engine._simulate_entry_price(100.0, "SELL", 50, market_data=market_data, ticker="BTC-USD")
+    assert crypto_sell < equity_sell
+
+    db.close()
+
+
+def test_time_exit_uses_bar_count_not_calendar_days():
+    """Intraday horizons should exit after N bars even within the same day."""
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.95))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    t0 = datetime(2024, 1, 2, 9, 30)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t1 + timedelta(hours=1)
+
+    entry = {"ticker": "AAPL", "action": "BUY", "confidence": 0.9, "forecast_horizon": 2}
+    opened = engine.execute_signal(entry, make_indexed_market_data(100.0, t0))
+    assert opened.status == "EXECUTED"
+    assert engine.portfolio.positions.get("AAPL") == 1
+
+    hold = {"ticker": "AAPL", "action": "HOLD", "confidence": 0.6}
+    mid = engine.execute_signal(hold, make_indexed_market_data(100.1, t1))
+    assert mid.status == "REJECTED"
+    assert engine.portfolio.positions.get("AAPL") == 1
+
+    final = engine.execute_signal(hold, make_indexed_market_data(100.2, t2))
+    assert final.status == "EXECUTED"
+    assert final.trade is not None
+    assert final.trade.exit_reason == "TIME_EXIT"
+    assert engine.portfolio.positions.get("AAPL", 0) == 0
 
     db.close()

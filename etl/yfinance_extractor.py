@@ -11,6 +11,7 @@ Success Criteria:
 - <5 data gaps per ticker
 """
 import json
+import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -227,6 +228,9 @@ class YFinanceExtractor(BaseExtractor):
 
         # Apply config-driven defaults (fall back to constructor args when missing).
         self.interval = self._get_config_value(("extraction", "data", "interval"))
+        env_interval = os.getenv("YFINANCE_INTERVAL") or os.getenv("YFINANCE_DATA_INTERVAL")
+        if env_interval:
+            self.interval = str(env_interval).strip()
         self.auto_adjust = bool(self._get_config_value(("extraction", "data", "auto_adjust"), False) or False)
 
         cache_hours = int(self._get_config_value(("extraction", "cache", "cache_hours"), cache_hours) or cache_hours)
@@ -393,6 +397,9 @@ class YFinanceExtractor(BaseExtractor):
         if not self.storage:
             self._record_cache_event(ticker, "miss", 0)
             return None
+        if getattr(self, "cache_hours", 0) <= 0:
+            self._record_cache_event(ticker, "miss", 0)
+            return None
 
         try:
             # Vectorized file lookup: most recent first
@@ -406,9 +413,10 @@ class YFinanceExtractor(BaseExtractor):
 
             # Check freshness (vectorized time delta)
             latest_file = files[0]
-            file_age = datetime.now() - datetime.fromtimestamp(latest_file.stat().st_mtime)
+            file_age_seconds = max(0.0, time.time() - latest_file.stat().st_mtime)
+            file_age = timedelta(seconds=file_age_seconds)
 
-            if file_age.total_seconds() > self.cache_hours * 3600:
+            if file_age_seconds >= self.cache_hours * 3600:
                 logger.info(f"Cache MISS for {ticker}: expired (age: {file_age.total_seconds()/3600:.1f}h)")
                 self._record_cache_event(ticker, "miss", 0)
                 return None

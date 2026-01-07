@@ -9,6 +9,8 @@ This plan is sequenced and intended to be kept in sync with the codebase. It bui
 - `Documentation/NAV_RISK_BUDGET_ARCH.md`
 - `Documentation/BARBELL_INTEGRATION_TODO.md`
 
+**Project-wide sequencing**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the TS ↔ execution ↔ reporting fixes that should land before tightening MTM/liquidation policies for profitability analysis.
+
 ---
 
 ## Phase 1 – Robust Spot-Only MTM (DONE)

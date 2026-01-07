@@ -2,6 +2,8 @@
 
 > **Purpose**: One-page view of how Time Series (TS) core signals, NAV-centric risk budgeting, the Taleb barbell shell, and LLM fallback fit together in `portfolio_maximizer` v45.
 
+**Project-wide sequencing**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the step-by-step plan to make TS signals bar-aware, horizon-consistent, and execution-cost-aligned before scaling NAV/bucket automation.
+
 ---
 
 ## 1. High-Level Flow

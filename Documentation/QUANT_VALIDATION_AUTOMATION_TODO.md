@@ -5,6 +5,8 @@
 
 This document turns the current quant‑validation findings into a concrete, automation‑friendly TODO list. All items are config‑ or script‑level only (no core architecture rewrites) and should be backed by stats/backtests before being made permanent.
 
+**Project-wide sequencing**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the higher-level, step-by-step plan that ties TS horizon alignment, execution cost modeling, and run-local reporting into the quant-validation workflow.
+
 ---
 
 ## Phase 1 – Grow Quant‑Validation Sample Size

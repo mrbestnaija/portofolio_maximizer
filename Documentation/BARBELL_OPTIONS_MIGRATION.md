@@ -17,6 +17,8 @@ It is implementation-oriented but does **not** change any guardrail: risk remain
 When these flags are left `false` (current default), the options/barbell paths remain inert and the spot-only system behaves as before. For **NAV-centric barbell risk budgeting and bucket-level NAV caps**, see `Documentation/NAV_BAR_BELL_TODO.md`.
 For how diagnostic mark-to-market and liquidation behave for options and synthetic structures during research runs, see `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` (and the current pricing_policy assumptions in `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`).
 
+**Project-wide sequencing**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the TS-first execution + reporting improvements that should be validated before enabling options/barbell features in any live-like environment.
+
 ---
 
 ## 1. OTM Options – Clear Primer for This Project
