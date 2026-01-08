@@ -1,0 +1,46 @@
+name: Sync issues and PRs to Project 7
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled, edited]
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled, unlabeled, edited]
+  workflow_dispatch:
+
+# This workflow uses a PAT via secrets.PROJECTS_TOKEN because
+# GitHub Projects (v2) requires GraphQL access beyond default GITHUB_TOKEN in some org/user setups.
+# Create a classic PAT with project and repo scopes and add it as a repository secret named PROJECTS_TOKEN.
+
+permissions:
+  contents: read
+
+jobs:
+  add_to_project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create .env from repo secrets
+        run: |
+          set -e
+          echo "ALPHA_VANTAGE_API_KEY=${{ secrets.ALPHA_VANTAGE_API_KEY }}" > .env
+          echo "FINNHUB_API_KEY=${{ secrets.FINNHUB_API_KEY }}" >> .env
+          echo "FINNHUB_EMAIL=${{ secrets.FINNHUB_EMAIL }}" >> .env
+          echo "FINNHUB_WEBHOOK_SECRET=${{ secrets.FINNHUB_WEBHOOK_SECRET }}" >> .env
+          echo "PROJECTS_TOKEN=${{ secrets.PROJECTS_TOKEN }}" >> .env
+          echo "CI=true" >> .env
+          # Mask secrets in logs
+          echo "::add-mask::${{ secrets.ALPHA_VANTAGE_API_KEY }}"
+          echo "::add-mask::${{ secrets.FINNHUB_API_KEY }}"
+          echo "::add-mask::${{ secrets.FINNHUB_EMAIL }}"
+          echo "::add-mask::${{ secrets.FINNHUB_WEBHOOK_SECRET }}"
+          echo "::add-mask::${{ secrets.PROJECTS_TOKEN }}"
+
+      - name: Add item to GitHub Project 7
+        uses: actions/add-to-project@v0.5.0
+        with:
+          project-url: https://github.com/users/mrbestnaija/projects/7
+          github-token: ${{ secrets.PROJECTS_TOKEN }}
+
+

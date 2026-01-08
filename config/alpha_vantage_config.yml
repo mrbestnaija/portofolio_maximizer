@@ -1,0 +1,94 @@
+# Alpha Vantage Data Extraction Configuration
+# API documentation: https://www.alphavantage.co/documentation/
+
+extraction:
+  # Data source settings
+  source:
+    name: "Alpha Vantage"
+    api: "alphavantage"
+    base_url: "https://www.alphavantage.co/query"
+    documentation_url: "https://www.alphavantage.co/documentation/"
+
+  # API authentication (credentials stored in .env)
+  authentication:
+    api_key_env: "ALPHA_VANTAGE_API_KEY"  # Read from .env file
+    required: true
+
+  # Rate limiting (free tier)
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 5  # Free tier: 5 requests/minute
+    requests_per_day: 500   # Free tier: 500 requests/day
+    delay_between_requests: 12  # Seconds (safe: 60/5 = 12s)
+
+    # Premium tier (if upgraded)
+    premium:
+      enabled: false
+      requests_per_minute: 75
+      requests_per_day: null  # No daily limit
+
+  # Network reliability settings
+  network:
+    timeout_seconds: 30
+    max_retries: 3
+    retry_delay_seconds: 5
+    exponential_backoff: true
+    backoff_factor: 2.0
+
+  # Data extraction parameters
+  data:
+    # Function for time series data
+    function: "TIME_SERIES_DAILY_ADJUSTED"  # Options: TIME_SERIES_DAILY, TIME_SERIES_DAILY_ADJUSTED, TIME_SERIES_INTRADAY
+
+    # Output size
+    outputsize: "full"  # Options: compact (100 data points), full (full-length)
+
+    # Data format
+    datatype: "json"  # Options: json, csv
+
+    # OHLCV column mapping (Alpha Vantage uses different names)
+    column_mapping:
+      "1. open": "Open"
+      "2. high": "High"
+      "3. low": "Low"
+      "4. close": "Close"
+      "5. adjusted close": "Adj Close"
+      "6. volume": "Volume"
+      "7. dividend amount": "Dividend"
+      "8. split coefficient": "Split"
+
+  # Cache configuration
+  cache:
+    enabled: true
+    cache_hours: 24  # Cache validity
+    storage_path: "data/raw"
+    tolerance_days: 3
+    auto_cleanup: true
+    retention_days: 365
+
+  # Quality checks
+  quality_checks:
+    enabled: true
+    check_empty_data: true
+    min_rows_required: 10
+
+    # Data integrity
+    integrity:
+      check_missing_dates: true
+      check_price_continuity: true
+      max_missing_rate: 0.10
+
+  # Error handling
+  error_handling:
+    on_fetch_failure: "skip"  # Options: skip, raise, retry
+    on_rate_limit: "wait"  # Options: wait, skip, raise
+    on_invalid_key: "raise"
+    log_errors: true
+    error_log_path: "logs/alpha_vantage_errors.log"
+
+# Logging
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_file: "logs/alpha_vantage_extraction.log"
+  log_api_calls: true

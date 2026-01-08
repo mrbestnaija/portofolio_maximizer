@@ -1,0 +1,80 @@
+{
+  "timestamp": "2025-10-23T07:26:30.844415",
+  "monitoring_results": {
+    "llm_performance": {
+      "status": "HEALTHY",
+      "inference_time": 11.391222,
+      "response_length": 398,
+      "model_used": "deepseek-coder:6.7b-instruct-q4_K_M"
+    },
+    "signal_quality": {
+      "status": "NO_DATA",
+      "signals_analyzed": 0
+    },
+    "database_integration": {
+      "status": "ERROR",
+      "error": "LLMDatabaseManager.save_risk_assessment() got an unexpected keyword argument 'portfolio_id'"
+    },
+    "performance_optimization": {
+      "status": "HEALTHY",
+      "fast_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+      "balanced_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+      "accurate_model": "qwen:14b-chat-q4_K_M",
+      "optimization_report": {
+        "timestamp": "2025-10-23T07:26:30.844296",
+        "models_analyzed": 1,
+        "model_performance": {
+          "deepseek-coder:6.7b-instruct-q4_K_M": {
+            "avg_inference_time": 5.0,
+            "avg_tokens_per_second": 15.0,
+            "success_rate": 1.0,
+            "accuracy_score": 0.8,
+            "memory_usage_gb": 4.1,
+            "last_updated": "2025-10-23T07:26:30.844295",
+            "performance_status": "HEALTHY"
+          }
+        },
+        "optimization_recommendations": {
+          "fast": {
+            "recommended_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+            "expected_inference_time": 5.0,
+            "expected_accuracy": 0.8,
+            "reason": "Optimized for fast use case",
+            "alternatives": []
+          },
+          "balanced": {
+            "recommended_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+            "expected_inference_time": 5.0,
+            "expected_accuracy": 0.8,
+            "reason": "Optimized for balanced use case",
+            "alternatives": []
+          },
+          "accurate": {
+            "recommended_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+            "expected_inference_time": 5.0,
+            "expected_accuracy": 0.8,
+            "reason": "Optimized for accurate use case",
+            "alternatives": []
+          },
+          "real_time": {
+            "recommended_model": "deepseek-coder:6.7b-instruct-q4_K_M",
+            "expected_inference_time": 5.0,
+            "expected_accuracy": 0.8,
+            "reason": "Optimized for real_time use case",
+            "alternatives": []
+          }
+        }
+      }
+    }
+  },
+  "system_health": {
+    "overall_status": "DEGRADED",
+    "issues": [
+      "database_integration: ERROR"
+    ],
+    "components_checked": 4
+  },
+  "recommendations": [
+    "Fix database integration issues"
+  ]
+}

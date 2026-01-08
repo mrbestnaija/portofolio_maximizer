@@ -1,0 +1,79 @@
+# Signal Routing Configuration
+# Time Series as Default Signal Generator, LLM as Fallback
+
+signal_routing:
+  # Primary signal source
+  time_series_primary: true  # DEFAULT: true - Time Series is primary
+  
+  # Fallback/redundancy
+  llm_fallback: false  # Disable LLM fallback to speed up runs
+  llm_redundancy: false  # Disable redundancy to avoid latency overhead
+  
+  # Time Series model flags
+  enable_samossa: true
+  enable_sarimax: true
+  enable_garch: true
+  enable_mssa_rl: true
+
+  # Time Series signal generation thresholds (production defaults)
+  time_series:
+    confidence_threshold: 0.50  # Lowered from 0.55 to allow more trades through
+    min_expected_return: 0.001  # Lowered from 0.003 to align with cost model fixes
+    max_risk_score: 0.8         # Raised from 0.7 to allow higher volatility trades
+    use_volatility_filter: true # Filter signals based on volatility
+    # Cost/uncertainty gating for Time Series signals.
+    # - default_roundtrip_cost_bps is a *prior* used only when bid/ask or synthetic microstructure
+    #   columns (TxnCostBps/ImpactBps) are unavailable. Values are basis points of notional.
+    # - min_signal_to_noise is an optional CI-based SNR gate (0 disables).
+    cost_model:
+      default_roundtrip_cost_bps:
+        US_EQUITY: 3.2  # Aligned to execution: 2x half_spread_bps (0.8*2=1.6) + impact buffer
+        INTL_EQUITY: 6.0  # Aligned to execution: 2x half_spread_bps (1.5*2=3) + impact buffer
+        FX: 2.0  # Aligned to execution: 2x half_spread_bps (0.2*2=0.4) + impact buffer
+        CRYPTO: 12.0  # Aligned to execution: 2x half_spread_bps (3.0*2=6) + impact buffer
+        INDEX: 2.0  # Aligned to execution: 2x half_spread_bps (0.5*2=1) + impact buffer
+        UNKNOWN: 5.0  # Conservative default
+      min_signal_to_noise: 0.0
+    # Production per-ticker overrides (aligned to proposals after review).
+    per_ticker:
+      "CL=F":
+        confidence_threshold: 0.55
+        min_expected_return: 0.005
+      "MSFT":
+        confidence_threshold: 0.50
+        min_expected_return: 0.001
+        max_risk_score: 0.80
+      "MTN":
+        confidence_threshold: 0.50
+        min_expected_return: 0.001
+      "AAPL":
+        confidence_threshold: 0.55
+        min_expected_return: 0.001
+
+    # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
+    # so production thresholds stay conservative while evidence is gathered.
+  
+  # Fallback triggers
+  ts_fallback_triggers:
+    - forecast_unavailable
+    - confidence_below_threshold
+    - model_failure
+    - insufficient_data
+
+  execution:
+    # No-trade windows by asset class (24h clock, inclusive of start, exclusive of end)
+    no_trade_windows:
+      US_EQUITY: []  # e.g., ["09:30-09:45", "15:50-16:00"]
+      FX: []         # e.g., ["16:00-18:00"]
+    enhanced_logging:
+      include_mid_price: true
+      include_route_type: true
+      include_fill_timestamp: true
+  
+  # Routing mode
+  routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:
+  # - TIME_SERIES_PRIMARY_LLM_FALLBACK (default)
+  # - TIME_SERIES_PRIMARY_LLM_REDUNDANCY
+  # - TIME_SERIES_ONLY
+  # - LLM_ONLY (legacy mode)
+

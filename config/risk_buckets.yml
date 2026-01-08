@@ -1,0 +1,19 @@
+risk_buckets:
+  enabled: false  # feature flag; when false, allocator is a pass-through
+  base_nav_frac:
+    safe: 0.7
+    ts_core: 0.25
+    ml_secondary: 0.04
+    llm_fallback: 0.01
+  min_nav_frac:
+    safe: 0.5
+    ts_core: 0.1
+    ml_secondary: 0.0
+    llm_fallback: 0.0
+  max_nav_frac:
+    safe: 0.95
+    ts_core: 0.35
+    ml_secondary: 0.1
+    llm_fallback: 0.02
+  notes: >
+    Default budgets are placeholders; allocator stays disabled until wired and tested.

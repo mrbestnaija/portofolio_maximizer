@@ -1,0 +1,82 @@
+# Yahoo Finance Data Extraction Configuration
+# Cache-first strategy with retry logic and rate limiting
+
+extraction:
+  # Data source settings
+  source:
+    name: "Yahoo Finance"
+    api: "yfinance"
+    base_url: "https://query1.finance.yahoo.com"
+
+  # Cache configuration (24-hour validity)
+  cache:
+    enabled: true
+    cache_hours: 24  # Cache validity in hours
+    storage_path: "data/raw"  # Cache storage location
+    tolerance_days: 3  # +/-3 days tolerance for non-trading days
+    auto_cleanup: true
+    retention_days: 365  # Keep cached data for 1 year
+
+  # Network reliability settings
+  network:
+    timeout_seconds: 30  # Request timeout
+    max_retries: 3  # Retry attempts on failure
+    retry_delay_seconds: 2  # Initial delay between retries
+    exponential_backoff: true  # Use exponential backoff
+    backoff_factor: 2.0  # Multiply delay by this factor each retry
+
+  # Rate limiting (prevent API throttling)
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 30
+    delay_between_tickers: 0.5  # Seconds between ticker requests
+
+  # Data extraction parameters
+  data:
+    default_tickers: ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"]
+    default_start_date: "2020-01-01"
+    default_end_date: null  # null = today's date
+    interval: "1d"  # Options: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+
+    # OHLCV columns to extract
+    columns:
+      - "Open"
+      - "High"
+      - "Low"
+      - "Close"
+      - "Volume"
+      - "Adj Close"  # Adjusted close for splits/dividends
+
+  # Quality checks (vectorized validation)
+  quality_checks:
+    enabled: true
+    check_empty_data: true
+    check_multiindex: true  # Flatten MultiIndex columns
+    min_rows_required: 30  # Minimum observations needed
+
+    # Data integrity checks
+    integrity:
+      check_missing_dates: true
+      check_price_continuity: true
+      max_missing_rate: 0.10  # Fail if >10% missing
+
+  # Error handling
+  error_handling:
+    on_fetch_failure: "skip"  # Options: skip, raise, retry
+    on_validation_failure: "warn"  # Options: warn, raise, ignore
+    log_errors: true
+    error_log_path: "logs/extraction_errors.log"
+
+# Performance optimization
+performance:
+  use_cache_first: true  # Always check cache before network
+  parallel_extraction: false  # Sequential by default (rate limiting)
+  batch_size: 10  # Tickers per batch (if parallel enabled)
+
+# Logging configuration
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_to_file: true
+  log_file: "logs/yfinance_extraction.log"
+  log_cache_hits: true  # Log cache hit/miss statistics

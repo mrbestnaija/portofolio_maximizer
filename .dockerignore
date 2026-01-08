@@ -1,0 +1,117 @@
+# Git files
+.git/
+.gitignore
+.gitmodules
+
+# GitHub workflows
+.github/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments (do not bake host venvs into images)
+venv/
+ENV/
+env/
+.venv/
+simpleTrader_env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Data files (will be mounted as volumes)
+data/raw/*
+data/processed/*
+data/training/*
+data/validation/*
+data/testing/*
+data/checkpoints/*
+cache/*
+
+# Log files
+logs/
+*.log
+
+# Documentation
+Documentation/
+*.md
+!README.md
+
+# Environment files
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Docker files (no need to copy into context)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Scripts that are not needed in production
+scripts/repo_cleanup.sh
+test_*.sh
+run_cv_validation.sh
+
+# Visualizations (can be regenerated)
+visualizations/
+
+# Large data files
+*.csv
+*.parquet
+*.h5
+*.hdf5
+
+# Backup files
+*.backup
+*.old

@@ -1,0 +1,73 @@
+# Time Series Forecasting Configuration
+# SARIMAX and GARCH models
+
+forecasting:
+  enabled: true
+  default_forecast_horizon: 30  # Days ahead
+  minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
+  minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
+  
+  # SARIMAX configuration
+  sarimax:
+    enabled: true
+    auto_select_order: true
+    max_p: 2
+    max_d: 1
+    max_q: 2
+    seasonal_periods: null  # Auto-detect (null) or specify (12=monthly, 4=quarterly)
+    max_P: 2
+    max_D: 1
+    max_Q: 2
+    trend: "c"  # Options: 'c' (constant), 't' (trend), 'ct' (both), 'n' (none)
+    enforce_stationarity: true
+    enforce_invertibility: true
+  
+  # GARCH configuration
+  garch:
+    enabled: true
+    p: 1  # ARCH order
+    q: 1  # GARCH order
+    vol: "GARCH"  # Options: 'GARCH', 'EGARCH', 'GJR-GARCH'
+    dist: "normal"  # Options: 'normal', 't', 'skewt'
+
+  # SAMOSSA configuration
+  samossa:
+    enabled: true
+    window_length: 40        # Hankel window length for SSA embedding
+    n_components: 6          # Number of leading components to retain
+    use_residual_arima: true # Fit ARIMA on residual component
+    arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
+    seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
+    min_series_length: 120   # Minimum observations required before fit
+    max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
+    reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
+  
+  # MSSA-RL configuration (change-point + RL forecaster)
+  mssa_rl:
+    enabled: true
+    window_length: 30              # Window for mSSA Page matrix
+    rank: null                     # Let MSSARLConfig choose rank to hit ~90% variance
+    change_point_threshold: 2.5    # Std-dev multiplier for CUSUM change-point detection
+    q_learning_alpha: 0.3
+    q_learning_gamma: 0.85
+    q_learning_epsilon: 0.1
+    use_gpu: true            # Optional CuPy acceleration; keep false on Tier-1 CPU runs but changed to true to speed up on Tier-2+GPU
+    min_series_length: 150   # Minimum observations required before fit
+    max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL  
+  
+  # Combined forecasting
+  combined:
+    enabled: true
+    use_sarimax_mean: true
+    use_garch_volatility: true
+    combine_confidence_intervals: true
+
+  # Ensemble orchestration
+  ensemble:
+    enabled: true
+    confidence_scaling: true
+    candidate_weights:
+      - {sarimax: 0.6, samossa: 0.4}
+      - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
+      - {sarimax: 0.5, mssa_rl: 0.5}
+    minimum_component_weight: 0.05  # Align with EnsembleConfig default guardrail

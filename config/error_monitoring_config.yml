@@ -1,0 +1,134 @@
+# Error Monitoring Configuration
+# Portfolio Maximizer v45 - Error Monitoring System
+
+# Error thresholds for alerting
+error_thresholds:
+  max_errors_per_hour: 5
+  max_errors_per_day: 20
+  critical_error_types:
+    - TypeError
+    - ValueError
+    - ConnectionError
+    - ImportError
+    - AttributeError
+  alert_cooldown_minutes: 30
+
+# Monitoring settings
+monitoring:
+  check_interval_minutes: 5
+  log_retention_days: 30
+  alert_retention_days: 90
+  enable_real_time_monitoring: true
+
+# Alert configuration
+alerts:
+  # File-based alerts (always enabled)
+  file:
+    enabled: true
+    path: "logs/alerts/"
+    max_files: 100
+    include_stack_traces: true
+  
+  # Email alerts (optional)
+  email:
+    enabled: false
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    use_tls: true
+    username: ""
+    password: ""
+    from_address: "portfolio-maximizer@company.com"
+    recipients:
+      - "admin@company.com"
+      - "dev-team@company.com"
+  
+  # Slack alerts (optional)
+  slack:
+    enabled: false
+    webhook_url: ""
+    channel: "#alerts"
+    username: "Portfolio Maximizer Bot"
+  
+  # Webhook alerts (optional)
+  webhook:
+    enabled: false
+    url: ""
+    timeout_seconds: 10
+    retry_attempts: 3
+
+# Error categorization
+error_categories:
+  critical:
+    - TypeError
+    - ImportError
+    - AttributeError
+    - ConnectionError
+  warning:
+    - ValueError
+    - KeyError
+    - FileNotFoundError
+  info:
+    - UserWarning
+    - DeprecationWarning
+
+# System health checks
+health_checks:
+  check_cache_health: true
+  check_import_health: true
+  check_disk_space: true
+  check_memory_usage: true
+  disk_space_threshold_mb: 1000
+  memory_usage_threshold_percent: 80
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_rotation:
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
+
+# Performance monitoring
+performance:
+  track_response_times: true
+  track_memory_usage: true
+  track_cpu_usage: true
+  slow_request_threshold_seconds: 30
+
+# Notification templates
+templates:
+  error_alert:
+    subject: "🚨 Bestman's Portfolio Maximizer Error Alert"
+    body: |
+      Error Alert - Bestman's Portfolio Maximizer v45
+      =====================================
+      
+      Timestamp: {timestamp}
+      Total Errors (24h): {total_errors}
+      
+      Error Breakdown:
+      {error_breakdown}
+      
+      Recent Errors:
+      {recent_errors}
+      
+      System Status: {status}
+      
+      Please investigate and resolve as soon as possible.
+  
+  system_health:
+    subject: "📊 Portfolio Maximizer System Health Report"
+    body: |
+      System Health Report - Portfolio Maximizer v45
+      =============================================
+      
+      Report Period: {period}
+      Overall Status: {overall_status}
+      
+      Health Metrics:
+      {health_metrics}
+      
+      Recommendations:
+      {recommendations}
+      
+      Generated: {timestamp}

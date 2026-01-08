@@ -1,0 +1,13 @@
+ai_companion:
+  knowledge_base:
+    - Documentation/QUANT_TIME_SERIES_STACK.md
+  recommended_stack:
+    tier: Tier-1
+    python: ">=3.10,<3.13"
+    packages:
+      core: ["numpy", "pandas", "scipy"]
+      tsa: ["statsmodels", "arch"]
+      project_modules: ["forcester_ts", "etl.time_series_forecaster"]
+      optional_gpu: ["cupy"]
+  guardrails:
+    upgrade_path: "Escalate to Tier-2 only after profitability proof + GPU budget approval."

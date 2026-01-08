@@ -1,0 +1,179 @@
+# Data Sources Configuration - Platform-Agnostic Design
+# Supports multiple data sources with unified interface
+
+data_sources:
+  # Available data source providers
+  providers:
+    - name: "synthetic"
+      type: "market_data"
+      enabled: true  # Enabled as default provider for pre-production/testing
+      priority: 1
+      config_file: "config/synthetic_data_config.yml"
+
+    - name: "yfinance"
+      type: "market_data"
+      enabled: true
+      priority: 2  # Secondary live provider
+      config_file: "config/yfinance_config.yml"
+
+    - name: "alpha_vantage"
+      type: "market_data"
+      enabled: true  # Enable when API key is configured in .env
+      priority: 3
+      config_file: "config/alpha_vantage_config.yml"
+      credentials_env: "ALPHA_VANTAGE_API_KEY"
+
+    - name: "finnhub"
+      type: "market_data"
+      enabled: true  # Enable when API key is configured in .env
+      priority: 4
+      config_file: "config/finnhub_config.yml"
+      credentials_env: "FINNHUB_API_KEY"
+
+    - name: "ctrader"
+      type: "market_data"
+      enabled: true  # cTrader Open API OHLCV source (demo-first per ctrader_config.yml)
+      priority: 5
+      config_file: "config/ctrader_config.yml"
+
+  # Data source selection strategy
+  selection_strategy:
+    mode: "fallback"  # Options: priority, fallback, parallel, custom
+
+    # Priority mode: Use highest priority enabled source
+    priority:
+      use_first_available: true
+      fail_on_all_unavailable: true
+
+    # Fallback mode: Try sources in priority order until success
+    fallback:
+      max_attempts: 3
+      retry_delay_seconds: 5
+      continue_on_partial_failure: true
+
+    # Parallel mode: Fetch from multiple sources and merge
+    parallel:
+      enabled: false
+      merge_strategy: "union"  # Options: union, intersection, primary
+      conflict_resolution: "latest"  # Options: latest, primary, average
+      max_concurrent_sources: 3
+
+  # Data source interface abstraction
+  interface:
+    # Required methods all data sources must implement
+    required_methods:
+      - "extract_ohlcv"  # Extract OHLCV data
+      - "validate_data"  # Validate data quality
+      - "get_metadata"   # Get source metadata
+
+    # Optional methods
+    optional_methods:
+      - "get_fundamentals"  # Company fundamentals
+      - "get_news"          # News articles
+      - "get_options"       # Options data
+      - "get_dividends"     # Dividend history
+      - "get_splits"        # Stock splits
+
+    # Standard return format (all sources must return this structure)
+    standard_format:
+      columns:
+        - "Open"
+        - "High"
+        - "Low"
+        - "Close"
+        - "Volume"
+        - "Adj Close"  # Optional, adjusted for splits/dividends
+
+      index: "datetime"  # DatetimeIndex required
+      data_type: "DataFrame"  # pandas.DataFrame
+
+      # Metadata fields
+      metadata:
+        - "ticker"
+        - "source"
+        - "extraction_timestamp"
+        - "data_start_date"
+        - "data_end_date"
+        - "row_count"
+        - "cache_hit"
+
+  # Data source failover configuration
+  failover:
+    enabled: true
+    max_failover_attempts: 3
+
+    # Failover triggers
+    triggers:
+      - "network_timeout"
+      - "rate_limit_exceeded"
+      - "invalid_api_key"
+      - "empty_response"
+      - "data_quality_failure"
+
+    # Failover actions
+    actions:
+      on_primary_failure: "try_fallback"  # Options: try_fallback, raise, skip
+      on_all_failures: "raise"  # Options: raise, return_empty, use_cache
+      log_failovers: true
+
+  # Platform-specific adapters
+  adapters:
+    # Adapter design pattern for different data sources
+    base_adapter: "etl.base_extractor.BaseExtractor"
+
+    adapter_registry:
+      yfinance: "etl.yfinance_extractor.YFinanceExtractor"
+      alpha_vantage: "etl.alpha_vantage_extractor.AlphaVantageExtractor"
+      finnhub: "etl.finnhub_extractor.FinnhubExtractor"
+      ctrader: "etl.ctrader_extractor.CTraderExtractor"
+      synthetic: "etl.synthetic_extractor.SyntheticExtractor"
+      # Deprecated adapters removed during v4.5 cleanup
+
+    # Adapter loading strategy
+    lazy_loading: true  # Only load adapters when needed
+    cache_adapters: true  # Cache adapter instances
+
+  # Data source health monitoring
+  health_monitoring:
+    enabled: true
+
+    # Health check configuration
+    health_checks:
+      interval_seconds: 300  # Check every 5 minutes
+      timeout_seconds: 10
+
+      # Metrics to monitor
+      metrics:
+        - "response_time"
+        - "success_rate"
+        - "cache_hit_rate"
+        - "data_quality_score"
+
+    # Alert thresholds
+    alerts:
+      slow_response_threshold_seconds: 5.0
+      low_success_rate_threshold: 0.90  # 90%
+
+# Extensibility guidelines
+extensibility:
+  adding_new_source:
+    steps:
+      1: "Create config file: config/{source_name}_config.yml"
+      2: "Implement adapter: etl/{source_name}_extractor.py"
+      3: "Extend BaseExtractor abstract class"
+      4: "Implement required methods: extract_ohlcv, validate_data, get_metadata"
+      5: "Add API key to .env: {SOURCE_NAME}_API_KEY=your_key_here"
+      6: "Add source to providers list in this file"
+      7: "Register adapter in adapter_registry"
+      8: "Write unit tests: tests/etl/test_{source_name}_extractor.py"
+
+  best_practices:
+    - "Use dependency injection for flexibility"
+    - "Follow single responsibility principle"
+    - "Implement comprehensive error handling"
+    - "Add caching for expensive operations"
+    - "Include retry logic for network calls"
+    - "Validate data format and quality"
+    - "Log all operations for debugging"
+    - "Write comprehensive unit tests"
+    - "Store credentials in .env, never in code"
