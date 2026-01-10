@@ -32,10 +32,14 @@ FROM base AS builder
 
 WORKDIR /app
 COPY requirements.txt .
+COPY requirements-ml.txt .
+
+ARG INSTALL_ML_EXTRAS=0
 
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade pip setuptools wheel && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt && \
+    if [ "$INSTALL_ML_EXTRAS" = "1" ]; then /opt/venv/bin/pip install --no-cache-dir -r requirements-ml.txt; fi
 
 # =============================================================================
 # Stage 3: Final Production Image
