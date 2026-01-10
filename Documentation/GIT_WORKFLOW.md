@@ -258,6 +258,30 @@ Before pushing to remote:
     HYPEROPT_ROUNDS=1 bash/bash/run_post_eval.sh
     ```
 
+### GitHub Actions Checks (What Blocks Merges)
+
+In PRs, treat checks in two classes:
+
+1) **Required (must be green)**:
+   - `CI / test` (runs `pip install -r requirements.txt`, `pip check`, then `pytest`).
+
+2) **Nice-to-have (should not block merges)**:
+   - Project automation workflows (e.g. `Sync issues and PRs to Project 7`) that depend on repo secrets and permissions.
+
+If a non-critical automation check fails, fix its permissions/guards or make it skip cleanly when secrets are absent.
+
+### Fixing a Failing CI/Test Run (Fast Playbook)
+
+1) Open the failing `CI / test` job log and find the **first** real error (ignore setup noise).
+2) Reproduce locally with the **same Python version** used in CI and a clean environment:
+   - Install deps from `requirements.txt`
+   - Run `pip check`
+   - Run the same `pytest` command as CI
+3) For dependency/security PRs:
+   - Run `python -m pip_audit -r requirements.txt` (and any optional extras files) and keep the diff minimal.
+4) If the breakage is a dependency constraint conflict:
+   - Prefer bumping the conflicting library instead of pinning around it, unless the pin is strictly temporary and documented.
+
 ### Automated Testing (Recommended)
 
 Create a pre-push hook (optional):
@@ -560,15 +584,23 @@ Closes #456
 
 **Solution**: Update remote URL
 
-#### Issue 8: "Password authentication is not supported"
+#### Issue 8: "CI / test" failing on a PR
+
+**Solution**: Open the job log and reproduce locally; the first traceback is the root cause. For dependency PRs, run `pip check` and `python -m pip_audit -r requirements.txt` before pushing.
+
+#### Issue 9: "Sync issues and PRs to Project 7" failing quickly
+
+**Solution**: This is usually repo permissions or missing `PROJECTS_TOKEN` secret. Either configure the secret with correct scopes or ensure the workflow skips when the token is absent (do not let it block merges).
+
+#### Issue 10: "Password authentication is not supported"
 
 **Solution**: Use SSH or HTTPS with a PAT (never a password).
 
-#### Issue 9: "git-credential-manager.exe: Exec format error" (WSL)
+#### Issue 11: "git-credential-manager.exe: Exec format error" (WSL)
 
 **Solution**: Your WSL git is trying to run a Windows credential helper; unset it and use SSH.
 
-#### Issue 10: "Invalid username or token"
+#### Issue 12: "Invalid username or token"
 
 **Solution**: Regenerate a PAT (correct scopes) or switch to SSH; clear cached credentials if needed.
 

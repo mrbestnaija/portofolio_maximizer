@@ -50,6 +50,12 @@ tail -n 10 logs/automation/execution_log.jsonl
 
 5) **Decide**: proceed, tighten thresholds, or roll back before moving to the next phase.
 
+### CI stance (keep the repo mergeable)
+
+- Default CI must run with feature flags in their safe defaults (barbell/options/sentiment disabled unless explicitly enabled) so the baseline remains stable.
+- Prefer a fast-fail smoke subset first (targeted tests), then full suite/brutal runs when promoting changes.
+- For dependency/security updates: keep diffs minimal, run `pip check` and `python -m pip_audit -r requirements.txt`, and ensure `CI / test` is green before merging.
+
 ---
 
 ## 1. Initial Setup and Planning

@@ -18,7 +18,7 @@
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
 - Auto-trader loop is bar-aware (`scripts/run_auto_trader.py` skips repeated cycles on the same bar; optional persisted bar-state)
 - Auto-trader parallel pipeline defaults ON for candidate prep + forecasts with GPU-first when available (`ENABLE_GPU_PARALLEL=1` + CUDA/torch present), otherwise CPU threads (override via `ENABLE_PARALLEL_TICKER_PROCESSING=0` / `ENABLE_PARALLEL_FORECASTS=0`); stress evidence in `logs/automation/stress_parallel_20260107_202403/comparison.json`
-- Dependency baseline now includes `torch==2.9.1` in `requirements.txt`; `requirements-ml.txt` retains CUDA extras (CuPy/NVIDIA libs) for full GPU stacks
+- Dependency baseline now includes `torch==2.9.1` in `requirements.txt`; optional `requirements-ml.txt` (when present) retains CUDA extras (CuPy/NVIDIA libs) for full GPU stacks
 - TS signals use the horizon-end forecast target for `expected_return`/`target_price` (`models/time_series_signal_generator.py`)
 - TS confidence is edge/uncertainty-aware and emits diagnostics provenance; quant validation supports `validation_mode=forecast_edge` using rolling CV regression metrics (`models/time_series_signal_generator.py`, `config/quant_success_config.yml`)
 - Forecaster health uses persisted horizon-end forecast snapshots + lagged regression backfill so `get_forecast_regression_summary` stays run-fresh (`scripts/run_auto_trader.py`, `etl/database_manager.py`)
@@ -29,6 +29,7 @@
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
 - Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
 - Dependency note: `arch==8.0.0` enables full GARCH; if missing, `forcester_ts.garch.GARCHForecaster` falls back to EWMA for test/dev continuity
+- CI notes: GitHub Actions runs `CI / test` on `ubuntu-latest` with Python 3.12 and executes `pip check` + `pytest -m "not gpu"`; project/issue automation workflows that require `PROJECTS_TOKEN` must be treated as non-blocking and skip when secrets are unavailable.
 
 ### Verification Commands (Repro)
 
