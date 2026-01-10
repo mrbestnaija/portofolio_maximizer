@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Commit + push helper (master-first) following Documentation/GIT_WORKFLOW.md
+# Commit + push helper for remote-first workflows (see Documentation/GIT_WORKFLOW.md).
 #
 # Usage:
 #   bash/git_sync.sh "commit message" [branch]
 #   bash/git_sync.sh                  # auto message, current branch
 #
 # Behavior:
-# - Adds all changes, commits with the provided message (or an auto-generated one),
-#   rebases on origin/<branch>, then pushes to origin/<branch>.
-# - Defaults to the current branch; pass a branch explicitly to target another.
+# - Refuses to push directly to master unless PMX_ALLOW_DIRECT_MASTER_PUSH=1.
+# - If there are working-tree changes: stages all, commits, then rebases feature branch onto origin/master.
+# - If there are no working-tree changes: still rebases feature branch onto origin/master and pushes if ahead.
+# - Never persists tokens into remotes; supports ephemeral GIT_ASKPASS when GIT_USE_ENV_REMOTE=1.
 
 set -euo pipefail
 
@@ -60,7 +61,6 @@ pmx_setup_git_askpass() {
     return 0
   fi
 
-  # Never persist tokens into git remotes. Use an ephemeral askpass helper instead.
   umask 077
   ASKPASS_FILE="$(mktemp -t pmx_git_askpass.XXXXXX)"
   cat > "${ASKPASS_FILE}" <<'EOF'
@@ -77,7 +77,23 @@ EOF
   export GIT_ASKPASS="${ASKPASS_FILE}"
   export GIT_TERMINAL_PROMPT=0
 
-  git remote set-url origin "https://github.com/${GitHub_Username}/${GitHub_Repo}.git" >/dev/null 2>&1 || true
+  if [[ "${PMX_GIT_SET_REMOTE_FROM_ENV:-0}" == "1" ]]; then
+    git remote set-url origin "https://github.com/${GitHub_Username}/${GitHub_Repo}.git" >/dev/null 2>&1 || true
+  fi
+}
+
+pmx_timestamp() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+pmx_abort_if_staging_secrets() {
+  local staged
+  staged="$(git diff --cached --name-only || true)"
+  if echo "${staged}" | grep -E -q '(^|/)\.env$|(^|/)scripts/\.env$|(^|/)secrets/|\.pem$|\.key$'; then
+    git reset -q -- .env scripts/.env 2>/dev/null || true
+    echo "Refusing to commit staged secrets (.env/scripts/.env/secrets/*/*.key/*.pem). Review 'git diff --cached'." >&2
+    exit 1
+  fi
 }
 
 # Optional: load credentials and repo hints from .env (never commit .env).
@@ -93,6 +109,11 @@ fi
 
 pmx_setup_git_askpass
 
+REMOTE="${PMX_GIT_REMOTE:-origin}"
+BASE_BRANCH="${PMX_BASE_BRANCH:-master}"
+ALLOW_MASTER_PUSH="${PMX_ALLOW_DIRECT_MASTER_PUSH:-0}"
+FORCE_WITH_LEASE="${PMX_FORCE_WITH_LEASE:-0}"
+
 BRANCH_DEFAULT="$(git rev-parse --abbrev-ref HEAD)"
 COMMIT_MSG="${1:-}"
 BRANCH="${2:-${BRANCH_DEFAULT}}"
@@ -102,30 +123,51 @@ if [[ -z "${BRANCH}" ]]; then
   exit 1
 fi
 
+if [[ "${BRANCH}" == "master" && "${ALLOW_MASTER_PUSH}" != "1" ]]; then
+  echo "Refusing to push directly to master (remote-first policy). Create a feature branch + PR. Set PMX_ALLOW_DIRECT_MASTER_PUSH=1 to override." >&2
+  exit 2
+fi
+
 if [[ -z "${COMMIT_MSG}" ]]; then
-  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  COMMIT_MSG="chore: sync ${BRANCH} @ ${ts}"
+  COMMIT_MSG="chore: sync ${BRANCH} @ $(pmx_timestamp)"
 fi
 
 git checkout "${BRANCH}"
 
-# Ensure there is something to commit
-if [[ -z "$(git status --porcelain)" ]]; then
-  echo "No changes to commit; ${BRANCH} is clean."
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Staging changes..."
+  git add -A
+  pmx_abort_if_staging_secrets
+
+  echo "Committing..."
+  git commit -m "${COMMIT_MSG}"
+fi
+
+echo "Fetching from ${REMOTE}..."
+git fetch --prune "${REMOTE}"
+
+if [[ "${BRANCH}" == "master" ]]; then
+  echo "Updating local master (fast-forward only)..."
+  git pull --ff-only "${REMOTE}" master
+  echo "Done."
   exit 0
 fi
 
-echo "Staging changes..."
-git add -A
+echo "Rebasing ${BRANCH} onto ${REMOTE}/${BASE_BRANCH}..."
+git rebase "${REMOTE}/${BASE_BRANCH}"
 
-echo "Committing..."
-git commit -m "${COMMIT_MSG}"
+echo "Pushing to ${REMOTE}/${BRANCH}..."
+if git push -u "${REMOTE}" "${BRANCH}"; then
+  echo "Sync complete for ${BRANCH}"
+  exit 0
+fi
 
-echo "Fetching and rebasing onto origin/${BRANCH}..."
-git fetch origin "${BRANCH}"
-git rebase origin/"${BRANCH}"
+if [[ "${FORCE_WITH_LEASE}" == "1" ]]; then
+  echo "Push rejected; retrying with --force-with-lease (feature branches only)..."
+  git push --force-with-lease -u "${REMOTE}" "${BRANCH}"
+  echo "Sync complete for ${BRANCH}"
+  exit 0
+fi
 
-echo "Pushing to origin/${BRANCH}..."
-git push origin "${BRANCH}"
-
-echo "Sync complete for ${BRANCH}"
+echo "Push rejected. If you rewrote history on this feature branch, rerun with PMX_FORCE_WITH_LEASE=1 (never for master)." >&2
+exit 3

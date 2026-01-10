@@ -18,6 +18,11 @@ If you’re running an unsupported version, please upgrade before reporting issu
 
 Please do **not** open a public GitHub issue for security reports.
 
+## Secrets & Credentials
+
+- This project treats credentials as **local-only secrets**; see `Documentation/API_KEYS_SECURITY.md`.
+- Never commit or print secrets (e.g., `.env`, `scripts/.env`, tokens, broker creds).
+
 ### Primary reporting channel (preferred)
 Use **GitHub Security Advisories** for all vulnerability reports:
 
