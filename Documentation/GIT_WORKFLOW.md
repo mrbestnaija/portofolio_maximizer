@@ -1,9 +1,9 @@
-# Git Workflow - Local as Source of Truth
+# Git Workflow - Remote as Source of Truth
 
-**Policy**: Local repository is ALWAYS the source of truth  
-**Last Updated**: 2026-01-10  
-**Status**: ENFORCED  
-**Version**: 2.2
+**Policy**: Remote repository (versioned, reviewed) is the source of truth
+**Last Updated**: 2026-01-10
+**Status**: ENFORCED
+**Version**: 3.0
 
 ---
 
@@ -30,22 +30,52 @@
 
 ### For New Contributors
 
+1. Clone the repository and check out `master`:
+   ```bash
+   git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+   cd portofolio_maximizer
+   git checkout master
+   ```
+
+2. Sync from remote (remote is canonical):
+   ```bash
+   git fetch origin
+   git pull --ff-only origin master
+   ```
+
+3. Create a feature branch for changes:
+   ```bash
+   git checkout -b feature/short-description
+   ```
+
 
 ### For Existing Contributors
 
-1. Ensure your local branch is clean and tests pass:
+1. Sync from remote first (remote is truth):
+   ```bash
+   git fetch origin
+   git checkout master
+   git pull --ff-only origin master
+   ```
+
+2. Ensure your local branch is clean and tests pass:
    ```bash
    git status
    pytest tests/
    ```
 
-2. Commit your work with a descriptive message:
+3. Create a feature branch for changes (recommended):
+   ```bash
+   git checkout -b feature/short-description
+   ```
+
+4. Commit your work with a descriptive message:
    ```bash
    git add .
    git commit -m "feat(hyperopt): add higher-order post-eval driver"
    ```
 
-3. Sync with remote (local is source of truth, use current branch):
+5. Sync with remote (feature branch; remote is truth):
    ```bash
    # Bash/Zsh
    git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
@@ -55,17 +85,17 @@
    ```powershell
    # PowerShell
    git pull --rebase origin (git rev-parse --abbrev-ref HEAD)
-   if ($LASTEXITCODE -ne 0) { Write-Output "pull failed (continuing per local-first policy)" }
+   if ($LASTEXITCODE -ne 0) { Write-Output "pull failed (continuing per remote-first policy)" }
    git push origin (git rev-parse --abbrev-ref HEAD)
    ```
 
-4. Optional: use the automated sync helper to run the same pull/push sequence for the current (or a named) branch:
+6. Optional: use the automated helpers:
    ```bash
-   # Sync current branch
-   bash/bash/git_sync.sh
+   # Sync local from remote (safe, non-destructive by default)
+   bash/git_syn_to_local.sh master
 
-   # Or sync a specific branch
-   bash/bash/git_sync.sh feature/branch-name
+   # Commit + push current branch (feature branch recommended)
+   bash/git_sync.sh "feat: my change" feature/branch-name
    ```
 
 
@@ -75,34 +105,64 @@
 
 **GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git  
 **Primary Branch**: `master`  
-**Last Sync**: 2025-11-24 (local hyperopt + doc updates, not yet pushed in this repo snapshot)
 
 **Authentication policy (GitHub)**:
 - Password authentication over HTTPS is **not supported**. Use SSH or a Personal Access Token (PAT).
 
 ### Remote Configuration
 
+```bash
+# Show current remote
+git remote -v
+
+# Recommended: SSH (avoids PAT/credential-helper issues)
+git remote set-url origin git@github.com:mrbestnaija/portofolio_maximizer.git
+```
 
 ### Adding Upstream (For Contributors)
 
+```bash
+# For forks: add upstream and keep it read-only
+git remote add upstream git@github.com:mrbestnaija/portofolio_maximizer.git
+git fetch upstream
+```
 
 ---
 
 ## Git Configuration
 
-The following git settings ensure local changes always take precedence and maintain a clear history:
+The following git settings reduce divergence and keep remote history authoritative:
 
 
 ### What These Settings Do
 
 | Setting | Value | Effect | Why |
 |---------|-------|--------|-----|
-| `pull.rebase` | `false` | Pull creates merge commits, preserving local history | Maintains complete development timeline |
+| `pull.rebase` | `true` (recommended) | Pull rebases local commits on top of remote | Keeps feature branches linear |
+| `pull.ff` | `only` (recommended on `master`) | Pull fails if a merge is required | Prevents accidental merge commits on `master` |
 | `push.default` | `current` | Only push current branch to remote | Prevents accidental pushes of other branches |
-| `merge.ff` | `false` | Always create merge commit (no fast-forward) | Clear merge history, easier to track changes |
+| `merge.ff` | `false` (optional) | Merge commits when merging locally | Use PR merges for canonical history |
 
 ### Verification
 
+```bash
+git config --show-origin --get-all pull.rebase || true
+git config --show-origin --get-all pull.ff || true
+git config --show-origin --get-all push.default || true
+```
+
+### Recommended Defaults (Remote-First)
+
+```bash
+# Feature branches: rebase when pulling
+git config --global pull.rebase true
+
+# master: only allow fast-forward updates
+git config --global pull.ff only
+
+# Safer pushing
+git config --global push.default current
+```
 
 ---
 
@@ -150,15 +210,14 @@ ssh -T git@github.com
 
 ## Workflow Principles
 
-### 1. **Local Changes Take Priority**
-- ✅ All development happens locally first
-- ✅ Local commits are never rebased or amended after creation
-- ✅ Remote is a backup/sync point, not the primary workspace
-- ✅ Local repository is the definitive source of truth
+### 1. **Remote Is Canonical**
+- ✅ Remote branch history is the source of truth
+- ✅ Local clones are working copies; sync forward from remote and avoid rewriting remote history
+- ✅ Prefer PRs for reviewable, progressive development and to avoid retrogression
 
 ### 2. **Preserve History**
-- ✅ Never rewrite published history
-- ✅ Use merge commits to combine changes
+- ✅ Never rewrite published history on `master`
+- ✅ Use PR merges (merge commit or squash) for canonical history
 - ✅ Create backup branches before major refactors
 - ✅ Document significant changes in commit messages
 
@@ -180,15 +239,38 @@ ssh -T git@github.com
 
 ### Daily Development Workflow
 
-#### 1. Make Local Changes
+1. Sync local `master` from remote (fast-forward only):
+   ```bash
+   git checkout master
+   git fetch origin
+   git pull --ff-only origin master
+   ```
 
+2. Create or update your feature branch:
+   ```bash
+   git checkout -b feature/short-description  # first time
+   # or:
+   git checkout feature/short-description
+   ```
 
-#### 2. Sync to Remote (Backup)
+3. Commit locally (small, reviewable commits):
+   ```bash
+   git add -A
+   git commit -m "feat(scope): short description"
+   ```
 
+4. Rebase your feature branch on the latest remote `master`, then push:
+   ```bash
+   git fetch origin
+   git rebase origin/master
+   git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
+   ```
 
-**Note**: `--force-with-lease` is safer than `--force` as it checks if remote has changed since last fetch.
-
-#### 3. Pull from Remote (When Needed)
+5. Open a PR and merge via GitHub (preferred). After merge, sync local `master` again:
+   ```bash
+   git checkout master
+   git pull --ff-only origin master
+   ```
 
 
 ---
@@ -197,12 +279,31 @@ ssh -T git@github.com
 
 ### For External Contributors (Pull Requests)
 
+1. Fork the repo on GitHub.
+2. Add `upstream` and keep your fork synced:
+   ```bash
+   git remote add upstream git@github.com:mrbestnaija/portofolio_maximizer.git
+   git fetch upstream
+   git checkout master
+   git pull --ff-only upstream master
+   git push origin master
+   ```
+3. Create a branch in your fork, push, and open a PR to `upstream/master`.
+
 
 ### Keeping Fork Up to Date
 
+```bash
+git fetch upstream
+git checkout master
+git pull --ff-only upstream master
+git push origin master
+```
 
 ### For Team Members (Direct Access)
 
+- Prefer feature branches + PRs for anything non-trivial.
+- Avoid direct pushes to `master` unless it’s a simple, low-risk change and CI will validate it immediately.
 
 ---
 
@@ -217,19 +318,42 @@ Conflicts occur when:
 
 ### Resolution Strategy
 
-**Policy**: Local changes take priority (local is source of truth)
+**Policy**: Remote is canonical; resolve conflicts by preserving remote history and applying local changes on top (usually on a feature branch).
 
-#### Method 1: Keep Local Version (Recommended)
+#### Method 1: Keep Remote Version (Recommended on `master`)
 
+If your local `master` diverged (should be rare), keep remote as canonical:
+```bash
+git checkout master
+git fetch origin
+git branch backup/local-master-before-sync-$(date -u +%Y%m%dT%H%M%SZ)
+git reset --hard origin/master
+```
 
-#### Method 2: Keep Remote Version
+#### Method 2: Keep Local Version (Feature branches / local experiments)
 
+If your local commits matter, move them to a feature branch and push as a PR:
+```bash
+git checkout -b feature/recover-local-work
+git push -u origin feature/recover-local-work
+```
 
 #### Method 3: Manual Resolution
 
+For feature branches, rebase and resolve conflicts:
+```bash
+git fetch origin
+git rebase origin/master
+# resolve conflicts, then:
+git add <files>
+git rebase --continue
+```
 
 ### Conflict Prevention
 
+- Keep `master` fast-forward only.
+- Rebase feature branches frequently onto `origin/master`.
+- Keep commits small and scoped.
 
 ---
 
@@ -248,15 +372,18 @@ Before pushing to remote:
 - For profit-critical or hyperopt changes:
   - Run the time series-first brutal suite when feasible:
     ```bash
-    bash/bash/comprehensive_brutal_test.sh
+    bash/comprehensive_brutal_test.sh
     # Optional legacy LLM path:
-    # BRUTAL_ENABLE_LLM=1 bash/bash/comprehensive_brutal_test.sh
+    # BRUTAL_ENABLE_LLM=1 bash/comprehensive_brutal_test.sh
     ```
 - If you touched hyperopt/strategy tuning:
   - Sanity-check `bash/run_post_eval.sh` on a small hyperopt run:
     ```bash
-    HYPEROPT_ROUNDS=1 bash/bash/run_post_eval.sh
+    HYPEROPT_ROUNDS=1 bash/run_post_eval.sh
     ```
+
+### WSL Note
+- Repository scripts under `bash/` assume a Unix-like shell; run them under WSL for consistency.
 
 ### GitHub Actions Checks (What Blocks Merges)
 
@@ -295,7 +422,7 @@ Create a pre-push hook (optional):
 
 - **Primary Branch**: `master`
 - **Development Model**: Single branch with feature branches as needed
-- **Remote Tracking**: Optional, local is definitive
+- **Remote Tracking**: `origin/master` is canonical; locals must fast-forward or rebase feature branches
 
 ### Branch Types
 
@@ -316,21 +443,25 @@ Create a pre-push hook (optional):
 
 ## Backup Strategy
 
-### Remote as Backup
+### Remote as Source of Truth (Canonical)
 
-- ✅ Remote repository (GitHub) serves as backup
-- ✅ Local always has latest, most accurate code
-- ✅ Push frequency: After each significant milestone or daily
-- ✅ Force push allowed with `--force-with-lease` for safety
+- ✅ Remote `origin/master` is the canonical, versioned history.
+- ✅ Local clones are disposable working copies; don’t treat a local machine as authoritative.
+- ✅ Progressive development happens via feature branches + PRs + green CI.
+- ✅ Never “repair” remote history from a local machine via force push on `master`.
 
 ### Local Backups
 
+Use local-only backups to protect work-in-progress without rewriting remote history:
+```bash
+git branch backup/wip-$(date -u +%Y%m%dT%H%M%SZ)
+```
 
 ### Backup Best Practices
 
 1. **Before Major Refactors**: Create backup branch
-2. **Before Force Push**: Create backup tag
-3. **Regular Pushes**: Push to remote after each milestone
+2. **Before Risky Git Operations**: Create backup branch/tag
+3. **Regular Pushes**: Push feature branches frequently; merge via PR
 4. **Documentation**: Document backup strategy in commit messages
 
 ---
@@ -339,24 +470,45 @@ Create a pre-push hook (optional):
 
 ### Scenario 1: Accidental Remote Override
 
-**Situation**: Remote was accidentally updated, need to restore local version
+**Situation**: A bad change was merged to `master`.
+
+**Response**: Revert via a PR; do not force push:
+```bash
+git checkout -b fix/revert-bad-merge
+# git revert <sha> ...
+git push -u origin fix/revert-bad-merge
+```
 
 
 ### Scenario 2: Local Repository Corruption
 
 **Situation**: Local git repository is corrupted or lost
 
+**Response**: Re-clone and sync from remote:
+```bash
+git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+```
 
 ### Scenario 3: Need to Inspect Remote Changes
 
 **Situation**: Want to see what changed on remote without merging
 
+```bash
+git fetch origin
+git log --oneline --decorate --graph --max-count=30 origin/master
+```
 
 ### Scenario 4: Undo Last Commit (Before Push)
 
+```bash
+git reset --soft HEAD~1
+```
 
 ### Scenario 5: Undo Last Commit (After Push)
 
+```bash
+git revert HEAD
+```
 
 ---
 
@@ -364,16 +516,20 @@ Create a pre-push hook (optional):
 
 ### When Force Push is Allowed
 
-✅ **ALLOWED** - Since local is source of truth:
-- After local rebase (if needed)
-- To restore local version after accidental remote update
-- To clean up commit history (before sharing)
-- When working on feature branches
+✅ **DISALLOWED on `master`** - remote is canonical:
+- Never force push `master`.
+
+✅ **Allowed on feature branches (with care)**:
+- Before opening a PR (to clean up work-in-progress history).
+- Only when you understand the impact on collaborators.
 
 ### Safe Force Push
 
 **Always use `--force-with-lease` instead of `--force`**:
 
+```bash
+git push --force-with-lease origin "$(git rev-parse --abbrev-ref HEAD)"
+```
 
 ### Force Push Best Practices
 
@@ -558,15 +714,25 @@ Closes #456
 
 #### Issue 1: "Your branch is ahead of 'origin/master'"
 
-**Solution**: Push your local commits
+**Solution**: This should not happen on `master`. Create a branch for the commits and push that branch:
+```bash
+git checkout -b feature/recover-local-commits
+git push -u origin feature/recover-local-commits
+```
 
 #### Issue 2: "Your branch and 'origin/master' have diverged"
 
-**Solution**: Use force-with-lease (local takes priority)
+**Solution**: Remote is canonical. Reset local `master` to `origin/master` (after creating a backup branch):
+```bash
+git checkout master
+git fetch origin
+git branch backup/diverged-master-$(date -u +%Y%m%dT%H%M%SZ)
+git reset --hard origin/master
+```
 
 #### Issue 3: Merge conflicts during pull
 
-**Solution**: Keep local version
+**Solution**: On `master`, avoid merges: keep `master` fast-forward only. On feature branches, rebase and resolve conflicts, then push.
 
 #### Issue 4: Accidentally committed sensitive data
 
@@ -618,7 +784,7 @@ Closes #456
 
 ### For Team Members
 
-1. **Communication**: Inform team before force pushing to master
+1. **Communication**: Never force push `master`; coordinate before rewriting any shared branch
 2. **Feature Branches**: Use feature branches for experimental work
 3. **Regular Sync**: Push changes at least daily
 4. **Test Before Push**: Always run tests before pushing
@@ -639,27 +805,19 @@ Closes #456
 
 ## Summary
 
-✅ **Configured**: Local-first git workflow  
-✅ **Policy**: Local is always source of truth  
-✅ **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git  
-✅ **Settings**: `pull.rebase=false`, `push.default=current`, `merge.ff=false`  
-✅ **Conflicts**: Always resolve with `git checkout --ours`  
-✅ **Force Push**: Allowed and encouraged with `--force-with-lease`  
-✅ **Testing**: Run tests before push  
+✅ **Configured**: Remote-first git workflow
+✅ **Policy**: Remote history is canonical
+✅ **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git
+✅ **Settings**: recommend `pull.rebase=true` and `pull.ff=only` on `master`
+✅ **Conflicts**: preserve remote history; apply local changes via feature branches
+✅ **Force Push**: never on `master`; feature branches only with care
+✅ **Testing**: Run tests before push
 ✅ **Documentation**: Update docs with architectural changes
-
-### Recent Sync Status
-
-- **Last Push**: 2025-11-06
-- **Last Commit**: 6839f0b (refactor(pipeline): Implement remote synchronization enhancements)
-- **Status**: All local changes synced to GitHub ✅
-
-
 
 ---
 
-**Document Version**: 2.0  
-**Last Updated**: 2025-11-06  
+**Document Version**: 3.0
+**Last Updated**: 2026-01-10
 **Status**: ACTIVE  
 **Review Schedule**: Monthly or before major changes  
 **Maintainer**: Bestman Ezekwu Enock (csgtmalice@protonmail.ch)
@@ -689,31 +847,3 @@ git branch backup/before-refactor-$(Get-Date -Format "yyyyMMdd")
 ---
 
 **End of Document**
-
-### Recent Sync Status
-
-- **Last Push**: 2025-11-06
-- **Last Commit**: 6839f0b (refactor(pipeline): Implement remote synchronization enhancements)
-- **Status**: All local changes synced to GitHub o. *(New work since then includes SQLite self-healing, MSSA/SARIMAX/visualization fixes, test-DB isolation, and documentation updatescommit and push as described below.)*
-
-### Quick Reference
-
-```bash
-# Daily workflow (docs + code)
-git status
-git add Documentation/implementation_checkpoint.md Documentation/arch_tree.md Documentation/BRUTAL_TEST_README.md Documentation/FORECASTING_IMPLEMENTATION_SUMMARY.md bash/comprehensive_brutal_test.sh
-git commit -m "docs(brutal+forecasting): Sync docs with DB/test isolation fixes"
-git push origin master
-
-# If conflicts
-git checkout --ours .
-git add .
-git commit -m "merge: Resolve conflicts"
-
-# If remote diverged
-git push --force-with-lease origin master
-
-# Verify
-git status
-git log --oneline -5
-```

@@ -91,8 +91,12 @@ Security note:
 
 - `.env` is ignored:
   - `git check-ignore -v .env`
+- `scripts/.env` is ignored:
+  - `git check-ignore -v scripts/.env`
 - `.env` is not tracked:
   - `git ls-files -- .env`
+- `scripts/.env` is not tracked:
+  - `git ls-files -- scripts/.env`
 - No staged secrets:
   - `git diff --cached`
   - `rg -n "(api[_ -]?key|token|secret|password)\\s*=" -S .`

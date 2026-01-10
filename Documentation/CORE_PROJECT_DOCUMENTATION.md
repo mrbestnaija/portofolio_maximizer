@@ -13,6 +13,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Repo overview and onboarding**: `README.md`
 - **Security policy (responsible disclosure)**: `SECURITY.md`
 - **API key handling (local secrets)**: `Documentation/API_KEYS_SECURITY.md`
+- **Version control policy (remote-first)**: `Documentation/GIT_WORKFLOW.md`
 - **Architecture + navigation map**: `Documentation/arch_tree.md`
 - **Current engineering health snapshot**: `Documentation/PROJECT_STATUS.md`
 - **Chronological verification/evidence log**: `Documentation/implementation_checkpoint.md`
