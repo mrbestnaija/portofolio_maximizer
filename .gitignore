@@ -64,6 +64,7 @@ local_database.db
 *.db.*
 
 # SQLite WAL/SHM artifacts sometimes created for :memory: handles
+:memory:
 :memory:-shm
 :memory:-wal
 :memory:-journal
