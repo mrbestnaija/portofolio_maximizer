@@ -11,6 +11,8 @@ This document is intentionally “policy-like”: it tells you what must be true
 The project contains many documents; the following are the **core** ones that should remain consistent with the code and with each other:
 
 - **Repo overview and onboarding**: `README.md`
+- **Security policy (responsible disclosure)**: `SECURITY.md`
+- **API key handling (local secrets)**: `Documentation/API_KEYS_SECURITY.md`
 - **Architecture + navigation map**: `Documentation/arch_tree.md`
 - **Current engineering health snapshot**: `Documentation/PROJECT_STATUS.md`
 - **Chronological verification/evidence log**: `Documentation/implementation_checkpoint.md`
@@ -93,6 +95,14 @@ Use this ladder to claim increasingly strong confidence.
 ---
 
 ## 4. Artifact Conventions (Future-Proofing)
+
+### CI verification (GitHub Actions)
+
+CI is treated as part of the evidence trail for merges:
+
+- Required merge blocker: `CI / test` must pass (dependency install + `pip check` + `pytest`).
+- Automation workflows that depend on repository secrets (e.g., Projects sync) must skip cleanly when secrets are absent or PRs are from forks; they must not block merges.
+- For dependency/security PRs: keep changes minimal, record which CVE/GHSA is addressed, and record what tests were run.
 
 ### 4.1 Recommended naming
 

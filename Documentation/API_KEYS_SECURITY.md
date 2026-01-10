@@ -76,6 +76,17 @@ Security note:
 - Embed tokens in remote URLs like `https://user:token@github.com/...`
 - Commit `.env` or `secrets/` files
 
+## GitHub Actions (CI) Secret Handling
+
+### Required behaviors
+- Do not write repository secrets into `.env` files inside workflows unless absolutely necessary; prefer passing secrets via action inputs or environment variables scoped to the step.
+- Workflows that require secrets (e.g., Projects automation tokens) must **skip** cleanly when secrets are unavailable (common for forked PRs).
+- Avoid printing secret values; always rely on GitHub masking and never echo tokens/keys.
+
+### Projects automation token
+- If you use GitHub Projects (v2) automation, store a PAT as a repository secret (e.g., `PROJECTS_TOKEN`) with the minimum required scopes.
+- Treat that automation as **nice-to-have**: it must not block merges if the token is absent or permissions are restricted.
+
 ## Verification Checklist (Before Any Push)
 
 - `.env` is ignored:

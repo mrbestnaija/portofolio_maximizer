@@ -1,9 +1,9 @@
 # Git Workflow - Local as Source of Truth
 
 **Policy**: Local repository is ALWAYS the source of truth  
-**Last Updated**: 2025-11-24  
+**Last Updated**: 2026-01-10  
 **Status**: ENFORCED  
-**Version**: 2.1
+**Version**: 2.2
 
 ---
 
@@ -12,6 +12,7 @@
 - [Quick Start](#quick-start)
 - [Remote Repository](#remote-repository)
 - [Git Configuration](#git-configuration)
+- [Authentication & Security](#authentication--security)
 - [Workflow Principles](#workflow-principles)
 - [Common Operations](#common-operations)
 - [Contributor Workflow](#contributor-workflow)
@@ -46,8 +47,16 @@
 
 3. Sync with remote (local is source of truth, use current branch):
    ```bash
-   git pull --rebase origin $(git rev-parse --abbrev-ref HEAD) || true
-   git push origin $(git rev-parse --abbrev-ref HEAD)
+   # Bash/Zsh
+   git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" || true
+   git push origin "$(git rev-parse --abbrev-ref HEAD)"
+   ```
+
+   ```powershell
+   # PowerShell
+   git pull --rebase origin (git rev-parse --abbrev-ref HEAD)
+   if ($LASTEXITCODE -ne 0) { Write-Output "pull failed (continuing per local-first policy)" }
+   git push origin (git rev-parse --abbrev-ref HEAD)
    ```
 
 4. Optional: use the automated sync helper to run the same pull/push sequence for the current (or a named) branch:
@@ -67,6 +76,9 @@
 **GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git  
 **Primary Branch**: `master`  
 **Last Sync**: 2025-11-24 (local hyperopt + doc updates, not yet pushed in this repo snapshot)
+
+**Authentication policy (GitHub)**:
+- Password authentication over HTTPS is **not supported**. Use SSH or a Personal Access Token (PAT).
 
 ### Remote Configuration
 
@@ -93,6 +105,48 @@ The following git settings ensure local changes always take precedence and maint
 
 
 ---
+
+## Authentication & Security
+
+### GitHub Authentication (Required)
+- **Preferred**: SSH (`git@github.com:mrbestnaija/portofolio_maximizer.git`).
+- **Alternative**: HTTPS + **PAT** (classic or fine-grained) stored via a credential helper.
+- **Forbidden**: GitHub account password for git operations (will fail).
+
+### SSH (Recommended)
+```bash
+# Generate a key
+ssh-keygen -t ed25519 -C "your_email@example.com"
+
+# Add public key (~/.ssh/id_ed25519.pub) to GitHub > Settings > SSH and GPG keys
+git remote set-url origin git@github.com:mrbestnaija/portofolio_maximizer.git
+
+# Test auth
+ssh -T git@github.com
+```
+
+### HTTPS + PAT (If You Must)
+- Create a PAT with least privilege (repo scope for private repos; fine-grained token where possible).
+- Do **not** embed tokens in the remote URL (it will leak via shell history/config).
+- Prefer a credential manager prompt + secure storage.
+
+### Credential Helpers (Windows vs WSL)
+- **Windows (Git for Windows)**: use Git Credential Manager.
+  - Verify: `git config --show-origin --get-all credential.helper`
+- **WSL**: do not point `credential.helper` at a Windows `.exe` path (causes `Exec format error`).
+  - Fix if misconfigured: `git config --global --unset-all credential.helper`
+  - Then use SSH (recommended) or install a Linux-native credential manager.
+
+### Secret Hygiene (Non-Negotiable)
+- Never commit secrets: `.env`, API keys, tokens, SSH private keys, broker creds.
+- Always review staged changes: `git diff --cached` before commit.
+- If a secret is committed: rotate it immediately and remove from history **before pushing**.
+
+### Dependency Security Updates
+- For dependency bumps and vulnerability fixes:
+  - Prefer a dedicated branch + PR (e.g., `chore/deps-*`).
+  - Run `python -m pip_audit -r requirements.txt` (and any extras files) before pushing.
+  - Keep changes minimal and validate against the existing test baseline.
 
 ## Workflow Principles
 
@@ -203,6 +257,30 @@ Before pushing to remote:
     ```bash
     HYPEROPT_ROUNDS=1 bash/bash/run_post_eval.sh
     ```
+
+### GitHub Actions Checks (What Blocks Merges)
+
+In PRs, treat checks in two classes:
+
+1) **Required (must be green)**:
+   - `CI / test` (runs `pip install -r requirements.txt`, `pip check`, then `pytest`).
+
+2) **Nice-to-have (should not block merges)**:
+   - Project automation workflows (e.g. `Sync issues and PRs to Project 7`) that depend on repo secrets and permissions.
+
+If a non-critical automation check fails, fix its permissions/guards or make it skip cleanly when secrets are absent.
+
+### Fixing a Failing CI/Test Run (Fast Playbook)
+
+1) Open the failing `CI / test` job log and find the **first** real error (ignore setup noise).
+2) Reproduce locally with the **same Python version** used in CI and a clean environment:
+   - Install deps from `requirements.txt`
+   - Run `pip check`
+   - Run the same `pytest` command as CI
+3) For dependency/security PRs:
+   - Run `python -m pip_audit -r requirements.txt` (and any optional extras files) and keep the diff minimal.
+4) If the breakage is a dependency constraint conflict:
+   - Prefer bumping the conflicting library instead of pinning around it, unless the pin is strictly temporary and documented.
 
 ### Automated Testing (Recommended)
 
@@ -505,6 +583,26 @@ Closes #456
 #### Issue 7: Remote URL incorrect
 
 **Solution**: Update remote URL
+
+#### Issue 8: "CI / test" failing on a PR
+
+**Solution**: Open the job log and reproduce locally; the first traceback is the root cause. For dependency PRs, run `pip check` and `python -m pip_audit -r requirements.txt` before pushing.
+
+#### Issue 9: "Sync issues and PRs to Project 7" failing quickly
+
+**Solution**: This is usually repo permissions or missing `PROJECTS_TOKEN` secret. Either configure the secret with correct scopes or ensure the workflow skips when the token is absent (do not let it block merges).
+
+#### Issue 10: "Password authentication is not supported"
+
+**Solution**: Use SSH or HTTPS with a PAT (never a password).
+
+#### Issue 11: "git-credential-manager.exe: Exec format error" (WSL)
+
+**Solution**: Your WSL git is trying to run a Windows credential helper; unset it and use SSH.
+
+#### Issue 12: "Invalid username or token"
+
+**Solution**: Regenerate a PAT (correct scopes) or switch to SSH; clear cached credentials if needed.
 
 ### Getting Help
 
