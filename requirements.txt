@@ -1,5 +1,5 @@
 aiohappyeyeballs==2.6.1
-aiohttp==3.13.2
+aiohttp==3.13.3
 aiosignal==1.4.0
 alpha_vantage==3.0.0
 annotated-types==0.7.0
@@ -51,7 +51,7 @@ platformdirs==4.4.0
 pluggy==1.6.0
 propcache==0.4.1
 protobuf==6.32.1
-pyarrow==14.0.2
+pyarrow==17.0.0
 pycparser==2.23
 pydantic==2.11.9
 pydantic_core==2.33.2
@@ -79,7 +79,7 @@ tqdm==4.67.1
 typing-inspection==0.4.1
 typing_extensions==4.15.0
 tzdata==2025.2
-urllib3==2.5.0
+urllib3==2.6.3
 websockets==15.0.1
 yarl==1.22.0
 yfinance==0.2.66
