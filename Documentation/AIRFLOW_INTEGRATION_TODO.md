@@ -8,6 +8,18 @@
 
 This document outlines the comprehensive plan for integrating Apache Airflow into the Portfolio Maximizer project to replace the current bash script and cron-based orchestration system. The migration will follow industry best practices for workflow orchestration, monitoring, and scalability.
 
+## Guardrails & References
+- Canonical references: `Documentation/implementation_checkpoint.md`, `Documentation/arch_tree.md`, `Documentation/STUB_IMPLEMENTATION_PLAN.md`, `Documentation/OPTIMIZATION_IMPLEMENTATION_PLAN.md`, `Documentation/OPTIMIZATION_OPTIONS.md`, `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`.
+- Heuristics vs. full models vs. ML calibrators: keep fast heuristics (quant health tiers, MVS summaries, barbell gates) separate from full-model outputs (TS ensemble + portfolio math) and any future ML calibrators; Airflow must not introduce new heuristics or rewrite gates.
+- Non-goals: do not enable options/derivatives paths or LLM fallback without existing gates; do not bypass TS-primary routing, bar-aware trader behaviour, or quant-health gates; do not route synthetic providers into live runs without explicit flags.
+- Evidence alignment: Airflow orchestration must emit artifacts compatible with brutal harness expectations and existing logs (`logs/`, `reports/`), not invent new formats.
+
+## Runtime & Install Guidance
+- Supported runtime: WSL + `./simpleTrader_env` (see `Documentation/implementation_checkpoint.md`); Windows `python` on PATH is not supported.
+- Airflow install: use constraints and Docker Compose or a dedicated virtualenv inside WSL; avoid host-wide `pip install apache-airflow`. Pin Airflow version and extras in `requirements-airflow.txt`.
+- Secrets/variables: load from `.env` via `etl/secret_loader.py` or Airflow Secrets Backend; no inline credentials. Connections/Variables should mirror existing env names (`CRON_*`, `PIPELINE_DEVICE`, etc.).
+- Networking/keys: respect `ENABLE_SYNTHETIC_PROVIDER` isolation rules and synthetic-only flags during tests; never mix synthetic artifacts with live trading configurations.
+
 ## Current State Analysis
 
 **Last Updated**: 2026-01-08  
@@ -120,6 +132,13 @@ The project already has production-ready infrastructure that Airflow can leverag
    - GPU-parallel processing support
    - Can be managed via Airflow resource pools
 
+## Operator & DAG Wiring Requirements (Cross-Cutting)
+- Operators must wrap existing entrypoints and reuse shared services: `etl/checkpoint_manager.py` (state/recovery), `etl/pipeline_logger.py` (structured logging), `etl/database_manager.py` (persistence + run-local metrics).
+- Propagate `run_id`/Airflow execution context into scripts (env/args) so database records and logs stay run-scoped; log to `logs/cron/` and preserve current JSON event formats.
+- Respect gating/env flags: `PIPELINE_DEVICE`, `ENABLE_GPU_PARALLEL`, `ENABLE_PARALLEL_TICKER_PROCESSING`, `ENABLE_SYNTHETIC_PROVIDER`/`SYNTHETIC_ONLY`, `CRON_*`, and quant-health gates. Keep TS-primary, bar-aware behaviour intact; LLM fallback stays off unless existing readiness checks pass.
+- Error/alerting: trigger `scripts/error_monitor.py` on failures; honor checkpoint recovery semantics; preserve retry/backoff already in bash orchestration.
+- Separation of modes: synthetic runs are allowed only when explicitly flagged; never mix synthetic artifacts with live trading runs or live database paths.
+
 ### Phases
 
 #### Phase 1: Infrastructure Setup (Foundation)
@@ -193,7 +212,8 @@ The project already has production-ready infrastructure that Airflow can leverag
 
 **Deliverables**:
 - `docker-compose.yml` for Airflow services
-- `requirements-airflow.txt` with Airflow dependencies
+- `requirements-airflow.txt` with Airflow dependencies (installed via constraints)
+- Secrets backend wiring (LocalFilesystemBackend) mounted at `/secrets` for connections/variables
 - Installation documentation
 
 #### Task 1.2: Directory Structure
@@ -251,11 +271,18 @@ Create reusable operators that wrap existing Python entrypoints:
 - Preserve existing error handling and retry logic
 
 **Deliverables**:
-- `airflow/plugins/operators/portfolio_operators.py`
-- Unit tests for operators (integrate with existing test patterns)
+- `airflow/plugins/operators/portfolio_operators.py` (structured logging via `etl/pipeline_logger.py` to `logs/cron/`)
+- Unit tests for operators (integrate with existing test patterns) under `airflow/tests`
 - Documentation (reference existing script documentation)
 
 ### Phase 2: Core Task Migration
+
+**Cross-cutting DAG requirements**:
+- Run quant health check (`scripts/check_quant_validation_health.py`) before trading tasks; fail fast or alert on RED.
+- Trigger performance dashboard snapshot (`monitoring/performance_dashboard.py`) after core runs to keep metrics fresh.
+- Route failures through `scripts/error_monitor.py` for alerting; keep logs in `logs/cron/` with Airflow context appended.
+- Enforce synthetic/live separation (`execution_mode`, `ENABLE_SYNTHETIC_PROVIDER`, DB path) and propagate `run_id` into all tasks.
+- Initial DAG scaffolds added: `airflow/dags/etl/daily_etl_dag.py`, `airflow/dags/trading/auto_trader_dag.py`, `airflow/dags/monitoring/health_monitoring_dag.py` (extend with sensors/pools/variables).
 
 #### Task 2.1: Daily ETL DAG
 **Current**: `bash/production_cron.sh daily_etl` → `scripts/run_etl_pipeline.py`  
@@ -642,6 +669,12 @@ For each task migration:
 - [ ] Monitor and compare
 - [ ] Cutover to Airflow
 - [ ] Decommission cron job
+
+## Validation & Testing Plan
+- Runtime: execute from WSL using `./simpleTrader_env` (Windows PATH python is unsupported).
+- Regression guards (existing): `./simpleTrader_env/bin/python -m compileall -q ai_llm analysis backtesting etl execution forcester_ts models monitoring recovery risk scripts tools`; `./simpleTrader_env/bin/python -m pytest -q tests/test_diagnostic_tools.py tests/ai_llm/test_signal_validator.py tests/execution/test_paper_trading_engine.py tests/execution/test_order_manager.py tests/scripts/test_forecast_persistence.py tests/etl/test_database_manager_schema.py tests/etl/test_data_source_manager_chunking.py`.
+- Full-suite evidence: `bash/comprehensive_brutal_test.sh` (expect green; artifacts under `logs/brutal/`).
+- Airflow additions: add unit tests for new operators/DAG factories and ensure they respect quant-health gates, synthetic/live separation, and run-id propagation; include WSL-only notes in test docs.
 
 ## Success Criteria
 
