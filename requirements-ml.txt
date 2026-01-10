@@ -1,0 +1,12 @@
+# GPU-enabled extras (optional). Install only on machines with compatible NVIDIA drivers/CUDA.
+#
+# Usage:
+# - CPU-only / baseline: `pip install -r requirements.txt`
+# - GPU extras (keep baseline first): `pip install -r requirements-ml.txt`
+#
+# Notes:
+# - `torch` is already pinned in `requirements.txt`.
+# - CuPy is optional and only used when MSSA-RL GPU acceleration is explicitly enabled.
+
+-r requirements.txt
+cupy-cuda12x==13.6.0
