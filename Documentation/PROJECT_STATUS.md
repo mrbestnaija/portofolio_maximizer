@@ -29,7 +29,7 @@
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
 - Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
 - Dependency note: `arch==8.0.0` enables full GARCH; if missing, `forcester_ts.garch.GARCHForecaster` falls back to EWMA for test/dev continuity
-- CI notes: GitHub Actions runs `CI / test` on `ubuntu-latest` with Python 3.12 and executes `pip check` + `pytest -m "not gpu"`; project/issue automation workflows that require `PROJECTS_TOKEN` must be treated as non-blocking and skip when secrets are unavailable.
+- CI notes: GitHub Actions runs `CI / test` on `ubuntu-latest` with Python 3.10 and executes `pip check` + `pytest -m "not gpu"`; project/issue automation workflows that require `PROJECTS_TOKEN` must be treated as non-blocking and skip when secrets are unavailable.
 
 ### Verification Commands (Repro)
 

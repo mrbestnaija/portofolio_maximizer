@@ -19,7 +19,7 @@ import subprocess
 import sys
 from contextlib import redirect_stdout
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -176,7 +176,7 @@ def capture_baseline_snapshot(
     out_dir = out_dir.resolve()
     tag_sanitized = _sanitize_tag(tag)
 
-    resolved_run_id = run_id or _infer_run_id(root) or datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    resolved_run_id = run_id or _infer_run_id(root) or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     snapshot_dir = out_dir / f"{resolved_run_id}_{tag_sanitized}"
     suffix = 1
@@ -186,7 +186,7 @@ def capture_baseline_snapshot(
     _safe_mkdir(snapshot_dir)
 
     manifest: Dict[str, Any] = {
-        "captured_at": datetime.now(UTC).isoformat(),
+        "captured_at": datetime.now(timezone.utc).isoformat(),
         "root": str(root),
         "run_id": resolved_run_id,
         "tag": tag_sanitized,
