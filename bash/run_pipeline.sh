@@ -26,6 +26,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=bash/lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
+pmx_log "INFO" "Runtime fingerprint (enforced):"
 PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
 pmx_require_executable "${PYTHON_BIN}"
 

@@ -1,5 +1,18 @@
 # AI Developer Guardrails: Reality-Based Development Checklist
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
+> **Truthfulness & Evidence (Mandatory)**  
+> - Never claim a task is complete without citing the exact commands run and their exit codes or outputs.  
+> - Prefer short verification commands (`ls`, `find`, `pytest -q …`, gate CLI) and include key numbers (effective audits, violation rates, decisions).  
+> - If a step fails or is skipped, report it explicitly; do not imply success.  
+> - After file moves/cleanups, show before/after listings to prove the change.  
+> - If unsure about a result, rerun under the correct runtime or mark it as untrusted.  
+> - Use cache artifacts (e.g., `logs/forecast_audits_cache/latest_summary.json`) as ground truth for reported decisions.
+
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
 > **Quant Validation & MTM:** For quant gates and liquidation, treat `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`, and `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` as the canonical references (plus their helper scripts in `scripts/`), rather than embedding ad-hoc thresholds or pricing rules in new code.

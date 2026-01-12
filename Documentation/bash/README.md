@@ -46,4 +46,5 @@ The legacy scripts `bash/test_llm_quick.sh`, `bash/test_llm_integration.sh`, and
 - All scripts assume the project virtual environment exists at `simpleTrader_env/` (see `requirements.txt`).
 - Logs and evidence artifacts should land under `logs/`, `reports/`, and `visualizations/` (see `Documentation/CORE_PROJECT_DOCUMENTATION.md`).
 - Shared helper functions live in `bash/lib/common.sh`.
+- Runtime check is default: every orchestrator should source `bash/lib/common.sh` and call `pmx_resolve_python` (enforces WSL + `simpleTrader_env` and prints the runtime fingerprint). Treat runs without that fingerprint as untrusted (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
