@@ -74,7 +74,8 @@ Behaviour:
    - If the merged list is non‑empty, return it directly with:
      - `universe_source="explicit+frontier"`  
      - `active_source` passed through unchanged.  
-   - This preserves today’s behaviour for `run_auto_trader.py` and CLI tools.
+   - This preserves today's behaviour for `run_auto_trader.py` and CLI tools.
+   - Apply provider-aware filters to drop tickers unsupported by the active source (e.g., yfinance lacks Sri Lanka CSE coverage) so live runs avoid repeated missing-data failures.
 
 2. **Optional provider‑level discovery** (only when no explicit tickers)  
    - If `base_tickers` is empty and `use_discovery` is `True`:

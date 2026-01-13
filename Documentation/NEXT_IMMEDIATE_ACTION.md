@@ -79,8 +79,8 @@ Testing already executed: `python3 -m compileall scripts/run_auto_trader.py`. Ne
 
 **Command**:
 ```bash
-# Activate virtual environment
-.\simpleTrader_env\Scripts\Activate.ps1
+cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+source simpleTrader_env/bin/activate
 
 # Run Time Series signal generator tests
 python -m pytest tests/models/test_time_series_signal_generator.py -v --tb=short

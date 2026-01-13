@@ -1,4 +1,9 @@
 # Implementation Checkpoint Document
+
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 **Version**: 7.2
 **Date**: 2025-12-28 (Updated)
 **Project**: Portfolio Maximizer
@@ -38,6 +43,10 @@ The nightly validation wrapper `schedule_backfill.bat` is registered in Windows 
 - `logs/brutal/results_20260103_220403/reports/final_report.md` (42/42 stages passed; quant health GREEN)
 - `logs/brutal/results_20260103_220403/logs/pipeline_execution.log` (synthetic pipeline run; checkpoint + DB mirror sync)
 - `logs/brutal/results_20260103_220403/logs/monitoring_run.log` (monitoring reported DEGRADED due to latency benchmark + missing backtest inputs)
+
+**Verification (2026-01-11)**: Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits:
+- violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **Decision: DISABLE ensemble as default** (insufficient lift vs BEST_SINGLE).
+- Config applied: `config/forecasting_config.yml` now has `ensemble.enabled: false`; ensemble remains research-only until lift is demonstrated over ≥20 effective audits.
 
 **Verification (2026-01-06)**: Roadmap Phase 2 + 3.1 commenced (bar-aware trader + horizon-end TS target). Focused checks:
 - `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py models/time_series_signal_generator.py`
@@ -167,7 +176,7 @@ Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Docume
 
 ### Frontier Market Coverage (2025-11-15)
 - `etl/frontier_markets.py` introduces the Nigeria â Bulgaria ticker atlas provided in the frontier liquidity guide (Nigeria: `MTNN`/`AIRTELAFRI`/`ZENITHBANK`/`GUARANTY`/`FBNH`, Kenya: `EABL`/`KCB`/`SCANGROUP`/`COOP`, South Africa: `NPN`/`BIL`/`SAB`/`SOL`/`MTN`, Vietnam: `VHM`/`GAS`/`BID`/`SSI`, Bangladesh: `BRACBANK`/`LAFSURCEML`/`IFADAUTOS`/`RELIANCE`, Sri Lanka: `COMBANK`/`HNB`/`SAMP`/`LOLC`, Pakistan: `OGDC`/`MEBL`/`LUCK`/`UBL`, Kuwait: `ZAIN`/`NBK`/`KFH`/`MAYADEEN`, Qatar: `QNBK`/`DUQM`/`QISB`/`QAMC`, Romania: `SIF1`/`TGN`/`BRD`/`TLV`, Bulgaria: `5EN`/`BGO`/`AIG`/`SYN`).
-- `scripts/run_etl_pipeline.py` now exports a `--include-frontier-tickers` flag so every multi-ticker training/test run automatically appends that atlas. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh`âs new frontier training stage so `.bash/` and `.script/` orchestrators stay synchronized.
+- `scripts/run_etl_pipeline.py` now exports a `--include-frontier-tickers` flag so every multi-ticker training/test run automatically appends that atlas. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh`’s new frontier training stage so `bash/` and `scripts/` orchestrators stay synchronized.
 - Documentation excerpts (`README.md`, `Documentation/arch_tree.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, `SECURITY_*` files) now reference the flag so operational teams donât forget to exercise frontier venues during simulations.
 
 ### Time-Series Forecaster Hardening (2025-11-18)
@@ -278,17 +287,18 @@ Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Docume
 - Signal validator now enforces the five-layer guardrail with corrected Kelly sizing, statistically significant backtesting, market-regime detection, and risk-level normalisation compatible with database constraints.
 - Pipeline execution supports live data with synthetic fallback via `bash/run_pipeline_live.sh`; stage timing and dataset artefacts are summarised automatically after each run.
 
-### How to Execute (PowerShell, Windows)
-``
-# Activate project virtual environment
-simpleTrader_env\Scripts\Activate.ps1
+### How to Execute (WSL)
+
+```bash
+cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+source simpleTrader_env/bin/activate
 
 # Run a live-first pipeline (auto synthetic fallback, LLM enabled)
-./bash/run_pipeline_live.sh
+bash bash/run_pipeline_live.sh
 
 # Force offline validation (deterministic synthetic data)
 python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm
-``
+```
 
 ## New Capabilities (2025-10-17)
 - Dry-run mode added to scripts/run_etl_pipeline.py (--dry-run) to exercise all stages without network usage by generating synthetic OHLCV data in-process.

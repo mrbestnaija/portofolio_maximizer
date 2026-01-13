@@ -17,9 +17,9 @@ signal_routing:
 
   # Time Series signal generation thresholds (production defaults)
   time_series:
-    confidence_threshold: 0.50  # Lowered from 0.55 to allow more trades through
-    min_expected_return: 0.001  # Lowered from 0.003 to align with cost model fixes
-    max_risk_score: 0.8         # Raised from 0.7 to allow higher volatility trades
+    confidence_threshold: 0.45  # Slightly lowered for test runs to admit more signals
+    min_expected_return: 0.0005 # Loosened for test runs; adjust up for production if costs rise
+    max_risk_score: 0.85        # Raised to allow higher volatility names during evaluation
     use_volatility_filter: true # Filter signals based on volatility
     # Cost/uncertainty gating for Time Series signals.
     # - default_roundtrip_cost_bps is a *prior* used only when bid/ask or synthetic microstructure
@@ -40,15 +40,15 @@ signal_routing:
         confidence_threshold: 0.55
         min_expected_return: 0.005
       "MSFT":
-        confidence_threshold: 0.50
-        min_expected_return: 0.001
-        max_risk_score: 0.80
+        confidence_threshold: 0.45
+        min_expected_return: 0.0005
+        max_risk_score: 0.85
       "MTN":
-        confidence_threshold: 0.50
-        min_expected_return: 0.001
+        confidence_threshold: 0.45
+        min_expected_return: 0.0005
       "AAPL":
-        confidence_threshold: 0.55
-        min_expected_return: 0.001
+        confidence_threshold: 0.50
+        min_expected_return: 0.0005
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.

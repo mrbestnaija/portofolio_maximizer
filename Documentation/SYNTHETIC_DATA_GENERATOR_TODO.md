@@ -55,7 +55,7 @@ Default data sources are currently inadequate for exercising the full TS/LLM pip
 - [ ] **No hardcoding**
   - Every generator choice (models, regimes, correlations, tickers, frequencies, seeds, microstructure, GAN training) must be driven by YAML + env overrides + CLI flags (no constants embedded in code paths).
 - [ ] **Modular + self-contained**
-  - Synthetic generator must plug into `etl/data_source_manager.py` via the existing adapter registry mechanism (provider = `synthetic`) and continue to work in `.bash/` and `bash/**` runners.
+  - Synthetic generator must plug into `etl/data_source_manager.py` via the existing adapter registry mechanism (provider = `synthetic`) and continue to work in `bash/` runners.
 - [ ] **Local-first (no paid external services)**
   - All persistence, versioning, and model training must work locally (DVC remote can be local filesystem).
 - [ ] **Reproducible + versioned artifacts**

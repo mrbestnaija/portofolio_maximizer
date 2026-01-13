@@ -1,5 +1,10 @@
 # Mark-to-Market & Liquidation Implementation Plan
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Last updated**: 2025-11-20  
 **Scope**: Enhancing `scripts/liquidate_open_trades.py` from a spot-only, yfinance-dependent helper into a configurable, asset-class-aware MTM tool that can support equities, crypto, options, and synthetic exposures under the barbell architecture.
 **Current status (2026-01-07)**: Phase 1 done; Phase 2 schema hints wired; synthetic legs implemented; options MTM (intrinsic/BS) and risk/reporting integration remain pending (see `Documentation/PROJECT_STATUS.md`).

@@ -5,7 +5,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
+source "${ROOT_DIR}/bash/lib/common.sh"
+pmx_require_wsl_simpletrader_runtime "${ROOT_DIR}"
+PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
 TRADER_SCRIPT="$ROOT_DIR/scripts/run_auto_trader.py"
 LOG_DIR="$ROOT_DIR/logs/auto_runs"
 RUN_LABEL="${RUN_LABEL:-}"
@@ -34,12 +36,12 @@ SLEEP_SECONDS="${SLEEP_SECONDS:-20}"
 ENABLE_LLM="${ENABLE_LLM:-0}"
 LLM_MODEL="${LLM_MODEL:-deepseek-coder:6.7b-instruct-q4_K_M}"
 INCLUDE_FRONTIER_TICKERS="${INCLUDE_FRONTIER_TICKERS:-1}"
-VERBOSE="${VERBOSE:-1}"
+VERBOSE="${VERBOSE:-0}"
 HYPEROPT_ROUNDS="${HYPEROPT_ROUNDS:-1}"
 BACKTEST_LOOKBACK_DAYS="${BACKTEST_LOOKBACK_DAYS:-365}"
 BACKTEST_HORIZON="${BACKTEST_HORIZON:-10}"
 # Optional fast intraday smoke (set INTRADAY_SMOKE=1 to enable)
-INTRADAY_SMOKE="${INTRADAY_SMOKE:-1}"
+INTRADAY_SMOKE="${INTRADAY_SMOKE:-0}"
 INTRADAY_INTERVAL="${INTRADAY_INTERVAL:-1h}"
 INTRADAY_FORECAST_HORIZON="${INTRADAY_FORECAST_HORIZON:-6}"
 

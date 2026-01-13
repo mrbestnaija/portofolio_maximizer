@@ -517,6 +517,37 @@ class DatabaseManager:
             )
             self._reset_connection()
             return True
+        if "readonly" in message:
+            logger.error(
+                "SQLite reported readonly database during %s; attempting writable recovery for %s",
+                context,
+                self._active_db_path,
+            )
+            try:
+                if not getattr(self, "_sqlite_in_memory", False):
+                    try:
+                        os.chmod(self._active_db_path, 0o600)
+                    except OSError:
+                        logger.debug("Unable to adjust permissions for %s", self._active_db_path)
+                    if not os.access(self._active_db_path, os.W_OK):
+                        clone_path = self._active_db_path.with_name(
+                            f"{self._active_db_path.stem}_rw{self._active_db_path.suffix}"
+                        )
+                        try:
+                            shutil.copy2(self._active_db_path, clone_path)
+                            self.db_path = clone_path
+                            self._active_db_path = clone_path
+                            logger.info("Redirected SQLite store to writable clone at %s", clone_path)
+                        except OSError as clone_exc:
+                            logger.error(
+                                "Failed to stage writable clone at %s: %s", clone_path, clone_exc
+                            )
+                            return False
+                self._reset_connection()
+                return True
+            except Exception as perm_exc:
+                logger.error("Readonly recovery failed during %s: %s", context, perm_exc)
+                return False
         if self._is_corruption_sqlite_error(message):
             logger.error(
                 "SQLite corruption detected during %s: %s",

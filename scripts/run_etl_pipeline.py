@@ -1920,21 +1920,24 @@ def execute_pipeline(
                             train_series = price_series
                             holdout_series = None
 
-                            if series_length < min_history_required:
-                                logger.warning(
-                                    "  WARN %s: Limited history (<%s observations). Using entire series; metrics disabled.",
-                                    ticker,
-                                    min_history_required,
-                                )
-                            elif series_length >= forecast_horizon * 2:
-                                train_series = price_series.iloc[:-forecast_horizon]
-                                holdout_series = price_series.iloc[-forecast_horizon:]
+                            # Build a holdout whenever possible so evaluation_metrics are
+                            # emitted for audit gating. Use a smaller holdout on short
+                            # series; default to full horizon otherwise.
+                            holdout_len = 0
+                            if series_length >= forecast_horizon * 2:
+                                holdout_len = forecast_horizon
+                            elif series_length >= max(forecast_horizon // 2, 6):
+                                holdout_len = max(2, min(forecast_horizon, series_length // 3))
+
+                            if holdout_len > 0 and series_length > holdout_len:
+                                train_series = price_series.iloc[:-holdout_len]
+                                holdout_series = price_series.iloc[-holdout_len:]
                             else:
                                 logger.warning(
-                                    "  WARN %s: Not enough history for walk-forward validation (required >= %s observations). "
-                                    "Using entire series for training; metrics will be skipped.",
+                                    "  WARN %s: Not enough history for walk-forward validation "
+                                    "(need > %s observations for holdout). Using entire series; metrics skipped.",
                                     ticker,
-                                    forecast_horizon * 2,
+                                    max(holdout_len, forecast_horizon),
                                 )
 
                             forecaster = TimeSeriesForecaster(

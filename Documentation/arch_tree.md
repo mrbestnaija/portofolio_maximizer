@@ -1,5 +1,10 @@
 # Architecture Tree & Documentation Map (Portfolio Maximizer)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Purpose**: Provide a navigable map of the repository (modules, workflows, and evidence artifacts) and point to the canonical “source of truth” documents.
 
 If you are looking for:
@@ -18,6 +23,7 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 - `Documentation/implementation_checkpoint.md` (chronological log + verification evidence)
 - `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` (research questions + hypotheses)
 - `Documentation/INTEGRATION_TESTING_COMPLETE.md` (integration test evidence)
+- Ensemble gate (research profile, 2026-01-11): 27 effective audits, violation_rate=3.7%, lift_fraction=0% ⇒ **ensemble disabled as default** (fallback to BEST_SINGLE). Config: `config/forecasting_config.yml` has `ensemble.enabled: false`.
 - `logs/brutal/results_20260103_220403/test.log` (brutal suite summary)
 - `logs/brutal/results_20260103_220403/stage_summary.csv` (timing summary)
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
@@ -211,7 +217,7 @@ scripts/analyze_dataset.py
 
 ### Frontier Market Multi-Ticker Coverage (Nov 2025) ?? NEW
 - `etl/frontier_markets.py` centralizes the Nigeria ? Bulgaria ticker sets and exposes `merge_frontier_tickers()` so every training/test flow can append the curated symbols without duplicating lists.
-- `scripts/run_etl_pipeline.py` now ships a `--include-frontier-tickers` flag that appends the curated symbols whenever a run contains multiple tickers. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `.bash/full_test_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh` (frontier training stage) to keep `.bash/` and `.script/` orchestration in sync.
+- `scripts/run_etl_pipeline.py` now ships a `--include-frontier-tickers` flag that appends the curated symbols whenever a run contains multiple tickers. The flag is wired through `bash/run_pipeline_live.sh`, `bash/run_pipeline_dry_run.sh`, `bash/full_test_run.sh`, `bash/test_real_time_pipeline.sh` (Step 10 synthetic multi-run), and `bash/comprehensive_brutal_test.sh` (frontier training stage) to keep `bash/` and `scripts/` orchestration in sync.
 - Frontier coverage list (also referenced in `Documentation/UNIFIED_ROADMAP.md`, `TO_DO_LIST_MACRO.mdc`, and the security docs to keep requirements synchronized):
   - **Nigeria (NGX)**: `MTNN`, `AIRTELAFRI`, `ZENITHBANK`, `GUARANTY`, `FBNH`
   - **Kenya (NSE)**: `EABL`, `KCB`, `SCANGROUP`, `COOP`

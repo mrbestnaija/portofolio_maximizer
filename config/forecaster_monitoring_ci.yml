@@ -1,0 +1,20 @@
+forecaster_monitoring:
+  regression_metrics:
+    # CI/brutal-friendly thresholds: faster gating with minimal warmup.
+    baseline_model: BEST_SINGLE
+    max_rmse_ratio_vs_baseline: 1.1
+    max_violation_rate: 0.25
+
+    # Lower counts so CI fails quickly on regressions.
+    min_effective_audits: 3
+    holding_period_audits: 5
+    promotion_margin: 0.0
+
+    fail_on_violation_during_holding_period: true
+    disable_ensemble_if_no_lift: true
+    min_lift_rmse_ratio: 0.00
+    min_lift_fraction: 0.10
+
+  quant_validation:
+    max_fail_fraction: 0.90
+    max_negative_expected_profit_fraction: 0.5

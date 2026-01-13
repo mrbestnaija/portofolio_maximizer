@@ -1,5 +1,10 @@
 ﻿# UNIFIED ROADMAP: Portfolio Maximizer v45
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 > **Current verified snapshot (2025-12-26):** `Documentation/PROJECT_STATUS.md` (engineering unblocked; paper-window MVS now PASS, live/paper still gated).
 
@@ -27,7 +32,7 @@
 
 
 ### Nov 15, 2025 Frontier Market Coverage Delta
-- Added `etl/frontier_markets.py` and the `--include-frontier-tickers` flag so every multi-ticker run in `.bash/` and `.script/` tooling appends the Nigeria → Bulgaria ticker atlas from the liquidity/spread guide (MTNN…SYN). `README.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, and all security guides now call out the flag explicitly.
+- Added `etl/frontier_markets.py` and the `--include-frontier-tickers` flag so every multi-ticker run in `bash/` and `scripts/` tooling appends the Nigeria → Bulgaria ticker atlas from the liquidity/spread guide (MTNN…SYN). `README.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, and all security guides now call out the flag explicitly.
 - `bash/test_real_time_pipeline.sh` Step 10 and the brutal suite gained synthetic multi-runs that exercise these symbols, keeping regression coverage honest even before NGX/NSE/BSE live suffix mappings land.
 
 ### Nov 18, 2025 SQLite Corruption Recovery

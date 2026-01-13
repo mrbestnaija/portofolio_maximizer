@@ -13,6 +13,11 @@ tasks using a single entrypoint script: `bash/production_cron.sh`.
 
 ## 0. Windows / WSL Equivalent (Evidence Freshness)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 For Windows hosts, the recommended operational equivalent to cron is:
 
 - Windows Task Scheduler calls `schedule_backfill.bat` (repo root).
@@ -64,8 +69,8 @@ Key tasks (first positional argument):
 The script automatically:
 
 - Resolves `PROJECT_ROOT` from its own location.
-- Locates `simpleTrader_env/bin/python` (or `Scripts/python.exe` on Windows‑style layouts).
-- Falls back to `python3`/`python` only if the venv binary is not available.
+- Locates `simpleTrader_env/bin/python` (WSL only; Windows layouts are unsupported).
+- Aborts if the WSL virtualenv is missing (no fallbacks; see `Documentation/RUNTIME_GUARDRAILS.md`).
 - Writes per‑task log files under `logs/cron/`, one file per invocation.
 
 ---

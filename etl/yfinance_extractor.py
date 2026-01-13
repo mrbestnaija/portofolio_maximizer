@@ -789,12 +789,21 @@ class YFinanceExtractor(BaseExtractor):
                     ", ".join(sorted(quiet_failed)),
                 )
 
-        # Reset index before concat to avoid duplicate indices
+        # Reset index before concat to avoid duplicate indices.
         combined = pd.concat([df.reset_index() for df in all_data], ignore_index=True)
 
-        # Set Date as index
-        if 'Date' in combined.columns:
-            combined.set_index('Date', inplace=True)
+        # Preserve timestamps across intervals (daily uses `Date`, intraday uses `Datetime`).
+        datetime_col = None
+        for candidate in ("Date", "Datetime", "date", "datetime"):
+            if candidate in combined.columns:
+                datetime_col = candidate
+                break
+        if datetime_col:
+            combined[datetime_col] = pd.to_datetime(combined[datetime_col], errors="coerce")
+            combined = combined.loc[combined[datetime_col].notna()].copy()
+            combined.set_index(datetime_col, inplace=True)
+            combined.index.name = "Date"
+            combined.sort_index(inplace=True)
 
         # Standardize columns and flatten MultiIndex (from BaseExtractor)
         combined = self._flatten_multiindex(combined)

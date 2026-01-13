@@ -1,5 +1,10 @@
 # Metrics & Evaluation (Definitions + Minimal Math)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Purpose**: Provide unambiguous, auditable metric definitions for papers/thesis, internal reports, dashboards, and automated gates.
 
 Ground truth implementations live in:
@@ -151,6 +156,13 @@ Reporting guidance:
 - average rank per model across folds,
 - a stability score in `[0, 1]` indicating whether model ordering is preserved across folds.
 
+### 6.3 Ensemble gate status (2026-01-11)
+
+- Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) with 27 effective audits:
+  - violation_rate=3.7% (<=25% cap)
+  - lift_fraction=0% (<10% required)
+  - **Decision: DISABLE ensemble as default**; config sets `config/forecasting_config.yml` `ensemble.enabled: false`; BEST_SINGLE remains the default until lift is demonstrated over ≥20 effective audits with required lift fraction.
+
 ---
 
 ## 7. Verification Windows (Avoiding Recency Bias)
@@ -162,3 +174,8 @@ For institutional-grade reporting, always report at least:
 - a hold-out or walk-forward evaluation window (CV protocol).
 
 When results disagree across windows, treat the discrepancy as the primary research signal (regime dependence, costs, gating strictness), not as something to average away.
+
+### Holdout and leakage avoidance
+- `TimeSeriesForecaster.evaluate()` must be called on strict holdout slices that do not overlap the training data used for that forecast (pipeline enforces this via a trailing holdout; when history is short, a smaller holdout is used to still emit metrics).
+- Audits under `logs/forecast_audits/` are considered **effective** only when they contain RMSE for ensemble and baseline; gates ignore metric-less audits.
+- Keep train/holdout splits contiguous in time; avoid shuffling or cross-window leakage when producing evidence for CI/brutal gates.

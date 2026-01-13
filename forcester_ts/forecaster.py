@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,8 @@ class TimeSeriesForecaster:
         if not audit_dir:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         self._audit_dir: Optional[Path] = Path(audit_dir).expanduser() if audit_dir else None
+        cfg_path = os.environ.get("TS_FORECAST_MONITOR_CONFIG", "config/forecaster_monitoring.yml")
+        self._rmse_monitor_cfg: Dict[str, Any] = self._load_rmse_monitoring_config(Path(cfg_path))
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -155,18 +158,43 @@ class TimeSeriesForecaster:
         normalized_index = pd.DatetimeIndex(series.index).tz_localize(None)
         series = series.copy()
         series.index = normalized_index
+        median_seconds: Optional[float] = None
+        if len(series.index) >= 3:
+            try:
+                diffs = pd.Series(series.index).diff().dropna()
+                if not diffs.empty:
+                    median_seconds = float(diffs.dt.total_seconds().median())
+            except Exception:
+                median_seconds = None
+
         try:
             inferred_freq = pd.infer_freq(series.index)
         except Exception:  # pragma: no cover - inference best effort
             inferred_freq = None
-        freq_to_use = inferred_freq or ("B" if len(series) > 3 else None)
-        if freq_to_use:
-            series.attrs["_pm_freq_hint"] = freq_to_use
+
+        freq_hint: Optional[str] = None
+        if inferred_freq:
+            freq_hint = str(inferred_freq)
+        elif median_seconds is not None and median_seconds > 0:
+            if median_seconds < 3600:
+                minutes = max(1, int(round(median_seconds / 60.0)))
+                freq_hint = f"{minutes}min"
+            elif median_seconds < 86400:
+                hours = max(1, int(round(median_seconds / 3600.0)))
+                freq_hint = f"{hours}H"
+            else:
+                freq_hint = "B"
+
+        if freq_hint:
+            series.attrs["_pm_freq_hint"] = freq_hint
+
+        # Only coerce to a fixed frequency for daily-or-slower series. Intraday
+        # gaps (overnights/weekends) would otherwise be padded into synthetic bars.
+        if freq_hint and median_seconds is not None and median_seconds >= 20 * 3600:
             try:
-                # Enforce a concrete DatetimeIndex frequency to keep statsmodels quiet.
-                series = series.asfreq(freq_to_use, method="pad")
+                series = series.asfreq(freq_hint, method="pad")
             except Exception:  # pragma: no cover - defensive; do not fail forecasting
-                logger.debug("Unable to enforce frequency %s on series", freq_to_use)
+                logger.debug("Unable to enforce frequency %s on series", freq_hint)
         return series
 
     def _capture_series_diagnostics(self, series: pd.Series) -> Dict[str, Any]:
@@ -611,6 +639,124 @@ class TimeSeriesForecaster:
         series = forecast_payload.get(key)
         return series if isinstance(series, pd.Series) else None
 
+    @staticmethod
+    def _rmse_from_metrics(metrics: Optional[Dict[str, Any]]) -> Optional[float]:
+        if not isinstance(metrics, dict):
+            return None
+        val = metrics.get("rmse")
+        try:
+            return float(val) if isinstance(val, (int, float)) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _best_single_from_metrics(
+        metrics_map: Dict[str, Dict[str, Any]]
+    ) -> tuple[Optional[str], Optional[float]]:
+        best_model: Optional[str] = None
+        best_rmse: Optional[float] = None
+        for name in ("sarimax", "samossa", "mssa_rl"):
+            rmse_val = TimeSeriesForecaster._rmse_from_metrics(metrics_map.get(name))
+            if rmse_val is None:
+                continue
+            if best_rmse is None or rmse_val < best_rmse:
+                best_rmse = rmse_val
+                best_model = name
+        return best_model, best_rmse
+
+    @staticmethod
+    def _load_rmse_monitoring_config(path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            import yaml  # type: ignore
+        except Exception:
+            return {}
+        try:
+            raw = yaml.safe_load(path.read_text()) or {}
+            fm = raw.get("forecaster_monitoring") or {}
+            return fm.get("regression_metrics") or {}
+        except Exception:
+            return {}
+
+    def _audit_history_stats(
+        self,
+        current_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Summarize recent audit performance for holdout-based model selection."""
+        ratios: list[float] = []
+        cfg = self._rmse_monitor_cfg or {}
+        max_ratio = float(cfg.get("max_rmse_ratio_vs_baseline", 1.1))
+        min_lift_rmse_ratio = float(cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+
+        def _append_from_metrics(metrics_map: Dict[str, Dict[str, Any]]) -> None:
+            ensemble_rmse = self._rmse_from_metrics(metrics_map.get("ensemble"))
+            best_model, best_rmse = self._best_single_from_metrics(metrics_map)
+            if ensemble_rmse is None or best_rmse is None or best_rmse <= 0:
+                return
+            ratios.append(ensemble_rmse / best_rmse)
+
+        def _extract_from_audit(path: Path) -> None:
+            try:
+                audit = json.loads(path.read_text())
+            except Exception:
+                return
+            artifacts = audit.get("artifacts") or {}
+            eval_metrics = artifacts.get("evaluation_metrics") or {}
+            if not isinstance(eval_metrics, dict):
+                return
+            metrics_map = {
+                key: val for key, val in eval_metrics.items() if isinstance(val, dict)
+            }
+            _append_from_metrics(metrics_map)
+
+        if self._audit_dir and self._audit_dir.exists():
+            files = sorted(
+                self._audit_dir.glob("forecast_audit_*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            seen_windows: set[tuple[Any, ...]] = set()
+            for path in files[:limit]:
+                try:
+                    audit = json.loads(path.read_text())
+                except Exception:
+                    continue
+                dataset = audit.get("dataset") or {}
+                window = (
+                    dataset.get("start"),
+                    dataset.get("end"),
+                    dataset.get("length"),
+                    dataset.get("forecast_horizon"),
+                )
+                if window in seen_windows:
+                    continue
+                seen_windows.add(window)
+                _extract_from_audit(path)
+
+        if current_metrics:
+            _append_from_metrics(current_metrics)
+
+        effective_n = len(ratios)
+        violation_rate = (
+            sum(1 for ratio in ratios if ratio > max_ratio) / effective_n
+            if effective_n
+            else 0.0
+        )
+        lift_threshold = 1.0 - min_lift_rmse_ratio
+        lift_fraction = (
+            sum(1 for ratio in ratios if ratio < lift_threshold) / effective_n
+            if effective_n
+            else 0.0
+        )
+        return {
+            "effective_n": effective_n,
+            "violation_rate": violation_rate,
+            "lift_fraction": lift_fraction,
+            "ratios": ratios,
+        }
+
     def evaluate(self, actual_series: pd.Series) -> Dict[str, Dict[str, float]]:
         """
         Compute regression metrics for the latest forecasts using realised prices.
@@ -645,6 +791,105 @@ class TimeSeriesForecaster:
         if isinstance(ensemble_payload, dict):
             _evaluate_model("ensemble", ensemble_payload)
 
+        rmse_cfg = self._rmse_monitor_cfg or {}
+        history_stats = self._audit_history_stats(metrics_map)
+
+        def _maybe_reweight_ensemble_from_holdout() -> None:
+            metadata = self._latest_results.get("ensemble_metadata")
+            if not isinstance(metadata, dict):
+                return
+            if not any(model in metrics_map for model in ("sarimax", "samossa", "mssa_rl")):
+                return
+            required = max(
+                int(rmse_cfg.get("holding_period_audits", 0) or 0),
+                int(rmse_cfg.get("min_effective_audits", 0) or 0),
+                0,
+            )
+            if required > 0 and history_stats.get("effective_n", 0) < required:
+                self._record_model_event(
+                    "ensemble",
+                    "holdout_wait",
+                    effective_audits=history_stats.get("effective_n", 0),
+                    required_audits=required,
+                )
+                return
+
+            rmse_by_model: Dict[str, float] = {}
+            for model in ("sarimax", "samossa", "mssa_rl"):
+                rmse_val = (metrics_map.get(model) or {}).get("rmse")
+                if isinstance(rmse_val, (int, float)) and float(rmse_val) >= 0:
+                    rmse_by_model[model] = float(rmse_val)
+            if not rmse_by_model:
+                return
+
+            best_model, best_rmse = min(rmse_by_model.items(), key=lambda item: item[1])
+            # Only blend models that are "close enough" to the best performer on
+            # the evaluated window. Otherwise, pick the best model outright so
+            # the ensemble cannot be worse than the best available forecaster.
+            #
+            # This implements the policy "model with least forecasting error is
+            # weightier" in a way that's robust for production gates.
+            relative_band = 0.05
+            eligible = {
+                model: rmse
+                for model, rmse in rmse_by_model.items()
+                if rmse <= best_rmse * (1.0 + relative_band)
+            }
+            if not eligible:
+                eligible = {best_model: best_rmse}
+
+            eps = 1e-12
+            raw_weights = {model: 1.0 / (rmse + eps) for model, rmse in eligible.items()}
+            total = sum(raw_weights.values())
+            if total <= 0:
+                return
+            weights = {model: val / total for model, val in raw_weights.items()}
+
+            # Rebuild the ensemble forecast using these RMSE-derived weights so
+            # the lowest error models are weightier on the evaluated window.
+            model_series: Dict[str, pd.Series] = {}
+            lower_bounds: Dict[str, Optional[pd.Series]] = {}
+            upper_bounds: Dict[str, Optional[pd.Series]] = {}
+            for model in weights.keys():
+                payload = self._latest_results.get(f"{model}_forecast")
+                if not isinstance(payload, dict):
+                    continue
+                forecast_series = self._extract_series(payload)
+                if forecast_series is None:
+                    continue
+                model_series[model] = forecast_series
+                lower_bounds[model] = payload.get("lower_ci") if isinstance(payload.get("lower_ci"), pd.Series) else None
+                upper_bounds[model] = payload.get("upper_ci") if isinstance(payload.get("upper_ci"), pd.Series) else None
+
+            if not model_series:
+                return
+
+            coordinator = EnsembleCoordinator(self._ensemble_config)
+            coordinator.selected_weights = dict(weights)
+            blended = coordinator.blend_forecasts(model_series, lower_bounds, upper_bounds)
+            if not blended:
+                return
+
+            self._latest_results["ensemble_forecast"] = blended
+            metadata["weights"] = dict(weights)
+            metadata["confidence"] = dict(weights)
+            self._instrumentation.record_artifact("ensemble_weights", dict(weights))
+            self._record_model_event(
+                "ensemble",
+                "reweighted_from_holdout",
+                weights=metadata.get("weights"),
+            )
+
+            # Recompute ensemble metrics on the reweighted forecast bundle.
+            ensemble_series = blended.get("forecast")
+            if isinstance(ensemble_series, pd.Series):
+                new_metrics = compute_regression_metrics(actual, ensemble_series)
+                if new_metrics:
+                    metrics_map["ensemble"] = new_metrics
+
+        _maybe_reweight_ensemble_from_holdout()
+        self._enforce_ensemble_safety(metrics_map, history_stats, rmse_cfg)
+
         self._latest_metrics = metrics_map
         self._latest_results.setdefault("regression_metrics", {}).update(metrics_map)
         self._instrumentation.record_artifact("evaluation_metrics", metrics_map)
@@ -664,4 +909,74 @@ class TimeSeriesForecaster:
         if metadata and "ensemble" in metrics_map:
             metadata["regression_metrics"] = metrics_map["ensemble"]
 
+        if self._audit_dir:
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
+            self.save_audit_report(audit_path)
+
         return metrics_map
+
+    def _enforce_ensemble_safety(
+        self,
+        metrics_map: Dict[str, Dict[str, Any]],
+        history_stats: Dict[str, Any],
+        rmse_cfg: Dict[str, Any],
+    ) -> None:
+        metadata = self._latest_results.setdefault("ensemble_metadata", {})
+        ensemble_rmse = self._rmse_from_metrics(metrics_map.get("ensemble"))
+        best_model, best_rmse = self._best_single_from_metrics(metrics_map)
+        if ensemble_rmse is None or best_rmse is None or best_rmse <= 0:
+            metadata.setdefault("ensemble_status", "NO_ENSEMBLE_EVIDENCE")
+            return
+
+        max_ratio = float(rmse_cfg.get("max_rmse_ratio_vs_baseline", 1.1))
+        promotion_margin = float(rmse_cfg.get("promotion_margin", 0.0) or 0.0)
+        min_lift_fraction = float(rmse_cfg.get("min_lift_fraction", 0.0) or 0.0)
+        min_effective = int(rmse_cfg.get("min_effective_audits", 0) or 0)
+        holding_period = int(rmse_cfg.get("holding_period_audits", 0) or 0)
+        disable_if_no_lift = bool(rmse_cfg.get("disable_ensemble_if_no_lift", False))
+        effective_n = history_stats.get("effective_n", 0) or 0
+        lift_fraction = history_stats.get("lift_fraction", 0.0) or 0.0
+        required = max(min_effective, holding_period, 0)
+
+        decision = "KEEP"
+        reason = "ensemble within tolerance"
+        ratio = ensemble_rmse / best_rmse
+
+        if ratio > max_ratio:
+            decision = "DISABLE_DEFAULT"
+            reason = f"rmse regression (ratio={ratio:.3f} > {max_ratio:.3f})"
+        elif disable_if_no_lift and required > 0 and effective_n >= required and lift_fraction < min_lift_fraction:
+            decision = "DISABLE_DEFAULT"
+            reason = (
+                f"insufficient lift over baseline (lift_fraction={lift_fraction:.3f} "
+                f"< {min_lift_fraction:.3f})"
+            )
+        elif promotion_margin > 0 and ratio > (1.0 - promotion_margin):
+            decision = "RESEARCH_ONLY"
+            reason = f"no margin lift (required >= {promotion_margin:.3f})"
+
+        metadata["ensemble_status"] = decision
+        metadata["ensemble_decision_reason"] = reason
+        if decision != "KEEP":
+            metadata["default_model"] = (best_model or "").upper() or metadata.get("primary_model")
+            self._latest_results["default_model"] = metadata.get("default_model")
+            self._record_model_event(
+                "ensemble",
+                "policy_decision",
+                status=decision,
+                reason=reason,
+                ratio=ratio,
+                effective_audits=effective_n,
+                required_audits=required,
+            )
+        self._instrumentation.record_artifact(
+            "ensemble_policy_decision",
+            {
+                "status": decision,
+                "reason": reason,
+                "ratio": ratio,
+                "effective_audits": effective_n,
+                "required_audits": required,
+            },
+        )

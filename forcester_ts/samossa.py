@@ -172,6 +172,12 @@ class SAMOSSAForecaster:
         if len(series) < self.config.min_series_length:
             raise ValueError("Series too short for SAMOSSA decomposition")
 
+        freq_hint = None
+        try:
+            freq_hint = series.attrs.get("_pm_freq_hint")
+        except Exception:
+            freq_hint = None
+
         cleaned = series.sort_index()
         cleaned = (
             cleaned.interpolate(method="time", limit_direction="both")
@@ -183,7 +189,7 @@ class SAMOSSAForecaster:
             raise ValueError("Insufficient non-NaN observations for SAMOSSA")
 
         self._last_index = cleaned.index[-1]
-        self._target_freq = cleaned.index.freqstr or cleaned.index.inferred_freq or "D"
+        self._target_freq = cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint or "D"
 
         if self.config.normalize:
             self._scale_mean = float(cleaned.mean())

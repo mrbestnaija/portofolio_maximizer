@@ -6,7 +6,7 @@ data_sources:
   providers:
     - name: "synthetic"
       type: "market_data"
-      enabled: true  # Enabled as default provider for pre-production/testing
+      enabled: false  # Disable by default so evaluation uses live data; enable via env for synthetic tests only
       priority: 1
       config_file: "config/synthetic_data_config.yml"
 

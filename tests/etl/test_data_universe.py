@@ -40,3 +40,18 @@ def test_resolve_ticker_universe_empty_no_discovery():
     assert universe.tickers == []
     assert universe.universe_source in ("none", "")
 
+
+def test_resolve_ticker_universe_filters_provider_blocklist():
+    """Provider-specific blocklists should drop unsupported tickers for yfinance."""
+
+    universe = resolve_ticker_universe(
+        base_tickers=["MSFT", "HNB", "SAMP"],
+        include_frontier=False,
+        active_source="yfinance",
+        use_discovery=False,
+    )
+
+    assert universe.tickers == ["MSFT"]
+    assert "provider_blocklist" in universe.notes
+    assert "HNB" in universe.notes["provider_blocklist"]
+

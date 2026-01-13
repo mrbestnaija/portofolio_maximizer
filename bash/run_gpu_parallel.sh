@@ -11,14 +11,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-# Preferred Python
-if [[ -x "${ROOT_DIR}/simpleTrader_env/bin/python" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/bin/python"
-elif [[ -x "${ROOT_DIR}/simpleTrader_env/Scripts/python.exe" ]]; then
-  PYTHON_BIN="${ROOT_DIR}/simpleTrader_env/Scripts/python.exe"
-else
-  PYTHON_BIN="${PYTHON_BIN:-python}"
-fi
+# Runtime guardrails (WSL + simpleTrader_env only; prints fingerprint).
+source "${ROOT_DIR}/bash/lib/common.sh"
+pmx_require_wsl_simpletrader_runtime "${ROOT_DIR}"
+PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
 
 # Mode selection
 MODE="${MODE:-synthetic}"  # synthetic | auto_trader

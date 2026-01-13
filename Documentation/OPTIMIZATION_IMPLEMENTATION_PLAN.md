@@ -1,5 +1,10 @@
 ﻿# 🚀 OPTIMIZATION IMPLEMENTATION PLAN
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
@@ -22,6 +27,12 @@
 - **Statistical Rigor**: B (Needs enhancement)
 - **Production Readiness**: B (Good but not institutional-grade)
 - **Test Coverage**: A (Excellent - 529 tests; latest full suite green per `Documentation/PROJECT_STATUS.md`)
+
+### 2026-01-11 Ensemble Gate Decision (evidence)
+- Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits:
+  - Violations: 1 (3.7% <= 25% cap), lift_fraction: 0% (<10% required) ⇒ **Decision: DISABLE ensemble as default** (insufficient lift vs BEST_SINGLE).
+  - `config/forecasting_config.yml` updated: `ensemble.enabled: false`; BEST_SINGLE remains the source of truth until lift is demonstrated.
+- Action: keep ensemble research-only; revisit when lift_fraction ≥ 10% with RMSE ratio within tolerance over ≥20 effective audits.
 
 ### Target State
 - **Mathematical Foundation**: A+ (Institutional-grade)

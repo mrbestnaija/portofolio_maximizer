@@ -11,8 +11,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_PATH="${PROJECT_ROOT}/simpleTrader_env"
-PYTHON_BIN="${ENV_PATH}/bin/python"
+cd "${PROJECT_ROOT}"
+
+source "${PROJECT_ROOT}/bash/lib/common.sh"
+pmx_require_wsl_simpletrader_runtime "${PROJECT_ROOT}"
+PYTHON_BIN="$(pmx_require_venv_python "${PROJECT_ROOT}")"
 PYTEST_CMD=("${PYTHON_BIN}" -m pytest)
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -29,11 +32,9 @@ fi
 
 printf -- "\n=============================================\n"
 printf -- " Portfolio Maximizer v45 - Full Test Run\n"
-printf -- " Environment : %s\n" "${ENV_PATH}"
+printf -- " Interpreter : %s\n" "${PYTHON_BIN}"
 printf -- " Working Dir : %s\n" "${PROJECT_ROOT}"
 printf -- "=============================================\n\n"
-
-cd "${PROJECT_ROOT}"
 
 TEST_ARGS=("$@")
 if [[ ${#TEST_ARGS[@]} -eq 0 ]]; then
@@ -63,4 +64,3 @@ fi
 printf -- "---------------------------------------------\n\n"
 
 exit "${TEST_STATUS}"
-

@@ -1,9 +1,15 @@
 # Portfolio Maximizer – Research Progress & Publication Plan
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Status**: Draft research log  
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading  
 **Last updated**: 2026-01-03  
 **Current status (2026-01-07)**: Engineering is unblocked, brutal suite is GREEN, but recent-window MVS is still FAIL; use `Documentation/PROJECT_STATUS.md` as the canonical status source.
+**Ensemble gate (2026-01-11)**: Research-profile RMSE gate on 27 effective audits, violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **DISABLE ensemble as default**. `config/forecasting_config.yml` has `ensemble.enabled: false`; BEST_SINGLE remains source of truth until lift is demonstrated over ≥20 effective audits.
 
 This document tracks the Portfolio Maximizer project as a scientific research artefact rather than only as a codebase. It is meant to evolve into the backbone of a Master’s‑level thesis or journal submission, with clear hypotheses, methods, experiments, and reproducible evidence.
 

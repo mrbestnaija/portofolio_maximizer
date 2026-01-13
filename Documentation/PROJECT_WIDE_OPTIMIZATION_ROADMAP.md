@@ -1,5 +1,10 @@
 ﻿# Project-Wide Optimization Roadmap (TS ↔ Execution ↔ Reporting)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Last updated**: 2026-01-06  
 **Status**: Active (sequenced, evidence-driven)  
 **Scope**: Fix Time Series (TS) model wiring, execution realism, and reporting so “live/paper” runs are bar-aware, horizon-consistent, cost-aware, and measurable.
@@ -331,6 +336,10 @@ CYCLES=1 SLEEP_SECONDS=0 ENABLE_LLM=0 bash bash/run_auto_trader.sh
 
 - [x] Forecast snapshot + backfill helpers (`tests/scripts/test_forecast_persistence.py`)
 - [x] DB API coverage (`tests/etl/test_database_manager_schema.py`)
+
+### 9.3 Ensemble gate outcome (2026-01-11)
+
+- Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits: violation_rate=3.7% (<=25% cap) but lift_fraction=0% (<10% required) ⇒ **Decision: DISABLE ensemble as default**. `config/forecasting_config.yml` now sets `ensemble.enabled: false`; BEST_SINGLE baseline remains the source of truth until lift is demonstrated over ≥20 effective audits with sufficient lift.
 
 ---
 

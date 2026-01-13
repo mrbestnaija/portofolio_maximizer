@@ -17,6 +17,13 @@
 - `etl.database_manager.DatabaseManager.get_performance_summary` supports `run_id` filtering; `scripts/run_auto_trader.py` reports run-local PF/WR and keeps lifetime metrics under `profitability.lifetime`.
 **Recent changes (2025-12-19)**: Synthetic mode adds profiles, t-copula/tail-scale shocks, macro events, intraday seasonality, txn-cost proxies, richer features/calibration persistence, and a refreshed `latest` pointer (`syn_6c850a7d0b99`), while pipeline/backtests continue to honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback. A cache/log sanitizer (`scripts/sanitize_cache_and_logs.py` + cron `sanitize_caches`) keeps artifacts under a 14-day retention by default.
 
+## Model Selection Policy (TS ensemble)
+- Holding period: do not change default model/weights until at least `regression_metrics.min_effective_audits` (default 10) are available, with a stricter promotion guard at `holding_period_audits` (default 20) and `promotion_margin` (default 2% RMSE improvement) before adopting the ensemble as default.
+- Objective: primary RMSE; secondary tie-breakers (reported in audit logs) are sMAPE, tracking_error, and directional_accuracy.
+- Hard constraint: ensemble must not be worse than the best individual model beyond `max_rmse_ratio_vs_baseline` (default 1.10); violation forces a default-to-best-single decision.
+- Fallback rule: if the ensemble adds no measurable improvement after the holding period (`min_lift_fraction` vs `min_lift_rmse_ratio`), disband it as the default and keep it research-only (`baseline_model` defaults to `BEST_SINGLE`).
+- Source of truth: `config/forecaster_monitoring.yml` under `forecaster_monitoring.regression_metrics` governs these knobs for brutal/CI vs research dashboards.
+
 ### Forecasting + ETL statistical hardening (2025-12-19)
 - SARIMAX: fixed log-transform inversion when a positivity shift is applied (invert: `exp(.) - shift`) and made Jarque–Bera diagnostics compatible with newer return shapes.
 - Ensemble: one-sided variance screening (does not reward higher tracking error), minimum component weight pruning, and row-wise convex blending under misaligned/partial model forecasts.

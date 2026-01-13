@@ -1,5 +1,10 @@
 ﻿# How to Run Comprehensive Brutal Test
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Script**: `bash/comprehensive_brutal_test.sh`  
 **Duration**: 3-6 hours (configurable)  
 **Purpose**: Exhaustive testing of all project components
@@ -17,17 +22,10 @@
 
 ## Quick Start
 
-### Option 1: Windows PowerShell
+### Option 1: Windows PowerShell (Supported via WSL only)
 
 ```powershell
-# Navigate to project root
-cd C:\Users\Bestman\personal_projects\portfolio_maximizer_v45
-
-# Activate virtual environment
-.\simpleTrader_env\Scripts\Activate.ps1
-
-# Run the test (using Git Bash or WSL)
-bash bash/comprehensive_brutal_test.sh
+wsl -e bash -lc "cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45 && source simpleTrader_env/bin/activate && bash bash/comprehensive_brutal_test.sh"
 ```
 
 ### Option 2: Windows WSL (Recommended)
@@ -46,34 +44,13 @@ chmod +x bash/comprehensive_brutal_test.sh
 bash bash/comprehensive_brutal_test.sh
 ```
 
-### Option 3: Git Bash (Windows)
+### Option 3: Git Bash (Windows) (Unsupported)
 
-```bash
-# Navigate to project root
-cd /c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+Do not run this repository under Git Bash/Windows Python. Use **Option 2 (Windows WSL)** instead.
 
-# Activate virtual environment
-source simpleTrader_env/Scripts/activate
+### Option 4: Linux/macOS (Unsupported)
 
-# Run the test
-bash bash/comprehensive_brutal_test.sh
-```
-
-### Option 4: Linux/macOS
-
-```bash
-# Navigate to project root
-cd ~/personal_projects/portfolio_maximizer_v45
-
-# Activate virtual environment
-source simpleTrader_env/bin/activate
-
-# Make script executable (first time only)
-chmod +x bash/comprehensive_brutal_test.sh
-
-# Run the test
-./bash/comprehensive_brutal_test.sh
-```
+This repo is validated only under WSL with `simpleTrader_env`. If you are not in WSL, switch to **Option 2**.
 
 ---
 
@@ -109,9 +86,8 @@ $env:TEST_DURATION_HOURS = "6"
 $env:ITERATIONS_PER_TEST = "5"
 $env:TICKERS_LIST = "AAPL,MSFT,GOOGL"
 
-# Activate environment and run
-.\simpleTrader_env\Scripts\Activate.ps1
-bash bash/comprehensive_brutal_test.sh
+# Run via WSL (supported runtime)
+wsl -e bash -lc "cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45 && source simpleTrader_env/bin/activate && TEST_DURATION_HOURS=6 ITERATIONS_PER_TEST=5 TICKERS_LIST='AAPL,MSFT,GOOGL' bash bash/comprehensive_brutal_test.sh"
 ```
 
 `bash/comprehensive_brutal_test.sh` now passes `--include-frontier-tickers`, so the Nigeria → Bulgaria atlas from `etl/frontier_markets.py` is exercised automatically alongside whatever base symbols you define in `TICKERS_LIST`.

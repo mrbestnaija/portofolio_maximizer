@@ -8,7 +8,9 @@ set -euo pipefail
 unset DIAGNOSTIC_MODE TS_DIAGNOSTIC_MODE EXECUTION_DIAGNOSTIC_MODE LLM_FORCE_FALLBACK || true
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="$ROOT_DIR/simpleTrader_env/bin/python"
+source "${ROOT_DIR}/bash/lib/common.sh"
+pmx_require_wsl_simpletrader_runtime "${ROOT_DIR}"
+PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
 TRADER_SCRIPT="$ROOT_DIR/scripts/run_auto_trader.py"
 LOG_DIR="$ROOT_DIR/logs/end_to_end"

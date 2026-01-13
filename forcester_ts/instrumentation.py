@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 import json
@@ -142,7 +142,7 @@ class ModelInstrumentation:
     def dump_json(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(self.export(), handle, indent=2)
+            json.dump(_make_json_safe(self.export()), handle, indent=2)
 
 
 def _safe_value(value: Any) -> Optional[float]:
@@ -256,3 +256,31 @@ def _summarize_benchmarks(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         bucket["mean_value"] = float(sum(values) / len(values)) if values else None
         summary[metric] = bucket
     return summary
+
+
+def _make_json_safe(value: Any) -> Any:
+    """Coerce nested telemetry into JSON-serializable primitives."""
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    if isinstance(value, pd.Series):
+        return {
+            "index": [str(idx) for idx in value.index],
+            "values": [_make_json_safe(val) for val in value.to_list()],
+        }
+    if isinstance(value, pd.Index):
+        return [str(idx) for idx in value]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, np.ndarray):
+        return [_make_json_safe(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    return value

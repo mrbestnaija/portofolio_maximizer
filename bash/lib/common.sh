@@ -45,6 +45,79 @@ pmx_unset_diagnostics() {
   unset DIAGNOSTIC_MODE TS_DIAGNOSTIC_MODE EXECUTION_DIAGNOSTIC_MODE LLM_FORCE_FALLBACK 2>/dev/null || true
 }
 
+pmx_is_wsl() {
+  # Prefer /proc/version markers; fall back to WSL_DISTRO_NAME when available.
+  if [[ -f /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version; then
+    return 0
+  fi
+  [[ -n "${WSL_DISTRO_NAME:-}" ]]
+}
+
+pmx_require_wsl() {
+  if ! pmx_is_wsl; then
+    pmx_die "Unsupported runtime: this repo is validated only under WSL. See Documentation/RUNTIME_GUARDRAILS.md"
+  fi
+}
+
+pmx_activate_simpletrader_env() {
+  pmx_require_wsl
+  local root=""
+  root="${1:-}"
+  if [[ -z "${root}" ]]; then
+    root="$(pmx_repo_root)"
+  fi
+
+  local activate_path="${root}/simpleTrader_env/bin/activate"
+  [[ -f "${activate_path}" ]] || pmx_die "Missing WSL virtualenv: ${activate_path} (see Documentation/RUNTIME_GUARDRAILS.md)"
+
+  # shellcheck source=/dev/null
+  source "${activate_path}"
+}
+
+pmx_print_runtime_fingerprint() {
+  pmx_require_wsl
+  local py_path=""
+  py_path="$(command -v python 2>/dev/null || true)"
+  pmx_log "INFO" "which python: ${py_path:-<missing>}"
+  python -V 2>&1 | sed 's/^/[INFO] /' || true
+
+  python - <<'PY' 2>&1 | sed 's/^/[INFO] /'
+import json
+
+try:
+    import torch  # type: ignore
+except Exception as exc:
+    raise SystemExit(f"torch import failed: {exc}")
+
+payload = {
+    "torch": getattr(torch, "__version__", None),
+    "cuda_available": bool(torch.cuda.is_available()),
+    "device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+    "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() and torch.cuda.device_count() else None,
+}
+print(json.dumps(payload, indent=2))
+PY
+}
+
+pmx_require_wsl_simpletrader_runtime() {
+  local root=""
+  root="${1:-}"
+  if [[ -z "${root}" ]]; then
+    root="$(pmx_repo_root)"
+  fi
+
+  pmx_activate_simpletrader_env "${root}"
+
+  local py_path=""
+  py_path="$(command -v python 2>/dev/null || true)"
+  if [[ -z "${py_path}" ]] || [[ "${py_path}" != *"/simpleTrader_env/bin/python"* ]]; then
+    pmx_die "Wrong interpreter selected (${py_path:-<missing>}); expected .../simpleTrader_env/bin/python. See Documentation/RUNTIME_GUARDRAILS.md"
+  fi
+
+  pmx_print_runtime_fingerprint
+  PMX_RUNTIME_VERIFIED=1
+}
+
 pmx_detect_python() {
   local root="${1:-}"
   if [[ -z "${root}" ]]; then
@@ -53,21 +126,7 @@ pmx_detect_python() {
 
   local candidate=""
 
-  if [[ -n "${PYTHON_BIN:-}" ]]; then
-    candidate="${PYTHON_BIN}"
-    if [[ -x "${candidate}" ]]; then
-      echo "${candidate}"
-      return 0
-    fi
-  fi
-
-  if [[ -n "${PMX_PYTHON_BIN:-}" ]]; then
-    candidate="${PMX_PYTHON_BIN}"
-    if [[ -x "${candidate}" ]]; then
-      echo "${candidate}"
-      return 0
-    fi
-  fi
+  pmx_require_wsl
 
   candidate="${root}/simpleTrader_env/bin/python"
   if [[ -x "${candidate}" ]]; then
@@ -78,21 +137,6 @@ pmx_detect_python() {
   candidate="${root}/simpleTrader_env/bin/python3"
   if [[ -x "${candidate}" ]]; then
     echo "${candidate}"
-    return 0
-  fi
-
-  candidate="${root}/simpleTrader_env/Scripts/python.exe"
-  if [[ -x "${candidate}" ]]; then
-    echo "${candidate}"
-    return 0
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    echo "python3"
-    return 0
-  fi
-  if command -v python >/dev/null 2>&1; then
-    echo "python"
     return 0
   fi
 
@@ -106,6 +150,7 @@ pmx_detect_venv_python() {
   fi
 
   local candidate=""
+  pmx_require_wsl
   candidate="${root}/simpleTrader_env/bin/python"
   if [[ -x "${candidate}" ]]; then
     echo "${candidate}"
@@ -113,12 +158,6 @@ pmx_detect_venv_python() {
   fi
 
   candidate="${root}/simpleTrader_env/bin/python3"
-  if [[ -x "${candidate}" ]]; then
-    echo "${candidate}"
-    return 0
-  fi
-
-  candidate="${root}/simpleTrader_env/Scripts/python.exe"
   if [[ -x "${candidate}" ]]; then
     echo "${candidate}"
     return 0
@@ -136,7 +175,7 @@ pmx_require_venv_python() {
   local py=""
   py="$(pmx_detect_venv_python "${root}")"
   if [[ -z "${py}" ]]; then
-    pmx_die "Python interpreter not found under ${root}/simpleTrader_env. Create it (python3 -m venv simpleTrader_env) and install requirements."
+    pmx_die "Python interpreter not found under ${root}/simpleTrader_env (WSL only). See Documentation/RUNTIME_GUARDRAILS.md"
   fi
   echo "${py}"
 }
@@ -147,22 +186,8 @@ pmx_resolve_python() {
     root="$(pmx_repo_root)"
   fi
 
-  local candidate=""
-
-  if [[ -n "${PMX_PYTHON_BIN:-}" ]]; then
-    candidate="${PMX_PYTHON_BIN}"
-    if [[ -x "${candidate}" ]]; then
-      echo "${candidate}"
-      return 0
-    fi
-  fi
-
-  if [[ -n "${PYTHON_BIN:-}" ]]; then
-    candidate="${PYTHON_BIN}"
-    if [[ -x "${candidate}" ]]; then
-      echo "${candidate}"
-      return 0
-    fi
+  if [[ "${PMX_RUNTIME_VERIFIED:-0}" != "1" ]]; then
+    pmx_require_wsl_simpletrader_runtime "${root}"
   fi
 
   pmx_require_venv_python "${root}"

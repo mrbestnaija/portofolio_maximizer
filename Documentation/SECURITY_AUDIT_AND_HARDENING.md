@@ -1,5 +1,10 @@
 ﻿# Security Audit & Production Hardening Plan
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Date**: 2025-01-27  
@@ -26,7 +31,7 @@ This portfolio management system has **good foundational security** (API keys pr
 **Estimated Time to SaaS-Ready**: 6-12 months with dedicated security engineering resources.
 
 ### Frontier Market Data Coverage (2025-11-15)
-- Multi-ticker training/tests now append the Nigeria → Bulgaria frontier list via `etl/frontier_markets.py` + the `--include-frontier-tickers` flag baked into every `.bash/`/`.script/` runner. Treat these symbols as high-volatility/low-liquidity datasets: confirm export controls, jurisdictional compliance, and data-source entitlements before enabling live (non-synthetic) pipelines.
+- Multi-ticker training/tests now append the Nigeria → Bulgaria frontier list via `etl/frontier_markets.py` + the `--include-frontier-tickers` flag baked into every `bash/`/`scripts/` runner. Treat these symbols as high-volatility/low-liquidity datasets: confirm export controls, jurisdictional compliance, and data-source entitlements before enabling live (non-synthetic) pipelines.
 - Security accreditation deliverables (`SECURITY_IMPLEMENTATION_SUMMARY.md`, `SECURITY_TESTS_AND_INTEGRATION.md`) now reference this flag so frontier-market telemetry remains auditable alongside US mega-cap coverage.
 
 ### SQLite Integrity (2025-11-18)

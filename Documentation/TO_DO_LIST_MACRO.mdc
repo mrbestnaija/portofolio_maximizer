@@ -1,5 +1,10 @@
 ﻿Based on the comprehensive project state analysis, here's the updated step-by-step implementation plan:
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 ```markdown
 # PRODUCTION-GRADE PORTFOLIO AUTOMATION - ML-FIRST IMPLEMENTATION PLAN
 
@@ -41,7 +46,7 @@
 5. 🚰 Prepare stress/regime detection modules and ensure they consume the unified signal metrics pipeline before Phase B automation.
 6. 📈 Surface the new RMSE / sMAPE / tracking-error fields from `time_series_forecasts.regression_metrics` inside dashboards/alerts so ensemble re-weighting is auditable end to end.
 7. 🔁 Enforce the “Time Series first, LLM fallback” routing path (see `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md` + `models/signal_router.py`) in every pipeline/environment so operational runs never skip the TS signal generator by default.
-8. 🌍 Keep `--include-frontier-tickers` enabled (via `etl/frontier_markets.py`) for every multi-ticker training/test invocation in `.bash/` + `.script/` so Nigeria → Bulgaria frontier venues remain in regression coverage; synthetic mode is acceptable until live ticker suffix mapping is finalized.
+8. 🌍 Keep `--include-frontier-tickers` enabled (via `etl/frontier_markets.py`) for every multi-ticker training/test invocation in `bash/` + `scripts/` so Nigeria → Bulgaria frontier venues remain in regression coverage; synthetic mode is acceptable until live ticker suffix mapping is finalized.
 9. 💾 Database hygiene: rely on the new auto-recovery path in `etl/database_manager.py` (backs up + rebuilds the SQLite store when “database disk image is malformed” hits) and monitor the `.corrupt.*` artifacts in `data/` before rerunning brutal tests.
 
 ---

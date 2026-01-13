@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from numpy.linalg import svd
+from pandas.tseries.frequencies import to_offset
 
 try:  # Optional GPU acceleration via CuPy
     import cupy as cp
@@ -57,6 +58,7 @@ class MSSARLForecaster:
         self._reconstruction: Optional[pd.Series] = None
         self._change_point_density: float = 0.0
         self._recent_change_point_days: Optional[int] = None
+        self._freq_hint: Optional[str] = None
         self._use_gpu = bool(self.config.use_gpu and CUPY_AVAILABLE)
         if self.config.use_gpu and not self._use_gpu:
             logger.warning(
@@ -151,6 +153,13 @@ class MSSARLForecaster:
         if len(cleaned) < self.config.window_length + 5:
             raise ValueError("Series length insufficient for mSSA analysis")
 
+        freq_hint = None
+        try:
+            freq_hint = series.attrs.get("_pm_freq_hint")
+        except Exception:
+            freq_hint = None
+        self._freq_hint = cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint
+
         self._last_index = cleaned.index[-1]
         trajectory = self._construct_page_matrix(cleaned)
         recon_matrix = self._truncate_svd(trajectory)
@@ -212,12 +221,19 @@ class MSSARLForecaster:
             decay = np.linspace(0.9, 0.7, num=steps)
             baseline_forecast = baseline_forecast * decay
 
+        freq = (
+            self._freq_hint
+            or getattr(self._reconstruction.index, "freqstr", None)
+            or getattr(self._reconstruction.index, "inferred_freq", None)
+            or "D"
+        )
         if self._last_index is not None:
-            future_index = pd.date_range(
-                self._last_index + pd.Timedelta(days=1),
-                periods=steps,
-                freq=self._reconstruction.index.freq or "D",
-            )
+            try:
+                offset = to_offset(freq)
+                start = self._last_index + offset
+                future_index = pd.date_range(start=start, periods=steps, freq=freq)
+            except Exception:
+                future_index = pd.RangeIndex(start=0, stop=steps, step=1)
         else:
             future_index = pd.RangeIndex(start=0, stop=steps, step=1)
 

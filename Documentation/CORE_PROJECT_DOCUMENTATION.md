@@ -1,5 +1,10 @@
 # Core Project Documentation (Institutional-Grade)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 **Purpose**: Define the project’s canonical documentation set, evidence standards, and verification workflow so the repository remains publishable, auditable, and maintainable over long horizons (thesis/paper + production evolution).
 
 This document is intentionally “policy-like”: it tells you what must be true for a result, report, or configuration change to be considered *research-grade* and *reproducible* in this codebase.
@@ -22,6 +27,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Quant gating policy (GREEN/YELLOW/RED)**: `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`
 - **Numeric invariants (guard rails)**: `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`
 - **Metrics + evaluation definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
+- **Ensemble governance (2026-01-11)**: Research-profile RMSE gate on 27 effective audits → violation_rate 3.7% (<= cap), lift_fraction 0% (<10% required) ⇒ **DISABLE ensemble as default**. Config reflects this (`config/forecasting_config.yml` sets `ensemble.enabled: false`); BEST_SINGLE remains the default until lift is demonstrated over ≥20 effective audits with required lift fraction.
 
 If something is unclear or conflicting, treat this as the priority order for resolving ambiguity:
 

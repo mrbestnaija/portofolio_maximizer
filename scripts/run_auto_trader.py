@@ -75,6 +75,7 @@ PERFORMANCE_LOG_DIR = ROOT_PATH / "logs" / "performance"
 
 UTC = timezone.utc
 _GPU_PARALLEL_ENABLED: Optional[bool] = None
+_INTRADAY_SARIMAX_PROFILE_LOGGED = False
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -96,6 +97,25 @@ def _env_flag(name: str) -> Optional[bool]:
     if val in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def _parse_int_tuple(raw: Optional[str], *, expected: int) -> Optional[Tuple[int, ...]]:
+    """Parse comma-delimited integers from env-style strings."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) != expected:
+        return None
+    try:
+        values = tuple(int(p) for p in parts)
+    except Exception:
+        return None
+    if any(v < 0 for v in values):
+        return None
+    return values
 
 
 def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
@@ -532,6 +552,44 @@ def _effective_min_lookback_days(interval: Optional[str]) -> int:
     return MIN_LOOKBACK_DAYS_INTRADAY if _is_intraday_interval(interval) else MIN_LOOKBACK_DAYS_DAILY
 
 
+def _sarimax_kwargs_for_interval(interval: Optional[str]) -> Dict[str, Any]:
+    """
+    Return SARIMAX kwargs appropriate for the current yfinance interval.
+
+    Intraday grids are disabled by default because SARIMAX order search is too
+    slow for multi-ticker evaluation runs. Re-enable by setting
+    PMX_SARIMAX_AUTO_SELECT=1.
+    """
+    if not _is_intraday_interval(interval):
+        return {}
+
+    auto_select = _env_flag("PMX_SARIMAX_AUTO_SELECT")
+    if auto_select is None:
+        auto_select = False
+    if auto_select:
+        return {}
+
+    manual_order = _parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_ORDER"), expected=3) or (1, 1, 0)
+    manual_seasonal = _parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_SEASONAL_ORDER"), expected=4) or (0, 0, 0, 0)
+
+    global _INTRADAY_SARIMAX_PROFILE_LOGGED
+    if not _INTRADAY_SARIMAX_PROFILE_LOGGED:
+        logger.info(
+            "Intraday interval detected (%s): using fixed SARIMAX order=%s seasonal=%s "
+            "(set PMX_SARIMAX_AUTO_SELECT=1 to re-enable order search).",
+            interval,
+            manual_order,
+            manual_seasonal,
+        )
+        _INTRADAY_SARIMAX_PROFILE_LOGGED = True
+
+    return {
+        "auto_select": False,
+        "manual_order": manual_order,
+        "manual_seasonal_order": manual_seasonal,
+    }
+
+
 def _parse_int_env(name: str) -> Optional[int]:
     """Return positive int from env if set; otherwise None."""
     raw = os.getenv(name)
@@ -656,6 +714,8 @@ def _prepare_market_window(
 def _generate_time_series_forecast(
     price_frame: pd.DataFrame,
     horizon: int,
+    *,
+    interval: Optional[str] = None,
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """Fit the ensemble forecaster and return the forecast bundle + latest price."""
     if "Close" not in price_frame.columns:
@@ -675,8 +735,21 @@ def _generate_time_series_forecast(
         returns_series = clean_close.pct_change().dropna()
 
     try:
+        resolved_interval = interval or os.getenv("YFINANCE_INTERVAL")
+        mssa_use_gpu = _env_flag("MSSA_RL_USE_GPU")
+        if mssa_use_gpu is None:
+            mssa_use_gpu = _gpu_parallel_enabled()
+
         forecaster = TimeSeriesForecaster(
-            config=TimeSeriesForecasterConfig(forecast_horizon=horizon)
+            config=TimeSeriesForecasterConfig(
+                forecast_horizon=horizon,
+                sarimax_kwargs=_sarimax_kwargs_for_interval(resolved_interval),
+                samossa_kwargs={"forecast_horizon": int(horizon)},
+                mssa_rl_kwargs={
+                    "forecast_horizon": int(horizon),
+                    "use_gpu": bool(mssa_use_gpu),
+                },
+            )
         )
         forecaster.fit(price_series=close_series, returns_series=returns_series)
         forecast_bundle = forecaster.forecast()
@@ -694,6 +767,7 @@ def _generate_forecasts_bulk(
     *,
     parallel: bool,
     max_workers: Optional[int] = None,
+    interval: Optional[str] = None,
 ) -> Dict[str, Tuple[Optional[Dict], Optional[float]]]:
     """
     Generate forecasts for many tickers, optionally in parallel.
@@ -706,14 +780,23 @@ def _generate_forecasts_bulk(
     if not parallel:
         out: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
         for symbol in tickers:
-            out[symbol] = _generate_time_series_forecast(frames_by_ticker[symbol], horizon)
+            out[symbol] = _generate_time_series_forecast(
+                frames_by_ticker[symbol],
+                horizon,
+                interval=interval,
+            )
         return out
 
     workers = max_workers or min(4, max(1, len(tickers)))
     out = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_generate_time_series_forecast, frames_by_ticker[symbol], horizon): symbol
+            executor.submit(
+                _generate_time_series_forecast,
+                frames_by_ticker[symbol],
+                horizon,
+                interval=interval,
+            ): symbol
             for symbol in tickers
         }
         for future in as_completed(futures):
@@ -1456,15 +1539,25 @@ def main(
         os.environ["YFINANCE_INTERVAL"] = str(yfinance_interval).strip()
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+    execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
+    if execution_mode not in {"live", "synthetic", "auto"}:
+        execution_mode = "live"
     enable_data_cache = _env_flag("ENABLE_DATA_CACHE")
     if enable_data_cache is None:
         enable_data_cache = False
     storage = DataStorage() if enable_data_cache else None
-    data_source_manager = DataSourceManager(storage=storage)
+    data_source_manager = DataSourceManager(storage=storage, execution_mode=execution_mode)
+    active_source = data_source_manager.get_active_source()
+    synthetic_only = bool(_env_flag("SYNTHETIC_ONLY"))
+    if active_source == "synthetic" and not synthetic_only and execution_mode != "synthetic":
+        raise click.UsageError(
+            "Synthetic data source selected; live evaluations require a real provider. "
+            "Unset ENABLE_SYNTHETIC_PROVIDER/ENABLE_SYNTHETIC_DATA_SOURCE or set EXECUTION_MODE=live."
+        )
     universe = resolve_ticker_universe(
         base_tickers=base_tickers,
         include_frontier=include_frontier_tickers,
-        active_source=data_source_manager.get_active_source(),
+        active_source=active_source,
         use_discovery=True,
     )
     ticker_list = universe.tickers
@@ -1672,6 +1765,8 @@ def main(
             except Exception:
                 logger.debug("Failed to record run provenance", exc_info=True)
 
+        interval = getattr(getattr(data_source_manager, "active_extractor", None), "interval", None)
+
         cycle_results = []
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
@@ -1829,6 +1924,7 @@ def main(
                 forecast_horizon,
                 parallel=True,
                 max_workers=parallel_workers,
+                interval=interval,
             )
 
         for candidate in candidates:
@@ -1860,6 +1956,7 @@ def main(
                 forecast_bundle, current_price = _generate_time_series_forecast(
                     ticker_frame,
                     forecast_horizon,
+                    interval=interval,
                 )
 
             if not forecast_bundle or current_price is None:

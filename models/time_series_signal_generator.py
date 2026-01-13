@@ -52,6 +52,62 @@ except Exception:  # pragma: no cover - graceful fallback when execution layer a
 logger = logging.getLogger(__name__)
 
 
+def _pmx_env_flag(name: str) -> Optional[bool]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _pmx_parse_int_tuple(raw: Optional[str], *, expected: int) -> Optional[Tuple[int, ...]]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) != expected:
+        return None
+    try:
+        values = tuple(int(p) for p in parts)
+    except Exception:
+        return None
+    if any(v < 0 for v in values):
+        return None
+    return values
+
+
+def _pmx_is_intraday_interval(interval: Optional[str]) -> bool:
+    if not interval:
+        return False
+    text = str(interval).strip().lower()
+    if any(token in text for token in ("d", "wk", "mo")):
+        return False
+    return any(token in text for token in ("m", "h", "min", "hour"))
+
+
+def _pmx_intraday_sarimax_kwargs(interval: Optional[str]) -> Dict[str, Any]:
+    if not _pmx_is_intraday_interval(interval):
+        return {}
+    auto_select = _pmx_env_flag("PMX_SARIMAX_AUTO_SELECT")
+    if auto_select is None:
+        auto_select = False
+    if auto_select:
+        return {}
+    manual_order = _pmx_parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_ORDER"), expected=3) or (1, 1, 0)
+    manual_seasonal = _pmx_parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_SEASONAL_ORDER"), expected=4) or (0, 0, 0, 0)
+    return {
+        "auto_select": False,
+        "manual_order": manual_order,
+        "manual_seasonal_order": manual_seasonal,
+    }
+
+
 @dataclass
 class TimeSeriesSignal:
     """Trading signal generated from time series forecast"""
@@ -1384,13 +1440,56 @@ class TimeSeriesSignalGenerator:
 
         try:
             returns_series = price_series.pct_change().dropna()
+            interval_hint = os.getenv("YFINANCE_INTERVAL")
+            if not interval_hint:
+                try:
+                    interval_hint = price_series.index.inferred_freq  # type: ignore[assignment]
+                except Exception:
+                    interval_hint = None
+
+            fast_cv_flag = _pmx_env_flag("PMX_FAST_FORECAST_EDGE_CV")
+            if fast_cv_flag is None:
+                fast_cv_flag = True
+            fast_intraday_cv = bool(fast_cv_flag and _pmx_is_intraday_interval(interval_hint))
+
+            cv_max_folds = max_folds_int
+            if fast_intraday_cv:
+                cv_max_folds = 1
+
+            baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
+            if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
+                baseline_key = "samossa"
+
+            if fast_intraday_cv:
+                sarimax_enabled = baseline_key == "sarimax"
+                samossa_enabled = baseline_key == "samossa"
+                mssa_enabled = baseline_key == "mssa_rl"
+                forecaster_config = TimeSeriesForecasterConfig(
+                    forecast_horizon=horizon,
+                    sarimax_enabled=sarimax_enabled,
+                    samossa_enabled=samossa_enabled,
+                    mssa_rl_enabled=mssa_enabled,
+                    garch_enabled=False,
+                    ensemble_enabled=True,
+                    sarimax_kwargs=_pmx_intraday_sarimax_kwargs(interval_hint) if sarimax_enabled else {},
+                    samossa_kwargs={"forecast_horizon": int(horizon)} if samossa_enabled else {},
+                    mssa_rl_kwargs={
+                        "forecast_horizon": int(horizon),
+                        "use_gpu": bool(_pmx_env_flag("MSSA_RL_USE_GPU") or False),
+                    }
+                    if mssa_enabled
+                    else {},
+                )
+            else:
+                forecaster_config = TimeSeriesForecasterConfig(forecast_horizon=horizon)
+
             validator = RollingWindowValidator(
-                forecaster_config=TimeSeriesForecasterConfig(forecast_horizon=horizon),
+                forecaster_config=forecaster_config,
                 cv_config=RollingWindowCVConfig(
                     min_train_size=int(min_train_size),
                     horizon=int(horizon),
                     step_size=int(step_size),
-                    max_folds=max_folds_int,
+                    max_folds=cv_max_folds,
                 ),
             )
             report = validator.run(price_series=price_series, returns_series=returns_series)

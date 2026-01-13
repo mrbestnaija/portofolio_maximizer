@@ -64,7 +64,8 @@ forecasting:
 
   # Ensemble orchestration
   ensemble:
-    enabled: true
+    # Disabled per research gate (insufficient lift vs BEST_SINGLE; see check_forecast_audits decision).
+    enabled: false
     confidence_scaling: true
     candidate_weights:
       - {sarimax: 0.6, samossa: 0.4}

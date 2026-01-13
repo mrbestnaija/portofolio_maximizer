@@ -15,9 +15,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence
 
-from etl.frontier_markets import merge_frontier_tickers
+from etl.frontier_markets import (
+    FRONTIER_MARKET_TICKERS_BY_REGION,
+    merge_frontier_tickers,
+)
 from etl.ticker_discovery.ticker_universe import TickerUniverseManager
 from etl.ticker_discovery.alpha_vantage_loader import AlphaVantageTickerLoader
+
+# Provider-specific ticker exclusions to avoid repeatedly requesting symbols
+# that the upstream source cannot serve (e.g., yfinance has no timezone/data
+# for Sri Lanka CSE tickers).
+_YFINANCE_FRONTIER_BLOCKLIST = {
+    ticker.strip().upper()
+    for ticker in FRONTIER_MARKET_TICKERS_BY_REGION.get("Asia - Sri Lanka (CSE)", [])
+}
+_PROVIDER_BLOCKLISTS: dict[str, set[str]] = {
+    "yfinance": _YFINANCE_FRONTIER_BLOCKLIST,
+}
 
 
 @dataclass
@@ -47,15 +61,29 @@ def resolve_ticker_universe(
       loaders and TickerUniverseManager.
     """
     # 1) Current default path: explicit tickers + optional frontier overlay.
+    notes: Dict[str, str] = {}
     merged = merge_frontier_tickers(base_tickers, include_frontier=include_frontier)
-    if merged:
+    filtered = merged
+    blocklist = _PROVIDER_BLOCKLISTS.get((active_source or "").lower())
+    if blocklist:
+        filtered = [ticker for ticker in merged if ticker not in blocklist]
+        removed = sorted({ticker for ticker in merged if ticker in blocklist})
+        if removed:
+            notes["provider_blocklist"] = f"{active_source}: {','.join(removed)}"
+
+    if filtered:
         return ResolvedUniverse(
-            tickers=merged,
+            tickers=filtered,
             active_source=active_source,
             universe_source="explicit+frontier",
+            notes=notes,
+        )
+    if merged and not filtered:
+        notes.setdefault(
+            "warning",
+            f"all_explicit_tickers_filtered_for_{active_source or 'unknown'}",
         )
 
-    notes: Dict[str, str] = {}
     discovered: List[str] = []
     universe_source = "none"
 
@@ -75,6 +103,17 @@ def resolve_ticker_universe(
 
         discovered = list(universe.tickers)
         universe_source = "alpha_vantage_universe" if discovered else "none"
+
+    if discovered:
+        filtered_discovery = [
+            ticker for ticker in discovered if ticker not in (blocklist or set())
+        ]
+        removed_discovery = sorted(
+            {ticker for ticker in discovered if ticker in (blocklist or set())}
+        )
+        if removed_discovery:
+            notes["provider_blocklist"] = f"{active_source}: {','.join(removed_discovery)}"
+        discovered = filtered_discovery
 
     return ResolvedUniverse(
         tickers=discovered,

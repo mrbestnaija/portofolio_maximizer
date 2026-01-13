@@ -1,5 +1,10 @@
 # Data Quality & Model Readiness TODOs (TS + LLM)
 
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
 - Enforce temporal cleanliness: normalize DatetimeIndex with explicit freq (B/D), pad only small gaps, reject windows with large holes; keep train/val/test strictly chronological and fit scalers on train only (persist with checkpoints).
 - Missing/outlier handling: cap ffill/interp to short gaps (≤3 bars); winsorize returns/vol; drop non-positive prices/absurd volumes; keep “raw” vs “cleaned” views.
 - Per-window quality scoring: compute coverage, missing%, outlier count, stationarity flags (ADF/KPSS), regime tags; derive a quality score; gate TS/LLM routing on the score and persist it with forecasts/signals.
