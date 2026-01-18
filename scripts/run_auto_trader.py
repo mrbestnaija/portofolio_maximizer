@@ -52,6 +52,8 @@ from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_router import SignalRouter
 from etl.data_universe import resolve_ticker_universe
 from risk.barbell_policy import BarbellConfig
+from risk.barbell_promotion_gate import load_promotion_evidence
+from risk.barbell_sizing import apply_barbell_confidence
 
 try:  # Optional Ollama dependency
     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -1158,6 +1160,8 @@ def _execute_signal(
     execution_mode: Optional[str] = None,
     synthetic_dataset_id: Optional[str] = None,
     synthetic_generator_version: Optional[str] = None,
+    barbell_sizing_enabled: bool = False,
+    barbell_cfg: Optional[BarbellConfig] = None,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -1185,6 +1189,23 @@ def _execute_signal(
     if synthetic_generator_version:
         primary_payload["synthetic_generator_version"] = synthetic_generator_version
 
+    if barbell_sizing_enabled and barbell_cfg is not None:
+        base_conf = primary_payload.get("confidence")
+        try:
+            if base_conf is not None:
+                sizing = apply_barbell_confidence(
+                    ticker=ticker,
+                    base_confidence=float(base_conf),
+                    cfg=barbell_cfg,
+                )
+                primary_payload["base_confidence"] = float(base_conf)
+                primary_payload["confidence"] = float(sizing.effective_confidence)
+                primary_payload["barbell_bucket"] = sizing.bucket
+                primary_payload["barbell_multiplier"] = float(sizing.multiplier)
+                primary_payload["barbell_sizing_enabled"] = True
+        except Exception:
+            logger.debug("Skipping barbell sizing overlay for %s", ticker, exc_info=True)
+
     result = trading_engine.execute_signal(primary_payload, market_data)
     logger.info(
         "Execution result for %s: %s",
@@ -1202,6 +1223,8 @@ def _execute_signal(
             "quality": quality,
             "data_source": data_source,
             "mid_price": mid_px,
+            "barbell_bucket": primary_payload.get("barbell_bucket"),
+            "barbell_multiplier": primary_payload.get("barbell_multiplier"),
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
@@ -1224,6 +1247,10 @@ def _execute_signal(
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
         "signal_confidence": primary.get("confidence"),
+        "base_confidence": primary_payload.get("base_confidence"),
+        "effective_confidence": primary_payload.get("confidence"),
+        "barbell_bucket": primary_payload.get("barbell_bucket"),
+        "barbell_multiplier": primary_payload.get("barbell_multiplier"),
         "expected_return": primary.get("expected_return"),
         "quality": quality,
         "data_source": data_source,
@@ -1661,6 +1688,30 @@ def main(
                     exc,
                 )
 
+    barbell_sizing_enabled = bool(_env_flag("ENABLE_BARBELL_SIZING"))
+    promotion_evidence_path = (
+        os.getenv("BARBELL_PROMOTION_EVIDENCE_PATH")
+        or os.getenv("BARBELL_EVIDENCE_PATH")
+        or str(ROOT_PATH / "reports" / "barbell_pnl_evidence_latest.json")
+    )
+    if barbell_sizing_enabled:
+        if not barbell_cfg:
+            barbell_cfg = BarbellConfig.from_yaml()
+        evidence_file = Path(promotion_evidence_path).expanduser()
+        if not evidence_file.exists():
+            raise click.UsageError(
+                "ENABLE_BARBELL_SIZING=1 requires a promotion evidence file. "
+                f"Missing: {evidence_file}. "
+                "Generate it via: ./simpleTrader_env/bin/python scripts/run_barbell_pnl_evaluation.py "
+                "--write-promotion-evidence <path> and ensure promotion gate passed."
+            )
+        decision = load_promotion_evidence(evidence_file)
+        if not decision.passed:
+            raise click.UsageError(
+                "ENABLE_BARBELL_SIZING=1 blocked by barbell promotion gate: "
+                f"{decision.reason} (evidence_source={decision.evidence_source}, file={evidence_file})"
+            )
+
     data_validator = DataValidator()
     preprocessor = Preprocessor()
     trading_engine = PaperTradingEngine(initial_capital=initial_capital)
@@ -1978,6 +2029,8 @@ def main(
                 execution_mode=effective_execution_mode,
                 synthetic_dataset_id=window_dataset_id,
                 synthetic_generator_version=window_generator_version,
+                barbell_sizing_enabled=barbell_sizing_enabled,
+                barbell_cfg=barbell_cfg,
             )
 
             if execution_report:

@@ -170,11 +170,19 @@ Include at least:
   --tickers "SHY,BIL,IEF,MSFT,CL=F,MTN,AAPL,BTC-USD" \
   --lookback-days 180 \
   --forecast-horizon 14 \
-  --report-path reports/barbell_pnl_eval.json
+  --report-path reports/barbell_pnl_eval.json \
+  --write-promotion-evidence reports/barbell_pnl_evidence_latest.json
 ```
 
 For promotion gating + evidence readiness tasks, track progress in:
 - `Documentation/BARBELL_PNL_EVIDENCE_AND_PROMOTION_TODO.md`
+
+If (and only if) `reports/barbell_pnl_evidence_latest.json` shows `passed=true`, you may enable the feature-flagged sizing overlay in `scripts/run_auto_trader.py`:
+
+```bash
+export ENABLE_BARBELL_SIZING=1
+export BARBELL_PROMOTION_EVIDENCE_PATH=reports/barbell_pnl_evidence_latest.json
+```
 
 ### 9.5 Acceptance criteria (minimum bar to claim “improves PnL”)
 

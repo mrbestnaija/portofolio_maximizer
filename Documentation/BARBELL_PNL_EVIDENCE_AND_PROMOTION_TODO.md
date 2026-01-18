@@ -1,5 +1,34 @@
 # Barbell PnL Evidence & Promotion TODO (Gate Before Production)
 
+This document is the **single source of truth** for promoting any barbell sizing logic into production-like execution paths.
+
+**Non-negotiable**: do not enable barbell sizing in `scripts/run_auto_trader.py` unless the promotion gate artifact says `passed=true`.
+
+## 0) Promotion Gate Artifact (Canonical)
+
+**File**: `reports/barbell_pnl_evidence_latest.json` (recommended default)
+
+Produced by:
+
+```bash
+./simpleTrader_env/bin/python scripts/run_barbell_pnl_evaluation.py \
+  --tickers "SHY,BIL,IEF,MSFT,CL=F,MTN,AAPL,BTC-USD" \
+  --lookback-days 180 \
+  --forecast-horizon 14 \
+  --report-path reports/barbell_pnl_eval.json \
+  --write-promotion-evidence reports/barbell_pnl_evidence_latest.json
+```
+
+Used by (gated runtime hook):
+
+```bash
+export ENABLE_BARBELL_SIZING=1
+export BARBELL_PROMOTION_EVIDENCE_PATH=reports/barbell_pnl_evidence_latest.json
+bash bash/run_auto_trader.sh
+```
+
+If the gate fails, `scripts/run_auto_trader.py` will refuse to start with a clear error message.
+
 ## Current evidence snapshot (local DB @ `data/portfolio_maximizer.db`)
 
 ### A) Walk-forward (TS-only signal regeneration)
@@ -28,6 +57,20 @@
 - **Secondary**:
   - Exposure by bucket respects `safe_min/safe_max` and `risk_max` constraints (when allocator is enabled).
   - No regression in runtime, guardrail rejects, or audit completeness.
+
+## TODO 0 — Wire “STUB hooks” without changing default behavior
+
+These are **feature-flagged, no-op by default** wiring points needed to actually benefit from the barbell policy after evidence is convincing.
+
+- [x] Add a promotion gate artifact and enforce it in the run path
+  - `scripts/run_barbell_pnl_evaluation.py --write-promotion-evidence …`
+  - `scripts/run_auto_trader.py` requires `ENABLE_BARBELL_SIZING=1` + `BARBELL_PROMOTION_EVIDENCE_PATH` with `passed=true`.
+- [x] Centralize sizing overlay helpers (single choke point)
+  - Use `risk/barbell_sizing.py` for `(bucket, multiplier, effective_confidence)`.
+  - Ensure audit fields are attached to each executed trade.
+- [ ] Extend dashboards to show bucket attribution
+  - Show `barbell_bucket`, `base_confidence`, `effective_confidence`, `barbell_multiplier` per trade in the live dashboard.
+  - Ensure DB-backed dashboard bridge pulls these from SQLite (no demo payloads).
 
 ## TODO A — Make the evidence step statistically valid
 

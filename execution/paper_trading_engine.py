@@ -80,7 +80,12 @@ class Trade:
     strike: Optional[float] = None
     expiry: Optional[str] = None
     multiplier: float = 1.0
-    
+    # Barbell sizing overlay audit fields (feature-flagged; stored when present).
+    barbell_bucket: Optional[str] = None
+    barbell_multiplier: Optional[float] = None
+    base_confidence: Optional[float] = None
+    effective_confidence: Optional[float] = None
+
     def __post_init__(self):
         if self.trade_id is None:
             self.trade_id = f"{self.ticker}_{self.timestamp.strftime('%Y%m%d_%H%M%S')}"
@@ -100,7 +105,7 @@ class Portfolio:
     target_prices: Dict[str, float] = field(default_factory=dict)  # ticker -> take-profit price
     max_holding_days: Dict[str, int] = field(default_factory=dict)  # ticker -> max holding days
     total_value: float = 0.0
-    
+
     def update_value(self, current_prices: Dict[str, float]):
         """Update total portfolio value"""
         position_value = sum(
@@ -124,7 +129,7 @@ class ExecutionResult:
 class PaperTradingEngine:
     """
     Paper trading engine with realistic market simulation.
-    
+
     Features:
     - Signal validation before execution
     - Realistic entry price simulation (slippage)
@@ -133,7 +138,7 @@ class PaperTradingEngine:
     - Database persistence
     - Portfolio tracking and performance metrics
     """
-    
+
     def __init__(self,
                  initial_capital: float = 10000.0,
                  slippage_pct: float = 0.0005,
@@ -143,7 +148,7 @@ class PaperTradingEngine:
                  signal_validator: Optional[SignalValidator] = None):
         """
         Initialize paper trading engine.
-        
+
         Args:
             initial_capital: Starting capital ($10,000 default)
             slippage_pct: Slippage percentage (0.1% default)
@@ -153,34 +158,34 @@ class PaperTradingEngine:
         self.initial_capital = initial_capital
         self.slippage_pct = slippage_pct
         self.transaction_cost_pct = transaction_cost_pct
-        
+
         # Initialize components
         self.db_manager = database_manager or DatabaseManager(db_path)
         self.signal_validator = signal_validator or SignalValidator()
         self._lob_config: Optional[LOBConfig] = None
         self._lob_enabled: Optional[bool] = None
-        
+
         # Initialize portfolio
         self.portfolio = Portfolio(cash=initial_capital, total_value=initial_capital)
-        
+
         # Trade history
         self.trades: list[Trade] = []
-        
+
         logger.info(
             f"Paper Trading Engine initialized with ${initial_capital:,.2f} "
             f"(slippage={slippage_pct:.2%}, costs={transaction_cost_pct:.2%})"
         )
-    
-    def execute_signal(self, 
-                      signal: Dict[str, Any], 
+
+    def execute_signal(self,
+                      signal: Dict[str, Any],
                       market_data: pd.DataFrame) -> ExecutionResult:
         """
         Execute trading signal with full validation and simulation.
-        
+
         Args:
             signal: LLM signal dict with action, confidence, reasoning
             market_data: Recent OHLCV data for validation
-            
+
         Returns:
             ExecutionResult with execution details
         """
@@ -312,7 +317,7 @@ class PaperTradingEngine:
                 status='REJECTED',
                 reason="Non-actionable signal",
             )
-        
+
         logger.info(f"Executing %s signal for %s", action, ticker)
         # Step 1: Validate signal (diagnostic toggle via env DIAGNOSTIC_MODE/EXECUTION_DIAGNOSTIC_MODE)
         diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
@@ -340,7 +345,7 @@ class PaperTradingEngine:
             )
         if diag_mode and validation.warnings:
             logger.warning("Validation warnings (ignored in DIAGNOSTIC_MODE): %s", validation.warnings)
-        
+
         # Step 2: Calculate position size (forced exits close the full position).
         if forced_exit_shares is not None:
             position_size = int(forced_exit_shares)
@@ -348,14 +353,14 @@ class PaperTradingEngine:
             position_size = self._calculate_position_size(
                 signal, validation.confidence_score, market_data, current_position
             )
-        
+
         if position_size == 0:
             return ExecutionResult(
                 status='REJECTED',
                 reason="Position size calculated as zero",
                 validation_warnings=validation.warnings
             )
-        
+
         # Step 3: Check available capital
         required_capital = position_size * float(current_price or 0.0)
 
@@ -370,7 +375,7 @@ class PaperTradingEngine:
                 status='REJECTED',
                 reason=f"Insufficient cash (need ${required_capital:,.2f})"
             )
-        
+
         # Step 4: Simulate entry price with slippage/market impact.
         entry_price = self._simulate_entry_price(
             float(current_price or 0.0),
@@ -379,7 +384,7 @@ class PaperTradingEngine:
             market_data=market_data,
             ticker=ticker,
         )
-        
+
         # Step 5: Calculate transaction costs
         transaction_value = position_size * entry_price
         txn_cost_bps = None
@@ -395,7 +400,7 @@ class PaperTradingEngine:
             transaction_cost = 0.0
         else:
             transaction_cost = transaction_value * self.transaction_cost_pct
-        
+
         # Step 6: Create trade object
         horizon_raw = signal.get("forecast_horizon") or signal.get("horizon")
         try:
@@ -425,6 +430,10 @@ class PaperTradingEngine:
             synthetic_generator_version=synthetic_generator_version,
             run_id=run_id,
             asset_class=asset_class,
+            barbell_bucket=signal.get("barbell_bucket"),
+            barbell_multiplier=signal.get("barbell_multiplier"),
+            base_confidence=signal.get("base_confidence"),
+            effective_confidence=signal.get("confidence"),
         )
         mid_price_hint = signal.get("mid_price_hint")
         try:
@@ -454,23 +463,23 @@ class PaperTradingEngine:
         if mid_price is not None and mid_price > 0:
             trade.mid_price = mid_price
             trade.mid_slippage_bps = ((trade.entry_price - mid_price) / mid_price) * 1e4
-        
+
         # Step 7: Execute trade (update portfolio)
         try:
             updated_portfolio = self._update_portfolio(trade, self.portfolio)
-            
+
             # Step 8: Store in database
             realized_pnl, realized_pct = self._store_trade_execution(trade)
             trade.realized_pnl = realized_pnl
             trade.realized_pnl_pct = realized_pct
-            
+
             # Step 9: Calculate performance impact
             performance_impact = self._calculate_performance_impact(trade, updated_portfolio)
-            
+
             # Update internal state
             self.portfolio = updated_portfolio
             self.trades.append(trade)
-            
+
             logger.info(
                 "EXECUTED: %s %s shares of %s @ $%.2f (cost: $%.2f, slippage: %.3f%%)",
                 action,
@@ -480,7 +489,7 @@ class PaperTradingEngine:
                 transaction_cost,
                 trade.slippage * 100,
             )
-            
+
             return ExecutionResult(
                 status='EXECUTED',
                 trade=trade,
@@ -488,7 +497,7 @@ class PaperTradingEngine:
                 performance_impact=performance_impact,
                 validation_warnings=validation.warnings
             )
-            
+
         except Exception as exc:
             logger.error("Trade execution failed: %s", exc)
             return ExecutionResult(
@@ -501,21 +510,21 @@ class PaperTradingEngine:
         if self.portfolio.total_value > 0:
             return self.portfolio.total_value
         return self.portfolio.cash
-    
-    def _calculate_position_size(self, 
+
+    def _calculate_position_size(self,
                                  signal: Dict[str, Any],
                                  confidence_score: float,
                                  market_data: pd.DataFrame,
         current_position: int) -> int:
         """
         Calculate position size using Kelly criterion with confidence adjustment.
-        
+
         Args:
             signal: Trading signal
             confidence_score: Adjusted confidence (0-1)
             market_data: Historical data for risk estimation
             current_position: Existing shares held (long only)
-            
+
         Returns:
             Number of shares to trade
         """
@@ -538,11 +547,11 @@ class PaperTradingEngine:
         if action == "SELL":
             # Tighter cap for shorts (1% of equity)
             max_position_value = portfolio_value * (0.05 if diag_mode else 0.01)
-        
+
         # Adjust by confidence (floor at 50% to avoid zero-size)
         confidence_weight = max(confidence_score, 0.1 if diag_mode else 0.5)
         position_value = max_position_value * confidence_weight
-        
+
         # Calculate shares
         current_price = market_data['Close'].iloc[-1]
 
@@ -612,7 +621,7 @@ class PaperTradingEngine:
         if state == "green":
             return 1.2
         return 1.0
-    
+
     def _load_lob_config(self) -> Optional[LOBConfig]:
         if self._lob_enabled is False:
             return None
@@ -675,12 +684,12 @@ class PaperTradingEngine:
     ) -> float:
         """
         Simulate realistic entry price with slippage and market impact.
-        
+
         Args:
             market_price: Current market price
             action: 'BUY' or 'SELL'
             shares: Number of shares
-            
+
         Returns:
             Simulated entry price
         """
@@ -744,15 +753,15 @@ class PaperTradingEngine:
         if side == 'BUY':
             return market_px * (1 + total_slippage)
         return market_px * (1 - total_slippage)
-    
+
     def _update_portfolio(self, trade: Trade, portfolio: Portfolio) -> Portfolio:
         """
         Update portfolio after trade execution.
-        
+
         Args:
             trade: Executed trade
             portfolio: Current portfolio state
-            
+
         Returns:
             Updated portfolio
         """
@@ -769,12 +778,12 @@ class PaperTradingEngine:
             target_prices=portfolio.target_prices.copy(),
             max_holding_days=portfolio.max_holding_days.copy(),
         )
-        
+
         if trade.action == 'BUY':
             # Deduct cash (price + transaction cost)
             total_cost = (trade.shares * trade.entry_price) + trade.transaction_cost
             new_portfolio.cash -= total_cost
-            
+
             # Update position
             if trade.ticker in new_portfolio.positions:
                 # Average entry price calculation
@@ -802,12 +811,12 @@ class PaperTradingEngine:
             else:
                 new_portfolio.positions[trade.ticker] = trade.shares
                 new_portfolio.entry_prices[trade.ticker] = trade.entry_price
-        
+
         elif trade.action == 'SELL':
             # Add cash (price - transaction cost)
             total_proceeds = (trade.shares * trade.entry_price) - trade.transaction_cost
             new_portfolio.cash += total_proceeds
-            
+
             # Update position
             if trade.ticker in new_portfolio.positions:
                 old_shares = new_portfolio.positions[trade.ticker]
@@ -836,7 +845,7 @@ class PaperTradingEngine:
                 # Open a new short
                 new_portfolio.positions[trade.ticker] = -trade.shares
                 new_portfolio.entry_prices[trade.ticker] = trade.entry_price
-        
+
         # Lifecycle metadata update (best-effort).
         new_shares = new_portfolio.positions.get(trade.ticker, 0)
         if new_shares == 0:
@@ -876,7 +885,7 @@ class PaperTradingEngine:
         # Update total value
         current_prices = {trade.ticker: trade.entry_price}
         new_portfolio.update_value(current_prices)
-        
+
         return new_portfolio
 
     def mark_to_market(self, price_map: Dict[str, float]) -> float:
@@ -987,7 +996,7 @@ class PaperTradingEngine:
         if days_held >= max_days:
             return "TIME_EXIT"
         return None
-    
+
     def _store_trade_execution(self, trade: Trade):
         """Store trade execution in database and return realized PnL details."""
         try:
@@ -1050,16 +1059,20 @@ class PaperTradingEngine:
                 strike=trade.strike,
                 expiry=trade.expiry,
                 multiplier=trade.multiplier,
+                barbell_bucket=trade.barbell_bucket,
+                barbell_multiplier=trade.barbell_multiplier,
+                base_confidence=trade.base_confidence,
+                effective_confidence=trade.effective_confidence,
             )
-            
+
             logger.debug("Trade stored in database: %s", trade.trade_id)
             return realized_pnl if realized_pct is not None else None, realized_pct
         except Exception as exc:
             logger.error("Failed to store trade: %s", exc)
             return None, None
-    
-    def _calculate_performance_impact(self, 
-                                     trade: Trade, 
+
+    def _calculate_performance_impact(self,
+                                     trade: Trade,
                                      portfolio: Portfolio) -> Dict[str, float]:
         """Calculate how trade impacts portfolio performance"""
         return {
@@ -1069,7 +1082,7 @@ class PaperTradingEngine:
             'trade_cost': trade.transaction_cost,
             'trade_value': trade.shares * trade.entry_price
         }
-    
+
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Get current portfolio summary"""
         return {
@@ -1081,7 +1094,7 @@ class PaperTradingEngine:
             'initial_capital': self.initial_capital,
             'total_return': (self.portfolio.total_value / self.initial_capital - 1) if self.initial_capital > 0 else 0
         }
-    
+
     def get_performance_metrics(self, run_id: Optional[str] = None) -> Dict[str, float]:
         """Calculate portfolio performance metrics (optionally scoped to run_id)."""
         if len(self.trades) == 0:
@@ -1091,10 +1104,10 @@ class PaperTradingEngine:
                 'win_rate': 0.0,
                 'avg_trade_value': 0.0
             }
-        
+
         # Get realized performance from database (run-local when run_id is set).
         perf = self.db_manager.get_performance_summary(run_id=run_id)
-        
+
         return {
             'total_return': (self.portfolio.total_value / self.initial_capital - 1),
             'num_trades': len(self.trades),
@@ -1111,5 +1124,3 @@ assert PaperTradingEngine.get_portfolio_summary.__doc__ is not None
 logger.info("Paper Trading Engine module loaded successfully")
 
 # Line count: ~450 lines (slightly over budget but comprehensive functionality)
-
-

@@ -374,7 +374,9 @@ def _trade_events(conn: sqlite3.Connection, tickers: Iterable[str], limit: int) 
         return []
     placeholders = ",".join("?" for _ in ticker_list)
     query_full = f"""
-    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps, data_source, execution_mode
+    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
+           data_source, execution_mode,
+           barbell_bucket, barbell_multiplier, base_confidence, effective_confidence
     FROM trade_executions
     WHERE UPPER(ticker) IN ({placeholders})
     ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
@@ -436,6 +438,10 @@ def _trade_events(conn: sqlite3.Connection, tickers: Iterable[str], limit: int) 
                 "slippage": float(slippage),
                 "data_source": str(r["data_source"] or "") if ("data_source" in r.keys()) else "",
                 "execution_mode": str(r["execution_mode"] or "") if ("execution_mode" in r.keys()) else "",
+                "barbell_bucket": str(r["barbell_bucket"] or "") if ("barbell_bucket" in r.keys()) else "",
+                "barbell_multiplier": float(r["barbell_multiplier"]) if ("barbell_multiplier" in r.keys() and r["barbell_multiplier"] is not None) else None,
+                "base_confidence": float(r["base_confidence"]) if ("base_confidence" in r.keys() and r["base_confidence"] is not None) else None,
+                "effective_confidence": float(r["effective_confidence"]) if ("effective_confidence" in r.keys() and r["effective_confidence"] is not None) else None,
             }
         )
     out.reverse()

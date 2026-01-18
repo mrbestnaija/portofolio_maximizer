@@ -36,6 +36,8 @@ from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecaste
 from execution.paper_trading_engine import PaperTradingEngine
 from models.time_series_signal_generator import TimeSeriesSignalGenerator
 from risk.barbell_policy import BarbellConfig
+from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence
+from risk.barbell_sizing import apply_barbell_confidence, barbell_confidence_multipliers
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -95,19 +97,8 @@ def _to_engine_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _barbell_multipliers(cfg: BarbellConfig) -> Dict[str, float]:
-    # Map barbell "max_per_position" constraints into a simple confidence
-    # multiplier heuristic. This keeps BARBELL_SIZED as a sizing overlay rather
-    # than a new allocator.
-    # The YAML stores safe max_per_position under safe_bucket; cfg currently stores
-    # only safe_min/safe_max. Use defaults that preserve behavior if unknown.
-    safe_max_per_position = 0.50
-    core_mult = float(cfg.core_max_per) / safe_max_per_position if safe_max_per_position else 0.2
-    spec_mult = float(cfg.spec_max_per) / safe_max_per_position if safe_max_per_position else 0.1
-    return {
-        "safe": 1.0,
-        "core": max(0.0, min(1.0, core_mult)),
-        "spec": max(0.0, min(1.0, spec_mult)),
-    }
+    # Backward-compatible wrapper. Source of truth lives in risk.barbell_sizing.
+    return barbell_confidence_multipliers(cfg)
 
 
 def _apply_barbell_confidence(
@@ -117,15 +108,12 @@ def _apply_barbell_confidence(
     cfg: BarbellConfig,
     multipliers: Dict[str, float],
 ) -> float:
-    sym = str(ticker).upper()
-    conf = float(confidence)
-    if sym in set(cfg.safe_symbols):
-        conf *= float(multipliers.get("safe", 1.0))
-    elif sym in set(cfg.core_symbols):
-        conf *= float(multipliers.get("core", 1.0))
-    elif sym in set(cfg.speculative_symbols):
-        conf *= float(multipliers.get("spec", 1.0))
-    return max(0.0, min(1.0, conf))
+    _ = multipliers  # signature retained; multipliers are derived from cfg in shared helper
+    return apply_barbell_confidence(
+        ticker=ticker,
+        base_confidence=float(confidence),
+        cfg=cfg,
+    ).effective_confidence
 
 
 def _max_drawdown(equity: List[Dict[str, float]]) -> float:
@@ -199,6 +187,7 @@ def _simulate_from_trade_history(
     gross_loss = sum(max(0.0, -pnl) for _, __, pnl in pnl_events)
     total_profit = gross_profit - gross_loss
     win_trades = sum(1 for _, __, pnl in pnl_events if pnl > 0)
+    losing_trades = sum(1 for _, __, pnl in pnl_events if pnl < 0)
     win_rate = (win_trades / total_trades) if total_trades else 0.0
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
 
@@ -218,6 +207,9 @@ def _simulate_from_trade_history(
         "win_rate": float(win_rate),
         "max_drawdown": float(max_dd),
         "total_trades": int(total_trades),
+        "losing_trades": int(losing_trades),
+        "gross_profit": float(gross_profit),
+        "gross_loss": float(gross_loss),
     }
 
 
@@ -378,6 +370,14 @@ def _simulate_walk_forward(
         "win_rate": float(summary.get("win_rate") or 0.0),
         "max_drawdown": float(max_dd),
         "total_trades": int(summary.get("total_trades") or 0),
+        "losing_trades": int(
+            summary.get("losing_trades")
+            or max(
+                0,
+                int(summary.get("total_trades") or 0)
+                - int(round(float(summary.get("win_rate") or 0.0) * float(summary.get("total_trades") or 0))),
+            )
+        ),
     }
 
 
@@ -499,6 +499,12 @@ def run_barbell_eval(
         },
         "metrics": {"ts_only": baseline, "barbell_sized": barbell, "delta": _delta(baseline, barbell)},
     }
+    decision = decide_promotion_from_report(payload)
+    payload["promotion_decision"] = {
+        "passed": bool(decision.passed),
+        "reason": decision.reason,
+        "evidence_source": decision.evidence_source,
+    }
     try:
         db.close()
     except Exception:
@@ -548,6 +554,11 @@ def _default_report_path() -> Path:
 )
 @click.option("--initial-capital", default=25000.0, show_default=True)
 @click.option("--report-path", default=None, help="Output JSON path (default: reports/barbell_pnl_eval_<ts>.json).")
+@click.option(
+    "--write-promotion-evidence",
+    default="",
+    help="Optional JSON path to write a promotion gate artifact (e.g., reports/barbell_pnl_evidence_latest.json).",
+)
 @click.option("--verbose", is_flag=True, help="Enable debug logging.")
 def main(
     tickers: str,
@@ -569,6 +580,7 @@ def main(
     step_days: int,
     initial_capital: float,
     report_path: Optional[str],
+    promotion_evidence_path: str,
     verbose: bool,
 ) -> None:
     _configure_logging(verbose)
@@ -606,6 +618,10 @@ def main(
     out_path = Path(report_path).expanduser() if report_path else _default_report_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    if promotion_evidence_path:
+        evidence_path = Path(promotion_evidence_path).expanduser()
+        decision = decide_promotion_from_report(payload)
+        write_promotion_evidence(path=evidence_path, decision=decision, report_path=out_path)
 
     m = payload.get("metrics") or {}
     ts_only = m.get("ts_only") or {}

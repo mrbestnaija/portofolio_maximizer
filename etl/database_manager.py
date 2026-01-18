@@ -66,7 +66,7 @@ def _normalise_risk_level(level: Any) -> str:
 class DatabaseManager:
     """
     Manage persistent storage for portfolio data and LLM outputs.
-    
+
     Database Schema:
     - ohlcv_data: Historical price data with quality scores
     - llm_analyses: Market analysis results from LLM
@@ -76,11 +76,11 @@ class DatabaseManager:
     - trade_executions: Executed trades with P&L
     - performance_metrics: Daily/weekly/monthly performance
     """
-    
+
     def __init__(self, db_path: str = "data/portfolio_maximizer.db"):
         """
         Initialize database connection.
-        
+
         Args:
             db_path: Path to SQLite database file
         """
@@ -93,7 +93,7 @@ class DatabaseManager:
         self._sqlite_in_memory = self.backend == "sqlite" and db_path_str == ":memory:"
         self._db_path_hint_is_dir = isinstance(db_path, str) and db_path_str.endswith(("/", "\\"))
         self.db_path = Path(db_path_str)
-        
+
         self.conn = None
         self.cursor = None
         self._busy_timeout_ms = 10000  # Reduce disk I/O contention on Windows
@@ -103,13 +103,13 @@ class DatabaseManager:
             self._ensure_sqlite_path_exists()
         self._connect()
         self._initialize_schema()
-        
+
         logger.info(f"Database initialized at: {self.db_path}")
 
     def _ensure_sqlite_path_exists(self) -> None:
         """
         Ensure the SQLite database path is valid before connecting.
-        
+
         Handles three cases documented in the architecture/implementation notes:
         1. Respect explicit in-memory connections (":memory:") without touching disk.
         2. Allow callers to pass a directory so we drop the default DB name inside it.
@@ -149,7 +149,7 @@ class DatabaseManager:
 
         self.db_path = normalized_path
         self._active_db_path = normalized_path
-    
+
     def _is_transient_sqlite_error(self, message: str) -> bool:
         """Return True if the sqlite error message is a transient I/O issue."""
         return any(marker in message for marker in SQLITE_TRANSIENT_ERRORS)
@@ -161,7 +161,7 @@ class DatabaseManager:
     def _should_route_disk_io_recovery(self, message: str) -> bool:
         """
         Determine if connection setup should run through the disk I/O fallback path.
-        
+
         Even known corruption markers (e.g., "database disk image is malformed") first
         flow through the disk I/O cleanup/mirror branch before we attempt a rebuild.
         """
@@ -193,7 +193,7 @@ class DatabaseManager:
                     logger.debug("Unable to move SQLite artifact %s: %s", artifact, exc)
 
         return backup_path if backup_path.exists() else None
-    
+
     def _connect(self):
         """Establish database connection"""
         connect_kwargs = {
@@ -292,7 +292,7 @@ class DatabaseManager:
     def _configure_sqlite_connection(self, target_path: Path, use_wal: bool) -> None:
         """
         Apply SQLite tuning pragmas but gracefully handle environments where they fail.
-        
+
         WSL/Windows drives often reject WAL/synchronous pragmas, so we treat them as optional.
         """
         if use_wal:
@@ -484,7 +484,7 @@ class DatabaseManager:
         """Reset SQLite connection (used after disk I/O errors)."""
         self._close_safely()
         self._connect()
-    
+
     def _rebuild_sqlite_store(self) -> None:
         """Backup the corrupted database, recreate the file, and reload schema."""
         self._close_safely()
@@ -557,10 +557,10 @@ class DatabaseManager:
             self._rebuild_sqlite_store()
             return True
         return False
-    
+
     def _initialize_schema(self):
         """Create database schema if not exists"""
-        
+
         # OHLCV data table
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS ohlcv_data (
@@ -579,7 +579,7 @@ class DatabaseManager:
                 UNIQUE(ticker, date, source)
             )
         """)
-        
+
         # LLM market analyses
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS llm_analyses (
@@ -598,7 +598,7 @@ class DatabaseManager:
                 UNIQUE(ticker, analysis_date, model_name)
             )
         """)
-        
+
         # LLM trading signals
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS llm_signals (
@@ -627,7 +627,7 @@ class DatabaseManager:
                 UNIQUE(ticker, signal_date, model_name)
             )
         """)
-        
+
         # LLM risk assessments
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS llm_risks (
@@ -648,7 +648,7 @@ class DatabaseManager:
                 UNIQUE(ticker, assessment_date, model_name)
             )
         """)
-        
+
         # Portfolio positions
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS portfolio_positions (
@@ -667,7 +667,7 @@ class DatabaseManager:
                 UNIQUE(ticker, position_date)
             )
         """)
-        
+
         # Trade executions (for profit/loss tracking)
         fk_clause = ""
         if self.backend != "sqlite":
@@ -699,6 +699,10 @@ class DatabaseManager:
                 strike REAL,
                 expiry TEXT,
                 multiplier REAL DEFAULT 1.0,
+                barbell_bucket TEXT,
+                barbell_multiplier REAL,
+                base_confidence REAL,
+                effective_confidence REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 {fk_clause}
             )
@@ -743,6 +747,14 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN synthetic_generator_version TEXT")
         if "run_id" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN run_id TEXT")
+        if "barbell_bucket" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN barbell_bucket TEXT")
+        if "barbell_multiplier" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN barbell_multiplier REAL")
+        if "base_confidence" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN base_confidence REAL")
+        if "effective_confidence" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN effective_confidence REAL")
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -921,7 +933,7 @@ class DatabaseManager:
                 logger.info("Adding regression_metrics column to time_series_forecasts")
                 self.cursor.execute("ALTER TABLE time_series_forecasts ADD COLUMN regression_metrics TEXT")
                 self.conn.commit()
-        
+
         # Performance metrics (quantifiable success criteria)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS performance_metrics (
@@ -1020,13 +1032,13 @@ class DatabaseManager:
                 UNIQUE(ticker, signal_date, source, model_type)
             )
         """)
-        
+
         # Create index for faster queries
         self.cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_trading_signals_ticker_date 
+            CREATE INDEX IF NOT EXISTS idx_trading_signals_ticker_date
             ON trading_signals(ticker, signal_date DESC)
         """)
-        
+
         self._migrate_llm_risks_table()
         self._migrate_llm_signals_table()
 
@@ -1101,8 +1113,8 @@ class DatabaseManager:
 
                 self.cursor.execute("""
                     UPDATE llm_signals
-                    SET signal_timestamp = 
-                        CASE 
+                    SET signal_timestamp =
+                        CASE
                             WHEN signal_timestamp IS NULL AND signal_date IS NOT NULL
                             THEN signal_date
                             ELSE signal_timestamp
@@ -1184,7 +1196,7 @@ class DatabaseManager:
             logger.info("llm_risks table migration complete")
         except Exception as migration_error:  # pragma: no cover - defensive
             logger.warning(f"llm_risks migration skipped due to error: {migration_error}")
-        
+
         # Create indices for performance
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_ohlcv_ticker_date ON ohlcv_data(ticker, date)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_analyses_ticker_date ON llm_analyses(ticker, analysis_date)")
@@ -1197,17 +1209,17 @@ class DatabaseManager:
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_latency_metrics_ticker ON latency_metrics(ticker)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_split_drift_run_split ON split_drift_metrics(run_id, split_name)")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_strategy_configs_regime_score ON strategy_configs(regime, score)")
-        
+
         self.conn.commit()
         logger.info("Database schema initialized successfully")
-    
+
     def save_ohlcv_data(self, df: pd.DataFrame, source: str = 'yfinance') -> int:
         """
         Save OHLCV data to database.
         """
 
         insert_sql = """
-            INSERT OR REPLACE INTO ohlcv_data 
+            INSERT OR REPLACE INTO ohlcv_data
             (ticker, date, open, high, low, close, volume, adj_close, source, quality_score)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
@@ -1771,7 +1783,7 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save signal validation: %s", safe_error)
             return -1
-    
+
     def save_llm_risk(self, ticker: str, date: str, risk: Dict,
                      model_name: str = 'qwen:14b-chat-q4_K_M',
                      latency: float = 0.0) -> int:
@@ -1804,12 +1816,12 @@ class DatabaseManager:
                 model_name,
                 latency
             ))
-            
+
             self.conn.commit()
             row_id = self.cursor.lastrowid
             logger.info(f"Saved LLM risk assessment for {ticker} on {date} (ID: {row_id})")
             return row_id
-        
+
         except Exception as e:
             safe_error = sanitize_error(e)
             logger.error(f"Failed to save LLM risk: {safe_error}")
@@ -1841,6 +1853,10 @@ class DatabaseManager:
         strike: Optional[float] = None,
         expiry: Optional[str] = None,
         multiplier: float = 1.0,
+        barbell_bucket: Optional[str] = None,
+        barbell_multiplier: Optional[float] = None,
+        base_confidence: Optional[float] = None,
+        effective_confidence: Optional[float] = None,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -1858,8 +1874,9 @@ class DatabaseManager:
                      data_source, execution_mode, synthetic_dataset_id, synthetic_generator_version, run_id,
                      realized_pnl, realized_pnl_pct,
                      holding_period_days, asset_class, instrument_type,
-                     underlying_ticker, strike, expiry, multiplier)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     underlying_ticker, strike, expiry, multiplier,
+                     barbell_bucket, barbell_multiplier, base_confidence, effective_confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -1886,6 +1903,10 @@ class DatabaseManager:
                         strike,
                         expiry,
                         float(multiplier),
+                        barbell_bucket,
+                        float(barbell_multiplier) if barbell_multiplier is not None else None,
+                        float(base_confidence) if base_confidence is not None else None,
+                        float(effective_confidence) if effective_confidence is not None else None,
                     ),
                 )
             trade_id = self.cursor.lastrowid
@@ -2131,11 +2152,11 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save data quality snapshot: %s", safe_error)
             return -1
-    
+
     def save_forecast(self, ticker: str, forecast_date: str, forecast_data: Dict) -> int:
         """
         Save time series forecast to database.
-        
+
         Args:
             ticker: Stock ticker
             forecast_date: Forecast generation date
@@ -2151,7 +2172,7 @@ class DatabaseManager:
                 - bic: BIC value (optional)
                 - diagnostics: Diagnostic metrics (dict, optional)
                 - regression_metrics: RMSE/sMAPE/Tracking-error dict (optional)
-        
+
         Returns:
             Row ID of inserted record
         """
@@ -2396,7 +2417,7 @@ class DatabaseManager:
             )
             alias = "ensemble" if model_type == "COMBINED" else model_type.lower()
             return {alias: {"rmse": None, "smape": None, "tracking_error": None}}
-    
+
     def save_trading_signal(
         self,
         ticker: str,
@@ -2409,7 +2430,7 @@ class DatabaseManager:
     ) -> int:
         """
         Save unified trading signal (Time Series or LLM) to trading_signals table.
-        
+
         Args:
             ticker: Stock ticker symbol
             date: Signal date (YYYY-MM-DD)
@@ -2418,7 +2439,7 @@ class DatabaseManager:
             model_type: Model type (e.g., 'ENSEMBLE', 'SARIMAX', 'qwen:14b-chat-q4_K_M')
             validation_status: Validation status
             latency: Signal generation latency in seconds
-            
+
         Returns:
             Signal ID or -1 on error
         """
@@ -2426,16 +2447,16 @@ class DatabaseManager:
         status = validation_status.lower() if validation_status else 'pending'
         if status not in allowed_statuses:
             status = 'pending'
-        
+
         if source not in ('TIME_SERIES', 'LLM', 'HYBRID'):
             logger.warning(f"Invalid source '{source}', defaulting to 'TIME_SERIES'")
             source = 'TIME_SERIES'
-        
+
         try:
             action = str(signal.get('action', 'HOLD')).upper()
             if action not in {'BUY', 'SELL', 'HOLD'}:
                 action = 'HOLD'
-            
+
             timestamp_raw = signal.get('signal_timestamp')
             if isinstance(timestamp_raw, datetime):
                 signal_timestamp = timestamp_raw
@@ -2446,17 +2467,17 @@ class DatabaseManager:
                     signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
             else:
                 signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
-            
+
             # Extract provenance (convert dict to JSON string if needed)
             provenance = signal.get('provenance', {})
             if isinstance(provenance, dict):
                 provenance = json.dumps(provenance)
             elif not isinstance(provenance, str):
                 provenance = json.dumps({})
-            
+
             actual_return = signal.get('actual_return')
             backtest_metrics = signal.get('backtest_metrics', {}) or {}
-            
+
             with self.conn:
                 self.cursor.execute(
                     """
@@ -2515,7 +2536,7 @@ class DatabaseManager:
                         backtest_metrics.get('profit_factor'),
                     ),
                 )
-            
+
             self.cursor.execute(
                 """
                 SELECT id FROM trading_signals
@@ -2527,12 +2548,12 @@ class DatabaseManager:
             row_id = row['id'] if row else -1
             logger.info("Saved trading signal for %s on %s (source=%s, ID: %s)", ticker, date, source, row_id)
             return row_id
-            
+
         except Exception as exc:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save trading signal: %s", safe_error)
             return -1
-    
+
     def get_latest_signals(self, ticker: Optional[str] = None, limit: int = 10) -> List[Dict]:
         """Retrieve latest trading signals"""
         query = """
@@ -2540,14 +2561,14 @@ class DatabaseManager:
             WHERE 1=1
         """
         params = []
-        
+
         if ticker:
             query += " AND ticker = ?"
             params.append(ticker)
-        
+
         query += " ORDER BY signal_date DESC LIMIT ?"
         params.append(limit)
-        
+
         self.cursor.execute(query, params)
         return [dict(row) for row in self.cursor.fetchall()]
 
@@ -2741,7 +2762,7 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to load best strategy config: %s", safe_error)
             return None
-    
+
     def get_performance_summary(
         self,
         start_date: Optional[str] = None,
@@ -2750,12 +2771,12 @@ class DatabaseManager:
     ) -> Dict:
         """
         Get quantifiable performance summary.
-        
+
         Returns:
             Dictionary with key performance metrics
         """
         query = """
-            SELECT 
+            SELECT
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
                 SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
@@ -2770,7 +2791,7 @@ class DatabaseManager:
             FROM trade_executions
             WHERE realized_pnl IS NOT NULL
         """
-        
+
         params = []
         if run_id:
             query += " AND run_id = ?"
@@ -2781,15 +2802,15 @@ class DatabaseManager:
         if end_date:
             query += " AND trade_date <= ?"
             params.append(end_date)
-        
+
         self.cursor.execute(query, params)
         result = dict(self.cursor.fetchone())
-        
+
         # Calculate win rate and profit factor
         # Profit Factor = Total Gross Profit / Total Gross Loss (CORRECT formula)
         if result['total_trades'] > 0:
             result['win_rate'] = result['winning_trades'] / result['total_trades']
-            
+
             # FIXED: Use gross_profit / gross_loss (not averages)
             if result['gross_loss'] and result['gross_loss'] > 0:
                 result['profit_factor'] = result['gross_profit'] / result['gross_loss']
@@ -2799,17 +2820,17 @@ class DatabaseManager:
         else:
             result['win_rate'] = 0.0
             result['profit_factor'] = 0.0
-        
+
         return result
-    
+
     def close(self):
         """Close database connection"""
         self._close_safely()
         self._sync_mirror_if_needed()
         logger.info("Database connection closed")
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
