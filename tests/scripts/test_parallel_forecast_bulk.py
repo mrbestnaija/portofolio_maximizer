@@ -23,7 +23,7 @@ def _make_frame(last_close: float) -> pd.DataFrame:
 def test_generate_forecasts_bulk_parallel_matches_sequential(monkeypatch: pytest.MonkeyPatch) -> None:
     frames = {f"T{i:02d}": _make_frame(100.0 + i) for i in range(12)}
 
-    def fake_forecast(frame: pd.DataFrame, horizon: int):
+    def fake_forecast(frame: pd.DataFrame, horizon: int, **_kwargs):
         last = float(frame["Close"].iloc[-1])
         return ({"horizon": horizon, "forecast": last + horizon}, last)
 

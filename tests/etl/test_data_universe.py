@@ -54,4 +54,3 @@ def test_resolve_ticker_universe_filters_provider_blocklist():
     assert universe.tickers == ["MSFT"]
     assert "provider_blocklist" in universe.notes
     assert "HNB" in universe.notes["provider_blocklist"]
-

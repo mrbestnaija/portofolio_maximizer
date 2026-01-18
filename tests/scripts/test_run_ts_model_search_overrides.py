@@ -160,4 +160,3 @@ def test_run_ts_model_search_uses_overrides_and_persists_candidates(
     assert saved_candidates, "No TS model candidates were persisted in the smoke test."
     # All saved entries should be for the requested ticker.
     assert all(cand["ticker"] == "AAPL" for cand in saved_candidates)
-

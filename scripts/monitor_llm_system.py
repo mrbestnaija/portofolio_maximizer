@@ -53,13 +53,13 @@ class LLMSystemMonitor:
     Comprehensive LLM system monitoring
     Addresses all issues from SYSTEM_STATUS_2025-10-22.md
     """
-    
+
     def __init__(self):
         self.ollama_client = None
         self.monitoring_results = {}
         self.db_manager = DatabaseManager()
         self.llm_db_manager = LLMDatabaseManager(db_path=str(self.db_manager.db_path))
-        
+
     def initialize_ollama_client(self):
         """Initialize Ollama client for monitoring"""
         try:
@@ -73,14 +73,14 @@ class LLMSystemMonitor:
         except Exception as e:
             logger.error(f"❌ Failed to initialize Ollama client: {e}")
             return False
-    
+
     def monitor_llm_performance(self):
         """
         Monitor LLM Performance: Track inference times in live scenarios
         Addresses: "Monitor LLM Performance: Track inference times in live scenarios"
         """
         logger.info("🔍 Monitoring LLM Performance...")
-        
+
         try:
             performance_status = get_performance_status()
             fallback_info = performance_status.get("fallback_events", {}) if isinstance(performance_status, dict) else {}
@@ -160,18 +160,18 @@ class LLMSystemMonitor:
                 'error': str(e),
                 'performance_summary': performance_status if 'performance_status' in locals() else None,
             }
-    
+
     def validate_signal_quality(self):
         """
         Validate Signal Quality: Ensure LLM-generated signals are accurate
         Addresses: "Validate Signal Quality: Ensure LLM-generated signals are accurate"
         """
         logger.info("🔍 Validating Signal Quality...")
-        
+
         try:
             # Get recent signals from database
             recent_signals = self.llm_db_manager.get_recent_signals(hours=24)
-            
+
             if not recent_signals:
                 cursor = self.db_manager.cursor
                 cursor.execute("SELECT COUNT(*) FROM llm_signals")
@@ -183,13 +183,13 @@ class LLMSystemMonitor:
                     'signals_available': int(existing_count),
                 }
                 return
-            
+
             # Create mock market data for validation
             dates = pd.date_range(start='2024-01-01', periods=30, freq='D')
             market_data = pd.DataFrame({
                 'close': np.random.normal(150, 5, 30)
             }, index=dates)
-            
+
             # Validate each signal
             validation_results = []
             skipped_signals = 0
@@ -472,14 +472,14 @@ class LLMSystemMonitor:
                 'status': 'ERROR',
                 'error': str(exc),
             }
-    
+
     def verify_database_integration(self):
         """
         Database Integration: Verify LLM risk assessments save properly
         Addresses: "Database Integration: Verify LLM risk assessments save properly"
         """
         logger.info("🔍 Verifying Database Integration...")
-        
+
         try:
             # Test saving a risk assessment
             assessment = LLMRiskAssessment(
@@ -495,11 +495,11 @@ class LLMSystemMonitor:
                 confidence=0.85,
             )
             test_assessment_id = self.llm_db_manager.save_risk_assessment(assessment)
-            
+
             # Verify the assessment was saved
             recent_assessments = self.llm_db_manager.get_recent_risk_assessments(hours=1)
             saved_assessment = next((a for a in recent_assessments if a.id == test_assessment_id), None)
-            
+
             if saved_assessment:
                 logger.info("✅ Risk assessment saved and retrieved successfully")
                 self.monitoring_results['database_integration'] = {
@@ -513,27 +513,27 @@ class LLMSystemMonitor:
                     'status': 'FAILED',
                     'reason': 'Assessment not found after saving'
                 }
-                
+
         except Exception as e:
             logger.error(f"❌ Database integration verification failed: {e}")
             self.monitoring_results['database_integration'] = {
                 'status': 'ERROR',
                 'error': str(e)
             }
-    
+
     def optimize_performance(self):
         """
         Performance Optimization: Fine-tune model selection for speed
         Addresses: "Performance Optimization: Fine-tune model selection for speed"
         """
         logger.info("🔍 Optimizing Performance...")
-        
+
         try:
             # Get performance optimization recommendations
             fast_model = optimize_model_selection("fast")
             balanced_model = optimize_model_selection("balanced")
             accurate_model = optimize_model_selection("accurate")
-            
+
             # Update optimizer with current performance data
             if self.ollama_client:
                 performance_optimizer.update_model_performance(
@@ -543,10 +543,10 @@ class LLMSystemMonitor:
                     success=True,
                     accuracy_score=0.8
                 )
-            
+
             # Get optimization report
             optimization_report = performance_optimizer.get_performance_report()
-            
+
             self.monitoring_results['performance_optimization'] = {
                 'status': 'HEALTHY',
                 'fast_model': fast_model.recommended_model,
@@ -554,85 +554,85 @@ class LLMSystemMonitor:
                 'accurate_model': accurate_model.recommended_model,
                 'optimization_report': optimization_report
             }
-            
+
             logger.info("✅ Performance optimization complete")
             logger.info(f"   Fast model: {fast_model.recommended_model}")
             logger.info(f"   Balanced model: {balanced_model.recommended_model}")
             logger.info(f"   Accurate model: {accurate_model.recommended_model}")
-            
+
         except Exception as e:
             logger.error(f"❌ Performance optimization failed: {e}")
             self.monitoring_results['performance_optimization'] = {
                 'status': 'ERROR',
                 'error': str(e)
             }
-    
+
     def run_comprehensive_monitoring(self):
         """Run comprehensive LLM system monitoring"""
         logger.info("🚀 Starting Comprehensive LLM System Monitoring")
         logger.info("=" * 60)
-        
+
         # Initialize Ollama client
         if not self.initialize_ollama_client():
             logger.error("❌ Cannot proceed without Ollama client")
             return False
-        
+
         # Run all monitoring checks
         self.monitor_llm_performance()
         self.validate_signal_quality()
         self.collect_signal_backtest_metrics()
         self.verify_database_integration()
         self.optimize_performance()
-        
+
         # Generate summary report
         self.generate_monitoring_report()
-        
+
         logger.info("✅ Comprehensive monitoring complete")
         return True
-    
+
     def generate_monitoring_report(self):
         """Generate comprehensive monitoring report"""
         logger.info("📊 Generating Monitoring Report...")
-        
+
         report = {
             "timestamp": datetime.now().isoformat(),
             "monitoring_results": self.monitoring_results,
             "system_health": self._assess_system_health(),
             "recommendations": self._generate_recommendations()
         }
-        
+
         # Save report to file
         report_file = f"logs/llm_monitoring_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         os.makedirs(os.path.dirname(report_file), exist_ok=True)
-        
+
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2, default=str)
-        
+
         logger.info(f"📄 Monitoring report saved to: {report_file}")
-        
+
         # Print summary
         self._print_summary_report(report)
-    
+
     def _assess_system_health(self):
         """Assess overall system health"""
         health_status = "HEALTHY"
         issues = []
-        
+
         for component, result in self.monitoring_results.items():
             if result.get('status') not in ['HEALTHY', 'NO_DATA']:
                 health_status = "DEGRADED"
                 issues.append(f"{component}: {result.get('status', 'UNKNOWN')}")
-        
+
         return {
             "overall_status": health_status,
             "issues": issues,
             "components_checked": len(self.monitoring_results)
         }
-    
+
     def _generate_recommendations(self):
         """Generate recommendations based on monitoring results"""
         recommendations = []
-        
+
         # Check LLM performance
         if 'llm_performance' in self.monitoring_results:
             perf = self.monitoring_results['llm_performance']
@@ -642,53 +642,53 @@ class LLMSystemMonitor:
                 recommendations.append("Latency above benchmark — review caching/fallback tuning (see logs/latency_benchmark.json)")
             elif perf.get('inference_time', 0) > 30:
                 recommendations.append("Consider optimizing model selection for faster inference")
-        
+
         # Check signal quality
         if 'signal_quality' in self.monitoring_results:
             quality = self.monitoring_results['signal_quality']
             if quality.get('validation_rate', 1.0) < 0.8:
                 recommendations.append("Review signal generation quality - low validation rate")
-        
+
         # Check database integration
         if 'database_integration' in self.monitoring_results:
             db = self.monitoring_results['database_integration']
             if db.get('status') != 'HEALTHY':
                 recommendations.append("Fix database integration issues")
-        
+
         return recommendations
-    
+
     def _print_summary_report(self, report):
         """Print summary report to console"""
         print("\n" + "=" * 60)
         print("📊 LLM SYSTEM MONITORING SUMMARY")
         print("=" * 60)
-        
+
         health = report['system_health']
         print(f"Overall Status: {health['overall_status']}")
         print(f"Components Checked: {health['components_checked']}")
-        
+
         if health['issues']:
             print("\n⚠️ Issues Found:")
             for issue in health['issues']:
                 print(f"  - {issue}")
-        
+
         if report['recommendations']:
             print("\n💡 Recommendations:")
             for rec in report['recommendations']:
                 print(f"  - {rec}")
-        
+
         print("\n📈 Component Status:")
         for component, result in self.monitoring_results.items():
             status = result.get('status', 'UNKNOWN')
             print(f"  {component}: {status}")
-        
+
         print("=" * 60)
 
 
 def main():
     """Main monitoring function"""
     monitor = LLMSystemMonitor()
-    
+
     try:
         success = monitor.run_comprehensive_monitoring()
         if success:

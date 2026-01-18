@@ -77,6 +77,8 @@ class SARIMAXForecaster:
         min_series_length: int = 50,
         auto_impute: bool = True,
         log_transform: bool = False,
+        order_search_mode: str = "full",
+        order_search_maxiter: Optional[int] = None,
     ) -> None:
         if not STATSMODELS_AVAILABLE:
             raise ImportError("statsmodels required for SARIMAX forecasting")
@@ -88,6 +90,8 @@ class SARIMAXForecaster:
         self.max_P = max_P
         self.max_D = max_D
         self.max_Q = max_Q
+        if str(trend).lower() == "auto":
+            trend = "c"
         self.trend = trend
         self.enforce_stationarity = enforce_stationarity
         self.enforce_invertibility = enforce_invertibility
@@ -97,6 +101,8 @@ class SARIMAXForecaster:
         self.min_series_length = max(10, min_series_length)
         self.auto_impute = auto_impute
         self.log_transform = log_transform
+        self.order_search_mode = str(order_search_mode or "full")
+        self.order_search_maxiter = int(order_search_maxiter) if order_search_maxiter is not None else None
 
         self.model = None
         self.fitted_model = None
@@ -124,7 +130,11 @@ class SARIMAXForecaster:
         """
         fit_kwargs: Dict[str, Any] = {"disp": False}
         if maxiter is not None:
-            fit_kwargs["maxiter"] = maxiter
+            requested = int(maxiter)
+            cap = getattr(self, "order_search_maxiter", None)
+            if cap is not None:
+                requested = min(requested, int(cap))
+            fit_kwargs["maxiter"] = requested
         if method is not None:
             fit_kwargs["method"] = method
 

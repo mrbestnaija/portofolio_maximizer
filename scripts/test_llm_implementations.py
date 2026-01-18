@@ -122,7 +122,7 @@ def main():
     """Run all tests"""
     print("🚀 Testing LLM System Enhancements")
     print("=" * 50)
-    
+
     tests = [
         test_performance_monitor,
         test_signal_validator,
@@ -130,7 +130,7 @@ def main():
         test_performance_optimizer,
         test_ollama_client_integration
     ]
-    
+
     results = []
     for test in tests:
         try:
@@ -140,14 +140,14 @@ def main():
             print(f"❌ Test {test.__name__} crashed: {e}")
             results.append(False)
         print()
-    
+
     # Summary
     passed = sum(results)
     total = len(results)
-    
+
     print("=" * 50)
     print(f"📊 Test Results: {passed}/{total} tests passed")
-    
+
     if passed == total:
         print("✅ All LLM enhancements are working correctly!")
         return 0

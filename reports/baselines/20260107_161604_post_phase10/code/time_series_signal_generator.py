@@ -77,12 +77,12 @@ class TimeSeriesSignal:
 class TimeSeriesSignalGenerator:
     """
     Generate trading signals from time series forecasts.
-    
+
     This is the DEFAULT signal generator. Converts ensemble forecasts
     (SARIMAX, SAMOSSA, GARCH, MSSA-RL) into actionable trading signals
     with confidence scores and risk metrics.
     """
-    
+
     def __init__(self,
                  confidence_threshold: float = 0.55,
                  min_expected_return: float = 0.003,  # 0.3% minimum to clear costs
@@ -94,7 +94,7 @@ class TimeSeriesSignalGenerator:
                  cost_model: Optional[Dict[str, Any]] = None):
         """
         Initialize Time Series signal generator.
-        
+
         Args:
             confidence_threshold: Minimum confidence to generate signal (0.55 = 55%)
             min_expected_return: Minimum expected return to trigger signal (0.3%)
@@ -155,7 +155,7 @@ class TimeSeriesSignalGenerator:
         # Keyed by (ticker, last_bar_ts, horizon) so repeated calls on the same
         # bar (or across near-identical windows) stay fast.
         self._forecast_edge_cache: Dict[Tuple[str, str, int], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
-        
+
         logger.info(
             "Time Series Signal Generator initialized "
             "(confidence_threshold=%.2f, min_return=%.2f%%, max_risk=%.2f, quant_validation=%s)",
@@ -224,7 +224,7 @@ class TimeSeriesSignalGenerator:
             if normalized:
                 return normalized
         return None
-    
+
     def generate_signal(self,
                        forecast_bundle: Dict[str, Any],
                        current_price: float,
@@ -232,13 +232,13 @@ class TimeSeriesSignalGenerator:
                        market_data: Optional[pd.DataFrame] = None) -> TimeSeriesSignal:
         """
         Generate trading signal from time series forecast bundle.
-        
+
         Args:
             forecast_bundle: Output from TimeSeriesForecaster.forecast()
             current_price: Current market price
             ticker: Stock ticker symbol
             market_data: Optional historical data for context
-            
+
         Returns:
             TimeSeriesSignal with action, confidence, and risk metrics
         """
@@ -248,7 +248,7 @@ class TimeSeriesSignalGenerator:
             if ensemble_forecast is None:
                 logger.warning(f"No ensemble forecast available for {ticker}, returning HOLD")
                 return self._create_hold_signal(ticker, current_price, "No forecast available")
-            
+
             # Get forecast target value (horizon-consistent: horizon-end by default).
             forecast_value = self._extract_forecast_value(ensemble_forecast)
             if forecast_value is None:
@@ -280,7 +280,7 @@ class TimeSeriesSignalGenerator:
             net_trade_return = max(0.0, gross_trade_return - roundtrip_cost)
             direction = float(np.sign(expected_return))
             net_expected_return = float(direction * net_trade_return) if direction != 0 else 0.0
-            
+
             # Extract volatility for risk assessment (ensure scalar)
             volatility_forecast = forecast_bundle.get('volatility_forecast') or {}
             if isinstance(volatility_forecast, dict):
@@ -312,7 +312,7 @@ class TimeSeriesSignalGenerator:
                 diagnostics_score=float(diagnostics.get("score", 0.5)),
                 snr=snr,
             )
-            
+
             # Calculate risk score
             risk_score = self._calculate_risk_score(
                 expected_return,
@@ -333,7 +333,7 @@ class TimeSeriesSignalGenerator:
                 if isinstance(recent_days, int) and recent_days <= 10:
                     risk_score = min(1.0, risk_score + 0.10)
                     confidence = max(0.0, confidence - 0.05)
-            
+
             action = self._determine_action(
                 expected_return=expected_return,
                 net_trade_return=net_trade_return,
@@ -343,7 +343,7 @@ class TimeSeriesSignalGenerator:
                 min_expected_return=min_expected_return,
                 max_risk_score=max_risk_score,
             )
-            
+
             # Calculate target and stop loss
             target_price, stop_loss = self._calculate_targets(
                 current_price,
@@ -351,7 +351,7 @@ class TimeSeriesSignalGenerator:
                 volatility,
                 action
             )
-            
+
             # Build reasoning
             reasoning = self._build_reasoning(
                 action,
@@ -362,7 +362,7 @@ class TimeSeriesSignalGenerator:
                 risk_score,
                 forecast_bundle
             )
-            
+
             # Extract provenance metadata
             provenance = self._extract_provenance(forecast_bundle)
 
@@ -385,7 +385,7 @@ class TimeSeriesSignalGenerator:
                 provenance["decision_context_snr"] = snr
             if change_point_info:
                 provenance["mssa_rl_change_points"] = change_point_info
-            
+
             provenance['decision_context'] = {
                 'expected_return': expected_return,
                 'expected_return_net': net_expected_return,
@@ -454,7 +454,7 @@ class TimeSeriesSignalGenerator:
                     quant_profile=quant_profile,
                     market_data=market_data,
                 )
-            
+
             if action == 'HOLD':
                 logger.info(
                     "Generated HOLD signal for %s: confidence=%.2f, expected_return=%.2f%%, risk=%.2f",
@@ -480,13 +480,13 @@ class TimeSeriesSignalGenerator:
                     expected_return * 100,
                     risk_score,
                 )
-            
+
             return signal
-            
+
         except Exception as e:
             logger.exception("Error generating Time Series signal for %s: %s", ticker, e)
             return self._create_hold_signal(ticker, current_price, f"Error: {str(e)}")
-    
+
 
     def _extract_forecast_value(self, forecast: Dict[str, Any]) -> Optional[float]:
         """Extract forecast value from forecast dictionary"""
@@ -508,9 +508,9 @@ class TimeSeriesSignalGenerator:
                 return float(forecast['mean'])
             elif 'value' in forecast:
                 return float(forecast['value'])
-        
+
         return None
-    
+
     def _to_scalar(self, value: Any) -> Optional[float]:
         """Convert Series/array-like values into a scalar float."""
         if value is None:
@@ -804,7 +804,7 @@ class TimeSeriesSignalGenerator:
             "last_change_point": str(last_cp),
             "recent_change_point_days": recent_days,
         }
-    
+
     @staticmethod
     def _clamp01(value: float) -> float:
         return max(0.0, min(1.0, float(value)))
@@ -867,47 +867,47 @@ class TimeSeriesSignalGenerator:
             confidence *= 0.75
 
         return self._clamp01(confidence)
-    
+
     def _check_model_agreement(self, forecast_bundle: Dict[str, Any]) -> float:
         """Check agreement between different models (0.0 to 1.0)"""
         forecasts = []
-        
+
         # Collect forecasts from all models
         sarimax_payload = forecast_bundle.get('sarimax_forecast')
         if self._has_payload(sarimax_payload):
             sarimax_val = self._extract_forecast_value(sarimax_payload)
             if sarimax_val is not None:
                 forecasts.append(sarimax_val)
-        
+
         samossa_payload = forecast_bundle.get('samossa_forecast')
         if self._has_payload(samossa_payload):
             samossa_val = self._extract_forecast_value(samossa_payload)
             if samossa_val is not None:
                 forecasts.append(samossa_val)
-        
+
         mssa_payload = forecast_bundle.get('mssa_rl_forecast')
         if self._has_payload(mssa_payload):
             mssa_val = self._extract_forecast_value(mssa_payload)
             if mssa_val is not None:
                 forecasts.append(mssa_val)
-        
+
         if len(forecasts) < 2:
             return 0.5  # Can't assess agreement with <2 models
-        
+
         # Calculate coefficient of variation (lower = more agreement)
         mean_forecast = np.mean(forecasts)
         std_forecast = np.std(forecasts)
-        
+
         if mean_forecast == 0:
             return 0.5
-        
+
         cv = std_forecast / abs(mean_forecast)
-        
+
         # Convert CV to agreement score (lower CV = higher agreement)
         # CV < 0.1 = excellent agreement (1.0)
         # CV > 0.5 = poor agreement (0.0)
         agreement = max(0.0, min(1.0, 1.0 - (cv - 0.1) / 0.4))
-        
+
         return agreement
 
     def _evaluate_diagnostics_details(self, forecast_bundle: Dict[str, Any]) -> Dict[str, Any]:
@@ -993,21 +993,21 @@ class TimeSeriesSignalGenerator:
             "rmse_ratio_vs_baseline": rmse_ratio,
             "directional_accuracy": dir_acc,
         }
-    
+
     def _calculate_risk_score(self,
                               expected_return: float,
                               volatility: Optional[float],
                               forecast_bundle: Dict[str, Any]) -> float:
         """
         Calculate risk score (0.0 to 1.0, higher = riskier).
-        
+
         Based on:
         - Volatility forecast
         - Confidence interval width
         - Model uncertainty
         """
         risk = 0.5  # Base risk
-        
+
         # Factor 1: Volatility (higher volatility = higher risk)
         if volatility is not None:
             if volatility > 0.40:  # >40% volatility
@@ -1016,7 +1016,7 @@ class TimeSeriesSignalGenerator:
                 risk += 0.15
             elif volatility < 0.15:  # <15% volatility
                 risk -= 0.15
-        
+
         # Factor 2: Confidence interval width (wider = riskier)
         ensemble_forecast = self._resolve_primary_forecast(forecast_bundle)
         if ensemble_forecast:
@@ -1032,14 +1032,14 @@ class TimeSeriesSignalGenerator:
                     risk += 0.2
                 elif uncertainty_ratio < 0.75:
                     risk -= 0.1
-        
+
         # Factor 3: Expected return magnitude (smaller moves = riskier relative to reward)
         if abs(expected_return) < 0.01:  # <1% expected return
             risk += 0.1
-        
+
         # Clamp to [0.0, 1.0]
         return max(0.0, min(1.0, risk))
-    
+
     def _determine_action(self,
                          expected_return: float,
                          net_trade_return: float,
@@ -1050,7 +1050,7 @@ class TimeSeriesSignalGenerator:
                          max_risk_score: float) -> str:
         """
         Determine trading action based on forecast and risk metrics.
-        
+
         Returns:
             'BUY', 'SELL', or 'HOLD'
         """
@@ -1064,14 +1064,14 @@ class TimeSeriesSignalGenerator:
 
         if risk_score > max_risk_score:
             return 'HOLD'
-        
+
         # Determine direction
         if expected_return > 0:
             return 'BUY'
         if expected_return < 0:
             return 'SELL'
         return 'HOLD'
-    
+
     def _calculate_targets(self,
                           current_price: float,
                           forecast_price: float,
@@ -1079,29 +1079,29 @@ class TimeSeriesSignalGenerator:
                           action: str) -> tuple[Optional[float], Optional[float]]:
         """
         Calculate target price and stop loss.
-        
+
         Returns:
             (target_price, stop_loss)
         """
         if action == 'HOLD':
             return None, None
-        
+
         # Target: forecast price (or 2:1 reward/risk ratio)
         target_price = forecast_price
-        
+
         # Stop loss: based on volatility or 2% default
         if volatility is not None:
             stop_loss_pct = max(0.015, min(0.05, volatility * 0.5))  # 1.5% to 5%
         else:
             stop_loss_pct = 0.02  # 2% default
-        
+
         if action == 'BUY':
             stop_loss = current_price * (1 - stop_loss_pct)
         else:  # SELL
             stop_loss = current_price * (1 + stop_loss_pct)
-        
+
         return target_price, stop_loss
-    
+
     def _build_reasoning(self,
                         action: str,
                         expected_return: float,
@@ -1112,7 +1112,7 @@ class TimeSeriesSignalGenerator:
                         forecast_bundle: Dict[str, Any]) -> str:
         """Build human-readable reasoning for signal"""
         model_type = forecast_bundle.get('ensemble_metadata', {}).get('primary_model', 'ENSEMBLE')
-        
+
         reasoning = (
             f"Time Series {model_type} forecast indicates {action} signal. "
             f"Gross move: {expected_return:.2%}, "
@@ -1120,15 +1120,15 @@ class TimeSeriesSignalGenerator:
             f"Confidence: {confidence:.1%}, "
             f"Risk score: {risk_score:.1%}. "
         )
-        
+
         if self._has_payload(forecast_bundle.get('samossa_forecast')):
             reasoning += "SAMOSSA SSA decomposition confirms trend. "
-        
+
         if self._has_payload(forecast_bundle.get('mssa_rl_forecast')):
             reasoning += "MSSA-RL change-point detection active. "
-        
+
         return reasoning.strip()
-    
+
     def _extract_provenance(self, forecast_bundle: Dict[str, Any]) -> Dict[str, Any]:
         """Extract provenance metadata from forecast bundle"""
         provenance = {
@@ -1136,7 +1136,7 @@ class TimeSeriesSignalGenerator:
             'timestamp': datetime.now().isoformat(),
             'forecast_horizon': forecast_bundle.get('horizon', 30)
         }
-        
+
         # Add model-specific metadata
         ensemble_metadata = forecast_bundle.get('ensemble_metadata', {})
         if ensemble_metadata:
@@ -1146,7 +1146,7 @@ class TimeSeriesSignalGenerator:
                 'aic': ensemble_metadata.get('aic'),
                 'bic': ensemble_metadata.get('bic')
             })
-        
+
         # Add individual model flags
         provenance['models_used'] = []
         if self._has_payload(forecast_bundle.get('sarimax_forecast')):
@@ -1157,9 +1157,9 @@ class TimeSeriesSignalGenerator:
             provenance['models_used'].append('MSSA_RL')
         if self._has_payload(forecast_bundle.get('garch_forecast')):
             provenance['models_used'].append('GARCH')
-        
+
         return provenance
-    
+
     def _create_hold_signal(self,
                            ticker: str,
                            current_price: float,
@@ -1183,7 +1183,7 @@ class TimeSeriesSignalGenerator:
             },
             signal_type='TIME_SERIES'
         )
-    
+
     def _build_quant_success_profile(
         self,
         ticker: str,
@@ -1554,7 +1554,7 @@ class TimeSeriesSignalGenerator:
         plt.close(fig)
 
         return str(target)
-    
+
     def _log_quant_validation(
         self,
         ticker: str,
@@ -1638,41 +1638,41 @@ class TimeSeriesSignalGenerator:
         if hasattr(obj, 'isoformat'):
             return obj.isoformat()
         return str(obj)
-    
+
     def generate_signals_batch(self,
                                forecast_bundles: Dict[str, Dict[str, Any]],
                                current_prices: Dict[str, float],
                                market_data: Optional[Dict[str, pd.DataFrame]] = None) -> Dict[str, TimeSeriesSignal]:
         """
         Generate signals for multiple tickers.
-        
+
         Args:
             forecast_bundles: Dict mapping ticker to forecast bundle
             current_prices: Dict mapping ticker to current price
             market_data: Optional dict mapping ticker to market data
-            
+
         Returns:
             Dict mapping ticker to TimeSeriesSignal
         """
         signals = {}
-        
+
         for ticker, forecast_bundle in forecast_bundles.items():
             current_price = current_prices.get(ticker)
             if current_price is None:
                 logger.warning(f"No current price for {ticker}, skipping")
                 continue
-            
+
             market_data_ticker = market_data.get(ticker) if market_data else None
-            
+
             signal = self.generate_signal(
                 forecast_bundle,
                 current_price,
                 ticker,
                 market_data_ticker
             )
-            
+
             signals[ticker] = signal
-        
+
         return signals
 
 

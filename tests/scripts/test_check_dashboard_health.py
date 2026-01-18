@@ -58,4 +58,3 @@ def test_summarize_tickers_computes_basic_stats(capsys):
     assert "2" in out  # trades column for AAPL
     assert "MSFT" in out
     assert "1" in out  # trades column for MSFT
-

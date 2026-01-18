@@ -1,8 +1,8 @@
 ﻿# Time Series Forecasting Implementation - Complete
 **Refactoring to Time Series as Default Signal Generator**
 
-**Date**: 2025-12-04 (Updated)  
-**Status**: 🔴 **PARTIALLY BLOCKED – 2025-11-15 brutal run exposed regressions; structural issues fixed and brutal harness green, global quant validation still RED**  
+**Date**: 2025-12-04 (Updated)
+**Status**: 🔴 **PARTIALLY BLOCKED – 2025-11-15 brutal run exposed regressions; structural issues fixed and brutal harness green, global quant validation still RED**
 **Verified as of**: 2025-12-04 (historical; treat `Documentation/PROJECT_STATUS.md` as the canonical current status).
 **Current status (2026-01-07)**: Core TS wiring is live (bar-aware loop, horizon-end targets, run-local reporting, forecast snapshot persistence); brutal suite is GREEN; live/paper evidence still gated on recent-window MVS (see `Documentation/PROJECT_STATUS.md`).
 **Refactoring Status**: See `Documentation/REFACTORING_STATUS.md` for detailed progress. For how TS-first signals feed NAV-centric risk buckets and the Taleb barbell shell (with LLM as capped fallback), see `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md`.
@@ -15,6 +15,9 @@
 **2026-01-07 (Roadmap Phase 3.2 + 9.1)**:
 - `execution.paper_trading_engine.PaperTradingEngine` time-exit now treats `forecast_horizon` / `max_holding_days` as **bar count** (intraday-safe; daily unchanged).
 - `etl.database_manager.DatabaseManager.get_performance_summary` supports `run_id` filtering; `scripts/run_auto_trader.py` reports run-local PF/WR and keeps lifetime metrics under `profitability.lifetime`.
+**2026-01-18 (Dashboard trade visualization)**:
+- `visualizations/live_dashboard.html` polls `visualizations/dashboard_data.json` every 5s and renders trade markers + realized trade PnL (no embedded demo payloads).
+- Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; audit snapshots persist to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 **Recent changes (2025-12-19)**: Synthetic mode adds profiles, t-copula/tail-scale shocks, macro events, intraday seasonality, txn-cost proxies, richer features/calibration persistence, and a refreshed `latest` pointer (`syn_6c850a7d0b99`), while pipeline/backtests continue to honour `PIPELINE_DEVICE` with GPU auto-detect + CPU fallback. A cache/log sanitizer (`scripts/sanitize_cache_and_logs.py` + cron `sanitize_caches`) keeps artifacts under a 14-day retention by default.
 
 ## Model Selection Policy (TS ensemble)
@@ -175,9 +178,8 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
 ### 3. SAMOSSA Forecasting Module ✅
 - **File**: `etl/time_series_forecaster.py` (via `forcester_ts/samossa.py`)
 - **Highlights**:
-  - Builds Hankel/Page matrices for SSA decomposition (`Y = F + E`) and retains leading components until ≥90% energy is captured (TruncatedSVD heuristic).
-  - Supports configurable window length, retained component count, residual ARIMA orders, and maximum forecast horizon (defaults in `config/forecasting_config.yml`).
-  - Optional residual ARIMA `(p,d,q)` with seasonal `(P,D,Q,s)` structure to model stochastic components, matching the design in `mSSA_with_RL_changPoint_detection.json`.
+  - Builds Hankel/Page matrices for SSA decomposition (`Y = F + E`) and retains leading components until the configured `target_variance_ratio` (default 0.90) is reached; `n_components` acts as a cap, not a fixed choice.
+  - Residual modelling uses lightweight AutoReg with AIC-selected lag order (bounded by `ar_order`) to keep multi-ticker and intraday runs tractable.
   - Emits deterministic forecasts with diagonal-averaged reconstruction, residual forecasts, explained-variance diagnostics, and confidence intervals sized by residual variance.
   - Provides hooks for CUSUM-based change-point scoring and future Q-learning policy interventions (per `SAMOSSA_algorithm_description.md`) once Phase B RL gating criteria are satisfied.
 
@@ -187,7 +189,7 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
 - **Highlights**:
   - `TimeSeriesForecaster` now orchestrates SARIMAX, GARCH, SAMOSSA, and the new MSSA-RL change-point forecaster.
   - Produces hybrid mean forecasts by blending deterministic models (SARIMAX + SAMOSSA/MSSA-RL) while retaining GARCH volatility for risk sizing.
-  - Respects per-model guardrails (e.g., SAMOSSA `max_forecast_steps`, MSSA window sizing) to prevent over-extension.
+  - Respects per-model guardrails (e.g., SAMOSSA component/lag caps, MSSA window sizing) to prevent over-extension.
   - Delivers per-model diagnostics (orders, EVR, change points, Q-learning table) for governance checks and statistical validation.
   - Exposes `TimeSeriesForecaster.evaluate()` so walk-forward tests and dashboards can compute RMSE, sMAPE, and tracking error without re-implementing metrics.
 
@@ -300,9 +302,9 @@ See `Documentation/REFACTORING_STATUS.md` for complete status and critical issue
 ### 9. Configuration ✅
 - **File**: `config/forecasting_config.yml`
 - **Options**:
-  - SARIMAX: `max_p`, `max_d`, `max_q`, seasonal orders, trend flags.
-  - GARCH: `p`, `q`, volatility model, distribution choice.
-  - SAMOSSA: `window_length`, `n_components`, `use_residual_arima`, `arima_order`, `seasonal_order`, `min_series_length`, `max_forecast_steps`, `reconstruction_method`.
+  - SARIMAX: `trend: auto`, order-grid caps (`max_p/max_d/max_q/max_P/max_D/max_Q`), `order_search_mode`, and built-in SARIMAX-X exogenous features (see `forcester_ts/forecaster.py`).
+  - GARCH: `auto_select`, `max_p/max_q`, `order_search_mode`, `selection_criterion`, volatility model, distribution choice.
+  - SAMOSSA: `window_length`, `n_components` (cap), `target_variance_ratio`, `ar_order` (cap), `matrix_type`, `normalize`, `min_series_length`.
   - Global: `default_forecast_horizon`, combined forecast toggles.
 
 **🆕 NEW**: `config/signal_routing_config.yml` required for signal routing. See `Documentation/REFACTORING_STATUS.md` Issue 4.
@@ -369,24 +371,30 @@ from etl.time_series_forecaster import TimeSeriesForecaster
 import pandas as pd
 
 prices = pd.read_csv("data/samples/aapl.csv", index_col="date", parse_dates=True)["Close"]
+returns = prices.pct_change().dropna()
 
 forecaster = TimeSeriesForecaster(
+    sarimax_config={
+        "enabled": True,
+        "trend": "auto",
+        "order_search_mode": "compact",
+    },
     samossa_config={
         "enabled": True,
         "window_length": 40,
-        "n_components": 6,
+        "n_components": 12,
+        "target_variance_ratio": 0.9,
         "min_series_length": 120,
-        "max_forecast_steps": 21,
+        "ar_order": 10,
     }
 )
 
-forecaster.fit(data=prices)
+forecaster.fit(price_series=prices, returns_series=returns)
 forecast_bundle = forecaster.forecast(steps=14)
 
 samossa = forecast_bundle["samossa_forecast"]["forecast"]
-sarimax = forecast_bundle["mean_forecast"]["forecast"]
+sarimax = forecast_bundle["sarimax_forecast"]["forecast"]
 volatility = forecast_bundle["volatility_forecast"]["volatility"]
-hybrid = forecast_bundle["combined"].get("hybrid_mean")
 
 # Optional: backtest metrics once you have realised prices
 holdout = prices.iloc[-14:]
@@ -404,7 +412,7 @@ import pandas as pd
 # Step 1: Generate forecasts
 prices = pd.read_csv("data/samples/aapl.csv", index_col="date", parse_dates=True)["Close"]
 forecaster = TimeSeriesForecaster()
-forecaster.fit(data=prices)
+forecaster.fit(price_series=prices)
 forecast_bundle = forecaster.forecast(steps=30)
 
 # Step 2: Generate signal from forecast
@@ -517,7 +525,7 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 - [ ] Integrate Signal Router
 - [ ] Update stage dependencies
 
-**Estimated Effort**: 4-6 hours  
+**Estimated Effort**: 4-6 hours
 **Status**: See `Documentation/REFACTORING_STATUS.md` Issue 1
 
 #### Phase 3: Database & Persistence ⏳ PENDING
@@ -527,7 +535,7 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 - [ ] Migrate existing `llm_signals` data
 - [ ] Update all signal retrieval queries
 
-**Estimated Effort**: 3-4 hours  
+**Estimated Effort**: 3-4 hours
 **Status**: See `Documentation/REFACTORING_STATUS.md` Issue 3
 
 #### Phase 4: Backward Compatibility ⏳ PENDING
@@ -537,7 +545,7 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 - [ ] Update `scripts/track_llm_signals.py`
 - [ ] Update monitoring dashboards
 
-**Estimated Effort**: 6-8 hours  
+**Estimated Effort**: 6-8 hours
 **Status**: See `Documentation/REFACTORING_STATUS.md` Issue 6
 
 #### Phase 5: Testing ⏳ PENDING
@@ -547,7 +555,7 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 - [ ] Backward compatibility tests
 - [ ] Performance benchmarks
 
-**Estimated Effort**: 8-10 hours  
+**Estimated Effort**: 8-10 hours
 **Status**: See `Documentation/REFACTORING_STATUS.md` Issue 5
 
 #### Phase 6: Configuration & Documentation ⏳ PENDING
@@ -557,14 +565,14 @@ This refactoring shifts the architecture from **LLM-first** to **Time Series-fir
 - [ ] Create migration guide
 - [ ] Update API documentation
 
-**Estimated Effort**: 4-6 hours  
+**Estimated Effort**: 4-6 hours
 **Status**: See `Documentation/REFACTORING_STATUS.md` Issues 4 & 7
 
 ### Critical Issues
 
 See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 
-1. **Pipeline Integration Implemented – Validation Pending** 🟡  
+1. **Pipeline Integration Implemented – Validation Pending** 🟡
    Time Series forecasting, signal generation, and routing now execute before any LLM stages in `scripts/run_etl_pipeline.py`, but the refactored flow still needs end-to-end validation.
 2. **Signal Schema Mismatch** ⚠️ HIGH
 3. **Database Schema Updates Required** ⚠️ HIGH
@@ -620,11 +628,11 @@ See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 
 ## 🎯 Status & Next Enhancements
 
-- **Implementation**: ✅ Core models complete  
-- **Integration**: ✅ Pipeline + DB wired (forecasting only)  
-- **Testing**: ✅ Regression suite updated (forecasting only)  
+- **Implementation**: ✅ Core models complete
+- **Integration**: ✅ Pipeline + DB wired (forecasting only)
+- **Testing**: ✅ Regression suite updated (forecasting only)
 - **Latest Validation Attempt**: `bash/comprehensive_brutal_test.sh` now completes end-to-end in `simpleTrader_env` (see `logs/brutal/results_20251204_190220/`), with profit-critical, ETL, Time Series forecasting, signal routing, integration, and security suites all passing. The previous `Broken pipe` timeout in the Time Series block and the missing `tests/etl/test_data_validator.py` file have been remediated. The remaining gating item for this document is global quant validation health, which is still RED (FAIL_fraction above `max_fail_fraction=0.90`) per `scripts/check_quant_validation_health.py` and `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`.
-- **Documentation**: ✅ Current (forecasting only)  
+- **Documentation**: ✅ Current (forecasting only)
 - **Refactoring**: 🟡 **IN PROGRESS** - See `Documentation/REFACTORING_STATUS.md`
 
 ### Immediate Next Steps (Refactoring)
@@ -652,6 +660,6 @@ See `Documentation/REFACTORING_STATUS.md` for complete list of critical issues:
 
 ---
 
-**Last Updated**: 2025-11-06  
-**Status**: ✅ Forecasting Complete | 🟡 Refactoring In Progress  
+**Last Updated**: 2025-11-06
+**Status**: ✅ Forecasting Complete | 🟡 Refactoring In Progress
 **Next Review**: After pipeline integration complete

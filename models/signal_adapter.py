@@ -32,22 +32,22 @@ class UnifiedSignal:
     source: str  # 'TIME_SERIES', 'LLM', 'HYBRID'
     model_type: Optional[str] = None
     reasoning: str = ''
-    
+
     # Optional fields (Time Series specific)
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
     expected_return: Optional[float] = None
     risk_score: Optional[float] = None
     volatility: Optional[float] = None
-    
+
     # Optional fields (LLM specific)
     llm_model: Optional[str] = None
     fallback: bool = False
-    
+
     # Metadata
     provenance: Dict[str, Any] = None
     signal_type: str = 'UNIFIED'
-    
+
     def __post_init__(self):
         if self.provenance is None:
             self.provenance = {}
@@ -56,19 +56,19 @@ class UnifiedSignal:
 class SignalAdapter:
     """
     Adapter for converting signals from different sources to unified format.
-    
+
     Ensures backward compatibility with existing consumers while supporting
     new Time Series signals.
     """
-    
+
     @staticmethod
     def from_time_series_signal(ts_signal: TimeSeriesSignal) -> UnifiedSignal:
         """
         Convert TimeSeriesSignal to UnifiedSignal.
-        
+
         Args:
             ts_signal: Time Series signal
-            
+
         Returns:
             UnifiedSignal with normalized schema
         """
@@ -89,15 +89,15 @@ class SignalAdapter:
             provenance=ts_signal.provenance.copy() if ts_signal.provenance else {},
             signal_type='TIME_SERIES'
         )
-    
+
     @staticmethod
     def from_llm_signal(llm_signal: Dict[str, Any]) -> UnifiedSignal:
         """
         Convert LLM signal dict to UnifiedSignal.
-        
+
         Args:
             llm_signal: LLM signal dictionary
-            
+
         Returns:
             UnifiedSignal with normalized schema
         """
@@ -110,12 +110,12 @@ class SignalAdapter:
                 signal_timestamp = datetime.now()
         elif not isinstance(signal_timestamp, datetime):
             signal_timestamp = datetime.now()
-        
+
         # Extract entry price
         entry_price = llm_signal.get('entry_price', 0.0)
         if entry_price is None:
             entry_price = 0.0
-        
+
         return UnifiedSignal(
             ticker=llm_signal.get('ticker', ''),
             action=llm_signal.get('action', 'HOLD'),
@@ -135,15 +135,15 @@ class SignalAdapter:
             },
             signal_type='LLM'
         )
-    
+
     @staticmethod
     def to_legacy_dict(unified_signal: UnifiedSignal) -> Dict[str, Any]:
         """
         Convert UnifiedSignal to legacy LLM signal format for backward compatibility.
-        
+
         Args:
             unified_signal: Unified signal
-            
+
         Returns:
             Dictionary in legacy LLM signal format
         """
@@ -166,15 +166,15 @@ class SignalAdapter:
             'source': unified_signal.source,
             'provenance': unified_signal.provenance
         }
-    
+
     @staticmethod
     def normalize_signal(signal: Any) -> UnifiedSignal:
         """
         Normalize signal from any source to UnifiedSignal.
-        
+
         Args:
             signal: Signal from any source (TimeSeriesSignal, dict, etc.)
-            
+
         Returns:
             UnifiedSignal
         """
@@ -217,30 +217,30 @@ class SignalAdapter:
                 source='UNKNOWN',
                 reasoning='Unknown signal type'
             )
-    
+
     @staticmethod
     def validate_signal(signal: UnifiedSignal) -> tuple[bool, Optional[str]]:
         """
         Validate unified signal.
-        
+
         Args:
             signal: Unified signal to validate
-            
+
         Returns:
             (is_valid, error_message)
         """
         if not signal.ticker:
             return False, "Missing ticker"
-        
+
         if signal.action not in ('BUY', 'SELL', 'HOLD'):
             return False, f"Invalid action: {signal.action}"
-        
+
         if not (0.0 <= signal.confidence <= 1.0):
             return False, f"Confidence out of range: {signal.confidence}"
-        
+
         if signal.entry_price <= 0:
             return False, f"Invalid entry price: {signal.entry_price}"
-        
+
         return True, None
 
 
@@ -250,4 +250,3 @@ assert SignalAdapter.from_llm_signal.__doc__ is not None
 assert SignalAdapter.normalize_signal.__doc__ is not None
 
 logger.info("Signal Adapter module loaded successfully")
-

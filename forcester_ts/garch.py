@@ -31,12 +31,19 @@ class GARCHForecaster:
         vol: str = "GARCH",
         dist: str = "normal",
         backend: Optional[str] = None,
+        *,
+        auto_select: bool = True,
+        max_p: int = 3,
+        max_q: int = 3,
     ) -> None:
         self.p = p
         self.q = q
         self.vol = vol
         self.dist = dist
         self.backend = (backend or ("arch" if ARCH_AVAILABLE else "ewma")).lower()
+        self.auto_select = bool(auto_select)
+        self.max_p = int(max_p)
+        self.max_q = int(max_q)
         if self.backend == "arch" and not ARCH_AVAILABLE:
             logger.warning("arch not installed; falling back to EWMA volatility model.")
             self.backend = "ewma"
@@ -50,6 +57,9 @@ class GARCHForecaster:
         self._fallback_state: Optional[Dict[str, Any]] = None
 
     def fit(self, returns: pd.Series) -> "GARCHForecaster":
+        if not getattr(self, "auto_select", True):
+            raise ValueError("Manual GARCH orders are unsupported; set auto_select=True and use max_p/max_q caps.")
+
         if returns.isna().all():
             raise ValueError("Returns series cannot be all NaNs")
 
@@ -91,30 +101,49 @@ class GARCHForecaster:
             )
             return self
 
-        # Scale returns to improve GARCH convergence (recommended by arch library)
-        # arch recommends values between 1 and 1000 for better convergence
-        
-        # Check if scaling is needed (check original scale)
+        # Scale returns to improve GARCH convergence (recommended by arch library).
         mean_abs = returns_clean.abs().mean()
         if mean_abs < 1.0 or mean_abs > 1000.0:
-            # Scale to bring into recommended range (use 100x for typical returns ~0.001)
             scale_factor = 100.0
             returns_scaled = returns_clean * scale_factor
             self._scale_factor = scale_factor
         else:
-            # Already in good range, no scaling needed
             self._scale_factor = 1.0
             returns_scaled = returns_clean
 
-        self.model = arch_model(
-            returns_scaled,
-            vol=self.vol,
-            p=self.p,
-            q=self.q,
-            dist=self.dist,
-            rescale=False,  # We handle scaling manually
-        )
-        self.fitted_model = self.model.fit(disp="off")
+        best_model = None
+        best_fit = None
+        best_aic = np.inf
+        best_order = (self.p, self.q)
+
+        max_p = max(1, int(getattr(self, "max_p", self.p)))
+        max_q = max(1, int(getattr(self, "max_q", self.q)))
+        for p_candidate in range(1, max_p + 1):
+            for q_candidate in range(1, max_q + 1):
+                try:
+                    model = arch_model(
+                        returns_scaled,
+                        vol=self.vol,
+                        p=p_candidate,
+                        q=q_candidate,
+                        dist=self.dist,
+                        rescale=False,  # We handle scaling manually
+                    )
+                    fitted = model.fit(disp="off")
+                    aic = float(getattr(fitted, "aic", np.inf))
+                    if np.isfinite(aic) and aic < best_aic:
+                        best_aic = aic
+                        best_model = model
+                        best_fit = fitted
+                        best_order = (p_candidate, q_candidate)
+                except Exception:  # pragma: no cover - best-effort search
+                    continue
+
+        self.p, self.q = best_order
+        self.model = best_model
+        self.fitted_model = best_fit
+        if self.fitted_model is None:
+            raise ValueError("GARCH auto_select failed to fit any model; verify `arch` install and inputs.")
         logger.info(
             "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s)",
             self.p,

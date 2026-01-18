@@ -75,4 +75,3 @@ def test_load_best_candidates_picks_highest_score_and_parses_dm(tmp_path: Path) 
     # DM block should be parsed from metrics JSON.
     assert cand.dm_better_model == "better_model"
     assert cand.dm_p_value == pytest.approx(0.01)
-

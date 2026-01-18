@@ -9,4 +9,3 @@ Per AGENT_INSTRUCTION.md:
 """
 
 __version__ = "1.0.0"
-

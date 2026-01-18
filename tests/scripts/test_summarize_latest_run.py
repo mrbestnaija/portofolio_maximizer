@@ -54,4 +54,3 @@ def test_summarize_execution_log_filters_and_averages(tmp_path: Path) -> None:
     assert summary["avg_mid_slippage_bp"] == 10.0
     assert summary["avg_signal_confidence"] == 0.8
     assert summary["avg_expected_return"] == 0.01
-

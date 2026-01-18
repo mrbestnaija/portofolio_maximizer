@@ -4,13 +4,18 @@
 
 **Production-Ready ML Trading System - Critical Fixes First**
 
-**Date**: October 19, 2025  
-**Status**: Ready for Implementation  
+**Date**: October 19, 2025
+**Status**: Ready for Implementation
 **Priority**: **CRITICAL** - Based on log analysis and system requirements
 
 **Note (2026-01)**: For the current, focused sequencing to fix TS ↔ execution ↔ reporting issues observed in live/paper runs (bar-aware loop, horizon consistency, confidence/diagnostics, quant gating, cost model alignment), follow `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`.
 
 ---
+
+## 🔄 2026-01-18 Delta (real-time dashboard, no demo data)
+
+- `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and shows empty states if missing (no embedded demo payloads).
+- `scripts/dashboard_db_bridge.py` renders `positions`, `price_series`, and `trade_events` into the dashboard payload from the SQLite trading DB; bash orchestrators persist audit snapshots to `data/dashboard_audit.db` by default (`--persist-snapshot` via `DASHBOARD_PERSIST=1`).
 
 ## 🔄 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
@@ -74,7 +79,7 @@
 
 **⚠️ CRITICAL UPDATE**: Profit factor calculation was fixed on Oct 14, 2025. Previous calculations were incorrect (using averages instead of totals). See `Documentation/PROFIT_CALCULATION_FIX.md` for details.
 
-**📚 NEW**: 
+**📚 NEW**:
 - A comprehensive sequenced implementation plan has been created. See **`Documentation/SEQUENCED_IMPLEMENTATION_PLAN.md`** for the complete 12-week implementation plan with critical fixes prioritized first.
 - **Stub Implementation Review**: Complete review of all missing/incomplete implementations documented in **`Documentation/STUB_IMPLEMENTATION_PLAN.md`**. The cTrader client + order manager are now implemented; remaining critical stubs cover the performance dashboard, production deploy pipeline, and disaster recovery systems.
 - **🟡 Time Series Signal Generation Refactoring IMPLEMENTED** (Nov 6, 2025) - **ROBUST TESTING REQUIRED**: See **`Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`** for details. Time Series ensemble is now the DEFAULT signal generator with LLM as fallback. Includes 50 tests written (38 unit + 12 integration) - **NEEDS EXECUTION & VALIDATION**, unified database schema - **TESTING REQUIRED**, and complete pipeline integration - **TESTING REQUIRED**.
@@ -128,7 +133,7 @@ class OptimizedOllamaClient:
         self.model = "qwen:7b-chat-q4_K_M"  # Smaller, faster model
         self.cache = {}  # Response caching
         self.parallel_processing = True  # Process multiple tickers
-        
+
     def optimize_prompts(self):
         """Reduce token count by 50% while maintaining quality"""
         # Shorter, more focused prompts
@@ -163,12 +168,12 @@ class StatisticalTestSuite:
         # T-test for mean difference
         # Information ratio calculation
         # F-test for variance equality
-        
+
     def test_autocorrelation(self, returns):
         """Test for serial correlation in returns"""
         # Ljung-Box test
         # Durbin-Watson test
-        
+
     def bootstrap_validation(self, returns, n_bootstrap=1000):
         """Bootstrap validation for performance metrics"""
         # Confidence intervals for Sharpe ratio
@@ -203,11 +208,11 @@ class PaperTradingEngine:
         """Execute signal with realistic simulation"""
         # 1. Validate signal (5-layer validation)
         # 2. Calculate position size (Kelly criterion)
-2. ? **Fix signal/risk persistence contract** (Nov 5, 2025)  
-   - `ai_llm/llm_database_integration.py` migrates `llm_risk_assessments` to accept 'extreme' and normalises legacy rows; validator tests confirm the schema.  
+2. ? **Fix signal/risk persistence contract** (Nov 5, 2025)
+   - `ai_llm/llm_database_integration.py` migrates `llm_risk_assessments` to accept 'extreme' and normalises legacy rows; validator tests confirm the schema.
    - `python -m pytest tests/ai_llm/test_llm_enhancements.py::TestLLMDatabaseIntegration::test_risk_assessment_extreme_persisted`
-3. ? **Persist validator telemetry via LLMSignalTracker** (Nov 5, 2025)  
-   - `scripts/run_etl_pipeline.py` now registers each signal and validator decision with `LLMSignalTracker`; `record_validator_result`/`flush` keep dashboards populated.  
+3. ? **Persist validator telemetry via LLMSignalTracker** (Nov 5, 2025)
+   - `scripts/run_etl_pipeline.py` now registers each signal and validator decision with `LLMSignalTracker`; `record_validator_result`/`flush` keep dashboards populated.
    - `python -m pytest tests/scripts/test_track_llm_signals.py`
 
 ---
@@ -233,12 +238,12 @@ class TimeSeriesFeatureBuilder:
         # Persist outputs via database_manager.py feature store helpers
 
 # TASK B7.2: SAMOSSA Forecaster (Days 46-47)  # ✅ Delivered 2025-11-05 (etl/time_series_forecaster.py::SAMOSSAForecaster)
-# Notes: SSA Page matrix, ≥90% energy capture, residual ARIMA, CUSUM hooks (see SAMOSSA_algorithm_description.md)
+# Notes: SSA Page/Page matrix, ≥ target variance capture, residual AutoReg(AIC), CUSUM hooks (see SAMOSSA_algorithm_description.md)
 class SAMOSSAForecaster:
-    def fit(self, features: pd.DataFrame) -> None:
+    def fit(self, price_series: pd.Series) -> None:
         """Train Seasonal Adaptive Multi-Order Smoothing (SAMOSSA) model"""
         # Extend model registry for checkpoint storage
-        # Configurable seasonality + adaptive smoothing parameters
+        # Configure caps/targets (components/lag caps) but do not hard-code “best” values
 
     def forecast(self, horizon: int) -> ForecastResult:
         """Return price forecasts with confidence intervals"""
@@ -247,25 +252,27 @@ class SAMOSSAForecaster:
 # TASK B7.3: SARIMAX Pipeline Refresh (Days 48-49)  # ✅ Delivered (see SAMOSSA rollout notes in TIME_SERIES_FORECASTING_IMPLEMENTATION.md)
 # File: models/sarimax_model.py (REFRESH - 280 lines)
 class SARIMAXForecaster:
-    def fit_and_forecast(self, market_data: pd.DataFrame) -> ForecastResult:
-        """Production SARIMAX with automated parameter tuning"""
-        # Use pmdarima auto_arima with guardrails
-        # Leverage cached exogenous features from ETL pipeline
-        # Persist diagnostics for regime-aware switching
+    def fit(self, price_series: pd.Series, exogenous: Optional[pd.DataFrame] = None) -> None:
+        """Production SARIMAX with AIC order search (no manual orders)"""
+        # Constrain via caps/search modes; SARIMAX-X exog frames must align to series index
+
+    def forecast(self, horizon: int, exogenous: Optional[pd.DataFrame] = None) -> ForecastResult:
+        """Return price forecasts with confidence intervals"""
+        # Persist diagnostics + selected (p,d,q,P,D,Q,s,trend)
 ```
 
 ### **Week 8: GARCH + Parallel Inference Integration**
 ```python
 # TASK B8.1: GARCH Volatility Engine (Days 50-52)  # ✅ Delivered (etl/time_series_forecaster.py::GARCHForecaster)
 # File: models/garch_model.py (NEW - 320 lines)
-class GARCHVolatilityEngine:
+class GARCHForecaster:
     def fit(self, returns: pd.Series) -> None:
-        """Estimate volatility clusters via GARCH(p, q)"""
+        """Estimate volatility clusters via GARCH(p, q) with auto-selected orders"""
         # Use arch package for variance forecasts
         # Emit risk-adjusted metrics for signal fusion
 
-    def forecast_volatility(self, steps: int = 1) -> VolatilityResult:
-        """Expose volatility forecast to risk sizing logic"""
+    def forecast(self, steps: int = 1) -> VolatilityResult:
+        """Expose volatility forecast (and diagnostics) to risk sizing logic"""
         # Integrate with portfolio_math_enhanced.py metrics
 
 # TASK B8.2: Parallel Model Runner (Days 53-54)  # ⏳ Pending (async orchestration + provenance logging)
@@ -287,9 +294,9 @@ class SignalRouter:
         # Downstream consumers see unchanged interface
 ```
 
-> **SAMOSSA Delivery Note (Nov 05, 2025)**  
-> • SSA-based forecasts with residual ARIMA are live in `etl/time_series_forecaster.py`; diagnostics (explained variance, residual forecasts) persist via `DatabaseManager.save_forecast`.  
-> • CUSUM change-point scoring and Q-learning intervention policies remain pending, gated on MVS/PRS profitability thresholds (`QUANTIFIABLE_SUCCESS_CRITERIA.md`).  
+> **SAMOSSA Delivery Note (Nov 05, 2025)**
+> • SSA-based forecasts with residual ARIMA are live in `etl/time_series_forecaster.py`; diagnostics (explained variance, residual forecasts) persist via `DatabaseManager.save_forecast`.
+> • CUSUM change-point scoring and Q-learning intervention policies remain pending, gated on MVS/PRS profitability thresholds (`QUANTIFIABLE_SUCCESS_CRITERIA.md`).
 > • Monitoring tasks must ingest SAMOSSA diagnostics before feature flags route time-series outputs downstream.
 
 ### **Week 9: Cross-Validation + Evaluation Framework**
@@ -351,4 +358,3 @@ def document_time_series_rollout():
 - [ ] Rolling CV shows >= 3% profit-factor uplift with <= 50% drawdown increase versus baseline
 - [ ] Governance sign-off documented with a tested fallback plan
 - [ ] Dynamic selector promotes the top model automatically and regression suite passes
-

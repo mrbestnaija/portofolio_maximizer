@@ -27,11 +27,19 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 pmx_log "INFO" "Runtime fingerprint (enforced):"
-PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}")"
+# Capture only the resolved interpreter path (pmx_resolve_python may log to stdout).
+PYTHON_BIN="$(pmx_resolve_python "${ROOT_DIR}" | tail -n 1)"
 pmx_require_executable "${PYTHON_BIN}"
 
 PIPELINE_SCRIPT="${ROOT_DIR}/scripts/run_etl_pipeline.py"
 pmx_require_file "${PIPELINE_SCRIPT}"
+
+DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
+DASHBOARD_AUTO_SERVE="${DASHBOARD_AUTO_SERVE:-1}"
+# Default ON: persist dashboard snapshots for auditability.
+DASHBOARD_PERSIST="${DASHBOARD_PERSIST:-1}"
+# Default ON: keep dashboard server running after script exits.
+DASHBOARD_KEEP_ALIVE="${DASHBOARD_KEEP_ALIVE:-1}"
 
 MODE="${PIPELINE_MODE:-live}"
 while [[ $# -gt 0 ]]; do
@@ -65,6 +73,17 @@ EOF
       ;;
   esac
 done
+
+###############################################################################
+# Live dashboard wiring (DB -> JSON -> static HTML)
+###############################################################################
+
+if [[ "${DASHBOARD_AUTO_SERVE}" == "1" ]]; then
+  pmx_ensure_dashboard "${ROOT_DIR}" "${PYTHON_BIN}" "${DASHBOARD_PORT}" "${DASHBOARD_PERSIST}" "${DASHBOARD_KEEP_ALIVE}" "${ROOT_DIR}/data/portfolio_maximizer.db"
+  if [[ "${DASHBOARD_KEEP_ALIVE}" != "1" ]]; then
+    trap pmx_dashboard_cleanup EXIT
+  fi
+fi
 
 case "${MODE}" in
   dry-run|dry_run|dry)
@@ -345,9 +364,26 @@ echo "Data source snapshot (from ${LOG_FILE}):"
 grep -E "Primary:" "${LOG_FILE}" | tail -n 1 || echo "  (no primary source line found)"
 grep -E "OK Successfully extracted" "${LOG_FILE}" | tail -n 1 || echo "  (no extraction success line found)"
 
+# Validate dashboard assets/wiring (non-blocking).
+set +e
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/dev_dashboard_smoke.py" >/dev/null 2>&1 || true
+set -e
+
+set +e
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/dashboard_db_bridge.py" --once >/dev/null 2>&1 || true
+set -e
+
 DASH_PATH="${ROOT_DIR}/visualizations/dashboard_data.json"
 echo "Log captured at: ${LOG_FILE}"
 if [[ -f "${DASH_PATH}" ]]; then
   echo "Dashboard JSON available at: ${DASH_PATH}"
+  echo "Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
+  echo "Dashboard HTML: ${ROOT_DIR}/visualizations/live_dashboard.html"
 fi
+
+echo "Auditing dashboard payload sources..."
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_dashboard_payload_sources.py" \
+  --db-path "${ROOT_DIR}/data/portfolio_maximizer.db" \
+  --audit-db-path "${ROOT_DIR}/data/dashboard_audit.db" \
+  --dashboard-json "${ROOT_DIR}/visualizations/dashboard_data.json"
 echo "Pipeline run complete."

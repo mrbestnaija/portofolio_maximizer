@@ -31,7 +31,7 @@ def test_parallel_combined_matches_sequential(monkeypatch: pytest.MonkeyPatch) -
     entries = [{"ticker": f"T{i}", "frame": frames[i], "order": i} for i in range(len(frames))]
     preprocessor = _DummyPreprocessor()
 
-    def fake_forecast(frame: pd.DataFrame, horizon: int):
+    def fake_forecast(frame: pd.DataFrame, horizon: int, **_kwargs):
         last = float(frame["Close"].iloc[-1])
         return ({"horizon": horizon, "forecast": last + horizon}, last)
 

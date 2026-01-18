@@ -1,17 +1,28 @@
 # AI Developer Guardrails: Reality-Based Development Checklist
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
-> **Truthfulness & Evidence (Mandatory)**  
-> - Never claim a task is complete without citing the exact commands run and their exit codes or outputs.  
-> - Prefer short verification commands (`ls`, `find`, `pytest -q …`, gate CLI) and include key numbers (effective audits, violation rates, decisions).  
-> - If a step fails or is skipped, report it explicitly; do not imply success.  
-> - After file moves/cleanups, show before/after listings to prove the change.  
-> - If unsure about a result, rerun under the correct runtime or mark it as untrusted.  
+> **Truthfulness & Evidence (Mandatory)**
+> - Never claim a task is complete without citing the exact commands run and their exit codes or outputs.
+> - Prefer short verification commands (`ls`, `find`, `pytest -q …`, gate CLI) and include key numbers (effective audits, violation rates, decisions).
+> - If a step fails or is skipped, report it explicitly; do not imply success.
+> - After file moves/cleanups, show before/after listings to prove the change.
+> - If unsure about a result, rerun under the correct runtime or mark it as untrusted.
 > - Use cache artifacts (e.g., `logs/forecast_audits_cache/latest_summary.json`) as ground truth for reported decisions.
+
+## Delta (2026-01-18)
+
+- Live dashboard must not fabricate results: `visualizations/live_dashboard.html` only renders from `visualizations/dashboard_data.json` (polled every 5s) and shows empty states when missing.
+- Canonical dashboard payload is DB-backed: `scripts/dashboard_db_bridge.py` renders `visualizations/dashboard_data.json` from the SQLite trading DB and can persist audit snapshots to `data/dashboard_audit.db` (`--persist-snapshot`, enabled by default in bash orchestrators); provenance can be audited via `scripts/audit_dashboard_payload_sources.py`.
+
+> **Time-Series Parameter Learning Policy (Mandatory)**
+> - SARIMAX parameters (trend + `(p,d,q,P,D,Q,s)`) must be **learned from data** (AIC search); manual orders are unsupported.
+> - GARCH `(p,q)` must be **learned from data** (AIC/BIC search); configure only caps (`max_p/max_q`) for performance.
+> - SAMOSSA chooses component count to hit `target_variance_ratio` and selects residual AutoReg lags via AIC (bounded by `ar_order`).
+> - For any reported run, include the selected hyperparameters from logs/artifacts (e.g., `[TS_MODEL] ... fit_complete` events and the `sarimax_exogenous` artifact).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
@@ -293,31 +304,31 @@ from portfolio_system import PortfolioCalculator, DataFetcher
 
 class TestCoreBusinessLogic:
     """Test only profit-critical functions"""
-    
+
     def test_portfolio_return_calculation(self):
         # This is money - test thoroughly
         calc = PortfolioCalculator()
         prices = pd.Series([100, 110, 105])
         returns = calc.calculate_returns(prices)
-        
+
         assert abs(returns.iloc[1] - 0.10) < 1e-6, "Return calculation wrong"
         assert abs(returns.iloc[2] - (-0.045)) < 1e-6, "Return calculation wrong"
-    
+
     def test_position_sizing_math(self):
         # Cash management errors lose money
         calc = PortfolioCalculator()
         result = calc.calculate_position_size(
             cash=10000, target_weight=0.6, price=100
         )
-        
+
         assert result == 60, f"Expected 60 shares, got {result}"
         assert calc.remaining_cash == 4000, "Cash tracking wrong"
-    
+
     def test_data_fetcher_handles_missing_data(self):
         # Missing data causes strategy failures
         fetcher = DataFetcher()
         data = fetcher.fetch_prices(['INVALID_SYMBOL'])
-        
+
         assert data.empty or data.isna().all().all(), "Should handle missing data gracefully"
 
 # Mandatory assertions in production code
@@ -326,9 +337,9 @@ def calculate_portfolio_value(positions, prices):
     assert len(positions) == len(prices), "Position-price mismatch"
     assert all(pos >= 0 for pos in positions), "Negative positions not allowed"
     assert all(price > 0 for price in prices), "Invalid prices detected"
-    
+
     value = sum(pos * price for pos, price in zip(positions, prices))
-    
+
     assert value >= 0, "Portfolio value cannot be negative"
     return value
 ```
@@ -339,27 +350,27 @@ def calculate_portfolio_value(positions, prices):
 ```python
 # test_integration.py - End-to-end validation
 class TestTradingIntegration:
-    
+
     def test_complete_trade_cycle(self):
         """Test buy -> hold -> sell -> cash reconciliation"""
         system = TradingSystem(initial_cash=10000)
-        
+
         # Execute complete cycle
         system.buy('SPY', dollar_amount=5000)
         system.wait_days(30)  # Simulate holding period
         system.sell('SPY', shares='all')
-        
+
         # Validate cash reconciliation
         assert abs(system.cash - system.initial_cash) < 100, "Cash not properly tracked"
         assert len(system.positions) == 0, "Positions not properly closed"
-    
+
     def test_strategy_performance_validation(self):
         """Test strategy meets minimum performance requirements"""
         strategy = MomentumStrategy()
         historical_data = fetch_test_data('2020-01-01', '2023-12-31')
-        
+
         performance = strategy.backtest(historical_data)
-        
+
         assert performance.annual_return > 0.08, f"Strategy only returned {performance.annual_return:.2%}"
         assert performance.max_drawdown < 0.20, f"Drawdown too high: {performance.max_drawdown:.2%}"
         assert performance.sharpe_ratio > 0.8, f"Sharpe ratio too low: {performance.sharpe_ratio:.2f}"
@@ -416,7 +427,7 @@ from datetime import datetime
 class DailyValidation:
     def __init__(self):
         self.logger = logging.getLogger('daily_validation')
-        
+
     def run_all_tests(self):
         """Run comprehensive daily validation"""
         results = {
@@ -425,58 +436,58 @@ class DailyValidation:
             'system_health': self.test_system_health(),
             'cost_tracking': self.test_cost_tracking()
         }
-        
+
         # Alert on any failures
         failures = [test for test, passed in results.items() if not passed]
         if failures:
             self.send_alert(f"Daily tests failed: {failures}")
             sys.exit(1)
-            
+
         self.logger.info("All daily tests passed")
-    
+
     def test_data_quality(self):
         """Validate market data is complete and accurate"""
         from data_fetcher import DataFetcher
-        
+
         fetcher = DataFetcher()
         today_data = fetcher.get_latest_prices(['SPY', 'TLT', 'VTI'])
-        
+
         # Data quality checks
         assert not today_data.empty, "No market data retrieved"
         assert not today_data.isna().any().any(), "Missing data in feed"
         assert (today_data > 0).all().all(), "Invalid negative prices"
-        
+
         return True
-    
+
     def test_strategy_performance(self):
         """Validate strategy is still profitable"""
         from strategy import CurrentStrategy
-        
+
         strategy = CurrentStrategy()
         recent_performance = strategy.get_performance_last_30_days()
-        
+
         # Performance validation
         assert recent_performance.total_return > -0.05, "Strategy losing too much money"
         assert recent_performance.max_drawdown < 0.10, "Drawdown too high recently"
-        
+
         return True
-    
+
     def test_system_health(self):
         """Check system resource usage and errors"""
         import psutil
-        
+
         # Memory usage
         memory_percent = psutil.virtual_memory().percent
         assert memory_percent < 80, f"High memory usage: {memory_percent}%"
-        
+
         # Disk space
         disk_usage = psutil.disk_usage('/').percent
         assert disk_usage < 90, f"Low disk space: {disk_usage}%"
-        
+
         # Check error logs
         error_count = self.count_recent_errors()
         assert error_count < 10, f"Too many recent errors: {error_count}"
-        
+
         return True
 
 if __name__ == "__main__":
@@ -494,18 +505,18 @@ portfolio-system/
 +-- README.md                  # Current status, how to run
 +-- PERFORMANCE.md             # Latest strategy results
 +-- requirements.txt           # Exact dependency versions
-+-- 
++--
 +-- src/                       # All source code
 ¦   +-- core/                  # Business logic
 ¦   +-- strategies/            # Trading strategies
 ¦   +-- data/                  # Data management
 ¦   +-- execution/             # Trade execution
-+-- 
++--
 +-- tests/                     # All test code
 ¦   +-- unit/                  # Unit tests
 ¦   +-- integration/           # Integration tests
 ¦   +-- performance/           # Strategy validation
-+-- 
++--
 +-- config/                    # Configuration files
 +-- scripts/                   # Deployment and utility scripts
 +-- docs/                      # Documentation
@@ -566,10 +577,10 @@ Strategy Performance:
 ```python
 # deployment_validation.py - Must pass before any deployment
 class DeploymentValidator:
-    
+
     def validate_deployment_readiness(self):
         """Comprehensive pre-deployment validation"""
-        
+
         checks = [
             self.check_strategy_profitability(),
             self.check_code_quality(),
@@ -578,53 +589,53 @@ class DeploymentValidator:
             self.check_backup_systems(),
             self.check_rollback_plan()
         ]
-        
+
         assert all(checks), "Deployment validation failed"
         return True
-    
+
     def check_strategy_profitability(self):
         """Strategy must be profitable before deployment"""
         from strategy_validator import StrategyValidator
-        
+
         validator = StrategyValidator()
         performance = validator.validate_last_90_days()
-        
+
         # Strict profitability requirements
         assert performance.total_return > 0.02, "Strategy not profitable enough"
         assert performance.win_rate > 0.45, "Win rate too low"
         assert performance.max_drawdown < 0.15, "Risk too high"
-        
+
         self.log_validation("Strategy profitability: PASSED")
         return True
-    
+
     def check_code_quality(self):
         """Code quality gates"""
         import subprocess
-        
+
         # Run all tests
-        test_result = subprocess.run(['python', '-m', 'pytest', '-x'], 
+        test_result = subprocess.run(['python', '-m', 'pytest', '-x'],
                                    capture_output=True)
         assert test_result.returncode == 0, "Tests failing"
-        
+
         # Check code complexity
-        complexity_result = subprocess.run(['python', 'check_complexity.py'], 
+        complexity_result = subprocess.run(['python', 'check_complexity.py'],
                                          capture_output=True)
         assert complexity_result.returncode == 0, "Code too complex"
-        
+
         self.log_validation("Code quality: PASSED")
         return True
-    
+
     def check_rollback_plan(self):
         """Verify rollback capability"""
         # Test that we can revert to previous version
         assert os.path.exists('rollback_script.sh'), "No rollback script"
         assert os.path.exists('config/previous_version.json'), "No previous config"
-        
+
         # Test rollback script
-        rollback_test = subprocess.run(['bash', 'rollback_script.sh', '--dry-run'], 
+        rollback_test = subprocess.run(['bash', 'rollback_script.sh', '--dry-run'],
                                      capture_output=True)
         assert rollback_test.returncode == 0, "Rollback script broken"
-        
+
         self.log_validation("Rollback plan: PASSED")
         return True
 ```
@@ -744,7 +755,7 @@ sleep 10
 python health_check.py --quick
 if [ $? -eq 0 ]; then
     echo "? Rollback successful"
-    
+
     # Send alert about rollback
     python send_alert.py "System rolled back to ${latest_backup} due to deployment issues"
 else
@@ -770,7 +781,7 @@ class SystemMonitor:
             'strategy_drawdown': 10,  # Percent
             'data_staleness': 30     # Minutes
         }
-    
+
     def continuous_monitoring(self):
         """Run continuous system monitoring"""
         while True:
@@ -778,23 +789,23 @@ class SystemMonitor:
                 self.check_system_health()
                 self.check_strategy_performance()
                 self.check_data_quality()
-                
+
                 time.sleep(300)  # Check every 5 minutes
-                
+
             except Exception as e:
                 self.send_critical_alert(f"Monitoring system failed: {e}")
                 time.sleep(60)  # Wait before retry
-    
+
     def check_strategy_performance(self):
         """Monitor strategy for concerning patterns"""
         from strategy import get_current_strategy
-        
+
         strategy = get_current_strategy()
         current_drawdown = strategy.get_current_drawdown()
-        
+
         if current_drawdown > self.alert_thresholds['strategy_drawdown']:
             self.send_alert(f"High drawdown detected: {current_drawdown:.1f}%")
-            
+
         # Check for unusual patterns
         recent_trades = strategy.get_recent_trades(hours=24)
         if len(recent_trades) > 50:  # Too many trades
@@ -802,4 +813,3 @@ class SystemMonitor:
 ```
 
 This testing and deployment framework ensures your system remains profitable while adding necessary software engineering rigor. The key principle is that all testing and deployment complexity must be justified by the business value at stake - don't over-engineer for a simple trading system.
-

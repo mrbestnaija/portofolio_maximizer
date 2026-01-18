@@ -21,19 +21,19 @@ from scripts.cache_manager import CacheManager
 def display_dashboard():
     """Display real-time monitoring dashboard"""
     os.system('clear' if os.name == 'posix' else 'cls')
-    
+
     print("=" * 60)
     print("📊 Portfolio Maximizer v45 - Monitoring Dashboard")
     print("=" * 60)
     print(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
-    
+
     # Error monitoring status
     print("🚨 Error Monitoring Status:")
     print("-" * 30)
     error_monitor = ErrorMonitor()
     error_status = error_monitor.monitor_errors()
-    
+
     if error_status['status'] == 'no_errors':
         print("✅ No errors detected")
     else:
@@ -42,24 +42,24 @@ def display_dashboard():
             recent = error_status['recent_errors']
             print(f"   Total errors (24h): {recent.get('total_errors', 0)}")
             print(f"   Error categories: {recent.get('error_categories', {})}")
-    
+
     print()
-    
+
     # Cache health status
     print("🧹 Cache Health Status:")
     print("-" * 30)
     cache_manager = CacheManager()
     cache_health = cache_manager.check_cache_health()
-    
+
     if cache_health['status'] == 'healthy':
         print("✅ Cache is healthy")
     else:
         print(f"⚠️  Status: {cache_health['status']}")
         print(f"   Issues: {cache_health.get('total_issues', 0)}")
         print(f"   Warnings: {cache_health.get('total_warnings', 0)}")
-    
+
     print()
-    
+
     # System recommendations
     print("💡 Recommendations:")
     print("-" * 30)
@@ -70,7 +70,7 @@ def display_dashboard():
         print("   - Clear stale cache files")
     if error_status.get('status') != 'no_errors':
         print("   - Investigate recent errors")
-    
+
     print()
     print("Press Ctrl+C to exit")
 

@@ -1,13 +1,24 @@
 # Core Project Documentation (Institutional-Grade)
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
+> **Time-Series Parameter Policy (Auto-Learned Only)**
+> - SARIMAX runs in **auto-select** mode only (learns `(p,d,q,P,D,Q,s)` + `trend` via AIC); manual orders are unsupported.
+> - SARIMAX-X is enabled by default via `forcester_ts/forecaster.py` (exogenous features are built from the observed window and supplied to SARIMAX fit + forecast).
+> - GARCH `(p,q)` and SAMOSSA residual lags/components are also auto-selected within configured caps for performance.
 
 **Purpose**: Define the project’s canonical documentation set, evidence standards, and verification workflow so the repository remains publishable, auditable, and maintainable over long horizons (thesis/paper + production evolution).
 
 This document is intentionally “policy-like”: it tells you what must be true for a result, report, or configuration change to be considered *research-grade* and *reproducible* in this codebase.
+
+## Delta (2026-01-18)
+
+- Live dashboard no longer fabricates demo values: `visualizations/live_dashboard.html` shows empty states until `visualizations/dashboard_data.json` exists and polls it every 5 seconds.
+- Canonical run→dashboard wiring is DB-backed: `scripts/dashboard_db_bridge.py` renders `visualizations/dashboard_data.json` from the SQLite trading DB and can persist audit snapshots to `data/dashboard_audit.db` (`--persist-snapshot`, enabled by default in bash orchestrators).
+- Payload provenance guardrails: `scripts/audit_dashboard_payload_sources.py` audits the latest dashboard JSON and (when enabled) the latest snapshot in `data/dashboard_audit.db` for synthetic/demo contamination and missing source fields.
 
 ---
 
@@ -23,6 +34,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Current engineering health snapshot**: `Documentation/PROJECT_STATUS.md`
 - **Chronological verification/evidence log**: `Documentation/implementation_checkpoint.md`
 - **Research questions + experimental design**: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`
+- **Institutional operating procedure (runbook)**: `Documentation/INSTITUTIONAL_WORKFLOW_RUNBOOK.md`
 - **Automation/cron wiring (evidence generation)**: `Documentation/CRON_AUTOMATION.md`
 - **Quant gating policy (GREEN/YELLOW/RED)**: `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`
 - **Numeric invariants (guard rails)**: `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`
@@ -139,4 +151,3 @@ All performance and validation claims must use the definitions in:
   - `etl/database_manager.py` (trade-level summaries such as profit factor)
 
 If code and documentation disagree, update the documentation *or* fix the code; do not silently reinterpret metrics.
-

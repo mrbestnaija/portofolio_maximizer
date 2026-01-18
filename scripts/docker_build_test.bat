@@ -265,7 +265,7 @@ goto :end
 echo Usage: docker_build_test.bat [prereq^|build^|test^|all]
 echo   prereq - Check prerequisites only
 echo   build  - Build Docker images
-echo   test   - Run container tests  
+echo   test   - Run container tests
 echo   all    - Run all steps (default)
 exit /b 1
 

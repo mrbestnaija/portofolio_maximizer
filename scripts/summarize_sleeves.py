@@ -218,4 +218,3 @@ def main(db_path: str, min_trades: int, output: Optional[str]) -> None:
 
 if __name__ == "__main__":
     main()
-

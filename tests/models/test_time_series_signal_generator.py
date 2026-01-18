@@ -49,13 +49,13 @@ def signal_generator(ts_routing_config):
 @pytest.fixture
 def sample_forecast_bundle():
     """Create sample forecast bundle for testing"""
-    forecast_series = pd.Series([110.0, 112.0, 115.0], 
+    forecast_series = pd.Series([110.0, 112.0, 115.0],
                                 index=pd.date_range('2024-01-01', periods=3, freq='D'))
     lower_ci = pd.Series([105.0, 107.0, 110.0],
                          index=pd.date_range('2024-01-01', periods=3, freq='D'))
     upper_ci = pd.Series([115.0, 117.0, 120.0],
                           index=pd.date_range('2024-01-01', periods=3, freq='D'))
-    
+
     return {
         'horizon': 30,
         'ensemble_forecast': {
@@ -93,7 +93,7 @@ def sample_market_data():
     dates = pd.date_range(start='2023-01-01', periods=100, freq='D')
     rng = np.random.default_rng(42)
     prices = 100 + np.cumsum(rng.normal(0.0, 0.5, 100))
-    
+
     return pd.DataFrame({
         'Close': prices,
         'Volume': rng.integers(1000000, 5000000, 100)
@@ -160,7 +160,7 @@ def quant_logging_config(quant_validation_config, tmp_path):
 
 class TestTimeSeriesSignalGenerator:
     """Test suite for TimeSeriesSignalGenerator"""
-    
+
     def test_initialization(self, signal_generator, ts_routing_config):
         """Test signal generator initialization"""
         assert signal_generator.confidence_threshold == pytest.approx(
@@ -175,26 +175,26 @@ class TestTimeSeriesSignalGenerator:
         assert signal_generator.use_volatility_filter == bool(
             ts_routing_config.get("use_volatility_filter", True)
         )
-    
+
     def test_generate_buy_signal(self, signal_generator, sample_forecast_bundle, sample_market_data):
         """Test generating a BUY signal from bullish forecast"""
         current_price = 100.0
         ticker = "AAPL"
-        
+
         signal = signal_generator.generate_signal(
             forecast_bundle=sample_forecast_bundle,
             current_price=current_price,
             ticker=ticker,
             market_data=sample_market_data
         )
-        
+
         assert isinstance(signal, TimeSeriesSignal)
         assert signal.ticker == ticker
         assert signal.entry_price == current_price
         assert signal.action in ('BUY', 'SELL', 'HOLD')
         assert 0.0 <= signal.confidence <= 1.0
         assert signal.signal_type == 'TIME_SERIES'
-    
+
     def test_generate_hold_signal_low_confidence(self, signal_generator, sample_forecast_bundle):
         """Test HOLD signal when confidence is below threshold"""
         # Create forecast with very low confidence
@@ -203,17 +203,17 @@ class TestTimeSeriesSignalGenerator:
             'forecast': pd.Series([100.5, 100.6, 100.7])  # Very small move
         }
         low_confidence_forecast['volatility_forecast'] = {'volatility': 0.50}  # High volatility
-        
+
         signal = signal_generator.generate_signal(
             forecast_bundle=low_confidence_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Should return HOLD due to low expected return or high risk
         assert signal.action == 'HOLD'
-    
+
     def test_confidence_calculation(self, signal_generator, sample_forecast_bundle):
         """Test confidence score calculation"""
         # Test with strong forecast (high expected return)
@@ -222,14 +222,14 @@ class TestTimeSeriesSignalGenerator:
             'forecast': pd.Series([120.0, 125.0, 130.0])  # 20-30% move
         }
         strong_forecast['volatility_forecast'] = {'volatility': 0.15}  # Low volatility
-        
+
         signal = signal_generator.generate_signal(
             forecast_bundle=strong_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Strong forecast should have higher confidence
         assert signal.confidence >= 0.5
 
@@ -325,20 +325,20 @@ class TestTimeSeriesSignalGenerator:
         )
 
         assert sig_narrow.confidence > sig_wide.confidence
-    
+
     def test_risk_score_calculation(self, signal_generator, sample_forecast_bundle):
         """Test risk score calculation"""
         # Test with high volatility
         high_vol_forecast = sample_forecast_bundle.copy()
         high_vol_forecast['volatility_forecast'] = {'volatility': 0.50}  # 50% volatility
-        
+
         signal = signal_generator.generate_signal(
             forecast_bundle=high_vol_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # High volatility should increase risk score
         assert signal.risk_score >= 0.5
 
@@ -377,25 +377,25 @@ class TestTimeSeriesSignalGenerator:
             ticker="AAPL",
             market_data=None
         )
-        
+
         if signal.action == 'BUY':
             # Target should be forecast price
             assert signal.target_price is not None
             assert signal.target_price > signal.entry_price
-            
+
             # Stop loss should be below entry
             assert signal.stop_loss is not None
             assert signal.stop_loss < signal.entry_price
-        
+
         elif signal.action == 'SELL':
             # Target should be forecast price (lower)
             assert signal.target_price is not None
             assert signal.target_price < signal.entry_price
-            
+
             # Stop loss should be above entry
             assert signal.stop_loss is not None
             assert signal.stop_loss > signal.entry_price
-    
+
     def test_model_agreement_calculation(self, signal_generator, sample_forecast_bundle):
         """Test model agreement affects confidence"""
         # Create forecast with high model agreement
@@ -406,14 +406,14 @@ class TestTimeSeriesSignalGenerator:
         agreeing_forecast['samossa_forecast'] = {
             'forecast': pd.Series([110.5, 112.5, 115.5])  # Very close to SARIMAX
         }
-        
+
         signal_agreeing = signal_generator.generate_signal(
             forecast_bundle=agreeing_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Create forecast with low model agreement
         disagreeing_forecast = sample_forecast_bundle.copy()
         disagreeing_forecast['sarimax_forecast'] = {
@@ -422,14 +422,14 @@ class TestTimeSeriesSignalGenerator:
         disagreeing_forecast['samossa_forecast'] = {
             'forecast': pd.Series([90.0, 88.0, 85.0])  # Very different from SARIMAX
         }
-        
+
         signal_disagreeing = signal_generator.generate_signal(
             forecast_bundle=disagreeing_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Agreeing models should have higher confidence
         assert signal_agreeing.confidence >= signal_disagreeing.confidence
 
@@ -520,23 +520,23 @@ class TestTimeSeriesSignalGenerator:
         assert ctx.get("expected_return_net") == pytest.approx(-0.003)
         # Net should be closer to zero than gross for SELL signals.
         assert ctx["expected_return_net"] > ctx["expected_return"]
-    
+
     def test_hold_signal_on_error(self, signal_generator):
         """Test HOLD signal returned on error"""
         # Invalid forecast bundle
         invalid_forecast = {'error': 'test error'}
-        
+
         signal = signal_generator.generate_signal(
             forecast_bundle=invalid_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         assert signal.action == 'HOLD'
         assert signal.confidence == 0.0
         assert 'error' in signal.reasoning.lower() or 'no forecast' in signal.reasoning.lower()
-    
+
     def test_batch_signal_generation(self, signal_generator, sample_forecast_bundle):
         """Test generating signals for multiple tickers"""
         forecast_bundles = {
@@ -547,19 +547,19 @@ class TestTimeSeriesSignalGenerator:
             'AAPL': 100.0,
             'MSFT': 200.0
         }
-        
+
         signals = signal_generator.generate_signals_batch(
             forecast_bundles=forecast_bundles,
             current_prices=current_prices,
             market_data=None
         )
-        
+
         assert len(signals) == 2
         assert 'AAPL' in signals
         assert 'MSFT' in signals
         assert isinstance(signals['AAPL'], TimeSeriesSignal)
         assert isinstance(signals['MSFT'], TimeSeriesSignal)
-    
+
     def test_provenance_extraction(self, signal_generator, sample_forecast_bundle):
         """Test provenance metadata extraction"""
         signal = signal_generator.generate_signal(
@@ -568,12 +568,12 @@ class TestTimeSeriesSignalGenerator:
             ticker="AAPL",
             market_data=None
         )
-        
+
         assert signal.provenance is not None
         assert 'model_type' in signal.provenance
         assert 'timestamp' in signal.provenance
         assert 'forecast_horizon' in signal.provenance
-    
+
     def test_expected_return_calculation(self, signal_generator, sample_forecast_bundle):
         """Test expected return calculation"""
         signal = signal_generator.generate_signal(
@@ -582,13 +582,13 @@ class TestTimeSeriesSignalGenerator:
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Expected return should be calculated from forecast vs current price
         if signal.action != 'HOLD':
             assert signal.expected_return != 0.0
             # For BUY: positive return expected
             # For SELL: negative return expected (price going down)
-    
+
     def test_volatility_filter(self, signal_generator):
         """Test volatility filter affects signal generation"""
         # Low volatility forecast
@@ -599,14 +599,14 @@ class TestTimeSeriesSignalGenerator:
             },
             'volatility_forecast': {'volatility': 0.15}  # 15% volatility
         }
-        
+
         signal_low_vol = signal_generator.generate_signal(
             forecast_bundle=low_vol_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # High volatility forecast
         high_vol_forecast = {
             'horizon': 30,
@@ -615,14 +615,14 @@ class TestTimeSeriesSignalGenerator:
             },
             'volatility_forecast': {'volatility': 0.50}  # 50% volatility
         }
-        
+
         signal_high_vol = signal_generator.generate_signal(
             forecast_bundle=high_vol_forecast,
             current_price=100.0,
             ticker="AAPL",
             market_data=None
         )
-        
+
         # Low volatility should have higher confidence (if filter enabled)
         if signal_generator.use_volatility_filter:
             assert signal_low_vol.confidence >= signal_high_vol.confidence
@@ -856,7 +856,7 @@ class TestTimeSeriesSignalGenerator:
 
 class TestTimeSeriesSignal:
     """Test suite for TimeSeriesSignal dataclass"""
-    
+
     def test_signal_creation(self):
         """Test creating a signal"""
         signal = TimeSeriesSignal(
@@ -872,11 +872,10 @@ class TestTimeSeriesSignal:
             risk_score=0.5,
             reasoning="Test signal"
         )
-        
+
         assert signal.ticker == "AAPL"
         assert signal.action == "BUY"
         assert signal.confidence == 0.75
         assert signal.entry_price == 100.0
         assert signal.target_price == 110.0
         assert signal.stop_loss == 95.0
-

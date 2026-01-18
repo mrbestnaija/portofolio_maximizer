@@ -103,8 +103,8 @@
 
 ## Remote Repository
 
-**GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git  
-**Primary Branch**: `master`  
+**GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Primary Branch**: `master`
 
 **Authentication policy (GitHub)**:
 - Password authentication over HTTPS is **not supported**. Use SSH or a Personal Access Token (PAT).
@@ -199,6 +199,7 @@ ssh -T git@github.com
 
 ### Secret Hygiene (Non-Negotiable)
 - Never commit secrets: `.env`, API keys, tokens, SSH private keys, broker creds.
+- Never commit runtime artifacts: SQLite DBs under `data/` (e.g., `data/portfolio_maximizer.db`, `data/dashboard_audit.db`) and generated payloads like `visualizations/dashboard_data.json` must stay untracked (verify `.gitignore` and review `git status` before staging).
 - Always review staged changes: `git diff --cached` before commit.
 - If a secret is committed: rotate it immediately and remove from history **before pushing**.
 
@@ -818,8 +819,8 @@ git reset --hard origin/master
 
 **Document Version**: 3.0
 **Last Updated**: 2026-01-10
-**Status**: ACTIVE  
-**Review Schedule**: Monthly or before major changes  
+**Status**: ACTIVE
+**Review Schedule**: Monthly or before major changes
 **Maintainer**: Bestman Ezekwu Enock (csgtmalice@protonmail.ch)
 
 ---

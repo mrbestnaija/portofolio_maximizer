@@ -14,6 +14,12 @@ PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
 PIPELINE_SCRIPT="$ROOT_DIR/scripts/run_etl_pipeline.py"
 TRADER_SCRIPT="$ROOT_DIR/scripts/run_auto_trader.py"
 LOG_DIR="$ROOT_DIR/logs/end_to_end"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
+DASHBOARD_AUTO_SERVE="${DASHBOARD_AUTO_SERVE:-1}"
+# Default ON: persist dashboard snapshots for auditability.
+DASHBOARD_PERSIST="${DASHBOARD_PERSIST:-1}"
+# Default ON: keep dashboard server running after script exits.
+DASHBOARD_KEEP_ALIVE="${DASHBOARD_KEEP_ALIVE:-1}"
 
 mkdir -p "$LOG_DIR"
 
@@ -21,9 +27,17 @@ RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 PIPELINE_LOG="$LOG_DIR/pipeline_${RUN_STAMP}.log"
 TRADER_LOG="$LOG_DIR/auto_trader_${RUN_STAMP}.log"
 
+# Live dashboard wiring (DB -> JSON -> static HTML).
+if [[ "${DASHBOARD_AUTO_SERVE}" == "1" ]]; then
+  pmx_ensure_dashboard "${ROOT_DIR}" "${PYTHON_BIN}" "${DASHBOARD_PORT}" "${DASHBOARD_PERSIST}" "${DASHBOARD_KEEP_ALIVE}" "${ROOT_DIR}/data/portfolio_maximizer.db"
+  if [[ "${DASHBOARD_KEEP_ALIVE}" != "1" ]]; then
+    trap pmx_dashboard_cleanup EXIT
+  fi
+fi
+
 # Defaults (override via env)
 TICKERS="${TICKERS:-AAPL,MSFT, GOOGL}"
-START_DATE="${START_DATE:-2015-01-01}" 
+START_DATE="${START_DATE:-2015-01-01}"
 END_DATE="${END_DATE:-2024-01-01}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-365}"
 FORECAST_HORIZON="${FORECAST_HORIZON:-10}"
@@ -169,4 +183,21 @@ mvs_passed = (
 print(f"MVS Status     : {'PASS' if mvs_passed else 'FAIL'}")
 PY
 
+# Validate dashboard assets/wiring (non-blocking).
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/dev_dashboard_smoke.py" >/dev/null 2>&1 || true
+set -e
+
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/dashboard_db_bridge.py" --once >/dev/null 2>&1 || true
+set -e
+
+echo "Auditing dashboard payload sources..."
+"$PYTHON_BIN" "$ROOT_DIR/scripts/audit_dashboard_payload_sources.py" \
+  --db-path "$ROOT_DIR/data/portfolio_maximizer.db" \
+  --audit-db-path "$ROOT_DIR/data/dashboard_audit.db" \
+  --dashboard-json "$ROOT_DIR/visualizations/dashboard_data.json"
+
 echo "End-to-end run finished @ $RUN_STAMP"
+echo "Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
+echo "Dashboard HTML: ${ROOT_DIR}/visualizations/live_dashboard.html"

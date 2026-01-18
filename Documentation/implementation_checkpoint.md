@@ -1,8 +1,8 @@
 # Implementation Checkpoint Document
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 **Version**: 7.2
 **Date**: 2025-12-28 (Updated)
@@ -57,6 +57,16 @@ Changes: `scripts/run_auto_trader.py` now skips repeated cycles on the same bar 
 - `./simpleTrader_env/bin/python -m py_compile execution/paper_trading_engine.py scripts/run_auto_trader.py etl/database_manager.py`
 - `./simpleTrader_env/bin/python -m pytest -q tests/execution/test_paper_trading_engine.py tests/etl/test_database_manager_schema.py`
 Changes: `execution.paper_trading_engine.PaperTradingEngine` time-exit now counts bars (intraday-safe) using `forecast_horizon`/`max_holding_days`; `etl.database_manager.DatabaseManager.get_performance_summary` accepts `run_id` and `scripts/run_auto_trader.py` reports run-local PF/WR while preserving lifetime metrics under `profitability.lifetime`.
+
+**Verification (2026-01-18)**: Dashboard reporting correctness + real-time visualization:
+- `visualizations/live_dashboard.html` removed demo/fictitious fallback payloads and polls `visualizations/dashboard_data.json` every 5s.
+- Canonical dashboard producer added: `scripts/dashboard_db_bridge.py` renders `visualizations/dashboard_data.json` from the SQLite trading DB and (when enabled) persists each snapshot to `data/dashboard_audit.db` via `--persist-snapshot` (enabled by default in bash orchestrators).
+- Payload provenance checks added: `scripts/audit_dashboard_payload_sources.py` audits both the live JSON and the latest persisted snapshot for demo/sample contamination, synthetic tickers, and missing/unknown source fields.
+- Monitoring correctness fix: `scripts/check_forecast_audits.py` dedupe keeps newest audit per dataset window.
+- Added `scripts/seed_dashboard_payload.py` (manual, optional) to patch `visualizations/dashboard_data.json` with sample `trade_events`/`price_series` only when empty; requires `--allow-sample` and skips if real data exists. Canonical sources remain DB-backed (`scripts/dashboard_db_bridge.py`) and run artifacts; do not use seeding in live/paper evidence.
+Focused checks:
+- `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py scripts/check_forecast_audits.py`
+- `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_dashboard_payload_invariants.py tests/scripts/test_check_forecast_audits.py tests/scripts/test_intraday_fallback_window.py`
 
 **Verification (2026-01-07)**: Roadmap Phase 1.1 commenced (baseline snapshot capture helper). Focused checks:
 - `./simpleTrader_env/bin/python -m py_compile scripts/capture_baseline_snapshot.py`
@@ -156,7 +166,7 @@ Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Docume
 4. Replace the deprecated Period coercion and tighten the SARIMAX grid so pandas/statsmodels warnings stop polluting the log stream that this checkpoint relies upon (Novâ¯18 update: frequency hints are now stored instead of forced, the SARIMAX grid enforces a data-per-parameter budget, and the warning recorder in `logs/warnings/warning_events.log` only captures genuinely new ConvergenceWarnings).
 5. Update `scripts/backfill_signal_validation.py` to use timezone-aware timestamps and sqlite adapters before re-enabling the nightly job described later in this document. This was the primary blocker for declaring the brutal suite green.
 
-> **2025-11-19 remediation note**  
+> **2025-11-19 remediation note**
 > Items 1-4 above now have in-code fixes: `etl/database_manager.py` backs up malformed SQLite stores and rebuilds clean files, MSSA change points are normalised via `_normalize_change_points` in `scripts/run_etl_pipeline.py`, the Matplotlib `autofmt_xdate` hook is patched in `etl/visualizer.py`, and the SARIMAX stack in `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py` uses frequency hints plus a bounded grid instead of Period coercion. Brutal/synthetic runs have also been redirected to `data/test_database.db` via `PORTFOLIO_DB_PATH` so they no longer contend with the production `data/portfolio_maximizer.db`. The remaining backfill modernization is complete and the brutal suite is green as of 2025-12-28; treat `Documentation/integration_fix_plan.md` as the historical remediation tracker.
 
 
@@ -180,7 +190,7 @@ Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Docume
 - Documentation excerpts (`README.md`, `Documentation/arch_tree.md`, `QUICK_REFERENCE_OPTIMIZED_SYSTEM.md`, `TO_DO_LIST_MACRO.mdc`, `SECURITY_*` files) now reference the flag so operational teams donât forget to exercise frontier venues during simulations.
 
 ### Time-Series Forecaster Hardening (2025-11-18)
-- `forcester_ts/sarimax.py` now follows the `Documentation/SARIMAX_IMPLEMENTATION_CHECKLIST.md`: time-series inputs are interpolated/log-transformed safely, exogenous frames are aligned before fitting, series are rescaled into the statsmodels stability band, and the order search halts after repeated non-convergence so `bash/test_real_time_pipeline.sh` no longer floods logs with DataScale + convergence warnings.
+- `forcester_ts/sarimax.py` now follows the `Documentation/SARIMAX_IMPLEMENTATION_CHECKLIST.md`: time-series inputs are interpolated/log-transformed safely, exogenous frames are aligned before fitting, intraday windows avoid synthetic overnight/weekend padding, series are rescaled into the statsmodels stability band, and the order search halts after repeated non-convergence. `forcester_ts/forecaster.py` now wires SARIMAX-X exogenous features into both fit + forecast (manual orders are unsupported) so audit logs show the learned (p,d,q,P,D,Q,s,trend) selections per run.
 - `forcester_ts/samossa.py` implements the Page-matrix/HSV decomposition pipeline from `Documentation/SAMOSSA_IMPLEMENTATION_CHECKLIST.md`, enforces \(L \le \sqrt{T}\), rescales outputs to the original units, and pushes residuals through an AutoReg fallback so deterministic + AR components are forecast separatelyâthe errors that paused `bash/comprehensive_brutal_test.sh` now surface with actionable context under `logs/warnings/warning_events.log`.
 
 ### Validation + Risk Snapshot
@@ -2284,7 +2294,7 @@ ollama:
   model: "deepseek-coder:6.7b-instruct-q4_K_M"
   timeout: 30
   max_retries: 3
-  
+
 performance:
   temperature: 0.7
   max_tokens: 500
@@ -3191,26 +3201,26 @@ Where:
 def test_profit_factor_calculation(self, test_db):
     """
     CRITICAL: Profit factor = Total Gross Profit / Total Gross Loss
-    
+
     Profit Factor Formula (CORRECT):
     PF = Sum(All Winning Trades) / Abs(Sum(All Losing Trades))
     """
     # Insert trades with known profit factor
     test_db.cursor.execute("""
-        INSERT INTO trade_executions 
+        INSERT INTO trade_executions
         (ticker, trade_date, action, shares, price, total_value, realized_pnl)
-        VALUES 
+        VALUES
         ('TEST1', '2025-01-01', 'SELL', 1, 100, 100, 150.00),  -- Win: +150
         ('TEST2', '2025-01-02', 'SELL', 1, 100, 100, 100.00),  -- Win: +100
         ('TEST3', '2025-01-03', 'SELL', 1, 100, 100, -50.00)   -- Loss: -50
     """)
-    
+
     perf = test_db.get_performance_summary()
-    
+
     # Verify components
     assert perf['gross_profit'] == 250.0
     assert perf['gross_loss'] == 50.0
-    
+
     # Profit factor = (150 + 100) / 50 = 5.0
     expected_profit_factor = 5.0
     assert abs(perf['profit_factor'] - expected_profit_factor) < 0.01

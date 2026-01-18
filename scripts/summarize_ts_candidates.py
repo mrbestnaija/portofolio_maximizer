@@ -163,4 +163,3 @@ def main(db_path: str, output: Optional[str]) -> None:
 
 if __name__ == "__main__":
     main()
-

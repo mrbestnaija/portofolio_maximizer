@@ -94,4 +94,3 @@ def test_compute_regression_metrics_returns_consistent_bundle():
         .shape[0]
     )
     assert metrics["n_observations"] == aligned_len
-

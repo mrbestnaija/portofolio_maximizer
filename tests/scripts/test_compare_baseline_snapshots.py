@@ -58,4 +58,3 @@ def test_compare_baseline_snapshots_detects_changed_files_and_metric_delta(tmp_p
         compare_baseline_snapshots.extract_run_metrics(b.run_summary),
     )
     assert run_deltas["profitability.pnl_dollars"] == (0.0, 1.0, 1.0)
-

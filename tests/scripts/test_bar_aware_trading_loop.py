@@ -91,7 +91,7 @@ def test_bar_aware_loop_skips_second_cycle(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(run_auto_trader, "_prepare_market_window", lambda *_args, **_kwargs: raw_window)
     monkeypatch.setattr(run_auto_trader, "_validate_market_window", lambda *_args, **_kwargs: True)
 
-    def fake_forecast(price_frame: pd.DataFrame, horizon: int):
+    def fake_forecast(price_frame: pd.DataFrame, horizon: int, **_kwargs):
         series = pd.Series(
             [101.0, 102.0],
             index=pd.date_range("2024-01-11", periods=2, freq="D"),

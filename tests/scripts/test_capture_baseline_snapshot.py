@@ -64,4 +64,3 @@ def test_capture_baseline_snapshot_writes_manifest_and_artifacts(tmp_path):
     assert (result.snapshot_dir / "artifacts" / "execution_log_tail.jsonl").exists()
     assert (result.snapshot_dir / "artifacts" / "quant_validation_summary.txt").exists()
     assert (result.snapshot_dir / "artifacts" / "dashboard_data.json").exists()
-

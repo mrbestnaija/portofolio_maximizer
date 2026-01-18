@@ -315,8 +315,9 @@ def main() -> None:
         # Skip entries without usable metrics; they do not inform RMSE gating.
         if not _has_effective_metrics(f):
             continue
-        if key not in unique_map:
-            unique_map[key] = f
+        # Files are sorted newest-first, so keep the first (newest) entry we see
+        # for each dataset window and ignore older duplicates.
+        if key in unique_map:
             continue
         unique_map[key] = f
 

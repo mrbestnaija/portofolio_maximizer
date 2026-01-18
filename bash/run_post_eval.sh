@@ -11,12 +11,17 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 cd "${PROJECT_ROOT}"
 
-PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}")"
+# Capture only the resolved interpreter path (pmx_resolve_python may log to stdout).
+PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}" | tail -n 1)"
 
 TICKERS=${TICKERS:-"AAPL,MSFT,CL=F,GC=F,BTC-USD,EURUSD=X"}
 START=${START:-"2024-11-15"}
 END=${END:-"2025-11-23"}
 RUN_ID="eval_$(date +%Y%m%d_%H%M%S)"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
+DASHBOARD_PERSIST="${DASHBOARD_PERSIST:-1}"
+DASHBOARD_KEEP_ALIVE="${DASHBOARD_KEEP_ALIVE:-1}"
+DASHBOARD_AUTO_SERVE="${DASHBOARD_AUTO_SERVE:-1}"
 
 # Enable forecast audit logging for interpretable TS evaluation (forecester_ts/instrumentation.py).
 export TS_FORECAST_AUDIT_DIR="${TS_FORECAST_AUDIT_DIR:-${PROJECT_ROOT}/logs/forecast_audits}"
@@ -282,7 +287,16 @@ else
   run_stack "${RUN_ID}" "${START}" "${END}" 50 0.002
 fi
 
+if [[ "${DASHBOARD_AUTO_SERVE}" == "1" ]]; then
+  pmx_ensure_dashboard "${PROJECT_ROOT}" "${PYTHON_BIN}" "${DASHBOARD_PORT}" "${DASHBOARD_PERSIST}" "${DASHBOARD_KEEP_ALIVE}" "${PROJECT_ROOT}/data/portfolio_maximizer_${FINAL_RUN_ID}.db"
+  if [[ "${DASHBOARD_KEEP_ALIVE}" != "1" ]]; then
+    trap pmx_dashboard_cleanup EXIT
+  fi
+fi
+
 echo "Artifacts:"
 echo "  - DB: data/portfolio_maximizer_${FINAL_RUN_ID}.db (plus hyperopt variants if run)"
 echo "  - Drift JSON: visualizations/split_drift_latest.json"
 echo "  - Dashboard JSON/PNG: visualizations/dashboard_data.json, visualizations/dashboard_snapshot.png"
+echo "  - Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
+echo "  - Dashboard HTML: ${PROJECT_ROOT}/visualizations/live_dashboard.html"

@@ -105,4 +105,3 @@ def test_backfill_forecast_regression_metrics_updates_row(tmp_path: Path) -> Non
         assert "evaluated_at" in metrics
     finally:
         manager.close()
-

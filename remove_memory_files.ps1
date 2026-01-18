@@ -10,7 +10,7 @@ $files = @(
 $indexEntries = git ls-files --stage
 
 # Filter out memory files
-$filtered = $indexEntries | Where-Object { 
+$filtered = $indexEntries | Where-Object {
     $entry = $_
     $shouldKeep = $true
     foreach ($file in $files) {

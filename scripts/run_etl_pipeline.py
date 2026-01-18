@@ -118,24 +118,24 @@ def _normalize_change_points(raw_change_points: Any) -> List[str]:
 
 def _setup_logging(verbose: bool = False) -> logging.Logger:
     """Configure logging for pipeline execution.
-    
+
     This function is called only when the script is run as main,
     preventing logging side effects when importing the module.
-    
+
     Args:
         verbose: If True, set logging level to DEBUG
-        
+
     Returns:
         Configured logger instance
     """
     logs_dir = Path("logs")
     logs_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Remove existing handlers to avoid duplicates
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+
     # Configure file handler
     file_handler = logging.FileHandler(
         str(logs_dir / "pipeline_run.log"),
@@ -145,21 +145,21 @@ def _setup_logging(verbose: bool = False) -> logging.Logger:
     file_handler.setFormatter(
         logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     )
-    
+
     # Configure console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     console_handler.setFormatter(
         logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     )
-    
+
     # Set root logger level
     root_logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
-    
+
     logging.captureWarnings(True)
-    
+
     return logging.getLogger(__name__)
 
 
@@ -646,25 +646,25 @@ def _build_stage_execution_order(
 ) -> List[str]:
     """
     Build stage execution order from config, respecting dependencies and enabled flags.
-    
+
     This function implements config-driven orchestration:
     1. Filters stages by enabled flag
     2. Resolves dependencies to determine execution order
     3. Includes LLM stages conditionally
     4. Maintains backward compatibility with hardcoded stages
-    
+
     Args:
         stages_cfg: List of stage configurations from pipeline_config.yml
         enable_llm: Whether LLM integration is enabled
         logger: Logger instance
-        
+
     Returns:
         List of stage names in execution order
     """
     # Core stages that must always run (backward compatibility)
     # Time Series-first architecture expects storage to precede forecasting.
     core_stages = ['data_extraction', 'data_validation', 'data_preprocessing', 'data_storage']
-    
+
     # Build stage map from config
     stage_map = {}
     for stage in stages_cfg:
@@ -676,10 +676,10 @@ def _build_stage_execution_order(
                 'depends_on': stage.get('depends_on', []),
                 'config': stage
             }
-    
+
     # Start with core stages (always included)
     execution_order = core_stages.copy()
-    
+
     # Add config-driven stages (Time Series forecasting, signal generation, routing)
     # These stages respect enabled flag and dependencies
     config_driven_stages = []
@@ -687,23 +687,23 @@ def _build_stage_execution_order(
         # Skip core stages (already added)
         if stage_name in core_stages or stage_name == 'data_storage':
             continue
-            
+
         # Skip LLM stages (handled separately above)
         if stage_name.startswith('llm_'):
             continue
-            
+
         # Only include if enabled
         if not stage_info.get('enabled', True):
             logger.debug(f"Skipping disabled stage: {stage_name}")
             continue
-            
+
         config_driven_stages.append((stage_name, stage_info))
-    
+
     # Sort config-driven stages by dependencies (topological sort)
     # Simple approach: insert stages after their dependencies
     for stage_name, stage_info in config_driven_stages:
         depends_on = stage_info.get('depends_on', [])
-        
+
         if not depends_on:
             # No dependencies - add after data_storage
             storage_idx = execution_order.index('data_storage')
@@ -715,7 +715,7 @@ def _build_stage_execution_order(
                 if dep in execution_order:
                     dep_idx = execution_order.index(dep)
                     max_dep_idx = max(max_dep_idx, dep_idx)
-            
+
             if max_dep_idx >= 0:
                 # Insert after last dependency
                 execution_order.insert(max_dep_idx + 1, stage_name)
@@ -723,7 +723,7 @@ def _build_stage_execution_order(
                 # Dependencies not found - add at end (shouldn't happen, but safe fallback)
                 logger.warning(f"Stage {stage_name} has dependencies {depends_on} not found in execution order. Adding at end.")
                 execution_order.append(stage_name)
-    
+
     # Add LLM stages after Time Series routing (Time Series-first architecture)
     if enable_llm:
         llm_stages = ['llm_market_analysis', 'llm_signal_generation', 'llm_risk_assessment']
@@ -746,7 +746,7 @@ def _build_stage_execution_order(
         if stage not in seen:
             seen.add(stage)
             unique_order.append(stage)
-    
+
     return unique_order
 
 
@@ -1006,11 +1006,11 @@ def execute_pipeline(
     prefer_gpu: bool = True,
 ) -> None:
     """Execute ETL pipeline with modular configuration-driven orchestration.
-    
+
     This is the core pipeline execution function that can be called directly
     from tests or other Python code. The Click command wrapper converts CLI
     arguments and calls this function.
-    
+
     Args:
         config: Path to pipeline configuration file
         data_source: Data source to use (yfinance, alpha_vantage, finnhub)
@@ -1121,7 +1121,7 @@ def execute_pipeline(
     allow_live_fallback = (execution_mode == 'auto')
     if allow_live_fallback:
         logger.info("Auto mode: attempting live extraction first, synthetic fallback enabled on failure")
-    
+
     # Initialize LLM component handles
     llm_client = llm_components.client
     market_analyzer = llm_components.market_analyzer
@@ -1193,7 +1193,7 @@ def execute_pipeline(
         enable_llm=enable_llm,
         logger=logger
     )
-    
+
     logger.info(f"OK Stage execution order (config-driven): {', '.join(stage_names)}")
 
     # Load preprocessing config once (missing handling + leak-free normalization)
@@ -1428,8 +1428,8 @@ def execute_pipeline(
                 # Save processed data with run metadata
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 storage.save(
-                    processed, 
-                    'processed', 
+                    processed,
+                    'processed',
                     f'processed_{timestamp}',
                     metadata={
                         'data_source': extraction_source,
@@ -1446,19 +1446,19 @@ def execute_pipeline(
                 # Stage 4 (LLM): Market Analysis
                 logger.info("Analyzing market data with LLM...")
                 llm_analyses = {}
-                
+
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data
                         ticker_data = _slice_ticker_dataframe(processed, ticker)
-                        
+
                         # Run LLM analysis with timing
                         start_time = time.time()
                         analysis = market_analyzer.analyze_ohlcv(ticker_data, ticker)
                         latency = time.time() - start_time
-                        
+
                         llm_analyses[ticker] = analysis
-                        
+
                         # Save to database
                         db_manager.save_llm_analysis(
                             ticker=ticker,
@@ -1467,16 +1467,16 @@ def execute_pipeline(
                             model_name=llm_client.model,
                             latency=latency
                         )
-                        
+
                         logger.info(f"  OK {ticker}: Trend={analysis['trend']}, Strength={analysis['strength']}/10 ({latency:.1f}s)")
                         if verbose:
                             logger.debug(f"    Summary: {analysis['summary']}")
                     except Exception as e:
                         logger.warning(f"  WARN {ticker} analysis failed: {e}")
                         llm_analyses[ticker] = {'trend': 'neutral', 'strength': 5, 'error': str(e)}
-                
+
                 logger.info(f"OK Analyzed {len(llm_analyses)} ticker(s) with LLM")
-                
+
                 # Save checkpoint with LLM analysis
                 checkpoint_id = checkpoint_manager.save_checkpoint(
                     pipeline_id=pipeline_id,
@@ -1504,13 +1504,13 @@ def execute_pipeline(
                         portfolio_notional = float(notional_cfg)
                     except (TypeError, ValueError):
                         portfolio_notional = 10000.0
-                
+
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data and analysis
                         ticker_data = _slice_ticker_dataframe(processed, ticker)
                         market_analysis = llm_analyses.get(ticker, {})
-                        
+
                         # Generate signal with timing
                         start_time = time.time()
                         if llm_signal_generator is None:
@@ -1655,11 +1655,11 @@ def execute_pipeline(
                                     'reasoning': signal.get('reasoning', '')
                                 }
                             )
-                        
+
                         llm_signals[ticker] = signal
                         if validation_entry:
                             llm_signal_validations[ticker] = validation_entry
-                        
+
                         # Save to database
                         signal_id = db_manager.save_llm_signal(
                             ticker=ticker,
@@ -1741,7 +1741,7 @@ def execute_pipeline(
                                 tracker_payload,
                                 validation_status
                             )
-                        
+
                         confidence_pct = float(signal.get('confidence', 0.0)) * 100
                         logger.info(
                             "  OK %s: Action=%s, Confidence=%.1f%% (%0.1fs) Validation=%s",
@@ -1756,10 +1756,10 @@ def execute_pipeline(
                     except Exception as e:
                         logger.warning(f"  WARN {ticker} signal generation failed: {e}")
                         llm_signals[ticker] = {'action': 'HOLD', 'confidence': 0.5, 'error': str(e)}
-                
+
                 logger.info(f"OK Generated {len(llm_signals)} signal(s) with LLM")
                 logger.warning("WARN ADVISORY ONLY: LLM signals require 30-day validation before trading")
-                
+
                 # Save checkpoint with signals
                 checkpoint_id = checkpoint_manager.save_checkpoint(
                     pipeline_id=pipeline_id,
@@ -1782,19 +1782,19 @@ def execute_pipeline(
                 logger.info("Assessing portfolio risk with LLM...")
                 portfolio_weight = 1.0 / len(ticker_list)  # Equal weight assumption
                 llm_risks = {}
-                
+
                 for ticker in ticker_list:
                     try:
                         # Get ticker-specific data
                         ticker_data = _slice_ticker_dataframe(processed, ticker)
-                        
+
                         # Assess risk with timing
                         start_time = time.time()
                         risk = risk_assessor.assess_risk(ticker_data, ticker, portfolio_weight)
                         latency = time.time() - start_time
-                        
+
                         llm_risks[ticker] = risk
-                        
+
                         # Save to database
                         risk['portfolio_weight'] = portfolio_weight
                         db_manager.save_llm_risk(
@@ -1804,16 +1804,16 @@ def execute_pipeline(
                             model_name=llm_client.model,
                             latency=latency
                         )
-                        
+
                         logger.info(f"  OK {ticker}: Risk Level={risk['risk_level']}, Score={risk['risk_score']}/100 ({latency:.1f}s)")
                         if verbose and risk.get('concerns'):
                             logger.debug(f"    Concerns: {', '.join(risk['concerns'][:2])}")
                     except Exception as e:
                         logger.warning(f"  WARN {ticker} risk assessment failed: {e}")
                         llm_risks[ticker] = {'risk_level': 'medium', 'risk_score': 50, 'error': str(e)}
-                
+
                 logger.info(f"OK Assessed {len(llm_risks)} ticker(s) risk with LLM")
-                
+
                 # Save checkpoint with risk assessment
                 checkpoint_id = checkpoint_manager.save_checkpoint(
                     pipeline_id=pipeline_id,
@@ -1832,7 +1832,7 @@ def execute_pipeline(
             elif stage_name == 'time_series_forecasting':
                 # Stage 7: Time Series Forecasting (SARIMAX/GARCH)
                 logger.info("Generating time series forecasts...")
-                
+
                 try:
                     from etl.time_series_forecaster import (
                         TimeSeriesForecaster,
@@ -1845,7 +1845,7 @@ def execute_pipeline(
                     if not forecasting_cfg.get('enabled', True):
                         logger.info("Forecasting disabled in config, skipping...")
                         continue
-                    
+
                     forecast_horizon = forecasting_cfg.get('default_forecast_horizon', 30)
                     min_history_required = int(forecasting_cfg.get('minimum_history_required', 90))
                     min_history_strict = int(forecasting_cfg.get('minimum_history_strict', 30))
@@ -1855,7 +1855,7 @@ def execute_pipeline(
                     mssa_rl_cfg = forecasting_cfg.get('mssa_rl', {})
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
-                    
+
                     forecasts = {}
 
                     def _build_model_config(target_horizon: int) -> TimeSeriesForecasterConfig:
@@ -1897,7 +1897,7 @@ def execute_pipeline(
                             if ticker_data.empty:
                                 logger.warning(f"  WARN {ticker}: No processed rows available after filtering")
                                 continue
-                            
+
                             # Extract Close price series
                             if 'Close' in ticker_data.columns:
                                 price_series = ticker_data['Close'].dropna()
@@ -1906,7 +1906,7 @@ def execute_pipeline(
                             else:
                                 logger.warning(f"  WARN {ticker}: No Close price data available")
                                 continue
-                            
+
                             series_length = len(price_series)
                             if series_length < min_history_strict:
                                 logger.warning(
@@ -2034,7 +2034,7 @@ def execute_pipeline(
                                             forecast_date=forecast_date,
                                             forecast_data=forecast_data,
                                         )
-                            
+
                             # Save GARCH forecast if available
                             if forecast_result.get('volatility_forecast'):
                                 garch_result = forecast_result['volatility_forecast']
@@ -2056,7 +2056,7 @@ def execute_pipeline(
                                             forecast_date=forecast_date,
                                             forecast_data=forecast_data,
                                         )
-                            
+
                             # Save SAMOSSA forecast if available
                             if forecast_result.get('samossa_forecast'):
                                 samossa_result = forecast_result['samossa_forecast']
@@ -2143,13 +2143,13 @@ def execute_pipeline(
                                             forecast_date=forecast_date,
                                             forecast_data=forecast_data,
                                         )
-                            
+
                             logger.info(f"  OK {ticker}: Generated {forecast_horizon}-step forecast")
-                            
+
                         except Exception as e:
                             logger.warning(f"  WARN {ticker} forecasting failed: {e}")
                             forecasts[ticker] = {'error': str(e)}
-                    
+
                     successful_forecasts = len([f for f in forecasts.values() if 'error' not in f])
                     logger.info(f"OK Generated forecasts for {successful_forecasts}/{len(ticker_list)} ticker(s)")
                     if successful_forecasts < len(ticker_list):
@@ -2160,7 +2160,7 @@ def execute_pipeline(
                         _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
                     except Exception as viz_exc:  # pragma: no cover - visualization optional
                         logger.warning("Time Series visualization generation failed: %s", viz_exc)
-                    
+
                     # Save checkpoint
                     checkpoint_id = checkpoint_manager.save_checkpoint(
                         pipeline_id=pipeline_id,
@@ -2173,10 +2173,10 @@ def execute_pipeline(
                         }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
-                    
+
                     # Store forecasts for signal generation stage
                     globals()['_ts_forecasts'] = forecasts or {}
-                        
+
                 except Exception as e:
                     from etl.security_utils import sanitize_error
                     safe_error = sanitize_error(e)
@@ -2185,11 +2185,11 @@ def execute_pipeline(
             elif stage_name == 'time_series_signal_generation':
                 # Stage 8: Time Series Signal Generation (NEW - DEFAULT SIGNAL SOURCE)
                 logger.info("Generating trading signals from Time Series forecasts...")
-                
+
                 try:
                     from models.time_series_signal_generator import TimeSeriesSignalGenerator
                     from models.signal_adapter import SignalAdapter
-                    
+
                     # Load signal routing config (pipeline override or shared YAML)
                     signal_routing_cfg = pipeline_cfg.get('signal_routing', {}) or {}
                     ts_signal_cfg = signal_routing_cfg.get('time_series', {}) or {}
@@ -2203,7 +2203,7 @@ def execute_pipeline(
                                 ts_signal_cfg = shared_cfg.get("time_series", {}) or {}
                             except Exception as exc:  # pragma: no cover - defensive
                                 logger.warning("Failed to load signal routing config: %s", exc)
-                    
+
                     # Initialize signal generator
                     ts_signal_generator = TimeSeriesSignalGenerator(
                         confidence_threshold=float(ts_signal_cfg.get('confidence_threshold', 0.55)),
@@ -2211,21 +2211,21 @@ def execute_pipeline(
                         max_risk_score=float(ts_signal_cfg.get('max_risk_score', 0.7)),
                         use_volatility_filter=bool(ts_signal_cfg.get('use_volatility_filter', True)),
                     )
-                    
+
                     # Get forecasts from previous stage
                     forecasts = globals().get('_ts_forecasts', {})
                     if not forecasts:
                         logger.warning("No Time Series forecasts available, skipping signal generation")
                         continue
-                    
+
                     ts_signals = {}
                     current_prices = {}
-                    
+
                     for ticker in ticker_list:
                         try:
                             # Get ticker-specific data for current price
                             ticker_data = _slice_ticker_dataframe(processed, ticker)
-                            
+
                             # Extract current price
                             if 'Close' in ticker_data.columns:
                                 current_price = float(ticker_data['Close'].iloc[-1])
@@ -2234,15 +2234,15 @@ def execute_pipeline(
                             else:
                                 logger.warning(f"  WARN {ticker}: No Close price data available")
                                 continue
-                            
+
                             current_prices[ticker] = current_price
-                            
+
                             # Get forecast bundle
                             forecast_bundle = forecasts.get(ticker)
                             if not forecast_bundle or 'error' in forecast_bundle:
                                 logger.warning(f"  WARN {ticker}: No valid forecast available")
                                 continue
-                            
+
                             # Generate signal
                             signal = ts_signal_generator.generate_signal(
                                 forecast_bundle=forecast_bundle,
@@ -2250,12 +2250,12 @@ def execute_pipeline(
                                 ticker=ticker,
                                 market_data=ticker_data
                             )
-                            
+
                             # Convert to unified format
                             unified_signal = SignalAdapter.from_time_series_signal(signal)
                             signal_dict = SignalAdapter.to_legacy_dict(unified_signal)
                             ts_signals[ticker] = signal_dict
-                            
+
                             # Save to unified trading_signals table
                             signal_date = datetime.now().strftime('%Y-%m-%d')
                             signal_id = db_manager.save_trading_signal(
@@ -2267,24 +2267,24 @@ def execute_pipeline(
                                 validation_status='pending',
                                 latency=0.0  # Time Series signals are fast
                             )
-                            
+
                             logger.info(
                                 f"  OK {ticker}: {signal.action} signal "
                                 f"(confidence={signal.confidence:.2f}, "
                                 f"expected_return={signal.expected_return:.2%}, "
                                 f"risk={signal.risk_score:.2f})"
                             )
-                            
+
                         except Exception as e:
                             logger.warning(f"  WARN {ticker} Time Series signal generation failed: {e}")
                             ts_signals[ticker] = {'action': 'HOLD', 'confidence': 0.0, 'error': str(e)}
-                    
+
                     logger.info(f"OK Generated {len([s for s in ts_signals.values() if s.get('action') != 'HOLD'])} Time Series signal(s)")
-                    
+
                     # Store signals for routing stage
                     globals()['_ts_signals'] = ts_signals
                     globals()['_current_prices'] = current_prices
-                    
+
                     # Save checkpoint
                     checkpoint_id = checkpoint_manager.save_checkpoint(
                         pipeline_id=pipeline_id,
@@ -2298,7 +2298,7 @@ def execute_pipeline(
                         }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
-                    
+
                 except ImportError as e:
                     logger.warning(f"Time Series signal generation modules not available: {e}")
                     logger.warning("Install required packages and ensure models package is available")
@@ -2310,36 +2310,36 @@ def execute_pipeline(
             elif stage_name == 'signal_router':
                 # Stage 9: Signal Router (NEW - Routes TS primary + LLM fallback)
                 logger.info("Routing signals (Time Series primary, LLM fallback)...")
-                
+
                 try:
                     from models.signal_router import SignalRouter
                     from models.signal_adapter import SignalAdapter
-                    
+
                     # Load signal routing config
                     signal_routing_cfg = pipeline_cfg.get('signal_routing', {})
-                    
+
                     # Initialize router
                     router = SignalRouter(
                         config=signal_routing_cfg,
                         time_series_generator=None,  # Already generated signals
                         llm_generator=llm_signal_generator if enable_llm and llm_signal_generator is not None else None
                     )
-                    
+
                     # Get Time Series signals from previous stage
                     ts_signals = globals().get('_ts_signals', {})
                     forecasts = globals().get('_ts_forecasts', {})
                     current_prices = globals().get('_current_prices', {})
-                    
+
                     # Get LLM signals if available
                     llm_signals = globals().get('llm_signals', {})
-                    
+
                     routed_bundles = {}
-                    
+
                     for ticker in ticker_list:
                         try:
                             # Get ticker-specific data
                             ticker_data = _slice_ticker_dataframe(processed, ticker)
-                            
+
                             current_price = current_prices.get(ticker, 0.0)
                             if current_price == 0.0:
                                 # Try to extract from data
@@ -2347,10 +2347,10 @@ def execute_pipeline(
                                     current_price = float(ticker_data['Close'].iloc[-1])
                                 elif 'close' in ticker_data.columns:
                                     current_price = float(ticker_data['close'].iloc[-1])
-                            
+
                             forecast_bundle = forecasts.get(ticker)
                             llm_signal = llm_signals.get(ticker) if llm_signals else None
-                            
+
                             # Route signal
                             bundle = router.route_signal(
                                 ticker=ticker,
@@ -2359,29 +2359,29 @@ def execute_pipeline(
                                 market_data=ticker_data,
                                 llm_signal=llm_signal
                             )
-                            
+
                             routed_bundles[ticker] = bundle
-                            
+
                             # Log routing result
                             primary_action = bundle.primary_signal.get('action', 'HOLD') if bundle.primary_signal else 'HOLD'
                             primary_source = bundle.primary_signal.get('source', 'UNKNOWN') if bundle.primary_signal else 'UNKNOWN'
-                            
+
                             logger.info(
                                 f"  OK {ticker}: Routed {primary_action} signal "
                                 f"(source={primary_source}, "
                                 f"fallback={'yes' if bundle.fallback_signal else 'no'})"
                             )
-                            
+
                         except Exception as e:
                             logger.warning(f"  WARN {ticker} signal routing failed: {e}")
                             routed_bundles[ticker] = None
-                    
+
                     logger.info(f"OK Routed signals for {len([b for b in routed_bundles.values() if b])} ticker(s)")
-                    
+
                     # Store routing stats
                     routing_stats = router.get_routing_stats()
                     logger.info(f"Routing statistics: {routing_stats['stats']}")
-                    
+
                     # Save checkpoint
                     checkpoint_id = checkpoint_manager.save_checkpoint(
                         pipeline_id=pipeline_id,
@@ -2398,7 +2398,7 @@ def execute_pipeline(
                         }
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
-                    
+
                 except ImportError as e:
                     logger.warning(f"Signal router modules not available: {e}")
                 except Exception as e:
@@ -2895,7 +2895,7 @@ def execute_pipeline(
     # Cleanup old logs and checkpoints
     pipeline_log.cleanup_old_logs()
     checkpoint_manager.cleanup_old_checkpoints(retention_days=7)
-    
+
     # Close database connection
     db_manager.close()
 

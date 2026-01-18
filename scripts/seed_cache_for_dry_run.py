@@ -53,4 +53,3 @@ if __name__ == "__main__":
     storage = DataStorage(base_path="data")
     path = storage.save(df, stage="raw", symbol="AAPL")
     print(f"Seeded cache at: {path}")
-
