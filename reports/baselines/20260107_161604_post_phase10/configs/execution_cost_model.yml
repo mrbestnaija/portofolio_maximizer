@@ -26,4 +26,3 @@ execution_cost_model:
       CRYPTO:
         depth_notional: 30000.0
         half_spread_bps: 3.0
-

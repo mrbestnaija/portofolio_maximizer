@@ -37,4 +37,3 @@ def test_prepare_market_window_uses_intraday_min_lookback(monkeypatch: pytest.Mo
     # Daily interval retains the original 365-day minimum.
     run_auto_trader._prepare_market_window(DummyManager("1d"), ["AAPL"], lookback_days=7)
     assert calls["start_date"] == "2023-01-10"
-

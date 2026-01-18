@@ -38,4 +38,3 @@ def test_run_horizon_backtest_writes_json_report(tmp_path: Path, monkeypatch: py
     assert written["metrics"]["profit_factor"] == 1.5
     assert payload["metrics"]["total_trades"] == 3
     assert captured["tickers"] == ["AAPL"]
-

@@ -10,14 +10,15 @@ execution into a single continuously running workflow.
 
 from __future__ import annotations
 
-from pathlib import Path
 import atexit
+import inspect
 import logging
 import os
 import re
 import site
 import sys
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,25 +98,6 @@ def _env_flag(name: str) -> Optional[bool]:
     if val in {"0", "false", "no", "n", "off"}:
         return False
     return None
-
-
-def _parse_int_tuple(raw: Optional[str], *, expected: int) -> Optional[Tuple[int, ...]]:
-    """Parse comma-delimited integers from env-style strings."""
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    parts = [p.strip() for p in text.split(",") if p.strip()]
-    if len(parts) != expected:
-        return None
-    try:
-        values = tuple(int(p) for p in parts)
-    except Exception:
-        return None
-    if any(v < 0 for v in values):
-        return None
-    return values
 
 
 def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
@@ -556,38 +538,43 @@ def _sarimax_kwargs_for_interval(interval: Optional[str]) -> Dict[str, Any]:
     """
     Return SARIMAX kwargs appropriate for the current yfinance interval.
 
-    Intraday grids are disabled by default because SARIMAX order search is too
-    slow for multi-ticker evaluation runs. Re-enable by setting
-    PMX_SARIMAX_AUTO_SELECT=1.
+    Important: this function **does not hard-code SARIMAX orders**. It only
+    narrows the order-search grid for intraday windows so multi-ticker runs
+    remain tractable while still learning (p,d,q,P,D,Q,s) from data per
+    `Documentation/SARIMAX_IMPLEMENTATION_CHECKLIST.md`.
     """
+    # Always learn the deterministic trend flag via AIC; do not hard-code it.
+    sarimax_kwargs: Dict[str, Any] = {"trend": "auto"}
     if not _is_intraday_interval(interval):
-        return {}
-
-    auto_select = _env_flag("PMX_SARIMAX_AUTO_SELECT")
-    if auto_select is None:
-        auto_select = False
-    if auto_select:
-        return {}
-
-    manual_order = _parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_ORDER"), expected=3) or (1, 1, 0)
-    manual_seasonal = _parse_int_tuple(os.getenv("PMX_SARIMAX_MANUAL_SEASONAL_ORDER"), expected=4) or (0, 0, 0, 0)
+        return sarimax_kwargs
 
     global _INTRADAY_SARIMAX_PROFILE_LOGGED
     if not _INTRADAY_SARIMAX_PROFILE_LOGGED:
+        # Keep this visible because it impacts runtime and is useful in audits.
         logger.info(
-            "Intraday interval detected (%s): using fixed SARIMAX order=%s seasonal=%s "
-            "(set PMX_SARIMAX_AUTO_SELECT=1 to re-enable order search).",
+            "Intraday interval detected (%s): constraining SARIMAX order search caps "
+            "(mode=compact,max_p=1,max_d=1,max_q=1,seasonal_periods=0,max_P=0,max_D=0,max_Q=0,order_search_maxiter=60).",
             interval,
-            manual_order,
-            manual_seasonal,
         )
         _INTRADAY_SARIMAX_PROFILE_LOGGED = True
 
-    return {
-        "auto_select": False,
-        "manual_order": manual_order,
-        "manual_seasonal_order": manual_seasonal,
-    }
+    sarimax_kwargs.update(
+        {
+        "auto_select": True,
+        "max_p": 1,
+        "max_d": 1,
+        "max_q": 1,
+        # Intraday guardrail: disable seasonal block entirely for speed and to
+        # avoid spurious daily-cycle insertion on gappy hour bars.
+        "seasonal_periods": 0,
+        "max_P": 0,
+        "max_D": 0,
+        "max_Q": 0,
+        "order_search_maxiter": 60,
+        "order_search_mode": "compact",
+        }
+    )
+    return sarimax_kwargs
 
 
 def _parse_int_env(name: str) -> Optional[int]:
@@ -686,12 +673,22 @@ def _prepare_market_window(
     )
     chunk_size = _parse_int_env("DATA_SOURCE_CHUNK_SIZE")
     t0 = time.perf_counter()
-    window = manager.extract_ohlcv(
-        tickers=tickers,
-        start_date=start_date.strftime("%Y-%m-%d"),
-        end_date=end_date.strftime("%Y-%m-%d"),
-        chunk_size=chunk_size,
-    )
+    extract_kwargs = {
+        "tickers": tickers,
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+    }
+    try:
+        sig = inspect.signature(manager.extract_ohlcv)
+        accepts_chunk = "chunk_size" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        )
+    except (TypeError, ValueError):
+        accepts_chunk = False
+    if chunk_size is not None and accepts_chunk:
+        extract_kwargs["chunk_size"] = chunk_size
+
+    window = manager.extract_ohlcv(**extract_kwargs)
     t1 = time.perf_counter()
     before_mb = _estimate_frame_mb(window)
     downcasted = _downcast_numeric_frame(window)
@@ -1306,6 +1303,8 @@ def _emit_dashboard_json(
     equity_points: list[Dict[str, Any]],
     realized_equity_points: Optional[list[Dict[str, Any]]] = None,
     recent_signals: Optional[list[Dict[str, Any]]] = None,
+    trade_events: Optional[list[Dict[str, Any]]] = None,
+    price_series: Optional[Dict[str, list[Dict[str, Any]]]] = None,
     win_rate: float = 0.0,
     latencies: Optional[Dict[str, float]] = None,
     quality_summary: Optional[Dict[str, Any]] = None,
@@ -1330,6 +1329,7 @@ def _emit_dashboard_json(
         "pnl": {"absolute": summary["pnl_dollars"], "pct": summary["pnl_pct"]},
         "win_rate": win_rate,
         "trade_count": summary["trades"],
+        "positions": summary.get("positions", {}),
         "latency": latencies or {},
         "forecaster_health": forecaster_health or {},
         "quant_validation_health": quant_validation_health or {},
@@ -1342,6 +1342,8 @@ def _emit_dashboard_json(
         "equity": equity_points,
         "equity_realized": realized_equity_points or [],
         "signals": (recent_signals or [])[-20:],  # keep it small
+        "trade_events": trade_events or [],
+        "price_series": price_series or {},
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1771,6 +1773,7 @@ def main(
         price_map: Dict[str, float] = {}
         recent_signals: list[Dict[str, Any]] = []
         frames_by_ticker = _build_ticker_frame_map(raw_window, ticker_list)
+        last_frames_by_ticker = frames_by_ticker
         pre_entries: list[Dict[str, Any]] = []
 
         for order, ticker in enumerate(ticker_list):
@@ -1813,27 +1816,12 @@ def main(
                 parallel_workers or "auto",
             )
 
-        combined_parallel = bool(parallel_ticker_processing and parallel_forecasts)
-        if combined_parallel:
-            logger.info(
-                "Parallel pipeline enabled (candidates + forecasts) for %s tickers (workers=%s)",
-                len(pre_entries),
-                parallel_workers or "auto",
-            )
-            candidates = _build_candidates_with_forecasts(
-                pre_entries,
-                preprocessor=preprocessor,
-                horizon=forecast_horizon,
-                parallel=True,
-                max_workers=parallel_workers,
-            )
-        else:
-            candidates = _build_ticker_candidates(
-                pre_entries,
-                preprocessor=preprocessor,
-                parallel=parallel_ticker_processing,
-                max_workers=parallel_workers,
-            )
+        candidates = _build_ticker_candidates(
+            pre_entries,
+            preprocessor=preprocessor,
+            parallel=parallel_ticker_processing,
+            max_workers=parallel_workers,
+        )
 
         forecast_inputs: Dict[str, pd.DataFrame] = {}
         for candidate in candidates:
@@ -1909,7 +1897,7 @@ def main(
                 continue
 
             candidate["data_source"] = data_source
-            if not combined_parallel:
+            if "forecast_bundle" not in candidate:
                 forecast_inputs[symbol] = ticker_frame
 
         forecast_map: Dict[str, Tuple[Optional[Dict], Optional[float]]] = {}
@@ -2232,6 +2220,45 @@ def main(
         "llm_enabled": bool(llm_generator),
         "strategy": strategy_config or {},
     }
+
+    max_series_points = _parse_int_env("DASHBOARD_PRICE_POINTS") or 240
+    price_series: Dict[str, list[Dict[str, Any]]] = {}
+    try:
+        frames = last_frames_by_ticker if "last_frames_by_ticker" in locals() else {}
+        for symbol, frame in (frames or {}).items():
+            if frame is None or frame.empty or "Close" not in frame.columns:
+                continue
+            trimmed = frame.tail(max_series_points)
+            closes = pd.Series(trimmed["Close"]).astype(float)
+            idx = pd.DatetimeIndex(trimmed.index)
+            price_series[str(symbol)] = [
+                {"t": idx[i].isoformat(), "close": float(closes.iloc[i])}
+                for i in range(len(closes))
+            ]
+    except Exception:
+        price_series = {}
+
+    max_trade_events = _parse_int_env("DASHBOARD_MAX_TRADES") or 300
+    trade_events: list[Dict[str, Any]] = []
+    try:
+        for trade in (trading_engine.trades or [])[-max_trade_events:]:
+            trade_events.append(
+                {
+                    "ticker": trade.ticker,
+                    "action": trade.action,
+                    "shares": trade.shares,
+                    "price": trade.entry_price,
+                    "timestamp": trade.timestamp,
+                    "bar_timestamp": trade.bar_timestamp,
+                    "realized_pnl": trade.realized_pnl,
+                    "realized_pnl_pct": trade.realized_pnl_pct,
+                    "exit_reason": trade.exit_reason,
+                    "slippage": trade.slippage,
+                }
+            )
+    except Exception:
+        trade_events = []
+
     _emit_dashboard_json(
         path=DASHBOARD_DATA_PATH,
         meta=meta,
@@ -2240,6 +2267,8 @@ def main(
         equity_points=equity_points,
         realized_equity_points=realized_equity_points,
         recent_signals=recent_signals if 'recent_signals' in locals() else [],
+        trade_events=trade_events,
+        price_series=price_series,
         win_rate=win_rate,
         latencies=latencies,
         quality_summary=quality_summary,

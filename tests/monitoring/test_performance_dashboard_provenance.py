@@ -34,4 +34,3 @@ def test_performance_dashboard_flags_synthetic_not_proof(tmp_path):
     assert snapshot.metrics["profitability_proof"] is False
     assert snapshot.alerts and "Synthetic data present" in snapshot.alerts[0]
     assert snapshot.provenance.get("origin") == "synthetic"
-

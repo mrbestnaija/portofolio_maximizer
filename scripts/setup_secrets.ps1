@@ -66,4 +66,3 @@ Write-Host "   3. Verify files are not tracked by git: git status --ignored | Se
 Write-Host ""
 Write-Host "⚠️  IMPORTANT: Never commit secrets to git!" -ForegroundColor Red
 Write-Host "   The secrets/ directory is already in .gitignore"
-

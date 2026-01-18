@@ -43,4 +43,3 @@ def test_data_provenance_marks_synthetic_when_trades_tagged(tmp_path):
     assert summary["trade_sources"]["synthetic"] >= 1
     assert "syn_demo" in summary["synthetic_dataset_ids"]
     db.close()
-

@@ -87,6 +87,11 @@ class TestSARIMAX:
         assert len(result["lower_ci"]) == 5
         assert "z_score" in result
 
+    def test_manual_orders_disallowed(self, price_series: pd.Series) -> None:
+        forecaster = SARIMAXForecaster(auto_select=False)
+        with pytest.raises(ValueError):
+            forecaster.fit(price_series)
+
     def test_sarimax_forecast_accuracy(self) -> None:
         np.random.seed(42)
         periods = 320
@@ -110,7 +115,7 @@ class TestSARIMAX:
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestGARCH:
     def test_garch_pipeline(self, returns_series: pd.Series) -> None:
-        forecaster = GARCHForecaster(p=1, q=1)
+        forecaster = GARCHForecaster(max_p=1, max_q=1)
         forecaster.fit(returns_series)
 
         result = forecaster.forecast(steps=5)
@@ -118,9 +123,47 @@ class TestGARCH:
         assert len(result["variance_forecast"]) >= 1
         assert np.all(result["variance_forecast"].values > 0)
 
-        summary = forecaster.get_model_summary()
-        assert "aic" in summary
-        assert "params" in summary
+    def test_manual_orders_disallowed(self, returns_series: pd.Series) -> None:
+        forecaster = GARCHForecaster(auto_select=False, max_p=1, max_q=1)
+        with pytest.raises(ValueError):
+            forecaster.fit(returns_series)
+
+
+@pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
+class TestSARIMAXXInstrumentation:
+    def test_exogenous_artifact_recorded(
+        self,
+        price_series: pd.Series,
+        returns_series: pd.Series,
+    ) -> None:
+        config = TimeSeriesForecasterConfig(
+            sarimax_enabled=True,
+            garch_enabled=False,
+            samossa_enabled=False,
+            mssa_rl_enabled=False,
+            ensemble_enabled=False,
+            forecast_horizon=3,
+            sarimax_kwargs={
+                "auto_select": True,
+                "trend": "auto",
+                "max_p": 1,
+                "max_d": 1,
+                "max_q": 1,
+                "max_P": 1,
+                "max_D": 1,
+                "max_Q": 1,
+                "order_search_mode": "compact",
+                "order_search_maxiter": 60,
+            },
+        )
+        forecaster = TimeSeriesForecaster(config=config)
+        forecaster.fit(price_series=price_series, returns_series=returns_series)
+        report = forecaster.get_instrumentation_report()
+        exog = (report.get("artifacts") or {}).get("sarimax_exogenous") or {}
+        assert exog.get("columns") == ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"]
+        sarimax_summary = (forecaster.get_component_summaries() or {}).get("sarimax") or {}
+        assert sarimax_summary.get("aic") is not None
+        assert sarimax_summary.get("order") is not None
 
     def test_garch_detects_volatility_regime(self) -> None:
         np.random.seed(0)
@@ -130,7 +173,7 @@ class TestGARCH:
         dates = pd.date_range(datetime(2021, 1, 1), periods=len(returns), freq="D")
         series = pd.Series(returns, index=dates)
 
-        forecaster = GARCHForecaster(p=1, q=1)
+        forecaster = GARCHForecaster(max_p=1, max_q=1)
         forecaster.fit(series)
         forecast = forecaster.forecast(steps=1)
         baseline_var = np.var(low_vol)

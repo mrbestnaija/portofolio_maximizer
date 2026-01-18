@@ -11,11 +11,11 @@ from ai_llm.market_analyzer import LLMMarketAnalyzer
 
 class MockOllamaClient:
     """Mock client for testing parsing"""
-    
+
     def __init__(self, response_type='valid'):
         self.response_type = response_type
         self.model = "test-model"
-    
+
     def generate(self, prompt, system=None, temperature=0.1):
         """Return different response types for testing"""
         responses = {
@@ -47,9 +47,9 @@ def test_valid_json_response():
     client = MockOllamaClient('valid')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     assert result['trend'] == 'bullish'
     assert result['strength'] == 7
     assert result['regime'] == 'trending'
@@ -62,9 +62,9 @@ def test_markdown_wrapped_json():
     client = MockOllamaClient('markdown')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     assert result['trend'] == 'bearish'
     assert result['strength'] == 3
     assert 'error' not in result  # Should parse successfully
@@ -75,9 +75,9 @@ def test_json_with_extra_text():
     client = MockOllamaClient('extra_text')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     assert result['trend'] == 'neutral'
     assert result['strength'] == 5
     assert 'error' not in result  # Should extract JSON successfully
@@ -88,9 +88,9 @@ def test_incomplete_json():
     client = MockOllamaClient('incomplete')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     # Should have all required fields with defaults
     assert 'trend' in result
     assert 'strength' in result
@@ -104,9 +104,9 @@ def test_invalid_json():
     client = MockOllamaClient('invalid_json')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     # Should return fallback response
     assert result['trend'] == 'neutral'
     assert result['strength'] == 5
@@ -119,9 +119,9 @@ def test_empty_response():
     client = MockOllamaClient('empty')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     # Should return safe fallback
     assert result['trend'] == 'neutral'
     assert result['strength'] == 5
@@ -133,9 +133,9 @@ def test_no_json_in_response():
     client = MockOllamaClient('no_json')
     analyzer = LLMMarketAnalyzer(client)
     data = create_test_data()
-    
+
     result = analyzer.analyze_ohlcv(data, ticker='TEST')
-    
+
     # Should return safe fallback
     assert result['trend'] == 'neutral'
     assert 'error' in result
@@ -150,7 +150,7 @@ def test_field_validation():
 
 if __name__ == '__main__':
     print("Running LLM parsing robustness tests...")
-    
+
     tests = [
         ("Valid JSON", test_valid_json_response),
         ("Markdown wrapped JSON", test_markdown_wrapped_json),
@@ -160,10 +160,10 @@ if __name__ == '__main__':
         ("Empty response", test_empty_response),
         ("No JSON in response", test_no_json_in_response),
     ]
-    
+
     passed = 0
     failed = 0
-    
+
     for name, test_func in tests:
         try:
             test_func()
@@ -172,8 +172,7 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ {name}: {e}")
             failed += 1
-    
+
     print(f"\n{'='*60}")
     print(f"Results: {passed} passed, {failed} failed")
     print(f"{'='*60}")
-

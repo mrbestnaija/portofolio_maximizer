@@ -4,11 +4,11 @@
 signal_routing:
   # Primary signal source
   time_series_primary: true  # DEFAULT: true - Time Series is primary
-  
+
   # Fallback/redundancy
   llm_fallback: false  # Disable LLM fallback to speed up runs
   llm_redundancy: false  # Disable redundancy to avoid latency overhead
-  
+
   # Time Series model flags
   enable_samossa: true
   enable_sarimax: true
@@ -52,7 +52,7 @@ signal_routing:
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.
-  
+
   # Fallback triggers
   ts_fallback_triggers:
     - forecast_unavailable
@@ -69,11 +69,10 @@ signal_routing:
       include_mid_price: true
       include_route_type: true
       include_fill_timestamp: true
-  
+
   # Routing mode
   routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:
   # - TIME_SERIES_PRIMARY_LLM_FALLBACK (default)
   # - TIME_SERIES_PRIMARY_LLM_REDUNDANCY
   # - TIME_SERIES_ONLY
   # - LLM_ONLY (legacy mode)
-

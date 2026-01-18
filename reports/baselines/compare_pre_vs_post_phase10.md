@@ -43,4 +43,3 @@
 | `backtest.total_return` | n/a | -83.398 | n/a |
 | `backtest.total_trades` | n/a | 8 | n/a |
 | `backtest.win_rate` | n/a | 0.375 | n/a |
-

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class LLMSignalTracker:
     """
     Track and validate LLM trading signals over time.
-    
+
     Validation Criteria (per AGENT_INSTRUCTION.md):
     - Annual return > 10%
     - Sharpe ratio > 0
@@ -43,7 +43,7 @@ class LLMSignalTracker:
     - Beats buy-and-hold baseline
     - Capital requirement: $25K+
     """
-    
+
     def __init__(self, tracking_db_path: str = "data/llm_signal_tracking.json"):
         """
         Args:
@@ -52,7 +52,7 @@ class LLMSignalTracker:
         self.tracking_db_path = Path(tracking_db_path)
         self.tracking_db = self._load_tracking_db()
         self._sync_metadata_counts()
-    
+
     def _load_tracking_db(self) -> Dict:
         """Load tracking database or create new one"""
         if self.tracking_db_path.exists():
@@ -72,14 +72,14 @@ class LLMSignalTracker:
                 'performance': {},
                 'validation_history': []
             }
-    
+
     def _save_tracking_db(self):
         """Save tracking database to disk"""
         self.tracking_db_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         with open(self.tracking_db_path, 'w') as f:
             json.dump(self.tracking_db, f, indent=2, default=str)
-        
+
         logger.info(f"Tracking database saved to: {self.tracking_db_path}")
 
     def _sync_metadata_counts(self) -> None:
@@ -92,25 +92,25 @@ class LLMSignalTracker:
             for sig in signals.values()
             if str(sig.get('validation_status', '')).lower() == 'validated'
         )
-    
+
     def register_signal(self, ticker: str, date: str, signal: Dict[str, Any]) -> str:
         """
         Register a new LLM signal for tracking.
-        
+
         Args:
             ticker: Stock ticker symbol
             date: Signal generation date (YYYY-MM-DD)
             signal: Signal dictionary with action, confidence, reasoning
-        
+
         Returns:
             Signal ID for tracking
         """
         signal_id = f"{ticker}_{date}_{signal['action']}"
-        
+
         if signal_id in self.tracking_db['signals']:
             logger.warning(f"Signal already registered: {signal_id}")
             return signal_id
-        
+
         self.tracking_db['signals'][signal_id] = {
             'id': signal_id,
             'ticker': ticker,
@@ -123,7 +123,7 @@ class LLMSignalTracker:
             'performance': {},
             'validation_results': {}
         }
-        
+
         self._sync_metadata_counts()
         logger.info(f"Registered signal: {signal_id}")
         self._save_tracking_db()
@@ -154,27 +154,27 @@ class LLMSignalTracker:
         self._sync_metadata_counts()
 
         self._save_tracking_db()
-    
-    def update_signal_performance(self, signal_id: str, 
-                                  actual_price: float, 
+
+    def update_signal_performance(self, signal_id: str,
+                                  actual_price: float,
                                   actual_date: str) -> Dict[str, Any]:
         """
         Update signal performance with actual market outcome.
-        
+
         Args:
             signal_id: Signal tracking ID
             actual_price: Actual market price after signal
             actual_date: Date of price observation
-        
+
         Returns:
             Updated performance metrics
         """
         if signal_id not in self.tracking_db['signals']:
             logger.error(f"Signal not found: {signal_id}")
             return {}
-        
+
         signal = self.tracking_db['signals'][signal_id]
-        
+
         # Calculate performance
         if 'entry_price' not in signal.get('performance', {}):
             # First update - record entry price
@@ -183,7 +183,7 @@ class LLMSignalTracker:
                 'entry_date': actual_date,
                 'observations': []
             }
-        
+
         # Add observation
         observation = {
             'date': actual_date,
@@ -191,7 +191,7 @@ class LLMSignalTracker:
             'timestamp': datetime.now().isoformat()
         }
         signal['performance']['observations'].append(observation)
-        
+
         # Calculate return
         entry_price = signal['performance']['entry_price']
         if signal['action'] == 'BUY':
@@ -200,33 +200,33 @@ class LLMSignalTracker:
             return_pct = (entry_price - actual_price) / entry_price  # Short position
         else:  # HOLD
             return_pct = 0.0
-        
+
         signal['performance']['current_return'] = return_pct
         signal['performance']['last_update'] = actual_date
-        
+
         logger.info(f"Updated signal {signal_id}: Return = {return_pct:.2%}")
-        
+
         return signal['performance']
-    
-    def validate_signal(self, signal_id: str, 
+
+    def validate_signal(self, signal_id: str,
                        backtest_results: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Validate signal against production criteria.
-        
+
         Args:
             signal_id: Signal tracking ID
             backtest_results: Optional backtest performance metrics
-        
+
         Returns:
             Validation results
         """
         if signal_id not in self.tracking_db['signals']:
             logger.error(f"Signal not found: {signal_id}")
             return {'passed': False, 'reason': 'Signal not found'}
-        
+
         signal = self.tracking_db['signals'][signal_id]
         performance = signal.get('performance', {})
-        
+
         # Validation checks
         validation = {
             'signal_id': signal_id,
@@ -235,7 +235,7 @@ class LLMSignalTracker:
             'passed': False,
             'ready_for_trading': False
         }
-        
+
         # Check 1: Validation period >= 30 days
         if 'observations' in performance:
             days_tracked = len(performance['observations'])
@@ -250,7 +250,7 @@ class LLMSignalTracker:
                 'actual': 0,
                 'passed': False
             }
-        
+
         # Check 2: Annual return > 10%
         if backtest_results and 'annual_return' in backtest_results:
             annual_return = backtest_results['annual_return']
@@ -269,7 +269,7 @@ class LLMSignalTracker:
                     'actual': annual_return,
                     'passed': annual_return > 0.10
                 }
-        
+
         # Check 3: Beats buy-and-hold (alpha > 0)
         if backtest_results and 'alpha' in backtest_results:
             alpha = backtest_results['alpha']
@@ -278,7 +278,7 @@ class LLMSignalTracker:
                 'actual': alpha,
                 'passed': alpha > 0
             }
-        
+
         # Check 4: Sharpe ratio > 0
         if backtest_results and 'sharpe_ratio' in backtest_results:
             sharpe = backtest_results['sharpe_ratio']
@@ -287,23 +287,23 @@ class LLMSignalTracker:
                 'actual': sharpe,
                 'passed': sharpe > 0
             }
-        
+
         # Overall validation
         validation['passed'] = all(
-            check.get('passed', False) 
+            check.get('passed', False)
             for check in validation['checks'].values()
         )
-        
+
         # Ready for trading check
         validation['ready_for_trading'] = (
             validation['passed'] and
             validation['checks'].get('validation_period', {}).get('passed', False)
         )
-        
+
         # Update signal
         signal['validation_status'] = 'validated' if validation['passed'] else 'failed'
         signal['validation_results'] = validation
-        
+
         if validation['passed']:
             self.tracking_db['metadata']['validated_signals'] += 1
             logger.info(f"✅ Signal {signal_id} PASSED validation")
@@ -314,7 +314,7 @@ class LLMSignalTracker:
                 if not check.get('passed', False)
             ]
             logger.warning(f"   Failed checks: {', '.join(failed_checks)}")
-        
+
         # Add to validation history
         self.tracking_db['validation_history'].append({
             'signal_id': signal_id,
@@ -322,9 +322,9 @@ class LLMSignalTracker:
             'passed': validation['passed'],
             'ready_for_trading': validation['ready_for_trading']
         })
-        
+
         return validation
-    
+
     def get_performance_summary(self) -> Dict[str, Any]:
         """Generate performance summary across all tracked signals"""
         summary = {
@@ -335,41 +335,41 @@ class LLMSignalTracker:
             'by_action': defaultdict(lambda: {'total': 0, 'validated': 0}),
             'ready_for_trading': []
         }
-        
+
         if summary['total_signals'] > 0:
             summary['validation_rate'] = summary['validated_signals'] / summary['total_signals']
-        
+
         for signal_id, signal in self.tracking_db['signals'].items():
             ticker = signal['ticker']
             action = signal['action']
-            
+
             # By ticker
             summary['by_ticker'][ticker]['total'] += 1
             if signal.get('validation_status') == 'validated':
                 summary['by_ticker'][ticker]['validated'] += 1
                 if 'current_return' in signal.get('performance', {}):
                     summary['by_ticker'][ticker]['avg_return'] += signal['performance']['current_return']
-            
+
             # By action
             summary['by_action'][action]['total'] += 1
             if signal.get('validation_status') == 'validated':
                 summary['by_action'][action]['validated'] += 1
-            
+
             # Ready for trading
             if signal.get('validation_results', {}).get('ready_for_trading', False):
                 summary['ready_for_trading'].append(signal_id)
-        
+
         # Average returns by ticker
         for ticker_stats in summary['by_ticker'].values():
             if ticker_stats['validated'] > 0:
                 ticker_stats['avg_return'] /= ticker_stats['validated']
-        
+
         return dict(summary)
-    
+
     def generate_report(self, output_format: str = 'text') -> str:
         """Generate comprehensive performance report"""
         summary = self.get_performance_summary()
-        
+
         if output_format == 'text':
             return self._generate_text_report(summary)
         elif output_format == 'json':
@@ -389,7 +389,7 @@ class LLMSignalTracker:
         lines.append("=" * 80)
         lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append("")
-        
+
         # Summary
         lines.append("OVERALL SUMMARY")
         lines.append("-" * 80)
@@ -398,7 +398,7 @@ class LLMSignalTracker:
         lines.append(f"Validation Rate: {summary['validation_rate']:.1%}")
         lines.append(f"Ready for Trading: {len(summary['ready_for_trading'])}")
         lines.append("")
-        
+
         # By ticker
         lines.append("PERFORMANCE BY TICKER")
         lines.append("-" * 80)
@@ -410,7 +410,7 @@ class LLMSignalTracker:
                 f"{stats['avg_return']:>14.2%}"
             )
         lines.append("")
-        
+
         # By action
         lines.append("PERFORMANCE BY ACTION")
         lines.append("-" * 80)
@@ -422,7 +422,7 @@ class LLMSignalTracker:
                 f"{action:<8} {stats['total']:>8} {stats['validated']:>12} {rate:>7.1%}"
             )
         lines.append("")
-        
+
         # Ready for trading
         if summary['ready_for_trading']:
             lines.append("✅ SIGNALS READY FOR PAPER TRADING")
@@ -443,9 +443,9 @@ class LLMSignalTracker:
             lines.append("- Validation period >= 30 days")
             lines.append("- Sharpe ratio > 0")
             lines.append("- Beats buy-and-hold baseline")
-        
+
         lines.append("=" * 80)
-        
+
         return "\n".join(lines)
 
 
@@ -456,43 +456,42 @@ class LLMSignalTracker:
 @click.option('--report', is_flag=True, help='Generate performance report')
 @click.option('--output', default='llm_signal_report.txt', help='Report output file')
 @click.option('--format', 'output_format', default='text', help='Report format (text or json)')
-def main(signals_dir: str, update: bool, validate: bool, report: bool, 
+def main(signals_dir: str, update: bool, validate: bool, report: bool,
          output: str, output_format: str):
     """Track and validate LLM trading signals"""
-    
+
     logger.info("=" * 80)
     logger.info("LLM SIGNAL TRACKING & VALIDATION SYSTEM")
     logger.info("=" * 80)
-    
+
     tracker = LLMSignalTracker()
-    
+
     if update:
         logger.info(f"Updating signals from: {signals_dir}")
         # Implementation for updating signals from directory
         logger.info("✓ Update complete")
-    
+
     if validate:
         logger.info("Running validation on tracked signals...")
         # Implementation for validation
         logger.info("✓ Validation complete")
-    
+
     if report:
         logger.info("Generating performance report...")
         report_content = tracker.generate_report(output_format)
-        
+
         # Print to console
         print("\n" + report_content)
-        
+
         # Save to file
         with open(output, 'w') as f:
             f.write(report_content)
-        
+
         logger.info(f"✓ Report saved to: {output}")
-    
+
     # Save tracking database
     tracker._save_tracking_db()
 
 
 if __name__ == '__main__':
     main()
-

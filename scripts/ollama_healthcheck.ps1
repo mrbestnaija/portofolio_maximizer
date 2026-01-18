@@ -11,27 +11,27 @@ try {
     $response = Invoke-WebRequest -Uri "$OLLAMA_HOST/api/tags" -UseBasicParsing -TimeoutSec 5
     if ($response.StatusCode -eq 200) {
         Write-Host "✅ Ollama service is running" -ForegroundColor Green
-        
+
         # Parse models from JSON response
         $modelsData = $response.Content | ConvertFrom-Json
         $modelCount = if ($modelsData.models) { $modelsData.models.Count } else { 0 }
         Write-Host "📊 Available models: $modelCount" -ForegroundColor Yellow
-        
+
         if ($modelCount -gt 0) {
             Write-Host "📋 Model list:" -ForegroundColor Yellow
             foreach ($model in $modelsData.models) {
                 Write-Host "  - $($model.name)" -ForegroundColor Gray
             }
-            
+
             # Determine model to test
             if ($OLLAMA_MODEL_ENV) {
                 $testModel = $OLLAMA_MODEL_ENV
             } else {
                 $testModel = $modelsData.models[0].name
             }
-            
+
             Write-Host "🧭 Using model: $testModel" -ForegroundColor Cyan
-            
+
             # Test basic functionality
             Write-Host "🧪 Testing basic inference..." -ForegroundColor Yellow
             $testPayload = @{
@@ -39,10 +39,10 @@ try {
                 prompt = "Hello"
                 stream = $false
             } | ConvertTo-Json
-            
+
             $testResponse = Invoke-WebRequest -Uri "$OLLAMA_HOST/api/generate" -Method POST -Body $testPayload -ContentType "application/json" -UseBasicParsing -TimeoutSec 30
             $testData = $testResponse.Content | ConvertFrom-Json
-            
+
             if ($testData.response -and -not $testData.error) {
                 Write-Host "✅ Basic inference working" -ForegroundColor Green
             } else {

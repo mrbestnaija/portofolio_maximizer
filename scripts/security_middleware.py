@@ -12,26 +12,26 @@ from typing import Callable, Any, Dict
 def add_security_headers(response: Any) -> Any:
     """
     Add security headers to HTTP response.
-    
+
     Implements security best practices from OWASP:
     - X-Content-Type-Options: Prevents MIME type sniffing
     - X-Frame-Options: Prevents clickjacking
     - X-XSS-Protection: Enables XSS filtering
     - Strict-Transport-Security: Forces HTTPS
     - Content-Security-Policy: Prevents XSS and injection attacks
-    
+
     Args:
         response: HTTP response object (Flask, FastAPI, Django, etc.)
-        
+
     Returns:
         Response object with security headers added
-        
+
     Example:
         # Flask
         @app.after_request
         def after_request(response):
             return add_security_headers(response)
-            
+
         # FastAPI
         @app.middleware("http")
         async def add_security_headers_middleware(request, call_next):
@@ -45,14 +45,14 @@ def add_security_headers(response: Any) -> Any:
     response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-    
+
     return response
 
 
 def security_headers_middleware(func: Callable) -> Callable:
     """
     Decorator to add security headers to response.
-    
+
     Usage:
         @app.route('/api/endpoint')
         @security_headers_middleware
@@ -69,7 +69,7 @@ def security_headers_middleware(func: Callable) -> Callable:
 def get_security_headers_dict() -> Dict[str, str]:
     """
     Get security headers as dictionary (for use with custom frameworks).
-    
+
     Returns:
         Dictionary of security headers
     """
@@ -82,4 +82,3 @@ def get_security_headers_dict() -> Dict[str, str]:
         'Referrer-Policy': 'strict-origin-when-cross-origin',
         'Permissions-Policy': 'geolocation=(), microphone=(), camera=()'
     }
-

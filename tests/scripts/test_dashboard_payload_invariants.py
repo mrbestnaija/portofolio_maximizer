@@ -103,4 +103,3 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
     assert payload["routing"]["llm_signals"] == routing_stats["llm_fallback_signals"]
     assert "forecaster_health" in payload and payload["forecaster_health"]
     assert "quant_validation_health" in payload and payload["quant_validation_health"]
-
