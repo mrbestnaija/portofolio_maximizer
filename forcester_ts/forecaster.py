@@ -5,6 +5,7 @@ and the new MSSA-RL variant in parallel.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import warnings
@@ -101,12 +102,105 @@ class TimeSeriesForecaster:
         self._model_events: list[Dict[str, Any]] = []
         self._series_diagnostics: Dict[str, Any] = {}
         self._instrumentation = ModelInstrumentation()
+        self._sarimax_exog_last_row: Optional[pd.Series] = None
+        self._sarimax_exog_columns: list[str] = []
         audit_dir = self.config.ensemble_kwargs.get("audit_log_dir") if isinstance(self.config.ensemble_kwargs, dict) else None
         if not audit_dir:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         self._audit_dir: Optional[Path] = Path(audit_dir).expanduser() if audit_dir else None
         cfg_path = os.environ.get("TS_FORECAST_MONITOR_CONFIG", "config/forecaster_monitoring.yml")
         self._rmse_monitor_cfg: Dict[str, Any] = self._load_rmse_monitoring_config(Path(cfg_path))
+
+    def _build_sarimax_exogenous(
+        self,
+        *,
+        price_series: pd.Series,
+        returns_series: Optional[pd.Series],
+    ) -> pd.DataFrame:
+        """
+        Build a minimal SARIMAX-X feature set from the observed window.
+
+        Feature names are treated as part of the instrumentation contract:
+        ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"].
+        """
+        returns = returns_series if returns_series is not None else price_series.pct_change()
+        returns = returns.reindex(price_series.index)
+
+        ret_1 = returns.shift(1)
+        vol_10 = returns.rolling(10).std()
+        mom_5 = price_series.pct_change(5)
+
+        ema_10 = price_series.ewm(span=10, adjust=False).mean()
+        ema_gap_10 = (price_series - ema_10) / ema_10.replace(0.0, pd.NA)
+
+        mean_20 = price_series.rolling(20).mean()
+        std_20 = price_series.rolling(20).std()
+        zscore_20 = (price_series - mean_20) / std_20.replace(0.0, pd.NA)
+
+        exog = pd.DataFrame(
+            {
+                "ret_1": ret_1,
+                "vol_10": vol_10,
+                "mom_5": mom_5,
+                "ema_gap_10": ema_gap_10,
+                "zscore_20": zscore_20,
+            },
+            index=price_series.index,
+        )
+        exog = exog.astype(float).replace([pd.NA, float("inf"), float("-inf")], 0.0).fillna(0.0)
+        return exog
+
+    def _build_sarimax_forecast_exogenous(self, horizon: int) -> Optional[pd.DataFrame]:
+        if not self._sarimax_exog_columns or self._sarimax_exog_last_row is None:
+            return None
+        horizon = int(horizon)
+        if horizon <= 0:
+            return None
+        last = self._sarimax_exog_last_row.reindex(self._sarimax_exog_columns).astype(float)
+        repeated = pd.DataFrame([last.to_dict()] * horizon, columns=self._sarimax_exog_columns)
+        return repeated
+
+    def _construct_with_filtered_kwargs(self, cls: type, kwargs: Optional[Dict[str, Any]]) -> Any:
+        """
+        Instantiate cls with kwargs filtered to only parameters accepted by cls.__init__.
+
+        - If cls.__init__ accepts **kwargs, forward everything.
+        - Otherwise, drop unsupported keys to avoid TypeError from config drift.
+        """
+        if kwargs is None:
+            kwargs = {}
+        if not isinstance(kwargs, dict):
+            return cls()
+
+        try:
+            sig = inspect.signature(cls.__init__)
+            accepts_varkw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+            if accepts_varkw:
+                return cls(**kwargs)
+
+            accepted = {
+                name
+                for name, p in sig.parameters.items()
+                if name != "self"
+                and p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+            filtered = {k: v for k, v in kwargs.items() if k in accepted}
+            removed = sorted(set(kwargs.keys()) - set(filtered.keys()))
+            if removed:
+                logger.debug(
+                    "Filtered unsupported kwargs for %s: %s",
+                    getattr(cls, "__name__", str(cls)),
+                    removed,
+                )
+            return cls(**filtered)
+        except Exception:
+            return cls(**kwargs)
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -285,8 +379,20 @@ class TimeSeriesForecaster:
             )
             try:
                 with self._instrumentation.track("sarimax", "fit", points=len(price_series)) as meta:
-                    self._sarimax = SARIMAXForecaster(**self.config.sarimax_kwargs)
-                    self._sarimax.fit(price_series)
+                    self._sarimax = self._construct_with_filtered_kwargs(
+                        SARIMAXForecaster, self.config.sarimax_kwargs
+                    )
+                    exog = self._build_sarimax_exogenous(
+                        price_series=price_series,
+                        returns_series=returns_series,
+                    )
+                    self._sarimax_exog_columns = list(exog.columns)
+                    self._sarimax_exog_last_row = exog.iloc[-1] if not exog.empty else None
+                    self._instrumentation.record_artifact(
+                        "sarimax_exogenous",
+                        {"columns": self._sarimax_exog_columns, "row_count": int(len(exog))},
+                    )
+                    self._sarimax.fit(price_series, exogenous=exog)
                     meta["order"] = getattr(self._sarimax, "best_order", None)
                     meta["seasonal"] = getattr(self._sarimax, "best_seasonal_order", None)
                 self._record_model_event(
@@ -297,6 +403,8 @@ class TimeSeriesForecaster:
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 self._sarimax = None
+                self._sarimax_exog_columns = []
+                self._sarimax_exog_last_row = None
                 self._handle_model_failure("sarimax", "fit", exc)
 
         if self.config.samossa_enabled:
@@ -309,7 +417,9 @@ class TimeSeriesForecaster:
             )
             try:
                 with self._instrumentation.track("samossa", "fit", points=len(price_series)) as meta:
-                    self._samossa = SAMOSSAForecaster(**self.config.samossa_kwargs)
+                    self._samossa = self._construct_with_filtered_kwargs(
+                        SAMOSSAForecaster, self.config.samossa_kwargs
+                    )
                     self._samossa.fit(price_series)
                     summary = self._samossa.get_model_summary()
                     meta["explained_variance"] = summary.get("explained_variance_ratio")
@@ -371,7 +481,9 @@ class TimeSeriesForecaster:
                 )
                 try:
                     with self._instrumentation.track("garch", "fit", points=len(returns_series)) as meta:
-                        self._garch = GARCHForecaster(**self.config.garch_kwargs)
+                        self._garch = self._construct_with_filtered_kwargs(
+                            GARCHForecaster, self.config.garch_kwargs
+                        )
                         self._garch.fit(returns_series)
                         summary = self._garch.get_model_summary()
                         meta["order"] = {"p": self._garch.p, "q": self._garch.q}
@@ -404,7 +516,12 @@ class TimeSeriesForecaster:
             try:
                 self._record_model_event("sarimax", "forecast_start", horizon=horizon)
                 with self._instrumentation.track("sarimax", "forecast", horizon=horizon) as meta:
-                    results["sarimax_forecast"] = self._sarimax.forecast(steps=horizon, alpha=alpha)
+                    exog = self._build_sarimax_forecast_exogenous(horizon)
+                    results["sarimax_forecast"] = self._sarimax.forecast(
+                        steps=horizon,
+                        exogenous=exog,
+                        alpha=alpha,
+                    )
                     meta["confidence_interval"] = alpha
                 self._record_model_event("sarimax", "forecast_complete")
             except Exception as exc:
