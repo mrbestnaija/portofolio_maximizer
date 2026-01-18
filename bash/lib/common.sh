@@ -220,3 +220,108 @@ pmx_run_tee() {
 
   return "${exit_code}"
 }
+
+pmx_pid_is_running() {
+  local pid="${1:-}"
+  [[ -n "${pid}" ]] || return 1
+  kill -0 "${pid}" >/dev/null 2>&1
+}
+
+pmx_pidfile_read() {
+  local pidfile="${1:-}"
+  [[ -n "${pidfile}" ]] || return 1
+  [[ -f "${pidfile}" ]] || return 1
+  local pid=""
+  pid="$(cat "${pidfile}" 2>/dev/null || true)"
+  if pmx_pid_is_running "${pid}"; then
+    echo "${pid}"
+    return 0
+  fi
+  rm -f "${pidfile}" >/dev/null 2>&1 || true
+  return 1
+}
+
+pmx_pidfile_write() {
+  local pidfile="${1:-}"
+  local pid="${2:-}"
+  [[ -n "${pidfile}" ]] || return 1
+  [[ -n "${pid}" ]] || return 1
+  mkdir -p "$(dirname "${pidfile}")" >/dev/null 2>&1 || true
+  echo "${pid}" >"${pidfile}"
+}
+
+pmx_kill_pidfile() {
+  local pidfile="${1:-}"
+  local pid=""
+  pid="$(pmx_pidfile_read "${pidfile}" 2>/dev/null || true)"
+  if [[ -n "${pid}" ]]; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    rm -f "${pidfile}" >/dev/null 2>&1 || true
+  fi
+}
+
+pmx_dashboard_url() {
+  local port="${1:-8000}"
+  echo "http://127.0.0.1:${port}/visualizations/live_dashboard.html"
+}
+
+pmx_ensure_dashboard() {
+  local root="${1:-}"
+  local python_bin="${2:-}"
+  local port="${3:-8000}"
+  local persist="${4:-1}"
+  local keep_alive="${5:-1}"
+  local db_path="${6:-}"
+
+  [[ -n "${root}" ]] || root="$(pmx_repo_root)"
+  [[ -n "${python_bin}" ]] || python_bin="$(pmx_require_venv_python "${root}")"
+
+  local dash_html="${root}/visualizations/live_dashboard.html"
+  local dash_json="${root}/visualizations/dashboard_data.json"
+  local bridge="${root}/scripts/dashboard_db_bridge.py"
+
+  local server_pidfile="${root}/logs/dashboard_http_${port}.pid"
+  local bridge_pidfile="${root}/logs/dashboard_bridge.pid"
+
+  # Start/keep DB->JSON bridge (writes dashboard_data.json and optionally dashboard_audit.db).
+  local bridge_pid=""
+  bridge_pid="$(pmx_pidfile_read "${bridge_pidfile}" 2>/dev/null || true)"
+  if [[ -z "${bridge_pid}" ]]; then
+    if [[ "${persist}" == "1" ]]; then
+      "${python_bin}" "${bridge}" --interval-seconds 5 --persist-snapshot ${db_path:+--db-path "${db_path}"} >/dev/null 2>&1 &
+    else
+      "${python_bin}" "${bridge}" --interval-seconds 5 ${db_path:+--db-path "${db_path}"} >/dev/null 2>&1 &
+    fi
+    bridge_pid=$!
+    pmx_pidfile_write "${bridge_pidfile}" "${bridge_pid}" || true
+  fi
+
+  # Start/keep local http.server for static dashboard.
+  local serve_pid=""
+  serve_pid="$(pmx_pidfile_read "${server_pidfile}" 2>/dev/null || true)"
+  if [[ -z "${serve_pid}" ]]; then
+    "${python_bin}" -m http.server "${port}" --bind 127.0.0.1 --directory "${root}" >/dev/null 2>&1 &
+    serve_pid=$!
+    if pmx_pid_is_running "${serve_pid}"; then
+      pmx_pidfile_write "${server_pidfile}" "${serve_pid}" || true
+    else
+      serve_pid=""
+    fi
+  fi
+
+  echo "Dashboard URL: $(pmx_dashboard_url "${port}")"
+  echo "Dashboard HTML: ${dash_html}"
+  echo "Dashboard JSON: ${dash_json}"
+
+  if [[ "${keep_alive}" != "1" ]]; then
+    # Best-effort cleanup instructions (caller may also trap).
+    PMX_DASHBOARD_SERVER_PIDFILE="${server_pidfile}"
+    PMX_DASHBOARD_BRIDGE_PIDFILE="${bridge_pidfile}"
+    export PMX_DASHBOARD_SERVER_PIDFILE PMX_DASHBOARD_BRIDGE_PIDFILE
+  fi
+}
+
+pmx_dashboard_cleanup() {
+  pmx_kill_pidfile "${PMX_DASHBOARD_SERVER_PIDFILE:-}" || true
+  pmx_kill_pidfile "${PMX_DASHBOARD_BRIDGE_PIDFILE:-}" || true
+}

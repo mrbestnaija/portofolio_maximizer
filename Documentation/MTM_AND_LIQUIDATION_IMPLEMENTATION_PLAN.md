@@ -1,13 +1,17 @@
 # Mark-to-Market & Liquidation Implementation Plan
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
-**Last updated**: 2025-11-20  
+**Last updated**: 2026-01-18
 **Scope**: Enhancing `scripts/liquidate_open_trades.py` from a spot-only, yfinance-dependent helper into a configurable, asset-class-aware MTM tool that can support equities, crypto, options, and synthetic exposures under the barbell architecture.
 **Current status (2026-01-07)**: Phase 1 done; Phase 2 schema hints wired; synthetic legs implemented; options MTM (intrinsic/BS) and risk/reporting integration remain pending (see `Documentation/PROJECT_STATUS.md`).
+
+## Delta (2026-01-18)
+
+- Reporting surface improved: `visualizations/dashboard_data.json` now includes `trade_events` and `positions`, enabling MTM/liquidation research runs to be inspected in the live dashboard alongside realized trade PnL (without manufacturing demo values). Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) and audit snapshots persist to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 
 This plan is sequenced and intended to be kept in sync with the codebase. It builds on the design discussion captured in the prompt text and aligns with:
 
@@ -34,10 +38,10 @@ This plan is sequenced and intended to be kept in sync with the codebase. It bui
   - Optional hints: `asset_class`, `instrument_type`, `underlying_ticker`, `strike`, `expiry`, `multiplier` (used only when present in schema).
 - [x] Add a pluggable **pricing policy** via CLI:
   - `--pricing-policy` with choices `neutral`, `conservative`, `intrinsic`, `bs_model`.
-  - Spot (equity/ETF/crypto):  
-    - `neutral`: MTM = latest spot price.  
+  - Spot (equity/ETF/crypto):
+    - `neutral`: MTM = latest spot price.
     - `conservative`: clamp MTM toward entry (no unrealised gains) depending on long/short side.
-  - Options (call/put):  
+  - Options (call/put):
     - `intrinsic` / `bs_model`: currently intrinsic-only (BS reserved for later), using underlying spot and strike.
   - Synthetic/unknown: MTM = entry price (no fantasy PnL).
 - [x] Keep **schema compatibility**:
@@ -79,8 +83,8 @@ This plan is sequenced and intended to be kept in sync with the codebase. It bui
 
 - [ ] Tighten option MTM logic in `liquidate_open_trades.py`:
   - For intrinsic pricing:
-    - Calls: `max(S − K, 0)`  
-    - Puts: `max(K − S, 0)`  
+    - Calls: `max(S − K, 0)`
+    - Puts: `max(K − S, 0)`
     - Decide whether entry price and MTM are *per contract* or *per underlying unit*, and document this explicitly.
   - Ensure PnL formula is consistent with how options are stored (contracts × premium vs underlying units).
 
@@ -178,8 +182,8 @@ This plan is sequenced and intended to be kept in sync with the codebase. It bui
 
 ## Quick Reference
 
-- **Current script**: `scripts/liquidate_open_trades.py`  
-  - CLI: `--db-path`, `--pricing-policy {neutral, conservative, intrinsic, bs_model}`  
+- **Current script**: `scripts/liquidate_open_trades.py`
+  - CLI: `--db-path`, `--pricing-policy {neutral, conservative, intrinsic, bs_model}`
   - Behaviour: robust spot MTM; basic hooks for options and future expansion.
 
 - **Next steps**:

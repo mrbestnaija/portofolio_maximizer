@@ -13,6 +13,10 @@
 
 ---
 
+## Delta (2026-01-18)
+
+- Dashboard reporting now supports trade-level visualization (`trade_events`, `price_series`, `positions`) in `visualizations/dashboard_data.json`, and `visualizations/live_dashboard.html` polls it every 5 seconds. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; audit snapshots persist to `data/dashboard_audit.db` by default (`--persist-snapshot`).
+
 ## 1. NAV Tracking & Exposure Surface
 
 - [ ] Create `portfolio/nav_tracker.py` (or equivalent helper):
@@ -134,3 +138,57 @@
 - [ ] When implementing, prefer:
   - [ ] Small, composable modules (`NAVTracker`, `NAVAllocator`, `RiskScaler`).
   - [ ] Clear feature flags so the legacy spot-only path remains easy to reason about.
+
+---
+
+## 9. Barbell PnL Evaluation Protocol (Do Not Promote Without Evidence)
+
+**Goal**: Quantify whether barbell constraints improve realized PnL outcomes versus TS-only sizing, **before** enabling any barbell/NAV allocator logic in production-like runs.
+
+### 9.1 What this protocol does (and does not do)
+
+- **Does**: compare two backtests on the same OHLCV window using the same forecasting/signal logic:
+  - `TS_ONLY`: baseline walk-forward backtest.
+  - `BARBELL_SIZED`: same backtest, but applies barbell bucket sizing multipliers (safe/core/spec) to the signal confidence before execution sizing (feature-flagged in the harness; does not change production config files).
+- **Does not**: implement a full NAV allocator, bucket budgets, or options legs. This is a *first-order sizing audit* to decide if barbell sizing is promising.
+
+### 9.2 Preconditions
+
+- Run under WSL `simpleTrader_env` and record the runtime fingerprint (see `Documentation/RUNTIME_GUARDRAILS.md`).
+- Ensure the DB contains OHLCV for the evaluation tickers and window (or run ETL first).
+
+### 9.3 Evaluation universe (must include safe + risk)
+
+Include at least:
+- Safe bucket tickers from `config/barbell.yml` (e.g., `SHY,BIL,IEF`)
+- Core/speculative tickers from `config/barbell.yml` (e.g., `MSFT,CL=F,MTN,AAPL,BTC-USD`)
+
+### 9.4 Run command (feature-flagged harness)
+
+```bash
+./simpleTrader_env/bin/python scripts/run_barbell_pnl_evaluation.py \
+  --tickers "SHY,BIL,IEF,MSFT,CL=F,MTN,AAPL,BTC-USD" \
+  --lookback-days 180 \
+  --forecast-horizon 14 \
+  --report-path reports/barbell_pnl_eval.json
+```
+
+For promotion gating + evidence readiness tasks, track progress in:
+- `Documentation/BARBELL_PNL_EVIDENCE_AND_PROMOTION_TODO.md`
+
+### 9.5 Acceptance criteria (minimum bar to claim “improves PnL”)
+
+Barbell is only considered “helpful” when all are true:
+- `BARBELL_SIZED.total_return > TS_ONLY.total_return` (PnL up in USD)
+- `BARBELL_SIZED.profit_factor >= TS_ONLY.profit_factor` (no PF regression)
+- `BARBELL_SIZED.max_drawdown <= TS_ONLY.max_drawdown` (risk not worse)
+- Trade count remains sufficient for inference (`total_trades >= 30`) or the result is marked “inconclusive”.
+
+### 9.6 Outputs (audit artifacts)
+
+The harness writes a JSON report with both metric bundles and deltas:
+- `reports/barbell_pnl_eval.json`
+
+This report should be attached whenever proposing:
+- enabling `barbell.enable_barbell_allocation`, or
+- adding NAV allocator integration.

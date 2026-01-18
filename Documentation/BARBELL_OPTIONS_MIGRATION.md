@@ -1,6 +1,6 @@
 # Migrating From Spot Assets to Options/Derivatives for Barbell Strategy Use
 
-**Status**: Design + Initial Config/Policy (Phase O1 in progress)  
+**Status**: Design + Initial Config/Policy (Phase O1 in progress)
 **Current status (2026-01-07)**: Feature flags remain OFF by default; options/derivatives ETL + execution remain unimplemented (see `Documentation/PROJECT_STATUS.md`).
 **Scope**: Portfolio Maximizer v45 – migration path from pure spot (stocks/commodities) to options / derivative / synthetic exposures suitable for Taleb-style barbell strategies.
 
@@ -22,6 +22,10 @@ For how diagnostic mark-to-market and liquidation behave for options and synthet
 
 ---
 
+## Delta (2026-01-18)
+
+- Reporting surface improved: live dashboard now renders trade/price/PnL panels from DB-backed run artifacts (via `scripts/dashboard_db_bridge.py`) and does not embed demo values; snapshots persist to `data/dashboard_audit.db` by default in bash orchestrators.
+
 ## 1. OTM Options – Clear Primer for This Project
 
 ### 1.1 Simple definition
@@ -42,20 +46,20 @@ It depends on whether it is a **Call** or a **Put**:
 
 ### 1.3 Key characteristics of OTM options
 
-1. **Cheap premium**  
+1. **Cheap premium**
    - OTM options cost far less than ATM/ITM because there is no intrinsic value.
    - You can control large notional with small capital.
 
-2. **Purely directional / volatility bets**  
+2. **Purely directional / volatility bets**
    - Their entire value comes from **time + volatility + probability** of moving ITM before expiry.
    - You buy OTM **Calls** when you expect **strong upside moves**.
    - You buy OTM **Puts** when you expect **strong downside moves**.
 
-3. **Lower probability of profit**  
+3. **Lower probability of profit**
    - The underlying must move a larger distance to make the option profitable.
    - Statistically, OTM options have a **lower chance of finishing ITM**.
 
-4. **High leverage, high risk**  
+4. **High leverage, high risk**
    - Maximum loss for a long option is the **entire premium**, which can easily go to zero.
    - Upside, especially for Calls, can be very large relative to the cost if a big move happens.
 

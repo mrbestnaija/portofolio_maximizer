@@ -1,9 +1,14 @@
 # Metrics & Evaluation (Definitions + Minimal Math)
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
+
+> **Evaluation Provenance (TS Models)**
+> - Use live-data providers for evaluation runs; synthetic providers are for smoke tests only.
+> - Always record the **learned** TS hyperparameters alongside metrics: SARIMAX `(p,d,q,P,D,Q,s,trend)`, SAMOSSA component count + residual AR lags, and GARCH `(p,q)`.
+> - Include the SARIMAX-X exogenous feature list from the forecast instrumentation (`sarimax_exogenous`) when reporting results.
 
 **Purpose**: Provide unambiguous, auditable metric definitions for papers/thesis, internal reports, dashboards, and automated gates.
 
@@ -12,6 +17,10 @@ Ground truth implementations live in:
 - `etl/portfolio_math.py` (portfolio-level metrics and risk)
 - `etl/database_manager.py` (`get_performance_summary()` and trade aggregates)
 - `etl/statistical_tests.py` (Diebold–Mariano-style tests and stability metrics)
+
+## Delta (2026-01-18)
+
+- Dashboard payload adds trade-level visualization fields (`trade_events`, `price_series`, `positions`) to support trade PnL scatter/markers. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON); run scripts enable audit snapshot persistence to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 
 ---
 

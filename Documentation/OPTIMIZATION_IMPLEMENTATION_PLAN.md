@@ -1,16 +1,16 @@
 ﻿# 🚀 OPTIMIZATION IMPLEMENTATION PLAN
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
 
-**Date**: October 14, 2025  
-**Status**: 🟢 UNBLOCKED – 2026-01-07 status aligns with `Documentation/PROJECT_STATUS.md`  
+**Date**: October 14, 2025
+**Status**: 🟢 UNBLOCKED – 2026-01-07 status aligns with `Documentation/PROJECT_STATUS.md`
 **Priority**: **CRITICAL** - Required for institutional-grade production
 
 ---
@@ -19,6 +19,12 @@
 > 📊 Telemetry note: `forcester_ts/instrumentation.py` records dataset diagnostics and benchmark metrics (RMSE, sMAPE, tracking error) per model with JSON audits under `logs/forecast_audits/`. Use these artifacts to quantify optimization impact.
 
 **Project-wide sequencing (2026-01)**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the step-by-step plan to fix TS horizon alignment, execution cost realism, and run-local reporting before deeper optimization phases.
+
+## Delta (2026-01-18)
+
+- Live dashboard is now real-time (polls `visualizations/dashboard_data.json` every 5s) and renders trade-level visualization (price + entry/exit markers + realized PnL) from emitted run artifacts.
+- Dashboard payload includes `positions`, `price_series`, `trade_events` and is rendered from the SQLite DB via `scripts/dashboard_db_bridge.py` (DB→JSON), with audit snapshots persisted by default to `data/dashboard_audit.db` (`--persist-snapshot` via bash orchestrators).
+- Forecast audit dedupe fixed in `scripts/check_forecast_audits.py` to ensure dataset-window monitoring uses “latest evidence wins”.
 
 ## 📊 EXECUTIVE SUMMARY
 
@@ -61,7 +67,7 @@
 - ✅ Statistical significance testing
 - ✅ Stress testing framework
 
-> 🔄 **Barbell Migration Note (2025-11-24)**  
+> 🔄 **Barbell Migration Note (2025-11-24)**
 > Long-volatility / tail-hedge and barbell “risk bucket” legs must be evaluated primarily with these asymmetric/tail-aware metrics (Sortino, Omega, CVaR, scenario analysis) at the **portfolio** level, not by Sharpe alone. See `BARBELL_INTEGRATION_TODO.md` for the dedicated barbell allocation and antifragility plan.
 
 **Next Steps**:
@@ -109,11 +115,11 @@ def calculate_kelly_fraction_correct(win_rate: float, avg_win: float, avg_loss: 
     """Correct Kelly Criterion: f* = (bp - q) / b"""
     if avg_loss <= 0 or win_rate <= 0 or win_rate >= 1:
         return 0.0
-    
+
     b = avg_win / avg_loss  # Odds
     p = win_rate
     q = 1 - p
-    
+
     kelly = (b * p - q) / b
     return max(0, min(kelly, 0.25))  # Cap at 25%
 
@@ -121,17 +127,17 @@ def calculate_kelly_fraction_correct(win_rate: float, avg_win: float, avg_loss: 
 def test_signal_significance(signals: List[Dict], actual_returns: np.ndarray) -> Dict:
     """Test if signals have statistically significant predictive power"""
     from scipy import stats
-    
+
     predicted_directions = [1 if s['action'] == 'BUY' else -1 for s in signals]
     actual_directions = np.sign(actual_returns)
-    
+
     # Binomial test for accuracy
     correct_predictions = sum(p == a for p, a in zip(predicted_directions, actual_directions))
     n = len(signals)
-    
+
     # H0: p = 0.5 (random), H1: p > 0.5 (skill)
     p_value = stats.binom_test(correct_predictions, n, p=0.5, alternative='greater')
-    
+
     return {
         'accuracy': correct_predictions / n,
         'p_value': p_value,
@@ -143,17 +149,17 @@ def test_signal_significance(signals: List[Dict], actual_returns: np.ndarray) ->
 def detect_market_regime(returns: np.ndarray, window: int = 60) -> Dict:
     """Detect market regimes using statistical tests"""
     from scipy import stats
-    
+
     rolling_vol = returns.rolling(window).std()
     regimes = []
-    
+
     for i in range(window, len(returns)):
         recent_vol = rolling_vol.iloc[i-window:i]
         current_vol = rolling_vol.iloc[i]
-        
+
         # Test if current volatility is significantly different
         t_stat, p_value = stats.ttest_1samp(recent_vol, current_vol)
-        
+
         if p_value < 0.05:
             if current_vol > recent_vol.mean():
                 regimes.append('high_vol')
@@ -161,7 +167,7 @@ def detect_market_regime(returns: np.ndarray, window: int = 60) -> Dict:
                 regimes.append('low_vol')
         else:
             regimes.append('normal')
-    
+
     return {
         'regimes': regimes,
         'regime_probabilities': calculate_regime_probabilities(regimes)
@@ -190,20 +196,20 @@ from typing import Dict, List, Tuple
 
 class StatisticalTestSuite:
     """Comprehensive statistical testing for trading strategies."""
-    
-    def test_strategy_significance(self, strategy_returns: np.ndarray, 
+
+    def test_strategy_significance(self, strategy_returns: np.ndarray,
                                  benchmark_returns: np.ndarray) -> Dict:
         """Test if strategy returns are statistically significant."""
         # T-test for mean difference
         t_stat, p_value = stats.ttest_ind(strategy_returns, benchmark_returns)
-        
+
         # Information ratio
         excess_returns = strategy_returns - benchmark_returns
         information_ratio = np.mean(excess_returns) / np.std(excess_returns)
-        
+
         # F-test for variance equality
         f_stat, f_p_value = stats.f_oneway(strategy_returns, benchmark_returns)
-        
+
         return {
             't_statistic': t_stat,
             'p_value': p_value,
@@ -213,29 +219,29 @@ class StatisticalTestSuite:
             'f_p_value': f_p_value,
             'variance_equal': f_p_value > 0.05
         }
-    
+
     def test_autocorrelation(self, returns: np.ndarray) -> Dict:
         """Test for serial correlation in returns (violates EMH)."""
         lb_stat, p_value = acorr_ljungbox(returns, lags=10, return_df=False)
-        
+
         return {
             'ljung_box_statistic': lb_stat,
             'p_value': p_value,
             'serial_correlation': p_value < 0.05,
             'efficient_market': p_value > 0.05
         }
-    
+
     def test_normality(self, returns: np.ndarray) -> Dict:
         """Test for normality of returns."""
         # Jarque-Bera test
         jb_stat, jb_p_value = stats.jarque_bera(returns)
-        
+
         # Shapiro-Wilk test (for smaller samples)
         if len(returns) <= 5000:
             sw_stat, sw_p_value = stats.shapiro(returns)
         else:
             sw_stat, sw_p_value = None, None
-        
+
         return {
             'jarque_bera_statistic': jb_stat,
             'jarque_bera_p_value': jb_p_value,
@@ -243,43 +249,43 @@ class StatisticalTestSuite:
             'shapiro_wilk_p_value': sw_p_value,
             'is_normal': jb_p_value > 0.05
         }
-    
+
     def test_stationarity(self, returns: np.ndarray) -> Dict:
         """Test for stationarity of returns."""
         from statsmodels.tsa.stattools import adfuller
-        
+
         adf_stat, adf_p_value, used_lag, nobs, critical_values, icbest = adfuller(returns)
-        
+
         return {
             'adf_statistic': adf_stat,
             'adf_p_value': adf_p_value,
             'critical_values': critical_values,
             'is_stationary': adf_p_value < 0.05
         }
-    
+
     def bootstrap_validation(self, returns: np.ndarray, n_bootstrap: int = 1000) -> Dict:
         """Bootstrap validation for performance metrics."""
         metrics = []
-        
+
         for _ in range(n_bootstrap):
             bootstrap_sample = np.random.choice(returns, size=len(returns), replace=True)
-            
+
             # Calculate metrics
             sharpe = (np.mean(bootstrap_sample) - 0.02) / np.std(bootstrap_sample) * np.sqrt(252)
             max_dd = self.calculate_max_drawdown(bootstrap_sample)
             sortino = self.calculate_sortino_ratio(bootstrap_sample)
-            
+
             metrics.append({
                 'sharpe': sharpe,
                 'max_drawdown': max_dd,
                 'sortino': sortino
             })
-        
+
         # Calculate confidence intervals
         sharpe_values = [m['sharpe'] for m in metrics]
         dd_values = [m['max_drawdown'] for m in metrics]
         sortino_values = [m['sortino'] for m in metrics]
-        
+
         return {
             'sharpe_ci': (np.percentile(sharpe_values, 2.5), np.percentile(sharpe_values, 97.5)),
             'max_dd_ci': (np.percentile(dd_values, 2.5), np.percentile(dd_values, 97.5)),
@@ -316,26 +322,26 @@ class RegimeState:
 
 class RegimeDetector:
     """Statistical market regime detection."""
-    
+
     def __init__(self, window_size: int = 60, significance_level: float = 0.05):
         self.window_size = window_size
         self.significance_level = significance_level
         self.current_regime = None
         self.regime_history = []
-    
+
     def detect_volatility_regime(self, returns: np.ndarray) -> RegimeState:
         """Detect volatility regime using statistical tests."""
         if len(returns) < self.window_size * 2:
             return RegimeState('insufficient_data', 0.0, len(returns), 0.0)
-        
+
         # Rolling volatility
         rolling_vol = pd.Series(returns).rolling(self.window_size).std()
         current_vol = rolling_vol.iloc[-1]
         historical_vol = rolling_vol.iloc[-self.window_size-1:-1]
-        
+
         # Statistical test for regime change
         t_stat, p_value = stats.ttest_1samp(historical_vol.dropna(), current_vol)
-        
+
         if p_value < self.significance_level:
             if current_vol > historical_vol.mean():
                 regime_type = 'high_vol'
@@ -346,27 +352,27 @@ class RegimeDetector:
         else:
             regime_type = 'normal_vol'
             confidence = p_value
-        
+
         return RegimeState(
             regime_type=regime_type,
             confidence=confidence,
             duration=self._calculate_regime_duration(regime_type),
             transition_probability=p_value
         )
-    
+
     def detect_trend_regime(self, returns: np.ndarray) -> RegimeState:
         """Detect trend regime using statistical tests."""
         if len(returns) < self.window_size * 2:
             return RegimeState('insufficient_data', 0.0, len(returns), 0.0)
-        
+
         # Rolling mean return
         rolling_mean = pd.Series(returns).rolling(self.window_size).mean()
         current_mean = rolling_mean.iloc[-1]
         historical_mean = rolling_mean.iloc[-self.window_size-1:-1]
-        
+
         # Statistical test for trend change
         t_stat, p_value = stats.ttest_1samp(historical_mean.dropna(), current_mean)
-        
+
         if p_value < self.significance_level:
             if current_mean > historical_mean.mean():
                 regime_type = 'bull'
@@ -377,14 +383,14 @@ class RegimeDetector:
         else:
             regime_type = 'sideways'
             confidence = p_value
-        
+
         return RegimeState(
             regime_type=regime_type,
             confidence=confidence,
             duration=self._calculate_regime_duration(regime_type),
             transition_probability=p_value
         )
-    
+
     def adapt_strategy_parameters(self, signal: Dict, regime_state: RegimeState) -> Dict:
         """Adapt strategy parameters based on current regime."""
         regime_multipliers = {
@@ -395,30 +401,30 @@ class RegimeDetector:
             'low_vol': {'confidence_multiplier': 1.3, 'position_multiplier': 1.2},
             'normal_vol': {'confidence_multiplier': 1.0, 'position_multiplier': 1.0}
         }
-        
-        multiplier = regime_multipliers.get(regime_state.regime_type, 
+
+        multiplier = regime_multipliers.get(regime_state.regime_type,
                                           {'confidence_multiplier': 1.0, 'position_multiplier': 1.0})
-        
+
         adapted_signal = signal.copy()
         adapted_signal['confidence'] *= multiplier['confidence_multiplier']
         adapted_signal['position_size'] *= multiplier['position_multiplier']
         adapted_signal['regime'] = regime_state.regime_type
         adapted_signal['regime_confidence'] = regime_state.confidence
-        
+
         return adapted_signal
-    
+
     def _calculate_regime_duration(self, regime_type: str) -> int:
         """Calculate duration of current regime."""
         if not self.regime_history:
             return 1
-        
+
         duration = 1
         for i in range(len(self.regime_history) - 1, -1, -1):
             if self.regime_history[i].regime_type == regime_type:
                 duration += 1
             else:
                 break
-        
+
         return duration
 ```
 
@@ -455,23 +461,23 @@ class OptimizationResult:
 
 class PortfolioOptimizer:
     """Advanced portfolio optimization with multiple methodologies."""
-    
+
     def __init__(self, risk_free_rate: float = 0.02):
         self.risk_free_rate = risk_free_rate
-    
-    def mean_variance_optimization(self, returns: np.ndarray, 
+
+    def mean_variance_optimization(self, returns: np.ndarray,
                                  target_return: Optional[float] = None,
                                  risk_aversion: float = 1.0) -> OptimizationResult:
         """Markowitz mean-variance optimization."""
         mu = np.mean(returns, axis=0)
         Sigma = np.cov(returns.T)
         n = len(mu)
-        
+
         if target_return is not None:
             # Target return optimization
             def objective(w):
                 return 0.5 * w.T @ Sigma @ w
-            
+
             constraints = [
                 {'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
                 {'type': 'eq', 'fun': lambda w: w.T @ mu - target_return}
@@ -480,14 +486,14 @@ class PortfolioOptimizer:
             # Risk aversion optimization
             def objective(w):
                 return 0.5 * risk_aversion * w.T @ Sigma @ w - w.T @ mu
-            
+
             constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]
-        
+
         bounds = [(0, 1) for _ in range(n)]
-        
+
         result = minimize(objective, x0=np.ones(n)/n, method='SLSQP',
                          bounds=bounds, constraints=constraints)
-        
+
         if result.success:
             weights = result.x
             expected_return = weights.T @ mu
@@ -498,7 +504,7 @@ class PortfolioOptimizer:
             expected_return = np.mean(mu)
             expected_volatility = np.sqrt(np.mean(np.diag(Sigma)))
             sharpe_ratio = 0.0
-        
+
         return OptimizationResult(
             weights=weights,
             expected_return=expected_return,
@@ -508,28 +514,28 @@ class PortfolioOptimizer:
             message=result.message,
             iterations=result.nit
         )
-    
+
     def risk_parity_optimization(self, returns: np.ndarray) -> OptimizationResult:
         """Risk parity portfolio optimization."""
         Sigma = np.cov(returns.T)
         n = len(Sigma)
-        
+
         def objective(w):
             portfolio_vol = np.sqrt(w.T @ Sigma @ w)
             if portfolio_vol < 1e-8:
                 return 1e6
-            
+
             risk_contributions = (w * (Sigma @ w)) / portfolio_vol
             target_contribution = portfolio_vol / n
-            
+
             return np.sum((risk_contributions - target_contribution)**2)
-        
+
         constraints = [{'type': 'eq', 'fun': lambda w: np.sum(w) - 1}]
         bounds = [(0, 1) for _ in range(n)]
-        
+
         result = minimize(objective, x0=np.ones(n)/n, method='SLSQP',
                          bounds=bounds, constraints=constraints)
-        
+
         if result.success:
             weights = result.x
             mu = np.mean(returns, axis=0)
@@ -542,7 +548,7 @@ class PortfolioOptimizer:
             expected_return = np.mean(mu)
             expected_volatility = np.sqrt(np.mean(np.diag(Sigma)))
             sharpe_ratio = 0.0
-        
+
         return OptimizationResult(
             weights=weights,
             expected_return=expected_return,
@@ -552,23 +558,23 @@ class PortfolioOptimizer:
             message=result.message,
             iterations=result.nit
         )
-    
-    def factor_model_optimization(self, returns: np.ndarray, 
+
+    def factor_model_optimization(self, returns: np.ndarray,
                                 factors: np.ndarray) -> OptimizationResult:
         """Factor model portfolio optimization."""
         from sklearn.linear_model import LinearRegression
-        
+
         # Fit factor model: R = α + β*F + ε
         model = LinearRegression()
         model.fit(factors, returns)
-        
+
         # Factor model covariance: Σ = B*F*B' + D
         factor_cov = np.cov(factors.T)
         beta = model.coef_.T
         residual_cov = np.cov(returns - model.predict(factors), rowvar=False)
-        
+
         Sigma = beta @ factor_cov @ beta.T + np.diag(np.diag(residual_cov))
-        
+
         # Optimize using factor model covariance
         return self.mean_variance_optimization(returns, Sigma=Sigma)
 ```
@@ -604,17 +610,17 @@ class SimulationResult:
 
 class MonteCarloSimulator:
     """Monte Carlo simulation for portfolio risk assessment."""
-    
+
     def __init__(self, n_simulations: int = 10000, random_seed: Optional[int] = None):
         self.n_simulations = n_simulations
         if random_seed is not None:
             np.random.seed(random_seed)
-    
+
     def simulate_portfolio_risk(self, portfolio_returns: np.ndarray,
                               portfolio_weights: np.ndarray,
                               simulation_method: str = 'bootstrap') -> SimulationResult:
         """Simulate portfolio risk using Monte Carlo methods."""
-        
+
         if simulation_method == 'bootstrap':
             simulated_returns = self._bootstrap_simulation(portfolio_returns, portfolio_weights)
         elif simulation_method == 'parametric':
@@ -623,14 +629,14 @@ class MonteCarloSimulator:
             simulated_returns = self._historical_simulation(portfolio_returns, portfolio_weights)
         else:
             raise ValueError(f"Unknown simulation method: {simulation_method}")
-        
+
         # Calculate risk metrics
         var_95 = np.percentile(simulated_returns, 5)
         var_99 = np.percentile(simulated_returns, 1)
         cvar_95 = simulated_returns[simulated_returns <= var_95].mean()
         cvar_99 = simulated_returns[simulated_returns <= var_99].mean()
         expected_shortfall = simulated_returns[simulated_returns < 0].mean()
-        
+
         return SimulationResult(
             var_95=var_95,
             var_99=var_99,
@@ -642,27 +648,27 @@ class MonteCarloSimulator:
             probability_of_loss=np.mean(simulated_returns < 0),
             expected_loss_given_loss=expected_shortfall
         )
-    
+
     def stress_test_simulation(self, portfolio_returns: np.ndarray,
                              portfolio_weights: np.ndarray,
                              stress_scenarios: Dict[str, float]) -> Dict[str, SimulationResult]:
         """Stress test portfolio under various scenarios."""
         results = {}
-        
+
         for scenario_name, shock_magnitude in stress_scenarios.items():
             # Apply shock to returns
             stressed_returns = portfolio_returns + shock_magnitude
-            
+
             # Simulate stressed portfolio
             simulated_returns = self._bootstrap_simulation(stressed_returns, portfolio_weights)
-            
+
             # Calculate stressed risk metrics
             var_95 = np.percentile(simulated_returns, 5)
             var_99 = np.percentile(simulated_returns, 1)
             cvar_95 = simulated_returns[simulated_returns <= var_95].mean()
             cvar_99 = simulated_returns[simulated_returns <= var_99].mean()
             expected_shortfall = simulated_returns[simulated_returns < 0].mean()
-            
+
             results[scenario_name] = SimulationResult(
                 var_95=var_95,
                 var_99=var_99,
@@ -674,28 +680,28 @@ class MonteCarloSimulator:
                 probability_of_loss=np.mean(simulated_returns < 0),
                 expected_loss_given_loss=expected_shortfall
             )
-        
+
         return results
-    
+
     def _bootstrap_simulation(self, returns: np.ndarray, weights: np.ndarray) -> np.ndarray:
         """Bootstrap simulation of portfolio returns."""
         simulated_returns = []
-        
+
         for _ in range(self.n_simulations):
             # Bootstrap sample
             bootstrap_sample = np.random.choice(returns, size=len(returns), replace=True)
             portfolio_return = np.mean(bootstrap_sample)  # Equal weight for simplicity
             simulated_returns.append(portfolio_return)
-        
+
         return np.array(simulated_returns)
-    
+
     def _parametric_simulation(self, returns: np.ndarray, weights: np.ndarray) -> np.ndarray:
         """Parametric simulation assuming normal distribution."""
         mu = np.mean(returns)
         sigma = np.std(returns)
-        
+
         return np.random.normal(mu, sigma, self.n_simulations)
-    
+
     def _historical_simulation(self, returns: np.ndarray, weights: np.ndarray) -> np.ndarray:
         """Historical simulation using past scenarios."""
         # Use historical returns as scenarios
@@ -752,13 +758,13 @@ class MonteCarloSimulator:
 > **Objective**: Lift the TS forecaster + hyper‑parameter stack from “good research grade” to **institutional‑grade**, tightly coupled to brutal tests, numeric invariants, and quant validation automation.
 
 1. **Higher‑Order TS Hyper‑Opt & Regime Backtesting**
-   - [ ] Extend `run_strategy_optimization.py` / `run_post_eval.sh` to drive a higher‑order grid over model configs (SARIMAX orders, SAMOSSA window/n_components, MSSA‑RL settings) per ticker.
+   - [ ] Extend `run_strategy_optimization.py` / `run_post_eval.sh` to drive a higher‑order grid over model configs (SARIMAX caps/search modes + SARIMAX‑X exog policy, SAMOSSA caps/targets, MSSA‑RL settings) per ticker.
    - [ ] Reuse `TIME_SERIES_CV` infrastructure to run walk‑forward CV per ticker and per regime (using existing MSSA‑RL / realised‑vol regime tags).
    - [ ] Persist `(ticker, regime, model_config, CV_metrics)` into a small `ts_model_candidates` table for later analysis and dashboards.
 
 2. **Regime‑ and Sleeve‑Aware Model Profiles**
    - [ ] Add a config section/file (e.g. `config/model_profiles.yml`) that defines model profiles keyed by `(sleeve, asset_class, regime)`.
-   - [ ] For each profile, specify constrained SARIMAX grids, SAMOSSA parameters, and MSSA‑RL toggles consistent with `QUANT_TIME_SERIES_STACK.md`.
+   - [ ] For each profile, specify constrained SARIMAX caps/search modes (not fixed orders), SAMOSSA caps/targets, and MSSA‑RL toggles consistent with `QUANT_TIME_SERIES_STACK.md`.
    - [ ] Add a thin router in `TimeSeriesForecaster` that selects a profile based on regime diagnostics and sleeve (safe/core/spec/crypto from `config/barbell.yml`).
 
 3. **Statistical Model‑Selection Tests**
@@ -960,10 +966,10 @@ python -m pytest tests/etl/test_portfolio_math_enhanced.py -v
 
 ---
 
-**Status**: ✅ **READY FOR IMPLEMENTATION**  
-**Priority**: **CRITICAL** - Required for institutional deployment  
-**Timeline**: 4-8 weeks for full optimization  
-**Investment**: High (mathematical expertise required)  
+**Status**: ✅ **READY FOR IMPLEMENTATION**
+**Priority**: **CRITICAL** - Required for institutional deployment
+**Timeline**: 4-8 weeks for full optimization
+**Investment**: High (mathematical expertise required)
 **ROI**: High (institutional-grade system)
 
 - 2025-11-23: Added stochastic StrategyOptimizer infrastructure (etl/strategy_optimizer.py, scripts/run_strategy_optimization.py, config/strategy_optimization_config.yml) with tests for sampling/constraints; no strategies hardcoded, all search spaces and objectives remain config-driven.

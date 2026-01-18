@@ -1,21 +1,28 @@
 # Portfolio Maximizer – Research Progress & Publication Plan
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
-**Status**: Draft research log  
-**Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading  
-**Last updated**: 2026-01-03  
+**Status**: Draft research log
+**Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading
+**Last updated**: 2026-01-18
 **Current status (2026-01-07)**: Engineering is unblocked, brutal suite is GREEN, but recent-window MVS is still FAIL; use `Documentation/PROJECT_STATUS.md` as the canonical status source.
 **Ensemble gate (2026-01-11)**: Research-profile RMSE gate on 27 effective audits, violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **DISABLE ensemble as default**. `config/forecasting_config.yml` has `ensemble.enabled: false`; BEST_SINGLE remains source of truth until lift is demonstrated over ≥20 effective audits.
+
+**Parameter learning policy (research runs)**: TS models must learn their hyperparameters from the data (SARIMAX `(p,d,q,P,D,Q,s,trend)`, SAMOSSA components/AR lags, GARCH `(p,q)`), with performance controlled via caps/compact search — no manual orders in evaluation claims. SARIMAX-X is enabled by default (exogenous features are logged via instrumentation).
 
 This document tracks the Portfolio Maximizer project as a scientific research artefact rather than only as a codebase. It is meant to evolve into the backbone of a Master’s‑level thesis or journal submission, with clear hypotheses, methods, experiments, and reproducible evidence.
 
 It complements the implementation-focused documents in `Documentation/` (e.g. `QUANTIFIABLE_SUCCESS_CRITERIA.md`, `TIME_SERIES_FORECASTING_IMPLEMENTATION.md`, `SYSTEM_STATUS_2025-10-22.md`) by giving a single, publication-oriented view. For current system status and verification evidence, see `Documentation/arch_tree.md` and `Documentation/implementation_checkpoint.md`.
 
 **Project-wide optimization roadmap (2026-01)**: See `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` for the sequenced engineering plan that turns current “live/paper” runs into bar-aware, horizon-consistent experiments with auditable cost and performance metrics.
+
+## Delta (2026-01-18)
+
+- Reporting/observability: `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels from real run artifacts (no demo/fictitious payloads).
+- Data contract: dashboard payload now includes `positions`, `price_series`, and `trade_events` for analysis-grade trade visualization. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) and run scripts persist audit snapshots to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 
 ---
 
@@ -64,7 +71,7 @@ This file is the research-facing single source of truth for turning the codebase
 2. Cost-aware quant gating lowers turnover and drawdown while maintaining or improving net risk-adjusted performance (profit factor, win rate) versus ungated TS signals, especially in high-vol regimes.
 3. Frontier markets exhibit higher raw predictability but weaker net performance after realistic costs unless liquidity-adjusted cost models and stricter gating are applied.
 4. LLM-only signals do not consistently outperform the TS ensemble out-of-sample; when capped as a fallback, they are non-degrading and occasionally additive rather than primary.
-  
+
 Each hypothesis will need explicit acceptance/rejection based on the experiments in Section 5.
 
 ---
@@ -184,24 +191,24 @@ This section is a structured log template for specific experiments. Fill it with
 
 ### 5.1 Example Experiment Record (template)
 
-- **ID**: EXP_TS_2025_001  
-- **Date**: YYYY‑MM‑DD  
-- **Objective**: e.g. “Compare TS ensemble vs buy‑and‑hold on AAPL/MSFT under quant validation gate, 2020‑01‑01 → 2024‑01‑01.”  
+- **ID**: EXP_TS_2025_001
+- **Date**: YYYY‑MM‑DD
+- **Objective**: e.g. “Compare TS ensemble vs buy‑and‑hold on AAPL/MSFT under quant validation gate, 2020‑01‑01 → 2024‑01‑01.”
 - **Setup**:
-  - Command(s):  
-    - `python scripts/run_etl_pipeline.py ...`  
-    - `python scripts/run_auto_trader.py --tickers AAPL,MSFT ...`  
-  - Config hashes: `analysis_config.yml`, `quant_success_config.yml`, `signal_routing_config.yml`.  
-  - Repo commit: `git rev-parse HEAD` (and branch name if not `master`).  
-  - Randomness controls: `PYTHONHASHSEED`, RNG seeds (Python/NumPy), and any hyperopt/RL sampler seeds.  
-  - Data snapshot: location of raw and training parquet files.  
-  - Evidence pointers: paths to the exact `logs/` report(s), quant validation JSONL slice(s), and any DB snapshot used for metrics.  
+  - Command(s):
+    - `python scripts/run_etl_pipeline.py ...`
+    - `python scripts/run_auto_trader.py --tickers AAPL,MSFT ...`
+  - Config hashes: `analysis_config.yml`, `quant_success_config.yml`, `signal_routing_config.yml`.
+  - Repo commit: `git rev-parse HEAD` (and branch name if not `master`).
+  - Randomness controls: `PYTHONHASHSEED`, RNG seeds (Python/NumPy), and any hyperopt/RL sampler seeds.
+  - Data snapshot: location of raw and training parquet files.
+  - Evidence pointers: paths to the exact `logs/` report(s), quant validation JSONL slice(s), and any DB snapshot used for metrics.
 - **Results (key metrics)**:
   - Total trades, win rate, profit factor, annualised return, max drawdown.
-  - Quant validation: PASS/FAIL counts, tiers by ticker (`scripts/summarize_quant_validation.py` output).  
+  - Quant validation: PASS/FAIL counts, tiers by ticker (`scripts/summarize_quant_validation.py` output).
 - **Interpretation**:
   - Did the experiment support or refute the relevant hypothesis?
-  - Any observed regime‑dependence (e.g. high‑vol vs low‑vol periods)?  
+  - Any observed regime‑dependence (e.g. high‑vol vs low‑vol periods)?
 - **Follow‑ups**:
   - Adjust thresholds?
   - Schedule additional runs for robustness?

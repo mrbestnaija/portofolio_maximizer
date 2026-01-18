@@ -1,9 +1,9 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified**: 2026-01-07  
-**Dependency sanity check**: 2026-01-04  
+**Last verified**: 2026-01-07
+**Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-01-07  
+**Document updated**: 2026-01-18
 
 **Metric definitions (canonical)**: `Documentation/METRICS_AND_EVALUATION.md` (implementations in `etl/database_manager.py`, `etl/portfolio_math.py`, `etl/statistical_tests.py`).
 
@@ -25,6 +25,7 @@
 - Lifecycle exits treat `forecast_horizon` as bar count (intraday-safe) (`execution/paper_trading_engine.py`)
 - Run reporting uses run-local PF/WR scoped by `run_id` and preserves lifetime metrics separately (`etl/database_manager.py`, `scripts/run_auto_trader.py`)
 - DataSourceManager supports chunked OHLCV extraction via `chunk_size` / `DATA_SOURCE_CHUNK_SIZE`, with batching tested in `tests/etl/test_data_source_manager_chunking.py`
+- Live dashboard is real-time and non-fictitious: `visualizations/live_dashboard.html` polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; snapshots persist to `data/dashboard_audit.db` by default (`DASHBOARD_PERSIST=1`). Provenance checks are enforced via `scripts/audit_dashboard_payload_sources.py` (warns/fails when synthetic/demo contamination is detected or when trade source metadata is missing).
 - Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
 - Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors

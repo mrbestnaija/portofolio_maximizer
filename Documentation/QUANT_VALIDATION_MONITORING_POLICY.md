@@ -1,7 +1,7 @@
 # Quant Validation Monitoring & Threshold Policy
 
-**Version**: 0.1  
-**Scope**: Time-series forecaster / signal quant validation (`logs/signals/quant_validation.jsonl`) and brutal/CI health checks.  
+**Version**: 0.1
+**Scope**: Time-series forecaster / signal quant validation (`logs/signals/quant_validation.jsonl`) and brutal/CI health checks.
 **Status**: Draft calibration memo – codifies current behaviour and outlines how to tighten it.
 **Current status (2026-01-07)**: Brutal suite quant health is GREEN; thresholds and scripts here remain the production monitoring source (see `Documentation/PROJECT_STATUS.md`).
 
@@ -13,6 +13,10 @@ The goal is twofold:
 - Provide a roadmap for tightening thresholds from “research hygiene” to “production gates” as empirical data accumulates, and for wiring those tightened thresholds into automation (see `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md` and the helper CLIs in `scripts/`).
 
 **Project-wide sequencing**: For the end-to-end optimization steps that connect quant validation to TS signal wiring, execution realism, and run-local reporting, see `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md`.
+
+## Delta (2026-01-18)
+
+- Dashboard integration: `visualizations/dashboard_data.json` now carries trade-level context (`trade_events`, `positions`) and per-ticker price series (`price_series`) so quant-health interpretation can be paired with trade outcomes in the live dashboard. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; audit snapshots persist to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 
 ---
 
@@ -80,8 +84,8 @@ Interpretation assumptions:
 
 This separation gives three conceptual layers:
 
-1. **Per-ticker** GREEN/YELLOW/RED (summaries & routing hints).  
-2. **Global** GREEN/YELLOW/RED (brutal/CI health).  
+1. **Per-ticker** GREEN/YELLOW/RED (summaries & routing hints).
+2. **Global** GREEN/YELLOW/RED (brutal/CI health).
 3. Execution/routing rules that decide which tiers are allowed to drive trades.
 
 ---
@@ -195,8 +199,8 @@ With the current configuration:
 
 This design separates:
 
-- **Hard CI/brutal gate (RED)** – strict, failure conditions.  
-- **Advisory monitoring band (YELLOW)** – flags that the ensemble is not yet comfortable but improving.  
+- **Hard CI/brutal gate (RED)** – strict, failure conditions.
+- **Advisory monitoring band (YELLOW)** – flags that the ensemble is not yet comfortable but improving.
 - **Healthy operation (GREEN)** – global metrics are robustly within limits.
 
 ---

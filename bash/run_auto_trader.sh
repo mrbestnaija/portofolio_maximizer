@@ -11,6 +11,12 @@ PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
 TRADER_SCRIPT="$ROOT_DIR/scripts/run_auto_trader.py"
 LOG_DIR="$ROOT_DIR/logs/auto_runs"
 RUN_LABEL="${RUN_LABEL:-}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
+DASHBOARD_AUTO_SERVE="${DASHBOARD_AUTO_SERVE:-1}"
+# Default ON: persist dashboard snapshots for auditability.
+DASHBOARD_PERSIST="${DASHBOARD_PERSIST:-1}"
+# Default ON: keep dashboard server running after script exits.
+DASHBOARD_KEEP_ALIVE="${DASHBOARD_KEEP_ALIVE:-1}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python interpreter not found at $PYTHON_BIN" >&2
@@ -51,6 +57,14 @@ if [[ "$HYPEROPT_ROUNDS" != "0" ]]; then
     START="${START_DATE:-2018-01-01}" END="${END_DATE:-$(date +%Y-%m-%d)}" \
   "$ROOT_DIR/bash/run_post_eval.sh"
   exit 0
+fi
+
+# Live dashboard wiring (DB -> JSON -> static HTML).
+if [[ "${DASHBOARD_AUTO_SERVE}" == "1" ]]; then
+  pmx_ensure_dashboard "${ROOT_DIR}" "${PYTHON_BIN}" "${DASHBOARD_PORT}" "${DASHBOARD_PERSIST}" "${DASHBOARD_KEEP_ALIVE}" "${ROOT_DIR}/data/portfolio_maximizer.db"
+  if [[ "${DASHBOARD_KEEP_ALIVE}" != "1" ]]; then
+    trap pmx_dashboard_cleanup EXIT
+  fi
 fi
 
 # Best-effort liquidation of any open paper trades before a new run.
@@ -111,9 +125,26 @@ if [[ "$EXIT_CODE" -ne 0 ]]; then
   exit "$EXIT_CODE"
 fi
 
+# Validate dashboard assets/wiring (non-blocking).
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/dev_dashboard_smoke.py" >/dev/null 2>&1 || true
+set -e
+
+set +e
+"$PYTHON_BIN" "$ROOT_DIR/scripts/dashboard_db_bridge.py" --once >/dev/null 2>&1 || true
+set -e
+
 DASH_PATH="$ROOT_DIR/visualizations/dashboard_data.json"
 if [[ -f "$DASH_PATH" ]]; then
   echo "Dashboard JSON updated: $DASH_PATH"
+  echo "Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
+  echo "Dashboard HTML: $ROOT_DIR/visualizations/live_dashboard.html"
 fi
+
+echo "Auditing dashboard payload sources..."
+"$PYTHON_BIN" "$ROOT_DIR/scripts/audit_dashboard_payload_sources.py" \
+  --db-path "$ROOT_DIR/data/portfolio_maximizer.db" \
+  --audit-db-path "$ROOT_DIR/data/dashboard_audit.db" \
+  --dashboard-json "$ROOT_DIR/visualizations/dashboard_data.json"
 
 echo "Auto-trader run complete. Logs: $LOG_FILE"

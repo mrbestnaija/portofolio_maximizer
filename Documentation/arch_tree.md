@@ -1,8 +1,8 @@
 # Architecture Tree & Documentation Map (Portfolio Maximizer)
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 **Purpose**: Provide a navigable map of the repository (modules, workflows, and evidence artifacts) and point to the canonical “source of truth” documents.
@@ -31,6 +31,7 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 **Recent Achievements**:
 - 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque–Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
 - 2026-01-03 Delta (comprehensive brutal verification): `bash/comprehensive_brutal_test.sh` completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, Time Series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Evidence lives under `logs/brutal/results_20260103_220403/` (`test.log`, per-suite logs in `logs/`, and `stage_summary.csv`); DB snapshot: `logs/brutal/results_20260103_220403/artifacts/test_database.db.bak`. Suite counts from `test.log`: ETL (98), Time Series (37), signal routing (26), integration (30), LLM (67), security (13), plus profit-critical and pipeline execution (4 runs).
+- 2026-01-18 Delta (dashboard + monitoring correctness): `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels from real run artifacts (no embedded demo data). Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators and snapshot-persisted to `data/dashboard_audit.db` by default; `scripts/audit_dashboard_payload_sources.py` audits payload provenance. `scripts/check_forecast_audits.py` dedupes audits by dataset window with “newest wins”.
 - 2025-11-30 Sentiment overlay plan captured (`Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md`); `config/sentiment.yml` remains disabled with strict gating and `tests/sentiment/test_sentiment_config_scaffold.py` guarding activation until profitability beats the benchmark.
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
@@ -103,7 +104,7 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 ## Architecture Overview
 
 ```
-                   v 
+                   v
         +---------------------------------------------+
         |            Output Layer                     |
         +---------------------------------------------+
@@ -266,7 +267,7 @@ Status: resolved; kept for audit context. Current evidence is in `logs/brutal/re
 
 ### Config Inventory (Nov 2025; updated Dec 2025)
 - `config/pipeline_config.yml` defines the default stage planner ordering that both the ETL pipeline and autonomous trader invoke.
-- `config/forecasting_config.yml` tunes the SARIMAX/GARCH/SAMOSSA ensemble parameters consumed by `forcester_ts/forecaster.py`.
+- `config/forecasting_config.yml` tunes the TS model **caps/search modes** (SARIMAX auto-select + SARIMAX-X exog, SAMOSSA component/lag caps, GARCH auto-select caps) consumed by `forcester_ts/forecaster.py`.
 - `config/llm_config.yml` lists the Ollama models, latency guardrails, and token-throughput failover policies enforced by `ai_llm/ollama_client.py`.
 - `config/signal_routing_config.yml` centralizes the TS-first, LLM-fallback feature flags shared by `scripts/run_etl_pipeline.py` and `scripts/run_auto_trader.py`.
 - `config/quant_success_config.yml` encodes the per-signal thresholds (Sharpe/Sortino/drawdown, min_expected_profit) that gate Time Series signals before routing/execution and feed quant validation logs (`logs/signals/quant_validation.jsonl`).
@@ -369,7 +370,7 @@ class AlphaVantageTickerLoader(BaseTickerLoader):
         # URL: https://www.alphavantage.co/query?function=LISTING_STATUS&apikey=YOUR_API_KEY
         # Returns: symbol, name, exchange, assetType, status
         # Integrate with existing cache (24h validity)
-    
+
     def get_active_equities(self) -> List[str]:
         """Filter for active stocks/ETFs using existing validation patterns"""
 ```
@@ -486,9 +487,16 @@ portfolio_maximizer_v45/
 |   |-- monitor_llm_system.py        # ? 418 lines - LLM system monitoring + latency/backtest reporting (Phase 5.6) ? NEW
 |   |-- test_llm_implementations.py  # ? 150 lines - LLM implementation testing (Phase 5.5) ? NEW
 |   |-- deploy_monitoring.sh         # ? 213 lines - Monitoring deployment script (Phase 5.5) ? NEW
+|   |-- dashboard_db_bridge.py       # DB→JSON live dashboard bridge (writes visualizations/dashboard_data.json; optional audit snapshots)
+|   |-- audit_dashboard_payload_sources.py # Audits dashboard payload + audit DB for non-fictitious content and source consistency
+|   |-- dev_dashboard_smoke.py       # Local wiring sanity check for dashboard bridge + http.server
 |   `-- refresh_ticker_universe.py   # ? NEW - Weekly ticker updates
 |-- schedule_backfill.bat            # ? Task Scheduler wrapper for nightly signal backfills (Phase 5.6)
 |-- visualizations/                  # ? Context-rich dashboards (Phase 5.6) ? UPDATED
+|   |-- live_dashboard.html          # Real-time audit dashboard (static HTML; polls dashboard_data.json)
+|   |-- dashboard_data.json          # Live payload (rendered by scripts/dashboard_db_bridge.py; do not hand-edit)
+|   |-- dashboard_data.schema.json   # Payload schema reference (loosely enforced by tests)
+|   |-- dashboard_data.sample.json   # Example payload (for local UI development only)
 |   |-- Close_dashboard.png          # ? Legacy price dashboard
 |   |-- Volume_dashboard.png         # ? Market conditions + commodities overlays (Phase 5.6)
 |   `-- training/                    # ? Sample training-set plots
@@ -605,7 +613,7 @@ Enhanced Portfolio Pipeline (OPTIMIZER READY)
 
 ### WEEK 1: Complete Multi-Source Implementation
 1. **Implement** `AlphaVantageExtractor` (use existing config)
-2. **Implement** `FinnhubExtractor` (use existing config) 
+2. **Implement** `FinnhubExtractor` (use existing config)
 3. **Test** multi-source fallback with `DataSourceManager`
 4. **Update** tests for new extractors (leverage existing test patterns)
 
@@ -626,7 +634,7 @@ Enhanced Portfolio Pipeline (OPTIMIZER READY)
 
 ### New Capabilities:
 - [ ] Alpha Vantage data extraction operational
-- [ ] Finnhub data extraction operational  
+- [ ] Finnhub data extraction operational
 - [ ] Multi-source fallback working (3 sources)
 - [ ] Ticker discovery from Alpha Vantage bulk data
 - [ ] Automatic ticker validation with yfinance
@@ -643,12 +651,12 @@ Enhanced Portfolio Pipeline (OPTIMIZER READY)
 ### Existing Config Files (READY):
 - `data_sources_config.yml` - Already configured for multi-source
 - `alpha_vantage_config.yml` - Structured, needs API key
-- `finnhub_config.yml` - Structured, needs API key  
+- `finnhub_config.yml` - Structured, needs API key
 - `pipeline_config.yml` - Ready for ticker discovery integration
 
 ### API Key Integration:
 ```python
-# .env - ADD NEW KEYS (maintain existing structure) # remove secret credential to dot environment 
+# .env - ADD NEW KEYS (maintain existing structure) # remove secret credential to dot environment
 ALPHA_VANTAGE_API_KEY='your_alpha_vantage_key_here'
 FINNHUB_API_KEY='your_finnhub_key_here'
 # Existing YFINANCE_API_KEY (if any) remains
@@ -689,4 +697,3 @@ FINNHUB_API_KEY='your_finnhub_key_here'
 
 - Hotfix 2025-11-23: ETL data_storage UnboundLocalError resolved (removed nested pandas imports); ASCII-only logging enforced in DataSourceManager to prevent cp1252 errors; CV drift metrics persisted and dashboard JSON emission extended.
 - Strategy optimization layer: etl/strategy_optimizer.py and scripts/run_strategy_optimization.py (config/strategy_optimization_config.yml) implement stochastic, regime-aware PnL tuning without hardcoded strategies; see Documentation/STOCHASTIC_PNL_OPTIMIZATION.md for design.
-

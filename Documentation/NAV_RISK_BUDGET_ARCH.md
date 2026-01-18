@@ -7,6 +7,10 @@
 
 ---
 
+## Delta (2026-01-18)
+
+- Dashboard reporting now supports trade-level visualization: `visualizations/live_dashboard.html` renders `positions`, `price_series`, and `trade_events` from `visualizations/dashboard_data.json` in real time. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; snapshots persist to `data/dashboard_audit.db` by default (`--persist-snapshot`).
+
 ## 1. High-Level Flow
 
 Textual data/control flow:
