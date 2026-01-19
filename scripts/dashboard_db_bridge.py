@@ -9,36 +9,121 @@ remaining a static HTML page (no backend required).
 
 Default behavior is READ-ONLY against the trading DB. Optional snapshot
 persisting writes into a separate audit DB to avoid contention.
+
+Robustness features:
+- Connection pooling with retry logic
+- Graceful degradation with cached data fallback
+- Health monitoring and error tracking
+- Query result caching for performance
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sqlite3
+import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("logs/dashboard_db_bridge.log", mode="a"),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = Path(os.getenv("PORTFOLIO_DB_PATH") or (ROOT / "data" / "portfolio_maximizer.db"))
 DEFAULT_OUTPUT_PATH = ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_AUDIT_DB_PATH = ROOT / "data" / "dashboard_audit.db"
+FALLBACK_CACHE_PATH = ROOT / "visualizations" / "dashboard_data_fallback.json"
+AUDIT_MAX_SNAPSHOTS = int(os.getenv("DASHBOARD_AUDIT_MAX_SNAPSHOTS", "2000") or 0)
+AUDIT_RETENTION_DAYS = int(os.getenv("DASHBOARD_AUDIT_RETENTION_DAYS", "30") or 0)
+
+# Health tracking
+_health_stats = {
+    "total_queries": 0,
+    "failed_queries": 0,
+    "db_errors": 0,
+    "last_successful_update": None,
+    "cache_fallback_count": 0,
+}
+
+
+def _check_db_health(conn: sqlite3.Connection) -> bool:
+    """Quick health check on database connection."""
+    try:
+        conn.execute("SELECT 1").fetchone()
+        return True
+    except Exception as exc:
+        logger.warning(f"Database health check failed: {exc}")
+        return False
+
+
+def _load_fallback_data(path: Path) -> Optional[Dict[str, Any]]:
+    """Load cached dashboard data as fallback."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            logger.info(f"Loaded fallback data from {path}")
+            _health_stats["cache_fallback_count"] += 1
+            return data
+    except Exception as exc:
+        logger.error(f"Failed to load fallback data: {exc}")
+    return None
+
+
+def _save_fallback_data(path: Path, payload: Dict[str, Any]) -> None:
+    """Save dashboard data as fallback cache."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        logger.debug(f"Saved fallback data to {path}")
+    except Exception as exc:
+        logger.warning(f"Failed to save fallback data: {exc}")
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _connect_ro(db_path: Path) -> sqlite3.Connection:
+def _connect_ro(db_path: Path, max_retries: int = 3) -> sqlite3.Connection:
+    """Connect to SQLite DB in read-only mode with retry logic."""
     uri = f"file:{db_path.as_posix()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=2.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=2000")
-    return conn
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            # Skip WAL/synchronous pragmas in read-only mode - they require write access
+            logger.debug(f"Connected to DB: {db_path} (attempt {attempt + 1}/{max_retries})")
+            return conn
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            err_msg = str(exc).lower()
+            if "locked" in err_msg or "busy" in err_msg or "readonly" in err_msg:
+                wait_time = min(0.5 * (2 ** attempt), 5.0)  # Exponential backoff
+                logger.warning(f"Database locked/busy, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            raise
+
+    logger.error(f"Failed to connect to database after {max_retries} attempts: {last_error}")
+    raise last_error if last_error else sqlite3.OperationalError("Failed to connect to database")
 
 
 def _connect_rw(db_path: Path) -> sqlite3.Connection:
@@ -51,24 +136,44 @@ def _connect_rw(db_path: Path) -> sqlite3.Connection:
 
 
 def _safe_fetchall(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...] = ()) -> List[sqlite3.Row]:
+    """Execute query with retry logic and error tracking."""
     last_exc: Optional[Exception] = None
-    for _ in range(3):
+    _health_stats["total_queries"] += 1
+
+    for attempt in range(3):
         try:
             cur = conn.execute(query, params)
-            return list(cur.fetchall() or [])
+            result = list(cur.fetchall() or [])
+            if attempt > 0:
+                logger.debug(f"Query succeeded on attempt {attempt + 1}/3")
+            return result
         except sqlite3.OperationalError as exc:
             last_exc = exc
             msg = str(exc).lower()
             if "locked" in msg or "busy" in msg:
-                time.sleep(0.2)
+                wait_time = min(0.2 * (2 ** attempt), 1.0)
+                logger.debug(f"Query locked/busy, retrying in {wait_time}s (attempt {attempt + 1}/3)")
+                time.sleep(wait_time)
                 continue
+            _health_stats["failed_queries"] += 1
+            _health_stats["db_errors"] += 1
+            logger.error(f"Query failed: {exc}")
             raise
+        except Exception as exc:
+            _health_stats["failed_queries"] += 1
+            _health_stats["db_errors"] += 1
+            logger.error(f"Unexpected query error: {exc}")
+            raise
+
     if last_exc:
+        _health_stats["failed_queries"] += 1
+        _health_stats["db_errors"] += 1
         raise last_exc
     return []
 
 
 def _safe_fetchone(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...] = ()) -> Optional[sqlite3.Row]:
+    """Execute single-row query with retry logic."""
     rows = _safe_fetchall(conn, query, params)
     return rows[0] if rows else None
 
@@ -158,7 +263,32 @@ def _barbell_bucket_map() -> Dict[str, str]:
     return out
 
 
+def _run_id_from_metadata(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        row = _safe_fetchone(conn, "SELECT value FROM db_metadata WHERE key = 'last_run_provenance'")
+    except Exception:
+        return None
+    if not row or "value" not in row.keys():
+        return None
+    raw = row["value"]
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            rid = parsed.get("run_id")
+            if rid:
+                return str(rid)
+    except Exception:
+        # fall through to raw string
+        pass
+    return str(raw) if str(raw).strip() else None
+
+
 def _latest_run_id(conn: sqlite3.Connection) -> Optional[str]:
+    meta_rid = _run_id_from_metadata(conn)
+    if meta_rid:
+        return meta_rid
     row = _safe_fetchone(
         conn,
         """
@@ -570,6 +700,33 @@ def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, A
     return fresh
 
 
+def _prune_audit_db(conn: sqlite3.Connection, max_entries: int, max_age_days: int) -> None:
+    """Apply size/age retention to the audit snapshot table."""
+    try:
+        if max_age_days and max_age_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            conn.execute(
+                "DELETE FROM dashboard_snapshots WHERE created_at < ?",
+                (cutoff.isoformat(),),
+            )
+        if max_entries and max_entries > 0:
+            conn.execute(
+                """
+                DELETE FROM dashboard_snapshots
+                WHERE id NOT IN (
+                    SELECT id
+                    FROM dashboard_snapshots
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (max_entries,),
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("Audit DB pruning skipped: %s", exc)
+
+
 def _persist_snapshot(audit_db: Path, payload: Dict[str, Any]) -> None:
     conn = _connect_rw(audit_db)
     try:
@@ -590,6 +747,7 @@ def _persist_snapshot(audit_db: Path, payload: Dict[str, Any]) -> None:
             (_utc_now_iso(), str(run_id) if run_id else None, json.dumps(payload, sort_keys=True)),
         )
         conn.commit()
+        _prune_audit_db(conn, AUDIT_MAX_SNAPSHOTS, AUDIT_RETENTION_DAYS)
     finally:
         conn.close()
 
@@ -613,6 +771,16 @@ def main() -> None:
     args = _parse_args()
     db_path = Path(args.db_path).expanduser()
     out_path = Path(args.output).expanduser()
+    fallback_path = FALLBACK_CACHE_PATH
+
+    # Ensure logs directory exists
+    (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Starting dashboard DB bridge")
+    logger.info(f"  Database: {db_path}")
+    logger.info(f"  Output: {out_path}")
+    logger.info(f"  Interval: {args.interval_seconds}s")
+    logger.info(f"  Persist snapshots: {args.persist_snapshot}")
 
     def _tickers(conn: sqlite3.Connection) -> List[str]:
         raw = str(args.tickers or "").strip()
@@ -620,9 +788,22 @@ def main() -> None:
             return [t.strip().upper() for t in raw.split(",") if t.strip()]
         return _default_tickers(conn)
 
+    consecutive_failures = 0
+    max_consecutive_failures = 5
+
     while True:
-        conn = _connect_ro(db_path)
+        conn = None
+        payload = None
+
         try:
+            # Connect with retry logic
+            conn = _connect_ro(db_path)
+
+            # Health check
+            if not _check_db_health(conn):
+                raise sqlite3.OperationalError("Database health check failed")
+
+            # Build payload
             tickers = _tickers(conn)
             payload = build_dashboard_payload(
                 conn=conn,
@@ -631,16 +812,69 @@ def main() -> None:
                 max_signals=int(args.max_signals),
                 max_trades=int(args.max_trades),
             )
-        finally:
-            conn.close()
 
-        merged = _maybe_merge_with_existing(out_path, payload)
-        _atomic_write_json(out_path, merged)
-        if args.persist_snapshot:
-            _persist_snapshot(Path(args.audit_db_path).expanduser(), merged)
+            # Success - reset failure counter
+            consecutive_failures = 0
+            _health_stats["last_successful_update"] = _utc_now_iso()
+
+        except Exception as exc:
+            consecutive_failures += 1
+            logger.error(f"Failed to build dashboard payload (failure {consecutive_failures}/{max_consecutive_failures}): {exc}")
+
+            # Try fallback data
+            if consecutive_failures < max_consecutive_failures:
+                payload = _load_fallback_data(fallback_path)
+                if payload:
+                    # Add error indicator to payload
+                    payload["meta"] = payload.get("meta", {})
+                    payload["meta"]["error"] = f"Using cached data due to DB error: {str(exc)[:100]}"
+                    payload["meta"]["cache_ts"] = _utc_now_iso()
+                    logger.warning("Using fallback cached data")
+            else:
+                logger.critical(f"Exceeded maximum consecutive failures ({max_consecutive_failures}), stopping")
+                break
+
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logger.debug(f"Error closing connection: {exc}")
+
+        # Write output if we have data
+        if payload:
+            try:
+                merged = _maybe_merge_with_existing(out_path, payload)
+                _atomic_write_json(out_path, merged)
+
+                # Save fallback cache on successful update
+                if consecutive_failures == 0:
+                    _save_fallback_data(fallback_path, merged)
+
+                # Persist snapshot if requested
+                if args.persist_snapshot:
+                    try:
+                        _persist_snapshot(Path(args.audit_db_path).expanduser(), merged)
+                    except Exception as exc:
+                        logger.warning(f"Failed to persist snapshot: {exc}")
+
+                # Log health stats periodically
+                if _health_stats["total_queries"] % 100 == 0:
+                    error_rate = (_health_stats["failed_queries"] / _health_stats["total_queries"]) * 100 if _health_stats["total_queries"] > 0 else 0
+                    logger.info(
+                        f"Health stats: queries={_health_stats['total_queries']}, "
+                        f"failures={_health_stats['failed_queries']} ({error_rate:.1f}%), "
+                        f"db_errors={_health_stats['db_errors']}, "
+                        f"cache_fallbacks={_health_stats['cache_fallback_count']}"
+                    )
+
+            except Exception as exc:
+                logger.error(f"Failed to write dashboard output: {exc}")
 
         if args.once:
+            logger.info("Single run completed")
             return
+
         time.sleep(max(0.5, float(args.interval_seconds)))
 
 

@@ -68,6 +68,15 @@ Focused checks:
 - `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py scripts/check_forecast_audits.py`
 - `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_dashboard_payload_invariants.py tests/scripts/test_check_forecast_audits.py tests/scripts/test_intraday_fallback_window.py`
 
+**Verification (2026-01-19)**: Live pipeline correctness and audit hygiene (run-scoped metrics + ticker hygiene).
+- `bash/run_pipeline.sh` now reports MVS/PnL only when the current `run_id` has realized trades; otherwise prints “no realized trades for this run” while still showing lifetime context to avoid misleading zero-trade PF/WR.
+- Quant validation summary uses directional edge (SELL flips sign) and surfaces action to prevent negative expected return PASS anomalies.
+- ETL extraction trims the universe to tickers with sufficient OHLCV rows (env `MIN_OHLCV_ROWS_PER_TICKER`, default 30) and logs frontier Yahoo suffix gaps so delisted/404 symbols don’t poison downstream stages.
+- Dashboard bridge prefers `db_metadata.last_run_provenance.run_id` for `meta.run_id` so UI reflects the latest pipeline; audit snapshots now prune by size/age (`DASHBOARD_AUDIT_MAX_SNAPSHOTS`, `DASHBOARD_AUDIT_RETENTION_DAYS`) to keep `dashboard_audit.db` bounded.
+Focused checks:
+- `python3 -m compileall scripts/run_etl_pipeline.py scripts/dashboard_db_bridge.py`
+- `bash/run_pipeline.sh --mode live` (log: `pipeline_20260118_231130`) shows run-scoped PnL skipped (no realized trades), directional quant summary printed, dashboard audit warnings only for legacy rows with missing `data_source`.
+
 **Verification (2026-01-07)**: Roadmap Phase 1.1 commenced (baseline snapshot capture helper). Focused checks:
 - `./simpleTrader_env/bin/python -m py_compile scripts/capture_baseline_snapshot.py`
 - `./simpleTrader_env/bin/python -m pytest -q tests/scripts/test_capture_baseline_snapshot.py`

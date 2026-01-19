@@ -148,6 +148,15 @@
     .tag.grade-b { color: #8bd17c; }
     .tag.grade-c { color: #f6c344; }
     .tag.grade-d { color: #f05252; }
+    .artifact-card { margin-top: 14px; }
+    .artifact-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+    .artifact-list { max-height: 240px; overflow:auto; border:1px solid rgba(255,255,255,0.06); border-radius:12px; }
+    .artifact-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.05); }
+    .artifact-item:last-child { border-bottom:none; }
+    .artifact-left { display:flex; flex-direction:column; gap:4px; }
+    .artifact-name { font-size:13px; }
+    .artifact-meta { font-size:12px; color: var(--muted); }
+    .chip-type { padding:4px 8px; border-radius:999px; font-size:11px; border:1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); }
     .universe { margin-top: 12px; }
     .universe-list { margin-top: 10px; max-height: 260px; overflow: auto; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); }
     .universe-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding: 10px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; }
@@ -320,6 +329,21 @@
           <span style="color:#f05252;">● Closed-Loss</span>
         </div>
       </div>
+
+      <div class="card artifact-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h3 style="margin-bottom:6px;">Run Artifacts (live)</h3>
+            <div class="subtitle">Browse latest visualizations (*.png, *.csv, *.json) directly from the server</div>
+          </div>
+          <div class="artifact-toolbar">
+            <input id="artifact-filter" type="text" placeholder="Filter by name/type…" aria-label="Filter artifacts" />
+            <button id="btn-refresh-artifacts" type="button">Refresh list</button>
+          </div>
+        </div>
+        <div class="artifact-list" id="artifact-list" role="list"></div>
+        <div class="subtitle" id="artifact-hint" style="margin-top:8px; display:none;">No artifacts found in live directories.</div>
+      </div>
     </div>
 
     <div class="card scroll-card" style="margin-top:0;">
@@ -344,6 +368,14 @@
   <footer>Drop fresh data into visualizations/dashboard_data.json and reload.</footer>
 
   <script>
+    const artifactRoots = [
+      'visualizations/quant_validation/',
+      'visualizations/',
+      'reports/',
+      'logs/live_runs/',
+    ];
+    const artifactExts = ['.png', '.jpg', '.jpeg', '.csv', '.json'];
+
     async function loadData() {
       try {
         const resp = await fetch('dashboard_data.json?_=' + Date.now());
@@ -368,6 +400,81 @@
       if (!n) return true;
       const h = haystackParts.map(p => String(p || '').toLowerCase()).join(' ');
       return h.includes(n);
+    }
+
+    function parseDirectoryListing(htmlText, base) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      const anchors = Array.from(doc.querySelectorAll('a'));
+      const items = [];
+      anchors.forEach(a => {
+        const href = a.getAttribute('href') || '';
+        const name = a.textContent || href;
+        const lower = href.toLowerCase();
+        const matchExt = artifactExts.find(ext => lower.endsWith(ext));
+        if (!matchExt) return;
+        const full = (base.endsWith('/') ? base : base + '/') + href;
+        items.push({ name, href: full, ext: matchExt });
+      });
+      return items;
+    }
+
+    async function fetchArtifacts() {
+      const results = [];
+      for (const root of artifactRoots) {
+        try {
+          const resp = await fetch(root);
+          if (!resp.ok) continue;
+          const text = await resp.text();
+          const parsed = parseDirectoryListing(text, root);
+          parsed.forEach(p => results.push({ ...p, source: root.replace(/\\/+$/, '') }));
+        } catch (e) {
+          // ignore missing dirs; keep UI responsive
+        }
+      }
+      // de-dupe by href
+      const seen = new Set();
+      return results.filter(item => {
+        if (seen.has(item.href)) return false;
+        seen.add(item.href);
+        return true;
+      });
+    }
+
+    async function refreshArtifacts() {
+      const list = await fetchArtifacts();
+      window.__artifacts = list;
+      renderArtifacts(list);
+    }
+
+    function renderArtifacts(list) {
+      const container = document.getElementById('artifact-list');
+      const hint = document.getElementById('artifact-hint');
+      const filterBox = document.getElementById('artifact-filter');
+      const q = filterBox ? filterBox.value : '';
+      container.innerHTML = '';
+      const filtered = (list || []).filter(item => filterTextIncludes(q, item.name, item.ext, item.source));
+      if (!filtered.length) {
+        if (hint) hint.style.display = 'block';
+        container.innerHTML = '<div class="artifact-item"><span class="muted">No matching artifacts</span></div>';
+        return;
+      }
+      if (hint) hint.style.display = 'none';
+      filtered.slice(0, 120).forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'artifact-item';
+        row.innerHTML = `
+          <div class="artifact-left">
+            <div class="artifact-name">${item.name}</div>
+            <div class="artifact-meta">${item.source}</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="chip-type">${item.ext.replace('.', '').toUpperCase()}</span>
+            <a href="${item.href}" target="_blank" rel="noopener noreferrer">Open</a>
+          </div>
+        `;
+        container.appendChild(row);
+      });
     }
 
     function bucketTag(bucket) {
@@ -957,6 +1064,8 @@
       const filter = document.getElementById('signals-filter');
       const btnClear = document.getElementById('btn-clear-filter');
       const wnd = document.getElementById('trade-window');
+      const artifactFilter = document.getElementById('artifact-filter');
+      const artifactRefresh = document.getElementById('btn-refresh-artifacts');
 
       if (btnRefresh) btnRefresh.addEventListener('click', refreshDashboard);
       if (filter) filter.addEventListener('input', () => renderSignals((window.__dashData || {}).signals || []));
@@ -979,6 +1088,8 @@
       if (tabPrice) tabPrice.addEventListener('click', () => setActiveTab('price'));
       if (tabPnl) tabPnl.addEventListener('click', () => setActiveTab('pnl'));
       if (tabEquity) tabEquity.addEventListener('click', () => setActiveTab('equity'));
+      if (artifactFilter) artifactFilter.addEventListener('input', () => renderArtifacts(window.__artifacts || []));
+      if (artifactRefresh) artifactRefresh.addEventListener('click', refreshArtifacts);
 
       let paused = false;
       let intervalId = null;
@@ -1005,6 +1116,7 @@
 
     bindUI();
     refreshDashboard();
+    refreshArtifacts();
     window.addEventListener('resize', () => renderDashboard(window.__dashData || null));
   </script>
 </body>

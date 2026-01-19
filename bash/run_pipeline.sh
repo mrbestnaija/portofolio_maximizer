@@ -301,12 +301,18 @@ else:
         for record in target:
             ticker = record.get("ticker", "UNKNOWN")
             status = record.get("status") or record.get("quant_validation", {}).get("status", "UNKNOWN")
+            action = (record.get("action") or record.get("signal", {}).get("action") or "UNKNOWN").upper()
             confidence = record.get("confidence")
             expected_return = record.get("expected_return")
+            directional_edge = None
+            if isinstance(expected_return, (int, float)):
+                directional_edge = expected_return
+                if action in {"SELL", "SHORT"}:
+                    directional_edge = -directional_edge
             conf_str = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "n/a"
-            exp_str = f"{expected_return:.2%}" if isinstance(expected_return, (int, float)) else "n/a"
+            edge_str = f"{directional_edge:.2%}" if isinstance(directional_edge, (int, float)) else "n/a"
             viz = record.get("visualization_path") or "n/a"
-            print(f"  - {ticker}: {status} (conf={conf_str}, exp={exp_str}) viz={viz}")
+            print(f"  - {ticker}: {status} action={action} (conf={conf_str}, edge={edge_str}) viz={viz}")
 
 print("\nPortfolio performance summary:")
 start_env = os.getenv("MVS_START_DATE")
@@ -331,7 +337,8 @@ if not db_path.exists():
     print(f"  (db not found at {db_path})")
 else:
     db = DatabaseManager(db_path=str(db_path))
-    perf = db.get_performance_summary(start_date=start_date, end_date=end_date)
+    perf = db.get_performance_summary(start_date=start_date, end_date=end_date, run_id=pipeline_id)
+    lifetime = db.get_performance_summary(start_date=start_date, end_date=end_date)
     db.close()
 
     total_trades = perf.get("total_trades", 0)
@@ -343,19 +350,27 @@ else:
     if start_date or end_date:
         window_label = f"{start_date or '...'} -> {end_date or '...'}"
 
-    print(f"  Window         : {window_label}")
-    print(f"  Total trades   : {total_trades}")
-    print(f"  Total profit   : {total_profit:.2f} USD")
-    print(f"  Win rate       : {win_rate:.1%}")
-    print(f"  Profit factor  : {profit_factor:.2f}")
+    if total_trades <= 0:
+        print(f"  run_id={pipeline_id}: no realized trades for this run; skipping PnL/MVS.")
+    else:
+        print(f"  Window         : {window_label} (run-scoped)")
+        print(f"  Total trades   : {total_trades}")
+        print(f"  Total profit   : {total_profit:.2f} USD")
+        print(f"  Win rate       : {win_rate:.1%}")
+        print(f"  Profit factor  : {profit_factor:.2f}")
 
-    mvs_passed = (
-        total_profit > 0.0
-        and win_rate > 0.45
-        and profit_factor > 1.0
-        and total_trades >= 30
-    )
-    print(f"  MVS Status     : {'PASS' if mvs_passed else 'FAIL'}")
+        mvs_passed = (
+            total_profit > 0.0
+            and win_rate > 0.45
+            and profit_factor > 1.0
+            and total_trades >= 30
+        )
+        print(f"  MVS Status     : {'PASS' if mvs_passed else 'FAIL'}")
+
+    # Still surface lifetime context to aid operators.
+    lifetime_trades = lifetime.get("total_trades", 0)
+    if lifetime_trades:
+        print(f"  Lifetime       : trades={lifetime_trades}, profit={float(lifetime.get('total_profit', 0.0) or 0.0):.2f} USD, win_rate={(lifetime.get('win_rate') or 0.0):.1%}, profit_factor={(lifetime.get('profit_factor') or 0.0):.2f}")
 print("")
 PY
 

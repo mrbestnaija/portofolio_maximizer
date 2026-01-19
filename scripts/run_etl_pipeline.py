@@ -67,6 +67,7 @@ from etl.portfolio_math import (
 )
 from etl.split_diagnostics import summarize_returns, drift_metrics, validate_non_overlap
 from etl.frontier_markets import (
+    FRONTIER_MARKET_TICKERS,
     FRONTIER_MARKET_TICKERS_BY_REGION,
     merge_frontier_tickers,
 )
@@ -582,6 +583,61 @@ class LLMComponents:
     optimizer: Optional[LLMPerformanceOptimizer] = None
     validator_version: str = "v1"
     llm_config: Optional[Dict[str, Any]] = None
+
+
+def _filter_extracted_universe(
+    df: Optional[pd.DataFrame],
+    ticker_list: List[str],
+    *,
+    min_rows_per_ticker: int,
+    extraction_source: Optional[str],
+    execution_mode: str,
+) -> Tuple[Optional[pd.DataFrame], List[str]]:
+    """
+    Drop tickers with insufficient OHLCV observations to avoid carrying empty
+    or fictitious series through the pipeline.
+    """
+    if df is None or df.empty:
+        return df, ticker_list
+
+    ticker_col = None
+    for candidate in ("ticker", "Ticker", "symbol", "Symbol"):
+        if candidate in df.columns:
+            ticker_col = candidate
+            break
+    if ticker_col is None:
+        return df, ticker_list
+
+    counts = df.groupby(ticker_col).size().sort_values(ascending=False)
+    keep = [t for t, c in counts.items() if c >= min_rows_per_ticker]
+    dropped = [t for t in counts.index if t not in keep]
+
+    if dropped:
+        logger.warning(
+            "Dropping %s ticker(s) with < %s rows: %s",
+            len(dropped),
+            min_rows_per_ticker,
+            ", ".join(str(t) for t in dropped),
+        )
+        if extraction_source and str(extraction_source).lower().startswith("yfinance") and execution_mode in {"live", "auto"}:
+            frontier_missed = [t for t in dropped if str(t).upper() in set(FRONTIER_MARKET_TICKERS)]
+            if frontier_missed:
+                logger.warning(
+                    "Frontier tickers missing from Yahoo extract; confirm correct symbol/suffix mapping (e.g., .JO/.L/.NS). Dropped: %s",
+                    ", ".join(frontier_missed),
+                )
+
+    if not keep:
+        logger.error(
+            "No tickers satisfied min_rows_per_ticker=%s (counts=%s)",
+            min_rows_per_ticker,
+            counts.to_dict(),
+        )
+        raise RuntimeError("Extraction produced insufficient OHLCV rows for all tickers")
+
+    filtered = df[df[ticker_col].isin(keep)].copy()
+    filtered.attrs.update(df.attrs)
+    return filtered, [str(t) for t in keep]
 
 
 def _load_pipeline_config_safe(config_path: str) -> Dict[str, Any]:
@@ -1343,12 +1399,32 @@ def execute_pipeline(
                         metadata={'reason': 'live_extraction_failure'}
                     )
 
+                try:
+                    min_rows_env = int(os.getenv("MIN_OHLCV_ROWS_PER_TICKER", "30") or 30)
+                except ValueError:
+                    min_rows_env = 30
+                raw_data, filtered_tickers = _filter_extracted_universe(
+                    raw_data,
+                    ticker_list,
+                    min_rows_per_ticker=min_rows_env,
+                    extraction_source=extraction_source,
+                    execution_mode=execution_mode,
+                )
+                if filtered_tickers != ticker_list:
+                    logger.info(
+                        "Proceeding with %s/%s tickers after OHLCV trim: %s",
+                        len(filtered_tickers),
+                        len(ticker_list),
+                        ", ".join(filtered_tickers),
+                    )
+                    ticker_list = filtered_tickers
+
                 # Save to database
                 rows_saved = db_manager.save_ohlcv_data(
                     raw_data,
                     source=extraction_source
                 )
-                logger.info("Saved {rows_saved} rows to database")
+                logger.info("Saved %s rows to database", rows_saved)
 
                 # Log cache statistics
                 if extraction_source and not extraction_source.lower().startswith('synthetic'):
