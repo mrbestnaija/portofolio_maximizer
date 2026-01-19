@@ -1,6 +1,6 @@
 # Runtime Guardrails (WSL `simpleTrader_env` Only)
 
-This repo is **validated only** when run under **WSL** using the **Linux virtualenv** at `simpleTrader_env/` (i.e. `simpleTrader_env/bin/python`).
+This repo is **validated only** when run under **WSL** using the **Linux virtualenv** at `simpleTrader_env/` (i.e. `simpleTrader_env/bin/python`). Supported Python is **>=3.10,<3.13**; the requirements files are pinned for that range and intentionally do not support 3.13+.
 
 If you run the code under any other interpreter (Windows Python, `py`, `.venv`, system `python`, or `simpleTrader_env\\Scripts\\python.exe`), results are **not comparable** and must be treated as **invalid**.
 
