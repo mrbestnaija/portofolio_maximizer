@@ -38,6 +38,9 @@ class MSSARLConfig:
     q_learning_epsilon: float = 0.1
     forecast_horizon: int = 10
     use_gpu: bool = False
+    # PHASE 7.3 FIX: Accept additional params from YAML config
+    min_series_length: int = 150
+    max_forecast_steps: int = 30
 
 
 class MSSARLForecaster:

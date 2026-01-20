@@ -2130,7 +2130,7 @@ def execute_pipeline(
                                 for step in range(min(forecast_horizon, len(ensemble_series))):
                                     if step < len(ensemble_series):
                                         forecast_data = {
-                                            'model_type': 'COMBINED',
+                                            'model_type': 'ENSEMBLE',  # Phase 7.3: Changed from COMBINED for clarity
                                             'forecast_horizon': step + 1,
                                             'forecast_value': float(ensemble_series.iloc[step]),
                                             'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,

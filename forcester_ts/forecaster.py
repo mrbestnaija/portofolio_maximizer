@@ -707,16 +707,19 @@ class TimeSeriesForecaster:
 
         forecasts = {
             "sarimax": self._extract_series(results.get("sarimax_forecast")),
+            "garch": self._extract_series(results.get("garch_forecast")),
             "samossa": self._extract_series(results.get("samossa_forecast")),
             "mssa_rl": self._extract_series(results.get("mssa_rl_forecast")),
         }
         lowers = {
             "sarimax": self._extract_series(results.get("sarimax_forecast"), "lower_ci"),
+            "garch": self._extract_series(results.get("garch_forecast"), "lower_ci"),
             "samossa": self._extract_series(results.get("samossa_forecast"), "lower_ci"),
             "mssa_rl": self._extract_series(results.get("mssa_rl_forecast"), "lower_ci"),
         }
         uppers = {
             "sarimax": self._extract_series(results.get("sarimax_forecast"), "upper_ci"),
+            "garch": self._extract_series(results.get("garch_forecast"), "upper_ci"),
             "samossa": self._extract_series(results.get("samossa_forecast"), "upper_ci"),
             "mssa_rl": self._extract_series(results.get("mssa_rl_forecast"), "upper_ci"),
         }
@@ -932,7 +935,7 @@ class TimeSeriesForecaster:
                 return
 
             rmse_by_model: Dict[str, float] = {}
-            for model in ("sarimax", "samossa", "mssa_rl"):
+            for model in ("sarimax", "garch", "samossa", "mssa_rl"):
                 rmse_val = (metrics_map.get(model) or {}).get("rmse")
                 if isinstance(rmse_val, (int, float)) and float(rmse_val) >= 0:
                     rmse_by_model[model] = float(rmse_val)

@@ -67,7 +67,17 @@ forecasting:
     enabled: true
     confidence_scaling: true
     candidate_weights:
+      # Phase 7.3 FIX: Add GARCH-dominant weights based on diagnostic findings
+      # Diagnostics showed GARCH RMSE 30.64 vs SARIMAX 229.44 (87% better)
+      - {garch: 0.85, sarimax: 0.10, samossa: 0.05}  # GARCH-dominant for liquid tickers
+      - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}  # GARCH-heavy with SSA
+      - {garch: 0.60, sarimax: 0.25, samossa: 0.15}  # Balanced GARCH blend
+      # Original candidates for regimes where GARCH underperforms
       - {sarimax: 0.6, samossa: 0.4}
       - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
       - {sarimax: 0.5, mssa_rl: 0.5}
+      # Pure model fallbacks
+      - {garch: 1.0}
+      - {samossa: 1.0}
+      - {mssa_rl: 1.0}
     minimum_component_weight: 0.05  # Align with EnsembleConfig default guardrail

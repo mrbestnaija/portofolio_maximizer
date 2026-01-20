@@ -162,6 +162,7 @@ def derive_model_confidence(
     confidence: Dict[str, float] = {}
 
     sarimax_summary = summaries.get("sarimax", {})
+    garch_summary = summaries.get("garch", {})
     samossa_summary = summaries.get("samossa", {})
     mssa_summary = summaries.get("mssa_rl", {})
 
@@ -250,6 +251,17 @@ def derive_model_confidence(
     )
     if sarimax_score is not None:
         confidence["sarimax"] = sarimax_score
+
+    # GARCH confidence scoring - Phase 7.3 addition for ensemble integration
+    garch_metrics = garch_summary.get("regression_metrics", {}) or {}
+    garch_score = _combine_scores(
+        _score_from_metrics(garch_metrics),
+        _variance_test_score(garch_metrics, baseline_metrics)
+        if baseline_metrics
+        else None,
+    )
+    if garch_score is not None:
+        confidence["garch"] = garch_score
 
     evr = samossa_summary.get("explained_variance_ratio")
     samossa_score = None
