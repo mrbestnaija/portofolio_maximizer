@@ -11,7 +11,7 @@ forecasting:
   sarimax:
     enabled: true
     auto_select_order: true
-    max_p: 2
+    max_p: 3  # Phase 7.3: Increased from 2 to capture more complex AR dynamics
     max_d: 1
     max_q: 2
     seasonal_periods: null  # Auto-detect (null) or specify (12=monthly, 4=quarterly)
@@ -33,8 +33,8 @@ forecasting:
   # SAMOSSA configuration
   samossa:
     enabled: true
-    window_length: 40        # Hankel window length for SSA embedding
-    n_components: 6          # Number of leading components to retain
+    window_length: 60        # Phase 7.3: Increased from 40 for richer trajectory matrix
+    n_components: 8          # Phase 7.3: Increased from 6 for complex patterns (or -1 for auto)
     use_residual_arima: true # Fit ARIMA on residual component
     arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
     seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
@@ -47,7 +47,7 @@ forecasting:
     enabled: true
     window_length: 30              # Window for mSSA Page matrix
     rank: null                     # Let MSSARLConfig choose rank to hit ~90% variance
-    change_point_threshold: 2.5    # Std-dev multiplier for CUSUM change-point detection
+    change_point_threshold: 3.5    # Phase 7.3: Increased from 2.5 to reduce false change-points
     q_learning_alpha: 0.3
     q_learning_gamma: 0.85
     q_learning_epsilon: 0.1

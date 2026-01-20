@@ -174,7 +174,26 @@ logging/
 logs/archive/*
 logs/automation/*
 logs/signals/*
+logs/*.pid
+logs/**/*.pid
 
+# Generated dashboard artifacts
+visualizations/dashboard_data.json
+visualizations/dashboard_data*.json
+data/dashboard_audit.db
+data/dashboard_audit.db-*
+
+# Large/packed artifacts (keep out of repo)
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.gz
+*.bz2
+*.xz
+*.zst
+*.bin
+*.bak
 
 # Ignore Jupyter Notebook checkpoints
 .ipynb_checkpoints/
