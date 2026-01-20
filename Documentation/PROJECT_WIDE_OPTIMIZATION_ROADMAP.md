@@ -14,6 +14,8 @@
 - Live dashboard is now real-time (polls `visualizations/dashboard_data.json` every 5s) and uses empty states when data is missing (no embedded demo data).
 - Dashboard payload includes `positions`, `price_series`, and `trade_events` for trade/price/PnL visualization; canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators and snapshot-persisted into `data/dashboard_audit.db` by default.
 - Forecast audit monitoring dedupe fixed in `scripts/check_forecast_audits.py` (newest audit per dataset window wins).
+- Profitability remediation is documented in `Documentation/CRITICAL_PROFITABILITY_ANALYSIS_AND_REMEDIATION_PLAN.md` (synthetic/test contamination, lifecycle exits). Keep future fixes aligned with that ledger.
+- Workflow hygiene: remote remains canonical; rebase/push small deltas early to avoid dashboard/forecaster drift and stash conflicts.
 
 This roadmap is a **sequenced To‑Do list** designed to avoid disruptive rewrites. Each phase is intended to be **small, testable, and reversible**.
 

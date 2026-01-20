@@ -39,7 +39,8 @@ The project contains many documents; the following are the **core** ones that sh
 - **Quant gating policy (GREEN/YELLOW/RED)**: `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`
 - **Numeric invariants (guard rails)**: `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`
 - **Metrics + evaluation definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
-- **Ensemble governance (2026-01-11)**: Research-profile RMSE gate on 27 effective audits → violation_rate 3.7% (<= cap), lift_fraction 0% (<10% required) ⇒ **DISABLE ensemble as default**. Config reflects this (`config/forecasting_config.yml` sets `ensemble.enabled: false`); BEST_SINGLE remains the default until lift is demonstrated over ≥20 effective audits with required lift fraction.
+- **Ensemble governance (2026-01-11 / refreshed 2026-01-20)**: Ensemble is **enabled** in `config/forecasting_config.yml` with Phase 7.3 tuning (higher SARIMAX order caps, wider SAMOSSA window, stricter MSSA-RL change-point gate). Keep the promotion bar: require ≥20 effective audits with lift_fraction ≥10% vs BEST_SINGLE and violation_rate within cap; disable if those regressions appear in fresh audits.
+- **Profitability remediation playbook**: `Documentation/CRITICAL_PROFITABILITY_ANALYSIS_AND_REMEDIATION_PLAN.md` is the canonical “what broke and how to fix” ledger (synthetic/test contamination, missing exits, remediation gates). Keep it in sync when profitability fixes land.
 
 If something is unclear or conflicting, treat this as the priority order for resolving ambiguity:
 
@@ -47,6 +48,10 @@ If something is unclear or conflicting, treat this as the priority order for res
 2. `Documentation/PROJECT_STATUS.md` (current intent)
 3. `Documentation/METRICS_AND_EVALUATION.md` (definitions)
 4. Other docs (supporting context)
+
+**Remote-first hygiene**
+- Always rebase or pull before branching; push small commits early to avoid dashboard/forecaster conflicts.
+- If stashes are used, label them and reconcile on a feature branch before touching `master` to keep the remote canonical.
 
 ---
 
