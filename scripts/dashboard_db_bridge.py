@@ -452,40 +452,57 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
     row = _safe_fetchone(
         conn,
         """
-        SELECT total_return, total_return_pct, win_rate, profit_factor, num_trades
+        SELECT total_return, total_return_pct, win_rate, profit_factor, num_trades,
+               sharpe_ratio, sortino_ratio, max_drawdown,
+               avg_win, avg_loss, largest_win, largest_loss
         FROM performance_metrics
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
     )
     if not row:
-        return {"pnl_abs": 0.0, "pnl_pct": 0.0, "win_rate": 0.0, "profit_factor": 0.0, "trade_count": 0}
-    try:
-        pnl_abs = float(row["total_return"] or 0.0)
-    except Exception:
-        pnl_abs = 0.0
-    try:
-        pnl_pct = float(row["total_return_pct"] or 0.0)
-    except Exception:
-        pnl_pct = 0.0
-    try:
-        win_rate = float(row["win_rate"] or 0.0)
-    except Exception:
-        win_rate = 0.0
-    try:
-        profit_factor = float(row["profit_factor"] or 0.0)
-    except Exception:
-        profit_factor = 0.0
-    try:
-        trade_count = int(row["num_trades"] or 0)
-    except Exception:
-        trade_count = 0
+        return {
+            "pnl_abs": 0.0,
+            "pnl_pct": 0.0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "trade_count": 0,
+            "sharpe": 0.0,
+            "sortino": 0.0,
+            "max_drawdown": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "largest_win": 0.0,
+            "largest_loss": 0.0,
+        }
+    def _f(key: str, default: float = 0.0) -> float:
+        try:
+            return float(row[key] or 0.0)
+        except Exception:
+            return default
+    def _i(key: str, default: int = 0) -> int:
+        try:
+            return int(row[key] or 0)
+        except Exception:
+            return default
+    pnl_abs = _f("total_return")
+    pnl_pct = _f("total_return_pct")
+    win_rate = _f("win_rate")
+    profit_factor = _f("profit_factor")
+    trade_count = _i("num_trades")
     return {
         "pnl_abs": pnl_abs,
         "pnl_pct": pnl_pct,
         "win_rate": win_rate,
         "profit_factor": profit_factor,
         "trade_count": trade_count,
+        "sharpe": _f("sharpe_ratio"),
+        "sortino": _f("sortino_ratio"),
+        "max_drawdown": _f("max_drawdown"),
+        "avg_win": _f("avg_win"),
+        "avg_loss": _f("avg_loss"),
+        "largest_win": _f("largest_win"),
+        "largest_loss": _f("largest_loss"),
     }
 
 
@@ -534,6 +551,7 @@ def build_dashboard_payload(
         "pnl": {"absolute": float(perf["pnl_abs"]), "pct": float(perf["pnl_pct"])},
         "win_rate": float(perf["win_rate"]),
         "trade_count": int(perf["trade_count"]),
+        "performance": perf,
         "positions": _positions(conn),
         "latency": {"ts_ms": None, "llm_ms": None},
         "routing": {"ts_signals": 0, "llm_signals": 0, "fallback_used": 0},

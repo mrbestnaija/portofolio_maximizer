@@ -148,6 +148,10 @@
     .tag.grade-b { color: #8bd17c; }
     .tag.grade-c { color: #f6c344; }
     .tag.grade-d { color: #f05252; }
+    .diag-grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:8px; }
+    .diag { background: var(--panel-2); border:1px solid rgba(255,255,255,0.06); border-radius:10px; padding:10px; }
+    .diag .label { color: var(--muted); font-size:12px; text-transform: uppercase; letter-spacing:0.6px; }
+    .diag .value { font-size:15px; margin-top:4px; }
     .universe { margin-top: 12px; }
     .universe-list { margin-top: 10px; max-height: 260px; overflow: auto; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); }
     .universe-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding: 10px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; }
@@ -231,6 +235,40 @@
             <span class="badge" id="payload-prices">Price series: 0</span>
           </div>
           <div class="subtitle" id="payload-warning" style="margin-top:8px; color: var(--danger); display:none;">Missing price_series/trade_events; add them to dashboard_data.json.</div>
+        </div>
+        <div class="card">
+          <h3>Model Diagnostics</h3>
+          <div class="subtitle">Performance + risk stats (latest performance_metrics row or derived)</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Profit Factor</div>
+              <div class="value" id="diag-pf">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Win Rate</div>
+              <div class="value" id="diag-win">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Trades</div>
+              <div class="value" id="diag-trades">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Sharpe / Sortino</div>
+              <div class="value" id="diag-sharpe">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Max Drawdown</div>
+              <div class="value" id="diag-dd">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Avg Win / Loss</div>
+              <div class="value" id="diag-avg">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Largest Win / Loss</div>
+              <div class="value" id="diag-largest">--</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -822,6 +860,24 @@
       }
     }
 
+    function deriveEquityFromTrades(trades) {
+      if (!Array.isArray(trades)) return [];
+      const parsed = trades
+        .filter(t => t && t.realized_pnl !== undefined && t.realized_pnl !== null)
+        .map(t => {
+          const ts = t.timestamp || t.bar_timestamp || t.trade_date || t.ts || Date.now();
+          return { ts: new Date(ts).getTime(), pnl: Number(t.realized_pnl) || 0 };
+        })
+        .filter(t => Number.isFinite(t.ts));
+      if (!parsed.length) return [];
+      parsed.sort((a, b) => a.ts - b.ts);
+      let acc = 0;
+      return parsed.map(item => {
+        acc += item.pnl;
+        return { t: new Date(item.ts).toISOString(), v: acc };
+      });
+    }
+
     function renderDashboard(data) {
       if (!data) {
         setText('run-meta', 'dashboard_data.json not found');
@@ -846,6 +902,8 @@
         setText('payload-signals', 'Signals: 0');
         setText('payload-trades', 'Trades: 0');
         setText('payload-prices', 'Price series: 0');
+        setText('diag-pf', '--'); setText('diag-win', '--'); setText('diag-trades', '--');
+        setText('diag-sharpe', '--'); setText('diag-dd', '--'); setText('diag-avg', '--'); setText('diag-largest', '--');
         setText('kpi-last-close', '--');
         setText('kpi-position', '--');
         setText('kpi-last-pnl', '--');
@@ -883,6 +941,18 @@
       tradeCountEl.textContent = `${data.trade_count || 0} trades`;
       setPillState(tradeCountEl, (data.win_rate || 0) - 0.5);
 
+      // Model diagnostics (performance_metrics if present)
+      const perf = data.performance || {};
+      const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(2) : '--';
+      const fmtPct = (v) => Number.isFinite(v) ? `${(v * 100).toFixed(2)}%` : '--';
+      setText('diag-pf', fmtNum(perf.profit_factor ?? data.profit_factor));
+      setText('diag-win', fmtPct((perf.win_rate ?? data.win_rate) || 0));
+      setText('diag-trades', String(perf.trade_count ?? data.trade_count ?? 0));
+      setText('diag-sharpe', `${fmtNum(perf.sharpe ?? 0)} / ${fmtNum(perf.sortino ?? 0)}`);
+      setText('diag-dd', fmtPct(perf.max_drawdown ?? 0));
+      setText('diag-avg', `${fmtNum(perf.avg_win ?? 0)} / ${fmtNum(perf.avg_loss ?? 0)}`);
+      setText('diag-largest', `${fmtNum(perf.largest_win ?? 0)} / ${fmtNum(perf.largest_loss ?? 0)}`);
+
       setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '--');
       const llmEl = document.getElementById('llm-latency');
       llmEl.textContent = data.latency?.llm_ms ? `LLM: ${data.latency.llm_ms.toFixed(0)} ms` : 'LLM: --';
@@ -912,7 +982,10 @@
       const warnNeeded = tradesCount === 0 || priceSeriesCount === 0;
       document.getElementById('payload-warning').style.display = warnNeeded ? 'block' : 'none';
 
-      renderEquity(data.equity, data.equity_realized);
+      const derivedRealized = (data.equity_realized && data.equity_realized.length)
+        ? data.equity_realized
+        : deriveEquityFromTrades(data.trade_events || []);
+      renderEquity(data.equity, derivedRealized);
       renderSignals(data.signals);
       renderUniverse(data);
       populateTradeTickerSelect(data);
