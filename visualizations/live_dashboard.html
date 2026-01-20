@@ -152,6 +152,10 @@
     .diag { background: var(--panel-2); border:1px solid rgba(255,255,255,0.06); border-radius:10px; padding:10px; }
     .diag .label { color: var(--muted); font-size:12px; text-transform: uppercase; letter-spacing:0.6px; }
     .diag .value { font-size:15px; margin-top:4px; }
+    .diag-figure { background: var(--panel-2); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:10px; }
+    .diag-figure h4 { margin:0 0 6px; font-size:13px; color: var(--muted); text-transform: uppercase; letter-spacing:0.6px; }
+    .diag-figure img { width:100%; border-radius:10px; border:1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.02); }
+    .diag-figure .placeholder { padding:12px; color: var(--muted); font-size:12px; }
     .universe { margin-top: 12px; }
     .universe-list { margin-top: 10px; max-height: 260px; overflow: auto; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); }
     .universe-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding: 10px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; }
@@ -356,6 +360,38 @@
           <span style="color:#f6a621;">● Active</span> ·
           <span style="color:#30c48d;">● Closed-Profit</span> ·
           <span style="color:#f05252;">● Closed-Loss</span>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h3 style="margin-bottom:6px;">Ensemble Diagnostics</h3>
+            <div class="subtitle">Error decomposition · confidence calibration · weight optimization</div>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <div class="subtitle">Ticker</div>
+              <select id="diag-ticker" aria-label="Diagnostics ticker"></select>
+            </div>
+          </div>
+        </div>
+        <div class="diag-grid" id="diag-grid">
+          <div class="diag-figure" id="fig-error">
+            <h4>Error Decomposition</h4>
+            <img id="diag-img-error" alt="Error decomposition" />
+            <div class="placeholder" id="diag-msg-error" style="display:none;">No error_decomposition.png found for this ticker.</div>
+          </div>
+          <div class="diag-figure" id="fig-calibration">
+            <h4>Confidence Calibration</h4>
+            <img id="diag-img-calibration" alt="Confidence calibration" />
+            <div class="placeholder" id="diag-msg-calibration" style="display:none;">No confidence_calibration.png found for this ticker.</div>
+          </div>
+          <div class="diag-figure" id="fig-weights">
+            <h4>Weight Optimization</h4>
+            <img id="diag-img-weights" alt="Weight optimization" />
+            <div class="placeholder" id="diag-msg-weights" style="display:none;">No weight_optimization.png found for this ticker.</div>
+          </div>
         </div>
       </div>
     </div>
@@ -878,6 +914,65 @@
       });
     }
 
+    function setDiagImage(imgId, msgId, ticker, filename) {
+      const img = document.getElementById(imgId);
+      const msg = document.getElementById(msgId);
+      const wrapper = img ? img.closest('.diag-figure') : null;
+      if (!img) return;
+      if (!ticker) {
+        img.style.display = 'none';
+        if (msg) msg.style.display = 'block';
+        if (wrapper) wrapper.style.opacity = 0.5;
+        return;
+      }
+      const src = `visualizations/ensemble_diagnostics/${ticker}/${filename}?t=${Date.now()}`;
+      img.onload = () => {
+        img.style.display = 'block';
+        if (msg) msg.style.display = 'none';
+        if (wrapper) wrapper.style.opacity = 1;
+      };
+      img.onerror = () => {
+        img.style.display = 'none';
+        if (msg) msg.style.display = 'block';
+        if (wrapper) wrapper.style.opacity = 0.6;
+      };
+      img.src = src;
+    }
+
+    function populateDiagTickerSelect(data) {
+      const select = document.getElementById('diag-ticker');
+      if (!select) return;
+      select.innerHTML = '';
+      const tickers = Array.isArray(data.meta?.tickers) ? [...data.meta.tickers] : [];
+      if (!tickers.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '—';
+        select.appendChild(opt);
+        setDiagImage('diag-img-error', 'diag-msg-error', '', '');
+        setDiagImage('diag-img-calibration', 'diag-msg-calibration', '', '');
+        setDiagImage('diag-img-weights', 'diag-msg-weights', '', '');
+        return;
+      }
+      tickers.sort().forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = t;
+        select.appendChild(opt);
+      });
+      const init = select.value || tickers[0];
+      select.value = init;
+      setDiagImage('diag-img-error', 'diag-msg-error', init, 'error_decomposition.png');
+      setDiagImage('diag-img-calibration', 'diag-msg-calibration', init, 'confidence_calibration.png');
+      setDiagImage('diag-img-weights', 'diag-msg-weights', init, 'weight_optimization.png');
+      select.onchange = () => {
+        const t = select.value;
+        setDiagImage('diag-img-error', 'diag-msg-error', t, 'error_decomposition.png');
+        setDiagImage('diag-img-calibration', 'diag-msg-calibration', t, 'confidence_calibration.png');
+        setDiagImage('diag-img-weights', 'diag-msg-weights', t, 'weight_optimization.png');
+      };
+    }
+
     function renderDashboard(data) {
       if (!data) {
         setText('run-meta', 'dashboard_data.json not found');
@@ -993,6 +1088,7 @@
       if (select && select.value) {
         renderTradesForTicker(data, select.value);
       }
+      populateDiagTickerSelect(data);
     }
 
     let refreshBusy = false;
