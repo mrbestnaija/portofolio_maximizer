@@ -904,6 +904,7 @@ class TimeSeriesForecaster:
                 metrics_map[name] = metrics
 
         _evaluate_model("sarimax", self._latest_results.get("sarimax_forecast"))
+        _evaluate_model("garch", self._latest_results.get("garch_forecast"))  # Phase 7.3: Add GARCH to metrics
         _evaluate_model("samossa", self._latest_results.get("samossa_forecast"))
         _evaluate_model("mssa_rl", self._latest_results.get("mssa_rl_forecast"))
 
