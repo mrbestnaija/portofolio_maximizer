@@ -89,6 +89,7 @@ data/testing/*.parquet
 data/synthetic/
 models/synthetic/
 *.csv
+.data/
 data/
 data/cache/
 data/temp/
@@ -156,7 +157,7 @@ settings.local.json
 # References files for research and development
 Reference/
 References/
-References/*    
+References/*
 
 # Cursor specific (protect AI configuration and settings)
 .Cursor/
@@ -174,9 +175,9 @@ logs/archive/*
 logs/automation/*
 logs/signals/*
 
- 
+
 # Ignore Jupyter Notebook checkpoints
-.ipynb_checkpoints/ 
+.ipynb_checkpoints/
 
 # Ignore coverage reports
 htmlcov/

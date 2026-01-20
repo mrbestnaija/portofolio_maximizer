@@ -6,7 +6,7 @@ forecasting:
   default_forecast_horizon: 30  # Days ahead
   minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
   minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
-  
+
   # SARIMAX configuration
   sarimax:
     enabled: true
@@ -21,7 +21,7 @@ forecasting:
     trend: "c"  # Options: 'c' (constant), 't' (trend), 'ct' (both), 'n' (none)
     enforce_stationarity: true
     enforce_invertibility: true
-  
+
   # GARCH configuration
   garch:
     enabled: true
@@ -41,7 +41,7 @@ forecasting:
     min_series_length: 120   # Minimum observations required before fit
     max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
     reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
-  
+
   # MSSA-RL configuration (change-point + RL forecaster)
   mssa_rl:
     enabled: true
@@ -53,8 +53,8 @@ forecasting:
     q_learning_epsilon: 0.1
     use_gpu: true            # Optional CuPy acceleration; keep false on Tier-1 CPU runs but changed to true to speed up on Tier-2+GPU
     min_series_length: 150   # Minimum observations required before fit
-    max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL  
-  
+    max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL
+
   # Combined forecasting
   combined:
     enabled: true
@@ -64,8 +64,7 @@ forecasting:
 
   # Ensemble orchestration
   ensemble:
-    # Disabled per research gate (insufficient lift vs BEST_SINGLE; see check_forecast_audits decision).
-    enabled: false
+    enabled: true
     confidence_scaling: true
     candidate_weights:
       - {sarimax: 0.6, samossa: 0.4}
