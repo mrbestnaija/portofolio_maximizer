@@ -518,6 +518,8 @@ def build_dashboard_payload(
     run_id = _latest_run_id(conn) or "db_bridge"
     ts = _utc_now_iso()
     bucket_map = _barbell_bucket_map()
+    model_params = _model_params(conn)
+    checks = _data_checks(conn)
 
     qual_records: List[Dict[str, Any]] = []
     for t in tickers:
@@ -561,6 +563,8 @@ def build_dashboard_payload(
         "signals": _latest_signals(conn, tickers, max_signals),
         "trade_events": _trade_events(conn, tickers, max_trades),
         "price_series": {t: _price_series(conn, t, lookback_days) for t in tickers},
+        "model_params": model_params,
+        "checks": checks,
     }
     return payload
 
@@ -610,6 +614,81 @@ def _persist_snapshot(audit_db: Path, payload: Dict[str, Any]) -> None:
         conn.commit()
     finally:
         conn.close()
+
+def _model_params(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Best-effort fetch of latest model parameters per ticker from time_series_forecasts.
+    Handles flexible column names for params to stay backward compatible.
+    """
+    try:
+        cols = [r[1] for r in _safe_fetchall(conn, "PRAGMA table_info(time_series_forecasts)")]
+    except sqlite3.OperationalError:
+        return {}
+    param_cols = [c for c in cols if "param" in c.lower()]
+    if not param_cols:
+        return {}
+    # prefer JSON-like column names
+    chosen_col = param_cols[0]
+    try:
+        rows = _safe_fetchall(
+            conn,
+            f"""
+            SELECT ticker, model_type, {chosen_col} AS params, created_at
+            FROM time_series_forecasts
+            WHERE {chosen_col} IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 400
+            """
+        )
+    except sqlite3.OperationalError:
+        return {}
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        t = str(r["ticker"] or "").strip().upper()
+        if not t:
+            continue
+        models = out.setdefault(t, [])
+        try:
+            import json  # type: ignore
+            parsed = json.loads(r["params"]) if isinstance(r["params"], str) else r["params"]
+        except Exception:
+            parsed = r["params"]
+        models.append(
+            {
+                "model_type": str(r["model_type"] or "").upper(),
+                "params": parsed,
+                "created_at": str(r["created_at"] or ""),
+            }
+        )
+    return out
+
+def _data_checks(conn: sqlite3.Connection) -> List[str]:
+    """Lightweight data/diagnostic checks to surface common pitfalls on the dashboard."""
+    checks: List[str] = []
+    # positions present?
+    try:
+        pos_count = _safe_fetchone(conn, "SELECT COUNT(*) AS c FROM portfolio_positions") or {"c": 0}
+        if int(pos_count["c"] or 0) == 0:
+            checks.append("No portfolio_positions rows found (positions table empty).")
+    except Exception:
+        checks.append("portfolio_positions table unavailable.")
+    # trade executions mix of actions?
+    try:
+        actions = _safe_fetchall(conn, "SELECT action, COUNT(*) AS c FROM trade_executions GROUP BY action")
+        sells = sum(int(r["c"] or 0) for r in actions if str(r["action"]).upper() in {"SELL", "CLOSE", "EXIT"})
+        buys = sum(int(r["c"] or 0) for r in actions if str(r["action"]).upper() in {"BUY", "OPEN"})
+        if buys > 0 and sells == 0:
+            checks.append("Only BUY/OPEN trades recorded; no SELL/CLOSE exits found.")
+    except Exception:
+        checks.append("trade_executions table unavailable.")
+    # performance metrics presence
+    try:
+        perf_rows = _safe_fetchone(conn, "SELECT COUNT(*) AS c FROM performance_metrics") or {"c": 0}
+        if int(perf_rows["c"] or 0) == 0:
+            checks.append("performance_metrics missing; run performance aggregation.")
+    except Exception:
+        checks.append("performance_metrics table unavailable.")
+    return checks
 
 
 def _parse_args() -> argparse.Namespace:

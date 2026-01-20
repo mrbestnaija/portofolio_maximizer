@@ -394,6 +394,23 @@
           </div>
         </div>
       </div>
+
+      <div class="card" style="margin-top:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h3 style="margin-bottom:6px;">Model Parameters</h3>
+            <div class="subtitle">Latest saved params per model (from time_series_forecasts)</div>
+          </div>
+        </div>
+        <div id="model-params" class="subtitle" style="margin-top:8px;">No model parameters available.</div>
+      </div>
+
+      <div class="card" style="margin-top:14px;">
+        <h3 style="margin-bottom:6px;">Data / Exit Checks</h3>
+        <div id="checks-list" class="subtitle" style="display:flex; flex-direction:column; gap:6px;">
+          <span>No checks available.</span>
+        </div>
+      </div>
     </div>
 
     <div class="card scroll-card" style="margin-top:0;">
@@ -939,6 +956,45 @@
       img.src = src;
     }
 
+    function renderModelParams(data) {
+      const el = document.getElementById('model-params');
+      if (!el) return;
+      const mp = data.model_params || {};
+      const tickers = Object.keys(mp || {});
+      if (!tickers.length) {
+        el.textContent = 'No model parameters available.';
+        return;
+      }
+      const parts = [];
+      tickers.sort().forEach(t => {
+        const models = mp[t] || [];
+        const mtxt = models.map(m => {
+          const params = typeof m.params === 'object' ? JSON.stringify(m.params) : String(m.params || '');
+          return `${m.model_type || 'MODEL'}: ${params}`;
+        }).join(' · ');
+        parts.push(`${t}: ${mtxt}`);
+      });
+      el.textContent = parts.join(' | ');
+    }
+
+    function renderChecks(data) {
+      const el = document.getElementById('checks-list');
+      if (!el) return;
+      const checks = Array.isArray(data.checks) ? data.checks : [];
+      el.innerHTML = '';
+      if (!checks.length) {
+        const span = document.createElement('span');
+        span.textContent = 'No blocking checks detected.';
+        el.appendChild(span);
+        return;
+      }
+      checks.forEach(msg => {
+        const span = document.createElement('span');
+        span.textContent = `⚠ ${msg}`;
+        el.appendChild(span);
+      });
+    }
+
     function populateDiagTickerSelect(data) {
       const select = document.getElementById('diag-ticker');
       if (!select) return;
@@ -1089,6 +1145,8 @@
         renderTradesForTicker(data, select.value);
       }
       populateDiagTickerSelect(data);
+      renderModelParams(data);
+      renderChecks(data);
     }
 
     let refreshBusy = false;
