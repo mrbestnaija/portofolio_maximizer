@@ -390,7 +390,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Live Ensemble Performance Dashboard')
-    parser.add_argument('--db', default='data/time_series_forecasts.db',
+    parser.add_argument('--db', default='data/portfolio_maximizer.db',
                        help='Path to forecasts database')
     parser.add_argument('--hours', type=int, default=24,
                        help='Look back N hours (default: 24)')
