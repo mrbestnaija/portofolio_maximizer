@@ -140,6 +140,8 @@ dist/
 docs/_build/
 
 #Documentation/ #Comment out if you want to track documentation source files
+# Ignore all markdown files locally (docs/notes remain untracked)
+*.md
 
 
 # Local automation configuration (keep private)

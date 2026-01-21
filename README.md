@@ -6,15 +6,20 @@
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 3.0
-**Status**: Production Ready ✅
-**Last Updated**: 2025-12-04
+**Version**: 3.0  
+**Status**: Phase 7.3 ensemble hardening (GARCH confidence/DB migration in place; RMSE still above target)  
+**Last Updated**: 2026-01-21
 
 ---
 
 ## 🎯 Overview
 
 Portfolio Maximizer is a self-directed trading stack that marries institutional-grade ETL with autonomous execution. It continuously extracts, validates, preprocesses, forecasts, and trades financial time series so profit-focused decisions are generated without human babysitting.
+
+### Current Phase & Scope (Jan 2026)
+- Phase 7.3 ensemble fix: ENSEMBLE DB CHECK updated, model keys canonicalized, confidence scoring de-saturated, GARCH now present in confidence/weights. RMSE ratios improved but remain above the <1.1x target.
+- Next up (Phase 8 canary): Neural forecasters (PatchTST/NHITS) and skforecast+XGBoost GPU for directional edge; Chronos-Bolt as a benchmark; GARCH retained for volatility sizing/stops. Horizon: 1-hour; training cadence: real-time plus daily batch; GPU: RTX 4060 Ti (CUDA 12.9).
+- Guardrails: WSL + `simpleTrader_env/bin/python` only (see Documentation/RUNTIME_GUARDRAILS.md). LLM paths are optional/feature-flagged and being replaced by TS/GPU models.
 
 ### Key Features
 
@@ -24,18 +29,18 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
 - **✅ Comprehensive Testing**: 141+ tests with high coverage across ETL, LLM, and integration modules
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
-- **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
-- **🔐 Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
+- **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, neural/TS stages, and ticker discovery with auditable logging
+- **🔐 Resilient Data Access**: Hardened Yahoo Finance extraction with pooling to reduce transient failures
 - **🤖 Autonomous Profit Engine**: `scripts/run_auto_trader.py` keeps the signal router + trading engine firing so positions are sized and executed automatically
 
 ---
 
-### ♻️ Latest Enhancements (Oct 2025)
+### ♻️ Latest Enhancements (Jan 2026)
 
-- Refactored `scripts/run_etl_pipeline.py` around `CVSettings` and `LLMComponents` helpers so cross-validation, LLM bootstrapping, and discovery fallbacks reuse a single orchestration path with consistent telemetry.
-- Centralised logging configuration by removing `logging.basicConfig` calls from extractor modules; entry points now own verbosity without side effects.
-- Improved `etl/yfinance_extractor.py` error handling by dropping recursive session patches and guarding log-return metrics against short or zero-valued series.
-- Reused a persistent `requests.Session` inside `ai_llm/ollama_client.py`, exposing a `close()` helper to trim LLM handshake latency and release sockets cleanly.
+- ENSEMBLE DB migration: CHECK now allows `ENSEMBLE`; added busy_timeout for contention-resistant writes.
+- Ensemble stability: canonicalized model keys, added confidence instrumentation, de-saturated scoring to avoid winner-takes-all, and ensured GARCH stays present with conservative fallback.
+- Tests: added confidence monotonicity coverage (`tests/test_ensemble_confidence.py`).
+- GPU/Neural forecaster plan: 1-hour horizon, real-time + daily retrain, GPU-enabled PatchTST/NHITS and skforecast+XGBoost under canary flags; Chronos-Bolt as zero-shot benchmark (see Documentation/MODEL_SIGNAL_REFACTOR_PLAN.md and Documentation/GPU_PARALLEL_RUNNER_CHECKLIST.md).
 
 ## Academic Rigor & Reproducibility (MIT-style)
 
@@ -155,41 +160,9 @@ ALPHA_VANTAGE_API_KEY=your_key_here
 CACHE_VALIDITY_HOURS=24
 ```
 
-### LLM Integration Setup (Optional)
+### LLM Integration (Optional and being phased out)
 
-To enable LLM-powered market analysis and signal generation:
-
-1. **Install Ollama**:
-   ```bash
-   # Linux/Mac
-   curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh
-   
-   # Windows: Download from https://ollama.ai/download
-   ```
-
-2. **Start Ollama Server**:
-   ```bash
-   ollama serve
-   # Server runs on http://localhost:11434
-   ```
-
-3. **Download Required Models**:
-   ```bash
-   # Primary model (recommended)
-   ollama pull deepseek-coder:6.7b-instruct-q4_K_M
-   
-   # Alternative models (optional)
-   ollama pull qwen:14b-chat-q4_K_M
-   ollama pull codellama:13b-instruct-q4_K_M
-   ```
-
-4. **Verify Installation**:
-   ```bash
-   # Test Ollama connection
-   curl http://localhost:11434/api/tags
-   ```
-
-**Note**: The pipeline will gracefully handle missing Ollama server when `--enable-llm` is used. LLM features are optional and the pipeline runs successfully without them.
+LLM paths remain available but are optional; the roadmap prioritizes TS/GPU forecasters. If you still need LLM-powered analysis, ensure Ollama is running locally; otherwise keep `--enable-llm` off for speed/energy savings.
 
 ---
 
