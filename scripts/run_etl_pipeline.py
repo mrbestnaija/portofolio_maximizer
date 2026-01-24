@@ -1856,6 +1856,13 @@ def execute_pipeline(
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
 
+                    # Phase 7.3 DEBUG: Check what's in ensemble_cfg
+                    logger.info(
+                        "Loaded ensemble_cfg keys: %s, candidate_weights count: %s",
+                        list(ensemble_cfg.keys()),
+                        len(ensemble_cfg.get('candidate_weights', [])),
+                    )
+
                     forecasts = {}
 
                     def _build_model_config(target_horizon: int) -> TimeSeriesForecasterConfig:
@@ -2116,33 +2123,40 @@ def execute_pipeline(
                                             forecast_data=forecast_data,
                                         )
 
-                            if forecast_result.get('ensemble_forecast'):
-                                ensemble_result = forecast_result['ensemble_forecast']
-                                ensemble_series = ensemble_result.get('forecast', pd.Series())
-                                lower_ci = ensemble_result.get('lower_ci')
-                                upper_ci = ensemble_result.get('upper_ci')
+                            ensemble_payload = forecast_result.get('ensemble_forecast')
+                            mean_payload = forecast_result.get('mean_forecast')
+                            if isinstance(ensemble_payload, dict) or isinstance(mean_payload, dict):
+                                ensemble_result = ensemble_payload if isinstance(ensemble_payload, dict) else {}
+                                fallback_mean = mean_payload.get('forecast') if isinstance(mean_payload, dict) else None
+                                ensemble_series = ensemble_result.get('forecast')
+                                ensemble_series = ensemble_series if isinstance(ensemble_series, pd.Series) else fallback_mean if isinstance(fallback_mean, pd.Series) else pd.Series()
+                                lower_ci = ensemble_result.get('lower_ci') if isinstance(ensemble_result, dict) else None
+                                upper_ci = ensemble_result.get('upper_ci') if isinstance(ensemble_result, dict) else None
+                                ensemble_meta = forecast_result.get('ensemble_metadata') or {}
                                 diagnostics = {
-                                    'weights': ensemble_result.get('weights'),
-                                    'confidence': ensemble_result.get('confidence'),
-                                    'selection_score': ensemble_result.get('selection_score'),
+                                    'weights': ensemble_result.get('weights') if isinstance(ensemble_result, dict) else ensemble_meta.get('weights'),
+                                    'confidence': ensemble_result.get('confidence') if isinstance(ensemble_result, dict) else ensemble_meta.get('confidence'),
+                                    'selection_score': ensemble_result.get('selection_score') if isinstance(ensemble_result, dict) else ensemble_meta.get('selection_score'),
+                                    'ensemble_status': ensemble_meta.get('ensemble_status'),
+                                    'ensemble_decision_reason': ensemble_meta.get('ensemble_decision_reason'),
                                     'regression_metrics': metrics_map.get('ensemble'),
                                 }
                                 for step in range(min(forecast_horizon, len(ensemble_series))):
-                                    if step < len(ensemble_series):
-                                        forecast_data = {
-                                            'model_type': 'ENSEMBLE',  # Phase 7.3: Changed from COMBINED for clarity
-                                            'forecast_horizon': step + 1,
-                                            'forecast_value': float(ensemble_series.iloc[step]),
-                                            'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
-                                            'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
-                                            'diagnostics': diagnostics,
-                                            'regression_metrics': metrics_map.get('ensemble'),
-                                        }
-                                        db_manager.save_forecast(
-                                            ticker=ticker,
-                                            forecast_date=forecast_date,
-                                            forecast_data=forecast_data,
-                                        )
+                                    forecast_value = ensemble_series.iloc[step]
+                                    forecast_data = {
+                                        'model_type': 'ENSEMBLE',  # Phase 7.3: Changed from COMBINED for clarity
+                                        'forecast_horizon': step + 1,
+                                        'forecast_value': float(forecast_value),
+                                        'lower_ci': float(lower_ci.iloc[step]) if isinstance(lower_ci, pd.Series) and step < len(lower_ci) else None,
+                                        'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
+                                        'diagnostics': diagnostics,
+                                        'regression_metrics': metrics_map.get('ensemble'),
+                                    }
+                                    db_manager.save_forecast(
+                                        ticker=ticker,
+                                        forecast_date=forecast_date,
+                                        forecast_data=forecast_data,
+                                    )
 
                             logger.info(f"  OK {ticker}: Generated {forecast_horizon}-step forecast")
 

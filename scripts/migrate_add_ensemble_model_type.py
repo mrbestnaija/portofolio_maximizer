@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 DB_PATH = Path("data/portfolio_maximizer.db")
+BUSY_TIMEOUT_MS = 5000
 
 def migrate_database():
     """Add 'ENSEMBLE' to model_type CHECK constraint."""
@@ -25,7 +26,8 @@ def migrate_database():
         print(f"ERROR: Database not found at {DB_PATH}")
         return False
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=BUSY_TIMEOUT_MS / 1000.0)
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     cursor = conn.cursor()
 
     try:
@@ -81,7 +83,7 @@ def migrate_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        print("   ✓ New table created")
+        print("   [OK] New table created")
 
         print("\n3. Copying all data to new table...")
         cursor.execute("""
@@ -96,23 +98,23 @@ def migrate_database():
             FROM time_series_forecasts
         """)
         copied_records = cursor.rowcount
-        print(f"   ✓ Copied {copied_records} records")
+        print(f"   [OK] Copied {copied_records} records")
 
         # Verify data integrity
         cursor.execute("SELECT COUNT(*) FROM time_series_forecasts_new")
         new_count = cursor.fetchone()[0]
         if new_count != total_records:
-            print(f"   ✗ ERROR: Record count mismatch ({new_count} vs {total_records})")
+            print(f"   [ERROR] Record count mismatch ({new_count} vs {total_records})")
             conn.rollback()
             return False
 
         print("\n4. Dropping old table...")
         cursor.execute("DROP TABLE time_series_forecasts")
-        print("   ✓ Old table dropped")
+        print("   [OK] Old table dropped")
 
         print("\n5. Renaming new table...")
         cursor.execute("ALTER TABLE time_series_forecasts_new RENAME TO time_series_forecasts")
-        print("   ✓ New table renamed")
+        print("   [OK] New table renamed")
 
         # Recreate indexes if they existed
         print("\n6. Recreating indexes...")
@@ -124,7 +126,7 @@ def migrate_database():
             CREATE INDEX IF NOT EXISTS idx_forecasts_model_type
             ON time_series_forecasts(model_type)
         """)
-        print("   ✓ Indexes recreated")
+        print("   [OK] Indexes recreated")
 
         # Commit transaction
         conn.commit()
@@ -144,13 +146,13 @@ def migrate_database():
             """)
             cursor.execute("DELETE FROM time_series_forecasts WHERE ticker = 'TEST'")
             conn.commit()
-            print("   ✓ ENSEMBLE model_type is now allowed!")
+            print("   [OK] ENSEMBLE model_type is now allowed!")
         except sqlite3.IntegrityError as e:
-            print(f"   ✗ ENSEMBLE still blocked: {e}")
+            print(f"   [ERROR] ENSEMBLE still blocked: {e}")
             return False
 
         print("\n" + "=" * 80)
-        print("✓ MIGRATION SUCCESSFUL!")
+        print("[SUCCESS] MIGRATION SUCCESSFUL!")
         print("=" * 80)
         print(f"\nSummary:")
         print(f"  - Records migrated: {final_count}")
@@ -161,7 +163,7 @@ def migrate_database():
         return True
 
     except Exception as e:
-        print(f"\n✗ MIGRATION FAILED: {e}")
+        print(f"\n[ERROR] MIGRATION FAILED: {e}")
         conn.rollback()
         return False
 

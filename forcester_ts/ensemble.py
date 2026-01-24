@@ -14,12 +14,20 @@ from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
 EPSILON = 1e-9
+CANONICAL_MODEL_MAP = {
+    "SARIMAX": "sarimax",
+    "GARCH": "garch",
+    "SAMOSSA": "samossa",
+    "MSSA_RL": "mssa_rl",
+}
+TRACKED_MODELS = {"sarimax", "garch", "samossa", "mssa_rl"}
 
 
 @dataclass
 class EnsembleConfig:
     enabled: bool = True
     confidence_scaling: bool = True
+    regime_detection_enabled: bool = True  # Phase 7.4: Enable regime-aware selection
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
             {"sarimax": 0.6, "samossa": 0.4},
@@ -82,10 +90,26 @@ class EnsembleCoordinator:
                     continue
             normalized = self._apply_minimum_component_weight(normalized)
 
-            score = sum(
-                normalized.get(model, 0.0) * model_confidence.get(model, 0.0)
-                for model in normalized.keys()
+            # Phase 7.3 FIX: When confidence_scaling is disabled, score candidates purely
+            # on config weights (first viable candidate wins) rather than confidence-adjusted scores
+            if self.config.confidence_scaling:
+                score = sum(
+                    normalized.get(model, 0.0) * model_confidence.get(model, 0.0)
+                    for model in normalized.keys()
+                )
+            else:
+                # Score = sum of weights (should be ~1.0 after normalization)
+                # This makes all candidates equal, so first in config wins
+                score = sum(normalized.values())
+
+            # Phase 7.3 DEBUG: Log candidate evaluation
+            logger.info(
+                "Candidate evaluation: raw=%s normalized=%s score=%.4f",
+                candidate,
+                normalized,
+                score,
             )
+
             if score > best_score:
                 best_score = score
                 best_weights = normalized
@@ -149,6 +173,13 @@ class EnsembleCoordinator:
         }
 
 
+def canonical_model_key(key: str) -> str:
+    if not isinstance(key, str):
+        return ""
+    canonical = CANONICAL_MODEL_MAP.get(key, None)
+    return canonical if canonical else key.lower()
+
+
 def derive_model_confidence(
     summaries: Dict[str, Dict[str, Any]],
 ) -> Dict[str, float]:
@@ -161,6 +192,21 @@ def derive_model_confidence(
 
     confidence: Dict[str, float] = {}
 
+    normalized_summaries: Dict[str, Dict[str, Any]] = {}
+    for raw_key, summary in (summaries or {}).items():
+        canon = canonical_model_key(raw_key)
+        normalized_summaries[canon] = summary or {}
+    summaries = normalized_summaries
+
+    # Instrumentation: show which models are present and whether metrics exist.
+    model_keys = sorted(k for k in summaries.keys() if k not in {"errors", "events", "series_diagnostics"})
+    metrics_presence = {
+        k: bool((summaries.get(k) or {}).get("regression_metrics"))
+        for k in model_keys
+        if k in TRACKED_MODELS
+    }
+    logger.info("Ensemble summaries keys=%s regression_metrics_present=%s", model_keys, metrics_presence)
+
     sarimax_summary = summaries.get("sarimax", {})
     garch_summary = summaries.get("garch", {})
     samossa_summary = summaries.get("samossa", {})
@@ -172,11 +218,34 @@ def derive_model_confidence(
     sarimax_metrics_baseline = sarimax_summary.get("regression_metrics", {}) or {}
     baseline_metrics = samossa_metrics_baseline or sarimax_metrics_baseline
 
+    metrics_map = {
+        model: (summaries.get(model) or {}).get("regression_metrics", {}) or {}
+        for model in TRACKED_MODELS
+    }
+    rmse_candidates = [m.get("rmse") for m in metrics_map.values() if m.get("rmse") is not None]
+    baseline_rmse = float(min(rmse_candidates)) if rmse_candidates else None
+    baseline_te = baseline_metrics.get("tracking_error")
+
     def _combine_scores(*scores: Optional[float]) -> Optional[float]:
         valid = [float(np.clip(s, 0.0, 1.0)) for s in scores if s is not None]
         if not valid:
             return None
-        return float(np.clip(np.mean(valid), 0.0, 1.0))
+        return float(np.clip(np.mean(valid), 0.05, 0.95))
+
+    def _relative_rmse_score(rmse: float, baseline: Optional[float]) -> Optional[float]:
+        if baseline is None or baseline <= 0.0:
+            return None
+        ratio = max(float(rmse) / max(float(baseline), EPSILON), EPSILON)
+        # ratio=1.0 -> ~0.7, ratio=1.1 -> ~0.55, ratio=1.5 -> ~0.25
+        score = 1.0 / (1.0 + 1.5 * (ratio - 1.0))
+        return float(np.clip(score, 0.05, 0.95))
+
+    def _relative_te_score(te: float, baseline: Optional[float]) -> Optional[float]:
+        if baseline is None or baseline <= 0.0:
+            return None
+        ratio = max(float(te) / max(float(baseline), EPSILON), EPSILON)
+        score = 1.0 / (1.0 + 1.2 * (ratio - 1.0))
+        return float(np.clip(score, 0.05, 0.95))
 
     def _score_from_metrics(metrics: Dict[str, float]) -> Optional[float]:
         if not metrics:
@@ -184,22 +253,28 @@ def derive_model_confidence(
         components = []
         rmse_val = metrics.get("rmse")
         if rmse_val is not None:
-            components.append(1.0 / (1.0 + float(rmse_val)))
+            rmse_score = _relative_rmse_score(float(rmse_val), baseline_rmse)
+            if rmse_score is not None:
+                components.append(rmse_score)
         smape_val = metrics.get("smape")
         if smape_val is not None:
-            components.append(max(0.0, 1.0 - min(float(smape_val), 2.0) / 2.0))
+            smape = max(float(smape_val), 0.0)
+            smape_score = 1.0 / (1.0 + 0.5 * smape)
+            components.append(float(np.clip(smape_score, 0.05, 0.95)))
         te_val = metrics.get("tracking_error")
         if te_val is not None:
-            components.append(1.0 / (1.0 + float(te_val)))
+            te_score = _relative_te_score(float(te_val), baseline_te)
+            if te_score is not None:
+                components.append(te_score)
         da_val = metrics.get("directional_accuracy")
         if da_val is not None:
             da = float(da_val)
             # Treat 0.5 as random baseline; reward edges above that.
             da_score = max(0.0, (da - 0.5) / 0.5)
-            components.append(da_score)
+            components.append(float(np.clip(da_score, 0.05, 0.95)))
         if not components:
             return None
-        return float(np.clip(np.mean(components), 0.0, 1.0))
+        return float(np.clip(np.mean(components), 0.05, 0.95))
 
     def _variance_test_score(metrics: Dict[str, float], baseline: Dict[str, float]) -> Optional[float]:
         if not metrics or not baseline:
@@ -253,13 +328,24 @@ def derive_model_confidence(
         confidence["sarimax"] = sarimax_score
 
     # GARCH confidence scoring - Phase 7.3 addition for ensemble integration
+    # Use AIC/BIC (like SARIMAX) as primary confidence indicator
+    aic = garch_summary.get("aic")
+    bic = garch_summary.get("bic")
+    garch_score = None
+    if aic is not None and bic is not None:
+        garch_score = np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6))
+
+    # If regression_metrics available, blend with AIC/BIC score
     garch_metrics = garch_summary.get("regression_metrics", {}) or {}
     garch_score = _combine_scores(
+        garch_score,  # AIC/BIC score (if available)
         _score_from_metrics(garch_metrics),
         _variance_test_score(garch_metrics, baseline_metrics)
         if baseline_metrics
         else None,
     )
+    if garch_score is None and garch_summary:
+        garch_score = 0.35  # fallback if AIC/BIC also unavailable
     if garch_score is not None:
         confidence["garch"] = garch_score
 
@@ -311,17 +397,43 @@ def derive_model_confidence(
         samossa_score = min(1.0, sarimax_score + 0.05)
         confidence["samossa"] = samossa_score
 
-    # Normalise to 0..1 range and avoid zero weights
-    if confidence:
-        values = np.array(list(confidence.values()), dtype=float)
-        max_val = values.max()
-        min_val = values.min()
-        if max_val > min_val:
-            normalized = (values - min_val) / (max_val - min_val + EPSILON)
+    # Keep scores within a bounded, non-saturating range to avoid winner-takes-all
+    clipped_confidence = {model: float(np.clip(score, 0.05, 0.95)) for model, score in confidence.items()}
+
+    # Phase 7.4 FIX: Quantile-based calibration instead of min-max normalization
+    # This prevents SAMoSSA from always getting 1.0 and makes scores truly comparable
+    if len(clipped_confidence) > 1:
+        values = np.array(list(clipped_confidence.values()))
+
+        # Use rank-based normalization (more robust than min-max)
+        # Ranks models from 0 to 1 based on relative performance
+        ranks = scipy_stats.rankdata(values, method='average')
+
+        # Normalize ranks to 0.3-0.9 range to avoid extremes
+        # This gives even the worst model some weight for diversity
+        min_rank, max_rank = ranks.min(), ranks.max()
+        if max_rank > min_rank:
+            normalized_ranks = 0.3 + 0.6 * (ranks - min_rank) / (max_rank - min_rank)
+            calibrated_confidence = {
+                model: float(normalized_ranks[i])
+                for i, model in enumerate(clipped_confidence.keys())
+            }
+
+            logger.info(
+                "Calibrated confidence (Phase 7.4 quantile-based): raw=%s calibrated=%s",
+                clipped_confidence,
+                calibrated_confidence,
+            )
+            return calibrated_confidence
         else:
-            normalized = np.ones_like(values)
-        confidence = {
-            model: float(np.clip(val, 0.0, 1.0))
-            for model, val in zip(confidence.keys(), normalized)
-        }
-    return confidence
+            # All models have same confidence - use uniform distribution
+            uniform_score = 0.6  # Middle of 0.3-0.9 range
+            calibrated_confidence = {model: uniform_score for model in clipped_confidence.keys()}
+            logger.info(
+                "Calibrated confidence (uniform - all equal): raw=%s calibrated=%s",
+                clipped_confidence,
+                calibrated_confidence,
+            )
+            return calibrated_confidence
+
+    return clipped_confidence

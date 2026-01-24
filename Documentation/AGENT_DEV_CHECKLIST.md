@@ -224,6 +224,7 @@ Before discussing any development:
 2. Confirm current phase completion status
 3. State specific problem being solved
 4. Set session time limit (maximum 2 hours)
+5. Read relevant markdown instructions (AGENT_DEV_CHECKLIST.md + phase docs) before edits or claims
 ```
 
 ### End-of-Session Validation
@@ -247,6 +248,31 @@ Before discussing any development:
 3. Re-run profitability validation
 4. Identify specific failure cause
 5. Resume only after root cause addressed
+
+## Mandatory Verification for Ensemble/Dashboard Work (Phase 7.x+)
+- Always run under `simpleTrader_env` and cite exact commands + exit codes.
+- After any pipeline run, verify ENSEMBLE persistence before claiming success:
+  - `sqlite3 data/portfolio_maximizer.db "SELECT COUNT(*) FROM time_series_forecasts WHERE model_type='ENSEMBLE';"`
+  - `sqlite3 data/portfolio_maximizer.db "SELECT regression_metrics, diagnostics FROM time_series_forecasts WHERE model_type='ENSEMBLE' ORDER BY ROWID DESC LIMIT 1;"`
+- If ENSEMBLE rows or regression_metrics are missing, stop and fix before reporting.
+- Dashboard check: `python dashboard/live_ensemble_monitor.py` must show ensemble data (weights/confidence/ratios); if empty, treat as a failure and rerun/fix.
+
+## Institutional-Grade Agent Protocol (Quant/DS/Trading/Neural)
+- Obey runtime guardrails (WSL + `simpleTrader_env/bin/python`; GPU only when configured) and document fingerprints.
+- Evidence-first: every claim needs command + exit code + artifact path; no inferred success.
+- Profit/risk gatekeeping: quantify RMSE/DA/PnL/drawdown impacts; respect ensemble policy gates and disable paths on regression.
+- Data integrity: validate inputs/indices/horizons; no silent drops; surface all model keys/metrics in summaries/DB.
+- Config-driven, reversible: use flags/configs (no hardcoding); keep rollbacks trivial; avoid scope creep.
+- Dashboard truthfulness: no claims without persisted ENSEMBLE rows/metrics and a passing dashboard check.
+- Minimal intrusion: keep changes small, logged, and reversible; do not introduce new dependencies without cost/benefit and approval.
+
+## Progress Tracking (Markdown Canon)
+- Keep progress and implementation notes in markdown only (no code clutter). Update when relevant work is done:
+  - `Documentation/PHASE_7.3_COMPLETE.md`, `Documentation/PHASE_7.4_PROGRESS.md`, `Documentation/PHASE_7.4_CALIBRATION_RESULTS.md`, `Documentation/SESSION_COMPLETE_SUMMARY.md`
+  - `Documentation/PHASE_8_NEURAL_FORECASTER_PLAN.md`, `Documentation/MODEL_SIGNAL_REFACTOR_PLAN.md`
+  - `Documentation/GPU_PARALLEL_RUNNER_CHECKLIST.md`, `Documentation/OPTIMIZATION_IMPLEMENTATION_PLAN.md`
+  - `Documentation/PHASE_7.3_PROGRESS_UPDATE.md`, `Documentation/REFACTORING_IMPLEMENTATION_COMPLETE.md`
+- When updating progress: summarize what changed, commands run, exit codes, artifacts/logs, and any blocked items. If evidence is missing, mark status as unverified.
 
 ## Documentation Requirements
 

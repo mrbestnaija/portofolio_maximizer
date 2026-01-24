@@ -300,3 +300,5 @@ echo "  - Drift JSON: visualizations/split_drift_latest.json"
 echo "  - Dashboard JSON/PNG: visualizations/dashboard_data.json, visualizations/dashboard_snapshot.png"
 echo "  - Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
 echo "  - Dashboard HTML: ${PROJECT_ROOT}/visualizations/live_dashboard.html"
+
+pmx_sanitize_logs "${PROJECT_ROOT}"

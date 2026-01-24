@@ -6,6 +6,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
+**Current Phase**: Phase 7.4 Complete (GARCH ensemble integration with quantile calibration)
+**Last Updated**: 2026-01-23
+
+---
+
+## Development Environment & Platform Considerations
+
+### Python Environment
+```bash
+# REQUIRED: Always activate virtual environment first
+source simpleTrader_env/bin/activate  # Linux/Mac
+simpleTrader_env\Scripts\activate     # Windows
+
+# Supported Python: >=3.10,<3.13
+# Current packages: See requirements.txt (last updated 2026-01-23)
+```
+
+### Platform-Specific Notes
+
+**Windows (Primary Development Platform)**:
+- Use forward slashes or proper escaping in bash commands
+- Unicode characters (✓, ✗) cause `UnicodeEncodeError` on Windows console
+- Always use ASCII alternatives: `[OK]`, `[ERROR]`, `[SUCCESS]`
+- Git bash on Windows: Use `/c/Users/...` instead of `C:\Users\...` for paths
+- Background tasks: Use `./simpleTrader_env/Scripts/python.exe` not `python`
+
+**Cross-Platform Best Practices**:
+- Use `Path()` from `pathlib` for all file paths
+- Test unicode output on Windows before deploying
+- Provide ASCII fallbacks for all console output
+- Document platform-specific requirements in migration scripts
+
+---
+
 ## Common Development Commands
 
 ### Environment Setup
@@ -16,6 +50,9 @@ simpleTrader_env\Scripts\activate     # Windows
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install GPU extras (optional, CUDA 12.x required)
+pip install -r requirements-ml.txt
 ```
 
 ### Build and Test Commands
@@ -55,11 +92,23 @@ bash/run_auto_trader.sh    # Autonomous trading with defaults
 # Analyze time series data
 python scripts/analyze_dataset.py --dataset data/training/training_*.parquet --column Close
 
+# Analyze multi-ticker results (Phase 7.4+)
+python scripts/analyze_multi_ticker_results.py
+
 # Generate visualizations
 python scripts/visualize_dataset.py --dataset data/training/training_*.parquet --output-dir visualizations/
 
 # Validate environment and dependencies
 python scripts/validate_environment.py
+```
+
+### Database Management (Phase 7.4+)
+```bash
+# Migrate database to support ENSEMBLE model type
+python scripts/migrate_add_ensemble_model_type.py
+
+# Verify migration
+sqlite3 data/portfolio_maximizer.db "SELECT DISTINCT model_type FROM time_series_forecasts;"
 ```
 
 ### Synthetic Data and Testing
@@ -73,6 +122,8 @@ bash/comprehensive_brutal_test.sh
 # Quick smoke test
 bash/run_synthetic_smoke.sh
 ```
+
+---
 
 ## High-Level Architecture
 
@@ -93,8 +144,11 @@ The system follows a 7-layer architecture:
 5. **Analysis Layer** (`etl/time_series_analyzer.py`): MIT-standard time series analysis
 
 6. **Forecasting Layer** (`forcester_ts/`, `models/`): Multiple forecasting models
-   - SARIMAX, GARCH, SAMoSSA (Singular Spectrum Analysis + RL)
-   - Ensemble routing through `SignalRouter`
+   - **SARIMAX**: Seasonal ARIMA with exogenous variables
+   - **GARCH**: Volatility forecasting (Phase 7.3+ integration)
+   - **SAMoSSA**: Singular Spectrum Analysis + RL
+   - **MSSA-RL**: Multivariate SSA with reinforcement learning
+   - **Ensemble**: Adaptive routing through `SignalRouter` (Phase 7.4+ quantile calibration)
 
 7. **Execution Layer** (`execution/`): Order management and paper trading
    - `paper_trading_engine.py`: Risk-managed position sizing
@@ -122,10 +176,13 @@ The system follows a 7-layer architecture:
 - Property-based testing for financial calculations
 - Security validation for credential handling
 
+---
+
 ## Configuration Management
 
 The system uses modular YAML configuration files in `config/`:
 - `pipeline_config.yml`: Main orchestration settings
+- `forecasting_config.yml`: Model parameters and ensemble config
 - `yfinance_config.yml`: Data extraction parameters
 - `llm_config.yml`: LLM integration settings
 - `quant_success_config.yml`: Trading success criteria
@@ -135,6 +192,13 @@ Configuration supports:
 - Environment variable overrides
 - Hyperparameter optimization (`.hyperopt.yml` files)
 - Per-environment settings
+
+**Important Notes**:
+- Ensemble candidate weights defined in `forecasting_config.yml` lines 69-83
+- Phase 7.4: Quantile-based confidence calibration enabled by default
+- Regime detection available but not yet integrated (Phase 7.5)
+
+---
 
 ## Data Flow Architecture
 
@@ -150,13 +214,17 @@ Data Sources → Extraction → Validation → Preprocessing → Forecasting →
 - Processed: `data/training/`, `data/validation/`, `data/testing/`
 - Checkpoints: `data/checkpoints/` (pipeline state)
 - Visualizations: `visualizations/` (analysis plots)
+- Database: `data/portfolio_maximizer.db` (SQLite with ENSEMBLE support)
 
-## Development Patterns
+---
+
+## Development Patterns & Best Practices
 
 ### Error Handling
 - Graceful degradation: synthetic fallback when live data fails
 - Comprehensive logging with structured JSON for monitoring
 - Circuit breaker patterns for external API calls
+- **Platform consideration**: Windows console requires ASCII-only output
 
 ### Performance Optimization
 - Intelligent caching with 24h validity (20x speedup)
@@ -169,6 +237,7 @@ Data Sources → Extraction → Validation → Preprocessing → Forecasting →
 - Integration tests for pipeline workflows
 - Security tests for credential handling
 - Performance benchmarks for critical paths
+- **Phase 7.4**: Multi-ticker validation (AAPL, MSFT, NVDA)
 
 ### Code Organization
 - Clear separation between extraction, processing, and execution
@@ -176,22 +245,229 @@ Data Sources → Extraction → Validation → Preprocessing → Forecasting →
 - Consistent logging and error handling patterns
 - Type hints and comprehensive docstrings
 
+### Database Best Practices (Phase 7.4+)
+- **Always check model_type constraint** when adding new model types
+- Run migration scripts before deploying forecast changes
+- Validate migrations on test database first
+- Document schema changes in migration scripts
+- **Current constraint**: `model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSSA_RL')`
+
+---
+
+## Phase 7.4 Specific Guidance (GARCH Ensemble Integration)
+
+### Completed Features
+
+1. **Ensemble Config Preservation Bug Fix**
+   - **File**: `models/time_series_signal_generator.py`
+   - **Issue**: TimeSeriesSignalGenerator wasn't preserving ensemble_kwargs during CV
+   - **Fix**: Added `_load_forecasting_config()` method to load ensemble configuration
+   - **Lines**: 137, 196-204, 230-250, 1470-1494
+
+2. **Quantile-Based Confidence Calibration**
+   - **File**: `forcester_ts/ensemble.py`
+   - **Method**: Rank-based normalization (scipy.stats.rankdata)
+   - **Range**: 0.3-0.9 (prevents SAMoSSA dominance)
+   - **Lines**: 402-432
+   - **Results**: SAMoSSA 0.95→0.9, GARCH/SARIMAX both 0.6
+
+3. **Database Schema Migration**
+   - **Script**: `scripts/migrate_add_ensemble_model_type.py`
+   - **Change**: Added 'ENSEMBLE' to model_type CHECK constraint
+   - **Platform Fix**: ASCII output only (no unicode ✓✗ characters)
+   - **Migration**: Recreates table (SQLite doesn't support ALTER CONSTRAINT)
+
+4. **Regime Detection System** (Ready for Phase 7.5)
+   - **File**: `forcester_ts/regime_detector.py` (340 lines)
+   - **Regimes**: 6 types (LIQUID_RANGEBOUND, HIGH_VOL_TRENDING, etc.)
+   - **Features**: Hurst exponent, ADF test, trend strength, volatility
+   - **Status**: Implemented but not yet integrated
+
+5. **Weight Optimization**
+   - **File**: `scripts/optimize_ensemble_weights.py` (300+ lines)
+   - **Method**: scipy.optimize.minimize with SLSQP
+   - **Status**: Ready for use if needed
+
+### Performance Metrics (Phase 7.4)
+
+**AAPL Single-Ticker Validation**:
+- RMSE Ratio: 1.470 → 1.043 (29% improvement)
+- GARCH Selection: 14% → 100%
+- Target Achievement: 94.6% (ratio < 1.1 is target)
+
+**Multi-Ticker Validation** (In Progress):
+- Expected: 2/3 or 3/3 tickers at target (<1.1 RMSE ratio)
+- Status: See logs/phase7.4_multi_ticker_retry.log
+
+---
+
+## Agent Workflow Best Practices
+
+### When Starting Work
+1. **Read CLAUDE.md** (this file) for project context
+2. **Check git status** to see current state
+3. **Review recent commits** to understand recent changes
+4. **Check Documentation/** for phase-specific context
+5. **Activate virtual environment** before any Python operations
+
+### When Modifying Code
+1. **Read existing code** before suggesting changes (never propose changes to unread code)
+2. **Preserve existing patterns** (logging, error handling, configuration style)
+3. **Update requirements.txt** when adding packages
+4. **Run migration scripts** when changing database schema
+5. **Test on target platform** (Windows primary, Linux secondary)
+6. **Document breaking changes** in relevant phase documentation
+
+### When Creating New Features
+1. **Check configuration files** for similar patterns
+2. **Follow existing architecture** (7-layer model)
+3. **Add comprehensive docstrings** with type hints
+4. **Include error handling** with platform-aware output
+5. **Update CLAUDE.md** with new patterns/practices
+6. **Create tests** for new functionality
+
+### When Debugging Issues
+1. **Check logs first** (`logs/*.log`, sorted by timestamp)
+2. **Look for platform-specific issues** (unicode, paths, etc.)
+3. **Verify database schema** if forecast saves fail
+4. **Check configuration loading** (ensemble_kwargs, etc.)
+5. **Use grep/analyze scripts** before manual log parsing
+6. **Document findings** in Documentation/ with timestamp
+
+### Platform-Specific Development
+
+**Windows Considerations**:
+- Bash commands: Use `/c/Users/...` paths, not `C:\...`
+- Unicode: Always use ASCII for console output ([OK] not ✓)
+- Paths: Use `Path()` from pathlib, not string concatenation
+- Background jobs: Full path to python.exe in venv
+- Git: Line endings set to LF (core.autocrlf=false)
+
+**Cross-Platform Testing**:
+- Test migration scripts on Windows first (unicode issues)
+- Verify file paths work on both Windows/Linux
+- Check that all console output is ASCII-safe
+- Test background job syntax on target platform
+
+### Requirements Management
+
+**When to Update requirements.txt**:
+- After installing new packages (`pip install <package>`)
+- When package versions change in environment
+- After major Python version upgrade
+- When deploying to new environment
+
+**How to Update**:
+```bash
+# Freeze current environment
+pip freeze > requirements_new.txt
+
+# Manually update requirements.txt header and merge
+# Header format:
+# Supported Python runtime: >=3.10,<3.13
+# Last updated: YYYY-MM-DD (Phase X.Y description)
+```
+
+**requirements-ml.txt**:
+- Only update for GPU/CUDA package changes
+- Test on GPU-enabled system before committing
+- Document CUDA version compatibility
+
+---
+
 ## Troubleshooting
 
-**Common Issues:**
-- Virtual environment not activated → All operations require `source simpleTrader_env/bin/activate`
-- Cache corruption → Clear with `rm data/raw/*.parquet`
-- Test failures → Check Python version (3.10+ required)
-- LLM integration issues → Verify Ollama server: `curl http://localhost:11434/api/tags`
+### Common Issues
 
-**Environment Validation:**
+**Issue**: Virtual environment not activated
+**Fix**: All operations require `source simpleTrader_env/bin/activate`
+
+**Issue**: Cache corruption
+**Fix**: Clear with `rm data/raw/*.parquet`
+
+**Issue**: Test failures
+**Fix**: Check Python version (3.10+ required)
+
+**Issue**: LLM integration issues
+**Fix**: Verify Ollama server: `curl http://localhost:11434/api/tags`
+
+**Issue**: Database constraint errors (Phase 7.4+)
+**Fix**: Run `python scripts/migrate_add_ensemble_model_type.py`
+
+**Issue**: Unicode output errors on Windows
+**Fix**: Replace unicode characters with ASCII equivalents
+
+**Issue**: Ensemble config not preserved during CV
+**Fix**: Verify forecasting_config.yml is loaded in TimeSeriesSignalGenerator
+
+### Environment Validation
 ```bash
 python scripts/validate_environment.py  # Checks all dependencies and paths
 ```
 
-**Debug Pipeline:**
+### Debug Pipeline
 ```bash
 # Enable verbose logging
 export LOG_LEVEL=DEBUG
 python scripts/run_etl_pipeline.py --execution-mode synthetic  # Safe test mode
 ```
+
+---
+
+## Git & GitHub Integration
+
+**Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Default Branch**: master
+**Main Branch**: master (for PRs)
+
+### Commit Message Format
+```
+Phase X.Y: Brief description (50 chars)
+
+- Bullet point details of changes
+- Reference issue numbers if applicable
+- Note breaking changes
+- Document migration requirements
+
+Results: Key metrics or validation results
+```
+
+### Pre-Commit Checklist
+
+- [ ] All tests passing (`pytest tests/`)
+- [ ] Requirements updated if packages changed
+- [ ] Database migrations run and tested
+- [ ] Platform-specific code tested on Windows
+- [ ] Documentation updated in relevant phase docs
+- [ ] CLAUDE.md updated with new patterns (if applicable)
+- [ ] No unicode characters in console output
+- [ ] Git status clean or changes documented
+
+---
+
+## Quick Reference
+
+### Essential Files
+- `CLAUDE.md` - This file (agent guidance)
+- `README.md` - User-facing project overview
+- `requirements.txt` - Python dependencies (updated 2026-01-23)
+- `config/pipeline_config.yml` - Main configuration
+- `Documentation/RUNTIME_GUARDRAILS.md` - Python version constraints
+
+### Key Directories
+- `etl/` - Data extraction, transformation, loading
+- `forcester_ts/` - Time series forecasting models
+- `models/` - Signal generation and routing
+- `execution/` - Order management and paper trading
+- `tests/` - Test suite (141+ tests)
+- `scripts/` - Utility scripts and migrations
+- `config/` - YAML configuration files
+- `Documentation/` - Phase-specific documentation
+- `logs/` - Pipeline and application logs
+
+---
+
+**Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
+
+**Last Updated**: 2026-01-23 (Phase 7.4 completion)
+**GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git

@@ -386,4 +386,5 @@ echo "Auditing dashboard payload sources..."
   --db-path "${ROOT_DIR}/data/portfolio_maximizer.db" \
   --audit-db-path "${ROOT_DIR}/data/dashboard_audit.db" \
   --dashboard-json "${ROOT_DIR}/visualizations/dashboard_data.json"
+pmx_sanitize_logs "$ROOT_DIR"
 echo "Pipeline run complete."

@@ -31,7 +31,12 @@ except Exception:  # pragma: no cover - logging helper optional in standalone ru
     def log_warning_records(records, context):
         return
 
-from .ensemble import EnsembleConfig, EnsembleCoordinator, derive_model_confidence
+from .ensemble import (
+    EnsembleConfig,
+    EnsembleCoordinator,
+    canonical_model_key,
+    derive_model_confidence,
+)
 from .garch import GARCHForecaster
 from .instrumentation import ModelInstrumentation
 from .mssa_rl import MSSARLConfig, MSSARLForecaster
@@ -90,6 +95,15 @@ class TimeSeriesForecaster:
         self._garch: Optional[GARCHForecaster] = None
         self._samossa: Optional[SAMOSSAForecaster] = None
         self._mssa: Optional[MSSARLForecaster] = None
+
+        # Phase 7.3 DEBUG: Log ensemble_kwargs to verify candidate_weights are loaded
+        if self.config.ensemble_enabled:
+            logger.info(
+                "Creating EnsembleConfig with kwargs keys: %s, candidate_weights count: %s",
+                list(self.config.ensemble_kwargs.keys()),
+                len(self.config.ensemble_kwargs.get('candidate_weights', [])),
+            )
+
         self._ensemble_config = (
             EnsembleConfig(**self.config.ensemble_kwargs)
             if self.config.ensemble_enabled
@@ -631,7 +645,7 @@ class TimeSeriesForecaster:
         return results
 
     def get_component_summaries(self) -> Dict[str, Any]:
-        return {
+        summaries = {
             "sarimax": self._sarimax.get_model_summary() if self._sarimax else {},
             "samossa": self._samossa.get_model_summary() if self._samossa else {},
             "garch": self._garch.get_model_summary() if self._garch else {},
@@ -639,6 +653,10 @@ class TimeSeriesForecaster:
             "errors": dict(self._model_errors),
             "events": list(self._model_events),
         }
+        canonicalized: Dict[str, Any] = {}
+        for key, value in summaries.items():
+            canonicalized[canonical_model_key(key)] = value
+        return canonicalized
 
     def get_instrumentation_report(self) -> Dict[str, Any]:
         """Expose the detailed model instrumentation payload."""
@@ -1013,6 +1031,13 @@ class TimeSeriesForecaster:
 
         self._latest_metrics = metrics_map
         self._latest_results.setdefault("regression_metrics", {}).update(metrics_map)
+        # Surface metrics in summaries/metadata for downstream consumers (dashboard/DB)
+        for model, metrics in metrics_map.items():
+            summary = self._model_summaries.setdefault(model, {})
+            summary["regression_metrics"] = metrics
+        ensemble_meta = self._latest_results.setdefault("ensemble_metadata", {})
+        if metrics_map.get("ensemble"):
+            ensemble_meta["regression_metrics"] = metrics_map["ensemble"]
         self._instrumentation.record_artifact("evaluation_metrics", metrics_map)
         for model, metrics in metrics_map.items():
             self._instrumentation.record_model_metrics(

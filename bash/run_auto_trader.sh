@@ -147,4 +147,6 @@ echo "Auditing dashboard payload sources..."
   --audit-db-path "$ROOT_DIR/data/dashboard_audit.db" \
   --dashboard-json "$ROOT_DIR/visualizations/dashboard_data.json"
 
+pmx_sanitize_logs "$ROOT_DIR"
+
 echo "Auto-trader run complete. Logs: $LOG_FILE"

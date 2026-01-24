@@ -325,3 +325,79 @@ pmx_dashboard_cleanup() {
   pmx_kill_pidfile "${PMX_DASHBOARD_SERVER_PIDFILE:-}" || true
   pmx_kill_pidfile "${PMX_DASHBOARD_BRIDGE_PIDFILE:-}" || true
 }
+
+pmx_sanitize_logs() {
+  local root="${1:-}"
+  [[ -n "${root}" ]] || root="$(pmx_repo_root)"
+  : "${PMX_SANITIZE_LOGS:=1}"
+  : "${PMX_LOG_RETENTION:=5}"
+  if [[ "${PMX_SANITIZE_LOGS}" != "1" ]]; then
+    return 0
+  fi
+  export PMX_ROOT="${root}"
+  command -v python3 >/dev/null 2>&1 || {
+    pmx_log "WARN" "python3 not available; skipping log sanitization."
+    return 0
+  }
+  python3 - <<'PY'
+import os
+import re
+import shutil
+import gzip
+from datetime import datetime
+from pathlib import Path
+
+root = Path(os.environ.get("PMX_ROOT", "")).expanduser()
+if not root or not root.exists():
+    root = Path(".").resolve()
+logs_dir = root / "logs"
+if not logs_dir.exists():
+    raise SystemExit(0)
+
+retention = int(os.environ.get("PMX_LOG_RETENTION", "5"))
+archive_dir = logs_dir / "archive" / datetime.now().strftime("%Y%m%d_%H%M%S")
+archive_dir.mkdir(parents=True, exist_ok=True)
+
+text_exts = {".log", ".txt", ".jsonl", ".json"}
+patterns = [
+    re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization|bearer)\\s*[:=]\\s*([^\\s,;]+)")
+]
+
+def redact_text(path: Path) -> None:
+    try:
+        data = path.read_text(errors="ignore")
+    except Exception:
+        return
+    original = data
+    for pat in patterns:
+        data = pat.sub(lambda m: f"{m.group(1)}=REDACTED", data)
+    if data != original:
+        path.write_text(data)
+
+for p in logs_dir.rglob("*"):
+    if p.is_file() and p.suffix.lower() in text_exts:
+        redact_text(p)
+
+for dirpath, _, filenames in os.walk(logs_dir):
+    dir_path = Path(dirpath)
+    if dir_path == archive_dir or archive_dir in dir_path.parents:
+        continue
+    files = [dir_path / f for f in filenames if (dir_path / f).is_file()]
+    files = [f for f in files if archive_dir not in f.parents]
+    if not files:
+        continue
+    files_sorted = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+    for f in files_sorted[retention:]:
+        rel = f.relative_to(logs_dir)
+        dest = archive_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(dest))
+
+for p in archive_dir.rglob("*"):
+    if p.is_file() and p.suffix != ".gz":
+        gz_path = p.with_suffix(p.suffix + ".gz")
+        with open(p, "rb") as src, gzip.open(gz_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        p.unlink()
+PY
+}

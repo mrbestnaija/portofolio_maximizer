@@ -134,7 +134,8 @@ class TimeSeriesSignalGenerator:
                  quant_validation_config: Optional[Dict[str, Any]] = None,
                  quant_validation_config_path: Optional[str] = None,
                  per_ticker_thresholds: Optional[Dict[str, Dict[str, Any]]] = None,
-                 cost_model: Optional[Dict[str, Any]] = None):
+                 cost_model: Optional[Dict[str, Any]] = None,
+                 forecasting_config_path: Optional[str] = None):
         """
         Initialize Time Series signal generator.
 
@@ -194,6 +195,14 @@ class TimeSeriesSignalGenerator:
             # Disable quant validation in diagnostic mode to avoid gating signals.
             self._quant_validation_enabled = False
 
+        # Phase 7.4 FIX: Load forecasting config to preserve ensemble_kwargs during CV
+        self._forecasting_config_path = (
+            Path(forecasting_config_path).expanduser()
+            if forecasting_config_path
+            else Path("config/forecasting_config.yml")
+        )
+        self._forecasting_config = self._load_forecasting_config()
+
         # Cache for expensive forecast-edge validation runs (rolling CV).
         # Keyed by (ticker, last_bar_ts, horizon) so repeated calls on the same
         # bar (or across near-identical windows) stay fast.
@@ -226,6 +235,28 @@ class TimeSeriesSignalGenerator:
 
         if isinstance(payload, dict) and "quant_validation" in payload:
             return payload["quant_validation"]
+
+    def _load_forecasting_config(self) -> Dict[str, Any]:
+        """
+        Load forecasting configuration to preserve ensemble_kwargs during CV.
+        Phase 7.4 FIX: Prevents empty ensemble config when creating forecasters for CV.
+        """
+        path = getattr(self, "_forecasting_config_path", None)
+        if not path or not path.exists():
+            logger.warning("Forecasting config not found at %s, ensemble_kwargs will be empty", path)
+            return {}
+
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle) or {}
+        except Exception as exc:
+            logger.warning("Unable to read forecasting config %s: %s", path, exc)
+            return {}
+
+        if isinstance(payload, dict) and "forecasting" in payload:
+            return payload["forecasting"]
+
+        return payload
         return payload if isinstance(payload, dict) else None
 
     def _load_execution_cost_model(self) -> Dict[str, Any]:
@@ -1447,6 +1478,10 @@ class TimeSeriesSignalGenerator:
             if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
                 baseline_key = "samossa"
 
+            # Phase 7.4 FIX: Extract ensemble_kwargs from loaded forecasting config
+            ensemble_cfg = self._forecasting_config.get('ensemble', {}) if self._forecasting_config else {}
+            ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != 'enabled'}
+
             if fast_intraday_cv:
                 sarimax_enabled = baseline_key == "sarimax"
                 samossa_enabled = baseline_key == "samossa"
@@ -1466,9 +1501,13 @@ class TimeSeriesSignalGenerator:
                     }
                     if mssa_enabled
                     else {},
+                    ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
                 )
             else:
-                forecaster_config = TimeSeriesForecasterConfig(forecast_horizon=horizon)
+                forecaster_config = TimeSeriesForecasterConfig(
+                    forecast_horizon=horizon,
+                    ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
+                )
 
             validator = RollingWindowValidator(
                 forecaster_config=forecaster_config,

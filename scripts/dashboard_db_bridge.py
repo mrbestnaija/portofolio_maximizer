@@ -59,6 +59,8 @@ def _safe_fetchall(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...]
         except sqlite3.OperationalError as exc:
             last_exc = exc
             msg = str(exc).lower()
+            if "no such table" in msg:
+                return []
             if "locked" in msg or "busy" in msg:
                 time.sleep(0.2)
                 continue
@@ -449,17 +451,23 @@ def _trade_events(conn: sqlite3.Connection, tickers: Iterable[str], limit: int) 
 
 
 def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
-    row = _safe_fetchone(
-        conn,
-        """
-        SELECT total_return, total_return_pct, win_rate, profit_factor, num_trades,
-               sharpe_ratio, sortino_ratio, max_drawdown,
-               avg_win, avg_loss, largest_win, largest_loss
-        FROM performance_metrics
-        ORDER BY created_at DESC, id DESC
-        LIMIT 1
-        """,
-    )
+    try:
+        row = _safe_fetchone(
+            conn,
+            """
+            SELECT total_return, total_return_pct, win_rate, profit_factor, num_trades,
+                   sharpe_ratio, sortino_ratio, max_drawdown,
+                   avg_win, avg_loss, largest_win, largest_loss
+            FROM performance_metrics
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+        )
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            row = None
+        else:
+            raise
     if not row:
         return {
             "pnl_abs": 0.0,
@@ -710,6 +718,7 @@ def main() -> None:
     args = _parse_args()
     db_path = Path(args.db_path).expanduser()
     out_path = Path(args.output).expanduser()
+    mirror_path = Path("/tmp") / f"{db_path.name}.wsl"
 
     def _tickers(conn: sqlite3.Connection) -> List[str]:
         raw = str(args.tickers or "").strip()
@@ -720,14 +729,40 @@ def main() -> None:
     while True:
         conn = _connect_ro(db_path)
         try:
-            tickers = _tickers(conn)
-            payload = build_dashboard_payload(
-                conn=conn,
-                tickers=tickers,
-                lookback_days=int(args.lookback_days),
-                max_signals=int(args.max_signals),
-                max_trades=int(args.max_trades),
-            )
+            try:
+                tickers = _tickers(conn)
+                payload = build_dashboard_payload(
+                    conn=conn,
+                    tickers=tickers,
+                    lookback_days=int(args.lookback_days),
+                    max_signals=int(args.max_signals),
+                    max_trades=int(args.max_trades),
+                )
+            except sqlite3.OperationalError as exc:
+                msg = str(exc).lower()
+                if "disk i/o error" in msg:
+                    if not mirror_path.exists():
+                        try:
+                            mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                            import shutil
+                            shutil.copy2(db_path, mirror_path)
+                        except Exception:
+                            pass
+                    if mirror_path.exists():
+                        conn.close()
+                        conn = _connect_ro(mirror_path)
+                        tickers = _tickers(conn)
+                        payload = build_dashboard_payload(
+                            conn=conn,
+                            tickers=tickers,
+                            lookback_days=int(args.lookback_days),
+                            max_signals=int(args.max_signals),
+                            max_trades=int(args.max_trades),
+                        )
+                    else:
+                        raise
+                else:
+                    raise
         finally:
             conn.close()
 

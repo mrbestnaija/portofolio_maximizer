@@ -65,7 +65,7 @@ forecasting:
   # Ensemble orchestration
   ensemble:
     enabled: true
-    confidence_scaling: true
+    confidence_scaling: false  # Phase 7.3: Disabled to allow GARCH-dominant candidates (SAMoSSA has inflated confidence from EVR)
     candidate_weights:
       # Phase 7.3 FIX: Add GARCH-dominant weights based on diagnostic findings
       # Diagnostics showed GARCH RMSE 30.64 vs SARIMAX 229.44 (87% better)

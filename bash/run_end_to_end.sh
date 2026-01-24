@@ -198,6 +198,8 @@ echo "Auditing dashboard payload sources..."
   --audit-db-path "$ROOT_DIR/data/dashboard_audit.db" \
   --dashboard-json "$ROOT_DIR/visualizations/dashboard_data.json"
 
+pmx_sanitize_logs "$ROOT_DIR"
+
 echo "End-to-end run finished @ $RUN_STAMP"
 echo "Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
 echo "Dashboard HTML: ${ROOT_DIR}/visualizations/live_dashboard.html"
