@@ -28,20 +28,21 @@
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
 > **Quant Validation & MTM:** For quant gates and liquidation, treat `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`, and `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` as the canonical references (plus their helper scripts in `scripts/`), rather than embedding ad-hoc thresholds or pricing rules in new code.
 
-## Project Status (Updated: 2026-01-23)
+## Project Status (Updated: 2026-01-24)
 
-### Current Phase: 7.4 - GARCH Ensemble Integration ✅ COMPLETE
+### Current Phase: 7.5 - Regime Detection Integration ✅ COMPLETE
 
-- **Implementation**: GARCH volatility forecasting integrated into ensemble with quantile-based confidence calibration
-- **Bug Fix**: Ensemble config preservation during CV evaluation (100% GARCH selection validated)
-- **Database**: Migrated schema to support ENSEMBLE model type (360 records preserved)
-- **Validation**: Single-ticker (AAPL RMSE 1.043) + multi-ticker (AAPL/MSFT/NVDA) tests passed
-- **Test Coverage**: 20/20 ensemble builds with 9 candidates, 0 empty configs, consistent 85% GARCH weight
-- **Configuration**: Quantile-based confidence calibration (0.3-0.9 range) prevents model dominance
-- **Documentation**: Comprehensive (11 files: PHASE_7.4_*.md, migration docs, final summary)
-- **Performance**: 29% RMSE improvement (1.470 → 1.043), 100% GARCH selection across all tests
-- **Production Status**: Ready for Windows deployment (WSL validation recommended for Linux)
-- **Git Commit**: b02b0ee (pushed to master, 41 files, +5320/-941 lines)
+- **Implementation**: Integrated RegimeDetector into TimeSeriesForecaster for adaptive model selection
+- **Regime Types**: 6 classifications (LIQUID_RANGEBOUND, MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS, etc.)
+- **Detection Features**: 8 metrics (volatility, trend strength, Hurst exponent, ADF test, skewness, kurtosis)
+- **Integration Points**: Regime detection in fit(), candidate reordering in _build_ensemble()
+- **Feature Flag**: regime_detection.enabled (default: false for safe deployment)
+- **Testing**: All integration tests passed (synthetic low-vol and high-vol trending data)
+- **Configuration**: 40+ lines added to forecasting_config.yml with all thresholds documented
+- **Code Changes**: +87 lines in forecaster.py, fully backward compatible with Phase 7.4
+- **Safety**: Graceful degradation on detection failures, falls back to Phase 7.4 static weights
+- **Production Status**: Ready for gradual rollout (feature flag disabled, enable when ready)
+- **Git Commit**: ffc5b19 (pushed to master, 5 files, +1390 lines)
 
 ### Integration Recovery Tracker
 - Treat `Documentation/integration_fix_plan.md` as the canonical remediation log; do not promote any downstream status in this file until that tracker is cleared.
@@ -58,6 +59,7 @@
 5. ✅ **Phase 4.5**: Time Series Cross-Validation - k-fold CV, backward compatible
 6. ✅ **Phase 7.3**: GARCH Volatility Forecasting - Standalone GARCH model integration
 7. ✅ **Phase 7.4**: GARCH Ensemble Integration - Quantile-calibrated ensemble with bug fix (2026-01-23, commit b02b0ee)
+8. ✅ **Phase 7.5**: Regime Detection Integration - Adaptive model selection (feature flag disabled, 2026-01-24, commit ffc5b19)
 
 ### Next Phase: 7.5 - Regime Detection or Audit Accumulation
 
