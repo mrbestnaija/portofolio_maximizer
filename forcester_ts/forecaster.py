@@ -61,6 +61,10 @@ class TimeSeriesForecasterConfig:
     mssa_rl_kwargs: Dict[str, Any] = field(default_factory=dict)
     ensemble_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    # Phase 7.5: Regime detection for adaptive model selection
+    regime_detection_enabled: bool = False
+    regime_detection_kwargs: Dict[str, Any] = field(default_factory=dict)
+
 
 class TimeSeriesForecaster:
     """
@@ -109,6 +113,22 @@ class TimeSeriesForecaster:
             if self.config.ensemble_enabled
             else EnsembleConfig(enabled=False)
         )
+
+        # Phase 7.5: Initialize regime detector if enabled
+        self._regime_detector: Optional['RegimeDetector'] = None
+        if self.config.regime_detection_enabled:
+            from forcester_ts.regime_detector import RegimeDetector, RegimeConfig
+            regime_config = RegimeConfig(**self.config.regime_detection_kwargs)
+            self._regime_detector = RegimeDetector(regime_config)
+            logger.info(
+                "[TS_MODEL] REGIME_DETECTION enabled :: lookback=%d, vol_thresholds=(%.2f,%.2f), trend_thresholds=(%.2f,%.2f)",
+                regime_config.lookback_window,
+                regime_config.vol_threshold_low,
+                regime_config.vol_threshold_high,
+                regime_config.trend_threshold_weak,
+                regime_config.trend_threshold_strong,
+            )
+
         self._model_summaries: Dict[str, Dict[str, Any]] = {}
         self._latest_results: Dict[str, Any] = {}
         self._latest_metrics: Dict[str, Dict[str, float]] = {}
@@ -383,6 +403,43 @@ class TimeSeriesForecaster:
             self._instrumentation.record_artifact("series_diagnostics", self._series_diagnostics)
         self._instrumentation.record_series_snapshot("price_series", price_series)
 
+        # Phase 7.5: Detect market regime before fitting models
+        self._regime_result: Optional[Dict[str, Any]] = None
+        if self._regime_detector:
+            try:
+                self._record_model_event("regime", "detect_start")
+                with self._instrumentation.track("regime", "detect", points=len(price_series)) as meta:
+                    self._regime_result = self._regime_detector.detect_regime(
+                        price_series,
+                        returns_series
+                    )
+                    meta["regime"] = self._regime_result["regime"]
+                    meta["confidence"] = self._regime_result["confidence"]
+                    meta["features"] = self._regime_result["features"]
+                self._record_model_event(
+                    "regime",
+                    "detect_complete",
+                    regime=self._regime_result["regime"],
+                    confidence=self._regime_result["confidence"],
+                    features=self._regime_result["features"],
+                )
+                logger.info(
+                    "[TS_MODEL] REGIME detected :: regime=%s, confidence=%.3f, vol=%.3f, trend=%.3f, hurst=%.3f",
+                    self._regime_result["regime"],
+                    self._regime_result["confidence"],
+                    self._regime_result["features"]["realized_volatility"],
+                    self._regime_result["features"]["trend_strength"],
+                    self._regime_result["features"]["hurst_exponent"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[TS_MODEL] REGIME detection failed: %s (falling back to static ensemble)",
+                    exc,
+                    exc_info=True
+                )
+                self._regime_result = None
+                self._handle_model_failure("regime", "detect", exc)
+
         if self.config.sarimax_enabled:
             self._record_model_event(
                 "sarimax",
@@ -634,6 +691,18 @@ class TimeSeriesForecaster:
             else:
                 results["mean_forecast"] = results.get("sarimax_forecast")
 
+        # Phase 7.5: Add regime metadata to results
+        if self._regime_result:
+            results["regime"] = self._regime_result["regime"]
+            results["regime_confidence"] = self._regime_result["confidence"]
+            results["regime_features"] = self._regime_result["features"]
+            results["regime_recommendations"] = self._regime_result["recommendations"]
+        else:
+            results["regime"] = "STATIC"  # No regime detection or disabled
+            results["regime_confidence"] = None
+            results["regime_features"] = None
+            results["regime_recommendations"] = None
+
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)
         results["model_events"] = list(self._model_events)
@@ -716,10 +785,36 @@ class TimeSeriesForecaster:
         if not self._ensemble_config.enabled:
             return None
 
+        # Phase 7.5: Reorder candidates based on regime detection (if enabled)
+        original_candidates = self._ensemble_config.candidate_weights
+        if self._regime_result and self._regime_detector and original_candidates:
+            try:
+                preferred_candidates = self._regime_detector.get_preferred_candidates(
+                    self._regime_result,
+                    original_candidates
+                )
+                logger.info(
+                    "[TS_MODEL] REGIME candidate_reorder :: regime=%s, original_top=%s, preferred_top=%s",
+                    self._regime_result["regime"],
+                    original_candidates[0] if original_candidates else None,
+                    preferred_candidates[0] if preferred_candidates else None,
+                )
+                # Temporarily use regime-preferred candidates
+                self._ensemble_config.candidate_weights = preferred_candidates
+            except Exception as exc:
+                logger.warning(
+                    "[TS_MODEL] REGIME candidate reordering failed: %s (using original order)",
+                    exc
+                )
+
         coordinator = EnsembleCoordinator(self._ensemble_config)
         confidence = derive_model_confidence(self._model_summaries)
         weights, score = coordinator.select_weights(confidence)
         weights = self._enforce_convexity(weights)
+
+        # Phase 7.5: Restore original candidates after ensemble build
+        if self._regime_result and original_candidates:
+            self._ensemble_config.candidate_weights = original_candidates
         if not weights:
             return None
 

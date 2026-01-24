@@ -81,3 +81,50 @@ forecasting:
       - {samossa: 1.0}
       - {mssa_rl: 1.0}
     minimum_component_weight: 0.05  # Align with EnsembleConfig default guardrail
+
+  # Phase 7.5: Regime Detection for Adaptive Model Selection
+  regime_detection:
+    enabled: false  # Feature flag: Set to true to enable regime-aware ensemble selection
+    lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
+
+    # Volatility thresholds (annualized)
+    vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
+    vol_threshold_high: 0.30  # Above 30% annual vol = high volatility regime
+
+    # Trend strength thresholds (0-1 scale, based on R² from linear regression)
+    trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
+    trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
+
+    # Regime-specific model preferences (optional overrides)
+    # If not specified, uses RegimeDetector's built-in recommendations
+    # Format: List models in preference order (highest priority first)
+    regime_model_preferences:
+      LIQUID_RANGEBOUND:
+        # Low vol, mean-reverting, stationary → GARCH excels
+        preferred_models: ['garch', 'sarimax', 'samossa']
+        description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
+
+      MODERATE_RANGEBOUND:
+        # Low vol, stationary, some trend → Mixed approach
+        preferred_models: ['garch', 'sarimax', 'samossa']
+        description: "Low volatility with some directional bias"
+
+      MODERATE_TRENDING:
+        # Medium vol/trend → Trend-following models
+        preferred_models: ['samossa', 'garch', 'sarimax']
+        description: "Clear trend with moderate volatility"
+
+      HIGH_VOL_TRENDING:
+        # High vol, strong trend → Advanced pattern recognition
+        preferred_models: ['samossa', 'mssa_rl', 'garch']
+        description: "Volatile directional moves, complex patterns"
+
+      CRISIS:
+        # Extreme volatility (>50% annual) → Defensive, stick to volatility
+        preferred_models: ['garch', 'sarimax']
+        description: "Crisis mode, focus on volatility and simple models"
+
+      MODERATE_MIXED:
+        # Fallback for unclear regimes → Balanced ensemble
+        preferred_models: ['garch', 'samossa', 'sarimax']
+        description: "No clear regime, use balanced ensemble"
