@@ -321,7 +321,7 @@ pipeline:
 
     # Phase 7.5: Regime Detection for Adaptive Model Selection
     regime_detection:
-      enabled: true  # Feature flag: Set to true to enable regime-aware ensemble selection
+      enabled: false  # Feature flag: keep disabled by default (enable only for controlled validation/audits)
       lookback_window: 60  # Days to analyze for regime classification
 
       # Volatility thresholds (annualized)
@@ -331,6 +331,16 @@ pipeline:
       # Trend strength thresholds (0-1 scale, based on R² from linear regression)
       trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
       trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
+
+      # Phase 7.7: Regime-specific ensemble candidate weights (optimized via rolling CV)
+      # When present, these replace pipeline.forecasting.ensemble.candidate_weights for the detected regime.
+      # Generated via: python scripts/optimize_ensemble_weights.py --source rolling_cv
+      # Optimization results: MODERATE_TRENDING achieved 65% RMSE reduction (19.26 -> 6.74)
+      regime_candidate_weights:
+        MODERATE_TRENDING:
+          # Optimized for 23-27% volatility, strong trend (R²>0.78), 5 CV folds, 25 samples
+          # SAMOSSA-dominant: 90% samossa, 5% sarimax, 5% mssa_rl
+          - {samossa: 0.90, sarimax: 0.05, mssa_rl: 0.05}
 
       # Regime-specific model preferences
       regime_model_preferences:
@@ -344,19 +354,19 @@ pipeline:
 
         MODERATE_TRENDING:
           preferred_models: ['samossa', 'garch', 'sarimax']
-          description: "Medium vol/trend, trend-following models preferred"
+          description: "Clear trend with moderate volatility"
 
         HIGH_VOL_TRENDING:
           preferred_models: ['samossa', 'mssa_rl', 'garch']
-          description: "High volatility with strong trend, advanced pattern recognition"
+          description: "Volatile directional moves, complex patterns"
 
         CRISIS:
           preferred_models: ['garch', 'sarimax']
-          description: "Extreme volatility, defensive models only"
+          description: "Crisis mode, focus on volatility and simple models"
 
         MODERATE_MIXED:
-          preferred_models: ['samossa', 'sarimax', 'garch']
-          description: "Mixed signals, balanced approach"
+          preferred_models: ['garch', 'samossa', 'sarimax']
+          description: "No clear regime, use balanced ensemble"
 
   logging:
     level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
