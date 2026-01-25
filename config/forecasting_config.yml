@@ -84,7 +84,7 @@ forecasting:
 
   # Phase 7.5: Regime Detection for Adaptive Model Selection
   regime_detection:
-    enabled: false  # Feature flag: Set to true to enable regime-aware ensemble selection
+    enabled: true  # Feature flag: Set to true to enable regime-aware ensemble selection
     lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
 
     # Volatility thresholds (annualized)

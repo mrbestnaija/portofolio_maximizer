@@ -1482,6 +1482,11 @@ class TimeSeriesSignalGenerator:
             ensemble_cfg = self._forecasting_config.get('ensemble', {}) if self._forecasting_config else {}
             ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != 'enabled'}
 
+            # Phase 7.5: Extract regime_detection parameters from loaded forecasting config
+            regime_cfg = self._forecasting_config.get('regime_detection', {}) if self._forecasting_config else {}
+            regime_detection_enabled = regime_cfg.get('enabled', False)
+            regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != 'enabled'}
+
             if fast_intraday_cv:
                 sarimax_enabled = baseline_key == "sarimax"
                 samossa_enabled = baseline_key == "samossa"
@@ -1502,11 +1507,15 @@ class TimeSeriesSignalGenerator:
                     if mssa_enabled
                     else {},
                     ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
+                    regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
+                    regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
                 )
             else:
                 forecaster_config = TimeSeriesForecasterConfig(
                     forecast_horizon=horizon,
                     ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
+                    regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
+                    regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
                 )
 
             validator = RollingWindowValidator(

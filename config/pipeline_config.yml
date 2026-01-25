@@ -9,10 +9,10 @@ pipeline:
   # Pipeline stages (executed in order)
   stages:
     - name: "data_extraction"
-      description: "Extract OHLCV data from Yahoo Finance with caching"
-      module: "etl.yfinance_extractor"
-      class: "YFinanceExtractor"
-      config_file: "config/yfinance_config.yml"
+      description: "Extract OHLCV data from configured market data providers (with caching)"
+      module: "etl.data_source_manager"
+      class: "DataSourceManager"
+      config_file: "config/data_sources_config.yml"
       timeout_seconds: 300
       retry_attempts: 3
       retry_delay: 2
@@ -318,7 +318,45 @@ pipeline:
         - {samossa: 1.0}
         - {mssa_rl: 1.0}
       minimum_component_weight: 0.05
-      # Phase 7.4: Regime detection (deferred to Phase 7.5 for proper integration)
+
+    # Phase 7.5: Regime Detection for Adaptive Model Selection
+    regime_detection:
+      enabled: true  # Feature flag: Set to true to enable regime-aware ensemble selection
+      lookback_window: 60  # Days to analyze for regime classification
+
+      # Volatility thresholds (annualized)
+      vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
+      vol_threshold_high: 0.30  # Above 30% annual vol = high volatility regime
+
+      # Trend strength thresholds (0-1 scale, based on R² from linear regression)
+      trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
+      trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
+
+      # Regime-specific model preferences
+      regime_model_preferences:
+        LIQUID_RANGEBOUND:
+          preferred_models: ['garch', 'sarimax', 'samossa']
+          description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
+
+        MODERATE_RANGEBOUND:
+          preferred_models: ['garch', 'sarimax', 'samossa']
+          description: "Low volatility with some directional bias"
+
+        MODERATE_TRENDING:
+          preferred_models: ['samossa', 'garch', 'sarimax']
+          description: "Medium vol/trend, trend-following models preferred"
+
+        HIGH_VOL_TRENDING:
+          preferred_models: ['samossa', 'mssa_rl', 'garch']
+          description: "High volatility with strong trend, advanced pattern recognition"
+
+        CRISIS:
+          preferred_models: ['garch', 'sarimax']
+          description: "Extreme volatility, defensive models only"
+
+        MODERATE_MIXED:
+          preferred_models: ['samossa', 'sarimax', 'garch']
+          description: "Mixed signals, balanced approach"
 
   logging:
     level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL

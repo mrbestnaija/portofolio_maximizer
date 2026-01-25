@@ -118,7 +118,17 @@ class TimeSeriesForecaster:
         self._regime_detector: Optional['RegimeDetector'] = None
         if self.config.regime_detection_enabled:
             from forcester_ts.regime_detector import RegimeDetector, RegimeConfig
-            regime_config = RegimeConfig(**self.config.regime_detection_kwargs)
+            # Filter regime_detection_kwargs to only include RegimeConfig fields
+            # (exclude regime_model_preferences which is handled by RegimeDetector internally)
+            regime_config_fields = {
+                'enabled', 'lookback_window', 'vol_threshold_low', 'vol_threshold_high',
+                'trend_threshold_weak', 'trend_threshold_strong'
+            }
+            regime_config_kwargs = {
+                k: v for k, v in self.config.regime_detection_kwargs.items()
+                if k in regime_config_fields
+            }
+            regime_config = RegimeConfig(**regime_config_kwargs)
             self._regime_detector = RegimeDetector(regime_config)
             logger.info(
                 "[TS_MODEL] REGIME_DETECTION enabled :: lookback=%d, vol_thresholds=(%.2f,%.2f), trend_thresholds=(%.2f,%.2f)",
@@ -1183,6 +1193,11 @@ class TimeSeriesForecaster:
         decision = "KEEP"
         reason = "ensemble within tolerance"
         ratio = ensemble_rmse / best_rmse
+
+        metadata["rmse_ratio"] = ratio
+        metadata["ensemble_rmse"] = ensemble_rmse
+        metadata["best_model_rmse"] = best_rmse
+        metadata["best_model"] = best_model
 
         if ratio > max_ratio:
             decision = "DISABLE_DEFAULT"

@@ -1855,12 +1855,20 @@ def execute_pipeline(
                     mssa_rl_cfg = forecasting_cfg.get('mssa_rl', {})
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
+                    regime_detection_cfg = forecasting_cfg.get('regime_detection', {})  # Phase 7.5
 
                     # Phase 7.3 DEBUG: Check what's in ensemble_cfg
                     logger.info(
                         "Loaded ensemble_cfg keys: %s, candidate_weights count: %s",
                         list(ensemble_cfg.keys()),
                         len(ensemble_cfg.get('candidate_weights', [])),
+                    )
+
+                    # Phase 7.5 DEBUG: Check if regime_detection config loaded
+                    logger.info(
+                        "Loaded regime_detection_cfg keys: %s, enabled: %s",
+                        list(regime_detection_cfg.keys()),
+                        regime_detection_cfg.get('enabled', False),
                     )
 
                     forecasts = {}
@@ -1887,6 +1895,11 @@ def execute_pipeline(
                             },
                             ensemble_kwargs={
                                 k: v for k, v in ensemble_cfg.items() if k != 'enabled'
+                            },
+                            # Phase 7.5: Regime detection for adaptive model selection
+                            regime_detection_enabled=regime_detection_cfg.get('enabled', False),
+                            regime_detection_kwargs={
+                                k: v for k, v in regime_detection_cfg.items() if k != 'enabled'
                             },
                         )
 
@@ -2133,12 +2146,33 @@ def execute_pipeline(
                                 lower_ci = ensemble_result.get('lower_ci') if isinstance(ensemble_result, dict) else None
                                 upper_ci = ensemble_result.get('upper_ci') if isinstance(ensemble_result, dict) else None
                                 ensemble_meta = forecast_result.get('ensemble_metadata') or {}
+                                rmse_ratio = ensemble_meta.get('rmse_ratio')
+                                ensemble_rmse = ensemble_meta.get('ensemble_rmse')
+                                best_model_rmse = ensemble_meta.get('best_model_rmse')
+                                best_model = ensemble_meta.get('best_model')
+                                if metrics_map:
+                                    if ensemble_rmse is None:
+                                        ensemble_rmse = (metrics_map.get('ensemble') or {}).get('rmse')
+                                    if best_model_rmse is None:
+                                        for model in ("sarimax", "samossa", "mssa_rl"):
+                                            rmse_val = (metrics_map.get(model) or {}).get('rmse')
+                                            if isinstance(rmse_val, (int, float)):
+                                                if best_model_rmse is None or float(rmse_val) < float(best_model_rmse):
+                                                    best_model_rmse = float(rmse_val)
+                                                    if not best_model:
+                                                        best_model = model
+                                if rmse_ratio is None and isinstance(ensemble_rmse, (int, float)) and isinstance(best_model_rmse, (int, float)) and best_model_rmse > 0:
+                                    rmse_ratio = float(ensemble_rmse) / float(best_model_rmse)
                                 diagnostics = {
                                     'weights': ensemble_result.get('weights') if isinstance(ensemble_result, dict) else ensemble_meta.get('weights'),
                                     'confidence': ensemble_result.get('confidence') if isinstance(ensemble_result, dict) else ensemble_meta.get('confidence'),
                                     'selection_score': ensemble_result.get('selection_score') if isinstance(ensemble_result, dict) else ensemble_meta.get('selection_score'),
                                     'ensemble_status': ensemble_meta.get('ensemble_status'),
                                     'ensemble_decision_reason': ensemble_meta.get('ensemble_decision_reason'),
+                                    'rmse_ratio': rmse_ratio,
+                                    'ensemble_rmse': ensemble_rmse,
+                                    'best_model_rmse': best_model_rmse,
+                                    'best_model': best_model,
                                     'regression_metrics': metrics_map.get('ensemble'),
                                 }
                                 for step in range(min(forecast_horizon, len(ensemble_series))):
