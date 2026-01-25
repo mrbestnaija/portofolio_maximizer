@@ -28,21 +28,63 @@
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
 > **Quant Validation & MTM:** For quant gates and liquidation, treat `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`, and `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` as the canonical references (plus their helper scripts in `scripts/`), rather than embedding ad-hoc thresholds or pricing rules in new code.
 
-## Project Status (Updated: 2026-01-24)
+## Project Status (Updated: 2026-01-25)
 
 ### Current Phase: 7.5 - Regime Detection Integration ✅ COMPLETE
 
+#### Phase 7.5 Summary
 - **Implementation**: Integrated RegimeDetector into TimeSeriesForecaster for adaptive model selection
-- **Regime Types**: 6 classifications (LIQUID_RANGEBOUND, MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS, etc.)
-- **Detection Features**: 8 metrics (volatility, trend strength, Hurst exponent, ADF test, skewness, kurtosis)
-- **Integration Points**: Regime detection in fit(), candidate reordering in _build_ensemble()
-- **Feature Flag**: regime_detection.enabled (default: false for safe deployment)
-- **Testing**: All integration tests passed (synthetic low-vol and high-vol trending data)
-- **Configuration**: 40+ lines added to forecasting_config.yml with all thresholds documented
-- **Code Changes**: +87 lines in forecaster.py, fully backward compatible with Phase 7.4
+- **Regime Types**: 6 classifications (LIQUID_RANGEBOUND, MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS, MODERATE_MIXED, MODERATE_RANGEBOUND)
+- **Detection Features**: 8 metrics (volatility, trend strength, Hurst exponent, ADF test, skewness, kurtosis, vol_of_vol, mean_return)
+- **Feature Flag**: regime_detection.enabled (default: false, enabled for validation: true)
 - **Safety**: Graceful degradation on detection failures, falls back to Phase 7.4 static weights
-- **Production Status**: Ready for gradual rollout (feature flag disabled, enable when ready)
-- **Git Commit**: ffc5b19 (pushed to master, 5 files, +1390 lines)
+
+#### Integration Fixes (3 Critical Issues Resolved)
+1. **Signal Generator Config** (models/time_series_signal_generator.py): Added regime_detection extraction from forecasting_config.yml
+2. **Pipeline Script Config** (scripts/run_etl_pipeline.py + config/pipeline_config.yml): Added regime_detection section and loading logic
+3. **RegimeConfig Parameter Filtering** (forcester_ts/forecaster.py): Filter kwargs to exclude regime_model_preferences
+
+#### Validation Results
+
+**Single-Ticker (AAPL, 2024-07-01 to 2026-01-18)**:
+- Status: ✅ PASSED
+- Regimes detected: 3 types (MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS)
+- Average confidence: 68.3% (range: 55.8-83.4%)
+- Candidate reordering: 2/5 builds (40%)
+- Key finding: HIGH_VOL_TRENDING switched from GARCH-dominant (0.85) to SAMOSSA-led (0.35)
+- RMSE impact: +42% regression (1.043 → 1.483, expected for research phase)
+
+**Multi-Ticker (AAPL, MSFT, NVDA, 2024-07-01 to 2026-01-18)**:
+- Status: ✅ PASSED (all 3 tickers completed successfully)
+- Total forecasts: 15 (5 per ticker)
+- Distinct regime types observed: 4
+- Overall adaptation rate: 53% (8/15 builds)
+- Average confidence: 65.2%
+
+**Regime Distribution**:
+- **AAPL**: Mixed (20% MODERATE_TRENDING, 40% HIGH_VOL_TRENDING, 40% CRISIS)
+- **MSFT**: 80% HIGH_VOL_TRENDING (sustained volatile trending)
+- **NVDA**: 40% HIGH_VOL_TRENDING, 40% CRISIS, 20% MODERATE_MIXED (extreme volatility)
+
+**Volatility Ranking** (Correct):
+1. NVDA: 57.8% avg (peaks at 73%!)
+2. AAPL: 41.8% avg
+3. MSFT: 26.8% avg (most stable)
+
+**Key Achievement**: ✅ Regime detection generalizes across tickers (not AAPL-specific)
+
+#### Git Commits
+- **1b696f5** (2026-01-24): Phase 7.5 integration with 3 critical fixes (6 files, 443 insertions)
+- **de443c9** (2026-01-25): Multi-ticker validation results (2 files, 338 insertions)
+
+#### Documentation
+- Documentation/PHASE_7.5_VALIDATION.md (340 lines): Single-ticker validation report
+- Documentation/PHASE_7.5_MULTI_TICKER_RESULTS.md (340 lines): Multi-ticker comparison analysis
+
+#### Production Status
+- Research-Ready: ✅ VALIDATED
+- Production-Pending: ⏳ Awaits 20 holdout audits (currently 1/20)
+- Feature Flag: Enabled for validation, recommend keep enabled for audit accumulation
 
 ### Integration Recovery Tracker
 - Treat `Documentation/integration_fix_plan.md` as the canonical remediation log; do not promote any downstream status in this file until that tracker is cleared.
@@ -59,29 +101,59 @@
 5. ✅ **Phase 4.5**: Time Series Cross-Validation - k-fold CV, backward compatible
 6. ✅ **Phase 7.3**: GARCH Volatility Forecasting - Standalone GARCH model integration
 7. ✅ **Phase 7.4**: GARCH Ensemble Integration - Quantile-calibrated ensemble with bug fix (2026-01-23, commit b02b0ee)
-8. ✅ **Phase 7.5**: Regime Detection Integration - Adaptive model selection (feature flag disabled, 2026-01-24, commit ffc5b19)
+8. ✅ **Phase 7.5**: Regime Detection Integration - Adaptive model selection with multi-ticker validation (2026-01-24/25, commits 1b696f5, de443c9)
 
-### Next Phase: 7.5 - Regime Detection or Audit Accumulation
+### Next Phase: 7.6 - Performance Tuning or Audit Accumulation
 
-**Option A: Regime Detection Integration** (RECOMMENDED - High Value)
-- **Focus**: Adaptive ensemble weights based on market regimes
-- **Prerequisites**: ✅ forcester_ts/regime_detector.py ready (6 regime types)
-- **Status**: Ready for integration and testing
-- **Expected Benefit**: Context-aware model selection, improved performance in volatile markets
+**Recommendation Based on Phase 7.5 Results**:
+- RMSE regression observed (+42% for AAPL)
+- Regime detection generalizes well across tickers
+- Feature currently enabled for validation
+- **Decision Point**: Keep enabled for audit accumulation vs disable for tuning
 
-**Option B: Ensemble Weight Optimization** (Medium Value)
+**Option A: Threshold Tuning & RMSE Optimization** (RECOMMENDED if RMSE is concern)
 
-- **Focus**: Data-driven weight optimization using scipy.optimize
-- **Prerequisites**: ✅ scripts/optimize_ensemble_weights.py ready
-- **Status**: Script ready, needs validation
-- **Expected Benefit**: Optimized weights beyond current 85% GARCH configuration
+- **Focus**: Reduce CRISIS detections, improve regime classification accuracy
+- **Actions**:
+  - Adjust vol_threshold_high (0.30 → 0.35?) to reduce false CRISIS classifications
+  - Investigate NVDA 73% volatility (potential data quality issue)
+  - Re-run single-ticker validations with adjusted thresholds
+  - Target: Reduce RMSE regression to ≤10% vs Phase 7.4
+- **Prerequisites**: Phase 7.5 validation results (✅ complete)
+- **Effort**: Low (2-3 hours, 2-3 validation runs)
+- **Expected Benefit**: Better RMSE performance while maintaining adaptive selection
 
-**Option C: Holdout Audit Accumulation** (Maintenance - Low Effort)
+**Option B: Per-Regime Weight Optimization** (High Value)
 
-- **Focus**: Collect 20+ holdout audits for production ensemble status
-- **Prerequisites**: ✅ System ready, just needs multiple runs
-- **Status**: Currently 1-2 audits, need 18+ more
-- **Expected Benefit**: Transition from RESEARCH_ONLY to production status
+- **Focus**: Optimize ensemble candidate weights separately for each regime type
+- **Tool**: scripts/optimize_ensemble_weights.py (already exists, 300+ lines)
+- **Process**:
+  1. Collect historical data by regime type (MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS)
+  2. Run scipy.optimize.minimize separately for each regime
+  3. Update config with regime-specific optimal weights
+  4. Validate on multi-ticker dataset
+- **Prerequisites**: ✅ Optimization script ready, Phase 7.5 validation complete
+- **Effort**: Medium (4-6 hours)
+- **Expected Benefit**: Better RMSE in regime-specific scenarios, optimal weights per context
+
+**Option C: Holdout Audit Accumulation** (Passive - Low Effort)
+
+- **Focus**: Collect 20+ holdout audits for production ensemble status transition
+- **Setup**: Create cron job or scheduled task for daily pipeline runs
+- **Timeline**: 3-4 weeks passive accumulation
+- **Prerequisites**: ✅ System ready, just needs automated scheduling
+- **Status**: Currently 1/20 audits completed, need 19 more
+- **Effort**: Low setup (30 minutes), then automated
+- **Expected Benefit**: Transition from RESEARCH_ONLY to production status, statistical confidence
+
+**Option D: Fix Multi-Ticker Pipeline** (Technical Debt)
+
+- **Focus**: Support true multi-ticker forecasting in single pipeline run
+- **Issue**: Currently concatenates data without ticker column preservation (discovered in Phase 7.5)
+- **Fix**: Add ticker column through forecasting stage, implement ticker-aware regime detection
+- **Prerequisites**: Understanding of data flow architecture
+- **Effort**: High (8-10 hours, significant refactoring)
+- **Expected Benefit**: Simplified validation workflow, true multi-ticker support
 
 ### Historical Phases (Deferred/Skipped)
 

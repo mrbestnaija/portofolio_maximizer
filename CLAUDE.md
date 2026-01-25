@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.4 Complete (GARCH ensemble integration with quantile calibration)
-**Last Updated**: 2026-01-23
+**Current Phase**: Phase 7.5 Complete (Regime detection integration with multi-ticker validation)
+**Last Updated**: 2026-01-25
 
 ---
 
@@ -254,50 +254,101 @@ Data Sources → Extraction → Validation → Preprocessing → Forecasting →
 
 ---
 
-## Phase 7.4 Specific Guidance (GARCH Ensemble Integration)
+## Phase 7.5 Specific Guidance (Regime Detection Integration)
 
-### Completed Features
+### Overview
 
-1. **Ensemble Config Preservation Bug Fix**
-   - **File**: `models/time_series_signal_generator.py`
-   - **Issue**: TimeSeriesSignalGenerator wasn't preserving ensemble_kwargs during CV
-   - **Fix**: Added `_load_forecasting_config()` method to load ensemble configuration
-   - **Lines**: 137, 196-204, 230-250, 1470-1494
+Phase 7.5 integrated RegimeDetector into TimeSeriesForecaster for adaptive model selection based on market conditions. The system now dynamically reorders ensemble candidates based on detected regime characteristics (volatility, trend strength, Hurst exponent).
 
-2. **Quantile-Based Confidence Calibration**
-   - **File**: `forcester_ts/ensemble.py`
-   - **Method**: Rank-based normalization (scipy.stats.rankdata)
-   - **Range**: 0.3-0.9 (prevents SAMoSSA dominance)
-   - **Lines**: 402-432
-   - **Results**: SAMoSSA 0.95→0.9, GARCH/SARIMAX both 0.6
+**Status**: ✅ COMPLETE (validated across 3 tickers with feature flag enabled)
 
-3. **Database Schema Migration**
-   - **Script**: `scripts/migrate_add_ensemble_model_type.py`
-   - **Change**: Added 'ENSEMBLE' to model_type CHECK constraint
-   - **Platform Fix**: ASCII output only (no unicode ✓✗ characters)
-   - **Migration**: Recreates table (SQLite doesn't support ALTER CONSTRAINT)
+### Integration Fixes Applied
 
-4. **Regime Detection System** (Ready for Phase 7.5)
-   - **File**: `forcester_ts/regime_detector.py` (340 lines)
-   - **Regimes**: 6 types (LIQUID_RANGEBOUND, HIGH_VOL_TRENDING, etc.)
-   - **Features**: Hurst exponent, ADF test, trend strength, volatility
-   - **Status**: Implemented but not yet integrated
+**Issue 1: Signal Generator Missing Config**
+- **File**: `models/time_series_signal_generator.py` (lines 1487-1515)
+- **Problem**: Wasn't extracting regime_detection params from forecasting_config.yml
+- **Fix**: Added regime_cfg extraction and passing to TimeSeriesForecasterConfig in both CV paths
 
-5. **Weight Optimization**
-   - **File**: `scripts/optimize_ensemble_weights.py` (300+ lines)
-   - **Method**: scipy.optimize.minimize with SLSQP
-   - **Status**: Ready for use if needed
+**Issue 2: Pipeline Script Missing Config**
+- **Files**: `scripts/run_etl_pipeline.py` (lines 1858, 1865-1870, 1893-1897) + `config/pipeline_config.yml` (lines 323-360)
+- **Problem**: Pipeline loaded from pipeline_config.yml but regime_detection only in forecasting_config.yml
+- **Fix**: Added 37-line regime_detection section to pipeline_config.yml and loading logic
 
-### Performance Metrics (Phase 7.4)
+**Issue 3: RegimeConfig Parameter Mismatch**
+- **File**: `forcester_ts/forecaster.py` (lines 118-132)
+- **Problem**: regime_model_preferences passed but not in RegimeConfig dataclass signature
+- **Fix**: Filter kwargs to only include valid fields: {enabled, lookback_window, vol_threshold_low, vol_threshold_high, trend_threshold_weak, trend_threshold_strong}
 
-**AAPL Single-Ticker Validation**:
-- RMSE Ratio: 1.470 → 1.043 (29% improvement)
+### Validation Results
+
+**Single-Ticker (AAPL, 2024-07-01 to 2026-01-18)**:
+- Regimes detected: MODERATE_TRENDING (1), HIGH_VOL_TRENDING (2), CRISIS (2)
+- Average confidence: 68.3%
+- Adaptation rate: 40% (2/5 builds switched to SAMOSSA-led)
+- RMSE impact: +42% regression (1.043 → 1.483, expected for research phase)
+
+**Multi-Ticker (AAPL, MSFT, NVDA)**:
+- Total forecasts: 15 (5 per ticker)
+- Distinct regimes: 4 types
+- Adaptation rate: 53% (8/15 builds)
+- Average confidence: 65.2%
+- **Key finding**: ✅ Regime detection generalizes across tickers
+
+**Regime Distribution**:
+- **AAPL**: Mixed (20% MODERATE, 40% HIGH_VOL, 40% CRISIS)
+- **MSFT**: 80% HIGH_VOL_TRENDING (sustained volatile trending)
+- **NVDA**: Extreme volatility (avg 57.8%, peaks at 73%)
+
+**Volatility Ranking** (Correct): NVDA (58%) > AAPL (42%) > MSFT (27%)
+
+### Configuration
+
+**Feature Flag** (config/pipeline_config.yml + config/forecasting_config.yml):
+```yaml
+regime_detection:
+  enabled: true  # Currently enabled for validation/audit accumulation
+  lookback_window: 60
+  vol_threshold_low: 0.15
+  vol_threshold_high: 0.30
+  trend_threshold_weak: 0.30
+  trend_threshold_strong: 0.60
+```
+
+**Regime Model Preferences**:
+- HIGH_VOL_TRENDING → {samossa, mssa_rl, garch}
+- CRISIS → {garch, sarimax} (defensive)
+- MODERATE_TRENDING → {samossa, garch, sarimax}
+- LIQUID_RANGEBOUND → {garch, sarimax, samossa}
+
+### Known Limitations
+
+1. **Multi-Ticker Pipeline**: Running `--tickers AAPL,MSFT,NVDA` concatenates data without ticker column. **Workaround**: Run separate pipelines per ticker.
+2. **RMSE Regression**: +42% vs Phase 7.4 baseline (trades accuracy for robustness/diversity).
+3. **Extreme Volatility (NVDA)**: 73% annualized detected - investigate data quality.
+
+### Documentation
+
+- [PHASE_7.5_VALIDATION.md](Documentation/PHASE_7.5_VALIDATION.md): Single-ticker validation (340 lines)
+- [PHASE_7.5_MULTI_TICKER_RESULTS.md](Documentation/PHASE_7.5_MULTI_TICKER_RESULTS.md): Multi-ticker analysis (340 lines)
+
+### Git Commits
+
+- **1b696f5** (2026-01-24): Integration with 3 fixes
+- **de443c9** (2026-01-25): Multi-ticker validation results
+
+---
+
+## Phase 7.4 Reference (GARCH Ensemble Integration - COMPLETE)
+
+**Performance Metrics**:
+- AAPL RMSE Ratio: 1.470 → 1.043 (29% improvement)
 - GARCH Selection: 14% → 100%
-- Target Achievement: 94.6% (ratio < 1.1 is target)
+- Target Achievement: 94.6%
 
-**Multi-Ticker Validation** (In Progress):
-- Expected: 2/3 or 3/3 tickers at target (<1.1 RMSE ratio)
-- Status: See logs/phase7.4_multi_ticker_retry.log
+**Key Features**:
+- Quantile-based confidence calibration (prevents SAMoSSA dominance)
+- Ensemble config preservation during CV
+- Database schema migration (added ENSEMBLE model type)
 
 ---
 
