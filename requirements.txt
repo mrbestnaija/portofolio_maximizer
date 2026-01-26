@@ -1,5 +1,5 @@
 # Supported Python runtime: >=3.10,<3.13 (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-01-23 (Phase 7.4 GARCH ensemble integration complete)
+# Last updated: 2026-01-25 (Security: pip-audit remediation)
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
@@ -21,7 +21,7 @@ curl_cffi==0.13.0
 cycler==0.12.1
 distro==1.9.0
 docstring_parser==0.17.0
-fonttools==4.60.1
+fonttools==4.60.2
 frozendict==2.4.6
 frozenlist==1.8.0
 fsspec==2025.12.0
@@ -54,7 +54,6 @@ pillow==12.0.0
 platformdirs==4.5.0
 pluggy==1.6.0
 propcache==0.4.1
-protobuf==6.33.0
 pyarrow==22.0.0
 pycparser==2.23
 pydantic==2.12.4
@@ -83,7 +82,7 @@ tqdm==4.67.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.2
-urllib3==2.5.0
+urllib3==2.6.3
 websockets==15.0.1
 yarl==1.22.0
-yfinance==0.2.66
+yfinance==0.2.55
