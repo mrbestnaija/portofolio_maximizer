@@ -233,15 +233,17 @@ class TestCacheFreshness:
         # Save data
         filepath = temp_storage.save(sample_ohlcv_data, 'raw', 'AAPL')
 
-        # Modify file timestamp to be exactly cache_hours old
         cache_hours = 24
-        old_time = datetime.now() - timedelta(hours=cache_hours, seconds=1)
-        old_timestamp = old_time.timestamp()
+        extractor = YFinanceExtractor(storage=temp_storage, cache_hours=cache_hours)
+        effective_cache_hours = extractor._effective_cache_hours()
+
+        # Expire strictly beyond the effective TTL (which may be extended off-hours/weekends).
+        import time
+        old_timestamp = time.time() - (effective_cache_hours * 3600) - 1
         filepath.parent.glob('*AAPL*.parquet').__next__().touch()
         import os
         os.utime(filepath, (old_timestamp, old_timestamp))
 
-        extractor = YFinanceExtractor(storage=temp_storage, cache_hours=cache_hours)
         result = extractor._check_cache('AAPL', datetime(2020, 1, 1), datetime(2020, 12, 31))
 
         # Should be expired

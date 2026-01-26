@@ -6,6 +6,8 @@ RMSE ratios, and provides automated recommendations.
 """
 
 import json
+import os
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -27,16 +29,64 @@ class EnsembleDashboard:
         self.target_rmse_ratio = 1.100
         self.results = {}
 
+    def _mirror_path(self) -> Path | None:
+        if os.name != "posix":
+            return None
+        if not self.db_path.as_posix().startswith("/mnt/"):
+            return None
+        tmp_root = Path(os.environ.get("WSL_SQLITE_TMP", "/tmp"))
+        return tmp_root / f"{self.db_path.name}.wsl"
+
+    def _resolve_db_path(self) -> Path:
+        mirror = self._mirror_path()
+        if mirror and mirror.exists():
+            try:
+                if not self.db_path.exists():
+                    return mirror
+                if mirror.stat().st_mtime >= self.db_path.stat().st_mtime:
+                    return mirror
+            except OSError:
+                return mirror
+        return self.db_path
+
     def connect_db(self) -> sqlite3.Connection:
         """Connect to forecasts database."""
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"Database not found: {self.db_path}")
-        return sqlite3.connect(str(self.db_path))
+        db_path = self._resolve_db_path()
+        if not db_path.exists():
+            raise FileNotFoundError(f"Database not found: {db_path}")
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        try:
+            return sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if "disk i/o error" not in msg:
+                raise
+            mirror = self._mirror_path()
+            if not mirror:
+                raise
+            try:
+                mirror.parent.mkdir(parents=True, exist_ok=True)
+                if db_path.exists():
+                    shutil.copy2(db_path, mirror)
+            except Exception:
+                pass
+            if mirror.exists():
+                mirror_uri = f"file:{mirror.as_posix()}?mode=ro"
+                return sqlite3.connect(mirror_uri, uri=True)
+            raise
 
     def fetch_recent_forecasts(self, hours: int = 24) -> pd.DataFrame:
         """Fetch forecasts from the last N hours."""
         conn = self.connect_db()
         cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+        ts_expr = "forecast_date"
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(time_series_forecasts)").fetchall()}
+            if "created_at" in cols:
+                ts_expr = "COALESCE(created_at, forecast_date)"
+        except sqlite3.Error:
+            pass
 
         query = """
         SELECT
@@ -46,11 +96,11 @@ class EnsembleDashboard:
             diagnostics,
             regression_metrics
         FROM time_series_forecasts
-        WHERE forecast_date >= ?
-        ORDER BY ticker, forecast_date DESC
+        WHERE DATE({ts_expr}) >= DATE(?)
+        ORDER BY ticker, {ts_expr} DESC
         """
 
-        df = pd.read_sql_query(query, conn, params=(cutoff,))
+        df = pd.read_sql_query(query.format(ts_expr=ts_expr), conn, params=(cutoff,))
         conn.close()
         return df
 
@@ -73,6 +123,11 @@ class EnsembleDashboard:
         rmse_ratio = merged.get("rmse_ratio") or merged.get("rmse_ratio_over_baseline")
         best_model_rmse = merged.get("best_model_rmse") or merged.get("best_rmse")
         ensemble_rmse = merged.get("ensemble_rmse") or merged.get("rmse")
+        if rmse_ratio is None and ensemble_rmse is not None and best_model_rmse:
+            try:
+                rmse_ratio = float(ensemble_rmse) / float(best_model_rmse)
+            except Exception:
+                rmse_ratio = None
         return {
             "weights": weights if isinstance(weights, dict) else {},
             "confidence": confidence if isinstance(confidence, dict) else {},
@@ -147,29 +202,37 @@ class EnsembleDashboard:
     def generate_recommendations(self, results: List[Dict]) -> List[str]:
         """Generate automated recommendations based on performance."""
         recommendations = []
+        if not results:
+            return recommendations
 
         # Analyze overall patterns
+        total = len(results)
         garch_selected = sum(1 for r in results if r.get('avg_garch_weight', 0) > 0.5)
-        at_target = sum(1 for r in results if r.get('avg_rmse_ratio', float('inf')) < self.target_rmse_ratio)
+        at_target = sum(
+            1 for r in results
+            if isinstance(r.get('avg_rmse_ratio'), (int, float))
+            and r['avg_rmse_ratio'] < self.target_rmse_ratio
+        )
         regressing = sum(1 for r in results if 'REGRESSING' in r.get('status', ''))
 
         # Recommendation 1: GARCH selection frequency
-        if garch_selected < len(results) * 0.3:  # Less than 30% GARCH selection
+        if garch_selected < total * 0.3:  # Less than 30% GARCH selection
             recommendations.append({
                 'priority': 'HIGH',
                 'category': 'Model Selection',
-                'issue': f'GARCH selected in only {garch_selected}/{len(results)} tickers ({garch_selected/len(results)*100:.0f}%)',
+                'issue': f'GARCH selected in only {garch_selected}/{total} tickers ({garch_selected/total*100:.0f}%)',
                 'action': 'Adjust confidence normalization or add regime detection',
                 'code': 'Modify ensemble.py derive_model_confidence() to better balance GARCH vs SAMoSSA confidence',
             })
 
         # Recommendation 2: Target achievement
-        if at_target < len(results):
-            gap_avg = sum(r.get('gap_to_target', 0) for r in results) / len(results)
+        if at_target < total:
+            gaps = [r.get('gap_to_target') for r in results if isinstance(r.get('gap_to_target'), (int, float))]
+            gap_avg = sum(gaps) / len(gaps) if gaps else 0.0
             recommendations.append({
                 'priority': 'MEDIUM',
                 'category': 'Performance',
-                'issue': f'{len(results) - at_target}/{len(results)} tickers above target (avg gap: {gap_avg:.3f})',
+                'issue': f'{total - at_target}/{total} tickers above target (avg gap: {gap_avg:.3f})',
                 'action': 'Implement ensemble weight optimization using holdout data',
                 'code': 'Add scipy.optimize.minimize to find optimal weights in EnsembleCoordinator',
             })
@@ -262,6 +325,7 @@ class EnsembleDashboard:
 
         overall_ratios = []
         overall_improvements = []
+        avg_garch = sum(r['avg_garch_weight'] for r in results) / len(results)
 
         for result in results:
             ticker = result['ticker']
@@ -288,7 +352,6 @@ class EnsembleDashboard:
         if overall_ratios:
             avg_ratio = sum(overall_ratios) / len(overall_ratios)
             avg_improvement = sum(overall_improvements) / len(overall_improvements) if overall_improvements else 0
-            avg_garch = sum(r['avg_garch_weight'] for r in results) / len(results)
 
             print("-" * 100)
             print(f"{'OVERALL':<8} {'🎯':<4} "
@@ -313,7 +376,11 @@ class EnsembleDashboard:
         print("\n## Key Metrics")
         print("-" * 100)
         garch_dominant = sum(1 for r in results if r['avg_garch_weight'] > 0.5)
-        at_target = sum(1 for r in results if r.get('avg_rmse_ratio', float('inf')) < self.target_rmse_ratio)
+        at_target = sum(
+            1 for r in results
+            if isinstance(r.get('avg_rmse_ratio'), (int, float))
+            and r['avg_rmse_ratio'] < self.target_rmse_ratio
+        )
 
         print(f"Total Tickers: {len(results)}")
         print(f"GARCH-Dominant (>50% weight): {garch_dominant} ({garch_dominant/len(results)*100:.1f}%)")
@@ -374,7 +441,11 @@ class EnsembleDashboard:
                 'total_tickers': len(self.results),
                 'avg_garch_weight': sum(r.get('avg_garch_weight', 0) for r in self.results) / len(self.results) if self.results else 0,
                 'avg_rmse_ratio': sum(r.get('avg_rmse_ratio', 0) for r in self.results if r.get('avg_rmse_ratio')) / max(len([r for r in self.results if r.get('avg_rmse_ratio')]), 1),
-                'at_target_count': sum(1 for r in self.results if r.get('avg_rmse_ratio', float('inf')) < self.target_rmse_ratio),
+                'at_target_count': sum(
+                    1 for r in self.results
+                    if isinstance(r.get('avg_rmse_ratio'), (int, float))
+                    and r['avg_rmse_ratio'] < self.target_rmse_ratio
+                ),
             },
             'recommendations': self.generate_recommendations(self.results),
         }

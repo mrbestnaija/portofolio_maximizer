@@ -28,6 +28,27 @@ DEFAULT_DB_PATH = Path(os.getenv("PORTFOLIO_DB_PATH") or (ROOT / "data" / "portf
 DEFAULT_OUTPUT_PATH = ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_AUDIT_DB_PATH = ROOT / "data" / "dashboard_audit.db"
 
+def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
+    if os.name != "posix":
+        return None
+    if not db_path.as_posix().startswith("/mnt/"):
+        return None
+    tmp_root = Path(os.environ.get("WSL_SQLITE_TMP", "/tmp"))
+    return tmp_root / f"{db_path.name}.wsl"
+
+
+def _select_read_path(db_path: Path) -> Path:
+    mirror = _wsl_mirror_path(db_path)
+    if mirror and mirror.exists():
+        try:
+            if not db_path.exists():
+                return mirror
+            if mirror.stat().st_mtime >= db_path.stat().st_mtime:
+                return mirror
+        except OSError:
+            return mirror
+    return db_path
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -718,7 +739,7 @@ def main() -> None:
     args = _parse_args()
     db_path = Path(args.db_path).expanduser()
     out_path = Path(args.output).expanduser()
-    mirror_path = Path("/tmp") / f"{db_path.name}.wsl"
+    mirror_path = _wsl_mirror_path(db_path)
 
     def _tickers(conn: sqlite3.Connection) -> List[str]:
         raw = str(args.tickers or "").strip()
@@ -727,7 +748,8 @@ def main() -> None:
         return _default_tickers(conn)
 
     while True:
-        conn = _connect_ro(db_path)
+        read_path = _select_read_path(db_path)
+        conn = _connect_ro(read_path)
         try:
             try:
                 tickers = _tickers(conn)
@@ -740,14 +762,14 @@ def main() -> None:
                 )
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
-                if "disk i/o error" in msg:
-                    if not mirror_path.exists():
-                        try:
+                if "disk i/o error" in msg and mirror_path:
+                    try:
+                        if db_path.exists():
                             mirror_path.parent.mkdir(parents=True, exist_ok=True)
                             import shutil
                             shutil.copy2(db_path, mirror_path)
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
                     if mirror_path.exists():
                         conn.close()
                         conn = _connect_ro(mirror_path)

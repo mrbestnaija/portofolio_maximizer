@@ -225,6 +225,7 @@ class YFinanceExtractor(BaseExtractor):
         resolved_config_path = config_path or kwargs.pop("config_path", None)
         self.config_path = Path(resolved_config_path) if resolved_config_path else None
         self.config: Dict[str, Any] = self._load_config(self.config_path) if self.config_path else {}
+        self._configure_provider_cache()
 
         # Apply config-driven defaults (fall back to constructor args when missing).
         self.interval = self._get_config_value(("extraction", "data", "interval"))
@@ -275,6 +276,30 @@ class YFinanceExtractor(BaseExtractor):
         self._recent_failures: Dict[str, datetime] = {}
         # Reduce noise for known sentinel/fake tickers used in tests or housekeeping.
         self._quiet_failure_tickers = {"DELISTED", "MISSING", "INVALID"}
+
+    def _configure_provider_cache(self) -> None:
+        """Route yfinance's internal sqlite caches to a writable location."""
+        cache_dir = os.getenv("YFINANCE_CACHE_DIR") or os.getenv("YFINANCE_TZ_CACHE_DIR")
+        if not cache_dir and os.name == "posix":
+            is_wsl = bool(os.getenv("WSL_DISTRO_NAME"))
+            if not is_wsl:
+                try:
+                    is_wsl = "microsoft" in Path("/proc/version").read_text().lower()
+                except OSError:
+                    is_wsl = False
+            if is_wsl:
+                cache_dir = str(Path(os.getenv("WSL_SQLITE_TMP", "/tmp")) / "py-yfinance")
+
+        if not cache_dir:
+            return
+
+        try:
+            cache_path = Path(cache_dir).expanduser()
+            cache_path.mkdir(parents=True, exist_ok=True)
+            yf.set_tz_cache_location(str(cache_path))
+            logger.info("yfinance cache dir set to %s", cache_path)
+        except Exception as exc:
+            logger.warning("Unable to set yfinance cache dir (%s): %s", cache_dir, exc)
 
     def _should_skip_ticker(self, ticker: str) -> bool:
         """Skip tickers that recently failed to reduce noisy retries."""
