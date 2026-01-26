@@ -84,7 +84,7 @@ forecasting:
 
   # Phase 7.5: Regime Detection for Adaptive Model Selection
   regime_detection:
-    enabled: false  # Feature flag: keep disabled by default (enable only for controlled validation/audits)
+    enabled: true  # Phase 7.7: Enabled to test optimized MODERATE_TRENDING weights
     lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
 
     # Volatility thresholds (annualized)
