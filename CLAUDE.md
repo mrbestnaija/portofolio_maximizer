@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.5 Complete (Regime detection integration with multi-ticker validation)
+**Current Phase**: Phase 7.6 (Regime holdout audits + performance tuning; regime detection disabled by default)
 **Last Updated**: 2026-01-25
 
 ---

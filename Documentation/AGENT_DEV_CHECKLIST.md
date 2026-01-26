@@ -30,13 +30,13 @@
 
 ## Project Status (Updated: 2026-01-25)
 
-### Current Phase: 7.5 - Regime Detection Integration ✅ COMPLETE
+### Current Phase: 7.6 - Regime Holdout Audits & Tuning (Feature Flag OFF by default)
 
 #### Phase 7.5 Summary
 - **Implementation**: Integrated RegimeDetector into TimeSeriesForecaster for adaptive model selection
 - **Regime Types**: 6 classifications (LIQUID_RANGEBOUND, MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS, MODERATE_MIXED, MODERATE_RANGEBOUND)
 - **Detection Features**: 8 metrics (volatility, trend strength, Hurst exponent, ADF test, skewness, kurtosis, vol_of_vol, mean_return)
-- **Feature Flag**: regime_detection.enabled (default: false, enabled for validation: true)
+- **Feature Flag**: regime_detection.enabled (default: false; enable only for controlled validation/audits)
 - **Safety**: Graceful degradation on detection failures, falls back to Phase 7.4 static weights
 
 #### Integration Fixes (3 Critical Issues Resolved)
@@ -84,7 +84,7 @@
 #### Production Status
 - Research-Ready: ✅ VALIDATED
 - Production-Pending: ⏳ Awaits 20 holdout audits (currently 1/20)
-- Feature Flag: Enabled for validation, recommend keep enabled for audit accumulation
+- Feature Flag: Disabled by default (Option B); enable only for controlled audit accumulation runs
 
 ### Integration Recovery Tracker
 - Treat `Documentation/integration_fix_plan.md` as the canonical remediation log; do not promote any downstream status in this file until that tracker is cleared.
@@ -108,8 +108,8 @@
 **Recommendation Based on Phase 7.5 Results**:
 - RMSE regression observed (+42% for AAPL)
 - Regime detection generalizes well across tickers
-- Feature currently enabled for validation
-- **Decision Point**: Keep enabled for audit accumulation vs disable for tuning
+- Feature flag now disabled by default (Option B)
+- **Decision**: Keep disabled in configs; enable only for controlled audit runs and tuning
 
 **Option A: Threshold Tuning & RMSE Optimization** (RECOMMENDED if RMSE is concern)
 

@@ -116,10 +116,11 @@ class TimeSeriesForecaster:
 
         # Phase 7.5: Initialize regime detector if enabled
         self._regime_detector: Optional['RegimeDetector'] = None
+        self._regime_candidate_weights: Dict[str, list[Dict[str, float]]] = {}
         if self.config.regime_detection_enabled:
             from forcester_ts.regime_detector import RegimeDetector, RegimeConfig
-            # Filter regime_detection_kwargs to only include RegimeConfig fields
-            # (exclude regime_model_preferences which is handled by RegimeDetector internally)
+            # Filter regime_detection_kwargs to only include RegimeConfig fields.
+            # Additional keys are handled locally (e.g., regime_candidate_weights).
             regime_config_fields = {
                 'enabled', 'lookback_window', 'vol_threshold_low', 'vol_threshold_high',
                 'trend_threshold_weak', 'trend_threshold_strong'
@@ -138,6 +139,9 @@ class TimeSeriesForecaster:
                 regime_config.trend_threshold_weak,
                 regime_config.trend_threshold_strong,
             )
+            self._regime_candidate_weights = self._coerce_regime_candidate_weights(
+                self.config.regime_detection_kwargs.get("regime_candidate_weights")
+            )
 
         self._model_summaries: Dict[str, Dict[str, Any]] = {}
         self._latest_results: Dict[str, Any] = {}
@@ -148,8 +152,10 @@ class TimeSeriesForecaster:
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
         self._sarimax_exog_columns: list[str] = []
-        audit_dir = self.config.ensemble_kwargs.get("audit_log_dir") if isinstance(self.config.ensemble_kwargs, dict) else None
-        if not audit_dir:
+        audit_dir = None
+        if isinstance(self.config.ensemble_kwargs, dict) and "audit_log_dir" in self.config.ensemble_kwargs:
+            audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
+        else:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         self._audit_dir: Optional[Path] = Path(audit_dir).expanduser() if audit_dir else None
         cfg_path = os.environ.get("TS_FORECAST_MONITOR_CONFIG", "config/forecaster_monitoring.yml")
@@ -791,39 +797,105 @@ class TimeSeriesForecaster:
 
         return config
 
+    @staticmethod
+    def _coerce_regime_candidate_weights(value: Any) -> Dict[str, list[Dict[str, float]]]:
+        """
+        Normalise regime-specific candidate weights from config.
+
+        Expected shape:
+            {
+                "LIQUID_RANGEBOUND": [{"sarimax": 0.6, "samossa": 0.4}, ...],
+                "CRISIS": [{"sarimax": 1.0}, ...],
+            }
+        """
+        if not isinstance(value, dict):
+            return {}
+
+        coerced: Dict[str, list[Dict[str, float]]] = {}
+        for regime, raw_candidates in value.items():
+            if regime is None:
+                continue
+            regime_key = str(regime)
+
+            if isinstance(raw_candidates, dict):
+                candidates_list = [raw_candidates]
+            elif isinstance(raw_candidates, list):
+                candidates_list = raw_candidates
+            else:
+                continue
+
+            cleaned_candidates: list[Dict[str, float]] = []
+            for candidate in candidates_list:
+                if not isinstance(candidate, dict):
+                    continue
+                cleaned: Dict[str, float] = {}
+                for model_key, weight in candidate.items():
+                    canon = canonical_model_key(str(model_key))
+                    try:
+                        weight_val = float(weight)
+                    except Exception:
+                        continue
+                    if weight_val <= 0.0:
+                        continue
+                    cleaned[canon] = weight_val
+                if cleaned:
+                    cleaned_candidates.append(cleaned)
+
+            if cleaned_candidates:
+                coerced[regime_key] = cleaned_candidates
+
+        return coerced
+
     def _build_ensemble(self, results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self._ensemble_config.enabled:
             return None
 
-        # Phase 7.5: Reorder candidates based on regime detection (if enabled)
         original_candidates = self._ensemble_config.candidate_weights
-        if self._regime_result and self._regime_detector and original_candidates:
-            try:
-                preferred_candidates = self._regime_detector.get_preferred_candidates(
-                    self._regime_result,
-                    original_candidates
-                )
+        try:
+            regime_name = None
+            if self._regime_result:
+                regime_name = self._regime_result.get("regime")
+
+            # Phase 7.6: If regime-specific candidate weights exist, use them
+            # instead of the Phase 7.5 reorder heuristic.
+            override_candidates = None
+            if regime_name and self._regime_candidate_weights:
+                override_candidates = self._regime_candidate_weights.get(str(regime_name))
+
+            if override_candidates:
                 logger.info(
-                    "[TS_MODEL] REGIME candidate_reorder :: regime=%s, original_top=%s, preferred_top=%s",
-                    self._regime_result["regime"],
-                    original_candidates[0] if original_candidates else None,
-                    preferred_candidates[0] if preferred_candidates else None,
+                    "[TS_MODEL] REGIME candidate_override :: regime=%s, override_top=%s",
+                    regime_name,
+                    override_candidates[0] if override_candidates else None,
                 )
-                # Temporarily use regime-preferred candidates
-                self._ensemble_config.candidate_weights = preferred_candidates
-            except Exception as exc:
-                logger.warning(
-                    "[TS_MODEL] REGIME candidate reordering failed: %s (using original order)",
-                    exc
-                )
+                self._ensemble_config.candidate_weights = override_candidates
+            elif self._regime_result and self._regime_detector and original_candidates:
+                # Phase 7.5: Reorder candidates based on regime detection (if enabled)
+                try:
+                    preferred_candidates = self._regime_detector.get_preferred_candidates(
+                        self._regime_result,
+                        original_candidates
+                    )
+                    logger.info(
+                        "[TS_MODEL] REGIME candidate_reorder :: regime=%s, original_top=%s, preferred_top=%s",
+                        self._regime_result["regime"],
+                        original_candidates[0] if original_candidates else None,
+                        preferred_candidates[0] if preferred_candidates else None,
+                    )
+                    # Temporarily use regime-preferred candidates
+                    self._ensemble_config.candidate_weights = preferred_candidates
+                except Exception as exc:
+                    logger.warning(
+                        "[TS_MODEL] REGIME candidate reordering failed: %s (using original order)",
+                        exc
+                    )
 
-        coordinator = EnsembleCoordinator(self._ensemble_config)
-        confidence = derive_model_confidence(self._model_summaries)
-        weights, score = coordinator.select_weights(confidence)
-        weights = self._enforce_convexity(weights)
-
-        # Phase 7.5: Restore original candidates after ensemble build
-        if self._regime_result and original_candidates:
+            coordinator = EnsembleCoordinator(self._ensemble_config)
+            confidence = derive_model_confidence(self._model_summaries)
+            weights, score = coordinator.select_weights(confidence)
+            weights = self._enforce_convexity(weights)
+        finally:
+            # Restore original candidates after ensemble build
             self._ensemble_config.candidate_weights = original_candidates
         if not weights:
             return None

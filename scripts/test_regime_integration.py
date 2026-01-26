@@ -2,11 +2,11 @@
 Quick test script to verify Phase 7.5 regime detection integration.
 
 Tests:
-1. Load forecasting config with regime detection enabled
-2. Create TimeSeriesForecaster with regime detection
+1. Load forecasting config (regime detection may be disabled by default)
+2. Create TimeSeriesForecaster with regime detection (forced on for this test)
 3. Generate synthetic data with known characteristics
 4. Verify regime detection works
-5. Verify candidate reordering occurs
+5. Verify candidate reordering/overrides occur
 """
 
 import sys
@@ -81,20 +81,26 @@ def test_regime_detection_enabled():
         yaml_config = yaml.safe_load(f)
 
     regime_config = yaml_config["forecasting"]["regime_detection"]
-    print(f"\n[INFO] Loaded regime config: enabled={regime_config['enabled']}")
+    print(f"\n[INFO] Loaded regime config (default): enabled={regime_config.get('enabled', False)}")
+    print("[INFO] NOTE: This test forces regime detection ON regardless of config default")
     print(f"[INFO] Lookback window: {regime_config['lookback_window']}")
     print(f"[INFO] Vol thresholds: low={regime_config['vol_threshold_low']}, high={regime_config['vol_threshold_high']}")
 
-    # Enable regime detection for this test
+    regime_kwargs = {
+        k: v for k, v in regime_config.items()
+        if k in {
+            "lookback_window",
+            "vol_threshold_low",
+            "vol_threshold_high",
+            "trend_threshold_weak",
+            "trend_threshold_strong",
+        }
+    }
+
+    # Force regime detection ON for this test (config default may be disabled)
     config = TimeSeriesForecasterConfig(
         regime_detection_enabled=True,
-        regime_detection_kwargs={
-            "lookback_window": 60,
-            "vol_threshold_low": 0.15,
-            "vol_threshold_high": 0.30,
-            "trend_threshold_weak": 0.30,
-            "trend_threshold_strong": 0.60,
-        },
+        regime_detection_kwargs=regime_kwargs,
         ensemble_enabled=True,
         ensemble_kwargs={
             "candidate_weights": [
@@ -113,6 +119,59 @@ def test_regime_detection_enabled():
     print("[OK] Regime detector initialized")
     print(f"[OK] Ensemble enabled: {forecaster._ensemble_config.enabled}")
     print(f"[OK] Candidate count: {len(forecaster._ensemble_config.candidate_weights)}")
+
+
+def test_regime_candidate_weights_override():
+    """Test Phase 7.6 regime_candidate_weights overrides."""
+    print("\n" + "=" * 80)
+    print("TEST 2B: Regime Candidate Weight Overrides (Phase 7.6)")
+    print("=" * 80)
+
+    np.random.seed(7)
+    length = 220
+    dates = pd.date_range("2024-01-01", periods=length, freq="D")
+    oscillation = ((-1) ** np.arange(length)) * 0.5
+    noise = np.random.normal(0, 0.05, size=length)
+    data = pd.Series(100 + oscillation + noise, index=dates, name="Close")
+
+    config = TimeSeriesForecasterConfig(
+        regime_detection_enabled=True,
+        regime_detection_kwargs={
+            "lookback_window": 60,
+            "vol_threshold_low": 1.0,
+            "vol_threshold_high": 2.0,
+            "trend_threshold_weak": 0.99,
+            "trend_threshold_strong": 1.0,
+            "regime_candidate_weights": {
+                "LIQUID_RANGEBOUND": [{"samossa": 1.0}],
+            },
+        },
+        sarimax_enabled=True,
+        garch_enabled=False,
+        samossa_enabled=True,
+        mssa_rl_enabled=False,
+        ensemble_enabled=True,
+        ensemble_kwargs={
+            "confidence_scaling": False,
+            "candidate_weights": [
+                {"sarimax": 1.0},  # would win without override
+                {"samossa": 1.0},
+            ],
+        },
+        forecast_horizon=10,
+    )
+
+    forecaster = TimeSeriesForecaster(config=config)
+    forecaster.fit(data)
+    result = forecaster.forecast()
+
+    print(f"[INFO] Detected regime: {result.get('regime')}")
+    ensemble = result.get("ensemble_forecast") or {}
+    weights = ensemble.get("weights") or {}
+    print(f"[INFO] Ensemble weights: {weights}")
+
+    assert result.get("regime") == "LIQUID_RANGEBOUND"
+    assert weights.get("samossa", 0.0) > 0.99
 
 
 def test_low_vol_rangebound_regime():
@@ -256,6 +315,7 @@ def main():
     try:
         test_regime_detection_disabled()
         test_regime_detection_enabled()
+        test_regime_candidate_weights_override()
         test_low_vol_rangebound_regime()
         test_high_vol_trending_regime()
 
@@ -264,8 +324,8 @@ def main():
         print("=" * 80)
         print("\nNext steps:")
         print("1. Run full multi-ticker validation: python scripts/run_etl_pipeline.py --tickers AAPL,MSFT,NVDA")
-        print("2. Enable regime detection in config/forecasting_config.yml (set enabled: true)")
-        print("3. Compare results to Phase 7.4 baseline")
+        print("2. (Research) Temporarily set regime_detection.enabled: true in config/forecasting_config.yml AND config/pipeline_config.yml")
+        print("3. Compare RMSE vs Phase 7.4 and accumulate holdout audits (target: >=20)")
 
     except Exception as e:
         print(f"\n[ERROR] Test failed: {e}")
