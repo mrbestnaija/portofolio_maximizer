@@ -31,6 +31,7 @@
 - [ ] Configure shards/GPU list and thresholds in `bash/run_gpu_parallel.sh` (or env overrides).
 - [ ] Run `bash/bash/run_gpu_parallel.sh`.
 - [ ] After completion: review `logs/auto_runs/auto_trader_*.log`, `logs/automation/slippage_windows.json`, `logs/automation/config_proposals.json`.
+- [ ] Run unit tests: `python -m pytest tests/scripts/test_gpu_parallel_runner_contract.py -q` (uses DRY_RUN=1).
 
 ### Recommended defaults for current box (RTX 4060 Ti 16GB, CUDA 12.9)
 - GPU list: `GPU_LIST=0` (single GPU, low util headroom).
@@ -39,6 +40,12 @@
 - Caps: `TARGET_TRADES=30`, `CYCLES=4-6`, `INITIAL_CAPITAL=25000-50000`, `SLEEP_SECONDS=10`.
 - LLM: keep disabled for sampling runs to avoid extra GPU load.
 - Monitoring: watch `nvidia-smi` for power/thermals; GPU util should stay low given TS workloads are mostly CPU-bound.
+
+### Dry-Run Validation (No GPU Needed)
+```bash
+DRY_RUN=1 PMX_SKIP_RUNTIME_GUARD=1 GPU_LIST="0 1" SHARD1="AAPL,MSFT" SHARD2="MTN" MODE=synthetic \
+  bash bash/run_gpu_parallel.sh
+```
 
 ## Pointers
 - Orchestrator script: `bash/run_gpu_parallel.sh`.

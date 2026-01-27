@@ -13,8 +13,14 @@ cd "${ROOT_DIR}"
 
 # Runtime guardrails (WSL + simpleTrader_env only; prints fingerprint).
 source "${ROOT_DIR}/bash/lib/common.sh"
-pmx_require_wsl_simpletrader_runtime "${ROOT_DIR}"
-PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
+DRY_RUN="${DRY_RUN:-0}"
+PMX_SKIP_RUNTIME_GUARD="${PMX_SKIP_RUNTIME_GUARD:-0}"
+if [[ "${DRY_RUN}" == "1" && "${PMX_SKIP_RUNTIME_GUARD}" == "1" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-python}"
+else
+  pmx_require_wsl_simpletrader_runtime "${ROOT_DIR}"
+  PYTHON_BIN="$(pmx_require_venv_python "${ROOT_DIR}")"
+fi
 
 # Mode selection
 MODE="${MODE:-synthetic}"  # synthetic | auto_trader
@@ -67,6 +73,10 @@ mkdir -p logs/automation logs/auto_runs
 trade_count() {
   local tickers="$1"
   local db_path="${DB_PATH:-data/portfolio_maximizer_new.db}"
+  if [[ -n "${DRY_RUN_TRADE_COUNT:-}" ]]; then
+    echo "${DRY_RUN_TRADE_COUNT}"
+    return 0
+  fi
   "${PYTHON_BIN}" - <<PY
 import sqlite3, pathlib, sys
 db = pathlib.Path("${db_path}")
@@ -96,6 +106,10 @@ run_shard_synthetic() {
   local run_label="syn_gpu${gpu}_$(echo "$shard" | tr ',= ' '_' | tr -cd 'A-Za-z0-9_')"
   local dataset_id="${SYN_DATASET_PREFIX}_${run_label}_$(date +%s)"
   local log_file="logs/automation/${run_label}.log"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] mode=synthetic shard=${shard} gpu=${gpu} run_label=${run_label} dataset_id=${dataset_id}"
+    return 0
+  fi
   echo "[synthetic][${run_label}] generating (GPU $gpu) -> ${dataset_id}" | tee -a "${log_file}"
 
   CUDA_VISIBLE_DEVICES="${gpu/cpu/}" \
@@ -137,6 +151,10 @@ run_shard() {
   local diag="${FORCE_DIAGNOSTIC:-0}"
   if [[ "$count" -ge "$TARGET_TRADES" ]]; then
     echo "[shard $shard] target met ($count >= $TARGET_TRADES); skipping"
+    return 0
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[dry-run] mode=auto_trader shard=${shard} gpu=${gpu} run_label=${run_label} trades=${count} target=${TARGET_TRADES} llm=0 cycles=${CYCLES} sleep=${SLEEP_SECONDS}"
     return 0
   fi
   echo "[shard $shard] launching on GPU $gpu (current trades=$count)"
