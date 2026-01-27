@@ -212,6 +212,28 @@ cat data/phase7.8_optimized_weights.json | jq
 grep "RMSE:" logs/phase7.8_weight_optimization.log
 ```
 
+### 1B. Fresh Data Regime Validation (Recommended)
+
+```bash
+# Fetch fresh parquet snapshots from yfinance
+python scripts/fetch_fresh_data.py \
+    --tickers AAPL,MSFT,NVDA \
+    --start 2024-07-01 \
+    --end 2026-01-18 \
+    --output-dir data/raw
+
+# Validate detected regime + weights against the fresh parquet
+python scripts/validate_regime_on_fresh_data.py \
+    --tickers AAPL,MSFT,NVDA \
+    --output-dir data/raw \
+    --regimes MODERATE_TRENDING,HIGH_VOL_TRENDING,CRISIS
+
+# Optional: audit duplicated rows in the SQLite DB (safe to run anytime)
+python scripts/audit_ohlcv_duplicates.py \
+    --tickers AAPL,MSFT,NVDA \
+    --export-deduped data/raw
+```
+
 ### 2. Update Configuration
 
 Copy the YAML snippet from console output to `config/forecasting_config.yml`:

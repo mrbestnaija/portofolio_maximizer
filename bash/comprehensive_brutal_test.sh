@@ -477,6 +477,7 @@ test_etl_unit_tests() {
         "tests/etl/test_time_series_cv.py"
         "tests/etl/test_data_source_manager.py"
         "tests/etl/test_checkpoint_manager.py"
+        "tests/etl/test_feature_engineering_pipeline_contract.py"
     )
     
     for test_file in "${test_files[@]}"; do
