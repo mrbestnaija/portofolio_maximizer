@@ -1,0 +1,91 @@
+{
+  "source": "rolling_cv",
+  "db": "data/portfolio_maximizer.db",
+  "tickers": [
+    "AAPL"
+  ],
+  "config": "config/forecasting_config.yml",
+  "models": null,
+  "cv": {
+    "min_train_size": 180,
+    "horizon": 5,
+    "step_size": 10,
+    "max_folds": 20,
+    "min_samples_per_regime": 20,
+    "per_regime": true
+  },
+  "results": {
+    "MODERATE_MIXED": {
+      "weights": {
+        "sarimax": 0.05,
+        "samossa": 0.7262221479641814,
+        "mssa_rl": 0.22377785203581965
+      },
+      "rmse": 16.51571599931117,
+      "info": {
+        "initial_rmse": 17.62581960875177,
+        "final_rmse": 16.51571599931117,
+        "improvement_pct": 6.298167314099815,
+        "n_iterations": 5,
+        "success": true,
+        "message": "Optimization terminated successfully",
+        "n_samples": 20
+      },
+      "n_samples": 20,
+      "n_folds": 4,
+      "models": [
+        "sarimax",
+        "samossa",
+        "mssa_rl"
+      ]
+    },
+    "CRISIS": {
+      "weights": {
+        "sarimax": 0.2331493114544432,
+        "samossa": 0.7168506885455569,
+        "mssa_rl": 0.05
+      },
+      "rmse": 6.7414430602159445,
+      "info": {
+        "initial_rmse": 17.149370969390727,
+        "final_rmse": 6.7414430602159445,
+        "improvement_pct": 60.68985228526169,
+        "n_iterations": 5,
+        "success": true,
+        "message": "Optimization terminated successfully",
+        "n_samples": 25
+      },
+      "n_samples": 25,
+      "n_folds": 5,
+      "models": [
+        "sarimax",
+        "samossa",
+        "mssa_rl"
+      ]
+    },
+    "MODERATE_TRENDING": {
+      "weights": {
+        "sarimax": 0.05,
+        "samossa": 0.9000000000000428,
+        "mssa_rl": 0.05
+      },
+      "rmse": 7.286752275797263,
+      "info": {
+        "initial_rmse": 20.863320351236524,
+        "final_rmse": 7.286752275797263,
+        "improvement_pct": 65.07386095250466,
+        "n_iterations": 4,
+        "success": true,
+        "message": "Optimization terminated successfully",
+        "n_samples": 50
+      },
+      "n_samples": 50,
+      "n_folds": 10,
+      "models": [
+        "sarimax",
+        "samossa",
+        "mssa_rl"
+      ]
+    }
+  }
+}
