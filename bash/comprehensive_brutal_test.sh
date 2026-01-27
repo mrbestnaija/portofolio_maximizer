@@ -612,6 +612,45 @@ test_time_series_forecasting() {
         log_warning "Time Series signal generator tests not found: tests/models/test_time_series_signal_generator.py"
         failed=$((failed + 1))
     fi
+
+    # Phase 8 neural forecaster contract tests (non-invasive, xfail when not implemented)
+    if [ -f "tests/forecasting/test_phase8_neural_forecaster_contract.py" ]; then
+        log_subsection "Phase 8 Neural Forecaster Contract Tests"
+
+        set +e
+        local test_count=$(python -m pytest tests/forecasting/test_phase8_neural_forecaster_contract.py --co -q 2>/dev/null | grep -E "test_" | wc -l | tr -d ' ' || echo "0")
+        if [ -z "$test_count" ] || [ "$test_count" = "" ]; then
+            test_count="0"
+        fi
+        set -e
+
+        if [ "$test_count" -gt "0" ]; then
+            log_info "Found $test_count test(s) in test_phase8_neural_forecaster_contract.py"
+            total_tests_run=$((total_tests_run + test_count))
+
+            set +e
+            python -m pytest tests/forecasting/test_phase8_neural_forecaster_contract.py \
+                -v --tb=short >> "$test_log" 2>&1
+            local exit_code=$?
+            set -e
+
+            if [ $exit_code -eq 0 ]; then
+                log_success "Phase 8 neural forecaster contract tests ($test_count tests passed)"
+                passed=$((passed + 1))
+            else
+                log_error "Phase 8 neural forecaster contract tests failed (exit code: $exit_code)"
+                log_info "Last 10 lines of output:"
+                tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
+                failed=$((failed + 1))
+            fi
+        else
+            log_warning "No tests found in test_phase8_neural_forecaster_contract.py"
+            failed=$((failed + 1))
+        fi
+    else
+        log_warning "Phase 8 neural forecaster tests not found: tests/forecasting/test_phase8_neural_forecaster_contract.py"
+        failed=$((failed + 1))
+    fi
     
     # Post-test quantitative review: summarize quant validation + forecast audits.
     log_subsection "Time Series Quant Validation Summary"
