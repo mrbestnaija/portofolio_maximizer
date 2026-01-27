@@ -11,6 +11,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import json
 import pytest
 
 
@@ -111,11 +112,59 @@ def test_ticker_shards_env_config_present() -> None:
     assert "shard=CL=F" in output
 
 
-@pytest.mark.xfail(reason="Per-shard DB mirror not implemented in runner yet.")
-def test_per_shard_db_mirror_not_yet_available() -> None:
-    assert False
+def test_per_shard_db_mirror_stub_emitted(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    mirror_dir = tmp_path / "db_mirror"
+    output = _run_runner(
+        {
+            "MODE": "auto_trader",
+            "DRY_RUN": "1",
+            "PMX_SKIP_RUNTIME_GUARD": "1",
+            "GPU_LIST": "0",
+            "SHARD1": "AAPL",
+            "SHARD2": ",",
+            "DRY_RUN_TRADE_COUNT": "0",
+            "TELEMETRY_DIR": str(telemetry_dir),
+            "SHARD_DB_MIRROR_DIR": str(mirror_dir),
+        }
+    )
+
+    assert f"db_mirror={mirror_dir}" in output
+    assert telemetry_dir.exists()
+    assert mirror_dir.exists()
 
 
-@pytest.mark.xfail(reason="Shard-level energy/latency telemetry not persisted yet.")
-def test_energy_latency_telemetry_not_yet_available() -> None:
-    assert False
+def test_energy_latency_telemetry_stub_written(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    output = _run_runner(
+        {
+            "MODE": "synthetic",
+            "DRY_RUN": "1",
+            "PMX_SKIP_RUNTIME_GUARD": "1",
+            "GPU_LIST": "0",
+            "SHARD1": "AAPL",
+            "SHARD2": ",",
+            "SYN_VALIDATE": "0",
+            "TELEMETRY_DIR": str(telemetry_dir),
+        }
+    )
+
+    telemetry_line = next(
+        (
+            line
+            for line in output.splitlines()
+            if "telemetry=" in line and "mode=synthetic" in line and "shard=AAPL" in line
+        ),
+        None,
+    )
+    assert telemetry_line is not None
+    telemetry_path = telemetry_line.split("telemetry=", 1)[1].strip()
+    path = Path(telemetry_path)
+    assert path.exists()
+
+    payload = json.loads(path.read_text())
+    assert payload["mode"] == "synthetic"
+    assert payload["run_label"]
+    assert payload["shard"] == "AAPL"
+    assert payload["energy_kwh"] is None
+    assert payload["latency_ms"] is None

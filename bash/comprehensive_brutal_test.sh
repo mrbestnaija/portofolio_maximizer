@@ -759,6 +759,57 @@ test_signal_routing() {
     echo "signal_routing,$passed,$failed" >> "$RESULTS_DIR/stage_summary.csv"
 }
 
+test_gpu_parallel_runner_contracts() {
+    log_section "GPU Parallel Runner Contract Tests"
+    log_info "Validating GPU-parallel runner orchestration (dry-run)"
+
+    local test_log="$LOGS_DIR/gpu_parallel_runner_contracts.log"
+    local passed=0
+    local failed=0
+    local total_tests_run=0
+
+    if [ -f "tests/scripts/test_gpu_parallel_runner_contract.py" ]; then
+        log_subsection "GPU Parallel Runner Contract Suite"
+
+        set +e
+        local test_count=$(python -m pytest tests/scripts/test_gpu_parallel_runner_contract.py --co -q 2>/dev/null | grep -E "test_" | wc -l | tr -d ' ' || echo "0")
+        if [ -z "$test_count" ] || [ "$test_count" = "" ]; then
+            test_count="0"
+        fi
+        set -e
+
+        if [ "$test_count" -gt "0" ]; then
+            log_info "Found $test_count test(s) in test_gpu_parallel_runner_contract.py"
+            total_tests_run=$((total_tests_run + test_count))
+
+            set +e
+            python -m pytest tests/scripts/test_gpu_parallel_runner_contract.py \
+                -v --tb=short > "$test_log" 2>&1
+            local exit_code=$?
+            set -e
+
+            if [ $exit_code -eq 0 ]; then
+                log_success "GPU parallel runner contract tests ($test_count tests passed)"
+                passed=$((passed + 1))
+            else
+                log_error "GPU parallel runner contract tests failed (exit code: $exit_code)"
+                log_info "Last 10 lines of output:"
+                tail -10 "$test_log" | while IFS= read -r line; do log_info "$line"; done
+                failed=$((failed + 1))
+            fi
+        else
+            log_warning "No tests found in test_gpu_parallel_runner_contract.py"
+            failed=$((failed + 1))
+        fi
+    else
+        log_warning "GPU runner contract tests not found: tests/scripts/test_gpu_parallel_runner_contract.py"
+        failed=$((failed + 1))
+    fi
+
+    log_info "GPU Runner Contract Tests Summary: $passed passed, $failed failed, $total_tests_run total tests executed"
+    echo "gpu_parallel_runner_contracts,$passed,$failed" >> "$RESULTS_DIR/stage_summary.csv"
+}
+
 test_llm_integration() {
     log_section "LLM Integration Tests"
     if [ "$BRUTAL_ENABLE_LLM" != "1" ]; then
@@ -1655,6 +1706,7 @@ main() {
     test_etl_unit_tests
     test_time_series_forecasting
     test_signal_routing
+    test_gpu_parallel_runner_contracts
     test_integration_tests
     
     # LLM Tests (Priority 3 - optional)

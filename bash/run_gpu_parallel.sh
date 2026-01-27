@@ -67,8 +67,34 @@ INITIAL_CAPITAL="${INITIAL_CAPITAL:-50000}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-10}"
 FORECAST_HORIZON="${FORECAST_HORIZON:-10}"
 DB_PATH="${DB_PATH:-data/test_database.db}" # never point to production when synthetic/testing
+SHARD_DB_MIRROR_DIR="${SHARD_DB_MIRROR_DIR:-data/shard_dbs}"
+TELEMETRY_DIR="${TELEMETRY_DIR:-logs/automation}"
 
-mkdir -p logs/automation logs/auto_runs
+mkdir -p logs/automation logs/auto_runs "${SHARD_DB_MIRROR_DIR}" "${TELEMETRY_DIR}"
+
+write_telemetry_stub() {
+  local mode="$1"; shift
+  local run_label="$1"; shift
+  local gpu="$1"; shift
+  local shard="$1"; shift
+  local db_mirror="$1"; shift
+  local telemetry_path="${TELEMETRY_DIR}/telemetry_${run_label}.json"
+  local ts
+  ts="$(date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")"
+  cat > "${telemetry_path}" <<EOF
+{
+  "run_label": "${run_label}",
+  "mode": "${mode}",
+  "gpu": "${gpu}",
+  "shard": "${shard}",
+  "db_mirror": "${db_mirror}",
+  "timestamp": "${ts}",
+  "energy_kwh": null,
+  "latency_ms": null
+}
+EOF
+  echo "${telemetry_path}"
+}
 
 trade_count() {
   local tickers="$1"
@@ -106,8 +132,11 @@ run_shard_synthetic() {
   local run_label="syn_gpu${gpu}_$(echo "$shard" | tr ',= ' '_' | tr -cd 'A-Za-z0-9_')"
   local dataset_id="${SYN_DATASET_PREFIX}_${run_label}_$(date +%s)"
   local log_file="logs/automation/${run_label}.log"
+  local db_mirror="${SHARD_DB_MIRROR_DIR}/${run_label}.db"
   if [[ "${DRY_RUN}" == "1" ]]; then
-    echo "[dry-run] mode=synthetic shard=${shard} gpu=${gpu} run_label=${run_label} dataset_id=${dataset_id}"
+    local telemetry_file
+    telemetry_file="$(write_telemetry_stub "synthetic" "${run_label}" "${gpu}" "${shard}" "${db_mirror}")"
+    echo "[dry-run] mode=synthetic shard=${shard} gpu=${gpu} run_label=${run_label} dataset_id=${dataset_id} db_mirror=${db_mirror} telemetry=${telemetry_file}"
     return 0
   fi
   echo "[synthetic][${run_label}] generating (GPU $gpu) -> ${dataset_id}" | tee -a "${log_file}"
@@ -146,6 +175,7 @@ run_shard() {
   local shard="$1"
   local run_label
   run_label="gpu${gpu}_$(echo "$shard" | tr ',= ' '_' | tr -cd 'A-Za-z0-9_')"
+  local db_mirror="${SHARD_DB_MIRROR_DIR}/${run_label}.db"
   local count
   count=$(trade_count "$shard")
   local diag="${FORCE_DIAGNOSTIC:-0}"
@@ -154,7 +184,9 @@ run_shard() {
     return 0
   fi
   if [[ "${DRY_RUN}" == "1" ]]; then
-    echo "[dry-run] mode=auto_trader shard=${shard} gpu=${gpu} run_label=${run_label} trades=${count} target=${TARGET_TRADES} llm=0 cycles=${CYCLES} sleep=${SLEEP_SECONDS}"
+    local telemetry_file
+    telemetry_file="$(write_telemetry_stub "auto_trader" "${run_label}" "${gpu}" "${shard}" "${db_mirror}")"
+    echo "[dry-run] mode=auto_trader shard=${shard} gpu=${gpu} run_label=${run_label} trades=${count} target=${TARGET_TRADES} llm=0 cycles=${CYCLES} sleep=${SLEEP_SECONDS} db_mirror=${db_mirror} telemetry=${telemetry_file}"
     return 0
   fi
   echo "[shard $shard] launching on GPU $gpu (current trades=$count)"
