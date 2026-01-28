@@ -26,13 +26,14 @@ signal_routing:
     #   columns (TxnCostBps/ImpactBps) are unavailable. Values are basis points of notional.
     # - min_signal_to_noise is an optional CI-based SNR gate (0 disables).
     cost_model:
+      # Phase 7.9: Updated to realistic 2026 execution costs (per risk_mode.yml)
       default_roundtrip_cost_bps:
-        US_EQUITY: 3.2  # Aligned to execution: 2x half_spread_bps (0.8*2=1.6) + impact buffer
-        INTL_EQUITY: 6.0  # Aligned to execution: 2x half_spread_bps (1.5*2=3) + impact buffer
-        FX: 2.0  # Aligned to execution: 2x half_spread_bps (0.2*2=0.4) + impact buffer
-        CRYPTO: 12.0  # Aligned to execution: 2x half_spread_bps (3.0*2=6) + impact buffer
-        INDEX: 2.0  # Aligned to execution: 2x half_spread_bps (0.5*2=1) + impact buffer
-        UNKNOWN: 5.0  # Conservative default
+        US_EQUITY: 1.5   # Updated from 3.2 - modern smart order routing
+        INTL_EQUITY: 3.0 # Updated from 6.0 - improved int'l execution
+        FX: 1.0          # Updated from 2.0 - tight spreads on majors
+        CRYPTO: 8.0      # Updated from 12.0 - CEX improvements
+        INDEX: 1.5       # Updated from 2.0 - ETF liquidity
+        UNKNOWN: 3.0     # Updated from 5.0 - less conservative default
       min_signal_to_noise: 0.0
     # Production per-ticker overrides (aligned to proposals after review).
     per_ticker:

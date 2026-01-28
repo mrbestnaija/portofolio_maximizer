@@ -28,6 +28,13 @@ from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
 from execution.lob_simulator import LOBConfig, simulate_market_order_fill
 
+# Phase 7.9: Risk mode configuration for position sizing
+try:
+    from utils.risk_mode_loader import get_position_sizing_config, get_active_mode
+    RISK_MODE_AVAILABLE = True
+except ImportError:
+    RISK_MODE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -529,12 +536,31 @@ class PaperTradingEngine:
             Number of shares to trade
         """
         diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
-        # Maximum position size (2% of portfolio as risk management, scaled by
-        # per-ticker regime state when available).
-        portfolio_value = self._current_portfolio_value()
-        max_position_value = portfolio_value * (0.10 if diag_mode else 0.02)
 
-        # Regime-aware risk scaling: use a smaller fraction of the 2% cap
+        # Phase 7.9: Use risk mode configuration for position sizing
+        # This allows research_production mode to use balanced limits (5%)
+        # while production uses strict limits (2%) and diagnostic uses loose (10%)
+        max_pos_pct = 0.02  # Default: 2%
+        max_short_pct = 0.01  # Default: 1%
+        conf_floor = 0.5  # Default: 50%
+
+        if RISK_MODE_AVAILABLE and not diag_mode:
+            pos_config = get_position_sizing_config()
+            active_mode = get_active_mode()
+            max_pos_pct = pos_config.get("max_position_pct", 5) / 100.0
+            max_short_pct = pos_config.get("max_short_pct", 2) / 100.0
+            conf_floor = pos_config.get("confidence_floor", 0.30)
+            logger.debug(f"Position sizing from risk_mode ({active_mode}): max={max_pos_pct:.0%}, short={max_short_pct:.0%}, floor={conf_floor:.0%}")
+        elif diag_mode:
+            max_pos_pct = 0.10
+            max_short_pct = 0.05
+            conf_floor = 0.10
+
+        # Maximum position size (scaled by per-ticker regime state when available)
+        portfolio_value = self._current_portfolio_value()
+        max_position_value = portfolio_value * max_pos_pct
+
+        # Regime-aware risk scaling: use a smaller fraction of the cap
         # when a ticker is still in exploration mode or in a red regime, and a
         # slightly larger fraction when it is in a green regime. This keeps
         # realised PnL risk small while allowing more trades where evidence is
@@ -545,11 +571,11 @@ class PaperTradingEngine:
             max_position_value *= risk_mult
         action = signal.get("action", "HOLD").upper()
         if action == "SELL":
-            # Tighter cap for shorts (1% of equity)
-            max_position_value = portfolio_value * (0.05 if diag_mode else 0.01)
+            # Tighter cap for shorts
+            max_position_value = portfolio_value * max_short_pct
 
-        # Adjust by confidence (floor at 50% to avoid zero-size)
-        confidence_weight = max(confidence_score, 0.1 if diag_mode else 0.5)
+        # Adjust by confidence (floor configurable via risk mode)
+        confidence_weight = max(confidence_score, conf_floor)
         position_value = max_position_value * confidence_weight
 
         # Calculate shares

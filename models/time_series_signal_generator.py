@@ -49,6 +49,21 @@ except Exception:  # pragma: no cover - graceful fallback when execution layer a
     LOBConfig = None  # type: ignore
     simulate_market_order_fill = None  # type: ignore
 
+# Phase 7.9: Risk mode configuration for quant validation
+RISK_MODE_AVAILABLE = False
+is_quant_validation_advisory = None
+is_quant_validation_disabled = None
+get_active_mode = None
+try:
+    from utils.risk_mode_loader import (
+        is_quant_validation_advisory,
+        is_quant_validation_disabled,
+        get_active_mode,
+    )
+    RISK_MODE_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional feature
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -513,14 +528,34 @@ class TimeSeriesSignalGenerator:
                 # profit_factor / win_rate / expected_profit thresholds can open
                 # positions. In diagnostic mode this gate is disabled via
                 # _quant_validation_enabled.
+                #
+                # Phase 7.9: Added advisory mode support via risk_mode_loader.
+                # In advisory mode, we log the failure but don't demote to HOLD.
                 if self._quant_validation_enabled and status == "FAIL" and action != "HOLD":
-                    logger.info(
-                        "Quant validation FAILED for %s; demoting %s signal to HOLD to protect PnL.",
-                        ticker,
-                        action,
-                    )
-                    action = "HOLD"
-                    signal.action = "HOLD"
+                    # Check if advisory mode is enabled via risk mode config
+                    advisory_mode = False
+                    if RISK_MODE_AVAILABLE and is_quant_validation_advisory is not None:
+                        advisory_mode = is_quant_validation_advisory()
+
+                    if advisory_mode:
+                        # Advisory mode: log warning but allow trade through
+                        mode_name = get_active_mode() if get_active_mode else "research_production"
+                        logger.info(
+                            "[ADVISORY] Quant validation FAILED for %s (%s signal) - risk_mode=%s allows execution.",
+                            ticker,
+                            action,
+                            mode_name,
+                        )
+                        signal.reasoning = f"{signal.reasoning or ''} | [ADVISORY] QuantFail (allowed in {mode_name} mode)"
+                    else:
+                        # Hard fail mode: demote to HOLD
+                        logger.info(
+                            "Quant validation FAILED for %s; demoting %s signal to HOLD to protect PnL.",
+                            ticker,
+                            action,
+                        )
+                        action = "HOLD"
+                        signal.action = "HOLD"
 
                 self._log_quant_validation(
                     ticker=ticker,

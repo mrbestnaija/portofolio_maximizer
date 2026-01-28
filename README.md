@@ -11,7 +11,7 @@
 
 **Version**: 4.1
 **Status**: Phase 7.8 Complete - All-Regime Ensemble Optimization (3/6 regimes optimized, SAMOSSA dominance confirmed)
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-01-28
 
 ---
 
@@ -62,7 +62,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 **Phase 7.8 Achievements**:
 
-- All-regime weight optimization with 60-65% RMSE improvement for 3 regimes
+- All-regime weight optimization (3/6 regimes) with ~60-65% RMSE improvement for CRISIS/MODERATE_TRENDING and +6.30% for MODERATE_MIXED
 - SAMOSSA dominance finding: 72-90% across ALL optimized regimes
 - CRISIS regime optimization contradicts initial GARCH hypothesis
 - Updated configuration files with data-driven weights
@@ -117,9 +117,9 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 | Regime | Samples | Folds | RMSE Before | RMSE After | Improvement | Optimal Weights |
 |--------|---------|-------|-------------|------------|-------------|-----------------|
-| **CRISIS** | 25 | 5 | 17.15 | 6.74 | **+60.69%** | 72% SAMOSSA, 23% SARIMAX |
-| **MODERATE_MIXED** | 20 | 4 | 17.63 | 16.52 | +6.30% | 73% SAMOSSA, 22% MSSA-RL |
-| **MODERATE_TRENDING** | 50 | 10 | 20.86 | 7.29 | **+65.07%** | 90% SAMOSSA |
+| **CRISIS** | 25 | 5 | 17.15 | 6.74 | **+60.69%** | 72% SAMOSSA, 23% SARIMAX, 5% MSSA-RL |
+| **MODERATE_MIXED** | 20 | 4 | 17.63 | 16.52 | +6.30% | 73% SAMOSSA, 22% MSSA-RL, 5% SARIMAX |
+| **MODERATE_TRENDING** | 50 | 10 | 20.86 | 7.29 | **+65.07%** | 90% SAMOSSA, 5% SARIMAX, 5% MSSA-RL |
 
 ### Major Finding: SAMOSSA Dominance
 
@@ -654,8 +654,9 @@ pytest tests/ -v --tb=short
 - **[PHASE_7.7_FINAL_SUMMARY.md](Documentation/PHASE_7.7_FINAL_SUMMARY.md)** (403 lines): Handoff summary and system state
 - **[LOG_ORGANIZATION_SUMMARY.md](Documentation/LOG_ORGANIZATION_SUMMARY.md)**: Log structure and best practices
 
-**Phase 7.8 - All-Regime Optimization (Ready)**:
-- **[PHASE_7.8_MANUAL_RUN_GUIDE.md](Documentation/PHASE_7.8_MANUAL_RUN_GUIDE.md)** (400 lines): Step-by-step manual execution guide
+**Phase 7.8 - All-Regime Optimization (Complete)**:
+- **[PHASE_7.8_RESULTS.md](Documentation/PHASE_7.8_RESULTS.md)**: Final results, weights, and validation plan
+- **[PHASE_7.8_MANUAL_RUN_GUIDE.md](Documentation/PHASE_7.8_MANUAL_RUN_GUIDE.md)**: Reproduction/manual execution guide
 
 **Phase 7.5 - Regime Detection Integration**:
 - **[PHASE_7.5_VALIDATION.md](Documentation/PHASE_7.5_VALIDATION.md)** (340 lines): Single-ticker validation results
@@ -698,9 +699,9 @@ If you use this work in academic research, please cite:
   title={Portfolio Maximizer: Autonomous Quantitative Trading with Regime-Adaptive Ensemble},
   author={Bestman, Ezekwu Enock},
   year={2026},
-  version={4.0},
+  version={4.1},
   url={https://github.com/mrbestnaija/portofolio_maximizer},
-  note={Phase 7.7: Per-regime optimization with 65\% RMSE reduction}
+  note={Phase 7.8: All-regime optimization with SAMOSSA-dominant weights}
 }
 ```
 
@@ -779,8 +780,8 @@ If you use this work in academic research, please cite:
 - Volatility clustering: GARCH modeling for time-varying volatility
 
 **Known Limitations**:
-- Only 1/6 regimes optimized (Phase 7.8 pending)
-- RMSE regression trade-off: +42% for robustness (target: <25% after Phase 7.8)
+- Only 3/6 regimes optimized (remaining regimes lack samples in the current AAPL window)
+- RMSE regression trade-off: +42% for robustness (target: <25% after further audits/weight refinement)
 - Limited to US equity markets (frontier markets in synthetic mode)
 - No live broker integration (paper trading engine)
 
@@ -796,15 +797,14 @@ If you use this work in academic research, please cite:
 - ✅ Phase 7.5: Regime detection integration (6 market regimes, multi-ticker validation)
 - ✅ Phase 7.6: Threshold tuning experiments
 - ✅ Phase 7.7: Per-regime weight optimization (65% RMSE reduction for MODERATE_TRENDING)
+- ✅ Phase 7.8: All-regime optimization (3/6 regimes optimized; SAMOSSA dominance confirmed)
 
 **Current**:
-- 🔄 Phase 7.8: All-regime optimization (manual execution ready, 4-6 hour runtime)
-  - Optimize CRISIS, HIGH_VOL_TRENDING, MODERATE_MIXED, MODERATE_RANGEBOUND, LIQUID_RANGEBOUND
-  - Target: Reduce RMSE regression from +42% to <25%
-  - Extended rolling CV with 3+ years of data
+- Phase 7.9: Holdout audit accumulation (currently 2/20 audits)
+  - Validate optimized weights on fresh holdouts
+  - Target: Reduce RMSE regression from +42% to <25% and build deployment evidence
 
 **Upcoming**:
-- Phase 7.9: Holdout audit accumulation (currently 1/20 audits)
 - Phase 7.10: Production deployment with full regime coverage
 
 ### Phase 8: Neural Forecasters & GPU Acceleration (Planned)
@@ -946,7 +946,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Current Phase**: 7.8 (ready for manual execution)
 - **Regimes Optimized**: 1/6 (MODERATE_TRENDING)
 - **Target**: All 6 regimes optimized by Phase 7.8 completion
-- **Audit Progress**: 1/20 (production deployment gate)
+- **Audit Progress**: 2/20 (production deployment gate)
 
 ---
 
@@ -1001,25 +1001,27 @@ For questions or issues:
 ## 🎯 Current Status Summary
 
 **Phase 7.7**: ✅ Complete (Per-Regime Optimization)
-**Phase 7.8**: 🔄 Ready for Manual Execution (All-Regime Optimization)
-**Production Status**: Research Phase (1/20 audits, awaiting Phase 7.8 completion)
+**Phase 7.8**: ✅ Complete (All-Regime Optimization)
+**Phase 7.9**: 🔄 In Progress (Holdout Audit Accumulation - 2/20 audits)
+**Production Status**: Research Phase (awaiting audit gate)
 
 **Latest Achievements**:
-- 65% RMSE reduction for MODERATE_TRENDING regime
+- 3/6 regimes optimized with data-driven weights (SAMOSSA dominance confirmed)
+- CRISIS and MODERATE_TRENDING regimes: ~60-65% RMSE reduction (MODERATE_MIXED: +6.30%)
 - Comprehensive log organization with phase-specific structure
-- 1,540+ lines of new documentation
+- Updated Phase 7.8 results documentation + run guides
 - Regime detection validated across 3 tickers
 
 **Next Steps**:
-1. Manual execution of Phase 7.8 optimization (4-6 hours)
-2. Validation with all optimized weights
-3. Accumulate remaining 19 audits
-4. Production deployment with full regime coverage
+1. Accumulate remaining holdout audits (target: 20/20)
+2. Validate RMSE regression targets and per-regime stability
+3. Expand optimization coverage with multi-ticker data (for rare regimes)
+4. Production deployment decision gate
 
 ---
 
 **Built with ❤️ using Python, NumPy, Pandas, and SciPy**
 
-**Version**: 4.0
-**Status**: Phase 7.7 Complete - Research Ready
-**Last Updated**: 2026-01-25
+**Version**: 4.1
+**Status**: Phase 7.8 Complete - Research Ready
+**Last Updated**: 2026-01-28

@@ -29,6 +29,21 @@ from dataclasses import dataclass, field
 from etl.portfolio_math import calculate_kelly_fraction_correct
 from etl.statistical_tests import StatisticalTestSuite
 
+# Phase 7.9: Risk mode configuration for advisory/gated filters
+try:
+    from utils.risk_mode_loader import (
+        get_counter_trend_config,
+        get_regime_filter_config,
+        get_confidence_config,
+        is_counter_trend_advisory,
+        is_counter_trend_disabled,
+        is_regime_filter_disabled,
+        should_block_on_regime,
+    )
+    RISK_MODE_AVAILABLE = True
+except ImportError:
+    RISK_MODE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
@@ -455,64 +470,135 @@ class SignalValidator:
             recommendation=recommendation
         )
     
-    def _validate_statistics(self, 
-                            signal: Dict[str, Any], 
+    def _validate_statistics(self,
+                            signal: Dict[str, Any],
                             market_data: pd.DataFrame) -> tuple[bool, List[str]]:
-        """Layer 1: Statistical validation (trend, volatility)"""
+        """Layer 1: Statistical validation (trend, volatility)
+
+        Phase 7.9: Now supports advisory mode via risk_mode.yml configuration.
+        In advisory mode, counter-trend warnings are logged but don't cause rejection.
+        """
         warnings = []
+        counter_trend_warnings = []  # Separate tracking for advisory mode
 
         context = self._market_context(market_data)
         sma_20 = context["sma_20"]
         sma_50 = context["sma_50"]
         current_price = context["current_price"]
-        
+
         action = signal.get('action', 'HOLD').upper()
-        
+
+        # Get risk mode config for counter-trend filter
+        ct_advisory = False
+        ct_disabled = False
+        ct_max_warnings = 2
+        if RISK_MODE_AVAILABLE:
+            ct_advisory = is_counter_trend_advisory()
+            ct_disabled = is_counter_trend_disabled()
+            ct_config = get_counter_trend_config()
+            ct_max_warnings = ct_config.get("max_warnings", 2)
+
         # Check trend alignment
         if action == 'BUY':
             if current_price < sma_20:
-                warnings.append("BUY signal below SMA(20) - counter-trend")
+                counter_trend_warnings.append("BUY signal below SMA(20) - counter-trend")
             if sma_20 < sma_50:
-                warnings.append("BUY signal in downtrend (SMA(20) < SMA(50))")
+                counter_trend_warnings.append("BUY signal in downtrend (SMA(20) < SMA(50))")
         elif action == 'SELL':
             if current_price > sma_20:
-                warnings.append("SELL signal above SMA(20) - counter-trend")
+                counter_trend_warnings.append("SELL signal above SMA(20) - counter-trend")
             if sma_20 > sma_50:
-                warnings.append("SELL signal in uptrend (SMA(20) > SMA(50))")
-        
+                counter_trend_warnings.append("SELL signal in uptrend (SMA(20) > SMA(50))")
+
+        # Handle counter-trend warnings based on mode
+        if ct_disabled:
+            # Disabled: Don't add warnings at all
+            pass
+        elif ct_advisory:
+            # Advisory mode: Log warnings but mark them as advisory (won't block)
+            for w in counter_trend_warnings:
+                warnings.append(f"[ADVISORY] {w}")
+            # Don't count advisory warnings toward the limit
+            counter_trend_warnings = []
+        else:
+            # Strict mode: Add all warnings normally
+            warnings.extend(counter_trend_warnings)
+
         vol_percentile = context["vol_percentile"]
-        
+
         if vol_percentile > self.max_volatility_percentile:
             warnings.append(f"High volatility: {vol_percentile:.1%} percentile")
-        
-        # Pass if < 2 warnings
-        is_valid = len(warnings) < 2
-        
+
+        # Count only non-advisory warnings for validation
+        blocking_warnings = [w for w in warnings if not w.startswith("[ADVISORY]")]
+        is_valid = len(blocking_warnings) < ct_max_warnings
+
         return is_valid, warnings
     
-    def _validate_regime(self, 
-                        signal: Dict[str, Any], 
+    def _validate_regime(self,
+                        signal: Dict[str, Any],
                         market_data: pd.DataFrame) -> tuple[bool, List[str]]:
-        """Layer 2: Market regime alignment"""
+        """Layer 2: Market regime alignment
+
+        Phase 7.9: Now supports confidence-gated mode via risk_mode.yml.
+        In confidence_gated mode, regime warnings only block if regime confidence
+        exceeds the threshold (e.g., 70%). This prevents blocking valid contrarian
+        trades when regime detection is uncertain.
+        """
         warnings = []
 
         regime_info = self._market_context(market_data)["regime_info"]
         regime = regime_info.get('current_regime', 'sideways_normal')
-        
+        # Use p_value to derive regime confidence (lower p = higher confidence)
+        regime_p_value = regime_info.get('p_value', 1.0)
+        regime_confidence = 1.0 - min(regime_p_value, 1.0)  # Convert to confidence
+
         action = signal.get('action', 'HOLD')
         risk_level = signal.get('risk_level', 'medium')
         confidence = signal.get('confidence', 0.0)
 
+        # Get risk mode config for regime filter
+        rf_disabled = False
+        rf_bearish_block = True
+        rf_high_vol_block = True
+        should_block = True  # Default: always block on regime warnings
+
+        if RISK_MODE_AVAILABLE:
+            rf_disabled = is_regime_filter_disabled()
+            rf_config = get_regime_filter_config()
+            rf_bearish_block = rf_config.get("bearish_buy_block", True)
+            rf_high_vol_block = rf_config.get("high_vol_block", True)
+            # Check if we should block based on regime confidence
+            should_block = should_block_on_regime(regime_confidence)
+
+        if rf_disabled:
+            # Regime filter completely disabled
+            return True, []
+
+        # Check regime alignment with configurable blocking
         if regime.startswith('bear') and action == 'BUY':
-            warnings.append(f"BUY signal in {regime} regime - elevated downside risk")
+            if rf_bearish_block and should_block:
+                warnings.append(f"BUY signal in {regime} regime - elevated downside risk")
+            elif rf_bearish_block:
+                # Low regime confidence - log but don't block
+                warnings.append(f"[ADVISORY] BUY in {regime} (regime confidence {regime_confidence:.0%} below threshold)")
+
         if regime.startswith('bull') and action == 'SELL' and confidence < 0.7:
-            warnings.append("SELL signal counter to bullish regime with modest confidence")
+            if should_block:
+                warnings.append("SELL signal counter to bullish regime with modest confidence")
+            else:
+                warnings.append("[ADVISORY] SELL counter to bullish regime (low regime confidence)")
+
         if "high_vol" in regime and risk_level == 'high':
-            warnings.append("High risk signal during high volatility regime")
-        
-        # Pass if < 2 warnings
-        is_valid = len(warnings) < 2
-        
+            if rf_high_vol_block and should_block:
+                warnings.append("High risk signal during high volatility regime")
+            elif rf_high_vol_block:
+                warnings.append("[ADVISORY] High risk in high vol regime (low regime confidence)")
+
+        # Count only non-advisory warnings for validation
+        blocking_warnings = [w for w in warnings if not w.startswith("[ADVISORY]")]
+        is_valid = len(blocking_warnings) < 2
+
         return is_valid, warnings
     
     def _validate_position_size(self, 

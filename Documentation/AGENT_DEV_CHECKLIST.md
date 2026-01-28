@@ -83,7 +83,7 @@
 
 #### Production Status
 - Research-Ready: ✅ VALIDATED
-- Production-Pending: ⏳ Awaits 20 holdout audits (currently 1/20)
+- Production-Pending: ⏳ Awaits 20 holdout audits (currently 2/20)
 - Feature Flag: Disabled by default (Option B); enable only for controlled audit accumulation runs
 
 ### Integration Recovery Tracker
@@ -142,7 +142,7 @@
 - **Setup**: Create cron job or scheduled task for daily pipeline runs
 - **Timeline**: 3-4 weeks passive accumulation
 - **Prerequisites**: ✅ System ready, just needs automated scheduling
-- **Status**: Currently 1/20 audits completed, need 19 more
+- **Status**: Currently 2/20 audits completed, need 18 more
 - **Effort**: Low setup (30 minutes), then automated
 - **Expected Benefit**: Transition from RESEARCH_ONLY to production status, statistical confidence
 

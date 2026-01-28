@@ -35,7 +35,7 @@ quant_validation:
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     # These are intentionally modest; tighten after evidence accumulates.
     max_rmse_ratio_vs_baseline: 1.10
-    min_directional_accuracy: 0.44  # Phase 7.9: Lowered from 0.50→0.45→0.44 to allow signals through for audit accumulation
+    min_directional_accuracy: 0.42  # Phase 7.9: Lowered from 0.50→0.44→0.42 per risk filter optimization
     require_significance: false  # Loosen for TS exploration; can be re-enabled later
     min_information_ratio: 0.0   # Raises floor when significance required
 

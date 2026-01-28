@@ -14,7 +14,7 @@ logs/
 ├── phase7.5/          # Phase 7.5: Regime Detection Integration logs
 ├── phase7.6/          # Phase 7.6: Threshold Tuning logs
 ├── phase7.7/          # Phase 7.7: Per-Regime Weight Optimization logs
-├── phase7.8/          # Phase 7.8: Future (all regimes optimization)
+├── phase7.8/          # Phase 7.8: All-regime optimization logs
 ├── archive/           # Old/large logs (compressed)
 ├── automation/        # Autonomous trading loop logs
 ├── brutal/            # Comprehensive testing suite logs

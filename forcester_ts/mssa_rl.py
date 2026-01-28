@@ -9,7 +9,10 @@ diagnostics that can replace LLM-driven analytics in monitoring dashboards.
 from __future__ import annotations
 
 import logging
+import importlib.util
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -22,6 +25,56 @@ _CUPY_AVAILABLE = False
 _CUPY_TRIED = False
 
 
+def _preload_cuda_libraries() -> None:
+    """Preload CUDA shared libraries shipped via pip (best-effort).
+
+    In WSL, CuPy may import successfully but later fail to dlopen CUDA libs
+    (e.g. `libnvrtc.so.12`) because the dynamic loader cannot see the packaged
+    `site-packages/nvidia/**/lib/` directories. Preloading by absolute path via
+    `ctypes.CDLL(..., RTLD_GLOBAL)` makes them available for CuPy's subsequent
+    loads.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+
+    try:  # pragma: no cover - optional platform behaviour
+        import ctypes
+    except Exception:
+        return
+
+    rtld_global = getattr(ctypes, "RTLD_GLOBAL", None)
+    if rtld_global is None:
+        return
+
+    # Load order matters: nvrtc -> cudart -> cusolver.
+    candidates = (
+        ("nvidia.cuda_nvrtc", "libnvrtc.so.12"),
+        ("nvidia.cuda_runtime", "libcudart.so.12"),
+        ("nvidia.cusolver", "libcusolver.so.11"),
+    )
+
+    for module_name, library_name in candidates:
+        try:
+            spec = importlib.util.find_spec(module_name)
+            if spec is None:
+                continue
+
+            base_path = None
+            if spec.submodule_search_locations:
+                base_path = Path(list(spec.submodule_search_locations)[0])
+            elif spec.origin:
+                base_path = Path(spec.origin).parent
+
+            if base_path is None:
+                continue
+
+            lib_path = base_path / "lib" / library_name
+            if lib_path.exists():
+                ctypes.CDLL(str(lib_path), mode=rtld_global)
+        except Exception:
+            continue
+
+
 def _load_cupy() -> bool:
     """Best-effort CuPy import (optional); caches the result for the process."""
     global cp, _CUPY_AVAILABLE, _CUPY_TRIED
@@ -29,7 +82,22 @@ def _load_cupy() -> bool:
         return _CUPY_AVAILABLE
     _CUPY_TRIED = True
     try:  # Optional GPU acceleration via CuPy
+        _preload_cuda_libraries()
+
         import cupy as _cp  # type: ignore
+
+        try:
+            if int(_cp.cuda.runtime.getDeviceCount()) < 1:
+                raise RuntimeError("No CUDA devices detected by CuPy")
+
+            # Minimal self-test to ensure linalg backends can be loaded.
+            test = _cp.eye(2, dtype=_cp.float32)
+            _cp.linalg.svd(test, full_matrices=False)
+        except Exception as exc:
+            cp = None
+            _CUPY_AVAILABLE = False
+            logger.debug("MSSARL: CuPy unavailable; falling back to CPU (%s).", exc)
+            return _CUPY_AVAILABLE
 
         cp = _cp
         _CUPY_AVAILABLE = True
@@ -126,6 +194,11 @@ class MSSARLForecaster:
         std = float(cleaned.std(ddof=0))
         if std <= 0 or not np.isfinite(std):
             return pd.DatetimeIndex([])
+
+        # Guardrail: for ultra-low residual volatility, standardization can make
+        # small noise look like frequent regime shifts. Floor the scale so
+        # stable series do not over-trigger change points.
+        std = max(std, 1.0)
 
         # Standardized one-sided CUSUM on residual mean shifts.
         # Reference: Page (1954) CUSUM tests for parameter changes.
