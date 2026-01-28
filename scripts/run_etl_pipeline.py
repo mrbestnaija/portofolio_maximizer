@@ -90,6 +90,14 @@ import time
 EXECUTION_MODES = ('auto', 'live', 'synthetic')
 
 
+def _ollama_enabled() -> bool:
+    """Return True when Ollama integration is explicitly enabled via env."""
+    raw = os.getenv("PM_ENABLE_OLLAMA")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _normalize_change_points(raw_change_points: Any) -> List[str]:
     """Convert MSSA change point payloads into serialisable ISO strings."""
     if raw_change_points is None:
@@ -777,6 +785,15 @@ def _initialize_llm_components(
     )
 
     if not enable_llm:
+        return components
+
+    # Ollama is deprecated/disabled by default to avoid unnecessary delays.
+    # Set PM_ENABLE_OLLAMA=1 to re-enable local Ollama experiments.
+    if not _ollama_enabled():
+        logger.warning(
+            "LLM requested via --enable-llm but Ollama is disabled by default; "
+            "set PM_ENABLE_OLLAMA=1 to enable."
+        )
         return components
 
     try:
@@ -2970,7 +2987,7 @@ def execute_pipeline(
 @click.option('--verbose', is_flag=True, default=False,
               help='Enable verbose logging (DEBUG level)')
 @click.option('--enable-llm', is_flag=True, default=False,
-              help='Enable LLM integration for market analysis and signal generation')
+              help='Enable LLM integration (deprecated; requires PM_ENABLE_OLLAMA=1 + local Ollama)')
 @click.option('--llm-model', default='',
               help='LLM model override. Leave blank to use config active_model (recommended). Options include deepseek-coder:6.7b-instruct-q4_K_M, codellama:13b-instruct-q4_K_M, qwen:14b-chat-q4_K_M')
 @click.option('--dry-run', is_flag=True, default=False,

@@ -28,7 +28,10 @@ from ai_llm.signal_quality_validator import (
 )
 from ai_llm.llm_database_integration import LLMDatabaseManager, LLMRiskAssessment
 from ai_llm.performance_optimizer import performance_optimizer, optimize_model_selection
-from ai_llm.ollama_client import OllamaClient
+try:  # Optional: Ollama is deprecated/disabled by default (see PM_ENABLE_OLLAMA)
+    from ai_llm.ollama_client import OllamaClient
+except Exception:  # pragma: no cover - optional dependency
+    OllamaClient = None  # type: ignore
 from etl.database_manager import DatabaseManager
 
 # Configure logging
@@ -48,6 +51,13 @@ logging.getLogger().addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class LLMSystemMonitor:
     """
     Comprehensive LLM system monitoring
@@ -56,12 +66,17 @@ class LLMSystemMonitor:
 
     def __init__(self):
         self.ollama_client = None
+        self.ollama_requested = False
+        self.ollama_required = False
         self.monitoring_results = {}
         self.db_manager = DatabaseManager()
         self.llm_db_manager = LLMDatabaseManager(db_path=str(self.db_manager.db_path))
 
     def initialize_ollama_client(self):
         """Initialize Ollama client for monitoring"""
+        if OllamaClient is None:
+            logger.warning("⚠️ Ollama client import unavailable (ai_llm.ollama_client missing)")
+            return False
         try:
             use_case = os.getenv("LLM_MONITOR_USE_CASE", "fast")
             self.ollama_client = OllamaClient(
@@ -146,10 +161,16 @@ class LLMSystemMonitor:
                         'performance_summary': performance_status,
                     }
             else:
-                logger.warning("⚠️ Ollama client not available for performance testing")
+                status = "DISABLED" if not self.ollama_requested else "UNAVAILABLE"
+                reason = (
+                    "Ollama integration disabled by default (set PM_ENABLE_OLLAMA=1 to enable)"
+                    if not self.ollama_requested
+                    else "Ollama client not initialized"
+                )
+                logger.warning("⚠️ %s", reason)
                 self.monitoring_results['llm_performance'] = {
-                    'status': 'UNAVAILABLE',
-                    'reason': 'Ollama client not initialized',
+                    'status': status,
+                    'reason': reason,
                     'performance_summary': performance_status,
                 }
 
@@ -572,10 +593,31 @@ class LLMSystemMonitor:
         logger.info("🚀 Starting Comprehensive LLM System Monitoring")
         logger.info("=" * 60)
 
-        # Initialize Ollama client
-        if not self.initialize_ollama_client():
-            logger.error("❌ Cannot proceed without Ollama client")
-            return False
+        # Ollama is deprecated/disabled by default to avoid unnecessary delays.
+        # Set PM_ENABLE_OLLAMA=1 to re-enable for local experimentation.
+        self.ollama_requested = _env_flag("PM_ENABLE_OLLAMA", default=False)
+        self.ollama_required = _env_flag("PM_REQUIRE_OLLAMA", default=False)
+
+        if self.ollama_requested:
+            if self.initialize_ollama_client():
+                self.monitoring_results["ollama_client"] = {
+                    "status": "HEALTHY",
+                    "model": getattr(self.ollama_client, "model", None),
+                    "host": getattr(self.ollama_client, "host", None),
+                }
+            else:
+                self.monitoring_results["ollama_client"] = {
+                    "status": "UNAVAILABLE",
+                    "reason": "Failed to initialize Ollama client",
+                }
+                if self.ollama_required:
+                    logger.error("❌ Cannot proceed without Ollama client (PM_REQUIRE_OLLAMA=1)")
+                    return False
+        else:
+            self.monitoring_results["ollama_client"] = {
+                "status": "DISABLED",
+                "reason": "Ollama integration disabled by default (set PM_ENABLE_OLLAMA=1 to enable)",
+            }
 
         # Run all monitoring checks
         self.monitor_llm_performance()

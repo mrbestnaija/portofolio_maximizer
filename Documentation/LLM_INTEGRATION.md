@@ -1,7 +1,7 @@
 # Local LLM Integration - Phase 5.2
 **Version**: 1.0.0  
 **Date**: 2025-10-12  
-**Status**: Production Ready  
+**Status**: Deprecated (disabled by default)  
 **Cost**: $0/month (local GPU)  
 
 ## Executive Summary
@@ -12,6 +12,8 @@ Phase 5.2 integrates local LLM (Ollama) into the production ETL pipeline for:
 - **Risk assessment** - AI-powered risk analysis
 
 **CRITICAL**: Per AGENT_INSTRUCTION.md, LLM signals are **advisory only**. NO TRADING until >10% annual returns proven with 30+ days validation.
+
+> **2026-01-28 Update**: Ollama integration is disabled by default in this repo to avoid unnecessary delays when the local server is not running. The code remains for potential future deletion; set `PM_ENABLE_OLLAMA=1` to temporarily re-enable the legacy path for experiments.
 
 ## System Requirements
 
@@ -95,8 +97,8 @@ ETL Pipeline Flow (Enhanced):
 LLM integration is optional. On CPU-only machines (no Ollama), the pipeline runs TS-only and disables LLM components automatically.
 
 ```bash
-# Enable LLM (requires Ollama running)
-python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm
+# Enable legacy LLM (deprecated; requires PM_ENABLE_OLLAMA=1 + Ollama running)
+PM_ENABLE_OLLAMA=1 python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm
 
 # Disable LLM (default)
 python scripts/run_etl_pipeline.py --tickers AAPL

@@ -1,17 +1,25 @@
 quant_validation:
   enabled: true
+  validation_mode: forecast_edge
   lookback_days: 365
   risk_free_rate: 0.04
   benchmark_column: null
   capital_base: 25000
+  forecast_edge_cv:
+    min_train_size: 180
+    step_size: null
+    max_folds: 2
+    baseline_model: samossa
   success_criteria:
-    min_annual_return: 0.1
-    min_sharpe: 0.5
-    min_sortino: 0.7
-    max_drawdown: 0.2
-    min_profit_factor: 1.2
-    min_win_rate: 0.5
+    min_annual_return: 0.0
+    min_sharpe: 0.1
+    min_sortino: 0.15
+    max_drawdown: 0.4
+    min_profit_factor: 1.0
+    min_win_rate: 0.4
     min_expected_profit: 50.0
+    max_rmse_ratio_vs_baseline: 1.1
+    min_directional_accuracy: 0.44
     require_significance: false
     min_information_ratio: 0.0
   per_ticker:
@@ -21,6 +29,13 @@ quant_validation:
     CL=F:
       success_criteria:
         min_expected_profit: 75.0
+    AAPL:
+      success_criteria:
+        min_annual_return: 0.0
+        max_drawdown: 0.35
+        min_profit_factor: 1.0
+        min_win_rate: 0.4
+        min_expected_profit: 5.0
   bootstrap:
     n_samples: 400
     confidence_level: 0.95

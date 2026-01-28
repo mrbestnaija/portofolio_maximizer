@@ -155,9 +155,9 @@ ALPHA_VANTAGE_API_KEY=your_key_here
 CACHE_VALIDITY_HOURS=24
 ```
 
-### LLM Integration Setup (Optional)
+### Legacy LLM Integration Setup (Deprecated)
 
-To enable LLM-powered market analysis and signal generation:
+LLM/Ollama integration is disabled by default to avoid unnecessary startup delays when Ollama is not running. To run the legacy LLM path for experiments, set `PM_ENABLE_OLLAMA=1` and use `--enable-llm` where supported.
 
 1. **Install Ollama**:
    ```bash
@@ -189,7 +189,7 @@ To enable LLM-powered market analysis and signal generation:
    curl http://localhost:11434/api/tags
    ```
 
-**Note**: The pipeline will gracefully handle missing Ollama server when `--enable-llm` is used. LLM features are optional and the pipeline runs successfully without them.
+**Note**: The pipeline will not attempt to initialize Ollama unless `PM_ENABLE_OLLAMA=1` is set. LLM features are optional and the pipeline runs successfully without them.
 
 ---
 
@@ -201,20 +201,19 @@ To enable LLM-powered market analysis and signal generation:
 # Activate virtual environment
 source simpleTrader_env/bin/activate
 
-# Recommended: live run with automatic synthetic fallback
-python scripts/run_etl_pipeline.py \
-  --tickers AAPL,MSFT \
-  --include-frontier-tickers \
-  --start 2020-01-01 \
-  --end 2024-01-01 \
-  --execution-mode auto \
-  --enable-llm
+ # Recommended: live run with automatic synthetic fallback
+ python scripts/run_etl_pipeline.py \
+   --tickers AAPL,MSFT \
+   --include-frontier-tickers \
+   --start 2020-01-01 \
+   --end 2024-01-01 \
+   --execution-mode auto
 
 # Force live-only execution (fails fast on network/API issues)
 python scripts/run_etl_pipeline.py --execution-mode live
 
 # Offline validation (synthetic data, no network)
-python scripts/run_etl_pipeline.py --execution-mode synthetic --enable-llm --include-frontier-tickers
+python scripts/run_etl_pipeline.py --execution-mode synthetic --include-frontier-tickers
 
 # Expected output:
 # ✓ Extraction complete (cache hit: <0.1s)
@@ -245,7 +244,7 @@ python scripts/run_auto_trader.py \
   --sleep-seconds 900
 ```
 
-Add `--enable-llm` to activate the Ollama-backed fallback router whenever the ensemble hesitates. Each cycle:
+Add `--enable-llm` (plus `PM_ENABLE_OLLAMA=1`) to activate the legacy Ollama-backed fallback router whenever the ensemble hesitates. Each cycle:
 
 1. Streams fresh OHLCV windows via `DataSourceManager` with cache-first failover.
 2. Validates, imputes, and feeds the data into the SARIMAX/SAMOSSA/GARCH/MSSA-RL ensemble.

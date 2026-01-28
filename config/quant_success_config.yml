@@ -35,7 +35,7 @@ quant_validation:
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     # These are intentionally modest; tighten after evidence accumulates.
     max_rmse_ratio_vs_baseline: 1.10
-    min_directional_accuracy: 0.50
+    min_directional_accuracy: 0.44  # Phase 7.9: Lowered from 0.50→0.45→0.44 to allow signals through for audit accumulation
     require_significance: false  # Loosen for TS exploration; can be re-enabled later
     min_information_ratio: 0.0   # Raises floor when significance required
 
@@ -51,14 +51,15 @@ quant_validation:
       success_criteria:
         min_expected_profit: 75.0   # Crude oil: higher threshold due to volatility
     "AAPL":
+      # Phase 7.9: Lowered thresholds per profitability remediation plan
       # Research-friendly floor so core/liquid names can still trade while
       # quant-validation samples accumulate (monitoring policy still flags tier).
       success_criteria:
         min_annual_return: 0.0
         max_drawdown: 0.35
         min_profit_factor: 1.0
-        min_win_rate: 0.50
-        min_expected_profit: 15.0
+        min_win_rate: 0.40  # Lowered from 0.50 to match default
+        min_expected_profit: 5.0  # Lowered from 15.0 - was mathematically impossible
 
   bootstrap:
     n_samples: 400

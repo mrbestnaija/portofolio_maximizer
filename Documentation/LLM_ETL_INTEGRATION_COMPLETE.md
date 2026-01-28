@@ -4,6 +4,8 @@
 **Status**: ✅ **PRODUCTION READY**  
 **Integration Level**: **COMPLETE** - Backtested & Unit Tested
 
+> **2026-01-28 Update**: Ollama integration is disabled by default in this repo to avoid unnecessary delays when the local server is not running. The code remains for potential future deletion; set `PM_ENABLE_OLLAMA=1` to temporarily re-enable the legacy path for experiments.
+
 ---
 
 ## 🎯 **Summary**
@@ -35,7 +37,7 @@ Successfully integrated local LLM (Ollama) into the ETL pipeline with comprehens
 **Usage**:
 ```bash
 # Run pipeline with LLM integration
-python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --enable-llm
+PM_ENABLE_OLLAMA=1 python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --include-frontier-tickers --enable-llm
 
 # Select specific model
 python scripts/run_etl_pipeline.py --tickers AAPL --enable-llm --llm-model qwen:14b-chat-q4_K_M

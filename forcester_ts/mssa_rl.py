@@ -17,13 +17,26 @@ import pandas as pd
 from numpy.linalg import svd
 from pandas.tseries.frequencies import to_offset
 
-try:  # Optional GPU acceleration via CuPy
-    import cupy as cp
+cp = None
+_CUPY_AVAILABLE = False
+_CUPY_TRIED = False
 
-    CUPY_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency
-    cp = None
-    CUPY_AVAILABLE = False
+
+def _load_cupy() -> bool:
+    """Best-effort CuPy import (optional); caches the result for the process."""
+    global cp, _CUPY_AVAILABLE, _CUPY_TRIED
+    if _CUPY_TRIED:
+        return _CUPY_AVAILABLE
+    _CUPY_TRIED = True
+    try:  # Optional GPU acceleration via CuPy
+        import cupy as _cp  # type: ignore
+
+        cp = _cp
+        _CUPY_AVAILABLE = True
+    except Exception:  # pragma: no cover - optional dependency
+        cp = None
+        _CUPY_AVAILABLE = False
+    return _CUPY_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +75,10 @@ class MSSARLForecaster:
         self._change_point_density: float = 0.0
         self._recent_change_point_days: Optional[int] = None
         self._freq_hint: Optional[str] = None
-        self._use_gpu = bool(self.config.use_gpu and CUPY_AVAILABLE)
+        self._use_gpu = bool(self.config.use_gpu and _load_cupy())
         if self.config.use_gpu and not self._use_gpu:
-            logger.warning(
-                "MSSARL: GPU acceleration requested but CuPy is unavailable. Falling back to CPU."
-            )
+            # CuPy is optional; when unavailable we fall back to CPU silently.
+            logger.debug("MSSARL: CuPy unavailable; falling back to CPU.")
 
     # ------------------------------------------------------------------
     # Helpers

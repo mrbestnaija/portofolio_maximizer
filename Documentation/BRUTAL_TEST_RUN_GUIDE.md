@@ -16,7 +16,7 @@
 1. **Virtual Environment**: Must be activated
 2. **Python Dependencies**: All packages installed
 3. **Test Database**: Will be created automatically
-4. **Ollama** (Optional): For LLM tests
+4. **Ollama** (Deprecated/Optional): Only needed if you explicitly re-enable legacy LLM checks
 
 ---
 
@@ -218,8 +218,8 @@ logs/brutal/results_YYYYMMDD_HHMMSS/
 **Issue**: "Required packages not available"
 - **Solution**: Run `pip install -r requirements.txt`
 
-**Issue**: "Ollama not found - LLM tests skipped"
-- **Solution**: This is OK - LLM tests are optional. Install Ollama if you want to test LLM integration.
+**Issue**: "Ollama disabled/not found - LLM checks skipped"
+- **Solution**: This is OK - legacy LLM checks are disabled by default. If you need them for experiments, install Ollama and set `PM_ENABLE_OLLAMA=1`.
 
 **Issue**: "Test file not found"
 - **Solution**: Some tests may be optional. Check if the file exists in `tests/` directory.

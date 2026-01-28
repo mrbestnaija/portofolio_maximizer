@@ -1508,9 +1508,9 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
 @click.option(
     "--enable-llm",
     is_flag=True,
-    default=True,
+    default=False,
     show_default=True,
-    help="Enable LLM fallback routing (requires local Ollama).",
+    help="Enable LLM fallback routing (deprecated; requires PM_ENABLE_OLLAMA=1 + local Ollama).",
 )
 @click.option(
     "--llm-model",
@@ -1551,6 +1551,12 @@ def main(
     _configure_logging(verbose)
     companion_config = _load_ai_companion_config()
     _activate_ai_companion_guardrails(companion_config)
+
+    if enable_llm and _env_flag("PM_ENABLE_OLLAMA") is not True:
+        logging.getLogger(__name__).warning(
+            "LLM fallback requested but Ollama is disabled by default; set PM_ENABLE_OLLAMA=1 to enable."
+        )
+        enable_llm = False
 
     env_bar_aware = _env_flag("BAR_AWARE_TRADING")
     if env_bar_aware is not None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -65,6 +66,9 @@ class TimeSeriesRunner:
         return {"source": "garch", "result": result}
 
     def _run_llm(self, context: Any) -> Optional[Dict[str, Any]]:
+        raw = os.getenv("PM_ENABLE_OLLAMA")
+        if raw is None or raw.strip().lower() not in {"1", "true", "yes", "on"}:
+            return None
         try:
             from ai_llm.signal_generator import LLMSignalGenerator
             from ai_llm.ollama_client import OllamaClient

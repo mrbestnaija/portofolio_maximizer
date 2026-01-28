@@ -1,28 +1,50 @@
 signal_routing:
   time_series_primary: true
-  llm_fallback: true
-  llm_redundancy: true
+  llm_fallback: false
+  llm_redundancy: false
   enable_samossa: true
   enable_sarimax: true
   enable_garch: true
   enable_mssa_rl: true
   time_series:
-    confidence_threshold: 0.55
+    confidence_threshold: 0.45
     min_expected_return: 0.002
-    max_risk_score: 0.7
+    max_risk_score: 0.85
     use_volatility_filter: true
     cost_model:
       default_roundtrip_cost_bps:
-        US_EQUITY: 10.0
-        INTL_EQUITY: 15.0
-        FX: 5.0
-        CRYPTO: 25.0
-        INDEX: 10.0
-        UNKNOWN: 10.0
+        US_EQUITY: 3.2
+        INTL_EQUITY: 6.0
+        FX: 2.0
+        CRYPTO: 12.0
+        INDEX: 2.0
+        UNKNOWN: 5.0
       min_signal_to_noise: 0.0
+    per_ticker:
+      CL=F:
+        confidence_threshold: 0.55
+        min_expected_return: 0.005
+      MSFT:
+        confidence_threshold: 0.45
+        min_expected_return: 0.0005
+        max_risk_score: 0.85
+      MTN:
+        confidence_threshold: 0.45
+        min_expected_return: 0.0005
+      AAPL:
+        confidence_threshold: 0.5
+        min_expected_return: 0.0005
   ts_fallback_triggers:
   - forecast_unavailable
   - confidence_below_threshold
   - model_failure
   - insufficient_data
+  execution:
+    no_trade_windows:
+      US_EQUITY: []
+      FX: []
+    enhanced_logging:
+      include_mid_price: true
+      include_route_type: true
+      include_fill_timestamp: true
   routing_mode: TIME_SERIES_PRIMARY_LLM_FALLBACK

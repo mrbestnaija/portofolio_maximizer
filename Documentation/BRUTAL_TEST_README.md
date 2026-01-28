@@ -55,7 +55,7 @@ The `comprehensive_brutal_test.sh` script provides exhaustive, multi-hour testin
 - **Time Series Forecasting**: Tests SARIMAX, GARCH, SAMOSSA, MSSA-RL models
 - **Signal Generation**: Tests Time Series signal generation
 - **Signal Routing**: Tests signal routing with Time Series primary, LLM fallback
-- **LLM Integration**: Tests LLM market analysis and signal generation (if Ollama available)
+- **LLM Integration**: Legacy Ollama-backed checks (disabled by default; only runs when explicitly enabled)
 
 ### ✅ Multi-Source Testing
 - Tests each data source individually
@@ -227,7 +227,7 @@ Duration depends on:
 - All project dependencies
 
 ### Optional
-- Ollama (for LLM integration tests)
+- Ollama (deprecated; only needed if you explicitly re-enable legacy LLM tests)
 - `bc` command (for calculations, usually pre-installed)
 - `time` command (for performance measurements)
 
@@ -247,9 +247,9 @@ Duration depends on:
    - Verify network connectivity
    - Check rate limits
 
-2. **Ollama Not Available**
-   - LLM tests will be skipped
-   - Other tests continue normally
+2. **Ollama Disabled/Not Available**
+   - Legacy LLM checks are skipped by default
+   - To re-enable for experiments: set `PM_ENABLE_OLLAMA=1` and ensure `ollama serve` is running
 
 3. **Database Errors**
    - Check disk space

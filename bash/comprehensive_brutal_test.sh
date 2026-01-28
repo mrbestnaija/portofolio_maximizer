@@ -1415,6 +1415,10 @@ payload = {
 print(json.dumps(payload, indent=2))
 
 if latency is None:
+    status = (llm_perf.get("status") or "").upper()
+    if status in {"DISABLED", "UNAVAILABLE"}:
+        print(f"LATENCY_SKIPPED: llm_performance.status={status}")
+        sys.exit(0)
     sys.exit(3)
 lat_limit = float(os.environ.get("BRUTAL_LAT_LIMIT", "45"))
 lat_target = float(os.environ.get("BRUTAL_LAT_TARGET", "5"))

@@ -1,7 +1,7 @@
 """
 AI LLM Module - Local GPU-based AI Integration
 Phase 5.2: Production LLM Integration
-Status: Production-ready with strict validation
+Status: Deprecated (disabled by default)
 
 This module integrates local LLM (Ollama) for:
 - Market data interpretation
@@ -9,11 +9,7 @@ This module integrates local LLM (Ollama) for:
 - Risk assessment
 - Portfolio recommendations
 
-REQUIREMENTS (per AGENT_INSTRUCTION.md):
-- Maximum 500 lines per module
-- Free tier only (local GPU, no API costs)
-- Fail-fast validation (pipeline stops if Ollama unavailable)
-- Zero breaking changes to existing ETL
+Note: Ollama-backed paths are currently disabled by default to avoid unnecessary delays when the local server is not running, and may be removed in a future cleanup pass.
 
 Line Count Budget: ~500 lines total across all modules
 Cost: $0/month (local GPU only)
