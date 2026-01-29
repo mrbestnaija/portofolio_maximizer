@@ -68,9 +68,12 @@ if [[ "${DASHBOARD_AUTO_SERVE}" == "1" ]]; then
 fi
 
 # Best-effort liquidation of any open paper trades before a new run.
-set +e
-"$PYTHON_BIN" "$ROOT_DIR/scripts/liquidate_open_trades.py" --db-path "$ROOT_DIR/data/portfolio_maximizer.db" --pricing-policy neutral >/dev/null 2>&1 || true
-set -e
+# Skip when position persistence is active (default); only liquidate on --no-resume.
+if [[ "${NO_RESUME:-0}" == "1" ]]; then
+  set +e
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/liquidate_open_trades.py" --db-path "$ROOT_DIR/data/portfolio_maximizer.db" --pricing-policy neutral >/dev/null 2>&1 || true
+  set -e
+fi
 
 # Pre-flight horizon-consistent backtest (full 365d) to log expectations.
 BACKTEST_REPORT="$ROOT_DIR/reports/horizon_backtest_${RUN_STAMP}.json"

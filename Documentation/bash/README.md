@@ -13,13 +13,16 @@ This directory contains the repository’s human-friendly operational entrypoint
 ### Trading / orchestration
 
 - `bash/run_auto_trader.sh` – paper trading loop (TS-first, LLM optional fallback)
+- `bash/run_daily_trader.sh` – daily + intraday passes (position persistence via `--resume`)
 - `bash/run_end_to_end.sh` – pipeline → auto-trader → dashboard refresh
 - `bash/run_post_eval.sh` – higher-order post-eval / hyperopt orchestration
+- `bash/reset_portfolio.sh` – clear persisted portfolio state for a clean start
 
 ### Automation (cron / scheduler)
 
 - `bash/production_cron.sh` – task multiplexer (see `Documentation/CRON_AUTOMATION.md`)
 - `bash/run_core_auto_trader_once.sh` – WSL-friendly wrapper for `production_cron.sh auto_trader_core`
+  - Windows Task Scheduler wrapper: `run_daily_trader.bat` (repo root) for daily+intraday passes
 
 ### Evidence and test gates
 

@@ -1,8 +1,10 @@
 # Phase 7.7: Final Summary & Handoff
 
 **Date**: 2026-01-25
-**Status**: ✅ **COMPLETE** - Ready for Phase 7.8 manual execution
+**Status**: ✅ **COMPLETE** - Ready for Phase 7.8 manual execution (historical)
 **Commits**: 2 (3543e9f, 2108e96) - Pushed to GitHub
+
+> **Update (2026-01-29)**: Phase 7.8 has been completed; see `Documentation/PHASE_7.8_RESULTS.md`. Current audit accumulation is **2/20**.
 
 ---
 
@@ -29,7 +31,7 @@ logs/
 ├── phase7.5/ (5 logs, 792KB) - Regime detection integration
 ├── phase7.6/ (1 log, 87KB)   - Threshold tuning experiment
 ├── phase7.7/ (2 logs, 35KB)  - Weight optimization
-├── phase7.8/ (empty, ready)  - Future all-regime optimization
+├── phase7.8/ (populated)     - Phase 7.8 all-regime optimization logs
 └── [14 categorized subdirectories]
 ```
 
@@ -63,7 +65,7 @@ regime_detection:
 **Effect**:
 - System will detect market regimes on every forecast build
 - **MODERATE_TRENDING**: Uses optimized weights (90% SAMOSSA)
-- **Other regimes**: Use default weights (awaiting Phase 7.8 optimization)
+- **Other regimes**: Use default weights (awaiting Phase 7.8 optimization at the time; now completed — see Phase 7.8 results)
 
 ### Optimized Weights Active
 
@@ -284,7 +286,7 @@ tail -f logs/phase7.8_weight_optimization.log | grep -E "REGIME|Optimizing|RMSE"
 - Other regimes fall back to default weights (suboptimal)
 - Need full validation with all regimes before production
 
-**Audit Status**: 1/20 audits (5% progress)
+**Audit Status**: 1/20 audits (5% progress at the time; current overall: 2/20)
 
 ### Path to Production
 
@@ -389,7 +391,7 @@ cat data/phase7.7_optimized_weights.json | jq '.results.MODERATE_TRENDING'
 ✅ **Documentation**: COMPREHENSIVE
 ✅ **Commits**: PUSHED TO GITHUB
 
-⏳ **Phase 7.8**: READY FOR MANUAL EXECUTION (4-6 hours)
+⏳ **Phase 7.8**: READY FOR MANUAL EXECUTION (historical; now complete)
 ⏳ **Full Validation**: PENDING (after Phase 7.8 completion)
 ⏳ **Production**: AWAITING PHASE 7.8 + AUDITS
 

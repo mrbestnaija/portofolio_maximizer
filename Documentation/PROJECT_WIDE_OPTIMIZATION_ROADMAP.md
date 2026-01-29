@@ -17,6 +17,12 @@
 - Profitability remediation is documented in `Documentation/CRITICAL_PROFITABILITY_ANALYSIS_AND_REMEDIATION_PLAN.md` (synthetic/test contamination, lifecycle exits). Keep future fixes aligned with that ledger.
 - Workflow hygiene: remote remains canonical; rebase/push small deltas early to avoid dashboard/forecaster drift and stash conflicts.
 
+## Delta (2026-01-29)
+
+- Auto-trader resumes **persisted portfolio state** by default (`--resume`), allowing multi-session audit accumulation without forced liquidation (`bash/reset_portfolio.sh` for clean starts).
+- Dashboard bridge filters `trade_events` to the **latest run_id by default** and backfills positions from `trade_executions` when `portfolio_positions` is empty.
+- Ops helpers added for daily evidence collection: `bash/run_daily_trader.sh` and `run_daily_trader.bat`.
+
 This roadmap is a **sequenced To‑Do list** designed to avoid disruptive rewrites. Each phase is intended to be **small, testable, and reversible**.
 
 ---

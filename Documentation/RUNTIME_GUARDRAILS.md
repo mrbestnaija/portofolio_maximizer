@@ -1,4 +1,6 @@
-# Runtime Guardrails (WSL `simpleTrader_env` Only)
+# Runtime Guardrails (WSL `simpleTrader_env` Only) — Updated 2026-01-29
+
+**Commit/Push Gate**: No commit or push to `origin/master` is allowed unless all relevant implementation tests pass and success criteria are met, with exact commands + outputs recorded.
 
 This repo is **validated only** when run under **WSL** using the **Linux virtualenv** at `simpleTrader_env/` (i.e. `simpleTrader_env/bin/python`). Supported Python is **>=3.10,<3.13**; the requirements files are pinned for that range and intentionally do not support 3.13+.
 
@@ -56,6 +58,12 @@ If you cannot `cd` into the repo first, use `--directory`:
 ```bash
 python3 -m http.server 8000 --directory /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
 ```
+
+## Portfolio State Persistence (Auto‑Trader)
+
+- `scripts/run_auto_trader.py` now **resumes persisted positions by default** (`--resume` on). Use `--no-resume` (or set `NO_RESUME=1` for `bash/run_auto_trader.sh`) to force a fresh start from `--initial-capital`.
+- To wipe persisted positions/cash, run `bash/reset_portfolio.sh`.
+- Existing DBs should run the one-time migration: `python scripts/migrate_add_portfolio_state.py`.
 
 ### Audit-Grade Persistence (Default in Orchestrators)
 

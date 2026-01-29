@@ -39,6 +39,12 @@ This file is a chronological engineering/evidence ledger. Use it to trace *what 
 Suite coverage (from `test.log`): profit-critical (profit calculation accuracy + profit factor + report generation), ETL unit tests (98), Time Series forecasting (37), signal routing (26), integration (30), LLM (67), security (13), and pipeline execution (4 runs).
 The nightly validation wrapper `schedule_backfill.bat` is registered in Windows Task Scheduler (`PortfolioMaximizer_BackfillSignals` at 02:00 daily) so `scripts/backfill_signal_validation.py` evidence stays fresh before any synthetic/live scaling.
 
+## Update (2026-01-29)
+
+- **Portfolio persistence**: `PaperTradingEngine` loads/saves portfolio state via SQLite (`portfolio_state`, `portfolio_cash_state`), and `scripts/run_auto_trader.py` exposes `--resume/--no-resume` (default resume). Reset helper: `bash/reset_portfolio.sh`. Migration helper: `scripts/migrate_add_portfolio_state.py`.
+- **Dashboard data fidelity**: `scripts/dashboard_db_bridge.py` filters trade events to the latest `run_id` by default and falls back to `trade_executions` when `portfolio_positions` is empty.
+- **Ops automation**: `bash/run_daily_trader.sh` (daily + intraday passes) and `run_daily_trader.bat` (Windows Task Scheduler).
+
 **Verification (2026-01-03)**: A subsequent brutal run completes with global quant-validation health GREEN. Evidence bundle:
 - `logs/brutal/results_20260103_220403/reports/final_report.md` (42/42 stages passed; quant health GREEN)
 - `logs/brutal/results_20260103_220403/logs/pipeline_execution.log` (synthetic pipeline run; checkpoint + DB mirror sync)

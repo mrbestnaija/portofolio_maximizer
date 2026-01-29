@@ -86,7 +86,19 @@ def test_config_from_env_reads_required_values(monkeypatch):
 
 
 def test_config_from_env_raises_when_missing(monkeypatch):
-    for key in ["USERNAME_CTRADER", "PASSWORD_CTRADER", "APPLICATION_NAME_CTRADER", "EMAIL_CTRADER"]:
+    for key in [
+        "USERNAME_CTRADER",
+        "CTRADER_USERNAME",
+        "EMAIL_CTRADER",
+        "CTRADER_EMAIL",
+        "PASSWORD_CTRADER",
+        "CTRADER_PASSWORD",
+        "APPLICATION_NAME_CTRADER",
+        "CTRADER_APPLICATION_ID",
+        "CTRADER_APP_ID",
+        "CTRADER_APPLICATION_SECRET",
+        "CTRADER_ACCOUNT_ID",
+    ]:
         monkeypatch.delenv(key, raising=False)
 
     monkeypatch.setattr("execution.ctrader_client._load_env_pair", lambda: {})

@@ -75,6 +75,10 @@ class SAMOSSAForecaster:
         self._scale_std: float = 1.0
         self._residual_model: Any = None
         self._normalized_stats: Dict[str, float] = {"mean": 0.0, "std": 1.0}
+        self._trend_slope: float = 0.0
+        self._trend_intercept: float = 0.0
+        self._trend_strength: float = 0.0
+        self._last_observed: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -108,6 +112,20 @@ class SAMOSSAForecaster:
         components = svd.fit_transform(trajectory)
         self._explained_variance_ratio = float(svd.explained_variance_ratio_.sum())
         return components @ svd.components_
+
+    def _estimate_trend(self, series: pd.Series, window: int) -> Tuple[float, float, float]:
+        if series is None or len(series) < 2:
+            last_val = float(series.iloc[-1]) if series is not None and len(series) else 0.0
+            return 0.0, last_val, 0.0
+        window = max(2, min(int(window), len(series)))
+        tail = series.iloc[-window:]
+        x = np.arange(len(tail), dtype=float)
+        y = tail.values.astype(float)
+        slope, intercept = np.polyfit(x, y, 1)
+        resid = y - (slope * x + intercept)
+        resid_std = float(np.std(resid)) if len(resid) > 1 else 0.0
+        strength = abs(float(slope)) / (resid_std + 1e-8)
+        return float(slope), float(intercept), float(strength)
 
     def _diagonal_averaging(self, matrix: np.ndarray) -> np.ndarray:
         L, K = matrix.shape
@@ -227,6 +245,11 @@ class SAMOSSAForecaster:
         except Exception:
             pass
 
+        try:
+            self._last_observed = float(observed_tail.iloc[-1])
+        except Exception:
+            self._last_observed = None
+
         matrix = self._ssa_decompose(normalized_tail)
         if self.config.matrix_type.lower() == "page":
             recon = matrix.reshape(-1, order="F")
@@ -241,6 +264,10 @@ class SAMOSSAForecaster:
         self._reconstructed = recon_series
         self._residuals = residuals
         self._fit_residual_model(residuals)
+        trend_window = min(max(30, self.config.window_length * 2), min(90, len(observed_tail)))
+        self._trend_slope, self._trend_intercept, self._trend_strength = self._estimate_trend(
+            observed_tail, trend_window
+        )
         self._fitted = True
 
         logger.info(
@@ -256,10 +283,15 @@ class SAMOSSAForecaster:
         if not self._fitted or self._reconstructed is None:
             raise ValueError("Fit must be called before forecast")
 
-        base_forecast = np.full(steps, self._reconstructed.iloc[-1])
+        base_value = float(self._last_observed) if self._last_observed is not None else float(self._reconstructed.iloc[-1])
+        base_forecast = np.full(steps, base_value)
         residual_forecast = self._fit_residual_trend(self._residuals, steps)
 
         combined = base_forecast + residual_forecast[:steps]
+        trend_factor = min(1.0, max(0.0, self._trend_strength))
+        if trend_factor >= 0.15 and np.isfinite(self._trend_slope):
+            trend_steps = np.arange(1, steps + 1, dtype=float)
+            combined = combined + (self._trend_slope * trend_steps * trend_factor)
 
         if self._last_index is not None:
             freq = self._target_freq or (self._reconstructed.index.freqstr if hasattr(self._reconstructed.index, "freqstr") else None) or "D"
@@ -287,6 +319,7 @@ class SAMOSSAForecaster:
             "window_length_used": self.config.window_length,
             "n_components": self.config.n_components,
             "explained_variance_ratio": self._explained_variance_ratio,
+            "trend_strength": self._trend_strength,
             "use_residual_arima": self.config.use_residual_arima,
             "trajectory_matrix_shape": self._trajectory_shape,
             "scale_mean": self._scale_mean,

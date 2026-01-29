@@ -668,6 +668,32 @@ class DatabaseManager:
             )
         """)
 
+        # Portfolio state persistence (cross-session position continuity)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                shares INTEGER NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_timestamp TEXT,
+                stop_loss REAL,
+                target_price REAL,
+                max_holding_days INTEGER,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker)
+            )
+        """)
+
+        # Portfolio cash state (single-row table for cash balance)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_cash_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cash REAL NOT NULL,
+                initial_capital REAL NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Trade executions (for profit/loss tracking)
         fk_clause = ""
         if self.backend != "sqlite":
@@ -2822,6 +2848,165 @@ class DatabaseManager:
             result['profit_factor'] = 0.0
 
         return result
+
+    # ------------------------------------------------------------------
+    # Portfolio State Persistence (cross-session position continuity)
+    # ------------------------------------------------------------------
+
+    def save_portfolio_state(
+        self,
+        cash: float,
+        initial_capital: float,
+        positions: dict,
+        entry_prices: dict,
+        entry_timestamps: dict,
+        stop_losses: dict,
+        target_prices: dict,
+        max_holding_days: dict,
+    ) -> None:
+        """Persist current portfolio state for cross-session continuity.
+
+        Replaces all rows in portfolio_state with the current snapshot
+        and upserts cash balance into portfolio_cash_state.
+        """
+        try:
+            self.cursor.execute("DELETE FROM portfolio_state")
+            for ticker, shares in positions.items():
+                if shares == 0:
+                    continue
+                entry_ts = entry_timestamps.get(ticker)
+                ts_str = None
+                if isinstance(entry_ts, datetime):
+                    ts_str = entry_ts.isoformat()
+                elif entry_ts is not None:
+                    ts_str = str(entry_ts)
+
+                self.cursor.execute(
+                    """
+                    INSERT INTO portfolio_state
+                    (ticker, shares, entry_price, entry_timestamp,
+                     stop_loss, target_price, max_holding_days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticker,
+                        int(shares),
+                        float(entry_prices.get(ticker, 0.0)),
+                        ts_str,
+                        stop_losses.get(ticker),
+                        target_prices.get(ticker),
+                        max_holding_days.get(ticker),
+                    ),
+                )
+
+            self.cursor.execute(
+                """
+                INSERT OR REPLACE INTO portfolio_cash_state
+                (id, cash, initial_capital, updated_at)
+                VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (float(cash), float(initial_capital)),
+            )
+            self.conn.commit()
+            pos_count = len([s for s in positions.values() if s != 0])
+            logger.info(
+                "Portfolio state saved: %d positions, cash=$%.2f",
+                pos_count, cash,
+            )
+        except Exception as exc:
+            logger.error("Failed to save portfolio state: %s", sanitize_error(exc))
+
+    def load_portfolio_state(self):
+        """Load persisted portfolio state for session resumption.
+
+        Returns:
+            Dict with keys: cash, initial_capital, positions, entry_prices,
+            entry_timestamps, stop_losses, target_prices, max_holding_days.
+            Returns None if no persisted state exists.
+        """
+        try:
+            self.cursor.execute(
+                "SELECT cash, initial_capital FROM portfolio_cash_state WHERE id = 1"
+            )
+            cash_row = self.cursor.fetchone()
+            if cash_row is None:
+                return None
+
+            self.cursor.execute(
+                "SELECT ticker, shares, entry_price, entry_timestamp, "
+                "stop_loss, target_price, max_holding_days FROM portfolio_state"
+            )
+            rows = self.cursor.fetchall()
+
+            positions = {}
+            entry_prices = {}
+            entry_timestamps_map = {}
+            stop_losses = {}
+            target_prices_map = {}
+            max_holding_days_map = {}
+
+            for row in rows:
+                # Support both dict-like Row and tuple access
+                if isinstance(row, dict) or hasattr(row, 'keys'):
+                    ticker = row["ticker"]
+                    shares_val = row["shares"]
+                    ep = row["entry_price"]
+                    ts_str = row["entry_timestamp"]
+                    sl = row["stop_loss"]
+                    tp = row["target_price"]
+                    mhd = row["max_holding_days"]
+                else:
+                    ticker, shares_val, ep, ts_str, sl, tp, mhd = row
+
+                positions[ticker] = int(shares_val)
+                entry_prices[ticker] = float(ep)
+                if ts_str:
+                    try:
+                        entry_timestamps_map[ticker] = datetime.fromisoformat(ts_str)
+                    except (ValueError, TypeError):
+                        entry_timestamps_map[ticker] = datetime.now()
+                if sl is not None:
+                    stop_losses[ticker] = float(sl)
+                if tp is not None:
+                    target_prices_map[ticker] = float(tp)
+                if mhd is not None:
+                    max_holding_days_map[ticker] = int(mhd)
+
+            # Extract cash values (support dict-like Row or tuple)
+            if isinstance(cash_row, dict) or hasattr(cash_row, 'keys'):
+                cash_val = float(cash_row["cash"])
+                ic_val = float(cash_row["initial_capital"])
+            else:
+                cash_val = float(cash_row[0])
+                ic_val = float(cash_row[1])
+
+            logger.info(
+                "Portfolio state loaded: %d positions, cash=$%.2f",
+                len(positions), cash_val,
+            )
+            return {
+                "cash": cash_val,
+                "initial_capital": ic_val,
+                "positions": positions,
+                "entry_prices": entry_prices,
+                "entry_timestamps": entry_timestamps_map,
+                "stop_losses": stop_losses,
+                "target_prices": target_prices_map,
+                "max_holding_days": max_holding_days_map,
+            }
+        except Exception as exc:
+            logger.warning("Could not load portfolio state: %s", sanitize_error(exc))
+            return None
+
+    def clear_portfolio_state(self) -> None:
+        """Clear persisted portfolio state (for fresh-start scenarios)."""
+        try:
+            self.cursor.execute("DELETE FROM portfolio_state")
+            self.cursor.execute("DELETE FROM portfolio_cash_state")
+            self.conn.commit()
+            logger.info("Portfolio state cleared")
+        except Exception as exc:
+            logger.warning("Could not clear portfolio state: %s", sanitize_error(exc))
 
     def close(self):
         """Close database connection"""

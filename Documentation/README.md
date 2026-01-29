@@ -244,6 +244,10 @@ python scripts/run_auto_trader.py \
   --sleep-seconds 900
 ```
 
+Auto-trader **resumes persisted positions by default** (`--resume` is on). Use `--no-resume` to start fresh from `--initial-capital`, or run `bash/reset_portfolio.sh` to clear the saved state. Existing databases should run the one-time migration: `python scripts/migrate_add_portfolio_state.py`.
+
+For scheduled daily+intraday passes, use `bash/run_daily_trader.sh` (WSL/Linux) or `run_daily_trader.bat` (Windows Task Scheduler); both runs keep positions via `--resume`.
+
 Add `--enable-llm` (plus `PM_ENABLE_OLLAMA=1`) to activate the legacy Ollama-backed fallback router whenever the ensemble hesitates. Each cycle:
 
 1. Streams fresh OHLCV windows via `DataSourceManager` with cache-first failover.

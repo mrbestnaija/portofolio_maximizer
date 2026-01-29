@@ -217,7 +217,7 @@ MODERATE_TRENDING:
 - ✅ Backward compatible: Phase 7.4 behavior when disabled
 - ✅ Comprehensive logging: All detections and decisions logged
 - ⚠️ Performance: RMSE regression requires further tuning
-- ⚠️ Holdout audits: 1/20 completed (need 19 more for production)
+- ⚠️ Holdout audits: 1/20 completed at the time (current overall: 2/20)
 
 **Status**: **Research-Ready**, Not Yet Production-Ready
 
@@ -301,7 +301,7 @@ MODERATE_TRENDING:
    - Expected: Better RMSE in regime-specific scenarios
 
 7. **Accumulate Holdout Audits**:
-   - Current: 1/20 audits
+   - Current: 1/20 audits at the time (current overall: 2/20)
    - Target: 20+ for production status transition
    - Timeline: ~3-4 weeks of daily runs
 

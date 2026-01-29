@@ -22,6 +22,11 @@ Ground truth implementations live in:
 
 - Dashboard payload adds trade-level visualization fields (`trade_events`, `price_series`, `positions`) to support trade PnL scatter/markers. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON); run scripts enable audit snapshot persistence to `data/dashboard_audit.db` by default (`--persist-snapshot`).
 
+## Delta (2026-01-29)
+
+- Dashboard trade events are **filtered to the latest `run_id` by default** (opt-out via `--latest-run-only`), improving run-local metric alignment.
+- Positions in dashboard payload **fall back to `trade_executions`** when `portfolio_positions` is empty, preventing misleading “no positions” displays during persistence gaps.
+
 ---
 
 ## 1. Returns and Annualization

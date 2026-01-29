@@ -374,6 +374,10 @@
               <div class="subtitle">Ticker</div>
               <select id="diag-ticker" aria-label="Diagnostics ticker"></select>
             </div>
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              <div class="subtitle">Missing retry (min)</div>
+              <input id="diag-ttl" type="number" min="1" max="240" step="1" value="30" aria-label="Diagnostics missing image retry minutes" />
+            </div>
           </div>
         </div>
         <div class="diag-grid" id="diag-grid">
@@ -444,6 +448,14 @@
         return null;
       }
     }
+
+    let diagMissingTtlMs = 30 * 60 * 1000;
+    const diagState = {
+      lastRunId: null,
+      tickersKey: '',
+      selectedTicker: '',
+      missing: {},
+    };
 
     function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
     function formatPct(v) { return `${(v * 100).toFixed(2)}%`; }
@@ -931,25 +943,41 @@
       });
     }
 
-    function setDiagImage(imgId, msgId, ticker, filename) {
+    function setDiagImage(imgId, msgId, ticker, filename, { forceRefresh = false } = {}) {
       const img = document.getElementById(imgId);
       const msg = document.getElementById(msgId);
       const wrapper = img ? img.closest('.diag-figure') : null;
       if (!img) return;
+      const placeholder = 'ensemble_diagnostics/placeholder.png';
+      const key = `${ticker}/${filename}`;
+      const lastMissing = diagState.missing[key];
+      if (lastMissing && !forceRefresh && (Date.now() - lastMissing) < diagMissingTtlMs) {
+        img.src = placeholder;
+        img.style.display = 'block';
+        if (msg) msg.style.display = 'block';
+        if (wrapper) wrapper.style.opacity = 0.6;
+        return;
+      }
       if (!ticker) {
         img.style.display = 'none';
         if (msg) msg.style.display = 'block';
         if (wrapper) wrapper.style.opacity = 0.5;
         return;
       }
-      const src = `visualizations/ensemble_diagnostics/${ticker}/${filename}?t=${Date.now()}`;
+      // Page is served from /visualizations/, so use a relative path (no double prefix).
+      const src = `ensemble_diagnostics/${ticker}/${filename}?t=${Date.now()}`;
       img.onload = () => {
         img.style.display = 'block';
         if (msg) msg.style.display = 'none';
         if (wrapper) wrapper.style.opacity = 1;
+        img.dataset.srcState = 'ok';
+        delete diagState.missing[key];
       };
       img.onerror = () => {
-        img.style.display = 'none';
+        img.dataset.srcState = 'missing';
+        diagState.missing[key] = Date.now();
+        img.src = placeholder;
+        img.style.display = 'block';
         if (msg) msg.style.display = 'block';
         if (wrapper) wrapper.style.opacity = 0.6;
       };
@@ -995,37 +1023,56 @@
       });
     }
 
-    function populateDiagTickerSelect(data) {
+    function populateDiagTickerSelect(data, forceRefresh = false) {
       const select = document.getElementById('diag-ticker');
       if (!select) return;
-      select.innerHTML = '';
       const tickers = Array.isArray(data.meta?.tickers) ? [...data.meta.tickers] : [];
+      const tickersKey = tickers.join('|');
+      const tickersChanged = tickersKey !== diagState.tickersKey;
+      if (tickersChanged) {
+        diagState.tickersKey = tickersKey;
+        select.innerHTML = '';
+      }
       if (!tickers.length) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = '—';
-        select.appendChild(opt);
+        if (tickersChanged) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = '—';
+          select.appendChild(opt);
+        }
         setDiagImage('diag-img-error', 'diag-msg-error', '', '');
         setDiagImage('diag-img-calibration', 'diag-msg-calibration', '', '');
         setDiagImage('diag-img-weights', 'diag-msg-weights', '', '');
         return;
       }
-      tickers.sort().forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t;
-        opt.textContent = t;
-        select.appendChild(opt);
-      });
-      const init = select.value || tickers[0];
-      select.value = init;
-      setDiagImage('diag-img-error', 'diag-msg-error', init, 'error_decomposition.png');
-      setDiagImage('diag-img-calibration', 'diag-msg-calibration', init, 'confidence_calibration.png');
-      setDiagImage('diag-img-weights', 'diag-msg-weights', init, 'weight_optimization.png');
+      if (tickersChanged) {
+        tickers.sort().forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t;
+          opt.textContent = t;
+          select.appendChild(opt);
+        });
+      }
+      const lastTrade = Array.isArray(data.trade_events) && data.trade_events.length
+        ? data.trade_events[data.trade_events.length - 1].ticker
+        : '';
+      let preferred = diagState.selectedTicker || select.value || '';
+      if (!preferred || !tickers.includes(preferred)) {
+        preferred = (lastTrade && tickers.includes(lastTrade)) ? lastTrade : tickers[0];
+      }
+      select.value = preferred;
+      diagState.selectedTicker = select.value;
+      if (tickersChanged || forceRefresh) {
+        setDiagImage('diag-img-error', 'diag-msg-error', select.value, 'error_decomposition.png', { forceRefresh });
+        setDiagImage('diag-img-calibration', 'diag-msg-calibration', select.value, 'confidence_calibration.png', { forceRefresh });
+        setDiagImage('diag-img-weights', 'diag-msg-weights', select.value, 'weight_optimization.png', { forceRefresh });
+      }
       select.onchange = () => {
         const t = select.value;
-        setDiagImage('diag-img-error', 'diag-msg-error', t, 'error_decomposition.png');
-        setDiagImage('diag-img-calibration', 'diag-msg-calibration', t, 'confidence_calibration.png');
-        setDiagImage('diag-img-weights', 'diag-msg-weights', t, 'weight_optimization.png');
+        diagState.selectedTicker = t;
+        setDiagImage('diag-img-error', 'diag-msg-error', t, 'error_decomposition.png', { forceRefresh: true });
+        setDiagImage('diag-img-calibration', 'diag-msg-calibration', t, 'confidence_calibration.png', { forceRefresh: true });
+        setDiagImage('diag-img-weights', 'diag-msg-weights', t, 'weight_optimization.png', { forceRefresh: true });
       };
     }
 
@@ -1066,8 +1113,11 @@
       }
 
       window.__dashData = data;
+      const runId = data.meta?.run_id || 'n/a';
+      const runChanged = runId !== diagState.lastRunId;
+      diagState.lastRunId = runId;
       const scope = (data.meta?.scope && Array.isArray(data.meta.scope)) ? ` · Scope: ${data.meta.scope.join(', ')}` : '';
-      setText('run-meta', `Run ${data.meta?.run_id || 'n/a'}${scope}`);
+      setText('run-meta', `Run ${runId}${scope}`);
       setText('scope-meta', data.meta?.dashboard_version ? `Payload: ${data.meta.dashboard_version}` : '');
       setText('last-refresh', data.meta?.ts ? `Updated ${data.meta.ts}` : 'Awaiting data…');
 
@@ -1144,7 +1194,7 @@
       if (select && select.value) {
         renderTradesForTicker(data, select.value);
       }
-      populateDiagTickerSelect(data);
+      populateDiagTickerSelect(data, runChanged);
       renderModelParams(data);
       renderChecks(data);
     }
@@ -1184,6 +1234,7 @@
       const filter = document.getElementById('signals-filter');
       const btnClear = document.getElementById('btn-clear-filter');
       const wnd = document.getElementById('trade-window');
+      const diagTtl = document.getElementById('diag-ttl');
 
       if (btnRefresh) btnRefresh.addEventListener('click', refreshDashboard);
       if (filter) filter.addEventListener('input', () => renderSignals((window.__dashData || {}).signals || []));
@@ -1192,6 +1243,21 @@
         const sel = document.getElementById('trade-ticker');
         if (sel && sel.value) renderTradesForTicker(window.__dashData || {}, sel.value);
       });
+
+      if (diagTtl) {
+        const saved = Number(localStorage.getItem('diagMissingTtlMinutes'));
+        const initial = Number.isFinite(saved) && saved > 0 ? saved : Number(diagTtl.value || 30);
+        diagTtl.value = String(initial);
+        diagMissingTtlMs = initial * 60 * 1000;
+        diagTtl.addEventListener('change', () => {
+          const val = Number(diagTtl.value);
+          if (!Number.isFinite(val) || val <= 0) return;
+          diagMissingTtlMs = val * 60 * 1000;
+          localStorage.setItem('diagMissingTtlMinutes', String(val));
+          diagState.missing = {};
+          populateDiagTickerSelect(window.__dashData || {}, true);
+        });
+      }
 
       const disc = document.getElementById('ticker-discovery');
       const onlyActive = document.getElementById('only-active');
@@ -1209,7 +1275,7 @@
 
       let paused = false;
       let intervalId = null;
-      const REFRESH_MS = 5000;
+      const REFRESH_MS = 15000;
       const start = () => {
         if (intervalId) return;
         intervalId = setInterval(refreshDashboard, REFRESH_MS);

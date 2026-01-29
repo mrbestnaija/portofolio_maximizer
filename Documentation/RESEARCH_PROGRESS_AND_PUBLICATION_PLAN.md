@@ -7,8 +7,8 @@
 
 **Status**: Draft research log
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading
-**Last updated**: 2026-01-18
-**Current status (2026-01-07)**: Engineering is unblocked, brutal suite is GREEN, but recent-window MVS is still FAIL; use `Documentation/PROJECT_STATUS.md` as the canonical status source.
+**Last updated**: 2026-01-29
+**Current status (2026-01-29)**: Engineering is unblocked; Phase 7.8 complete; holdout audits at **2/20**; recent-window MVS still FAIL. Use `Documentation/PROJECT_STATUS.md` as the canonical status source.
 **Ensemble gate (2026-01-11)**: Research-profile RMSE gate on 27 effective audits, violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **DISABLE ensemble as default**. `config/forecasting_config.yml` has `ensemble.enabled: false`; BEST_SINGLE remains source of truth until lift is demonstrated over ≥20 effective audits.
 
 **Parameter learning policy (research runs)**: TS models must learn their hyperparameters from the data (SARIMAX `(p,d,q,P,D,Q,s,trend)`, SAMOSSA components/AR lags, GARCH `(p,q)`), with performance controlled via caps/compact search — no manual orders in evaluation claims. SARIMAX-X is enabled by default (exogenous features are logged via instrumentation).
@@ -23,6 +23,12 @@ It complements the implementation-focused documents in `Documentation/` (e.g. `Q
 
 - Reporting/observability: `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels from real run artifacts (no demo/fictitious payloads).
 - Data contract: dashboard payload now includes `positions`, `price_series`, and `trade_events` for analysis-grade trade visualization. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) and run scripts persist audit snapshots to `data/dashboard_audit.db` by default (`--persist-snapshot`).
+
+## Delta (2026-01-29)
+
+- Auto-trader now **resumes portfolio state by default** (`--resume`), enabling multi-session holdout audits without forced liquidation. Use `--no-resume` or `bash/reset_portfolio.sh` for clean starts.
+- Dashboard bridge filters trade events to the **latest run_id by default** and falls back to `trade_executions` when `portfolio_positions` is empty (useful when position snapshots are missing).
+- Ops automation: `bash/run_daily_trader.sh` + `run_daily_trader.bat` provide daily + intraday passes for evidence accumulation.
 
 ---
 

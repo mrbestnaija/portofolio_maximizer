@@ -1,9 +1,10 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified**: 2026-01-07
+**Last verified (focused)**: 2026-01-29
+**Last full-suite**: 2026-01-07
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-01-18
+**Document updated**: 2026-01-29
 
 **Metric definitions (canonical)**: `Documentation/METRICS_AND_EVALUATION.md` (implementations in `etl/database_manager.py`, `etl/portfolio_math.py`, `etl/statistical_tests.py`).
 
@@ -12,11 +13,12 @@
 ## Verified Now
 
 - Code compiles cleanly (`python -m compileall` on core packages)
-- Full pytest suite passes: **529 tests** (new chunked OHLCV test added; last full-suite run still green)
+- Full pytest suite passes: **529 tests** (last full-suite run 2026-01-07; still green)
 - Brutal harness completes end-to-end with quant-validation health GREEN (see `logs/brutal/results_20260103_220403/reports/final_report.md`)
 - LLM monitoring script no longer errors on missing `llm_db_manager` (see `scripts/monitor_llm_system.py`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
 - Auto-trader loop is bar-aware (`scripts/run_auto_trader.py` skips repeated cycles on the same bar; optional persisted bar-state)
+- Auto-trader supports **cross-session portfolio persistence** (`--resume` default; `PaperTradingEngine` loads/saves DB state, reset via `bash/reset_portfolio.sh` or `scripts/migrate_add_portfolio_state.py`)
 - Auto-trader parallel pipeline defaults ON for candidate prep + forecasts with GPU-first when available (`ENABLE_GPU_PARALLEL=1` + CUDA/torch present), otherwise CPU threads (override via `ENABLE_PARALLEL_TICKER_PROCESSING=0` / `ENABLE_PARALLEL_FORECASTS=0`); stress evidence in `logs/automation/stress_parallel_20260107_202403/comparison.json`
 - Dependency baseline now includes `torch==2.9.1` in `requirements.txt`; optional `requirements-ml.txt` (when present) retains CUDA extras (CuPy/NVIDIA libs) for full GPU stacks
 - TS signals use the horizon-end forecast target for `expected_return`/`target_price` (`models/time_series_signal_generator.py`)
@@ -25,7 +27,7 @@
 - Lifecycle exits treat `forecast_horizon` as bar count (intraday-safe) (`execution/paper_trading_engine.py`)
 - Run reporting uses run-local PF/WR scoped by `run_id` and preserves lifetime metrics separately (`etl/database_manager.py`, `scripts/run_auto_trader.py`)
 - DataSourceManager supports chunked OHLCV extraction via `chunk_size` / `DATA_SOURCE_CHUNK_SIZE`, with batching tested in `tests/etl/test_data_source_manager_chunking.py`
-- Live dashboard is real-time and non-fictitious: `visualizations/live_dashboard.html` polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; snapshots persist to `data/dashboard_audit.db` by default (`DASHBOARD_PERSIST=1`). Provenance checks are enforced via `scripts/audit_dashboard_payload_sources.py` (warns/fails when synthetic/demo contamination is detected or when trade source metadata is missing).
+- Live dashboard is real-time and non-fictitious: `visualizations/live_dashboard.html` polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels. Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators; snapshots persist to `data/dashboard_audit.db` by default (`DASHBOARD_PERSIST=1`). Provenance checks are enforced via `scripts/audit_dashboard_payload_sources.py` (warns/fails when synthetic/demo contamination is detected or when trade source metadata is missing). Trade events default to the **latest run_id**, and positions fall back to `trade_executions` when `portfolio_positions` is empty.
 - Portfolio impact checks include concentration caps + optional correlation warnings (when correlations can be computed from stored OHLCV)
 - Position lifecycle management supports stop/target/time exits (so HOLD signals can still close positions when risk controls trigger)
 - Trade execution telemetry persists mid-price + mid-slippage (bps) in `trade_executions` for bps-accurate cost priors
@@ -35,6 +37,16 @@
 ### Verification Commands (Repro)
 
 ```bash
+# Focused validations (2026-01-29)
+./simpleTrader_env/bin/python -m pytest -q \
+  tests/ai_llm/test_signal_validator.py \
+  tests/execution/test_paper_trading_engine.py
+
+./simpleTrader_env/bin/python -m pytest -q \
+  tests/forecasting/test_parameter_learning.py::TestParameterLearning::test_mssa_rl_learns_rank_from_variance \
+  tests/forecasting/test_parameter_learning.py::TestParameterLearning::test_mssa_rl_change_points_data_dependent \
+  tests/etl/test_time_series_forecaster.py::TestMSSARL
+
 # From repo root
 ./simpleTrader_env/bin/python -m compileall -q ai_llm analysis backtesting etl execution forcester_ts models monitoring recovery risk scripts tools
 

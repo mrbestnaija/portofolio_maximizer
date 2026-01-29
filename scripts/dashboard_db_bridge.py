@@ -201,7 +201,7 @@ def _latest_run_id(conn: sqlite3.Connection) -> Optional[str]:
 def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
     row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
     if not row or not row["d"]:
-        return {}
+        return _positions_from_executions(conn)
     latest = str(row["d"])
     # Backward-compatible: some environments/tests may have a minimal schema.
     query_full = """
@@ -273,6 +273,127 @@ def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
         if market_value is not None:
             out[t]["market_value"] = market_value
         out[t]["status"] = "ACTIVE" if shares else "FLAT"
+    return out
+
+
+def _latest_close(conn: sqlite3.Connection, ticker: str) -> Optional[float]:
+    row = _safe_fetchone(
+        conn,
+        """
+        SELECT close
+        FROM ohlcv_data
+        WHERE ticker = ?
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (ticker,),
+    )
+    if not row:
+        return None
+    try:
+        return float(row["close"])
+    except Exception:
+        return None
+
+
+def _positions_from_executions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    """Fallback position view when portfolio_positions is empty.
+
+    Reconstructs average cost by replaying executions in time order so partial
+    closes don't distort entry price. Uses latest close from ohlcv_data as
+    current price when available.
+    """
+    rows = _safe_fetchall(
+        conn,
+        """
+        SELECT ticker, action, shares, price, trade_date, created_at
+        FROM trade_executions
+        WHERE ticker IS NOT NULL AND action IS NOT NULL
+        ORDER BY COALESCE(created_at, trade_date) ASC, id ASC
+        """,
+    )
+    positions: Dict[str, Dict[str, Any]] = {}
+
+    def _apply_trade(state: Dict[str, Any], signed_qty: float, price: float) -> None:
+        pos = float(state.get("shares", 0.0) or 0.0)
+        avg = state.get("entry_price")
+        if avg is None:
+            avg = price
+
+        if pos == 0:
+            state["shares"] = signed_qty
+            state["entry_price"] = price
+            return
+
+        same_side = (pos > 0 and signed_qty > 0) or (pos < 0 and signed_qty < 0)
+        if same_side:
+            total = abs(pos) + abs(signed_qty)
+            if total > 0:
+                state["entry_price"] = (abs(pos) * avg + abs(signed_qty) * price) / total
+            state["shares"] = pos + signed_qty
+            return
+
+        if abs(signed_qty) < abs(pos):
+            state["shares"] = pos + signed_qty
+            return
+
+        if abs(signed_qty) == abs(pos):
+            state["shares"] = 0.0
+            state["entry_price"] = None
+            return
+
+        state["shares"] = pos + signed_qty
+        state["entry_price"] = price
+
+    for r in rows:
+        t = str(r["ticker"]).upper()
+        if not t:
+            continue
+        action = str(r["action"]).strip().upper()
+        if action not in {"BUY", "SELL"}:
+            continue
+        try:
+            qty = abs(float(r["shares"] or 0.0))
+        except Exception:
+            qty = 0.0
+        if qty <= 0:
+            continue
+        try:
+            price = float(r["price"] or 0.0)
+        except Exception:
+            price = 0.0
+        if price <= 0:
+            continue
+        state = positions.setdefault(t, {"shares": 0.0, "entry_price": None})
+        signed_qty = qty if action == "BUY" else -qty
+        _apply_trade(state, signed_qty, price)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for t, state in positions.items():
+        shares = float(state.get("shares") or 0.0)
+        if abs(shares) < 1e-6:
+            continue
+        entry = state.get("entry_price")
+        current_price = _latest_close(conn, t)
+        market_value = current_price * shares if current_price is not None else None
+        unreal_abs = None
+        unreal_pct = None
+        if current_price is not None and entry:
+            unreal_abs = (current_price - entry) * shares
+            unreal_pct = (current_price / entry - 1.0) * (1 if shares > 0 else -1)
+        out[t] = {
+            "shares": int(round(shares)),
+            "entry_price": entry,
+            "status": "ACTIVE",
+        }
+        if current_price is not None:
+            out[t]["current_price"] = current_price
+        if market_value is not None:
+            out[t]["market_value"] = market_value
+        if unreal_abs is not None:
+            out[t]["unrealized_pnl"] = unreal_abs
+        if unreal_pct is not None:
+            out[t]["unrealized_pnl_pct"] = unreal_pct
     return out
 
 
@@ -392,32 +513,48 @@ def _latest_signals(conn: sqlite3.Connection, tickers: Iterable[str], limit: int
 
 
 def _trade_events(conn: sqlite3.Connection, tickers: Iterable[str], limit: int) -> List[Dict[str, Any]]:
+    return _trade_events_filtered(conn, tickers, limit, latest_run_only=False, latest_run_id=None)
+
+
+def _trade_events_filtered(
+    conn: sqlite3.Connection,
+    tickers: Iterable[str],
+    limit: int,
+    *,
+    latest_run_only: bool,
+    latest_run_id: Optional[str],
+) -> List[Dict[str, Any]]:
     ticker_list = [str(t).upper() for t in tickers if str(t).strip()]
     if not ticker_list:
         return []
     placeholders = ",".join("?" for _ in ticker_list)
+    run_clause = ""
+    params_base: List[Any] = ticker_list + [int(limit)]
+    if latest_run_only and latest_run_id:
+        run_clause = " AND run_id = ? "
+        params_base = ticker_list + [latest_run_id, int(limit)]
     query_full = f"""
     SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
            data_source, execution_mode,
            barbell_bucket, barbell_multiplier, base_confidence, effective_confidence
     FROM trade_executions
-    WHERE UPPER(ticker) IN ({placeholders})
+    WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
     ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
     LIMIT ?
     """
     query_min = f"""
     SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps
     FROM trade_executions
-    WHERE UPPER(ticker) IN ({placeholders})
+    WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
     ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
     LIMIT ?
     """
     try:
-        rows = _safe_fetchall(conn, query_full, tuple(ticker_list + [int(limit)]))
+        rows = _safe_fetchall(conn, query_full, tuple(params_base))
     except sqlite3.OperationalError as exc:
         if "no such column" not in str(exc).lower():
             raise
-        rows = _safe_fetchall(conn, query_min, tuple(ticker_list + [int(limit)]))
+        rows = _safe_fetchall(conn, query_min, tuple(params_base))
     out: List[Dict[str, Any]] = []
     for r in rows:
         t = str(r["ticker"]).upper()
@@ -487,6 +624,16 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             row = None
+        elif "no such column" in str(exc).lower():
+            row = _safe_fetchone(
+                conn,
+                """
+                SELECT total_return, total_return_pct, win_rate, profit_factor, num_trades
+                FROM performance_metrics
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+            )
         else:
             raise
     if not row:
@@ -542,6 +689,7 @@ def build_dashboard_payload(
     lookback_days: int,
     max_signals: int,
     max_trades: int,
+    latest_run_only: bool = True,
 ) -> Dict[str, Any]:
     perf = _latest_performance(conn)
     run_id = _latest_run_id(conn) or "db_bridge"
@@ -590,7 +738,13 @@ def build_dashboard_payload(
         "equity": [],
         "equity_realized": [],
         "signals": _latest_signals(conn, tickers, max_signals),
-        "trade_events": _trade_events(conn, tickers, max_trades),
+        "trade_events": _trade_events_filtered(
+            conn,
+            tickers,
+            max_trades,
+            latest_run_only=latest_run_only,
+            latest_run_id=run_id if run_id else None,
+        ),
         "price_series": {t: _price_series(conn, t, lookback_days) for t in tickers},
         "model_params": model_params,
         "checks": checks,
@@ -732,6 +886,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Render once and exit.")
     parser.add_argument("--persist-snapshot", action="store_true", help="Persist each snapshot into an audit SQLite DB.")
     parser.add_argument("--audit-db-path", default=str(DEFAULT_AUDIT_DB_PATH), help="Audit DB path for snapshots (default: data/dashboard_audit.db).")
+    parser.add_argument("--latest-run-only", dest="latest_run_only", action="store_true", default=True, help="Show trade events only for the latest run_id (default: on).")
+    parser.add_argument("--all-runs", dest="latest_run_only", action="store_false", help="Include trade events from all runs (disables --latest-run-only).")
     return parser.parse_args()
 
 
@@ -759,6 +915,7 @@ def main() -> None:
                     lookback_days=int(args.lookback_days),
                     max_signals=int(args.max_signals),
                     max_trades=int(args.max_trades),
+                    latest_run_only=bool(args.latest_run_only),
                 )
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()

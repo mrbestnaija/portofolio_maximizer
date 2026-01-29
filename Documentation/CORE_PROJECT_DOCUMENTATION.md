@@ -20,6 +20,12 @@ This document is intentionally “policy-like”: it tells you what must be true
 - Canonical run→dashboard wiring is DB-backed: `scripts/dashboard_db_bridge.py` renders `visualizations/dashboard_data.json` from the SQLite trading DB and can persist audit snapshots to `data/dashboard_audit.db` (`--persist-snapshot`, enabled by default in bash orchestrators).
 - Payload provenance guardrails: `scripts/audit_dashboard_payload_sources.py` audits the latest dashboard JSON and (when enabled) the latest snapshot in `data/dashboard_audit.db` for synthetic/demo contamination and missing source fields.
 
+## Delta (2026-01-29)
+
+- Auto-trader supports **cross-session portfolio persistence**: `PaperTradingEngine(resume_from_db=True)` loads positions/cash from SQLite and `scripts/run_auto_trader.py` persists state at shutdown (`--resume` default, `--no-resume` for clean starts).
+- DB-backed dashboard now **falls back to trade executions** when `portfolio_positions` is empty and **filters trade events to the latest `run_id` by default** (opt-out via `--latest-run-only`).
+- Ops helpers: `bash/run_daily_trader.sh` (daily + intraday passes with resume), `bash/reset_portfolio.sh` (clear persisted state), and `scripts/migrate_add_portfolio_state.py` (add the new state tables for existing DBs).
+
 ---
 
 ## 1. Canonical Documents (Single Source of Truth)

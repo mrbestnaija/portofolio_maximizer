@@ -1529,6 +1529,13 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     show_default=False,
     help="Optional override for yfinance interval (e.g., 1h, 30m, 1d).",
 )
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    show_default=True,
+    help="Resume from persisted portfolio state if available. "
+         "Use --no-resume to start fresh with --initial-capital.",
+)
 def main(
     tickers: str,
     include_frontier_tickers: bool,
@@ -1544,6 +1551,7 @@ def main(
     llm_model: str,
     verbose: bool,
     yfinance_interval: Optional[str] = None,
+    resume: bool = True,
 ) -> None:
     """Entry point for the automated profit engine."""
     run_started_at = datetime.now(UTC)
@@ -1720,7 +1728,10 @@ def main(
 
     data_validator = DataValidator()
     preprocessor = Preprocessor()
-    trading_engine = PaperTradingEngine(initial_capital=initial_capital)
+    trading_engine = PaperTradingEngine(
+        initial_capital=initial_capital,
+        resume_from_db=resume,
+    )
     # Ensure the WSL SQLite mirror (if used) is synchronized back to the
     # Windows-mount database even when this script exits without an explicit
     # close (e.g., Ctrl+C, exceptions).
@@ -1762,7 +1773,7 @@ def main(
         "time_series": routing_cfg.get("time_series") or {},
     }
     signal_router = SignalRouter(config=router_config, llm_generator=llm_generator)
-    equity_points: list[Dict[str, Any]] = [{"t": "start", "v": initial_capital}]
+    equity_points: list[Dict[str, Any]] = [{"t": "start", "v": trading_engine.portfolio.total_value}]
     executed_signals: list[Dict[str, Any]] = []
     quality_records: list[Dict[str, Any]] = []
     last_dataset_id: Optional[str] = None
@@ -2450,6 +2461,13 @@ def main(
         logger.info("Wrote DB provenance artifact: %s", artifact)
     except Exception:
         logger.debug("Failed to emit DB provenance artifact", exc_info=True)
+
+    # Persist portfolio state for cross-session continuity
+    try:
+        trading_engine.save_state()
+        logger.info("Portfolio state persisted for next session")
+    except Exception:
+        logger.error("Failed to persist portfolio state", exc_info=True)
 
     # Close to flush + sync any WSL mirror back to the canonical DB path.
     try:

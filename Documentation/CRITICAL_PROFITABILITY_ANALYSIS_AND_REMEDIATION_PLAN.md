@@ -17,6 +17,12 @@
 
 ---
 
+## New Tooling (2026-01-29)
+
+- **Profitability proof validator**: `scripts/validate_profitability_proof.py`
+- **Requirements config**: `config/profitability_proof_requirements.yml`
+- Use these to enforce minimum trade counts, win-rate sanity, data-source coverage, and audit-trail completeness before reporting profitability.
+
 ## Phase 1: Database Cleanup & Audit Trail
 
 ### 1.1 Identify and Tag Contaminated Data

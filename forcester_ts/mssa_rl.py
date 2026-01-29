@@ -143,6 +143,8 @@ class MSSARLForecaster:
         self._change_point_density: float = 0.0
         self._recent_change_point_days: Optional[int] = None
         self._freq_hint: Optional[str] = None
+        self._last_observed_value: Optional[float] = None
+        self._last_reconstruction_error: Optional[float] = None
         self._use_gpu = bool(self.config.use_gpu and _load_cupy())
         if self.config.use_gpu and not self._use_gpu:
             # CuPy is optional; when unavailable we fall back to CPU silently.
@@ -241,6 +243,11 @@ class MSSARLForecaster:
         if len(cleaned) < self.config.window_length + 5:
             raise ValueError("Series length insufficient for mSSA analysis")
 
+        try:
+            self._last_observed_value = float(cleaned.iloc[-1])
+        except Exception:
+            self._last_observed_value = None
+
         freq_hint = None
         try:
             freq_hint = series.attrs.get("_pm_freq_hint")
@@ -264,6 +271,10 @@ class MSSARLForecaster:
         self._reconstruction = pd.Series(recon, index=cleaned.index)
         residuals = cleaned - self._reconstruction
         self._baseline_variance = float(residuals.var(ddof=1))
+        try:
+            self._last_reconstruction_error = float(abs(residuals.iloc[-1]))
+        except Exception:
+            self._last_reconstruction_error = None
 
         change_points = self._cusum_change_points(residuals)
         self._change_points = change_points
@@ -302,12 +313,32 @@ class MSSARLForecaster:
         if not self._fitted or self._reconstruction is None:
             raise ValueError("Model must be fitted before forecasting")
 
-        last_value = self._reconstruction.iloc[-1]
-        baseline_forecast = np.full(steps, last_value)
+        last_recon = float(self._reconstruction.iloc[-1])
+        last_obs = self._last_observed_value
+        base_value = last_obs if last_obs is not None else last_recon
+
+        if (
+            self._last_reconstruction_error is not None
+            and self._baseline_variance is not None
+            and np.isfinite(self._baseline_variance)
+            and self._change_point_density < 0.005
+        ):
+            scale = float(np.sqrt(max(self._baseline_variance, 0.0)))
+            if scale > 0 and self._last_reconstruction_error <= 1.5 * scale:
+                base_value = 0.85 * base_value + 0.15 * last_recon
+
+        baseline_forecast = np.full(steps, base_value)
 
         if self._change_points is not None and len(self._change_points) > 0:
-            decay = np.linspace(0.9, 0.7, num=steps)
-            baseline_forecast = baseline_forecast * decay
+            apply_decay = False
+            if self._recent_change_point_days is not None:
+                if self._recent_change_point_days <= max(1, self.config.window_length // 4):
+                    apply_decay = True
+            if self._change_point_density < 0.1:
+                apply_decay = False
+            if apply_decay:
+                decay = np.linspace(0.998, 0.99, num=steps)
+                baseline_forecast = baseline_forecast * decay
 
         freq = (
             self._freq_hint

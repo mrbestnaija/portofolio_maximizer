@@ -24,6 +24,9 @@ For Windows hosts, the recommended operational equivalent to cron is:
 - `schedule_backfill.bat` defaults to `auto_trader_core` and invokes WSL:
   - `bash/production_cron.sh auto_trader_core`
 
+Optional daily automation:
+- `bash/run_daily_trader.sh` (WSL) or `run_daily_trader.bat` (Windows Task Scheduler) runs a **daily + intraday** pass with `--resume` to keep positions across sessions.
+
 This keeps time-series evidence building (core tickers + gating) reproducible on Windows while still using the Linux-style cron multiplexer as the single entry point.
 
 ## 1. Design Principles

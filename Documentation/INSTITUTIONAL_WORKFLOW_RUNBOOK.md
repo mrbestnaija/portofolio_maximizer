@@ -60,6 +60,8 @@ Use when you want forecasting → signals → paper execution → dashboard outp
 bash bash/run_auto_trader.sh
 ```
 
+Auto-trader **resumes persisted positions by default**. Use `NO_RESUME=1 bash bash/run_auto_trader.sh` (or `--no-resume` when calling `scripts/run_auto_trader.py`) to start fresh. To wipe persisted state, run `bash/reset_portfolio.sh`. Existing DBs should run the one-time migration: `python scripts/migrate_add_portfolio_state.py`.
+
 Expected artifacts:
 - Execution logs: `logs/automation/*`
 - Dashboard JSON/PNG: `visualizations/dashboard_data.json`, `visualizations/dashboard_snapshot.png`
@@ -90,8 +92,8 @@ Open:
 **Payload expectations (for full trade/price/PnL panels):**
 - `meta.tickers`, `signals[]` (ticker, action, confidence, expected_return, source, quality)
 - `price_series` (per-ticker close series)
-- `trade_events` (BUY/SELL events + realized PnL fields)
-- `positions` (open positions, if any)
+- `trade_events` (BUY/SELL events + realized PnL fields; **latest run_id by default**)
+- `positions` (open positions, if any; falls back to trade executions when `portfolio_positions` is empty)
 
 If the dashboard shows `Price series: 0` or `Trades: 0`, the run did not emit those fields (or no trades were executed).
 

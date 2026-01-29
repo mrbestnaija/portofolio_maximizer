@@ -5,13 +5,15 @@
 **Regime Detection**: ENABLED
 **Optimized Weights**: ACTIVE (MODERATE_TRENDING)
 
+> **Update (2026-01-29)**: Phase 7.8 has been completed; see `Documentation/PHASE_7.8_RESULTS.md`. Current audit accumulation is **2/20**.
+
 ---
 
 ## Executive Summary
 
 ✅ **Validation Successful** - Phase 7.7 optimized weights correctly applied
 ⚠️ **Partial Coverage** - Only 1/5 folds used optimized weights (20%)
-🎯 **Phase 7.8 Required** - Remaining regimes need optimization to reduce 81% regression
+🎯 **Phase 7.8 Required** - Remaining regimes need optimization to reduce 81% regression (now completed; see Phase 7.8 results)
 
 **Key Finding**: MODERATE_TRENDING regime used optimized 90% SAMOSSA weights as expected, but HIGH_VOL_TRENDING and CRISIS regimes (80% of folds) still suffer from default weight regression.
 
@@ -399,7 +401,7 @@ python scripts/run_etl_pipeline.py \
 - Commits: 3543e9f, 2108e96, dd445be, 4fece2b
 - Optimized weights: `data/phase7.7_optimized_weights.json`
 
-**Effective Audits**: 1/20 (this validation counts as 1 audit)
+**Effective Audits**: 1/20 (this validation counts as 1 audit; current overall: 2/20)
 
 ---
 
@@ -413,10 +415,10 @@ python scripts/run_etl_pipeline.py \
 
 🎯 **Phase 7.8 ready**: System configured and validated, ready for extended optimization to cover all 6 regimes.
 
-**Overall Assessment**: Phase 7.7 infrastructure working correctly. Proceed with Phase 7.8 manual execution to optimize remaining regimes and achieve <25% overall RMSE regression target.
+**Overall Assessment**: Phase 7.7 infrastructure working correctly. Proceed with Phase 7.8 manual execution to optimize remaining regimes and achieve <25% overall RMSE regression target (historical; Phase 7.8 now complete).
 
 ---
 
 **Prepared by**: Claude Sonnet 4.5
 **Date**: 2026-01-26
-**Status**: ✅ Validation Complete - Phase 7.8 Ready
+**Status**: ✅ Validation Complete - Phase 7.8 Ready (historical; Phase 7.8 now complete)

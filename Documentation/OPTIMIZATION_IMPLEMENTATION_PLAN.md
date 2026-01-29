@@ -10,7 +10,7 @@
 **Portfolio Maximizer v45 - Professional Standards Upgrade**
 
 **Date**: October 14, 2025
-**Status**: 🟢 UNBLOCKED – 2026-01-07 status aligns with `Documentation/PROJECT_STATUS.md`
+**Status**: 🟢 UNBLOCKED – 2026-01-29 status aligns with `Documentation/PROJECT_STATUS.md`
 **Priority**: **CRITICAL** - Required for institutional-grade production
 
 ---
@@ -25,6 +25,12 @@
 - Live dashboard is now real-time (polls `visualizations/dashboard_data.json` every 5s) and renders trade-level visualization (price + entry/exit markers + realized PnL) from emitted run artifacts.
 - Dashboard payload includes `positions`, `price_series`, `trade_events` and is rendered from the SQLite DB via `scripts/dashboard_db_bridge.py` (DB→JSON), with audit snapshots persisted by default to `data/dashboard_audit.db` (`--persist-snapshot` via bash orchestrators).
 - Forecast audit dedupe fixed in `scripts/check_forecast_audits.py` to ensure dataset-window monitoring uses “latest evidence wins”.
+
+## Delta (2026-01-29)
+
+- Auto-trader now **resumes portfolio state by default** (`--resume`), with `--no-resume` / `bash/reset_portfolio.sh` for clean starts; existing DBs require `python scripts/migrate_add_portfolio_state.py`.
+- Dashboard bridge filters trade events to the **latest run_id by default** and falls back to `trade_executions` when `portfolio_positions` is empty.
+- Ops helpers added: `bash/run_daily_trader.sh` (daily + intraday passes) and `run_daily_trader.bat` (Windows Task Scheduler).
 
 ## 📊 EXECUTIVE SUMMARY
 

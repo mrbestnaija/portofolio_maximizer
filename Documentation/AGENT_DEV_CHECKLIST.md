@@ -13,10 +13,20 @@
 > - If unsure about a result, rerun under the correct runtime or mark it as untrusted.
 > - Use cache artifacts (e.g., `logs/forecast_audits_cache/latest_summary.json`) as ground truth for reported decisions.
 
+> **Commit/Push Gate (Mandatory)**
+> - **Do not commit or push** to `origin/master` unless **all implementation tests pass** and **success criteria are explicitly met**.
+> - Always report the exact test commands and outputs used to justify a commit/push decision.
+> - If tests are skipped or fail, **block the commit/push** and document the reason.
+
 ## Delta (2026-01-18)
 
 - Live dashboard must not fabricate results: `visualizations/live_dashboard.html` only renders from `visualizations/dashboard_data.json` (polled every 5s) and shows empty states when missing.
 - Canonical dashboard payload is DB-backed: `scripts/dashboard_db_bridge.py` renders `visualizations/dashboard_data.json` from the SQLite trading DB and can persist audit snapshots to `data/dashboard_audit.db` (`--persist-snapshot`, enabled by default in bash orchestrators); provenance can be audited via `scripts/audit_dashboard_payload_sources.py`.
+
+## Delta (2026-01-29)
+
+- Auto-trader now **resumes persisted positions by default** (`--resume`) and saves portfolio state to SQLite; reset with `bash/reset_portfolio.sh` and migrate existing DBs with `python scripts/migrate_add_portfolio_state.py`.
+- Dashboard trade events are **filtered to the latest run_id by default**, and positions fall back to `trade_executions` when `portfolio_positions` is empty.
 
 > **Time-Series Parameter Learning Policy (Mandatory)**
 > - SARIMAX parameters (trend + `(p,d,q,P,D,Q,s)`) must be **learned from data** (AIC search); manual orders are unsupported.
@@ -28,16 +38,20 @@
 > **NAV & Barbell Integration:** For TS-first, NAV-centric barbell architecture (safe vs risk buckets, capped LLM fallback, future options sleeve), align with `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` instead of introducing new allocation logic or unmanaged leverage.
 > **Quant Validation & MTM:** For quant gates and liquidation, treat `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`, `Documentation/QUANT_VALIDATION_AUTOMATION_TODO.md`, and `Documentation/MTM_AND_LIQUIDATION_IMPLEMENTATION_PLAN.md` as the canonical references (plus their helper scripts in `scripts/`), rather than embedding ad-hoc thresholds or pricing rules in new code.
 
-## Project Status (Updated: 2026-01-25)
+## Project Status (Updated: 2026-01-29)
 
-### Current Phase: 7.6 - Regime Holdout Audits & Tuning (Feature Flag OFF by default)
+### Current Phase: 7.9 - Holdout Audit Accumulation (2/20 complete)
 
-#### Phase 7.5 Summary
+#### Phase 7.5 Summary (Historical)
 - **Implementation**: Integrated RegimeDetector into TimeSeriesForecaster for adaptive model selection
 - **Regime Types**: 6 classifications (LIQUID_RANGEBOUND, MODERATE_TRENDING, HIGH_VOL_TRENDING, CRISIS, MODERATE_MIXED, MODERATE_RANGEBOUND)
 - **Detection Features**: 8 metrics (volatility, trend strength, Hurst exponent, ADF test, skewness, kurtosis, vol_of_vol, mean_return)
 - **Feature Flag**: regime_detection.enabled (default: false; enable only for controlled validation/audits)
 - **Safety**: Graceful degradation on detection failures, falls back to Phase 7.4 static weights
+
+#### Phase 7.8 Status
+- **Status**: ✅ Complete (3/6 regimes optimized; SAMOSSA dominance confirmed)
+- **Audits**: 2/20 holdout audits complete (Phase 7.9 in progress)
 
 #### Integration Fixes (3 Critical Issues Resolved)
 1. **Signal Generator Config** (models/time_series_signal_generator.py): Added regime_detection extraction from forecasting_config.yml

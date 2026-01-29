@@ -152,7 +152,8 @@ class PaperTradingEngine:
                  transaction_cost_pct: float = 0.0,
                  db_path: str = None,
                  database_manager: Optional[DatabaseManager] = None,
-                 signal_validator: Optional[SignalValidator] = None):
+                 signal_validator: Optional[SignalValidator] = None,
+                 resume_from_db: bool = False):
         """
         Initialize paper trading engine.
 
@@ -161,6 +162,7 @@ class PaperTradingEngine:
             slippage_pct: Slippage percentage (0.1% default)
             transaction_cost_pct: Transaction cost percentage (0.1% default)
             db_path: Path to database for persistence
+            resume_from_db: If True, load persisted positions from database
         """
         self.initial_capital = initial_capital
         self.slippage_pct = slippage_pct
@@ -172,14 +174,41 @@ class PaperTradingEngine:
         self._lob_config: Optional[LOBConfig] = None
         self._lob_enabled: Optional[bool] = None
 
-        # Initialize portfolio
-        self.portfolio = Portfolio(cash=initial_capital, total_value=initial_capital)
+        # Initialize portfolio (with optional resume from DB)
+        loaded = False
+        if resume_from_db:
+            state = self.db_manager.load_portfolio_state()
+            if state is not None:
+                self.initial_capital = state["initial_capital"]
+                self.portfolio = Portfolio(
+                    cash=state["cash"],
+                    positions=state["positions"],
+                    entry_prices=state["entry_prices"],
+                    entry_timestamps=state["entry_timestamps"],
+                    stop_losses=state["stop_losses"],
+                    target_prices=state["target_prices"],
+                    max_holding_days=state["max_holding_days"],
+                    total_value=state["cash"],
+                )
+                # Recalculate total value using entry prices as proxy
+                self.portfolio.update_value(state["entry_prices"])
+                loaded = True
+                logger.info(
+                    "Resumed portfolio from DB: %d positions, cash=$%.2f, "
+                    "total_value=$%.2f",
+                    len(state["positions"]),
+                    state["cash"],
+                    self.portfolio.total_value,
+                )
+
+        if not loaded:
+            self.portfolio = Portfolio(cash=initial_capital, total_value=initial_capital)
 
         # Trade history
         self.trades: list[Trade] = []
 
         logger.info(
-            f"Paper Trading Engine initialized with ${initial_capital:,.2f} "
+            f"Paper Trading Engine initialized with ${self.initial_capital:,.2f} "
             f"(slippage={slippage_pct:.2%}, costs={transaction_cost_pct:.2%})"
         )
 
@@ -918,6 +947,19 @@ class PaperTradingEngine:
         """Refresh portfolio valuation using the latest market prices."""
         self.portfolio.update_value(price_map)
         return self.portfolio.total_value
+
+    def save_state(self) -> None:
+        """Persist current portfolio state to database for cross-session continuity."""
+        self.db_manager.save_portfolio_state(
+            cash=self.portfolio.cash,
+            initial_capital=self.initial_capital,
+            positions=self.portfolio.positions,
+            entry_prices=self.portfolio.entry_prices,
+            entry_timestamps=self.portfolio.entry_timestamps,
+            stop_losses=self.portfolio.stop_losses,
+            target_prices=self.portfolio.target_prices,
+            max_holding_days=self.portfolio.max_holding_days,
+        )
 
     def _evaluate_exit_reason(
         self,
