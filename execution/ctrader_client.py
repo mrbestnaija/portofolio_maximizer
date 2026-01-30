@@ -191,8 +191,24 @@ class CTraderClientConfig:
 
         overrides = overrides or {}
 
+        env = overrides.get("environment", environment)
+        env_lower = str(env).lower()
+        use_live = env_lower == "live"
+
+        def _env_first(*keys: str) -> Optional[str]:
+            for key in keys:
+                value = _env_value(key)
+                if value:
+                    return value
+            return None
+
         username = (
             overrides.get("username")
+            or (
+                _env_first("CTRADER_LIVE_USERNAME", "CTRADER_LIVE_EMAIL")
+                if use_live
+                else _env_first("CTRADER_DEMO_USERNAME", "CTRADER_DEMO_EMAIL")
+            )
             or _env_value("USERNAME_CTRADER")
             or _env_value("CTRADER_USERNAME")
         )
@@ -201,21 +217,43 @@ class CTraderClientConfig:
 
         password = (
             overrides.get("password")
+            or (
+                _env_first("CTRADER_LIVE_PASSWORD")
+                if use_live
+                else _env_first("CTRADER_DEMO_PASSWORD")
+            )
             or _env_value("PASSWORD_CTRADER")
             or _env_value("CTRADER_PASSWORD")
         )
         application_id = (
             overrides.get("application_id")
+            or (
+                _env_first("CTRADER_LIVE_APPLICATION_ID", "CTRADER_LIVE_APP_ID")
+                if use_live
+                else _env_first("CTRADER_DEMO_APPLICATION_ID", "CTRADER_DEMO_APP_ID")
+            )
             or _env_value("APPLICATION_NAME_CTRADER")
             or _env_value("CTRADER_APPLICATION_ID")
             or _env_value("CTRADER_APP_ID")
         )
-        application_secret = overrides.get("application_secret") or _env_value(
-            "CTRADER_APPLICATION_SECRET"
+        application_secret = (
+            overrides.get("application_secret")
+            or (
+                _env_first("CTRADER_LIVE_APPLICATION_SECRET")
+                if use_live
+                else _env_first("CTRADER_DEMO_APPLICATION_SECRET")
+            )
+            or _env_value("CTRADER_APPLICATION_SECRET")
         )
 
-        account_id_raw = overrides.get("account_id") or _env_value(
-            "CTRADER_ACCOUNT_ID"
+        account_id_raw = (
+            overrides.get("account_id")
+            or (
+                _env_first("CTRADER_LIVE_ACCOUNT_ID")
+                if use_live
+                else _env_first("CTRADER_DEMO_ACCOUNT_ID")
+            )
+            or _env_value("CTRADER_ACCOUNT_ID")
         )
         account_id = None
         if account_id_raw:
@@ -237,8 +275,6 @@ class CTraderClientConfig:
                 "Missing cTrader credentials. Ensure the following environment "
                 f"variables exist: {', '.join(missing)}"
             )
-
-        env = overrides.get("environment", environment)
 
         return cls(
             username=username,

@@ -42,15 +42,37 @@ def main(argv: List[str]) -> int:
     # cTrader (live execution readiness)
     user_ok, user_line = _report_group(
         "ctrader_username",
-        ["USERNAME_CTRADER", "CTRADER_USERNAME", "EMAIL_CTRADER", "CTRADER_EMAIL"],
+        [
+            "CTRADER_DEMO_USERNAME",
+            "CTRADER_DEMO_EMAIL",
+            "CTRADER_LIVE_USERNAME",
+            "CTRADER_LIVE_EMAIL",
+            "USERNAME_CTRADER",
+            "CTRADER_USERNAME",
+            "EMAIL_CTRADER",
+            "CTRADER_EMAIL",
+        ],
     )
     pwd_ok, pwd_line = _report_group(
         "ctrader_password",
-        ["PASSWORD_CTRADER", "CTRADER_PASSWORD"],
+        [
+            "CTRADER_DEMO_PASSWORD",
+            "CTRADER_LIVE_PASSWORD",
+            "PASSWORD_CTRADER",
+            "CTRADER_PASSWORD",
+        ],
     )
     app_ok, app_line = _report_group(
         "ctrader_application_id",
-        ["APPLICATION_NAME_CTRADER", "CTRADER_APPLICATION_ID", "CTRADER_APP_ID"],
+        [
+            "CTRADER_DEMO_APPLICATION_ID",
+            "CTRADER_DEMO_APP_ID",
+            "CTRADER_LIVE_APPLICATION_ID",
+            "CTRADER_LIVE_APP_ID",
+            "APPLICATION_NAME_CTRADER",
+            "CTRADER_APPLICATION_ID",
+            "CTRADER_APP_ID",
+        ],
     )
     lines.extend([user_line, pwd_line, app_line])
 

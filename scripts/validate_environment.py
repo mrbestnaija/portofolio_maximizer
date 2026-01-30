@@ -32,9 +32,31 @@ if load_dotenv:
 def validate_ctrader_credentials():
     """Validate that cTrader credentials are available via env/.env without printing secrets."""
     required_any = {
-        "username": ["USERNAME_CTRADER", "CTRADER_USERNAME", "EMAIL_CTRADER", "CTRADER_EMAIL"],
-        "password": ["PASSWORD_CTRADER", "CTRADER_PASSWORD"],
-        "application_id": ["APPLICATION_NAME_CTRADER", "CTRADER_APPLICATION_ID", "CTRADER_APP_ID"],
+        "username": [
+            "CTRADER_DEMO_USERNAME",
+            "CTRADER_DEMO_EMAIL",
+            "CTRADER_LIVE_USERNAME",
+            "CTRADER_LIVE_EMAIL",
+            "USERNAME_CTRADER",
+            "CTRADER_USERNAME",
+            "EMAIL_CTRADER",
+            "CTRADER_EMAIL",
+        ],
+        "password": [
+            "CTRADER_DEMO_PASSWORD",
+            "CTRADER_LIVE_PASSWORD",
+            "PASSWORD_CTRADER",
+            "CTRADER_PASSWORD",
+        ],
+        "application_id": [
+            "CTRADER_DEMO_APPLICATION_ID",
+            "CTRADER_DEMO_APP_ID",
+            "CTRADER_LIVE_APPLICATION_ID",
+            "CTRADER_LIVE_APP_ID",
+            "APPLICATION_NAME_CTRADER",
+            "CTRADER_APPLICATION_ID",
+            "CTRADER_APP_ID",
+        ],
     }
 
     missing_groups = []
