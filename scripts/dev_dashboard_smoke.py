@@ -32,7 +32,10 @@ def _check_static_files() -> None:
     sample_path = ROOT / "visualizations" / "dashboard_data.sample.json"
 
     html = html_path.read_text(encoding="utf-8")
-    if "fetch('dashboard_data.json?_=' + Date.now())" not in html:
+    if (
+        "fetch('dashboard_data.json?_=' + Date.now())" not in html
+        and "fetch(cacheBust(DATA_SOURCE)" not in html
+    ):
         raise SystemExit(
             "FAIL: live_dashboard.html is not configured to poll dashboard_data.json with cache busting."
         )

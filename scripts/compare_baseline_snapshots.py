@@ -65,9 +65,9 @@ def _file_sha_map(snapshot: Snapshot, category: str) -> Dict[str, str]:
         if not dst or not sha:
             continue
         try:
-            rel = str(Path(dst).resolve().relative_to(snapshot.path.resolve()))
+            rel = Path(dst).resolve().relative_to(snapshot.path.resolve()).as_posix()
         except Exception:
-            rel = str(dst)
+            rel = Path(dst).as_posix()
         mapping[rel] = str(sha)
     return mapping
 

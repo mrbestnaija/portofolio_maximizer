@@ -63,43 +63,31 @@ class GARCHForecaster:
         if returns.isna().all():
             raise ValueError("Returns series cannot be all NaNs")
 
-        returns_clean = returns.dropna()
+        returns_clean = returns.replace([np.inf, -np.inf], np.nan).dropna()
         if returns_clean.empty:
             raise ValueError("Returns series required for GARCH is empty after dropna")
         returns_clean = returns_clean.astype(float)
+
+        # Guard against numerical overflow by clipping extreme tails.
+        abs_returns = returns_clean.abs()
+        abs_returns = abs_returns[np.isfinite(abs_returns)]
+        if abs_returns.empty:
+            raise ValueError("Returns series required for GARCH is empty after sanitization")
+        try:
+            p995 = float(np.nanpercentile(abs_returns, 99.5))
+        except Exception:
+            p995 = float(abs_returns.max())
+        med = float(np.nanmedian(abs_returns)) if len(abs_returns) else 0.0
+        cap = max(p995, med * 10.0) if med > 0 else p995
+        if np.isfinite(cap) and cap > 0:
+            returns_clean = returns_clean.clip(-cap, cap)
 
         backend = getattr(self, "backend", "arch")
         if backend != "arch":
             # Lightweight EWMA fallback when `arch` isn't installed. This keeps
             # the forecasting stack functional in minimal environments and for
             # unit tests while still reacting to recent volatility.
-            lam = 0.94
-            squared = np.square(returns_clean.to_numpy(dtype=float, copy=False))
-            baseline_var = float(np.var(squared)) if squared.size else 0.0
-            variance = float(np.var(returns_clean.to_numpy(dtype=float, copy=False), ddof=0))
-            if not np.isfinite(variance) or variance <= 0.0:
-                variance = max(1e-12, baseline_var)
-
-            ewma_var = variance
-            for r2 in squared:
-                ewma_var = lam * ewma_var + (1.0 - lam) * float(r2)
-            ewma_var = float(max(ewma_var, 1e-12))
-
-            self._fallback_state = {
-                "lambda": lam,
-                "unconditional_variance": variance,
-                "last_variance": ewma_var,
-                "mean": float(returns_clean.mean()),
-                "n_obs": int(len(returns_clean)),
-            }
-            # Sentinel so downstream callers treat the model as "fitted".
-            self.fitted_model = True
-            logger.info(
-                "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g)",
-                lam,
-                ewma_var,
-            )
-            return self
+            return self._fit_ewma(returns_clean)
 
         # Scale returns to improve GARCH convergence (recommended by arch library).
         mean_abs = returns_clean.abs().mean()
@@ -143,13 +131,46 @@ class GARCHForecaster:
         self.model = best_model
         self.fitted_model = best_fit
         if self.fitted_model is None:
-            raise ValueError("GARCH auto_select failed to fit any model; verify `arch` install and inputs.")
+            logger.warning(
+                "GARCH auto_select failed to fit any model; falling back to EWMA volatility."
+            )
+            self.backend = "ewma"
+            return self._fit_ewma(returns_clean)
         logger.info(
             "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s)",
             self.p,
             self.q,
             self.vol,
             self.dist,
+        )
+        return self
+
+    def _fit_ewma(self, returns_clean: pd.Series) -> "GARCHForecaster":
+        lam = 0.94
+        squared = np.square(returns_clean.to_numpy(dtype=float, copy=False))
+        baseline_var = float(np.var(squared)) if squared.size else 0.0
+        variance = float(np.var(returns_clean.to_numpy(dtype=float, copy=False), ddof=0))
+        if not np.isfinite(variance) or variance <= 0.0:
+            variance = max(1e-12, baseline_var)
+
+        ewma_var = variance
+        for r2 in squared:
+            ewma_var = lam * ewma_var + (1.0 - lam) * float(r2)
+        ewma_var = float(max(ewma_var, 1e-12))
+
+        self._fallback_state = {
+            "lambda": lam,
+            "unconditional_variance": variance,
+            "last_variance": ewma_var,
+            "mean": float(returns_clean.mean()),
+            "n_obs": int(len(returns_clean)),
+        }
+        # Sentinel so downstream callers treat the model as "fitted".
+        self.fitted_model = True
+        logger.info(
+            "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g)",
+            lam,
+            ewma_var,
         )
         return self
 

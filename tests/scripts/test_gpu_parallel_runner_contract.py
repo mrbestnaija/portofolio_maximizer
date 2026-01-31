@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import shutil
 from pathlib import Path
 
 import json
@@ -17,6 +18,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "bash" / "run_gpu_parallel.sh"
+
+if os.name == "nt":
+    pytest.skip("GPU parallel runner relies on bash; skip on native Windows.", allow_module_level=True)
+
+BASH_BIN = shutil.which("bash")
+if BASH_BIN is None:
+    pytest.skip("bash not available; skipping GPU parallel runner contract tests.", allow_module_level=True)
 
 
 def _run_runner(env: dict) -> str:

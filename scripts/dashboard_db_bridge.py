@@ -198,6 +198,96 @@ def _latest_run_id(conn: sqlite3.Connection) -> Optional[str]:
     return str(rid) if rid else None
 
 
+def _load_db_metadata(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    try:
+        cur = conn.execute("SELECT value FROM db_metadata WHERE key = ? LIMIT 1", (key,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        val = row["value"] if isinstance(row, sqlite3.Row) else row[0]
+        return str(val) if val is not None else None
+    except Exception:
+        return None
+
+
+def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
+    ohlcv_sources: Dict[str, int] = {}
+    trade_sources: Dict[str, int] = {}
+    synthetic_dataset_ids: List[str] = []
+
+    try:
+        cur = conn.execute("SELECT source, COUNT(*) AS n FROM ohlcv_data GROUP BY source")
+        for row in cur.fetchall():
+            src = str(row["source"] or "") if isinstance(row, sqlite3.Row) else str(row[0] or "")
+            if src:
+                ohlcv_sources[src] = int(row["n"] if isinstance(row, sqlite3.Row) else row[1] or 0)
+    except Exception:
+        ohlcv_sources = {}
+
+    try:
+        cur = conn.execute("SELECT data_source, COUNT(*) AS n FROM trade_executions GROUP BY data_source")
+        for row in cur.fetchall():
+            src = str(row["data_source"] or "") if isinstance(row, sqlite3.Row) else str(row[0] or "")
+            if src:
+                trade_sources[src] = int(row["n"] if isinstance(row, sqlite3.Row) else row[1] or 0)
+    except Exception:
+        trade_sources = {}
+
+    try:
+        cur = conn.execute(
+            """
+            SELECT DISTINCT synthetic_dataset_id
+            FROM trade_executions
+            WHERE synthetic_dataset_id IS NOT NULL AND synthetic_dataset_id != ''
+            ORDER BY synthetic_dataset_id
+            """
+        )
+        for row in cur.fetchall():
+            val = row["synthetic_dataset_id"] if isinstance(row, sqlite3.Row) else row[0]
+            if val:
+                synthetic_dataset_ids.append(str(val))
+    except Exception:
+        synthetic_dataset_ids = []
+
+    last_run_provenance = None
+    raw = _load_db_metadata(conn, "last_run_provenance")
+    if raw:
+        try:
+            last_run_provenance = json.loads(raw)
+        except Exception:
+            last_run_provenance = raw
+
+    has_synthetic = bool(
+        ohlcv_sources.get("synthetic")
+        or trade_sources.get("synthetic")
+        or synthetic_dataset_ids
+    )
+    origin = "synthetic" if has_synthetic else "live"
+    if has_synthetic and any(src for src in ohlcv_sources if src and src != "synthetic"):
+        origin = "mixed"
+
+    data_source = None
+    execution_mode = None
+    dataset_id = None
+    if isinstance(last_run_provenance, dict):
+        data_source = last_run_provenance.get("data_source")
+        execution_mode = last_run_provenance.get("execution_mode")
+        dataset_id = last_run_provenance.get("synthetic_dataset_id") or last_run_provenance.get("dataset_id")
+    if not dataset_id and synthetic_dataset_ids:
+        dataset_id = synthetic_dataset_ids[-1]
+
+    return {
+        "origin": origin,
+        "data_source": data_source,
+        "execution_mode": execution_mode,
+        "dataset_id": dataset_id,
+        "synthetic_dataset_ids": synthetic_dataset_ids,
+        "ohlcv_sources": ohlcv_sources,
+        "trade_sources": trade_sources,
+        "last_run_provenance": last_run_provenance,
+    }
+
+
 def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
     row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
     if not row or not row["d"]:
@@ -697,6 +787,7 @@ def build_dashboard_payload(
     bucket_map = _barbell_bucket_map()
     model_params = _model_params(conn)
     checks = _data_checks(conn)
+    provenance = _provenance_summary(conn)
 
     qual_records: List[Dict[str, Any]] = []
     for t in tickers:
@@ -715,6 +806,11 @@ def build_dashboard_payload(
             "cycles": None,
             "llm_enabled": None,
             "dashboard_version": "db_bridge_v1",
+            "data_origin": provenance.get("origin"),
+            "dataset_id": provenance.get("dataset_id"),
+            "data_source": provenance.get("data_source"),
+            "execution_mode": provenance.get("execution_mode"),
+            "provenance": provenance,
             "scope": [
                 "Close",
                 "Entry",
@@ -886,8 +982,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Render once and exit.")
     parser.add_argument("--persist-snapshot", action="store_true", help="Persist each snapshot into an audit SQLite DB.")
     parser.add_argument("--audit-db-path", default=str(DEFAULT_AUDIT_DB_PATH), help="Audit DB path for snapshots (default: data/dashboard_audit.db).")
-    parser.add_argument("--latest-run-only", dest="latest_run_only", action="store_true", default=True, help="Show trade events only for the latest run_id (default: on).")
-    parser.add_argument("--all-runs", dest="latest_run_only", action="store_false", help="Include trade events from all runs (disables --latest-run-only).")
+    runs_group = parser.add_mutually_exclusive_group()
+    runs_group.add_argument(
+        "--latest-run-only",
+        dest="latest_run_only",
+        action="store_true",
+        help="Show trade events only for the latest run_id (default: on).",
+    )
+    runs_group.add_argument(
+        "--all-runs",
+        dest="latest_run_only",
+        action="store_false",
+        help="Include trade events from all runs (disables --latest-run-only).",
+    )
+    parser.set_defaults(latest_run_only=True)
     return parser.parse_args()
 
 

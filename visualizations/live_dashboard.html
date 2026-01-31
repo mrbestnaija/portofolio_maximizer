@@ -122,6 +122,7 @@
       justify-content: space-between;
     }
     .toolbar-left, .toolbar-right { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .toolbar-right select { min-width: 140px; }
     .tabs { display: inline-flex; gap: 6px; background: rgba(0,0,0,0.18); padding: 6px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.08); }
     .tab { padding: 7px 10px; border-radius: 999px; border: 1px solid transparent; background: transparent; }
     .tab.active { border-color: rgba(37,194,160,0.35); background: rgba(37,194,160,0.12); }
@@ -170,6 +171,46 @@
       input { min-width: 140px; }
       select { min-width: 140px; }
     }
+    @media (max-width: 720px) {
+      .hero { padding: 18px 18px 14px; }
+      header { flex-direction: column; align-items: flex-start; }
+      header > div:last-child { align-items: flex-start; width: 100%; }
+      h1 { font-size: 20px; }
+      .layout { padding: 16px 18px 24px; }
+      .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+      .toolbar-left, .toolbar-right { width: 100%; justify-content: space-between; }
+      .grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+      .card { padding: 14px; }
+      .metric { font-size: 22px; }
+      .scroll-card { max-height: 520px; }
+      .row-controls { flex-direction: column; align-items: stretch; }
+      .row-controls > * { width: 100%; }
+      .tabs { width: 100%; justify-content: space-between; }
+      .kpi-row { width: 100%; margin-left: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .kpi { min-width: 0; padding: 8px; }
+      .universe-item { flex-direction: column; align-items: flex-start; }
+      .universe-right { justify-content: flex-start; }
+      .diag-grid { grid-template-columns: 1fr; }
+      .diag-figure img { max-height: 220px; object-fit: contain; }
+      .pane canvas { height: 220px; }
+    }
+    @media (max-width: 480px) {
+      h1 { font-size: 18px; }
+      .subtitle { font-size: 12px; }
+      .grid { grid-template-columns: 1fr; }
+      canvas { height: 200px; }
+      th, td { font-size: 12px; padding: 6px 4px; }
+      select, input, button { width: 100%; min-width: 0; }
+      .capsule-row { width: 100%; }
+      .pill, .chip { font-size: 11px; }
+      .scroll-table { overflow-x: auto; }
+      table { min-width: 520px; }
+      .kpi-row { grid-template-columns: 1fr; }
+      .kpi { padding: 8px; }
+      .tabs { flex-wrap: wrap; }
+      .tab { flex: 1 1 100%; text-align: center; }
+      .pane canvas { height: 180px; }
+    }
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(37,194,160,0.35); } 70% { box-shadow: 0 0 0 10px rgba(37,194,160,0); } 100% { box-shadow: 0 0 0 0 rgba(37,194,160,0); } }
   </style>
 </head>
@@ -184,6 +225,9 @@
         <div class="capsule-row">
           <span class="chip"><span class="refresh-dot"></span> <span id="last-refresh">Waiting…</span></span>
           <span class="pill" id="run-meta">Awaiting data…</span>
+          <span class="pill neutral" id="origin-meta">Origin: --</span>
+          <span class="pill neutral" id="dataset-meta">Dataset: --</span>
+          <span class="pill neutral" id="source-meta">Source: --</span>
         </div>
         <div class="subtitle" id="strategy-meta"></div>
       </div>
@@ -195,7 +239,21 @@
         <span class="pill neutral" id="data-health">Data: --</span>
       </div>
       <div class="toolbar-right">
-        <span class="subtitle" id="scope-meta"></span>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <span class="subtitle" id="scope-meta"></span>
+          <select id="tz-select" aria-label="Timezone">
+            <option value="local">Local</option>
+            <option value="UTC">UTC</option>
+            <option value="America/New_York">America/New_York</option>
+            <option value="America/Chicago">America/Chicago</option>
+            <option value="America/Denver">America/Denver</option>
+            <option value="America/Los_Angeles">America/Los_Angeles</option>
+            <option value="Europe/London">Europe/London</option>
+            <option value="Europe/Zurich">Europe/Zurich</option>
+            <option value="Asia/Singapore">Asia/Singapore</option>
+            <option value="Asia/Tokyo">Asia/Tokyo</option>
+          </select>
+        </div>
       </div>
     </div>
   </div>
@@ -239,6 +297,15 @@
             <span class="badge" id="payload-prices">Price series: 0</span>
           </div>
           <div class="subtitle" id="payload-warning" style="margin-top:8px; color: var(--danger); display:none;">Missing price_series/trade_events; add them to dashboard_data.json.</div>
+        </div>
+        <div class="card">
+          <h3>Exit Readiness</h3>
+          <div class="subtitle">Cross-session persistence + exit logic are required to move from paper to real trading behavior.</div>
+          <div class="mini" style="margin-top:8px;">• Positions persist across sessions (resume closes positions over multiple runs).</div>
+          <div class="mini">• Exit checks run each cycle (stop/target/time) — see `[EXIT_CHECK]` logs.</div>
+          <div class="mini">• Fresh market data is required to trigger closes; rerun with new bars.</div>
+          <div class="mini">• Proof mode (`--proof-mode`) forces round trips for profitability validation.</div>
+          <div class="mini">• Reference: `Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md`</div>
         </div>
         <div class="card">
           <h3>Model Diagnostics</h3>
@@ -439,13 +506,61 @@
   <footer>Drop fresh data into visualizations/dashboard_data.json and reload.</footer>
 
   <script>
-    async function loadData() {
+    const DEFAULT_DATA_SOURCE = 'dashboard_data.json';
+    const DATA_SOURCE = DEFAULT_DATA_SOURCE;
+    const DATA_CACHE_TTL_MS = 4000;
+    const DATA_STALE_TTL_MS = 60000;
+    const loadState = {
+      lastFetchAt: 0,
+      lastSuccessAt: 0,
+      lastError: null,
+      lastSource: DATA_SOURCE,
+    };
+    let lastData = null;
+    let activeController = null;
+    let activeRequestId = 0;
+
+    function cacheBust(url) {
+      const joiner = url.includes('?') ? '&' : '?';
+      return `${url}${joiner}_=${Date.now()}`;
+    }
+
+    async function loadData({ force = false } = {}) {
+      const now = Date.now();
+      if (!force && lastData && (now - loadState.lastSuccessAt) < DATA_CACHE_TTL_MS && loadState.lastSource === DATA_SOURCE) {
+        return lastData;
+      }
+      if (activeController) activeController.abort();
+      const requestId = ++activeRequestId;
+      const controller = new AbortController();
+      activeController = controller;
+      loadState.lastFetchAt = now;
+      loadState.lastSource = DATA_SOURCE;
+      loadState.lastError = null;
       try {
-        const resp = await fetch('dashboard_data.json?_=' + Date.now());
-        if (!resp.ok) throw new Error('No data file found');
-        return await resp.json();
+        const resp = await fetch(cacheBust(DATA_SOURCE), { cache: 'no-store', signal: controller.signal });
+        if (!resp.ok) {
+          loadState.lastError = resp.status === 404 ? 'missing' : `http_${resp.status}`;
+          return null;
+        }
+        const text = await resp.text();
+        let parsed = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch (err) {
+          loadState.lastError = 'parse_error';
+          return lastData;
+        }
+        if (requestId !== activeRequestId) return lastData;
+        lastData = parsed;
+        loadState.lastSuccessAt = now;
+        return parsed;
       } catch (e) {
-        return null;
+        if (e.name === 'AbortError') return lastData;
+        loadState.lastError = e.message || 'fetch_error';
+        return lastData;
+      } finally {
+        if (controller === activeController) activeController = null;
       }
     }
 
@@ -460,6 +575,42 @@
     function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
     function formatPct(v) { return `${(v * 100).toFixed(2)}%`; }
     function formatUsd(v) { return `$${v.toFixed(2)}`; }
+    function getTzSetting() {
+      const stored = localStorage.getItem('dashboardTimezone');
+      return stored || 'local';
+    }
+    function setTzSetting(tz) {
+      localStorage.setItem('dashboardTimezone', tz || 'local');
+    }
+    function formatTimestamp(ts) {
+      if (!ts) return '';
+      const dt = new Date(ts);
+      if (!Number.isFinite(dt.getTime())) return String(ts);
+      const tz = getTzSetting();
+      const opts = {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      };
+      if (tz && tz !== 'local') opts.timeZone = tz;
+      return new Intl.DateTimeFormat(undefined, opts).format(dt);
+    }
+    function parseTimestamp(ts) {
+      if (!ts) return null;
+      const parsed = Date.parse(ts);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    function formatAge(ms) {
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s < 60) return `${s}s`;
+      const m = Math.round(s / 60);
+      if (m < 60) return `${m}m`;
+      const h = Math.round(m / 60);
+      return `${h}h`;
+    }
     function setPillState(el, val) {
       if (!el) return;
       el.classList.remove('success', 'danger', 'neutral');
@@ -522,7 +673,7 @@
           <td>${(sig.expected_return * 100).toFixed(2)}%</td>
           <td>${sig.source}</td>
           <td>${q}</td>
-          <td>${sig.timestamp || ''}</td>
+          <td>${formatTimestamp(sig.timestamp)}</td>
         `;
       body.appendChild(tr);
     });
@@ -1078,9 +1229,19 @@
 
     function renderDashboard(data) {
       if (!data) {
-        setText('run-meta', 'dashboard_data.json not found');
-        setText('scope-meta', '');
-        setText('data-health', 'Data: --');
+        setText('run-meta', `Source unavailable: ${loadState.lastSource}`);
+        setText('scope-meta', `Source: ${loadState.lastSource}`);
+        const healthEl = document.getElementById('data-health');
+        if (healthEl) {
+          const errText = loadState.lastError === 'missing'
+            ? 'Data: Missing'
+            : loadState.lastError ? 'Data: Error' : 'Data: --';
+          healthEl.textContent = errText;
+          setPillState(healthEl, loadState.lastError ? -1 : 0);
+        }
+        setText('origin-meta', 'Origin: --');
+        setText('dataset-meta', 'Dataset: --');
+        setText('source-meta', 'Source: --');
         setText('strategy-meta', '');
         setText('last-refresh', 'Waiting…');
         setText('pnl-abs', '$0.00');
@@ -1117,9 +1278,25 @@
       const runChanged = runId !== diagState.lastRunId;
       diagState.lastRunId = runId;
       const scope = (data.meta?.scope && Array.isArray(data.meta.scope)) ? ` · Scope: ${data.meta.scope.join(', ')}` : '';
-      setText('run-meta', `Run ${runId}${scope}`);
-      setText('scope-meta', data.meta?.dashboard_version ? `Payload: ${data.meta.dashboard_version}` : '');
-      setText('last-refresh', data.meta?.ts ? `Updated ${data.meta.ts}` : 'Awaiting data…');
+      setText('run-meta', `Run: ${runId}${scope}`);
+      const payloadLabel = data.meta?.dashboard_version ? `Payload: ${data.meta.dashboard_version}` : '';
+      setText('scope-meta', payloadLabel);
+      const dataTs = parseTimestamp(data.meta?.ts);
+      const ageMs = Number.isFinite(dataTs) ? (Date.now() - dataTs) : (loadState.lastSuccessAt ? (Date.now() - loadState.lastSuccessAt) : null);
+      const ageLabel = Number.isFinite(ageMs) ? ` (${formatAge(ageMs)} old)` : '';
+      const lastRefreshTs = data.meta?.ts ? formatTimestamp(data.meta.ts) : (loadState.lastSuccessAt ? formatTimestamp(loadState.lastSuccessAt) : '');
+      setText('last-refresh', data.meta?.ts ? `Updated ${lastRefreshTs}${ageLabel}` : (loadState.lastSuccessAt ? `Fetched ${lastRefreshTs}${ageLabel}` : 'Awaiting data…'));
+
+      const meta = data.meta || {};
+      const prov = meta.provenance || data.provenance || {};
+      const origin = meta.data_origin || prov.origin || meta.origin || '--';
+      const datasetId = meta.dataset_id || meta.synthetic_dataset_id || prov.dataset_id || prov.synthetic_dataset_id || (Array.isArray(prov.synthetic_dataset_ids) ? prov.synthetic_dataset_ids[0] : null);
+      const dataSource = meta.data_source || prov.data_source || (prov.last_run_provenance ? prov.last_run_provenance.data_source : null);
+      const executionMode = meta.execution_mode || prov.execution_mode || (prov.last_run_provenance ? prov.last_run_provenance.execution_mode : null);
+      setText('origin-meta', `Origin: ${origin || '--'}`);
+      setText('dataset-meta', `Dataset: ${datasetId || '--'}`);
+      const sourceParts = [dataSource, executionMode].filter(Boolean);
+      setText('source-meta', `Source: ${sourceParts.length ? sourceParts.join(' / ') : '--'}`);
 
       const strat = data.meta?.strategy || {};
       const params = strat && strat.params ? strat.params : {};
@@ -1176,9 +1353,28 @@
       setText('payload-prices', `Price series: ${priceSeriesCount}`);
       const healthEl = document.getElementById('data-health');
       const healthScore = (tradesCount > 0 ? 1 : 0) + (priceSeriesCount > 0 ? 1 : 0) + (signalsCount > 0 ? 1 : 0);
+      const stale = Number.isFinite(ageMs) && ageMs > DATA_STALE_TTL_MS;
       if (healthEl) {
-        healthEl.textContent = healthScore >= 3 ? 'Data: OK' : healthScore === 2 ? 'Data: Partial' : 'Data: Missing';
-        setPillState(healthEl, healthScore >= 3 ? 1 : healthScore === 2 ? 0 : -1);
+        let healthText = '';
+        let healthVal = 0;
+        if (loadState.lastError) {
+          healthText = `Data: Error${ageLabel}`;
+          healthVal = -1;
+        } else if (stale) {
+          healthText = `Data: Stale${ageLabel}`;
+          healthVal = -1;
+        } else if (healthScore >= 3) {
+          healthText = `Data: OK${ageLabel}`;
+          healthVal = 1;
+        } else if (healthScore === 2) {
+          healthText = `Data: Partial${ageLabel}`;
+          healthVal = 0;
+        } else {
+          healthText = `Data: Missing${ageLabel}`;
+          healthVal = -1;
+        }
+        healthEl.textContent = healthText;
+        setPillState(healthEl, healthVal);
       }
       const warnNeeded = tradesCount === 0 || priceSeriesCount === 0;
       document.getElementById('payload-warning').style.display = warnNeeded ? 'block' : 'none';
@@ -1200,14 +1396,22 @@
     }
 
     let refreshBusy = false;
-    async function refreshDashboard() {
-      if (refreshBusy) return;
+    let refreshPending = false;
+    async function refreshDashboard(options = {}) {
+      if (refreshBusy) {
+        refreshPending = true;
+        return;
+      }
       refreshBusy = true;
       try {
-        const data = await loadData();
+        const data = await loadData(options);
         renderDashboard(data);
       } finally {
         refreshBusy = false;
+        if (refreshPending) {
+          refreshPending = false;
+          refreshDashboard({ force: true });
+        }
       }
     }
 
@@ -1235,8 +1439,9 @@
       const btnClear = document.getElementById('btn-clear-filter');
       const wnd = document.getElementById('trade-window');
       const diagTtl = document.getElementById('diag-ttl');
+      const tzSelect = document.getElementById('tz-select');
 
-      if (btnRefresh) btnRefresh.addEventListener('click', refreshDashboard);
+      if (btnRefresh) btnRefresh.addEventListener('click', () => refreshDashboard({ force: true }));
       if (filter) filter.addEventListener('input', () => renderSignals((window.__dashData || {}).signals || []));
       if (btnClear) btnClear.addEventListener('click', () => { if (filter) filter.value = ''; renderSignals((window.__dashData || {}).signals || []); });
       if (wnd) wnd.addEventListener('change', () => {
@@ -1259,6 +1464,14 @@
         });
       }
 
+      if (tzSelect) {
+        tzSelect.value = getTzSetting();
+        tzSelect.addEventListener('change', () => {
+          setTzSetting(tzSelect.value);
+          renderDashboard(window.__dashData || null);
+        });
+      }
+
       const disc = document.getElementById('ticker-discovery');
       const onlyActive = document.getElementById('only-active');
       const onlyActionable = document.getElementById('only-actionable');
@@ -1274,8 +1487,9 @@
       if (tabEquity) tabEquity.addEventListener('click', () => setActiveTab('equity'));
 
       let paused = false;
+      let autoPaused = false;
       let intervalId = null;
-      const REFRESH_MS = 15000;
+      const REFRESH_MS = 5000;
       const start = () => {
         if (intervalId) return;
         intervalId = setInterval(refreshDashboard, REFRESH_MS);
@@ -1293,6 +1507,22 @@
           if (paused) stop(); else start();
         });
       }
+      const handleVisibility = () => {
+        if (document.hidden) {
+          autoPaused = true;
+          stop();
+          return;
+        }
+        if (autoPaused && !paused) {
+          autoPaused = false;
+          start();
+          refreshDashboard({ force: true });
+        }
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('focus', () => {
+        if (!document.hidden && !paused) refreshDashboard({ force: true });
+      });
       start();
     }
 

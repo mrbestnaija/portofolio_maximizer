@@ -50,6 +50,17 @@ def migrate(db_path: Path = DB_PATH):
         )
     """)
 
+    # Add bar-tracking columns (safe to run multiple times).
+    for col, col_type in [
+        ("holding_bars", "INTEGER DEFAULT 0"),
+        ("entry_bar_timestamp", "TEXT"),
+        ("last_bar_timestamp", "TEXT"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE portfolio_state ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     conn.commit()
     conn.close()
     print("[OK] portfolio_state and portfolio_cash_state tables created/verified")

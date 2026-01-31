@@ -312,10 +312,45 @@ The execution core is sound. The zero-closed-trade situation stems from:
 the AAPL TAKE_PROFIT (target 257.92, only 0.08% below entry) should trigger
 on the next run if AAPL drops at all.
 
-**Structural fix**: Implement Proof Mode (`--proof-mode`) with:
+**Structural fix**: Proof Mode (`--proof-mode`) is now implemented with:
 - `max_holding_bars = 5` (daily) / `6` (intraday) to force TIME_EXIT
 - ATR-based stops/targets instead of forecast-price targets
 - Flatten-before-reverse to prevent position stacking
 
 This creates guaranteed round trips for profitability validation without
 changing the production trading strategy.
+
+---
+
+## Implementation Status (2026-01-29)
+
+All features implemented and verified:
+
+| Feature | File | Status |
+|---------|------|--------|
+| `[EXIT_CHECK]` diagnostic log | `execution/paper_trading_engine.py` | Implemented |
+| `--proof-mode` CLI flag | `scripts/run_auto_trader.py` | Implemented |
+| ATR-based stops/targets | `scripts/run_auto_trader.py` (_execute_signal) | Implemented |
+| Flatten-before-reverse | `execution/paper_trading_engine.py` (execute_signal) | Implemented |
+| holding_bars persistence | `etl/database_manager.py` + migration | Implemented |
+| entry_bar/last_bar timestamps | `etl/database_manager.py` + migration | Implemented |
+
+### Verification Results
+
+**First closed trade achieved:**
+```
+AAPL BUY 1@256.59 PnL=-0.2975 (-0.12%) held=0d
+[EXIT_CHECK] AAPL: shares=-1, entry=256.29, last=256.44, stop=263.81(+2.87%),
+  target=246.62(-3.83%), max_hold=5, bars_held=5, exit=TIME_EXIT
+```
+
+- TIME_EXIT fired correctly at `bars_held >= max_holding_days` (5 >= 5)
+- Forced exit converted SELL signal to BUY (correct for short cover)
+- Realized P&L calculated: `(entry - cover) * shares = (256.29 - 256.59) * 1 = -0.30`
+- Portfolio state saved with 0 positions (fully flat)
+
+### Bug Found and Fixed During Implementation
+
+**sqlite3.Row `.get()` access**: The `load_portfolio_state` method used `.get()`
+for new columns, but `sqlite3.Row` objects don't support `.get()` despite having
+`keys()`. Fixed by using `try/except KeyError` bracket access.

@@ -12,6 +12,7 @@
 > - After file moves/cleanups, show before/after listings to prove the change.
 > - If unsure about a result, rerun under the correct runtime or mark it as untrusted.
 > - Use cache artifacts (e.g., `logs/forecast_audits_cache/latest_summary.json`) as ground truth for reported decisions.
+> - **Persistent findings log**: Every implementation must record its findings for persistence/reference/audit/research. At minimum, append a dated summary to `Documentation/SESSION_COMPLETE_SUMMARY.md` or another approved audit artifact in `logs/` or `Documentation/`.
 
 > **Commit/Push Gate (Mandatory)**
 > - **Do not commit or push** to `origin/master` unless **all implementation tests pass** and **success criteria are explicitly met**.

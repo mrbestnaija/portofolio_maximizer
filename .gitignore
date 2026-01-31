@@ -16,7 +16,7 @@ database_credentials.json
 
 # Docker secrets directory (SECURITY: Contains API keys)
 secrets/
-*.txt
+# *.txt # Comment out if you want to track secret files
 
 # Virtual environments
 portfolio_env/
@@ -125,6 +125,10 @@ data/testing/*
 visualizations/*.png
 visualizations/training/*.png
 visualizations/quant_validation/
+visualizations/ensemble_diagnostics/
+
+# Test visualization artifacts
+tests/visualizations/
 
 # Temporary files
 tmp/
@@ -178,12 +182,18 @@ logs/automation/*
 logs/signals/*
 logs/*.pid
 logs/**/*.pid
+logs/brutal/
+logs/audit_sprint/
+logs/phase7.8/
 
 # Generated dashboard artifacts
 visualizations/dashboard_data.json
 visualizations/dashboard_data*.json
 data/dashboard_audit.db
 data/dashboard_audit.db-*
+
+# Baseline snapshot artifacts (generated, large)
+reports/baselines/*/artifacts/
 
 # Large/packed artifacts (keep out of repo)
 *.tar

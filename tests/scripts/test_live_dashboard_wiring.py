@@ -11,7 +11,10 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
     assert "T-3" not in html
 
     # Must poll the real artifact via cache-busted query param.
-    assert "fetch('dashboard_data.json?_=' + Date.now())" in html
+    assert (
+        "fetch('dashboard_data.json?_=' + Date.now())" in html
+        or "fetch(cacheBust(DATA_SOURCE)" in html
+    )
     assert "setInterval(refreshDashboard" in html
 
     # Must not fabricate data when missing.

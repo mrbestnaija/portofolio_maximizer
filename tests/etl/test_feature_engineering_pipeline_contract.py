@@ -163,7 +163,6 @@ def test_preprocessor_rejects_unknown_missing_method() -> None:
         preprocessor.handle_missing(frame, method="unknown")
 
 
-@pytest.mark.xfail(reason="TODO: feature engineering pipeline blocks not implemented yet.")
 def test_contract_requires_missingness_and_drift_features() -> None:
     builder = TimeSeriesFeatureBuilder()
     frame = _make_price_frame("AAPL", periods=220)

@@ -53,3 +53,27 @@ def test_fallback_to_generic_keys_when_env_specific_missing(monkeypatch):
     assert cfg.password == "generic_pass"
     assert cfg.application_id == "generic_app"
     assert cfg.account_id == 999
+
+
+def test_account_id_strips_whitespace(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setenv("CTRADER_DEMO_USERNAME", "demo_user")
+    monkeypatch.setenv("CTRADER_DEMO_PASSWORD", "demo_pass")
+    monkeypatch.setenv("CTRADER_DEMO_APPLICATION_ID", "demo_app")
+    monkeypatch.setenv("CTRADER_DEMO_ACCOUNT_ID", " 456 ")
+
+    cfg = CTraderClientConfig.from_env(environment="demo")
+
+    assert cfg.account_id == 456
+
+
+def test_account_id_invalid_returns_none(monkeypatch):
+    _set_common(monkeypatch)
+    monkeypatch.setenv("CTRADER_DEMO_USERNAME", "demo_user")
+    monkeypatch.setenv("CTRADER_DEMO_PASSWORD", "demo_pass")
+    monkeypatch.setenv("CTRADER_DEMO_APPLICATION_ID", "demo_app")
+    monkeypatch.setenv("CTRADER_DEMO_ACCOUNT_ID", "not-an-int")
+
+    cfg = CTraderClientConfig.from_env(environment="demo")
+
+    assert cfg.account_id is None
