@@ -22,7 +22,7 @@ Responsibilities
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
 import logging
@@ -446,7 +446,7 @@ class OrderManager:
 
         self.db_manager.save_trade_execution(
             ticker=request.ticker,
-            trade_date=datetime.utcnow(),
+            trade_date=datetime.now(timezone.utc),
             action=request.action,
             shares=placement.filled_volume,
             price=executed_price,

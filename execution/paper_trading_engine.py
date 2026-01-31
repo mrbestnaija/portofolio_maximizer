@@ -19,13 +19,14 @@ Per AGENT_INSTRUCTION.md:
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import pandas as pd
 
 from ai_llm.signal_validator import SignalValidator
 from etl.database_manager import DatabaseManager
+from etl.timestamp_utils import ensure_utc, utc_now, ensure_utc_index
 from execution.lob_simulator import LOBConfig, simulate_market_order_fill
 
 # Phase 7.9: Risk mode configuration for position sizing
@@ -190,6 +191,13 @@ class PaperTradingEngine:
                     max_holding_days=state["max_holding_days"],
                     total_value=state["cash"],
                 )
+                # Restore bar-tracking state for TIME_EXIT continuity
+                if state.get("holding_bars"):
+                    self.portfolio.holding_bars.update(state["holding_bars"])
+                if state.get("entry_bar_timestamps"):
+                    self.portfolio.entry_bar_timestamps.update(state["entry_bar_timestamps"])
+                if state.get("last_bar_timestamps"):
+                    self.portfolio.last_bar_timestamps.update(state["last_bar_timestamps"])
                 # Recalculate total value using entry prices as proxy
                 self.portfolio.update_value(state["entry_prices"])
                 loaded = True
@@ -214,13 +222,15 @@ class PaperTradingEngine:
 
     def execute_signal(self,
                       signal: Dict[str, Any],
-                      market_data: pd.DataFrame) -> ExecutionResult:
+                      market_data: pd.DataFrame,
+                      proof_mode: bool = False) -> ExecutionResult:
         """
         Execute trading signal with full validation and simulation.
 
         Args:
             signal: LLM signal dict with action, confidence, reasoning
             market_data: Recent OHLCV data for validation
+            proof_mode: If True, enforce flatten-before-reverse (close only)
 
         Returns:
             ExecutionResult with execution details
@@ -236,18 +246,18 @@ class PaperTradingEngine:
 
         # Prefer signal-provided timestamps when replaying historical windows so
         # trade_date reflects the simulated session instead of "now".
-        trade_timestamp = datetime.now()
+        trade_timestamp = utc_now()
         signal_timestamp = signal.get("signal_timestamp") or signal.get("timestamp")
         if signal_timestamp is not None:
             if isinstance(signal_timestamp, datetime):
-                trade_timestamp = signal_timestamp
+                trade_timestamp = ensure_utc(signal_timestamp) or utc_now()
             else:
                 try:
                     parsed = pd.to_datetime(signal_timestamp, errors="coerce")
                     if parsed is not pd.NaT:
-                        trade_timestamp = parsed.to_pydatetime()
+                        trade_timestamp = ensure_utc(parsed) or utc_now()
                 except Exception:
-                    trade_timestamp = datetime.now()
+                    trade_timestamp = utc_now()
 
         # Best-effort current price from the market window.
         current_price = None
@@ -269,7 +279,7 @@ class PaperTradingEngine:
             if isinstance(market_data, pd.DataFrame) and not market_data.empty:
                 idx = market_data.index
                 if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
-                    bar_timestamp = pd.Timestamp(idx[-1]).to_pydatetime()
+                    bar_timestamp = ensure_utc(pd.Timestamp(idx[-1]))
         except Exception:
             bar_timestamp = None
 
@@ -299,6 +309,23 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     signal["confidence"] = 0.9
                 forced_exit_shares = abs(int(current_position))
+
+        # Exit eligibility diagnostic log for every open position.
+        if current_position != 0 and current_price:
+            _stop = self.portfolio.stop_losses.get(ticker)
+            _target = self.portfolio.target_prices.get(ticker)
+            _max_hold = self.portfolio.max_holding_days.get(ticker)
+            _bars = self.portfolio.holding_bars.get(ticker, 0)
+            _entry = self.portfolio.entry_prices.get(ticker, 0)
+            _stop_dist = f"{(_stop - current_price) / current_price * 100:+.2f}%" if _stop else "N/A"
+            _tgt_dist = f"{(_target - current_price) / current_price * 100:+.2f}%" if _target else "N/A"
+            logger.info(
+                "[EXIT_CHECK] %s: shares=%d, entry=%.2f, last=%.2f, "
+                "stop=%s(%s), target=%s(%s), max_hold=%s, bars_held=%s, exit=%s",
+                ticker, current_position, _entry,
+                current_price, _stop, _stop_dist, _target, _tgt_dist,
+                _max_hold, _bars, forced_exit_reason or "NONE",
+            )
 
         # Portfolio snapshot passed into the validator for correlation/concentration checks.
         portfolio_snapshot = {
@@ -389,6 +416,18 @@ class PaperTradingEngine:
             position_size = self._calculate_position_size(
                 signal, validation.confidence_score, market_data, current_position
             )
+
+        # Proof-mode: flatten-before-reverse -- cap closing trades at the
+        # existing position size so we pass through flat before switching sides.
+        if proof_mode and forced_exit_shares is None and current_position != 0:
+            closing_long = action == "SELL" and current_position > 0
+            closing_short = action == "BUY" and current_position < 0
+            if closing_long or closing_short:
+                position_size = min(position_size, abs(current_position))
+                logger.info(
+                    "[PROOF_MODE] Flatten-before-reverse: capping %s %s to %d shares (close only)",
+                    action, ticker, position_size,
+                )
 
         if position_size == 0:
             return ExecutionResult(
@@ -959,6 +998,9 @@ class PaperTradingEngine:
             stop_losses=self.portfolio.stop_losses,
             target_prices=self.portfolio.target_prices,
             max_holding_days=self.portfolio.max_holding_days,
+            holding_bars=self.portfolio.holding_bars,
+            entry_bar_timestamps=self.portfolio.entry_bar_timestamps,
+            last_bar_timestamps=self.portfolio.last_bar_timestamps,
         )
 
     def _evaluate_exit_reason(
@@ -1021,7 +1063,7 @@ class PaperTradingEngine:
         if bar_timestamp is not None:
             current_bar_ts = bar_timestamp
         elif isinstance(market_data, pd.DataFrame) and not market_data.empty and isinstance(market_data.index, pd.DatetimeIndex):
-            current_bar_ts = pd.Timestamp(market_data.index[-1]).to_pydatetime()
+            current_bar_ts = ensure_utc(pd.Timestamp(market_data.index[-1]))
 
         # Bootstrap bar timestamps for legacy positions (pre-migration).
         if entry_bar_ts is None and current_bar_ts is not None:
@@ -1035,8 +1077,9 @@ class PaperTradingEngine:
             last_bar_ts = self.portfolio.last_bar_timestamps.get(ticker) or entry_bar_ts
 
             try:
-                current_ts = pd.Timestamp(current_bar_ts)
-                last_ts = pd.Timestamp(last_bar_ts)
+                # Normalize all bar timestamps to UTC for consistent comparison.
+                current_ts = pd.Timestamp(ensure_utc(current_bar_ts))
+                last_ts = pd.Timestamp(ensure_utc(last_bar_ts))
             except Exception:
                 current_ts = None
                 last_ts = None
@@ -1045,13 +1088,13 @@ class PaperTradingEngine:
                 gap = 1
                 try:
                     if isinstance(market_data, pd.DataFrame) and not market_data.empty and isinstance(market_data.index, pd.DatetimeIndex):
-                        idx = pd.DatetimeIndex(market_data.index)
+                        idx = ensure_utc_index(pd.DatetimeIndex(market_data.index))
                         gap = int(((idx > last_ts) & (idx <= current_ts)).sum()) or 1
                 except Exception:
                     gap = 1
                 bars_held += gap
                 self.portfolio.holding_bars[ticker] = bars_held
-                self.portfolio.last_bar_timestamps[ticker] = current_ts.to_pydatetime()
+                self.portfolio.last_bar_timestamps[ticker] = ensure_utc(current_ts)
 
             if bars_held >= max_days:
                 return "TIME_EXIT"

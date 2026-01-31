@@ -20,8 +20,10 @@ import pandas as pd
 import numpy as np
 import yaml
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
+
+from etl.timestamp_utils import utc_now
 
 from etl.time_series_forecaster import (
     TimeSeriesForecaster,
@@ -119,7 +121,7 @@ class TimeSeriesSignal:
     entry_price: float
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
-    signal_timestamp: datetime = field(default_factory=datetime.now)
+    signal_timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     model_type: str = 'ENSEMBLE'  # 'SARIMAX', 'SAMOSSA', 'GARCH', 'MSSA_RL', 'ENSEMBLE'
     forecast_horizon: int = 30
     expected_return: float = 0.0
@@ -495,7 +497,7 @@ class TimeSeriesSignalGenerator:
                 entry_price=current_price,
                 target_price=target_price,
                 stop_loss=stop_loss,
-                signal_timestamp=datetime.now(),
+                signal_timestamp=utc_now(),
                 model_type=provenance.get('primary_model', 'ENSEMBLE'),
                 forecast_horizon=forecast_bundle.get('horizon', 30),
                 expected_return=expected_return,
@@ -1242,7 +1244,7 @@ class TimeSeriesSignalGenerator:
         """Extract provenance metadata from forecast bundle"""
         provenance = {
             'model_type': 'TIME_SERIES_ENSEMBLE',
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': utc_now().isoformat(),
             'forecast_horizon': forecast_bundle.get('horizon', 30)
         }
 
@@ -1274,7 +1276,7 @@ class TimeSeriesSignalGenerator:
                            current_price: float,
                            reason: str) -> TimeSeriesSignal:
         """Create a HOLD signal"""
-        timestamp = datetime.now()
+        timestamp = utc_now()
         return TimeSeriesSignal(
             ticker=ticker,
             action='HOLD',
@@ -1774,7 +1776,7 @@ class TimeSeriesSignalGenerator:
             market_context['data_source'] = market_data.attrs.get('source')
 
         entry = {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': utc_now().isoformat(),
             'pipeline_id': pipeline_id,
             'ticker': ticker,
             'action': signal.action,

@@ -18,7 +18,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import datetime as dt
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 import logging
 import json
@@ -26,6 +26,8 @@ import sys
 import time
 import os
 import shutil
+
+from .timestamp_utils import ensure_utc, utc_now
 
 try:
     from etl.security_utils import sanitize_error
@@ -171,7 +173,7 @@ class DatabaseManager:
         """Move the corrupted SQLite store aside so a clean file can be created."""
         if getattr(self, "_sqlite_in_memory", False):
             return None
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        timestamp = utc_now().strftime("%Y%m%d%H%M%S")
         backup_name = f"{self.db_path.name}.corrupt.{timestamp}"
         backup_path = self.db_path.with_name(backup_name)
 
@@ -1333,7 +1335,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Retrieve recent signals for a ticker ordered chronologically."""
         if reference_timestamp is None:
-            reference_timestamp = datetime.utcnow()
+            reference_timestamp = utc_now()
 
         cutoff = reference_timestamp - timedelta(days=max(lookback_days, 1))
         cutoff_iso = cutoff.isoformat()
@@ -1602,17 +1604,13 @@ class DatabaseManager:
             return str(value)
 
         def _parse_timestamp(raw: Any, fallback_date: str) -> datetime:
-            if isinstance(raw, datetime):
-                return raw
-            if isinstance(raw, str) and raw.strip():
-                try:
-                    return datetime.fromisoformat(raw.replace('Z', '+00:00'))
-                except ValueError:
-                    pass
+            result = ensure_utc(raw)
+            if result is not None:
+                return result
             try:
-                return datetime.strptime(fallback_date, "%Y-%m-%d")
+                return datetime.strptime(fallback_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             except ValueError:
-                return datetime.utcnow()
+                return utc_now()
 
         def _safe_float(value: Any) -> Optional[float]:
             if value in (None, ""):
@@ -2002,7 +2000,7 @@ class DatabaseManager:
             "synthetic_generator_version": synthetic_generator_version,
             "note": note,
             "db_path": str(self.db_path),
-            "recorded_at": datetime.utcnow().isoformat() + "Z",
+            "recorded_at": utc_now().isoformat(),
         }
         self.set_metadata("last_run_provenance", payload)
         if (execution_mode or "").lower() == "synthetic" or (data_source or "").lower() == "synthetic":
@@ -2484,15 +2482,12 @@ class DatabaseManager:
                 action = 'HOLD'
 
             timestamp_raw = signal.get('signal_timestamp')
-            if isinstance(timestamp_raw, datetime):
-                signal_timestamp = timestamp_raw
-            elif isinstance(timestamp_raw, str) and timestamp_raw.strip():
+            signal_timestamp = ensure_utc(timestamp_raw)
+            if signal_timestamp is None:
                 try:
-                    signal_timestamp = datetime.fromisoformat(timestamp_raw.replace('Z', '+00:00'))
+                    signal_timestamp = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                 except ValueError:
-                    signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
-            else:
-                signal_timestamp = datetime.strptime(date, "%Y-%m-%d")
+                    signal_timestamp = utc_now()
 
             # Extract provenance (convert dict to JSON string if needed)
             provenance = signal.get('provenance', {})
@@ -2863,12 +2858,19 @@ class DatabaseManager:
         stop_losses: dict,
         target_prices: dict,
         max_holding_days: dict,
+        holding_bars: Optional[dict] = None,
+        entry_bar_timestamps: Optional[dict] = None,
+        last_bar_timestamps: Optional[dict] = None,
     ) -> None:
         """Persist current portfolio state for cross-session continuity.
 
         Replaces all rows in portfolio_state with the current snapshot
         and upserts cash balance into portfolio_cash_state.
         """
+        holding_bars = holding_bars or {}
+        entry_bar_timestamps = entry_bar_timestamps or {}
+        last_bar_timestamps = last_bar_timestamps or {}
+
         try:
             self.cursor.execute("DELETE FROM portfolio_state")
             for ticker, shares in positions.items():
@@ -2881,12 +2883,18 @@ class DatabaseManager:
                 elif entry_ts is not None:
                     ts_str = str(entry_ts)
 
+                ebt = entry_bar_timestamps.get(ticker)
+                ebt_str = ebt.isoformat() if isinstance(ebt, datetime) else (str(ebt) if ebt else None)
+                lbt = last_bar_timestamps.get(ticker)
+                lbt_str = lbt.isoformat() if isinstance(lbt, datetime) else (str(lbt) if lbt else None)
+
                 self.cursor.execute(
                     """
                     INSERT INTO portfolio_state
                     (ticker, shares, entry_price, entry_timestamp,
-                     stop_loss, target_price, max_holding_days)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     stop_loss, target_price, max_holding_days,
+                     holding_bars, entry_bar_timestamp, last_bar_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -2896,6 +2904,9 @@ class DatabaseManager:
                         stop_losses.get(ticker),
                         target_prices.get(ticker),
                         max_holding_days.get(ticker),
+                        holding_bars.get(ticker, 0),
+                        ebt_str,
+                        lbt_str,
                     ),
                 )
 
@@ -2934,7 +2945,9 @@ class DatabaseManager:
 
             self.cursor.execute(
                 "SELECT ticker, shares, entry_price, entry_timestamp, "
-                "stop_loss, target_price, max_holding_days FROM portfolio_state"
+                "stop_loss, target_price, max_holding_days, "
+                "holding_bars, entry_bar_timestamp, last_bar_timestamp "
+                "FROM portfolio_state"
             )
             rows = self.cursor.fetchall()
 
@@ -2944,6 +2957,9 @@ class DatabaseManager:
             stop_losses = {}
             target_prices_map = {}
             max_holding_days_map = {}
+            holding_bars_map = {}
+            entry_bar_timestamps_map = {}
+            last_bar_timestamps_map = {}
 
             for row in rows:
                 # Support both dict-like Row and tuple access
@@ -2955,22 +2971,44 @@ class DatabaseManager:
                     sl = row["stop_loss"]
                     tp = row["target_price"]
                     mhd = row["max_holding_days"]
+                    try:
+                        hb = row["holding_bars"]
+                    except (KeyError, IndexError):
+                        hb = None
+                    try:
+                        ebt_str = row["entry_bar_timestamp"]
+                    except (KeyError, IndexError):
+                        ebt_str = None
+                    try:
+                        lbt_str = row["last_bar_timestamp"]
+                    except (KeyError, IndexError):
+                        lbt_str = None
                 else:
-                    ticker, shares_val, ep, ts_str, sl, tp, mhd = row
+                    ticker, shares_val, ep, ts_str, sl, tp, mhd = row[:7]
+                    hb = row[7] if len(row) > 7 else None
+                    ebt_str = row[8] if len(row) > 8 else None
+                    lbt_str = row[9] if len(row) > 9 else None
 
                 positions[ticker] = int(shares_val)
                 entry_prices[ticker] = float(ep)
                 if ts_str:
-                    try:
-                        entry_timestamps_map[ticker] = datetime.fromisoformat(ts_str)
-                    except (ValueError, TypeError):
-                        entry_timestamps_map[ticker] = datetime.now()
+                    entry_timestamps_map[ticker] = ensure_utc(ts_str) or utc_now()
                 if sl is not None:
                     stop_losses[ticker] = float(sl)
                 if tp is not None:
                     target_prices_map[ticker] = float(tp)
                 if mhd is not None:
                     max_holding_days_map[ticker] = int(mhd)
+                if hb is not None:
+                    holding_bars_map[ticker] = int(hb)
+                for ts_val, target_map in [
+                    (ebt_str, entry_bar_timestamps_map),
+                    (lbt_str, last_bar_timestamps_map),
+                ]:
+                    if ts_val:
+                        parsed = ensure_utc(str(ts_val))
+                        if parsed is not None:
+                            target_map[ticker] = parsed
 
             # Extract cash values (support dict-like Row or tuple)
             if isinstance(cash_row, dict) or hasattr(cash_row, 'keys'):
@@ -2993,6 +3031,9 @@ class DatabaseManager:
                 "stop_losses": stop_losses,
                 "target_prices": target_prices_map,
                 "max_holding_days": max_holding_days_map,
+                "holding_bars": holding_bars_map,
+                "entry_bar_timestamps": entry_bar_timestamps_map,
+                "last_bar_timestamps": last_bar_timestamps_map,
             }
         except Exception as exc:
             logger.warning("Could not load portfolio state: %s", sanitize_error(exc))

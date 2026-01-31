@@ -103,28 +103,37 @@ def _env_flag(name: str) -> Optional[bool]:
 
 
 def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
-    """Return the last observed bar timestamp for a ticker frame."""
+    """Return the last observed bar timestamp for a ticker frame (UTC-normalized)."""
     if frame is None or frame.empty:
         return None
     try:
         idx = pd.DatetimeIndex(frame.index)
         if idx.empty:
             return None
-        return pd.Timestamp(idx[-1])
+        raw = pd.Timestamp(idx[-1])
+        # Normalize to UTC: intraday bars are tz-aware, daily bars are tz-naive.
+        return raw.tz_localize("UTC") if raw.tzinfo is None else raw.tz_convert("UTC")
     except Exception:
         try:
             ts = pd.to_datetime(frame.index[-1], errors="coerce")
-            return None if ts is pd.NaT else pd.Timestamp(ts)
+            if ts is pd.NaT:
+                return None
+            raw = pd.Timestamp(ts)
+            return raw.tz_localize("UTC") if raw.tzinfo is None else raw.tz_convert("UTC")
         except Exception:
             return None
 
 
 def _format_bar_timestamp(ts: pd.Timestamp) -> str:
+    """Format a bar timestamp as an ISO string (UTC-normalized)."""
     if ts is None or ts is pd.NaT:  # type: ignore[truthy-bool]
         return ""
     try:
+        # Ensure UTC before serialization.
         if ts.tzinfo is not None:
             ts = ts.tz_convert(UTC)
+        else:
+            ts = ts.tz_localize(UTC)
     except Exception:
         pass
     try:
@@ -1162,6 +1171,8 @@ def _execute_signal(
     synthetic_generator_version: Optional[str] = None,
     barbell_sizing_enabled: bool = False,
     barbell_cfg: Optional[BarbellConfig] = None,
+    proof_mode: bool = False,
+    is_intraday: bool = False,
 ) -> Optional[Dict]:
     """Route signals and push the primary decision through the execution engine."""
     bundle = router.route_signal(
@@ -1206,7 +1217,30 @@ def _execute_signal(
         except Exception:
             logger.debug("Skipping barbell sizing overlay for %s", ticker, exc_info=True)
 
-    result = trading_engine.execute_signal(primary_payload, market_data)
+    # Proof-mode overrides: tighter exits for guaranteed round trips.
+    if proof_mode:
+        proof_horizon = 6 if is_intraday else 5
+        primary_payload["forecast_horizon"] = proof_horizon
+        # ATR-based stops/targets (wider, symmetric, realistic).
+        if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14:
+            atr = (market_data['High'] - market_data['Low']).rolling(14).mean().iloc[-1]
+            if pd.notna(atr) and atr > 0:
+                sig_action = primary_payload.get("action", "").upper()
+                if sig_action == "BUY":
+                    primary_payload["stop_loss"] = current_price - 1.5 * atr
+                    primary_payload["target_price"] = current_price + 2.0 * atr
+                elif sig_action == "SELL":
+                    primary_payload["stop_loss"] = current_price + 1.5 * atr
+                    primary_payload["target_price"] = current_price - 2.0 * atr
+        logger.info(
+            "[PROOF_MODE] %s: horizon=%d, stop=%s, target=%s",
+            ticker, proof_horizon,
+            primary_payload.get("stop_loss"), primary_payload.get("target_price"),
+        )
+
+    result = trading_engine.execute_signal(
+        primary_payload, market_data, proof_mode=proof_mode,
+    )
     logger.info(
         "Execution result for %s: %s",
         ticker,
@@ -1536,6 +1570,14 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     help="Resume from persisted portfolio state if available. "
          "Use --no-resume to start fresh with --initial-capital.",
 )
+@click.option(
+    "--proof-mode",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Tighten exits to force round trips for profitability validation. "
+         "Sets tight max_holding, ATR-based stops/targets, and flatten-before-reverse.",
+)
 def main(
     tickers: str,
     include_frontier_tickers: bool,
@@ -1552,6 +1594,7 @@ def main(
     verbose: bool,
     yfinance_interval: Optional[str] = None,
     resume: bool = True,
+    proof_mode: bool = False,
 ) -> None:
     """Entry point for the automated profit engine."""
     run_started_at = datetime.now(UTC)
@@ -1559,6 +1602,11 @@ def main(
     _configure_logging(verbose)
     companion_config = _load_ai_companion_config()
     _activate_ai_companion_guardrails(companion_config)
+
+    if proof_mode:
+        logging.getLogger(__name__).info(
+            "[PROOF_MODE] Active: tight max_holding, ATR stops/targets, flatten-before-reverse"
+        )
 
     if enable_llm and _env_flag("PM_ENABLE_OLLAMA") is not True:
         logging.getLogger(__name__).warning(
@@ -2048,6 +2096,8 @@ def main(
                 synthetic_generator_version=window_generator_version,
                 barbell_sizing_enabled=barbell_sizing_enabled,
                 barbell_cfg=barbell_cfg,
+                proof_mode=proof_mode,
+                is_intraday=interval is not None and interval != "1d",
             )
 
             if execution_report:
