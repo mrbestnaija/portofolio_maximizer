@@ -7,9 +7,10 @@ forecasting:
   minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
   minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
 
-  # SARIMAX configuration
+  # SARIMAX configuration (disabled by default; slow grid search)
+  # Set enabled: true or pass --enable-sarimax to re-enable.
   sarimax:
-    enabled: true
+    enabled: false
     auto_select_order: true
     max_p: 3  # Phase 7.3: Increased from 2 to capture more complex AR dynamics
     max_d: 1
@@ -67,15 +68,12 @@ forecasting:
     enabled: true
     confidence_scaling: false  # Phase 7.3: Disabled to allow GARCH-dominant candidates (SAMoSSA has inflated confidence from EVR)
     candidate_weights:
-      # Phase 7.3 FIX: Add GARCH-dominant weights based on diagnostic findings
-      # Diagnostics showed GARCH RMSE 30.64 vs SARIMAX 229.44 (87% better)
-      - {garch: 0.85, sarimax: 0.10, samossa: 0.05}  # GARCH-dominant for liquid tickers
+      # Fast-only defaults (SARIMAX disabled by default; re-enable in config to restore)
+      - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}  # GARCH-dominant for liquid tickers
       - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}  # GARCH-heavy with SSA
-      - {garch: 0.60, sarimax: 0.25, samossa: 0.15}  # Balanced GARCH blend
-      # Original candidates for regimes where GARCH underperforms
-      - {sarimax: 0.6, samossa: 0.4}
-      - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
-      - {sarimax: 0.5, mssa_rl: 0.5}
+      - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}  # Balanced GARCH blend
+      - {samossa: 0.60, mssa_rl: 0.40}                # SSA-dominant
+      - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}  # Balanced SSA
       # Pure model fallbacks
       - {garch: 1.0}
       - {samossa: 1.0}
@@ -103,15 +101,15 @@ forecasting:
       CRISIS:
         # Optimized for 50%+ volatility, weak trend, 5 CV folds, 25 samples
         # RMSE: 17.15 -> 6.74 (+60.69% improvement)
-        - {sarimax: 0.23, samossa: 0.72, mssa_rl: 0.05}
+        - {garch: 0.23, samossa: 0.72, mssa_rl: 0.05}
       MODERATE_MIXED:
         # Optimized for 26-30% volatility, mixed trend (R²=0.00-0.30), 4 CV folds, 20 samples
         # RMSE: 17.63 -> 16.52 (+6.30% improvement)
-        - {sarimax: 0.05, samossa: 0.73, mssa_rl: 0.22}
+        - {garch: 0.05, samossa: 0.73, mssa_rl: 0.22}
       MODERATE_TRENDING:
         # Optimized for 18-23% volatility, strong trend (R²>0.73), 10 CV folds, 50 samples
         # RMSE: 20.86 -> 7.29 (+65.07% improvement)
-        - {sarimax: 0.05, samossa: 0.90, mssa_rl: 0.05}
+        - {garch: 0.05, samossa: 0.90, mssa_rl: 0.05}
 
     # Regime-specific model preferences (optional overrides)
     # If not specified, uses RegimeDetector's built-in recommendations
@@ -119,17 +117,17 @@ forecasting:
     regime_model_preferences:
       LIQUID_RANGEBOUND:
         # Low vol, mean-reverting, stationary → GARCH excels
-        preferred_models: ['garch', 'sarimax', 'samossa']
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
         description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
 
       MODERATE_RANGEBOUND:
         # Low vol, stationary, some trend → Mixed approach
-        preferred_models: ['garch', 'sarimax', 'samossa']
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
         description: "Low volatility with some directional bias"
 
       MODERATE_TRENDING:
         # Medium vol/trend → Trend-following models
-        preferred_models: ['samossa', 'garch', 'sarimax']
+        preferred_models: ['samossa', 'garch', 'mssa_rl']
         description: "Clear trend with moderate volatility"
 
       HIGH_VOL_TRENDING:
@@ -139,10 +137,10 @@ forecasting:
 
       CRISIS:
         # Extreme volatility (>50% annual) → Defensive, stick to volatility
-        preferred_models: ['garch', 'sarimax']
+        preferred_models: ['garch', 'samossa']
         description: "Crisis mode, focus on volatility and simple models"
 
       MODERATE_MIXED:
         # Fallback for unclear regimes → Balanced ensemble
-        preferred_models: ['garch', 'samossa', 'sarimax']
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
         description: "No clear regime, use balanced ensemble"

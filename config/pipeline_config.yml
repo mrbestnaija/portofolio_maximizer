@@ -255,7 +255,7 @@ pipeline:
     minimum_history_strict: 30
 
     sarimax:
-      enabled: true
+      enabled: false  # Disabled by default; slow grid search
       auto_select_order: true
       max_p: 3
       max_d: 1
@@ -308,12 +308,11 @@ pipeline:
       enabled: true
       confidence_scaling: false
       candidate_weights:
-        - {garch: 0.85, sarimax: 0.10, samossa: 0.05}
+        - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
         - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
-        - {garch: 0.60, sarimax: 0.25, samossa: 0.15}
-        - {sarimax: 0.6, samossa: 0.4}
-        - {sarimax: 0.45, samossa: 0.35, mssa_rl: 0.2}
-        - {sarimax: 0.5, mssa_rl: 0.5}
+        - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
+        - {samossa: 0.60, mssa_rl: 0.40}
+        - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
         - {garch: 1.0}
         - {samossa: 1.0}
         - {mssa_rl: 1.0}

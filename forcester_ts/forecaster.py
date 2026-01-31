@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TimeSeriesForecasterConfig:
-    sarimax_enabled: bool = True
+    sarimax_enabled: bool = False  # Off by default; slow SARIMAX grid search
     garch_enabled: bool = True
     samossa_enabled: bool = True
     mssa_rl_enabled: bool = True
@@ -768,7 +768,7 @@ class TimeSeriesForecaster:
             config.forecast_horizon = int(forecast_horizon)
 
         if sarimax_config is not None:
-            config.sarimax_enabled = bool(sarimax_config.get("enabled", True))
+            config.sarimax_enabled = bool(sarimax_config.get("enabled", False))
             config.sarimax_kwargs = {
                 k: v for k, v in sarimax_config.items() if k != "enabled"
             }
