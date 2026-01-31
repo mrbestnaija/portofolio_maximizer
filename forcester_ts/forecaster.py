@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from ._freq_compat import normalize_freq
+
 try:
     from statsmodels.tsa.stattools import adfuller, kpss
     from statsmodels.tools.sm_exceptions import InterpolationWarning  # type: ignore
@@ -318,14 +320,14 @@ class TimeSeriesForecaster:
 
         freq_hint: Optional[str] = None
         if inferred_freq:
-            freq_hint = str(inferred_freq)
+            freq_hint = normalize_freq(str(inferred_freq))
         elif median_seconds is not None and median_seconds > 0:
             if median_seconds < 3600:
                 minutes = max(1, int(round(median_seconds / 60.0)))
                 freq_hint = f"{minutes}min"
             elif median_seconds < 86400:
                 hours = max(1, int(round(median_seconds / 3600.0)))
-                freq_hint = f"{hours}H"
+                freq_hint = f"{hours}h"
             else:
                 freq_hint = "B"
 
@@ -413,7 +415,7 @@ class TimeSeriesForecaster:
             length=len(price_series),
             start=str(price_series.index.min()),
             end=str(price_series.index.max()),
-            frequency=str(getattr(price_series.index, "freqstr", None) or price_series.attrs.get("_pm_freq_hint")),
+            frequency=normalize_freq(str(getattr(price_series.index, "freqstr", None) or price_series.attrs.get("_pm_freq_hint"))),
         )
         if self._series_diagnostics:
             self._instrumentation.record_artifact("series_diagnostics", self._series_diagnostics)

@@ -20,6 +20,8 @@ import pandas as pd
 from numpy.linalg import svd
 from pandas.tseries.frequencies import to_offset
 
+from ._freq_compat import normalize_freq
+
 cp = None
 _CUPY_AVAILABLE = False
 _CUPY_TRIED = False
@@ -253,7 +255,9 @@ class MSSARLForecaster:
             freq_hint = series.attrs.get("_pm_freq_hint")
         except Exception:
             freq_hint = None
-        self._freq_hint = cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint
+        self._freq_hint = normalize_freq(
+            cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint
+        )
 
         self._last_index = cleaned.index[-1]
         trajectory = self._construct_page_matrix(cleaned)

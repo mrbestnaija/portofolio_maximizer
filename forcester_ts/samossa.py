@@ -13,6 +13,8 @@ import pandas as pd
 from pandas.tseries.frequencies import to_offset
 from sklearn.decomposition import TruncatedSVD
 
+from ._freq_compat import normalize_freq
+
 try:
     from statsmodels.tsa.ar_model import AutoReg
 except Exception:  # pragma: no cover - optional dependency guard
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 class SAMOSSAConfig:
     window_length: int = 40
     n_components: int = 6
+    auto_select: bool = False
+    variance_target: float = 0.90
     use_residual_arima: bool = True
     min_series_length: int = 120
     forecast_horizon: int = 30
@@ -47,6 +51,8 @@ class SAMOSSAForecaster:
         self,
         window_length: int = 40,
         n_components: int = 6,
+        auto_select: bool = False,
+        variance_target: float = 0.90,
         use_residual_arima: bool = True,
         min_series_length: int = 120,
         forecast_horizon: int = 30,
@@ -57,6 +63,8 @@ class SAMOSSAForecaster:
         self.config = SAMOSSAConfig(
             window_length=window_length,
             n_components=n_components,
+            auto_select=auto_select,
+            variance_target=variance_target,
             use_residual_arima=use_residual_arima,
             min_series_length=min_series_length,
             forecast_horizon=forecast_horizon,
@@ -108,7 +116,32 @@ class SAMOSSAForecaster:
         else:
             trajectory = self._build_hankel_matrix(series)
         self._trajectory_shape = trajectory.shape
-        svd = TruncatedSVD(n_components=self.config.n_components, random_state=0)
+        max_components = min(trajectory.shape)
+        if max_components <= 0:
+            raise ValueError("Trajectory matrix too small for decomposition")
+
+        n_components = int(self.config.n_components)
+        auto_select = bool(self.config.auto_select or n_components <= 0)
+        if auto_select:
+            target = float(self.config.variance_target or 0.90)
+            target = max(0.5, min(target, 0.999))
+            svd = TruncatedSVD(n_components=max_components, random_state=0)
+            transformed = svd.fit_transform(trajectory)
+            explained = np.asarray(svd.explained_variance_ratio_, dtype=float)
+            if explained.size == 0:
+                self._explained_variance_ratio = 0.0
+                self.config.n_components = 1
+                return transformed @ svd.components_
+            cumulative = np.cumsum(explained)
+            n_select = int(np.searchsorted(cumulative, target) + 1)
+            n_select = max(1, min(n_select, max_components))
+            self.config.n_components = n_select
+            self._explained_variance_ratio = float(cumulative[n_select - 1])
+            return transformed[:, :n_select] @ svd.components_[:n_select, :]
+
+        n_components = max(1, min(n_components, max_components))
+        self.config.n_components = n_components
+        svd = TruncatedSVD(n_components=n_components, random_state=0)
         components = svd.fit_transform(trajectory)
         self._explained_variance_ratio = float(svd.explained_variance_ratio_.sum())
         return components @ svd.components_
@@ -167,7 +200,9 @@ class SAMOSSAForecaster:
             return
         residuals = residuals.copy()
         residuals.index = pd.DatetimeIndex(residuals.index).tz_localize(None)
-        freq = self._target_freq or residuals.index.freqstr or residuals.index.inferred_freq
+        freq = normalize_freq(
+            self._target_freq or residuals.index.freqstr or residuals.index.inferred_freq
+        )
         if freq:
             try:
                 residuals.index = residuals.index.asfreq(freq)
@@ -187,8 +222,17 @@ class SAMOSSAForecaster:
     # Public API
     # ------------------------------------------------------------------
     def fit(self, series: pd.Series) -> "SAMOSSAForecaster":
-        if len(series) < self.config.min_series_length:
-            raise ValueError("Series too short for SAMOSSA decomposition")
+        series_len = len(series)
+        if series_len < self.config.min_series_length:
+            adaptive_min = max(20, self.config.n_components * 5)
+            if series_len < adaptive_min:
+                raise ValueError("Series too short for SAMOSSA decomposition")
+            logger.debug(
+                "SAMOSSA: relaxing min_series_length from %s to %s for short series",
+                self.config.min_series_length,
+                series_len,
+            )
+            self.config.min_series_length = series_len
 
         freq_hint = None
         try:
@@ -207,7 +251,9 @@ class SAMOSSAForecaster:
             raise ValueError("Insufficient non-NaN observations for SAMOSSA")
 
         self._last_index = cleaned.index[-1]
-        self._target_freq = cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint or "D"
+        self._target_freq = normalize_freq(
+            cleaned.index.freqstr or cleaned.index.inferred_freq or freq_hint
+        ) or "D"
 
         if self.config.normalize:
             self._scale_mean = float(cleaned.mean())
@@ -294,7 +340,10 @@ class SAMOSSAForecaster:
             combined = combined + (self._trend_slope * trend_steps * trend_factor)
 
         if self._last_index is not None:
-            freq = self._target_freq or (self._reconstructed.index.freqstr if hasattr(self._reconstructed.index, "freqstr") else None) or "D"
+            freq = normalize_freq(
+                self._target_freq
+                or (self._reconstructed.index.freqstr if hasattr(self._reconstructed.index, "freqstr") else None)
+            ) or "D"
             offset = to_offset(freq)
             start = self._last_index + offset
             future_index = pd.date_range(start=start, periods=steps, freq=freq)

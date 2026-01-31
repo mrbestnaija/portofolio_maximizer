@@ -16,6 +16,8 @@ import pandas as pd
 from pandas.tseries.frequencies import to_offset
 from scipy import stats
 
+from ._freq_compat import normalize_freq
+
 try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
     from statsmodels.tsa.stattools import adfuller, acf
@@ -49,7 +51,9 @@ FREQ_TO_SEASON_MAP = {
     "A": 1,
     "Y": 1,
     "H": 24,
+    "h": 24,
     "T": 60,
+    "min": 60,
     "MIN": 60,
 }
 
@@ -281,7 +285,9 @@ class SARIMAXForecaster:
         cleaned.index = pd.DatetimeIndex(cleaned.index).tz_localize(None)
         if not freq_hint:
             try:
-                freq_hint = cleaned.index.freqstr or cleaned.index.inferred_freq
+                freq_hint = normalize_freq(
+                    cleaned.index.freqstr or cleaned.index.inferred_freq
+                )
             except Exception:
                 freq_hint = None
 
@@ -590,7 +596,9 @@ class SARIMAXForecaster:
             freq_hint = None
         if not freq_hint:
             try:
-                freq_hint = series.index.freqstr or series.index.inferred_freq
+                freq_hint = normalize_freq(
+                    series.index.freqstr or series.index.inferred_freq
+                )
             except Exception:
                 freq_hint = None
 

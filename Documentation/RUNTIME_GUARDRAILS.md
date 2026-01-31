@@ -1,4 +1,5 @@
-# Runtime Guardrails (WSL `simpleTrader_env` Only) — Updated 2026-01-29
+# Runtime Guardrails (WSL `simpleTrader_env` Only) — Updated 2026-01-31
+**Standing instruction (repo-wide):** Log every implementation’s findings for persistence/reference/audit/research (append to `Documentation/SESSION_COMPLETE_SUMMARY.md` or an approved audit artifact in `logs/`/`Documentation/`).
 
 **Commit/Push Gate**: No commit or push to `origin/master` is allowed unless all relevant implementation tests pass and success criteria are met, with exact commands + outputs recorded.
 

@@ -9,9 +9,9 @@
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 4.1
-**Status**: Phase 7.8 Complete - All-Regime Ensemble Optimization (3/6 regimes optimized, SAMOSSA dominance confirmed)
-**Last Updated**: 2026-01-29
+**Version**: 4.2
+**Status**: Phase 7.9 In Progress - Cross-session persistence, proof-mode validation, UTC normalization
+**Last Updated**: 2026-01-31
 
 ---
 
@@ -97,7 +97,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
 - [Phase 7.8 Results](#-phase-78-results-all-regime-optimization)
-- [Phase 7.9 Roadmap](#-phase-79-roadmap-holdout-audit-accumulation)
+- [Phase 7.9 Status](#-phase-79-cross-session-persistence--proof-mode)
 - [Usage](#-usage)
 - [Project Structure](#-project-structure)
 - [Performance](#-performance)
@@ -154,38 +154,49 @@ regime_candidate_weights:
 
 ---
 
-## 🚀 Phase 7.9 Roadmap: Holdout Audit Accumulation
+## 🚀 Phase 7.9: Cross-Session Persistence & Proof Mode
 
 ### Objective
 
-Accumulate 20 holdout audits to validate optimized weights before production deployment.
+Establish reliable round-trip trade execution with cross-session position persistence, enabling profitability validation and holdout audit accumulation.
 
 ### Current Status
 
-- **Audits Complete**: 2/20
-- **Target**: 20 audits with consistent RMSE improvements
-- **Expected Timeline**: Daily validation runs
+- **Closed trades**: 30 validated (proof-mode TIME_EXIT)
+- **Holdout audits**: 9/20 (forecast audit gate active at 25% max violation rate)
+- **UTC normalization**: Complete across execution and persistence layers
+- **Frequency compatibility**: Deprecated pandas aliases (`'H'` -> `'h'`) resolved
 
-### Validation Command
+### Key Components
+
+- **Cross-session persistence**: `portfolio_state` + `portfolio_cash_state` tables via `--resume`
+- **Proof mode** (`--proof-mode`): Tight max_holding (5d/6h), ATR stops/targets, flatten-before-reverse
+- **Audit sprint**: `bash/run_20_audit_sprint.sh` with gate enforcement (forecast, quant health, dashboard)
+- **UTC timestamps**: `etl/timestamp_utils.py` (`ensure_utc()`, `utc_now()`, `ensure_utc_index()`)
+
+### Validation Commands
 
 ```bash
-# Run validation with optimized weights
-python scripts/run_etl_pipeline.py \
-    --tickers AAPL \
-    --start 2024-07-01 \
-    --end 2026-01-18 \
-    --execution-mode auto
+# Run proof-mode audit sprint
+PROOF_MODE=1 RISK_MODE=research_production bash bash/run_20_audit_sprint.sh
 
-# Check regime detection and weight application
-grep -E "REGIME detected|candidate_override" logs/pipeline_run.log
+# Check closed trades
+python -c "
+import sqlite3
+conn = sqlite3.connect('data/portfolio_maximizer.db')
+closed = conn.execute('SELECT COUNT(*) FROM trade_executions WHERE realized_pnl IS NOT NULL').fetchone()[0]
+print(f'Closed trades with realized PnL: {closed}')
+conn.close()
+"
 ```
 
 ### Success Criteria
 
-- ✅ 20/20 audits passed
-- ✅ CRISIS regime: ~60% RMSE improvement
-- ✅ MODERATE_TRENDING regime: ~65% RMSE improvement
-- ✅ Overall RMSE regression <25%
+- [x] Cross-session position persistence working
+- [x] Proof mode creates guaranteed round trips
+- [x] UTC-aware timestamps across all layers
+- [ ] 20/20 holdout audits accumulated
+- [ ] Forecast audit gate violation rate < 25%
 
 ### Phase 7.10: Production Deployment (Future)
 
@@ -425,6 +436,16 @@ python scripts/visualize_dataset.py \
 ---
 
 ## 📖 Usage
+
+### cTrader Credentials Precedence (Demo/Live)
+
+The cTrader client resolves credentials in this order:
+
+1. **Environment‑specific keys** (`CTRADER_DEMO_*` or `CTRADER_LIVE_*`)
+2. **Generic keys** (`USERNAME_CTRADER` / `CTRADER_USERNAME`, `PASSWORD_CTRADER` / `CTRADER_PASSWORD`, `APPLICATION_NAME_CTRADER` / `CTRADER_APPLICATION_ID`)
+3. **Email fallback** (`EMAIL_CTRADER` / `CTRADER_EMAIL`) if username is missing
+
+This allows demo + live to run side‑by‑side without cross‑env leakage.
 
 ### 1. Data Extraction
 

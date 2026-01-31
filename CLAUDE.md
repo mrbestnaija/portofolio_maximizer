@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.6 (Regime holdout audits + performance tuning; regime detection disabled by default)
-**Last Updated**: 2026-01-25
+**Current Phase**: Phase 7.9 (Cross-session persistence, proof-mode validation, UTC normalization)
+**Last Updated**: 2026-01-31
 
 ---
 
@@ -20,7 +20,7 @@ source simpleTrader_env/bin/activate  # Linux/Mac
 simpleTrader_env\Scripts\activate     # Windows
 
 # Supported Python: >=3.10,<3.13
-# Current packages: See requirements.txt (last updated 2026-01-23)
+# Current packages: See requirements.txt (last updated 2026-01-31)
 ```
 
 ### Platform-Specific Notes
@@ -107,6 +107,9 @@ python scripts/validate_environment.py
 # Migrate database to support ENSEMBLE model type
 python scripts/migrate_add_ensemble_model_type.py
 
+# Migrate portfolio state tables (Phase 7.9: cross-session persistence)
+python scripts/migrate_add_portfolio_state.py
+
 # Verify migration
 sqlite3 data/portfolio_maximizer.db "SELECT DISTINCT model_type FROM time_series_forecasts;"
 ```
@@ -172,7 +175,7 @@ The system follows a 7-layer architecture:
 - `market_analyzer.py`: Fundamental analysis via LLM
 
 **Testing Infrastructure:**
-- 141+ tests across ETL, LLM, integration, and security modules
+- 606+ tests across ETL, LLM, forecaster, integration, and security modules
 - Property-based testing for financial calculations
 - Security validation for credential handling
 
@@ -196,7 +199,7 @@ Configuration supports:
 **Important Notes**:
 - Ensemble candidate weights defined in `forecasting_config.yml` lines 69-83
 - Phase 7.4: Quantile-based confidence calibration enabled by default
-- Regime detection available but not yet integrated (Phase 7.5)
+- Regime detection integrated with feature flag (Phase 7.5+)
 
 ---
 
@@ -335,6 +338,40 @@ regime_detection:
 
 - **1b696f5** (2026-01-24): Integration with 3 fixes
 - **de443c9** (2026-01-25): Multi-ticker validation results
+
+---
+
+## Phase 7.9 Specific Guidance (Cross-Session Persistence & Proof Mode)
+
+Phase 7.9 adds cross-session position persistence, proof-mode validation, UTC-aware timestamps, and pandas frequency compatibility.
+
+**Status**: In progress (30 closed trades validated, audit accumulation ongoing)
+
+### Phase 7.9 Key Features
+
+- **Cross-session persistence**: `portfolio_state` + `portfolio_cash_state` tables persist positions/cash across auto-trader sessions via `--resume`
+- **Proof mode** (`--proof-mode`): Testing harness with tight max_holding (5 daily / 6 intraday), ATR stops/targets, flatten-before-reverse to force round trips
+- **UTC-aware timestamps**: `etl/timestamp_utils.py` provides `ensure_utc()`, `utc_now()`, `ensure_utc_index()` used at all system boundaries
+- **Frequency compatibility**: `forcester_ts/_freq_compat.py` normalizes deprecated pandas aliases (`'H'` -> `'h'`, `'T'` -> `'min'`)
+- **Audit sprint runbook**: `bash/run_20_audit_sprint.sh` runs 20 daily+intraday passes with gate enforcement
+
+### Database Migrations
+
+```bash
+# Required for cross-session persistence (safe to run multiple times)
+python scripts/migrate_add_portfolio_state.py
+```
+
+### Phase 7.9 Configuration
+
+- `RISK_MODE=research_production` for balanced risk filtering
+- `PROOF_MODE=1` in audit sprint to enable `--proof-mode` args
+- `ENABLE_DATA_CACHE=0` to ensure fresh market data per run
+- Forecast audit gate: `config/forecaster_monitoring.yml` (20 audits required, 25% max violation rate)
+
+### Phase 7.9 Documentation
+
+- [EXIT_ELIGIBILITY_AND_PROOF_MODE.md](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md): Exit diagnosis + proof-mode spec
 
 ---
 
@@ -501,7 +538,7 @@ Results: Key metrics or validation results
 ### Essential Files
 - `CLAUDE.md` - This file (agent guidance)
 - `README.md` - User-facing project overview
-- `requirements.txt` - Python dependencies (updated 2026-01-23)
+- `requirements.txt` - Python dependencies (updated 2026-01-31)
 - `config/pipeline_config.yml` - Main configuration
 - `Documentation/RUNTIME_GUARDRAILS.md` - Python version constraints
 
@@ -510,7 +547,7 @@ Results: Key metrics or validation results
 - `forcester_ts/` - Time series forecasting models
 - `models/` - Signal generation and routing
 - `execution/` - Order management and paper trading
-- `tests/` - Test suite (141+ tests)
+- `tests/` - Test suite (606+ tests)
 - `scripts/` - Utility scripts and migrations
 - `config/` - YAML configuration files
 - `Documentation/` - Phase-specific documentation
@@ -520,5 +557,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-01-23 (Phase 7.4 completion)
+**Last Updated**: 2026-01-31 (Phase 7.9: UTC normalization, freq-compat, proof-mode)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
