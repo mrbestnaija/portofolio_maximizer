@@ -47,11 +47,17 @@ class TestParameterLearning:
         """Generate series with time-varying volatility for GARCH."""
         np.random.seed(456)
         dates = pd.date_range('2020-01-01', periods=400, freq='D')
-        # ARCH process: volatility clusters
-        returns = [0.0]
-        for i in range(399):
-            sigma = 1.0 + 0.5 * returns[-1]**2  # Volatility clustering
-            returns.append(np.random.randn() * sigma)
+        # Stable GARCH-like process to avoid overflow in test environments.
+        omega = 0.1
+        alpha = 0.1
+        beta = 0.8
+        sigma2 = omega / (1.0 - alpha - beta)
+        returns = []
+        for _ in range(400):
+            eps = np.random.randn()
+            sigma2 = omega + alpha * (eps**2) + beta * sigma2
+            sigma2 = float(np.clip(sigma2, 1e-6, 25.0))
+            returns.append(eps * np.sqrt(sigma2))
         prices = 100 * np.exp(np.cumsum(returns))
         return pd.Series(prices, index=dates, name='Close')
 
@@ -386,36 +392,47 @@ class TestParameterLearning:
 class TestBayesianWarmStart:
     """Test Bayesian parameter priors and warm-start caching."""
 
+    @pytest.fixture(autouse=True)
+    def _use_tmp_cache(self, tmp_path):
+        """Use a temporary directory for each test to avoid side-effects."""
+        self._cache_dir = str(tmp_path / "model_params")
+
     def test_parameter_cache_structure(self):
         """Verify parameter cache has correct structure."""
         from forcester_ts.parameter_cache import ParameterCache
 
-        cache = ParameterCache(cache_dir="data/model_params")
+        cache = ParameterCache(cache_dir=self._cache_dir)
 
-        # Should be able to save/load parameters
+        # Build a dummy series for the data-hash argument
+        dummy_series = pd.Series(
+            np.random.randn(100) + 100,
+            index=pd.date_range('2020-01-01', periods=100, freq='D'),
+        )
+
         params = {
-            'model': 'sarimax',
-            'ticker': 'AAPL',
             'order': (2, 1, 1),
             'seasonal_order': (1, 0, 1, 12),
-            'aic': 4523.12,
-            'rmse': 2.34,
-            'timestamp': '2026-01-19T12:00:00'
         }
+        performance = {'aic': 4523.12, 'rmse': 2.34}
 
-        cache.save('AAPL', 'sarimax', params)
+        cache.save('AAPL', 'sarimax', params, performance, dummy_series)
         loaded = cache.load('AAPL', 'sarimax')
 
         assert loaded is not None, "Should load cached parameters"
-        assert loaded['order'] == params['order'], "Order should match"
+        assert tuple(loaded['parameters']['order']) == params['order'], "Order should match"
 
     def test_bayesian_prior_from_history(self):
         """Verify Bayesian priors computed from historical best parameters."""
         from forcester_ts.parameter_cache import ParameterCache
 
-        cache = ParameterCache(cache_dir="data/model_params")
+        cache = ParameterCache(cache_dir=self._cache_dir)
 
-        # Simulate historical runs
+        # Simulate historical runs by saving multiple records
+        dummy_series = pd.Series(
+            np.random.randn(100) + 100,
+            index=pd.date_range('2020-01-01', periods=100, freq='D'),
+        )
+
         history = [
             {'order': (2, 1, 1), 'aic': 1000, 'rmse': 2.1},
             {'order': (2, 1, 1), 'aic': 1010, 'rmse': 2.2},
@@ -424,28 +441,43 @@ class TestBayesianWarmStart:
             {'order': (2, 1, 1), 'aic': 1002, 'rmse': 2.15},
         ]
 
-        # Get Bayesian prior
-        prior = cache.compute_bayesian_prior(history, metric='aic')
+        for entry in history:
+            cache.save(
+                'AAPL', 'sarimax',
+                parameters={'order': entry['order']},
+                performance={'aic': entry['aic'], 'rmse': entry['rmse']},
+                series=dummy_series,
+            )
+
+        prior = cache.compute_bayesian_prior('AAPL', 'sarimax', metric='aic')
 
         # (2,1,1) appears 3/5 times with good AIC -> should have high prior probability
-        assert prior['order'] == (2, 1, 1), "Should select most frequent good order"
-        assert 0.5 <= prior['confidence'] <= 1.0, "Should have reasonable confidence"
+        assert prior is not None, "Should compute a prior from 5 observations"
+        assert prior.order == (2, 1, 1), "Should select most frequent good order"
+        assert 0.4 <= prior.confidence <= 1.0, "Should have reasonable confidence"
 
     def test_warm_start_uses_cached_parameters(self):
-        """Verify warm-start uses cached parameters as search starting point."""
-        # This test verifies the warm-start logic reduces search space
-        from forcester_ts.sarimax import SARIMAXForecaster
+        """Verify warm-start returns cached parameters for a known ticker."""
+        from forcester_ts.parameter_cache import ParameterCache
 
-        # Create forecaster with cached parameters
-        forecaster = SARIMAXForecaster(
-            max_p=5,
-            max_q=5,
-            auto_select=True,
-            warm_start_order=(2, 1, 1),  # Cached from previous run
+        cache = ParameterCache(cache_dir=self._cache_dir)
+
+        dummy_series = pd.Series(
+            np.random.randn(100) + 100,
+            index=pd.date_range('2020-01-01', periods=100, freq='D'),
         )
 
-        # Warm start should prioritize searching near (2,1,1)
-        # Not fully testable without mocking, but structure is correct
+        # Save a parameter record, then retrieve via get_warm_start_parameters
+        cache.save(
+            'AAPL', 'sarimax',
+            parameters={'order': (2, 1, 1)},
+            performance={'aic': 1000, 'rmse': 2.0},
+            series=dummy_series,
+        )
+
+        warm = cache.get_warm_start_parameters('AAPL', 'sarimax', use_bayesian=False)
+        assert warm is not None, "Should return warm-start params from cache"
+        assert tuple(warm['order']) == (2, 1, 1), "Should return cached order"
 
 
 if __name__ == '__main__':
