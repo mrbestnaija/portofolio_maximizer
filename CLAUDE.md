@@ -147,7 +147,7 @@ The system follows a 7-layer architecture:
 5. **Analysis Layer** (`etl/time_series_analyzer.py`): MIT-standard time series analysis
 
 6. **Forecasting Layer** (`forcester_ts/`, `models/`): Multiple forecasting models
-   - **SARIMAX**: Seasonal ARIMA with exogenous variables
+   - **SARIMAX**: Seasonal ARIMA with exogenous variables (disabled by default; re-enable via config or `--enable-sarimax`)
    - **GARCH**: Volatility forecasting (Phase 7.3+ integration)
    - **SAMoSSA**: Singular Spectrum Analysis + RL
    - **MSSA-RL**: Multivariate SSA with reinforcement learning
@@ -234,6 +234,7 @@ Data Sources → Extraction → Validation → Preprocessing → Forecasting →
 - Vectorized operations throughout (NumPy/Pandas)
 - Parquet format for 10x faster I/O vs CSV
 - Connection pooling for LLM and data sources
+- **SARIMAX off by default**: 15x single-forecast speedup (0.18s vs 2.74s); re-enable with `sarimax: enabled: true` in config
 
 ### Testing Strategy
 - Unit tests for core calculations and data processing
@@ -386,6 +387,33 @@ python scripts/migrate_add_portfolio_state.py
 - Quantile-based confidence calibration (prevents SAMoSSA dominance)
 - Ensemble config preservation during CV
 - Database schema migration (added ENSEMBLE model type)
+
+---
+
+## SARIMAX-Off Default (Phase 7.9 -- Fast-Only Inference)
+
+SARIMAX is disabled by default (mirrors LLM's off-by-default pattern). Only fast forecasters (GARCH, SAMoSSA, MSSA-RL) run unless SARIMAX is explicitly re-enabled.
+
+**Benchmark Results** (2026-01-31, 601 tests, Windows):
+
+| Metric | SARIMAX Off | SARIMAX On | Delta |
+|--------|------------|-----------|-------|
+| Single forecast (AAPL, 60-day) | 0.18 s | 2.74 s | **15x speedup** |
+| Full test suite | 456.53 s (7:36) | 464.34 s (7:44) | ~8 s / 1.7% |
+
+The modest project-level delta reflects that most tests explicitly set their own `sarimax_enabled` flag. The 15x single-forecast speedup is the meaningful production metric.
+
+**How to re-enable SARIMAX**:
+- Config: set `forecasting.sarimax.enabled: true` in `config/forecasting_config.yml`
+- Dataclass: `TimeSeriesForecasterConfig(sarimax_enabled=True)`
+- Tests that require SARIMAX already pass `sarimax_enabled=True` explicitly
+
+**Files changed** (commit `1c538de`):
+- `forcester_ts/forecaster.py`: Dataclass default + `_build_config_from_kwargs` fallback
+- `config/forecasting_config.yml`: SARIMAX disabled, ensemble weights updated
+- `config/pipeline_config.yml`: Mirror of forecasting config
+- `scripts/run_etl_pipeline.py`: Fallback default aligned
+- `tests/etl/test_time_series_forecaster_slow.py`: Explicit `sarimax_enabled=True`
 
 ---
 
