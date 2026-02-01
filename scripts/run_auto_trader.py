@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
@@ -693,9 +693,11 @@ def _prepare_market_window(
     manager: DataSourceManager,
     tickers: List[str],
     lookback_days: int,
+    *,
+    as_of_date: Optional[date] = None,
 ) -> pd.DataFrame:
     """Fetch the latest OHLCV window for all tickers."""
-    end_date = datetime.now(UTC).date()
+    end_date = as_of_date or datetime.now(UTC).date()
     interval = getattr(getattr(manager, "active_extractor", None), "interval", None)
     min_lookback_days = _effective_min_lookback_days(interval)
     start_date = end_date - timedelta(days=max(lookback_days, min_lookback_days))
@@ -1615,6 +1617,13 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     help="Tighten exits to force round trips for profitability validation. "
          "Sets tight max_holding, ATR-based stops/targets, and flatten-before-reverse.",
 )
+@click.option(
+    "--as-of-date",
+    default=None,
+    show_default=False,
+    help="Optional YYYY-MM-DD override for the market window end date. "
+         "Use this to accumulate holdout audits on historical end dates.",
+)
 def main(
     tickers: str,
     include_frontier_tickers: bool,
@@ -1632,6 +1641,7 @@ def main(
     yfinance_interval: Optional[str] = None,
     resume: bool = True,
     proof_mode: bool = False,
+    as_of_date: Optional[str] = None,
 ) -> None:
     """Entry point for the automated profit engine."""
     run_started_at = datetime.now(UTC)
@@ -1665,6 +1675,16 @@ def main(
 
     if yfinance_interval:
         os.environ["YFINANCE_INTERVAL"] = str(yfinance_interval).strip()
+
+    resolved_as_of_date: Optional[date] = None
+    if as_of_date:
+        try:
+            resolved_as_of_date = datetime.strptime(str(as_of_date).strip(), "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise click.UsageError(
+                f"Invalid --as-of-date {as_of_date!r}; expected YYYY-MM-DD"
+            ) from exc
+        logger.info("As-of date override active: %s", resolved_as_of_date.isoformat())
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
     execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
@@ -1713,7 +1733,12 @@ def main(
             warm_list = ticker_list[: min(10, len(ticker_list))]
         try:
             logger.info("Cache warming enabled; warming %s tickers", len(warm_list))
-            _prepare_market_window(data_source_manager, warm_list, warm_lookback)
+            _prepare_market_window(
+                data_source_manager,
+                warm_list,
+                warm_lookback,
+                as_of_date=resolved_as_of_date,
+            )
         except Exception:
             logger.debug("Cache warming failed; continuing without warmed cache", exc_info=True)
 
@@ -1892,7 +1917,12 @@ def main(
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
         try:
-            raw_window = _prepare_market_window(data_source_manager, ticker_list, lookback_days)
+            raw_window = _prepare_market_window(
+                data_source_manager,
+                ticker_list,
+                lookback_days,
+                as_of_date=resolved_as_of_date,
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.error("Market window extraction failed: %s", exc)
             if cycle < cycles:
@@ -2405,6 +2435,7 @@ def main(
                     "action": trade.action,
                     "shares": trade.shares,
                     "price": trade.entry_price,
+                    "data_source": trade.data_source,
                     "timestamp": trade.timestamp,
                     "bar_timestamp": trade.bar_timestamp,
                     "realized_pnl": trade.realized_pnl,

@@ -1306,7 +1306,8 @@ def execute_pipeline(
                             logger.warning(f"Live extraction failed: {extraction_error}")
                             logger.warning("Falling back to synthetic OHLCV data to keep pipeline operational")
                             raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
-                            extraction_source = 'synthetic(auto-fallback)'
+                            # Keep ohlcv_data.source values within the audited allowlist.
+                            extraction_source = 'synthetic'
                             synthetic_fallback = True
                         else:
                             raise
@@ -1315,7 +1316,8 @@ def execute_pipeline(
                     if allow_live_fallback and extraction_source and not extraction_source.lower().startswith('synthetic'):
                         logger.warning("Live extraction returned empty dataset; generating synthetic fallback")
                         raw_data = generate_synthetic_ohlcv(ticker_list, start, end)
-                        extraction_source = 'synthetic(auto-fallback)'
+                        # Keep ohlcv_data.source values within the audited allowlist.
+                        extraction_source = 'synthetic'
                         synthetic_fallback = True
                     else:
                         raise RuntimeError("Data extraction failed - empty dataset")

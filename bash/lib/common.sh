@@ -33,7 +33,9 @@ pmx_timestamp() {
 pmx_log() {
   local level="${1:-INFO}"
   shift || true
-  echo "[${level}] $(pmx_timestamp) $*"
+  # Logs should not pollute stdout because several helpers are used in command
+  # substitutions (e.g., resolving the Python interpreter for cron tasks).
+  echo "[${level}] $(pmx_timestamp) $*" >&2
 }
 
 pmx_die() {
@@ -79,9 +81,9 @@ pmx_print_runtime_fingerprint() {
   local py_path=""
   py_path="$(command -v python 2>/dev/null || true)"
   pmx_log "INFO" "which python: ${py_path:-<missing>}"
-  python -V 2>&1 | sed 's/^/[INFO] /' || true
+  python -V 2>&1 | sed 's/^/[INFO] /' >&2 || true
 
-  python - <<'PY' 2>&1 | sed 's/^/[INFO] /'
+  python - <<'PY' 2>&1 | sed 's/^/[INFO] /' >&2
 import json
 
 try:

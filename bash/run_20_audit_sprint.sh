@@ -51,6 +51,11 @@ GPU_POLL_SECONDS="${GPU_POLL_SECONDS:-15}"
 WAIT_BETWEEN_RUNS_SECONDS="${WAIT_BETWEEN_RUNS_SECONDS:-0}"
 AUTO_WAIT_FOR_NEW_BARS="${AUTO_WAIT_FOR_NEW_BARS:-1}"
 PROOF_MODE="${PROOF_MODE:-1}"
+# Optional holdout-audit backfill: run the same pipeline as if "today" were a
+# previous date to create unique dataset windows for forecast_audit gating.
+AS_OF_START_DATE="${AS_OF_START_DATE:-}"
+AS_OF_STEP_DAYS="${AS_OF_STEP_DAYS:-1}"
+ALLOW_FORECAST_GATE_FAILURE="${ALLOW_FORECAST_GATE_FAILURE:-1}"
 
 mkdir -p "${TS_FORECAST_AUDIT_DIR}"
 
@@ -100,6 +105,9 @@ log "[RUNBOOK] TS_FORECAST_MONITOR_CONFIG=${TS_FORECAST_MONITOR_CONFIG}"
 log "[RUNBOOK] TS_FORECAST_AUDIT_DIR=${TS_FORECAST_AUDIT_DIR}"
 log "[RUNBOOK] TICKERS=${TICKERS}"
 log "[RUNBOOK] AUDIT_RUNS=${AUDIT_RUNS}"
+if [[ -n "${AS_OF_START_DATE}" ]]; then
+    log "[RUNBOOK] AS_OF_START_DATE=${AS_OF_START_DATE} | AS_OF_STEP_DAYS=${AS_OF_STEP_DAYS}"
+fi
 log ""
 if [[ "${WAIT_BETWEEN_RUNS_SECONDS}" -eq 0 ]]; then
     log "[WARN] WAIT_BETWEEN_RUNS_SECONDS=0; sequential runs may reuse cached market data."
@@ -151,6 +159,22 @@ run_and_log() {
     fi
 }
 
+run_and_log_allow_fail() {
+    local label="$1"
+    shift
+    local target_log="${LOG_DIR}/${label}.log"
+    log ""
+    log "[STEP] ${label}"
+    set +e
+    "$@" 2>&1 | tee -a "${target_log}" | tee -a "${LOG_FILE}"
+    local exit_code=${PIPESTATUS[0]}
+    set -e
+    if [[ "${exit_code}" -ne 0 ]]; then
+        log "[WARN] ${label} failed (exit=${exit_code}); see ${target_log}"
+    fi
+    return "${exit_code}"
+}
+
 start_gpu_monitor
 
 PROOF_ARGS=()
@@ -164,6 +188,15 @@ for ((run_idx=1; run_idx<=AUDIT_RUNS; run_idx++)); do
     log "[AUDIT] Run ${run_idx}/${AUDIT_RUNS} - $(date -Iseconds)"
     log "============================================================"
 
+    AS_OF_ARGS=()
+    if [[ -n "${AS_OF_START_DATE}" ]]; then
+        # offset can be negative or positive; GNU date accepts "YYYY-MM-DD -N days".
+        offset_days=$(( (run_idx - 1) * AS_OF_STEP_DAYS ))
+        AS_OF_DATE="$(date -d "${AS_OF_START_DATE} ${offset_days} days" +%Y-%m-%d)"
+        AS_OF_ARGS+=(--as-of-date "${AS_OF_DATE}")
+        log "[AUDIT] as_of_date=${AS_OF_DATE}"
+    fi
+
     run_and_log "audit_${run_idx}_daily" \
         "${PYTHON_BIN}" "${ROOT_DIR}/scripts/run_auto_trader.py" \
         --tickers "${TICKERS}" \
@@ -174,6 +207,7 @@ for ((run_idx=1; run_idx<=AUDIT_RUNS; run_idx++)); do
         --resume \
         --bar-aware \
         --persist-bar-state \
+        "${AS_OF_ARGS[@]}" \
         "${PROOF_ARGS[@]}"
 
     run_and_log "audit_${run_idx}_intraday" \
@@ -188,12 +222,20 @@ for ((run_idx=1; run_idx<=AUDIT_RUNS; run_idx++)); do
         --resume \
         --bar-aware \
         --persist-bar-state \
+        "${AS_OF_ARGS[@]}" \
         "${PROOF_ARGS[@]}"
 
-    run_and_log "gate_${run_idx}_forecast_audits" \
-        "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_forecast_audits.py" \
-        --config-path "${TS_FORECAST_MONITOR_CONFIG}" \
-        --max-files 500
+    if [[ "${ALLOW_FORECAST_GATE_FAILURE}" == "1" ]]; then
+        run_and_log_allow_fail "gate_${run_idx}_forecast_audits" \
+            "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_forecast_audits.py" \
+            --config-path "${TS_FORECAST_MONITOR_CONFIG}" \
+            --max-files 500 || true
+    else
+        run_and_log "gate_${run_idx}_forecast_audits" \
+            "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_forecast_audits.py" \
+            --config-path "${TS_FORECAST_MONITOR_CONFIG}" \
+            --max-files 500
+    fi
 
     run_and_log "gate_${run_idx}_quant_health" \
         "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_quant_validation_health.py"

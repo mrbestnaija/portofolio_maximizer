@@ -17,7 +17,10 @@ cd "$PROJECT_ROOT"
 # shellcheck source=bash/lib/common.sh
 source "${PROJECT_ROOT}/bash/lib/common.sh"
 
-PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}")"
+# pmx_resolve_python prints the interpreter path to stdout; any diagnostics are
+# expected on stderr. Tail defensively in case older environments echo extra.
+PYTHON_BIN="$(pmx_resolve_python "${PROJECT_ROOT}" | tail -n 1)"
+pmx_require_executable "${PYTHON_BIN}"
 
 LOG_DIR="${PROJECT_ROOT}/logs/cron"
 mkdir -p "${LOG_DIR}"

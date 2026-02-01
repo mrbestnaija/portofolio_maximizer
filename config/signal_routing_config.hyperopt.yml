@@ -13,12 +13,12 @@ signal_routing:
     use_volatility_filter: true
     cost_model:
       default_roundtrip_cost_bps:
-        US_EQUITY: 3.2
-        INTL_EQUITY: 6.0
-        FX: 2.0
-        CRYPTO: 12.0
-        INDEX: 2.0
-        UNKNOWN: 5.0
+        US_EQUITY: 1.5
+        INTL_EQUITY: 3.0
+        FX: 1.0
+        CRYPTO: 8.0
+        INDEX: 1.5
+        UNKNOWN: 3.0
       min_signal_to_noise: 0.0
     per_ticker:
       CL=F:
