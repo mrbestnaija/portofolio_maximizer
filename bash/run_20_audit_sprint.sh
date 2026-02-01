@@ -55,7 +55,35 @@ PROOF_MODE="${PROOF_MODE:-1}"
 # previous date to create unique dataset windows for forecast_audit gating.
 AS_OF_START_DATE="${AS_OF_START_DATE:-}"
 AS_OF_STEP_DAYS="${AS_OF_STEP_DAYS:-1}"
-ALLOW_FORECAST_GATE_FAILURE="${ALLOW_FORECAST_GATE_FAILURE:-1}"
+ALLOW_FORECAST_GATE_FAILURE="${ALLOW_FORECAST_GATE_FAILURE:-}"
+FORECAST_GATE_FAILURE_COUNT=0
+
+# Determine whether we're in a local/holdout audit (non-live or as-of backfill).
+IS_HOLDOUT_AUDIT=0
+if [[ -n "${AS_OF_START_DATE}" ]]; then
+    IS_HOLDOUT_AUDIT=1
+fi
+IS_LOCAL_AUDIT=0
+if [[ "${EXECUTION_MODE}" != "live" ]]; then
+    IS_LOCAL_AUDIT=1
+fi
+ALLOW_GATE_CONTEXT=0
+if [[ "${IS_HOLDOUT_AUDIT}" == "1" || "${IS_LOCAL_AUDIT}" == "1" ]]; then
+    ALLOW_GATE_CONTEXT=1
+fi
+
+if [[ -z "${ALLOW_FORECAST_GATE_FAILURE}" ]]; then
+    if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
+        ALLOW_FORECAST_GATE_FAILURE="1"
+    else
+        ALLOW_FORECAST_GATE_FAILURE="0"
+    fi
+fi
+
+if [[ "${ALLOW_FORECAST_GATE_FAILURE}" == "1" && "${ALLOW_GATE_CONTEXT}" != "1" ]]; then
+    log "[WARN] ALLOW_FORECAST_GATE_FAILURE=1 is only permitted for local/holdout audits; enforcing fatal gate."
+    ALLOW_FORECAST_GATE_FAILURE="0"
+fi
 
 mkdir -p "${TS_FORECAST_AUDIT_DIR}"
 
@@ -105,6 +133,11 @@ log "[RUNBOOK] TS_FORECAST_MONITOR_CONFIG=${TS_FORECAST_MONITOR_CONFIG}"
 log "[RUNBOOK] TS_FORECAST_AUDIT_DIR=${TS_FORECAST_AUDIT_DIR}"
 log "[RUNBOOK] TICKERS=${TICKERS}"
 log "[RUNBOOK] AUDIT_RUNS=${AUDIT_RUNS}"
+if [[ "${ALLOW_FORECAST_GATE_FAILURE}" == "1" ]]; then
+    log "[RUNBOOK] Forecast gate: non-fatal (local/holdout audit)"
+else
+    log "[RUNBOOK] Forecast gate: fatal"
+fi
 if [[ -n "${AS_OF_START_DATE}" ]]; then
     log "[RUNBOOK] AS_OF_START_DATE=${AS_OF_START_DATE} | AS_OF_STEP_DAYS=${AS_OF_STEP_DAYS}"
 fi
@@ -140,7 +173,11 @@ cleanup() {
         kill "${GPU_MONITOR_PID}" >/dev/null 2>&1 || true
     fi
     if [[ "${exit_code}" -eq 0 ]]; then
-        log "[RUNBOOK] Completed successfully"
+        if [[ "${FORECAST_GATE_FAILURE_COUNT}" -gt 0 ]]; then
+            log "[RUNBOOK] Completed with ${FORECAST_GATE_FAILURE_COUNT} non-fatal forecast gate failure(s)."
+        else
+            log "[RUNBOOK] Completed successfully"
+        fi
     else
         log "[RUNBOOK] Failed with exit code ${exit_code}"
     fi
@@ -226,10 +263,14 @@ for ((run_idx=1; run_idx<=AUDIT_RUNS; run_idx++)); do
         "${PROOF_ARGS[@]}"
 
     if [[ "${ALLOW_FORECAST_GATE_FAILURE}" == "1" ]]; then
+        gate_exit=0
         run_and_log_allow_fail "gate_${run_idx}_forecast_audits" \
             "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_forecast_audits.py" \
             --config-path "${TS_FORECAST_MONITOR_CONFIG}" \
-            --max-files 500 || true
+            --max-files 500 || gate_exit=$?
+        if [[ "${gate_exit}" -ne 0 ]]; then
+            FORECAST_GATE_FAILURE_COUNT=$((FORECAST_GATE_FAILURE_COUNT + 1))
+        fi
     else
         run_and_log "gate_${run_idx}_forecast_audits" \
             "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_forecast_audits.py" \
