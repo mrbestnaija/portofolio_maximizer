@@ -339,28 +339,28 @@ pipeline:
         CRISIS:
           # Optimized for 50%+ volatility, weak trend, 5 CV folds, 25 samples
           # RMSE: 17.15 -> 6.74 (+60.69% improvement)
-          - {sarimax: 0.23, samossa: 0.72, mssa_rl: 0.05}
+          - {garch: 0.23, samossa: 0.72, mssa_rl: 0.05}
         MODERATE_MIXED:
           # Optimized for 26-30% volatility, mixed trend (R²=0.00-0.30), 4 CV folds, 20 samples
           # RMSE: 17.63 -> 16.52 (+6.30% improvement)
-          - {sarimax: 0.05, samossa: 0.73, mssa_rl: 0.22}
+          - {garch: 0.05, samossa: 0.73, mssa_rl: 0.22}
         MODERATE_TRENDING:
           # Optimized for 18-23% volatility, strong trend (R²>0.73), 10 CV folds, 50 samples
           # RMSE: 20.86 -> 7.29 (+65.07% improvement)
-          - {sarimax: 0.05, samossa: 0.90, mssa_rl: 0.05}
+          - {garch: 0.05, samossa: 0.90, mssa_rl: 0.05}
 
       # Regime-specific model preferences
       regime_model_preferences:
         LIQUID_RANGEBOUND:
-          preferred_models: ['garch', 'sarimax', 'samossa']
+          preferred_models: ['garch', 'samossa', 'mssa_rl']
           description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
 
         MODERATE_RANGEBOUND:
-          preferred_models: ['garch', 'sarimax', 'samossa']
+          preferred_models: ['garch', 'samossa', 'mssa_rl']
           description: "Low volatility with some directional bias"
 
         MODERATE_TRENDING:
-          preferred_models: ['samossa', 'garch', 'sarimax']
+          preferred_models: ['samossa', 'garch', 'mssa_rl']
           description: "Clear trend with moderate volatility"
 
         HIGH_VOL_TRENDING:
@@ -368,11 +368,11 @@ pipeline:
           description: "Volatile directional moves, complex patterns"
 
         CRISIS:
-          preferred_models: ['garch', 'sarimax']
+          preferred_models: ['garch', 'samossa']
           description: "Crisis mode, focus on volatility and simple models"
 
         MODERATE_MIXED:
-          preferred_models: ['garch', 'samossa', 'sarimax']
+          preferred_models: ['garch', 'samossa', 'mssa_rl']
           description: "No clear regime, use balanced ensemble"
 
   logging:
