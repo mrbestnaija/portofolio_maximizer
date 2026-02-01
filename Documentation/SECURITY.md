@@ -33,7 +33,7 @@ This is the fastest way for us to triage and track fixes privately.
 ### Email (for core / urgent issues)
 If the issue is **core**, **actively exploitable**, or you cannot use GitHub Advisories, email us:
 
-**security@yourdomain.com**  
+**security@yourdomain.com**
 (Replace with the correct address for this project.)
 
 ### What to include
@@ -65,6 +65,10 @@ If the report is valid, we will:
 - Publish a GitHub Security Advisory (crediting you if you want)
 
 We may request that details remain private until a fix is available. Disclosure windows vary by severity and exploitability.
+
+## Dependabot Alerts
+
+As of 2026-02-01, Dependabot reports CVE-2026-0994 in protobuf with no fixed release available. We are monitoring upstream and will upgrade once a fixed version is published; until then, keep the alert open (do not dismiss as fixed) and document any mitigations here.
 
 ## Safe Harbor
 
