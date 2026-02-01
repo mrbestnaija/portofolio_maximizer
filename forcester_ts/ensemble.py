@@ -30,13 +30,14 @@ class EnsembleConfig:
     regime_detection_enabled: bool = True  # Phase 7.4: Enable regime-aware selection
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
-            {"sarimax": 0.6, "samossa": 0.4},
-            {"sarimax": 0.5, "samossa": 0.3, "mssa_rl": 0.2},
-            {"sarimax": 0.5, "mssa_rl": 0.5},
-            # Allow non-SARIMAX-dominated blends when diagnostics support it.
+            {"garch": 0.85, "samossa": 0.10, "mssa_rl": 0.05},
+            {"garch": 0.70, "samossa": 0.20, "mssa_rl": 0.10},
+            {"garch": 0.60, "samossa": 0.25, "mssa_rl": 0.15},
+            {"samossa": 0.60, "mssa_rl": 0.40},
+            {"samossa": 0.45, "garch": 0.35, "mssa_rl": 0.20},
+            {"garch": 1.0},
             {"samossa": 1.0},
             {"mssa_rl": 1.0},
-            {"samossa": 0.7, "mssa_rl": 0.3},
         ]
     )
     minimum_component_weight: float = 0.05

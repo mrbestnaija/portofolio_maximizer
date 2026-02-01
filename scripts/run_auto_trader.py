@@ -545,6 +545,29 @@ def _effective_min_lookback_days(interval: Optional[str]) -> int:
     return MIN_LOOKBACK_DAYS_INTRADAY if _is_intraday_interval(interval) else MIN_LOOKBACK_DAYS_DAILY
 
 
+def _load_forecasting_config() -> Dict[str, Any]:
+    """Load forecasting_config.yml for ensemble/regime settings."""
+    cfg_path = ROOT_PATH / "config" / "forecasting_config.yml"
+    if cfg_path.exists():
+        try:
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            return raw.get("forecasting", raw)
+        except Exception as exc:
+            logger.warning("Failed to load forecasting config: %s", exc)
+    return {}
+
+
+_FORECASTING_CONFIG: Optional[Dict[str, Any]] = None
+
+
+def _get_forecasting_config() -> Dict[str, Any]:
+    """Cached access to forecasting config."""
+    global _FORECASTING_CONFIG
+    if _FORECASTING_CONFIG is None:
+        _FORECASTING_CONFIG = _load_forecasting_config()
+    return _FORECASTING_CONFIG
+
+
 def _sarimax_kwargs_for_interval(interval: Optional[str]) -> Dict[str, Any]:
     """
     Return SARIMAX kwargs appropriate for the current yfinance interval.
@@ -748,15 +771,29 @@ def _generate_time_series_forecast(
         if mssa_use_gpu is None:
             mssa_use_gpu = _gpu_parallel_enabled()
 
+        fcfg = _get_forecasting_config()
+        ensemble_cfg = fcfg.get("ensemble", {})
+        ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
+        regime_cfg = fcfg.get("regime_detection", {})
+        regime_detection_enabled = regime_cfg.get("enabled", False)
+        regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != "enabled"}
+
+        sarimax_cfg = fcfg.get("sarimax", {})
+        sarimax_enabled = sarimax_cfg.get("enabled", False)
+
         forecaster = TimeSeriesForecaster(
             config=TimeSeriesForecasterConfig(
                 forecast_horizon=horizon,
+                sarimax_enabled=sarimax_enabled,
                 sarimax_kwargs=_sarimax_kwargs_for_interval(resolved_interval),
                 samossa_kwargs={"forecast_horizon": int(horizon)},
                 mssa_rl_kwargs={
                     "forecast_horizon": int(horizon),
                     "use_gpu": bool(mssa_use_gpu),
                 },
+                ensemble_kwargs=ensemble_kwargs,
+                regime_detection_enabled=regime_detection_enabled,
+                regime_detection_kwargs=regime_detection_kwargs,
             )
         )
         forecaster.fit(price_series=close_series, returns_series=returns_series)
