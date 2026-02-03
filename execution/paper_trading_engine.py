@@ -348,7 +348,7 @@ class PaperTradingEngine:
                         frame = self.db_manager.load_ohlcv([str(ticker)] + peers, start_date=start_date, end_date=end_date)
                         if frame is not None and not frame.empty and "ticker" in frame.columns and "close" in frame.columns:
                             closes = frame.pivot_table(index=frame.index, columns="ticker", values="close")
-                            returns = closes.pct_change()
+                            returns = closes.pct_change(fill_method=None)
                             ticker_upper = str(ticker).upper()
                             candidate_col = None
                             for col in returns.columns:
@@ -1092,6 +1092,32 @@ class PaperTradingEngine:
                         gap = int(((idx > last_ts) & (idx <= current_ts)).sum()) or 1
                 except Exception:
                     gap = 1
+
+                # Detect cross-frequency scenario: position opened in a daily
+                # pass but now evaluated with intraday data.  The calendar gap
+                # between last_bar_ts (daily close) and current_bar_ts spans
+                # >= 0.5 days, yet gap exceeds max_days because bar-counting
+                # uses the higher intraday frequency.  Scale max_days from
+                # daily bar units to intraday bar units so TIME_EXIT triggers
+                # at the equivalent calendar duration.
+                if gap > max_days:
+                    calendar_gap_days = (current_ts - last_ts).total_seconds() / 86400.0
+                    if (
+                        calendar_gap_days >= 0.5
+                        and isinstance(market_data, pd.DataFrame)
+                        and len(market_data) >= 2
+                        and isinstance(market_data.index, pd.DatetimeIndex)
+                    ):
+                        try:
+                            bar_intervals = pd.Series(market_data.index).diff().dropna()
+                            median_bar_td = bar_intervals.median()
+                            if pd.Timedelta(0) < median_bar_td < pd.Timedelta(hours=20):
+                                dates = pd.Series(market_data.index).dt.normalize()
+                                bars_per_day = max(1, int(dates.value_counts().median()))
+                                max_days = max_days * bars_per_day
+                        except Exception:
+                            pass
+
                 bars_held += gap
                 self.portfolio.holding_bars[ticker] = bars_held
                 self.portfolio.last_bar_timestamps[ticker] = ensure_utc(current_ts)
