@@ -721,6 +721,16 @@ class DatabaseManager:
                 realized_pnl REAL,
                 realized_pnl_pct REAL,
                 holding_period_days INTEGER,
+                -- Optional close-trade attribution fields to make win/loss stats auditable.
+                -- These are additive and can be NULL for legacy rows/opening trades.
+                entry_price REAL,
+                exit_price REAL,
+                close_size REAL,
+                position_before REAL,
+                position_after REAL,
+                is_close INTEGER,
+                bar_timestamp TEXT,
+                exit_reason TEXT,
                 asset_class TEXT DEFAULT 'equity',
                 instrument_type TEXT DEFAULT 'spot',
                 underlying_ticker TEXT,
@@ -783,6 +793,22 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN base_confidence REAL")
         if "effective_confidence" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN effective_confidence REAL")
+        if "entry_price" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN entry_price REAL")
+        if "exit_price" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN exit_price REAL")
+        if "close_size" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN close_size REAL")
+        if "position_before" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN position_before REAL")
+        if "position_after" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN position_after REAL")
+        if "is_close" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN is_close INTEGER")
+        if "bar_timestamp" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_timestamp TEXT")
+        if "exit_reason" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN exit_reason TEXT")
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -1881,6 +1907,14 @@ class DatabaseManager:
         barbell_multiplier: Optional[float] = None,
         base_confidence: Optional[float] = None,
         effective_confidence: Optional[float] = None,
+        entry_price: Optional[float] = None,
+        exit_price: Optional[float] = None,
+        close_size: Optional[float] = None,
+        position_before: Optional[float] = None,
+        position_after: Optional[float] = None,
+        is_close: Optional[bool] = None,
+        bar_timestamp: Optional[str] = None,
+        exit_reason: Optional[str] = None,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -1890,49 +1924,85 @@ class DatabaseManager:
                 trade_date = trade_date.isoformat()
 
             with self.conn:
-                self.cursor.execute(
-                    """
-                    INSERT INTO trade_executions
-                    (ticker, trade_date, action, shares, price, total_value,
-                     commission, mid_price, mid_slippage_bps, signal_id,
-                     data_source, execution_mode, synthetic_dataset_id, synthetic_generator_version, run_id,
-                     realized_pnl, realized_pnl_pct,
-                     holding_period_days, asset_class, instrument_type,
-                     underlying_ticker, strike, expiry, multiplier,
-                     barbell_bucket, barbell_multiplier, base_confidence, effective_confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ticker,
-                        trade_date,
-                        action,
-                        float(shares),
-                        float(price),
-                        float(total_value),
-                        float(commission),
-                        mid_price,
-                        mid_slippage_bps,
-                        signal_id,
-                        data_source,
-                        execution_mode,
-                        synthetic_dataset_id,
-                        synthetic_generator_version,
-                        run_id,
-                        realized_pnl,
-                        realized_pnl_pct,
-                        holding_period_days,
-                        asset_class,
-                        instrument_type,
-                        underlying_ticker,
-                        strike,
-                        expiry,
-                        float(multiplier),
-                        barbell_bucket,
-                        float(barbell_multiplier) if barbell_multiplier is not None else None,
-                        float(base_confidence) if base_confidence is not None else None,
-                        float(effective_confidence) if effective_confidence is not None else None,
-                    ),
-                )
+                columns = [
+                    "ticker",
+                    "trade_date",
+                    "action",
+                    "shares",
+                    "price",
+                    "total_value",
+                    "commission",
+                    "mid_price",
+                    "mid_slippage_bps",
+                    "signal_id",
+                    "data_source",
+                    "execution_mode",
+                    "synthetic_dataset_id",
+                    "synthetic_generator_version",
+                    "run_id",
+                    "realized_pnl",
+                    "realized_pnl_pct",
+                    "holding_period_days",
+                    "entry_price",
+                    "exit_price",
+                    "close_size",
+                    "position_before",
+                    "position_after",
+                    "is_close",
+                    "bar_timestamp",
+                    "exit_reason",
+                    "asset_class",
+                    "instrument_type",
+                    "underlying_ticker",
+                    "strike",
+                    "expiry",
+                    "multiplier",
+                    "barbell_bucket",
+                    "barbell_multiplier",
+                    "base_confidence",
+                    "effective_confidence",
+                ]
+                values = [
+                    ticker,
+                    trade_date,
+                    action,
+                    float(shares),
+                    float(price),
+                    float(total_value),
+                    float(commission),
+                    mid_price,
+                    mid_slippage_bps,
+                    signal_id,
+                    data_source,
+                    execution_mode,
+                    synthetic_dataset_id,
+                    synthetic_generator_version,
+                    run_id,
+                    realized_pnl,
+                    realized_pnl_pct,
+                    holding_period_days,
+                    float(entry_price) if entry_price is not None else None,
+                    float(exit_price) if exit_price is not None else None,
+                    float(close_size) if close_size is not None else None,
+                    float(position_before) if position_before is not None else None,
+                    float(position_after) if position_after is not None else None,
+                    int(bool(is_close)) if is_close is not None else None,
+                    bar_timestamp,
+                    exit_reason,
+                    asset_class,
+                    instrument_type,
+                    underlying_ticker,
+                    strike,
+                    expiry,
+                    float(multiplier),
+                    barbell_bucket,
+                    float(barbell_multiplier) if barbell_multiplier is not None else None,
+                    float(base_confidence) if base_confidence is not None else None,
+                    float(effective_confidence) if effective_confidence is not None else None,
+                ]
+                placeholders = ", ".join(["?"] * len(columns))
+                sql = f"INSERT INTO trade_executions ({', '.join(columns)}) VALUES ({placeholders})"
+                self.cursor.execute(sql, values)
             trade_id = self.cursor.lastrowid
             logger.debug("Trade execution saved (id=%s) for %s", trade_id, ticker)
             return trade_id

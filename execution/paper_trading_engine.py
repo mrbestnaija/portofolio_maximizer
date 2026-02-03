@@ -381,6 +381,18 @@ class PaperTradingEngine:
                 reason="Non-actionable signal",
             )
 
+        # Optional: long-only execution guard (keep closes allowed).
+        # This is intended for proof runs to avoid short-side whipsaws while the
+        # edge/cost gates are being tuned.
+        long_only = str(os.getenv("PMX_LONG_ONLY") or "").strip().lower() in {"1", "true", "yes", "on"}
+        if long_only and forced_exit_shares is None:
+            opening_or_adding_short = action == "SELL" and current_position <= 0
+            if opening_or_adding_short:
+                return ExecutionResult(
+                    status="REJECTED",
+                    reason="LONG_ONLY enabled: short entries/short adds disabled",
+                )
+
         logger.info(f"Executing %s signal for %s", action, ticker)
         # Step 1: Validate signal (diagnostic toggle via env DIAGNOSTIC_MODE/EXECUTION_DIAGNOSTIC_MODE)
         diag_mode = str(os.getenv("EXECUTION_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
@@ -408,6 +420,52 @@ class PaperTradingEngine:
             )
         if diag_mode and validation.warnings:
             logger.warning("Validation warnings (ignored in DIAGNOSTIC_MODE): %s", validation.warnings)
+
+        # Optional: execution-time cost gate (only for new entries; never block exits).
+        # Uses expected_return_net when available (already cost-adjusted in TS generator).
+        edge_cost_gate = str(os.getenv("PMX_EDGE_COST_GATE") or "").strip().lower() in {"1", "true", "yes", "on"}
+        if (edge_cost_gate or proof_mode) and not diag_mode and forced_exit_shares is None:
+            expected_ret = signal.get("expected_return_net")
+            if expected_ret is None:
+                expected_ret = signal.get("expected_return")
+            try:
+                expected_ret_f = float(expected_ret) if expected_ret is not None else None
+            except (TypeError, ValueError):
+                expected_ret_f = None
+
+            if expected_ret_f is not None:
+                # Best-effort spread estimate from the last bar.
+                spread_pct = 0.0
+                try:
+                    if isinstance(market_data, pd.DataFrame) and not market_data.empty:
+                        last = market_data.iloc[-1]
+                        bid = last.get("Bid") if hasattr(last, "get") else None
+                        ask = last.get("Ask") if hasattr(last, "get") else None
+                        if bid is not None and ask is not None and pd.notna(bid) and pd.notna(ask):
+                            bid_f = float(bid)
+                            ask_f = float(ask)
+                            mid = (bid_f + ask_f) / 2.0 if (bid_f + ask_f) else 0.0
+                            if mid > 0:
+                                spread_pct = max(0.0, (ask_f - bid_f) / mid)
+                except Exception:
+                    spread_pct = 0.0
+
+                # Round-trip cost proxy: spread + both-side slippage + both-side explicit costs.
+                est_roundtrip_cost = float(spread_pct) + 2.0 * float(self.slippage_pct or 0.0) + 2.0 * float(self.transaction_cost_pct or 0.0)
+                try:
+                    mult = float(os.getenv("PMX_EDGE_COST_MULTIPLIER") or (1.25 if proof_mode else 1.0))
+                except (TypeError, ValueError):
+                    mult = 1.0
+                required_edge = mult * est_roundtrip_cost
+                if abs(float(expected_ret_f)) < required_edge:
+                    return ExecutionResult(
+                        status="REJECTED",
+                        reason=(
+                            f"Edge/cost gate: abs(expected_return)={abs(expected_ret_f):.4%} "
+                            f"< required={required_edge:.4%} (est_roundtrip_cost={est_roundtrip_cost:.4%}, mult={mult:.2f})"
+                        ),
+                        validation_warnings=validation.warnings,
+                    )
 
         # Step 2: Calculate position size (forced exits close the full position).
         if forced_exit_shares is not None:
@@ -1143,6 +1201,16 @@ class PaperTradingEngine:
             prior_entry = self.portfolio.entry_prices.get(trade.ticker)
             prior_shares = self.portfolio.positions.get(trade.ticker, 0)
             holding_period_days = None
+            position_before = float(prior_shares or 0)
+            if trade.action == "BUY":
+                position_after = float((prior_shares or 0) + int(trade.shares))
+            else:
+                position_after = float((prior_shares or 0) - int(trade.shares))
+
+            entry_price_ref: Optional[float] = None
+            exit_price_ref: Optional[float] = None
+            close_size_ref: Optional[float] = None
+            is_close_ref: Optional[bool] = None
 
             if prior_entry and prior_entry > 0:
                 if trade.action == 'SELL' and prior_shares > 0:
@@ -1152,6 +1220,10 @@ class PaperTradingEngine:
                         - trade.transaction_cost
                     )
                     realized_pct = (trade.entry_price - prior_entry) / prior_entry
+                    entry_price_ref = float(prior_entry)
+                    exit_price_ref = float(trade.entry_price)
+                    close_size_ref = float(close_size)
+                    is_close_ref = True
                     entry_ts = self.portfolio.entry_timestamps.get(trade.ticker)
                     if isinstance(entry_ts, datetime):
                         holding_period_days = max(0, (trade.timestamp.date() - entry_ts.date()).days)
@@ -1162,9 +1234,15 @@ class PaperTradingEngine:
                         - trade.transaction_cost
                     )
                     realized_pct = (prior_entry - trade.entry_price) / prior_entry
+                    entry_price_ref = float(prior_entry)
+                    exit_price_ref = float(trade.entry_price)
+                    close_size_ref = float(close_size)
+                    is_close_ref = True
                     entry_ts = self.portfolio.entry_timestamps.get(trade.ticker)
                     if isinstance(entry_ts, datetime):
                         holding_period_days = max(0, (trade.timestamp.date() - entry_ts.date()).days)
+            if is_close_ref is None:
+                is_close_ref = False
             # Instrument metadata – currently spot/crypto only, but the Trade
             # dataclass allows options/synthetic extensions once feature flags
             # are enabled.
@@ -1200,6 +1278,14 @@ class PaperTradingEngine:
                 barbell_multiplier=trade.barbell_multiplier,
                 base_confidence=trade.base_confidence,
                 effective_confidence=trade.effective_confidence,
+                entry_price=entry_price_ref,
+                exit_price=exit_price_ref,
+                close_size=close_size_ref,
+                position_before=position_before,
+                position_after=position_after,
+                is_close=is_close_ref,
+                bar_timestamp=trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
+                exit_reason=trade.exit_reason,
             )
 
             logger.debug("Trade stored in database: %s", trade.trade_id)

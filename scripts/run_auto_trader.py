@@ -1654,6 +1654,11 @@ def main(
         logging.getLogger(__name__).info(
             "[PROOF_MODE] Active: tight max_holding, ATR stops/targets, flatten-before-reverse"
         )
+        # Proof runs should bias toward fewer, higher-quality trades.
+        os.environ.setdefault("PMX_LONG_ONLY", "1")
+        os.environ.setdefault("PMX_EDGE_COST_GATE", "1")
+        os.environ.setdefault("PMX_EDGE_COST_MULTIPLIER", "1.25")
+        os.environ.setdefault("PMX_PROOF_STRICT_THRESHOLDS", "1")
 
     if enable_llm and _env_flag("PM_ENABLE_OLLAMA") is not True:
         logging.getLogger(__name__).warning(
@@ -1870,6 +1875,24 @@ def main(
         except Exception as exc:
             logger.warning("Failed to load signal routing config: %s", exc)
 
+    ts_cfg = dict(routing_cfg.get("time_series") or {})
+    strict_ts = str(os.getenv("PMX_PROOF_STRICT_THRESHOLDS") or "0") == "1"
+    if proof_mode and strict_ts:
+        # Defaults chosen to reduce churn: higher confidence + higher min-return
+        # + modestly tighter risk cap. Values are decimal returns.
+        ts_cfg["confidence_threshold"] = float(ts_cfg.get("confidence_threshold", 0.55) or 0.55)
+        ts_cfg["confidence_threshold"] = max(ts_cfg["confidence_threshold"], 0.65)
+        ts_cfg["min_expected_return"] = float(ts_cfg.get("min_expected_return", 0.003) or 0.003)
+        ts_cfg["min_expected_return"] = max(ts_cfg["min_expected_return"], 0.005)
+        ts_cfg["max_risk_score"] = float(ts_cfg.get("max_risk_score", 0.7) or 0.7)
+        ts_cfg["max_risk_score"] = min(ts_cfg["max_risk_score"], 0.60)
+        logger.info(
+            "[PROOF_MODE] Strict TS thresholds active: confidence>=%.2f, min_return>=%.2f%%, max_risk<=%.2f",
+            ts_cfg["confidence_threshold"],
+            ts_cfg["min_expected_return"] * 100,
+            ts_cfg["max_risk_score"],
+        )
+
     router_config = {
         "time_series_primary": routing_cfg.get("time_series_primary", True),
         "llm_fallback": routing_cfg.get(
@@ -1880,7 +1903,7 @@ def main(
         "enable_sarimax": routing_cfg.get("enable_sarimax", True),
         "enable_garch": routing_cfg.get("enable_garch", True),
         "enable_mssa_rl": routing_cfg.get("enable_mssa_rl", True),
-        "time_series": routing_cfg.get("time_series") or {},
+        "time_series": ts_cfg,
     }
     signal_router = SignalRouter(config=router_config, llm_generator=llm_generator)
     equity_points: list[Dict[str, Any]] = [{"t": "start", "v": trading_engine.portfolio.total_value}]
