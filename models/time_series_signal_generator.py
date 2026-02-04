@@ -967,10 +967,10 @@ class TimeSeriesSignalGenerator:
         # clear confidence when model agreement/quality is strong, while
         # remaining discriminative across regimes.
         core = (
-            0.30 * self._clamp01(diagnostics_score)
-            + 0.25 * self._clamp01(model_agreement)
+            0.20 * self._clamp01(diagnostics_score)
+            + 0.20 * self._clamp01(model_agreement)
             + 0.20 * self._clamp01(snr_score)
-            + 0.25 * self._clamp01(edge_score)
+            + 0.40 * self._clamp01(edge_score)
         )
         confidence = (0.05 + 0.95 * core) * vol_factor
         # Very small gross expected_return should be conservative even if other signals look good.

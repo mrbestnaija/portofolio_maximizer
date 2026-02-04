@@ -150,7 +150,7 @@ class PaperTradingEngine:
     def __init__(self,
                  initial_capital: float = 10000.0,
                  slippage_pct: float = 0.0005,
-                 transaction_cost_pct: float = 0.0,
+                 transaction_cost_pct: float = 0.00015,
                  db_path: str = None,
                  database_manager: Optional[DatabaseManager] = None,
                  signal_validator: Optional[SignalValidator] = None,
@@ -451,7 +451,12 @@ class PaperTradingEngine:
                     spread_pct = 0.0
 
                 # Round-trip cost proxy: spread + both-side slippage + both-side explicit costs.
-                est_roundtrip_cost = float(spread_pct) + 2.0 * float(self.slippage_pct or 0.0) + 2.0 * float(self.transaction_cost_pct or 0.0)
+                est_roundtrip_cost = (
+                    float(spread_pct)
+                    + 2.0 * float(self.slippage_pct or 0.0)
+                    + 2.0 * float(self.transaction_cost_pct or 0.0)
+                    + 2.0 * float(getattr(self, 'impact_pct', 0.00005) or 0.00005)  # 0.5 bps each-way market-impact floor
+                )
                 try:
                     mult = float(os.getenv("PMX_EDGE_COST_MULTIPLIER") or (1.25 if proof_mode else 1.0))
                 except (TypeError, ValueError):
@@ -765,10 +770,10 @@ class PaperTradingEngine:
 
         # Exploration mode: trade smaller until n_trades is sufficient.
         if mode == "exploration":
-            return 0.25
+            return 0.50
         # Exploitation + red regime: shrink risk aggressively.
         if state == "red":
-            return 0.3
+            return 0.60
         # Exploitation + green regime: modestly increase risk.
         if state == "green":
             return 1.2
