@@ -291,20 +291,20 @@ REGIME_ENABLED=0 bash/run_20_audit_sprint.sh --audits 20 --tickers AAPL
 
 **Objective**: Final checks before declaring production-ready.
 
-### 5.1 Checklist
+### 5.1 Checklist (evaluated 2026-02-05)
 
-- [ ] P0 cost fixes applied and validated (Phase 0)
-- [ ] 100+ audits accumulated with KEEP status (Phase 4)
-- [ ] Close-trade attribution fully populated (Phase 1)
-- [ ] Barbell activated and validated OR explicitly deferred with rationale (Phase 3)
-- [ ] Frontier markets activated and validated OR explicitly deferred (Phase 3)
-- [ ] Regime detection decision made and config updated (Phase 4)
-- [ ] `min_directional_accuracy >= 0.50` (Phase 2)
-- [ ] Win rate >= 50% on last 50 closed trades
-- [ ] Profit factor >= 1.0 on last 50 closed trades
-- [ ] All tests pass: `pytest tests/ -m "not slow"` (720+ tests)
-- [ ] UTC timestamps verified: all `trade_date` and `entry_timestamp` fields contain `+00:00`
-- [ ] Cron job path fixed (currently `/mnt/c/.../bin/python` — needs Windows path)
+- [x] P0 cost fixes applied and validated (Phase 0) — commit a9601b8; avg PnL -0.01% (was -0.14%)
+- [ ] 100+ audits accumulated with KEEP status (Phase 4) — 76 effective audits, 0% violation, lift=0%; need live trading days to reach 100+ with lift > 10%
+- [x] Close-trade attribution fully populated (Phase 1) — recent closes (TIME_EXIT, TAKE_PROFIT) have attribution; 3 pre-proof-mode closes from user's earlier sprint lack exit_reason
+- [x] Barbell activated and validated (Phase 3) — commit 0baad44; safe=1.0x / core=0.2x / spec=0.1x verified; risk-bucket throttling confirmed active
+- [x] Frontier markets activated and validated (Phase 3) — 47 tickers extracted (NGX, NSE, Vietnam, Pakistan, etc.); pipeline clean exit
+- [x] Regime detection decision made and config updated (Phase 4) — commit 482ca48; A/B test inconclusive on PnL (no trades in either arm); regime kept ON
+- [x] `min_directional_accuracy >= 0.50` (Phase 2) — commit a9601b8
+- [ ] Win rate >= 50% on last 50 closed trades — only 5 closed trades available (40%); need more live trading to populate
+- [ ] Profit factor >= 1.0 on last 50 closed trades — PF=2.53 on 5 trades (sample too small for production decision)
+- [x] All tests pass: `pytest tests/ -m "not slow"` (720+ tests) — 723 passed, 1 skipped, 7 xfailed (2026-02-05)
+- [x] UTC timestamps verified — portfolio_state fields (entry_timestamp, entry_bar_timestamp, last_bar_timestamp) all contain `+00:00`; trade_date is DATE-only column (by design)
+- [x] Cron job path — production_cron.sh uses `pmx_resolve_python` with BASH_SOURCE-relative resolution; `/mnt/c/...` reference was stale
 
 ### 5.2 DQN / Deep RL — Future Consideration
 
@@ -331,4 +331,6 @@ The current RL component (MSSA-RL, tabular Q-learning in [forcester_ts/mssa_rl.p
 
 ---
 
-*Reconciled against codebase on 2026-02-04. Commits in scope: local working tree.*
+*Reconciled against codebase on 2026-02-04. Phase 5 checklist evaluated 2026-02-05.*
+*Commits this session: a9601b8 (P0+P1), f5f11f2 (docs), 0ea68d0 (schema+gates), 0baad44 (barbell), 482ca48 (regime A/B).*
+*Remaining blockers for go/no-go: 50 closed trades for win-rate/PF evaluation; 100+ effective audits with lift (requires live trading days).*
