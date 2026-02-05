@@ -36,7 +36,7 @@ from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecaste
 from execution.paper_trading_engine import PaperTradingEngine
 from models.time_series_signal_generator import TimeSeriesSignalGenerator
 from risk.barbell_policy import BarbellConfig
-from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence
+from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence as _write_promotion_evidence
 from risk.barbell_sizing import apply_barbell_confidence, barbell_confidence_multipliers
 
 logger = logging.getLogger(__name__)
@@ -580,7 +580,7 @@ def main(
     step_days: int,
     initial_capital: float,
     report_path: Optional[str],
-    promotion_evidence_path: str,
+    write_promotion_evidence: str,
     verbose: bool,
 ) -> None:
     _configure_logging(verbose)
@@ -618,10 +618,10 @@ def main(
     out_path = Path(report_path).expanduser() if report_path else _default_report_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    if promotion_evidence_path:
-        evidence_path = Path(promotion_evidence_path).expanduser()
+    if write_promotion_evidence:
+        evidence_path = Path(write_promotion_evidence).expanduser()
         decision = decide_promotion_from_report(payload)
-        write_promotion_evidence(path=evidence_path, decision=decision, report_path=out_path)
+        _write_promotion_evidence(path=evidence_path, decision=decision, report_path=out_path)
 
     m = payload.get("metrics") or {}
     ts_only = m.get("ts_only") or {}

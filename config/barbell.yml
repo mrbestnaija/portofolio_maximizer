@@ -2,7 +2,7 @@ barbell:
   # Global master switches for Taleb-style barbell allocation. When
   # enable_barbell_allocation is false, portfolio behaviour must remain
   # unchanged relative to the pre-barbell implementation.
-  enable_barbell_allocation: false
+  enable_barbell_allocation: true
   enable_barbell_validation: false
   enable_antifragility_tests: false
 
