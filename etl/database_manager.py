@@ -466,15 +466,46 @@ class DatabaseManager:
         if not self._mirror_path.exists():
             self._mirror_path = None
             return
+        def _quick_check(candidate: Path) -> bool:
+            try:
+                conn = sqlite3.connect(str(candidate), timeout=1.0)
+                cur = conn.cursor()
+                cur.execute("PRAGMA quick_check(1)")
+                row = cur.fetchone()
+                conn.close()
+                return bool(row and row[0] == "ok")
+            except Exception:
+                return False
+
+        tmp_target = self.db_path.with_name(f".{self.db_path.name}.syncing")
         try:
-            shutil.copy2(self._mirror_path, self.db_path)
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic-ish sync: copy to a temp file, validate it, then replace.
+            shutil.copyfile(self._mirror_path, tmp_target)
+            if not _quick_check(tmp_target):
+                raise OSError(f"quick_check failed after mirror sync staging: {tmp_target}")
+            os.replace(tmp_target, self.db_path)
             # Remove any stale WAL/SHM artifacts on the canonical path; mirror
             # syncs a single consistent DB file.
             self._cleanup_wal_artifacts(target=self.db_path)
             logger.info("Synchronized mirror database %s back to %s", self._mirror_path, self.db_path)
         except OSError as exc:
             logger.error("Failed to synchronize mirror database %s: %s", self._mirror_path, exc)
+            # Keep the mirror for manual recovery; it is the best-known-good file.
+            try:
+                if tmp_target.exists():
+                    tmp_target.unlink()
+            except OSError:
+                logger.debug("Unable to cleanup mirror sync temp file %s", tmp_target)
+            self._active_db_path = self._mirror_path
+            return
         finally:
+            try:
+                if tmp_target.exists():
+                    tmp_target.unlink()
+            except OSError:
+                logger.debug("Unable to cleanup mirror sync temp file %s", tmp_target)
+            # Best-effort cleanup of the mirror once the canonical DB is updated.
             try:
                 self._mirror_path.unlink()
             except OSError:
@@ -681,10 +712,22 @@ class DatabaseManager:
                 stop_loss REAL,
                 target_price REAL,
                 max_holding_days INTEGER,
+                holding_bars INTEGER DEFAULT 0,
+                entry_bar_timestamp TEXT,
+                last_bar_timestamp TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(ticker)
             )
         """)
+        # Migration: ensure portfolio_state has bar-aware fields (SQLite only).
+        self.cursor.execute("PRAGMA table_info(portfolio_state)")
+        ps_cols = {row["name"] for row in self.cursor.fetchall()}
+        if "holding_bars" not in ps_cols:
+            self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN holding_bars INTEGER DEFAULT 0")
+        if "entry_bar_timestamp" not in ps_cols:
+            self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN entry_bar_timestamp TEXT")
+        if "last_bar_timestamp" not in ps_cols:
+            self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN last_bar_timestamp TEXT")
 
         # Portfolio cash state (single-row table for cash balance)
         self.cursor.execute("""

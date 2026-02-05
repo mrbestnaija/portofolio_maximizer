@@ -39,15 +39,50 @@ def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
 
 def _select_read_path(db_path: Path) -> Path:
     mirror = _wsl_mirror_path(db_path)
+    # Prefer the canonical DB path when it exists. Mirrors are a recovery tool
+    # for disk I/O issues on Windows mounts, but using them as a primary read
+    # target can surface partially-written/corrupted copies after abrupt exits.
+    if db_path.exists():
+        return db_path
     if mirror and mirror.exists():
-        try:
-            if not db_path.exists():
-                return mirror
-            if mirror.stat().st_mtime >= db_path.stat().st_mtime:
-                return mirror
-        except OSError:
-            return mirror
+        return mirror
     return db_path
+
+
+def _connect_ro_with_fallback(db_path: Path) -> sqlite3.Connection:
+    """
+    Connect read-only, preferring the canonical path and only falling back to a
+    WSL mirror when the canonical path cannot be opened or is corrupt.
+    """
+    primary = _select_read_path(db_path)
+    mirror = _wsl_mirror_path(db_path)
+    tried: List[Path] = []
+    for candidate in (primary, mirror):
+        if candidate is None:
+            continue
+        candidate = Path(candidate)
+        if candidate in tried:
+            continue
+        tried.append(candidate)
+        if not candidate.exists():
+            continue
+        try:
+            conn = _connect_ro(candidate)
+            # Quick corruption signal. If the DB is corrupt, we'd rather fail
+            # fast (or fall back) than crash deeper in a SELECT.
+            try:
+                row = conn.execute("PRAGMA quick_check(1)").fetchone()
+                if row and row[0] != "ok":
+                    raise sqlite3.DatabaseError(str(row[0]))
+            except sqlite3.DatabaseError:
+                conn.close()
+                raise
+            return conn
+        except sqlite3.DatabaseError:
+            continue
+    raise sqlite3.DatabaseError(
+        f"Unable to open a healthy SQLite DB for dashboard rendering. Tried: {', '.join(str(p) for p in tried)}"
+    )
 
 
 def _utc_now_iso() -> str:
@@ -1012,8 +1047,7 @@ def main() -> None:
         return _default_tickers(conn)
 
     while True:
-        read_path = _select_read_path(db_path)
-        conn = _connect_ro(read_path)
+        conn = _connect_ro_with_fallback(db_path)
         try:
             try:
                 tickers = _tickers(conn)

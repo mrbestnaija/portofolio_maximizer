@@ -229,6 +229,17 @@ def main() -> None:
         "If omitted, uses forecaster_monitoring.regression_metrics.baseline_model "
         f"or {DEFAULT_BASELINE_MODEL}.",
     )
+    parser.add_argument(
+        "--require-effective-audits",
+        type=int,
+        default=None,
+        help="If set, exit non-zero when effective audits with RMSE metrics are below this count.",
+    )
+    parser.add_argument(
+        "--require-holding-period",
+        action="store_true",
+        help="If set, require effective audits to meet holding_period_audits from the monitoring config.",
+    )
     args = parser.parse_args()
 
     audit_dir = Path(args.audit_dir)
@@ -400,6 +411,16 @@ def main() -> None:
 
     warmup_required = max(min_effective_audits, holding_period, 0)
     if warmup_required > 0 and effective_n < warmup_required:
+        explicit_required: Optional[int] = None
+        if args.require_holding_period and holding_period > 0:
+            explicit_required = holding_period
+        if args.require_effective_audits is not None:
+            explicit_required = int(args.require_effective_audits)
+        if explicit_required is not None and effective_n < explicit_required:
+            raise SystemExit(
+                f"Insufficient effective audits for RMSE gating: effective_audits={effective_n} "
+                f"< required_audits={explicit_required}"
+            )
         if (
             fail_on_violation_during_holding_period
             and effective_n > 0

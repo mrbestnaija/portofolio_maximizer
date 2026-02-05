@@ -246,3 +246,79 @@ def test_check_forecast_audits_fail_during_holding_period(tmp_path: Path, monkey
     with pytest.raises(SystemExit) as excinfo:
         mod.main()
     assert excinfo.value.code != 0
+
+
+def test_check_forecast_audits_require_holding_period_fails_when_insufficient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2024-05-01",
+        end="2024-06-01",
+        length=200,
+        horizon=30,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 10.0},
+            "samossa": {"rmse": 10.0},
+            "ensemble": {"rmse": 10.0},  # within tolerance => no violation
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 20",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    # Default behavior: inconclusive warmup exits 0.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    # Strict behavior: require holding period exits non-zero when insufficient.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--require-holding-period",
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo2:
+        mod.main()
+    assert excinfo2.value.code != 0
