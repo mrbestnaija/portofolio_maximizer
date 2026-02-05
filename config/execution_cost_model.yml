@@ -1,0 +1,29 @@
+# Execution cost model configuration (paper trading / simulation).
+# Keeps execution realism configurable and auditable.
+
+execution_cost_model:
+  lob:
+    enabled: true
+    levels: 10
+    tick_size_bps: 1.0
+    alpha: 0.8
+    max_exhaust_levels: 25
+    default_order_value: 25000.0  # notional used when signal size unknown
+    tail_depth_multiplier: 2.0    # extend depth when sweeping many levels
+    depth_profiles:
+      US_EQUITY:
+        depth_notional: 100000.0
+        half_spread_bps: 0.8
+      INTL_EQUITY:
+        depth_notional: 50000.0
+        half_spread_bps: 1.5
+      INDEX:
+        depth_notional: 250000.0
+        half_spread_bps: 0.5
+      FX:
+        depth_notional: 500000.0
+        half_spread_bps: 0.2
+      CRYPTO:
+        depth_notional: 30000.0
+        half_spread_bps: 3.0
+

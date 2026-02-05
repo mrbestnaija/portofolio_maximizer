@@ -1,0 +1,43 @@
+{
+  "source": "rolling_cv",
+  "db": "data/portfolio_maximizer.db",
+  "tickers": [
+    "AAPL"
+  ],
+  "config": "config/forecasting_config.yml",
+  "models": null,
+  "cv": {
+    "min_train_size": 180,
+    "horizon": 5,
+    "step_size": 20,
+    "max_folds": 10,
+    "min_samples_per_regime": 25,
+    "per_regime": true
+  },
+  "results": {
+    "MODERATE_TRENDING": {
+      "weights": {
+        "sarimax": 0.050000000000000044,
+        "samossa": 0.8999999999999997,
+        "mssa_rl": 0.050000000000000176
+      },
+      "rmse": 6.739485036939027,
+      "info": {
+        "initial_rmse": 19.259867609724747,
+        "final_rmse": 6.739485036939027,
+        "improvement_pct": 65.00762531962522,
+        "n_iterations": 3,
+        "success": true,
+        "message": "Optimization terminated successfully",
+        "n_samples": 25
+      },
+      "n_samples": 25,
+      "n_folds": 5,
+      "models": [
+        "sarimax",
+        "samossa",
+        "mssa_rl"
+      ]
+    }
+  }
+}

@@ -1,0 +1,148 @@
+# Risk Mode Configuration
+# Phase 7.9: Configurable risk filter modes for research vs production
+#
+# This file controls the strictness of signal validation and risk filters.
+# Choose a mode based on your current phase:
+#   - strict: Full production safety (conservative, may block valid trades)
+#   - research_production: Balanced for research with reasonable guards
+#   - diagnostic: Minimal filtering for debugging (NOT for production)
+
+# Active mode - change this to switch between configurations
+active_mode: strict
+
+modes:
+  # Full production safety - conservative thresholds
+  strict:
+    description: "Production mode with full safety controls"
+
+    # Signal Validator Layer 1: Counter-trend filter
+    counter_trend_filter:
+      mode: hard_fail      # Options: hard_fail, advisory, disabled
+      max_warnings: 2      # Fail if >= this many warnings
+
+    # Signal Validator Layer 2: Regime alignment filter
+    regime_filter:
+      mode: hard_fail      # Options: hard_fail, confidence_gated, disabled
+      min_regime_confidence: 0.0  # Block regardless of regime confidence
+      bearish_buy_block: true     # Block BUY in bear regimes
+      high_vol_block: true        # Block high-risk signals in high vol
+
+    # Confidence thresholds
+    confidence:
+      min_signal_confidence: 0.55
+      warning_penalty_pct: 5       # Reduce confidence by 5% per warning
+      failure_penalty_pct: 15      # Reduce confidence by 15% per failed layer
+
+    # Position sizing
+    position_sizing:
+      max_position_pct: 2          # Max 2% of portfolio per position
+      max_short_pct: 1             # Max 1% for shorts
+      confidence_floor: 0.50       # Min confidence weight for sizing
+
+    # Quant validation
+    quant_validation:
+      enabled: true
+      mode: hard_fail                 # Options: hard_fail, advisory, disabled
+      min_directional_accuracy: 0.50
+      max_rmse_ratio: 1.10
+
+    # Transaction costs (basis points)
+    transaction_costs:
+      US_EQUITY: 3.2
+      INTL_EQUITY: 6.0
+      FX: 2.0
+      CRYPTO: 12.0
+      INDEX: 2.0
+      UNKNOWN: 5.0
+
+  # Balanced mode for research with reasonable guards
+  research_production:
+    description: "Research mode with balanced risk controls - Phase 7.9+"
+
+    # Signal Validator Layer 1: Counter-trend filter
+    counter_trend_filter:
+      mode: advisory       # Log warnings but don't block
+      max_warnings: 4      # Higher tolerance
+
+    # Signal Validator Layer 2: Regime alignment filter
+    regime_filter:
+      mode: confidence_gated  # Only block if regime confidence > threshold
+      min_regime_confidence: 0.70  # Must be 70%+ confident in regime to block
+      bearish_buy_block: false     # Allow contrarian buys
+      high_vol_block: false        # Allow volatility trades
+
+    # Confidence thresholds
+    confidence:
+      min_signal_confidence: 0.45
+      warning_penalty_pct: 2       # Reduced penalty per warning
+      failure_penalty_pct: 10      # Reduced penalty per failed layer
+
+    # Position sizing
+    position_sizing:
+      max_position_pct: 5          # 5% for research (between 2% and 10%)
+      max_short_pct: 2             # 2% for shorts
+      confidence_floor: 0.30       # Lower floor for research
+
+    # Quant validation
+    quant_validation:
+      enabled: true
+      mode: advisory                  # Options: hard_fail, advisory, disabled
+      min_directional_accuracy: 0.42  # Lowered with hysteresis concept
+      max_rmse_ratio: 1.15            # Slightly relaxed
+
+    # Transaction costs (basis points) - realistic 2026 values
+    transaction_costs:
+      US_EQUITY: 1.5       # Reduced from 3.2 - modern execution
+      INTL_EQUITY: 3.0     # Reduced from 6.0
+      FX: 1.0              # Reduced from 2.0
+      CRYPTO: 8.0          # Reduced from 12.0
+      INDEX: 1.5           # Reduced from 2.0
+      UNKNOWN: 3.0         # Reduced from 5.0
+
+  # Minimal filtering for debugging - NOT for production
+  diagnostic:
+    description: "Diagnostic mode - minimal filtering for debugging only"
+
+    # Signal Validator Layer 1: Counter-trend filter
+    counter_trend_filter:
+      mode: disabled       # Completely disabled
+      max_warnings: 99     # Effectively unlimited
+
+    # Signal Validator Layer 2: Regime alignment filter
+    regime_filter:
+      mode: disabled       # Completely disabled
+      min_regime_confidence: 1.0  # Never block
+      bearish_buy_block: false
+      high_vol_block: false
+
+    # Confidence thresholds
+    confidence:
+      min_signal_confidence: 0.10
+      warning_penalty_pct: 0       # No penalties
+      failure_penalty_pct: 0
+
+    # Position sizing
+    position_sizing:
+      max_position_pct: 10         # 10% for diagnostic
+      max_short_pct: 5             # 5% for shorts
+      confidence_floor: 0.10       # Very low floor
+
+    # Quant validation
+    quant_validation:
+      enabled: false               # Disabled in diagnostic
+      mode: disabled               # Options: hard_fail, advisory, disabled
+      min_directional_accuracy: 0.0
+      max_rmse_ratio: 99.0
+
+    # Transaction costs (basis points)
+    transaction_costs:
+      US_EQUITY: 0.5
+      INTL_EQUITY: 1.0
+      FX: 0.5
+      CRYPTO: 2.0
+      INDEX: 0.5
+      UNKNOWN: 1.0
+
+# Environment variable overrides
+# Set RISK_MODE=strict|research_production|diagnostic to override active_mode
+# Set DIAGNOSTIC_MODE=1 to force diagnostic mode (backwards compatible)

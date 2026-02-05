@@ -1,0 +1,116 @@
+forecaster_monitoring:
+  quant_validation:
+    # Production thresholds used for per-ticker alerts and
+    # GREEN tier classification in summarize_quant_validation.py.
+    min_profit_factor: 1.1
+    min_win_rate: 0.52
+    min_annual_return: 0.0
+    min_pass_rate: 0.05
+
+    # Global ceilings used by check_quant_validation_health.py
+    # to gate CI/brutal runs. With these values, a global
+    # FAIL fraction above 90% or more than half of entries
+    # having negative expected_profit will trip the hard gate
+    # and mark the run RED.
+    max_fail_fraction: 0.90
+    max_negative_expected_profit_fraction: 0.5
+
+    # Softer global warning band used to classify runs as
+    # YELLOW when they are better than the hard RED gate but
+    # still outside the comfortable GREEN zone. These do not
+    # cause CI/brutal to fail, but should be treated as
+    # "research / needs attention" in dashboards.
+    warn_fail_fraction: 0.80
+    warn_negative_expected_profit_fraction: 0.40
+
+    # Softer "research-ok" thresholds used for YELLOW tier.
+    # Regimes that clear these but fail the production bars
+    # can be treated as promising but not yet production ready.
+    warn_profit_factor: 1.0
+    warn_win_rate: 0.48
+    warn_annual_return: -0.05
+    warn_pass_rate: 0.02
+  regression_metrics:
+    # Baseline used for RMSE gating in scripts/check_forecast_audits.py.
+    # BEST_SINGLE compares the ensemble to the best single model (lowest RMSE)
+    # on each evaluated window, enforcing a "do not add complexity without lift"
+    # guardrail.
+    baseline_model: BEST_SINGLE
+    # Minimum effective audits with RMSE before promotion/weight changes. Use a
+    # lower value for brutal/CI and a higher value for research dashboards.
+    min_effective_audits: 10
+    max_rmse_ratio_vs_baseline: 1.1
+    max_violation_rate: 0.25
+
+    # Holding period: only enforce ensemble lift/no-lift decisions once we have
+    # enough effective audits with RMSE values. Until then, checks are
+    # considered inconclusive (non-failing).
+    holding_period_audits: 20
+    # Minimum lift required to "promote" the ensemble as default after holding
+    # period is met (e.g., require >=2% RMSE improvement).
+    promotion_margin: 0.02
+
+    # Safety: if true, do not allow obvious regressions to pass during the
+    # holding period. If the current effective audits already violate the RMSE
+    # ceiling beyond max_violation_rate, fail immediately (CI/brutal-safe).
+    fail_on_violation_during_holding_period: true
+
+    # If true, fail the RMSE gate when the ensemble does not demonstrate enough
+    # lift over the selected baseline across the holding period window.
+    disable_ensemble_if_no_lift: true
+
+    # "Lift" means ensemble_rmse <= (1 - min_lift_rmse_ratio) * baseline_rmse.
+    # 0.00 means "any improvement counts". 0.02 means ">=2% RMSE improvement".
+    min_lift_rmse_ratio: 0.00
+
+    # Minimum fraction of effective audits that must show lift; otherwise we
+    # recommend disbanding the ensemble as default source of truth.
+    min_lift_fraction: 0.10
+  per_ticker:
+    AAPL:
+      min_profit_factor: 1.15
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+      warn_profit_factor: 1.05
+      warn_win_rate: 0.50
+      warn_annual_return: -0.02
+      warn_pass_rate: 0.03
+    MSFT:
+      min_profit_factor: 1.15
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+      warn_profit_factor: 1.05
+      warn_win_rate: 0.50
+      warn_annual_return: -0.02
+      warn_pass_rate: 0.03
+    CL=F:
+      min_profit_factor: 1.3
+      min_win_rate: 0.55
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true
+    GC=F:
+      min_profit_factor: 1.1
+      min_win_rate: 0.52
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+    BTC-USD:
+      min_profit_factor: 1.3
+      min_win_rate: 0.55
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true
+    EURUSD=X:
+      min_profit_factor: 1.2
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.03
+      disable_time_series: true
+    SOL:
+      min_profit_factor: 1.5
+      min_win_rate: 0.60
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true

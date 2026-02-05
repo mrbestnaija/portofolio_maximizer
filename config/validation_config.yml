@@ -1,0 +1,248 @@
+# Data Validation Configuration
+# Statistical quality checks following MIT standards
+
+validation:
+  # Global validation settings
+  enabled: true
+  strict_mode: false  # If true, fail on any validation error
+  log_validation_results: true
+  validation_report_path: "data/validation_reports"
+
+  # Price validation rules
+  price_validation:
+    enabled: true
+
+    # Positivity checks (prices must be > 0)
+    positivity:
+      check_positive: true
+      min_price: 0.01  # Minimum valid price
+      max_price: 1000000.0  # Maximum reasonable price
+      on_violation: "warn"  # Options: raise, warn, ignore
+
+    # Continuity checks (detect gaps/jumps)
+    continuity:
+      check_gaps: true
+      max_gap_days: 10  # Maximum allowed gap in trading days
+      check_jumps: true
+      max_jump_percentage: 50.0  # Flag if price jumps >50% in 1 day
+
+    # OHLC relationship checks
+    ohlc_relationships:
+      check_relationships: true
+      # High >= Low, High >= Open, High >= Close, Low <= Open, Low <= Close
+      enforce_logic: true
+      tolerance: 0.01  # Allow 1% tolerance for rounding
+
+    # Missing price data
+    missing_prices:
+      max_missing_rate: 0.10  # Fail if >10% missing
+      warn_missing_rate: 0.05  # Warn if >5% missing
+      check_consecutive_missing: true
+      max_consecutive_missing: 5  # Flag if >5 consecutive missing
+
+  # Volume validation rules
+  volume_validation:
+    enabled: true
+
+    # Non-negativity checks (volume must be >= 0)
+    non_negativity:
+      check_non_negative: true
+      allow_zero: true  # Zero volume allowed (low liquidity stocks)
+      on_negative: "raise"  # Negative volume is data error
+
+    # Zero volume detection
+    zero_volume:
+      check_zero_volume: true
+      max_zero_rate: 0.20  # Warn if >20% of days have zero volume
+      warn_zero_rate: 0.10
+
+    # Volume spikes (detect anomalies)
+    volume_spikes:
+      check_spikes: true
+      spike_threshold: 10.0  # Flag if volume >10x average
+      method: "zscore"  # Options: zscore, iqr, percentage
+      zscore_threshold: 5.0  # |z| > 5 considered spike
+
+    # Missing volume data
+    missing_volume:
+      max_missing_rate: 0.10
+      warn_missing_rate: 0.05
+
+  # Outlier detection (statistical anomalies)
+  outlier_detection:
+    enabled: true
+    method: "zscore"  # Options: zscore, iqr, isolation_forest
+
+    # Z-score method (3-sigma rule)
+    zscore:
+      threshold: 3.0  # |z| > 3 considered outlier
+      apply_to_columns: ["Open", "High", "Low", "Close", "Volume"]
+      action: "flag"  # Options: flag, remove, cap, ignore
+
+    # IQR method
+    iqr:
+      multiplier: 1.5  # Standard IQR multiplier (Q3 + 1.5*IQR)
+      apply_to_columns: ["Open", "High", "Low", "Close", "Volume"]
+      action: "flag"
+
+    # Isolation Forest (ML-based)
+    isolation_forest:
+      contamination: 0.05  # Expected proportion of outliers
+      random_state: 42
+      action: "flag"
+
+    # Reporting
+    report_outliers: true
+    outlier_summary_path: "data/validation_reports/outliers.json"
+
+  # Statistical validation
+  statistical_checks:
+    enabled: true
+
+    # Missing data analysis
+    missing_data:
+      compute_missing_rate: true
+      # ρ_missing = (Σ I(x_ij = NA)) / (n × p)
+      max_missing_rate: 0.10
+      warn_missing_rate: 0.05
+
+      # Missing data patterns
+      check_patterns: true
+      detect_systematic_missing: true  # e.g., all weekends missing
+
+    # Data distribution checks
+    distribution:
+      check_normality: true
+      normality_test: "jarque_bera"  # Options: jarque_bera, shapiro, ks
+      alpha: 0.05  # Significance level
+
+      # Skewness and kurtosis
+      check_skewness: true
+      max_skewness: 5.0  # Flag if |skewness| > 5
+      check_kurtosis: true
+      max_kurtosis: 10.0  # Flag if |kurtosis| > 10
+
+    # Stationarity checks (basic)
+    stationarity:
+      check_stationarity: false  # Disabled (handled by analysis module)
+      warn_non_stationary: true
+
+  # Temporal validation
+  temporal_checks:
+    enabled: true
+
+    # Date validation
+    date_validation:
+      check_chronological: true  # Ensure dates are sorted
+      check_duplicates: true  # No duplicate dates
+      check_future_dates: true  # No dates in future
+      allow_gaps: true  # Gaps allowed (weekends, holidays)
+
+    # Frequency detection
+    frequency:
+      detect_frequency: true
+      expected_frequency: "daily"  # Options: daily, weekly, monthly
+      tolerance: 0.1  # 10% tolerance for frequency detection
+
+    # Temporal gaps
+    gaps:
+      detect_gaps: true
+      max_gap_days: 10  # Maximum allowed gap
+      flag_unusual_gaps: true
+
+  # Duplicate detection
+  duplicate_detection:
+    enabled: true
+
+    # Check for duplicate rows
+    check_duplicate_rows: true
+    on_duplicates: "warn"  # Options: raise, warn, remove, ignore
+
+    # Check for duplicate dates
+    check_duplicate_dates: true
+    on_duplicate_dates: "raise"  # Duplicate dates usually indicate error
+
+    # Subset columns to check
+    subset_columns: null  # null = check all columns
+
+  # Data type validation
+  data_type_checks:
+    enabled: true
+
+    # Expected data types
+    expected_types:
+      date_column: "datetime64[ns]"
+      price_columns: "float64"
+      volume_column: "int64"
+      ticker_column: "object"
+
+    # Enforce types
+    enforce_types: true
+    convert_types: true  # Auto-convert if possible
+    on_type_mismatch: "warn"  # Options: raise, warn, convert, ignore
+
+  # Validation reporting
+  reporting:
+    # Report generation
+    generate_report: true
+    report_format: "json"  # Options: json, html, markdown
+    report_path: "data/validation_reports/validation_report.json"
+
+    # Report contents
+    include_summary: true
+    include_details: true
+    include_statistics: true
+    include_recommendations: true
+
+    # Severity classification
+    severity_levels:
+      critical: "Data errors that must be fixed"
+      warning: "Data quality issues that should be reviewed"
+      info: "Data characteristics to be aware of"
+
+    # Thresholds for severity
+    critical_thresholds:
+      missing_rate: 0.10  # >10% missing is critical
+      negative_prices: 1  # Any negative price is critical
+      duplicate_dates: 1  # Any duplicate date is critical
+
+    warning_thresholds:
+      missing_rate: 0.05  # >5% missing is warning
+      zero_volume_rate: 0.20  # >20% zero volume is warning
+      outlier_rate: 0.05  # >5% outliers is warning
+
+  # Action on validation failure
+  on_validation_failure:
+    action: "warn"  # Options: raise, warn, ignore
+    continue_pipeline: true  # Continue even if validation fails
+    save_invalid_data: true  # Save data that failed validation
+    invalid_data_path: "data/invalid"
+
+  # Performance settings
+  performance:
+    vectorized_checks: true  # Use numpy vectorization
+    parallel_checks: false  # Not needed for small datasets
+    chunk_size: 10000  # Process large datasets in chunks
+
+  # Logging
+  logging:
+    level: "INFO"
+    log_all_checks: false  # Only log failures
+    log_file: "logs/validation.log"
+    verbose: false
+
+# Mathematical formulas used
+formulas:
+  missing_rate: "ρ_missing = (Σ I(x_ij = NA)) / (n × p)"
+  zscore: "z = (x - μ) / σ"
+  iqr: "IQR = Q3 - Q1; outlier if x < Q1 - 1.5*IQR or x > Q3 + 1.5*IQR"
+  jarque_bera: "JB = (n/6) * [S² + (K-3)²/4]"
+
+# Validation standards
+standards:
+  reference: "MIT Statistical Learning Standards"
+  quality_levels:
+    excellent: "ρ_missing < 0.01, no outliers, no data errors"
+    good: "ρ_missing < 0.05, minimal outliers, minor issues"
+    acceptable: "ρ_missing < 0.10, some outliers, no critical errors"
+    poor: "ρ_missing > 0.10 or critical data errors present"

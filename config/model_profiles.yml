@@ -1,0 +1,45 @@
+model_profiles:
+  # Default profile for most TS forecasting runs. Conservative and aligned
+  # with the existing forecasting_config.yml defaults.
+  default:
+    sleeves: ["safe", "core", "speculative", "crypto", "other"]
+    regimes: ["default"]
+    sarimax:
+      enabled: true
+      max_p: 2
+      max_d: 1
+      max_q: 2
+      seasonal: false
+    samossa:
+      enabled: true
+      window_length: 40
+      n_components: 6
+      min_series_length: 120
+    mssa_rl:
+      enabled: true
+      rank: 4
+    garch:
+      enabled: true
+
+  # Example profile for high-volatility regimes on risk sleeves; this is a
+  # starting point for regime-aware tuning rather than a hard default.
+  high_vol_risk:
+    sleeves: ["speculative", "crypto"]
+    regimes: ["high_vol"]
+    sarimax:
+      enabled: true
+      max_p: 1
+      max_d: 1
+      max_q: 1
+      seasonal: false
+    samossa:
+      enabled: true
+      window_length: 20
+      n_components: 4
+      min_series_length: 120
+    mssa_rl:
+      enabled: true
+      rank: 6
+    garch:
+      enabled: true
+

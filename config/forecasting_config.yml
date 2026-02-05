@@ -1,0 +1,146 @@
+# Time Series Forecasting Configuration
+# SARIMAX and GARCH models
+
+forecasting:
+  enabled: true
+  default_forecast_horizon: 30  # Days ahead
+  minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
+  minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
+
+  # SARIMAX configuration (disabled by default; slow grid search)
+  # Set enabled: true or pass --enable-sarimax to re-enable.
+  sarimax:
+    enabled: false
+    auto_select_order: true
+    max_p: 3  # Phase 7.3: Increased from 2 to capture more complex AR dynamics
+    max_d: 1
+    max_q: 2
+    seasonal_periods: null  # Auto-detect (null) or specify (12=monthly, 4=quarterly)
+    max_P: 2
+    max_D: 1
+    max_Q: 2
+    trend: "c"  # Options: 'c' (constant), 't' (trend), 'ct' (both), 'n' (none)
+    enforce_stationarity: true
+    enforce_invertibility: true
+
+  # GARCH configuration
+  garch:
+    enabled: true
+    p: 1  # ARCH order
+    q: 1  # GARCH order
+    vol: "GARCH"  # Options: 'GARCH', 'EGARCH', 'GJR-GARCH'
+    dist: "normal"  # Options: 'normal', 't', 'skewt'
+
+  # SAMOSSA configuration
+  samossa:
+    enabled: true
+    window_length: 60        # Phase 7.3: Increased from 40 for richer trajectory matrix
+    n_components: 8          # Phase 7.3: Increased from 6 for complex patterns (or -1 for auto)
+    use_residual_arima: true # Fit ARIMA on residual component
+    arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
+    seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
+    min_series_length: 120   # Minimum observations required before fit
+    max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
+    reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
+
+  # MSSA-RL configuration (change-point + RL forecaster)
+  mssa_rl:
+    enabled: true
+    window_length: 30              # Window for mSSA Page matrix
+    rank: null                     # Let MSSARLConfig choose rank to hit ~90% variance
+    change_point_threshold: 3.5    # Phase 7.3: Increased from 2.5 to reduce false change-points
+    q_learning_alpha: 0.3
+    q_learning_gamma: 0.85
+    q_learning_epsilon: 0.1
+    use_gpu: true            # Optional CuPy acceleration; keep false on Tier-1 CPU runs but changed to true to speed up on Tier-2+GPU
+    min_series_length: 150   # Minimum observations required before fit
+    max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL
+
+  # Combined forecasting
+  combined:
+    enabled: true
+    use_sarimax_mean: true
+    use_garch_volatility: true
+    combine_confidence_intervals: true
+
+  # Ensemble orchestration
+  ensemble:
+    enabled: true
+    confidence_scaling: false  # Phase 7.3: Disabled to allow GARCH-dominant candidates (SAMoSSA has inflated confidence from EVR)
+    candidate_weights:
+      # Fast-only defaults (SARIMAX disabled by default; re-enable in config to restore)
+      - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}  # GARCH-dominant for liquid tickers
+      - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}  # GARCH-heavy with SSA
+      - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}  # Balanced GARCH blend
+      - {samossa: 0.60, mssa_rl: 0.40}                # SSA-dominant
+      - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}  # Balanced SSA
+      # Pure model fallbacks
+      - {garch: 1.0}
+      - {samossa: 1.0}
+      - {mssa_rl: 1.0}
+    minimum_component_weight: 0.05  # Align with EnsembleConfig default guardrail
+
+  # Phase 7.5: Regime Detection for Adaptive Model Selection
+  regime_detection:
+    enabled: true  # Phase 7.9: regime kept ON; A/B test (2026-02-05) showed no >10% PnL lift from disabling.
+    lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
+
+    # Volatility thresholds (annualized)
+    vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
+    vol_threshold_high: 0.30  # Above 30% annual vol = high volatility regime
+
+    # Trend strength thresholds (0-1 scale, based on R² from linear regression)
+    trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
+    trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
+
+    # Phase 7.8: Regime-specific ensemble candidate weights (optimized via rolling CV)
+    # When present, these replace forecasting.ensemble.candidate_weights for the detected regime.
+    # Generated via: python scripts/optimize_ensemble_weights.py --source rolling_cv
+    # Phase 7.8 Results (2026-01-27): 3 regimes optimized with SAMOSSA-dominant weights
+    regime_candidate_weights:
+      CRISIS:
+        # Optimized for 50%+ volatility, weak trend, 5 CV folds, 25 samples
+        # RMSE: 17.15 -> 6.74 (+60.69% improvement)
+        - {garch: 0.23, samossa: 0.72, mssa_rl: 0.05}
+      MODERATE_MIXED:
+        # Optimized for 26-30% volatility, mixed trend (R²=0.00-0.30), 4 CV folds, 20 samples
+        # RMSE: 17.63 -> 16.52 (+6.30% improvement)
+        - {garch: 0.05, samossa: 0.73, mssa_rl: 0.22}
+      MODERATE_TRENDING:
+        # Optimized for 18-23% volatility, strong trend (R²>0.73), 10 CV folds, 50 samples
+        # RMSE: 20.86 -> 7.29 (+65.07% improvement)
+        - {garch: 0.05, samossa: 0.90, mssa_rl: 0.05}
+
+    # Regime-specific model preferences (optional overrides)
+    # If not specified, uses RegimeDetector's built-in recommendations
+    # Format: List models in preference order (highest priority first)
+    regime_model_preferences:
+      LIQUID_RANGEBOUND:
+        # Low vol, mean-reverting, stationary → GARCH excels
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
+        description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
+
+      MODERATE_RANGEBOUND:
+        # Low vol, stationary, some trend → Mixed approach
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
+        description: "Low volatility with some directional bias"
+
+      MODERATE_TRENDING:
+        # Medium vol/trend → Trend-following models
+        preferred_models: ['samossa', 'garch', 'mssa_rl']
+        description: "Clear trend with moderate volatility"
+
+      HIGH_VOL_TRENDING:
+        # High vol, strong trend → Advanced pattern recognition
+        preferred_models: ['samossa', 'mssa_rl', 'garch']
+        description: "Volatile directional moves, complex patterns"
+
+      CRISIS:
+        # Extreme volatility (>50% annual) → Defensive, stick to volatility
+        preferred_models: ['garch', 'samossa']
+        description: "Crisis mode, focus on volatility and simple models"
+
+      MODERATE_MIXED:
+        # Fallback for unclear regimes → Balanced ensemble
+        preferred_models: ['garch', 'samossa', 'mssa_rl']
+        description: "No clear regime, use balanced ensemble"

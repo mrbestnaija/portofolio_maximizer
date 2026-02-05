@@ -1,0 +1,22 @@
+2025-11-19 06:42:57,466 - __main__ - INFO - ================================================================================
+2025-11-19 06:42:57,467 - __main__ - INFO - LLM PERFORMANCE REPORTING SYSTEM
+2025-11-19 06:42:57,467 - __main__ - INFO - ================================================================================
+2025-11-19 06:42:57,636 - etl.database_manager - INFO - Operating on temporary SQLite mirror /tmp/portfolio_maximizer.db.wsl due to cross-filesystem locking issues with /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db.
+2025-11-19 06:42:57,637 - etl.database_manager - INFO - Database initialized at: /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db
+2025-11-19 06:42:57,637 - __main__ - INFO - Generating comprehensive LLM performance report...
+2025-11-19 06:42:57,638 - __main__ - INFO - Generating profit/loss report...
+2025-11-19 06:42:57,638 - __main__ - ERROR - Report generation failed: '>' not supported between instances of 'NoneType' and 'int'
+2025-11-19 06:42:57,641 - __main__ - ERROR - Traceback (most recent call last):
+  File "/mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/scripts/generate_llm_report.py", line 484, in main
+    report_content = reporter.generate_comprehensive_report(output_format)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/scripts/generate_llm_report.py", line 308, in generate_comprehensive_report
+    profit_report = self.generate_profit_report()
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/scripts/generate_llm_report.py", line 120, in generate_profit_report
+    'profitability': performance.get('total_profit', 0) > 0,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: '>' not supported between instances of 'NoneType' and 'int'
+
+2025-11-19 06:42:57,804 - etl.database_manager - INFO - Synchronized mirror database /tmp/portfolio_maximizer.db.wsl back to /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db
+2025-11-19 06:42:57,806 - etl.database_manager - INFO - Database connection closed

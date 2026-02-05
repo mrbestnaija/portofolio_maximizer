@@ -1,0 +1,111 @@
+# XTB API Configuration - Portfolio Maximizer v45
+# Demo Account Integration for Live Trading
+
+xtb:
+  # Connection settings
+  connection:
+    server: "xtb-demo"  # "xtb-demo" for demo, "xtb" for live
+    app_name: "PortfolioMaximizer"
+    app_version: "1.0"
+    connection_timeout: 30
+    request_timeout: 10
+    max_retries: 3
+    retry_delay: 1
+
+  # Authentication (load from .env file)
+  auth:
+    username_env: "XTB_USERNAME"
+    password_env: "XTB_PASSWORD"
+    session_timeout: 3600  # 1 hour
+    encrypt_password: true
+
+  # Trading settings
+  trading:
+    default_leverage: 1
+    max_position_size: 10000  # Maximum position size in base currency
+    default_slippage: 0.001   # 0.1% default slippage
+    min_trade_size: 0.01      # Minimum trade size
+    max_trades_per_day: 50    # Maximum trades per day
+
+  # Risk management
+  risk_management:
+    max_daily_loss: 0.05      # 5% maximum daily loss
+    max_position_risk: 0.02   # 2% maximum risk per position
+    stop_loss_default: 0.02   # 2% default stop loss
+    take_profit_default: 0.04 # 4% default take profit
+    max_open_positions: 10    # Maximum concurrent positions
+
+  # Supported instruments
+  instruments:
+    forex:
+      enabled: true
+      major_pairs: ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+      leverage: 30
+      spread_typical: 0.0001
+    
+    indices:
+      enabled: true
+      major_indices: ["US500", "US30", "US100", "UK100", "GER30", "FRA40"]
+      leverage: 20
+      spread_typical: 0.5
+    
+    commodities:
+      enabled: true
+      major_commodities: ["GOLD", "SILVER", "OIL", "GAS"]
+      leverage: 10
+      spread_typical: 0.1
+    
+    stocks:
+      enabled: false  # Enable if needed
+      leverage: 1
+      spread_typical: 0.01
+
+  # Order types
+  order_types:
+    market: true
+    limit: true
+    stop: true
+    stop_limit: true
+    trailing_stop: true
+
+  # Logging and monitoring
+  logging:
+    log_level: "INFO"
+    log_trades: true
+    log_orders: true
+    log_errors: true
+    log_file: "logs/xtb_trading.log"
+
+  # Performance tracking
+  performance:
+    track_pnl: true
+    track_drawdown: true
+    track_win_rate: true
+    track_sharpe_ratio: true
+    daily_report: true
+
+# Environment variables (to be loaded from .env file)
+env_variables:
+  - XTB_USERNAME
+  - XTB_PASSWORD
+  - XTB_SERVER
+  - XTB_APP_NAME
+  - XTB_APP_VERSION
+
+# Validation rules
+validation:
+  require_demo_first: true    # Must test on demo before live
+  min_demo_trades: 100        # Minimum demo trades before live
+  min_demo_days: 30           # Minimum demo trading days
+  min_win_rate: 0.55          # Minimum 55% win rate for live trading
+  max_drawdown_demo: 0.15     # Maximum 15% drawdown in demo
+
+# Metadata
+metadata:
+  created_by: "Portfolio Maximizer v45"
+  created_date: "2025-10-19"
+  phase: "5.4 - XTB Integration"
+  status: "Development"
+  broker: "XTB"
+  account_type: "Demo"
+

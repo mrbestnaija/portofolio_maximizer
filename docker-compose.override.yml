@@ -1,0 +1,30 @@
+version: "3.8"
+
+# Development-friendly overrides:
+# - Reuse host source tree and venv (read-only)
+# - Relax logging to DEBUG
+# - Skip rebuilds by reusing the tagged image if already built
+
+services:
+  portfolio-maximizer:
+    image: portfolio-maximizer:test
+    environment:
+      - PORTFOLIO_ENV=production
+      - PORTFOLIO_LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./cache:/app/cache
+
+  portfolio-dev:
+    image: portfolio-maximizer:test
+    environment:
+      - PORTFOLIO_ENV=development
+      - PORTFOLIO_LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app
+      - ./simpleTrader_env:/opt/venv:ro
+    command: /bin/bash
+    stdin_open: true
+    tty: true

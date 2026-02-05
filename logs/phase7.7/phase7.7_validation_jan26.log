@@ -1,0 +1,633 @@
+2026-01-26 06:26:16,932 - torch._subclasses.fake_tensor - INFO - FakeTensor cache stats:
+2026-01-26 06:26:16,933 - torch._subclasses.fake_tensor - INFO -   cache_hits: 0
+2026-01-26 06:26:16,933 - torch._subclasses.fake_tensor - INFO -   cache_misses: 0
+2026-01-26 06:26:41,607 - __main__ - INFO - Device selection: cuda (prefer_gpu=True)
+2026-01-26 06:26:41,619 - __main__ - INFO - OK Loaded configuration from: config/pipeline_config.yml
+2026-01-26 06:26:41,619 - __main__ - INFO - Pipeline: Portfolio Maximizer v45 (Phase 5.2)
+2026-01-26 06:26:41,620 - __main__ - INFO - Data Source: from config
+2026-01-26 06:26:41,620 - __main__ - INFO - Tickers: AAPL
+2026-01-26 06:26:41,620 - __main__ - INFO - Date range: 2024-07-01 to 2024-01-01
+2026-01-26 06:26:41,620 - __main__ - INFO - LLM Integration: DISABLED
+2026-01-26 06:26:41,620 - __main__ - INFO - Execution mode: AUTO
+2026-01-26 06:26:41,620 - __main__ - INFO - Auto mode: attempting live extraction first, synthetic fallback enabled on failure
+2026-01-26 06:26:41,874 - etl.database_manager - INFO - Refreshed SQLite mirror /tmp/portfolio_maximizer.db.wsl from /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db (source newer).
+2026-01-26 06:26:41,875 - etl.database_manager - INFO - Database initialized at: /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db
+2026-01-26 06:26:41,876 - scripts.track_llm_signals - INFO - Loading tracking database from: data/llm_signal_tracking.json
+2026-01-26 06:26:41,880 - __main__ - INFO - OK Database manager initialized
+2026-01-26 06:26:41,887 - __main__ - INFO - OK Pipeline ID: pipeline_20260126_062641
+2026-01-26 06:26:41,887 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:41.887506", "event_type": "pipeline_start", "pipeline_id": "pipeline_20260126_062641", "stage": null, "status": "success", "metadata": {"tickers": ["AAPL"], "start_date": "2024-07-01", "end_date": "2024-01-01", "use_cv": true, "execution_mode": "auto", "synthetic_dataset_env": null}}
+2026-01-26 06:26:41,892 - pipeline - INFO - [pipeline_start] Pipeline: pipeline_20260126_062641, Status: success
+2026-01-26 06:26:41,899 - etl.data_source_manager - INFO - OK Loaded data sources configuration from config/data_sources_config.yml
+2026-01-26 06:26:41,900 - etl.data_source_manager - INFO - Found 4 enabled providers: alpha_vantage, finnhub, yfinance, ctrader
+2026-01-26 06:26:41,911 - etl.base_extractor - INFO - Initialized alpha_vantage extractor (cache: 24h)
+2026-01-26 06:26:41,914 - etl.alpha_vantage_extractor - INFO - Alpha Vantage extractor initialized successfully
+2026-01-26 06:26:41,915 - etl.alpha_vantage_extractor - INFO -   - Rate limit: 5 requests/minute
+2026-01-26 06:26:41,915 - etl.alpha_vantage_extractor - INFO -   - Cache: 24 hours validity
+2026-01-26 06:26:41,915 - etl.alpha_vantage_extractor - INFO -   - Function: TIME_SERIES_DAILY_ADJUSTED
+2026-01-26 06:26:41,916 - etl.data_source_manager - INFO - OK Instantiated alpha_vantage extractor
+2026-01-26 06:26:41,921 - etl.base_extractor - INFO - Initialized finnhub extractor (cache: 24h)
+2026-01-26 06:26:41,925 - etl.finnhub_extractor - INFO - Finnhub extractor initialized successfully
+2026-01-26 06:26:41,926 - etl.finnhub_extractor - INFO -   - Rate limit: 60 requests/minute
+2026-01-26 06:26:41,926 - etl.finnhub_extractor - INFO -   - Cache: 24 hours validity
+2026-01-26 06:26:41,926 - etl.finnhub_extractor - INFO -   - Resolution: D (daily)
+2026-01-26 06:26:41,926 - etl.data_source_manager - INFO - OK Instantiated finnhub extractor
+2026-01-26 06:26:43,168 - etl.yfinance_extractor - INFO - yfinance cache dir set to /tmp/py-yfinance
+2026-01-26 06:26:43,168 - etl.base_extractor - INFO - Initialized yfinance extractor (cache: 24h)
+2026-01-26 06:26:43,169 - etl.data_source_manager - INFO - OK Instantiated yfinance extractor
+2026-01-26 06:26:43,225 - risk.real_time_risk_manager - INFO - Real-Time Risk Manager module loaded successfully
+2026-01-26 06:26:43,227 - etl.base_extractor - INFO - Initialized ctrader extractor (cache: 24h)
+2026-01-26 06:26:43,240 - execution.ctrader_client - INFO - cTrader client initialized for demo environment
+2026-01-26 06:26:43,241 - etl.ctrader_extractor - INFO - CTraderExtractor initialised (environment=demo, account_id=None)
+2026-01-26 06:26:43,241 - etl.data_source_manager - INFO - OK Instantiated ctrader extractor
+2026-01-26 06:26:43,241 - etl.data_source_manager - INFO - OK Initialized 4 sources for failover
+2026-01-26 06:26:43,241 - etl.data_source_manager - INFO -   Primary: alpha_vantage
+2026-01-26 06:26:43,241 - __main__ - INFO - OK Data source manager initialized
+2026-01-26 06:26:43,241 - __main__ - INFO -   Available sources: alpha_vantage, finnhub, yfinance, ctrader
+2026-01-26 06:26:43,242 - __main__ - INFO -   Active source: alpha_vantage
+2026-01-26 06:26:43,245 - __main__ - INFO - OK Using k-fold cross-validation (k=5)
+2026-01-26 06:26:43,245 - __main__ - INFO -   - Test size: 15%
+2026-01-26 06:26:43,246 - __main__ - INFO -   - Gap between train/val: 0 periods
+2026-01-26 06:26:43,246 - __main__ - INFO -   - Window strategy: expanding
+2026-01-26 06:26:43,246 - __main__ - INFO -   - Expected validation coverage: 83%
+2026-01-26 06:26:43,246 - __main__ - INFO - OK Stage execution order (config-driven): data_extraction, data_validation, data_preprocessing, data_storage, time_series_forecasting, time_series_signal_generation, signal_router
+2026-01-26 06:26:43,252 - __main__ - INFO - OK Loaded configuration from: config/preprocessing_config.yml
+2026-01-26 06:26:43,253 - __main__ - INFO - ======================================================================
+2026-01-26 06:26:43,253 - __main__ - INFO - Starting ETL Pipeline
+2026-01-26 06:26:43,253 - __main__ - INFO - ======================================================================
+2026-01-26 06:26:43,256 - __main__ - INFO - 
+2026-01-26 06:26:43,256 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.256505", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "data_extraction", "status": "info", "metadata": {}}
+2026-01-26 06:26:43,257 - __main__ - INFO - Extracting OHLCV data using data source manager...
+2026-01-26 06:26:43,257 - etl.alpha_vantage_extractor - INFO - Extracting data for 1 ticker(s) from Alpha Vantage
+2026-01-26 06:26:43,257 - etl.alpha_vantage_extractor - INFO - [1/1] Processing AAPL
+2026-01-26 06:26:43,519 - etl.alpha_vantage_extractor - INFO -   ✓ Cache HIT for AAPL
+2026-01-26 06:26:43,520 - etl.alpha_vantage_extractor - INFO - Cache performance: 1/1 hits (100.0%)
+2026-01-26 06:26:43,520 - etl.data_source_manager - INFO - OK Extracted 389 rows from alpha_vantage
+2026-01-26 06:26:43,522 - __main__ - INFO - OK Extracted 389 rows from 1 ticker(s)
+2026-01-26 06:26:43,522 - __main__ - INFO -   Source: alpha_vantage
+2026-01-26 06:26:43,522 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.522597", "event_type": "data_extraction", "pipeline_id": "pipeline_20260126_062641", "stage": null, "status": "success", "metadata": {"source": "alpha_vantage", "rows": 389, "tickers": ["AAPL"], "dataset_id": null, "generator_version": null, "execution_mode": "auto"}}
+2026-01-26 06:26:43,523 - pipeline - INFO - [data_extraction] Pipeline: pipeline_20260126_062641, Status: success
+2026-01-26 06:26:43,551 - etl.database_manager - INFO - Saved 389 OHLCV rows to database
+2026-01-26 06:26:43,552 - __main__ - INFO - Saved {rows_saved} rows to database
+2026-01-26 06:26:43,592 - etl.checkpoint_manager - INFO - Checkpoint saved: pipeline_20260126_062641_data_extraction_20260126_062643 (stage=data_extraction, shape=(389, 6), hash=751e0db307357d10)
+2026-01-26 06:26:43,592 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.592450", "event_type": "checkpoint_saved", "pipeline_id": "pipeline_20260126_062641", "stage": "data_extraction", "status": "success", "metadata": {"checkpoint_id": "pipeline_20260126_062641_data_extraction_20260126_062643"}}
+2026-01-26 06:26:43,592 - pipeline - INFO - [checkpoint_saved] Pipeline: pipeline_20260126_062641, Stage: data_extraction, Status: success
+2026-01-26 06:26:43,593 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.593497", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "data_extraction", "status": "success", "metadata": {"duration_seconds": 0.3369932174682617}}
+2026-01-26 06:26:43,593 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: data_extraction, Status: success
+2026-01-26 06:26:43,594 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.594258", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "data_extraction", "status": "success", "metadata": {"duration_seconds": 0.3369932174682617}}
+2026-01-26 06:26:43,594 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: data_extraction, Status: success
+2026-01-26 06:26:43,595 - __main__ - INFO - 
+2026-01-26 06:26:43,595 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.595230", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "data_validation", "status": "info", "metadata": {}}
+2026-01-26 06:26:43,595 - __main__ - INFO - Validating data quality...
+2026-01-26 06:26:43,597 - etl.data_validator - INFO - Data validation passed
+2026-01-26 06:26:43,597 - __main__ - INFO - OK Data validation passed
+2026-01-26 06:26:43,597 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.597499", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "data_validation", "status": "success", "metadata": {"duration_seconds": 0.002266407012939453}}
+2026-01-26 06:26:43,597 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: data_validation, Status: success
+2026-01-26 06:26:43,598 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.598523", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "data_validation", "status": "success", "metadata": {"duration_seconds": 0.002266407012939453}}
+2026-01-26 06:26:43,598 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: data_validation, Status: success
+2026-01-26 06:26:43,599 - __main__ - INFO - 
+2026-01-26 06:26:43,599 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.599605", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "data_preprocessing", "status": "info", "metadata": {}}
+2026-01-26 06:26:43,599 - __main__ - INFO - Preprocessing data (missing data; normalization deferred)...
+2026-01-26 06:26:43,600 - __main__ - WARNING - Non-causal missing_data.strategy=hybrid with execution_mode=auto; overriding to 'forward' to avoid lookahead.
+2026-01-26 06:26:43,604 - etl.preprocessor - INFO - Filled missing data using forward
+2026-01-26 06:26:43,604 - __main__ - INFO - Normalization enabled (method=zscore) but will be applied post-split in data_storage to prevent leakage.
+2026-01-26 06:26:43,623 - etl.data_storage - INFO - Saved 389 rows to data/processed/processed_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,623 - __main__ - INFO - OK Preprocessed 389 rows
+2026-01-26 06:26:43,623 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.623483", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "data_preprocessing", "status": "success", "metadata": {"duration_seconds": 0.023876428604125977}}
+2026-01-26 06:26:43,623 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: data_preprocessing, Status: success
+2026-01-26 06:26:43,624 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.624360", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "data_preprocessing", "status": "success", "metadata": {"duration_seconds": 0.023876428604125977}}
+2026-01-26 06:26:43,624 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: data_preprocessing, Status: success
+2026-01-26 06:26:43,625 - __main__ - INFO - 
+2026-01-26 06:26:43,625 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:43.625449", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "data_storage", "status": "info", "metadata": {}}
+2026-01-26 06:26:43,625 - __main__ - INFO - Splitting and saving datasets...
+2026-01-26 06:26:43,625 - __main__ - INFO -   Configuration source: pipeline_config.yml
+2026-01-26 06:26:43,626 - __main__ - INFO -   Split strategy: CV
+2026-01-26 06:26:43,626 - etl.time_series_cv - INFO - Time Series CV: 5 folds, CV size: 330, Test size: 59
+2026-01-26 06:26:43,626 - etl.time_series_cv - INFO - Fold 0: Train=55 (14.1%), Val=55 (14.1%)
+2026-01-26 06:26:43,626 - etl.time_series_cv - INFO - Fold 1: Train=110 (28.3%), Val=55 (14.1%)
+2026-01-26 06:26:43,627 - etl.time_series_cv - INFO - Fold 2: Train=165 (42.4%), Val=55 (14.1%)
+2026-01-26 06:26:43,627 - etl.time_series_cv - INFO - Fold 3: Train=220 (56.6%), Val=55 (14.1%)
+2026-01-26 06:26:43,627 - etl.time_series_cv - INFO - Fold 4: Train=275 (70.7%), Val=55 (14.1%)
+2026-01-26 06:26:43,628 - etl.data_storage - INFO - CV Split: 5 folds, test=59
+2026-01-26 06:26:43,632 - __main__ - INFO - Split cv0_train: len=54 start=2024-07-01 00:00:00 end=2024-09-17 00:00:00 mean=0.0001 std=0.0141 skew=-1.1820 kurt=1.7004
+2026-01-26 06:26:43,633 - __main__ - INFO - Split cv0_val: len=54 start=2024-09-18 00:00:00 end=2024-12-04 00:00:00 mean=0.0019 std=0.0121 skew=-0.0364 kurt=0.8698
+2026-01-26 06:26:43,636 - __main__ - WARNING - Drift detected in CV fold 0 (psi=0.239 vol_psi=0.687)
+2026-01-26 06:26:43,637 - __main__ - INFO - Split cv1_train: len=109 start=2024-07-01 00:00:00 end=2024-12-04 00:00:00 mean=0.0011 std=0.0132 skew=-0.7595 kurt=1.5273
+2026-01-26 06:26:43,638 - __main__ - INFO - Split cv1_val: len=54 start=2024-12-05 00:00:00 end=2025-02-26 00:00:00 mean=-0.0001 std=0.0160 skew=-0.3722 kurt=0.3697
+2026-01-26 06:26:43,640 - __main__ - WARNING - Drift detected in CV fold 1 (psi=0.156 vol_psi=0.423)
+2026-01-26 06:26:43,641 - __main__ - INFO - Split cv2_train: len=164 start=2024-07-01 00:00:00 end=2025-02-26 00:00:00 mean=0.0007 std=0.0141 skew=-0.6041 kurt=1.0144
+2026-01-26 06:26:43,642 - __main__ - INFO - Split cv2_val: len=54 start=2025-02-27 00:00:00 end=2025-05-15 00:00:00 mean=-0.0016 std=0.0347 skew=1.1832 kurt=7.1665
+2026-01-26 06:26:43,643 - __main__ - WARNING - Drift detected in CV fold 2 (psi=2.039 vol_psi=2.226)
+2026-01-26 06:26:43,645 - __main__ - INFO - Split cv3_train: len=219 start=2024-07-01 00:00:00 end=2025-05-15 00:00:00 mean=0.0001 std=0.0211 skew=0.9921 kurt=14.2765
+2026-01-26 06:26:43,645 - __main__ - INFO - Split cv3_val: len=54 start=2025-05-16 00:00:00 end=2025-08-05 00:00:00 mean=-0.0007 std=0.0117 skew=-0.1437 kurt=0.3079
+2026-01-26 06:26:43,647 - __main__ - WARNING - Drift detected in CV fold 3 (psi=0.443 vol_psi=2.077)
+2026-01-26 06:26:43,648 - __main__ - INFO - Split cv4_train: len=274 start=2024-07-01 00:00:00 end=2025-08-05 00:00:00 mean=-0.0001 std=0.0195 skew=1.0040 kurt=15.7322
+2026-01-26 06:26:43,649 - __main__ - INFO - Split cv4_val: len=54 start=2025-08-06 00:00:00 end=2025-10-22 00:00:00 mean=0.0037 std=0.0164 skew=0.4958 kurt=0.8319
+2026-01-26 06:26:43,651 - __main__ - INFO - CV fold 4 drift psi=0.189 vol_psi=0.160 (OK)
+2026-01-26 06:26:43,652 - __main__ - INFO - Split test: len=58 start=2025-10-23 00:00:00 end=2026-01-16 00:00:00 mean=-0.0002 std=0.0088 skew=0.4993 kurt=0.6887
+2026-01-26 06:26:43,670 - etl.data_storage - INFO - Saved 55 rows to data/training/fold0_train_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,687 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold0_val_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,705 - etl.data_storage - INFO - Saved 110 rows to data/training/fold1_train_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,722 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold1_val_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,740 - etl.data_storage - INFO - Saved 165 rows to data/training/fold2_train_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,764 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold2_val_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,786 - etl.data_storage - INFO - Saved 220 rows to data/training/fold3_train_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,807 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold3_val_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,828 - etl.data_storage - INFO - Saved 275 rows to data/training/fold4_train_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,848 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold4_val_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,867 - etl.data_storage - INFO - Saved 59 rows to data/testing/test_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,868 - __main__ - INFO - Saved 5 CV folds + 1 test set
+2026-01-26 06:26:43,868 - __main__ - INFO -   - Train size (avg): 165 rows
+2026-01-26 06:26:43,868 - __main__ - INFO -   - Val size (avg): 55 rows
+2026-01-26 06:26:43,869 - __main__ - INFO -   - Test size: 59 rows
+2026-01-26 06:26:43,870 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:43,871 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:43,891 - etl.data_storage - INFO - Saved 55 rows to data/training/fold0_train_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,910 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold0_val_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,912 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:43,913 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:43,930 - etl.data_storage - INFO - Saved 110 rows to data/training/fold1_train_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,946 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold1_val_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,948 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:43,949 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:43,965 - etl.data_storage - INFO - Saved 165 rows to data/training/fold2_train_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,982 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold2_val_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:43,983 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:43,984 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:44,003 - etl.data_storage - INFO - Saved 220 rows to data/training/fold3_train_norm_20260126_062643_20260126_062643_pipeline_20260126_062641.parquet
+2026-01-26 06:26:44,021 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold3_val_norm_20260126_062643_20260126_062644_pipeline_20260126_062641.parquet
+2026-01-26 06:26:44,023 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:44,024 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:44,042 - etl.data_storage - INFO - Saved 275 rows to data/training/fold4_train_norm_20260126_062643_20260126_062644_pipeline_20260126_062641.parquet
+2026-01-26 06:26:44,060 - etl.data_storage - INFO - Saved 55 rows to data/validation/fold4_val_norm_20260126_062643_20260126_062644_pipeline_20260126_062641.parquet
+2026-01-26 06:26:44,061 - etl.preprocessor - INFO - Normalized 6 columns
+2026-01-26 06:26:44,062 - etl.preprocessor - INFO - Applied normalization to 6 columns
+2026-01-26 06:26:44,079 - etl.data_storage - INFO - Saved 59 rows to data/testing/test_norm_20260126_062643_20260126_062644_pipeline_20260126_062641.parquet
+2026-01-26 06:26:44,084 - __main__ - INFO - Saved normalization stats: data/processed/normalization_stats_pipeline_20260126_062641.json
+2026-01-26 06:26:44,084 - py.warnings - WARNING - /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/scripts/run_etl_pipeline.py:312: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+2026-01-26 06:26:44,090 - __main__ - INFO - Split drift diagnostics emitted to visualizations/split_drift_latest.json
+2026-01-26 06:26:44,090 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:44.090876", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "data_storage", "status": "success", "metadata": {"duration_seconds": 0.4654242992401123}}
+2026-01-26 06:26:44,091 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: data_storage, Status: success
+2026-01-26 06:26:44,091 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:44.091705", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "data_storage", "status": "success", "metadata": {"duration_seconds": 0.4654242992401123}}
+2026-01-26 06:26:44,091 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: data_storage, Status: success
+2026-01-26 06:26:44,092 - __main__ - INFO - 
+2026-01-26 06:26:44,092 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:26:44.092718", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_forecasting", "status": "info", "metadata": {}}
+2026-01-26 06:26:44,092 - __main__ - INFO - Generating time series forecasts...
+2026-01-26 06:26:48,545 - __main__ - INFO - Loaded ensemble_cfg keys: ['enabled', 'confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:26:48,546 - __main__ - INFO - Loaded regime_detection_cfg keys: ['enabled', 'lookback_window', 'vol_threshold_low', 'vol_threshold_high', 'trend_threshold_weak', 'trend_threshold_strong', 'regime_candidate_weights', 'regime_model_preferences'], enabled: True
+2026-01-26 06:26:48,547 - forcester_ts.forecaster - INFO - Creating EnsembleConfig with kwargs keys: ['confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:26:48,551 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME_DETECTION enabled :: lookback=60, vol_thresholds=(0.15,0.30), trend_thresholds=(0.30,0.60)
+2026-01-26 06:26:48,574 - forcester_ts.forecaster - INFO - [TS_MODEL] SERIES diagnostics :: adf_pvalue=0.7072798046826085, kpss_pvalue=0.034016033957180475, length=373
+2026-01-26 06:26:48,575 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_start
+2026-01-26 06:26:48,579 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_complete :: regime=MODERATE_TRENDING, confidence=0.6325503803670358, features={'realized_volatility': 0.21966511672028063, 'vol_of_vol': 0.006111701884978103, 'trend_strength': 0.8257705272935104, 'hurst_exponent': 0.21202278933307797, 'adf_pvalue': 2.248865453324636e-09, 'skewness': 0.22617675684961822, 'kurtosis': 1.8118226711855043, 'mean_return': 0.0033102840849957163}
+2026-01-26 06:26:48,579 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detected :: regime=MODERATE_TRENDING, confidence=0.633, vol=0.220, trend=0.826, hurst=0.212
+2026-01-26 06:26:48,579 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_start :: points=373, first=2024-07-01 00:00:00, last=2025-12-03 00:00:00
+2026-01-26 06:26:48,586 - forcester_ts.sarimax - INFO - Selecting optimal SARIMAX order...
+2026-01-26 06:28:52,436 - forcester_ts.sarimax - INFO - Selected order (2, 1, 0) seasonal (0, 0, 0, 0) with AIC 623.59
+2026-01-26 06:28:52,807 - forcester_ts.sarimax - WARNING - Primary SARIMAX fit did not converge; retrying with relaxed constraints.
+2026-01-26 06:28:53,019 - forcester_ts.sarimax - INFO - Fallback SARIMAX fit converged with relaxed constraints.
+2026-01-26 06:28:53,020 - forcester_ts.sarimax - INFO - SARIMAX model fitted successfully (order=(2, 1, 0), seasonal=(0, 0, 0, 0))
+2026-01-26 06:28:53,021 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_complete :: order=(2, 1, 0), seasonal=(0, 0, 0, 0)
+2026-01-26 06:28:53,021 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_start :: points=373, first=2024-07-01 00:00:00, last=2025-12-03 00:00:00
+2026-01-26 06:28:53,027 - forcester_ts.samossa - INFO - SAMOSSA fit complete (matrix=page, window=19, components=8, EVR=0.978)
+2026-01-26 06:28:53,027 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_complete :: explained_variance=0.9780641495392759, components=8, window=19
+2026-01-26 06:28:53,027 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_start :: points=373
+2026-01-26 06:28:53,027 - forcester_ts.mssa_rl - WARNING - MSSARL: GPU acceleration requested but CuPy is unavailable. Falling back to CPU.
+2026-01-26 06:28:53,062 - forcester_ts.mssa_rl - INFO - MSSARL fit complete (window=30, rank=2, change_points=48)
+2026-01-26 06:28:53,062 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_complete :: change_points=48, rank=2
+2026-01-26 06:28:53,064 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_start :: points=358
+2026-01-26 06:28:53,209 - forcester_ts.garch - INFO - GARCH(1,3) model fitted successfully (vol=GARCH, dist=normal)
+2026-01-26 06:28:53,210 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_complete :: order={'p': 1, 'q': 3}, aic=1380.8301939256824, bic=1404.1133918440864
+2026-01-26 06:28:53,210 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_start :: horizon=30
+2026-01-26 06:28:53,218 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_complete
+2026-01-26 06:28:53,218 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_start :: horizon=30
+2026-01-26 06:28:53,220 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_complete
+2026-01-26 06:28:53,220 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_start :: horizon=30
+2026-01-26 06:28:53,221 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_complete
+2026-01-26 06:28:53,221 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_start :: horizon=30
+2026-01-26 06:28:53,222 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_complete
+2026-01-26 06:28:53,223 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME candidate_override :: regime=MODERATE_TRENDING, override_top={'samossa': 0.9, 'sarimax': 0.05, 'mssa_rl': 0.05}
+2026-01-26 06:28:53,223 - forcester_ts.ensemble - INFO - Ensemble summaries keys=['garch', 'mssa_rl', 'samossa', 'sarimax'] regression_metrics_present={'garch': False, 'mssa_rl': False, 'samossa': False, 'sarimax': False}
+2026-01-26 06:28:53,224 - forcester_ts.ensemble - INFO - Calibrated confidence (Phase 7.4 quantile-based): raw={'sarimax': 0.6065306597126334, 'garch': 0.6065306597126334, 'samossa': 0.95, 'mssa_rl': 0.47475300392508873} calibrated={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:28:53,225 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'samossa': 0.9, 'sarimax': 0.05, 'mssa_rl': 0.05} normalized={'samossa': 0.9, 'sarimax': 0.05, 'mssa_rl': 0.05} score=1.0000
+2026-01-26 06:28:53,228 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE build_complete :: weights={'samossa': 0.9, 'sarimax': 0.05, 'mssa_rl': 0.05}, confidence={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:28:53,242 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE holdout_wait :: effective_audits=1, required_audits=20
+2026-01-26 06:28:53,243 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3122)
+2026-01-26 06:28:53,245 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3123)
+2026-01-26 06:28:53,246 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3124)
+2026-01-26 06:28:53,249 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3125)
+2026-01-26 06:28:53,249 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3126)
+2026-01-26 06:28:53,249 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3127)
+2026-01-26 06:28:53,250 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3128)
+2026-01-26 06:28:53,250 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3129)
+2026-01-26 06:28:53,250 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3130)
+2026-01-26 06:28:53,251 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3131)
+2026-01-26 06:28:53,251 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3132)
+2026-01-26 06:28:53,251 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3133)
+2026-01-26 06:28:53,251 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3134)
+2026-01-26 06:28:53,252 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3135)
+2026-01-26 06:28:53,252 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3136)
+2026-01-26 06:28:53,252 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3137)
+2026-01-26 06:28:53,252 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3138)
+2026-01-26 06:28:53,252 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3139)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3140)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3141)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3142)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3143)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3144)
+2026-01-26 06:28:53,253 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3145)
+2026-01-26 06:28:53,254 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3146)
+2026-01-26 06:28:53,254 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3147)
+2026-01-26 06:28:53,254 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3148)
+2026-01-26 06:28:53,255 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3149)
+2026-01-26 06:28:53,255 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3150)
+2026-01-26 06:28:53,255 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3151)
+2026-01-26 06:28:53,256 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3152)
+2026-01-26 06:28:53,256 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3153)
+2026-01-26 06:28:53,256 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3154)
+2026-01-26 06:28:53,256 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3155)
+2026-01-26 06:28:53,256 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3156)
+2026-01-26 06:28:53,257 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3157)
+2026-01-26 06:28:53,257 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3158)
+2026-01-26 06:28:53,257 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3159)
+2026-01-26 06:28:53,258 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3160)
+2026-01-26 06:28:53,258 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3161)
+2026-01-26 06:28:53,258 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3162)
+2026-01-26 06:28:53,258 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3163)
+2026-01-26 06:28:53,259 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3164)
+2026-01-26 06:28:53,259 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3165)
+2026-01-26 06:28:53,259 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3166)
+2026-01-26 06:28:53,260 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3167)
+2026-01-26 06:28:53,260 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3168)
+2026-01-26 06:28:53,261 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3169)
+2026-01-26 06:28:53,261 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3170)
+2026-01-26 06:28:53,261 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3171)
+2026-01-26 06:28:53,261 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3172)
+2026-01-26 06:28:53,262 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3173)
+2026-01-26 06:28:53,262 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3174)
+2026-01-26 06:28:53,262 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3175)
+2026-01-26 06:28:53,262 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3176)
+2026-01-26 06:28:53,263 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3177)
+2026-01-26 06:28:53,263 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3178)
+2026-01-26 06:28:53,263 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3179)
+2026-01-26 06:28:53,263 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3180)
+2026-01-26 06:28:53,263 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3181)
+2026-01-26 06:28:53,264 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3182)
+2026-01-26 06:28:53,264 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3183)
+2026-01-26 06:28:53,264 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3184)
+2026-01-26 06:28:53,265 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3185)
+2026-01-26 06:28:53,265 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3186)
+2026-01-26 06:28:53,265 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3187)
+2026-01-26 06:28:53,265 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3188)
+2026-01-26 06:28:53,266 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3189)
+2026-01-26 06:28:53,266 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3190)
+2026-01-26 06:28:53,266 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3191)
+2026-01-26 06:28:53,267 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3192)
+2026-01-26 06:28:53,267 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3193)
+2026-01-26 06:28:53,268 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3194)
+2026-01-26 06:28:53,268 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3195)
+2026-01-26 06:28:53,268 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3196)
+2026-01-26 06:28:53,273 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3197)
+2026-01-26 06:28:53,274 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3198)
+2026-01-26 06:28:53,274 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3199)
+2026-01-26 06:28:53,274 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3200)
+2026-01-26 06:28:53,274 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3201)
+2026-01-26 06:28:53,275 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3202)
+2026-01-26 06:28:53,275 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3203)
+2026-01-26 06:28:53,275 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3204)
+2026-01-26 06:28:53,275 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3205)
+2026-01-26 06:28:53,275 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3206)
+2026-01-26 06:28:53,276 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3207)
+2026-01-26 06:28:53,276 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3208)
+2026-01-26 06:28:53,276 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3209)
+2026-01-26 06:28:53,276 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3210)
+2026-01-26 06:28:53,276 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3211)
+2026-01-26 06:28:53,277 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3212)
+2026-01-26 06:28:53,277 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3213)
+2026-01-26 06:28:53,277 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3214)
+2026-01-26 06:28:53,277 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3215)
+2026-01-26 06:28:53,278 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3216)
+2026-01-26 06:28:53,278 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3217)
+2026-01-26 06:28:53,278 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3218)
+2026-01-26 06:28:53,279 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3219)
+2026-01-26 06:28:53,279 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3220)
+2026-01-26 06:28:53,279 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3221)
+2026-01-26 06:28:53,279 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3222)
+2026-01-26 06:28:53,280 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3223)
+2026-01-26 06:28:53,280 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3224)
+2026-01-26 06:28:53,280 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3225)
+2026-01-26 06:28:53,280 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3226)
+2026-01-26 06:28:53,280 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3227)
+2026-01-26 06:28:53,281 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3228)
+2026-01-26 06:28:53,281 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3229)
+2026-01-26 06:28:53,281 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3230)
+2026-01-26 06:28:53,281 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3231)
+2026-01-26 06:28:53,281 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3232)
+2026-01-26 06:28:53,282 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3233)
+2026-01-26 06:28:53,282 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3234)
+2026-01-26 06:28:53,282 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3235)
+2026-01-26 06:28:53,282 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3236)
+2026-01-26 06:28:53,283 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3237)
+2026-01-26 06:28:53,283 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3238)
+2026-01-26 06:28:53,283 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3239)
+2026-01-26 06:28:53,283 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3240)
+2026-01-26 06:28:53,283 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3241)
+2026-01-26 06:28:53,284 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3242)
+2026-01-26 06:28:53,284 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3243)
+2026-01-26 06:28:53,284 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3244)
+2026-01-26 06:28:53,284 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3245)
+2026-01-26 06:28:53,285 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3246)
+2026-01-26 06:28:53,285 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3247)
+2026-01-26 06:28:53,285 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3248)
+2026-01-26 06:28:53,285 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3249)
+2026-01-26 06:28:53,286 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3250)
+2026-01-26 06:28:53,286 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3251)
+2026-01-26 06:28:53,286 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3252)
+2026-01-26 06:28:53,286 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3253)
+2026-01-26 06:28:53,286 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3254)
+2026-01-26 06:28:53,287 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3255)
+2026-01-26 06:28:53,287 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3256)
+2026-01-26 06:28:53,287 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3257)
+2026-01-26 06:28:53,287 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3258)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3259)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3260)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3261)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3262)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3263)
+2026-01-26 06:28:53,288 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3264)
+2026-01-26 06:28:53,289 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3265)
+2026-01-26 06:28:53,289 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3266)
+2026-01-26 06:28:53,289 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3267)
+2026-01-26 06:28:53,289 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3268)
+2026-01-26 06:28:53,289 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3269)
+2026-01-26 06:28:53,290 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3270)
+2026-01-26 06:28:53,290 - etl.database_manager - INFO - Saved forecast for AAPL on 2026-01-26 (ID: 3271)
+2026-01-26 06:28:53,290 - __main__ - INFO -   OK AAPL: Generated 30-step forecast
+2026-01-26 06:28:53,290 - __main__ - INFO - OK Generated forecasts for 1/1 ticker(s)
+2026-01-26 06:28:53,881 - __main__ - WARNING - Time Series visualization generation failed: name 'datetime' is not defined
+2026-01-26 06:28:53,911 - etl.checkpoint_manager - INFO - Checkpoint saved: pipeline_20260126_062641_time_series_forecasting_20260126_062853 (stage=time_series_forecasting, shape=(389, 6), hash=751e0db307357d10)
+2026-01-26 06:28:53,911 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:28:53.911358", "event_type": "checkpoint_saved", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_forecasting", "status": "success", "metadata": {"checkpoint_id": "pipeline_20260126_062641_time_series_forecasting_20260126_062853"}}
+2026-01-26 06:28:53,911 - pipeline - INFO - [checkpoint_saved] Pipeline: pipeline_20260126_062641, Stage: time_series_forecasting, Status: success
+2026-01-26 06:28:53,912 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:28:53.912298", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_forecasting", "status": "success", "metadata": {"duration_seconds": 129.8195788860321}}
+2026-01-26 06:28:53,912 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: time_series_forecasting, Status: success
+2026-01-26 06:28:53,913 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:28:53.913056", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_forecasting", "status": "success", "metadata": {"duration_seconds": 129.8195788860321}}
+2026-01-26 06:28:53,913 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: time_series_forecasting, Status: success
+2026-01-26 06:28:53,913 - __main__ - INFO - 
+2026-01-26 06:28:53,914 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:28:53.914012", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_signal_generation", "status": "info", "metadata": {}}
+2026-01-26 06:28:53,914 - __main__ - INFO - Generating trading signals from Time Series forecasts...
+2026-01-26 06:28:53,934 - models.time_series_signal_generator - INFO - Time Series Signal Generator module loaded successfully
+2026-01-26 06:28:53,944 - models.signal_router - INFO - Signal Router module loaded successfully
+2026-01-26 06:28:53,956 - models.signal_adapter - INFO - Signal Adapter module loaded successfully
+2026-01-26 06:28:53,978 - models.time_series_signal_generator - INFO - Time Series Signal Generator initialized (confidence_threshold=0.45, min_return=0.05%, max_risk=0.85, quant_validation=on)
+2026-01-26 06:28:54,000 - forcester_ts.forecaster - INFO - Creating EnsembleConfig with kwargs keys: ['confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:28:54,000 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME_DETECTION enabled :: lookback=60, vol_thresholds=(0.15,0.30), trend_thresholds=(0.30,0.60)
+2026-01-26 06:28:54,011 - forcester_ts.forecaster - INFO - [TS_MODEL] SERIES diagnostics :: adf_pvalue=0.3078056682870591, kpss_pvalue=0.09611270292073494, length=188
+2026-01-26 06:28:54,012 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_start
+2026-01-26 06:28:54,015 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_complete :: regime=HIGH_VOL_TRENDING, confidence=0.8341351415032443, features={'realized_volatility': 0.5184662552173483, 'vol_of_vol': 0.021793144917702248, 'trend_strength': 0.6682702830064886, 'hurst_exponent': 0.1751766330858692, 'adf_pvalue': 1.311467076456643e-12, 'skewness': 1.184323216594578, 'kurtosis': 8.351504509441389, 'mean_return': -0.0014236930728035225}
+2026-01-26 06:28:54,015 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detected :: regime=HIGH_VOL_TRENDING, confidence=0.834, vol=0.518, trend=0.668, hurst=0.175
+2026-01-26 06:28:54,015 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_start :: points=188, first=2024-08-05 00:00:00, last=2025-04-23 00:00:00
+2026-01-26 06:28:54,018 - forcester_ts.sarimax - INFO - Selecting optimal SARIMAX order...
+2026-01-26 06:29:28,784 - forcester_ts.sarimax - INFO - Selected order (2, 1, 0) seasonal (0, 0, 0, 0) with AIC 318.55
+2026-01-26 06:29:29,004 - forcester_ts.sarimax - WARNING - Primary SARIMAX fit did not converge; retrying with relaxed constraints.
+2026-01-26 06:29:29,162 - forcester_ts.sarimax - INFO - Fallback SARIMAX fit converged with relaxed constraints.
+2026-01-26 06:29:29,163 - forcester_ts.sarimax - INFO - SARIMAX model fitted successfully (order=(2, 1, 0), seasonal=(0, 0, 0, 0))
+2026-01-26 06:29:29,163 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_complete :: order=(2, 1, 0), seasonal=(0, 0, 0, 0)
+2026-01-26 06:29:29,163 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_start :: points=188, first=2024-08-05 00:00:00, last=2025-04-23 00:00:00
+2026-01-26 06:29:29,169 - forcester_ts.samossa - INFO - SAMOSSA fit complete (matrix=page, window=13, components=6, EVR=0.974)
+2026-01-26 06:29:29,169 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_complete :: explained_variance=0.9735757629755383, components=6, window=13
+2026-01-26 06:29:29,169 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_start :: points=188
+2026-01-26 06:29:29,173 - forcester_ts.mssa_rl - INFO - MSSARL fit complete (window=30, rank=2, change_points=37)
+2026-01-26 06:29:29,173 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_complete :: change_points=37, rank=2
+2026-01-26 06:29:29,174 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_start :: points=179
+2026-01-26 06:29:29,272 - forcester_ts.garch - INFO - GARCH(1,3) model fitted successfully (vol=GARCH, dist=normal)
+2026-01-26 06:29:29,273 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_complete :: order={'p': 1, 'q': 3}, aic=708.7252395357079, bic=727.8495543707525
+2026-01-26 06:29:29,273 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_start :: horizon=30
+2026-01-26 06:29:29,279 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_complete
+2026-01-26 06:29:29,280 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_start :: horizon=30
+2026-01-26 06:29:29,281 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_complete
+2026-01-26 06:29:29,281 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_start :: horizon=30
+2026-01-26 06:29:29,282 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_complete
+2026-01-26 06:29:29,282 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_start :: horizon=30
+2026-01-26 06:29:29,283 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_complete
+2026-01-26 06:29:29,284 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME candidate_reorder :: regime=HIGH_VOL_TRENDING, original_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, preferred_top={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2}
+2026-01-26 06:29:29,284 - forcester_ts.ensemble - INFO - Ensemble summaries keys=['garch', 'mssa_rl', 'samossa', 'sarimax'] regression_metrics_present={'garch': False, 'mssa_rl': False, 'samossa': False, 'sarimax': False}
+2026-01-26 06:29:29,284 - forcester_ts.ensemble - INFO - Calibrated confidence (Phase 7.4 quantile-based): raw={'sarimax': 0.6065306597126334, 'garch': 0.6065306597126334, 'samossa': 0.95, 'mssa_rl': 0.5156850648999721} calibrated={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:29:29,285 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} normalized={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} score=1.0000
+2026-01-26 06:29:29,285 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} normalized={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} score=1.0000
+2026-01-26 06:29:29,285 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'samossa': 1.0} normalized={'samossa': 1.0} score=1.0000
+2026-01-26 06:29:29,285 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'mssa_rl': 1.0} normalized={'mssa_rl': 1.0} score=1.0000
+2026-01-26 06:29:29,285 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.5, 'mssa_rl': 0.5} normalized={'sarimax': 0.5, 'mssa_rl': 0.5} score=1.0000
+2026-01-26 06:29:29,286 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.6, 'samossa': 0.4} normalized={'sarimax': 0.6, 'samossa': 0.4} score=1.0000
+2026-01-26 06:29:29,286 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} normalized={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} score=1.0000
+2026-01-26 06:29:29,286 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} normalized={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} score=1.0000
+2026-01-26 06:29:29,286 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 1.0} normalized={'garch': 1.0} score=1.0000
+2026-01-26 06:29:29,290 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE build_complete :: weights={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2}, confidence={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:29:29,305 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE holdout_wait :: effective_audits=1, required_audits=20
+2026-01-26 06:29:29,305 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE policy_decision :: status=DISABLE_DEFAULT, reason=rmse regression (ratio=1.813 > 1.100), ratio=1.8134440138329906, effective_audits=1, required_audits=20
+2026-01-26 06:29:29,306 - forcester_ts.forecaster - INFO - Creating EnsembleConfig with kwargs keys: ['confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:29:29,306 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME_DETECTION enabled :: lookback=60, vol_thresholds=(0.15,0.30), trend_thresholds=(0.30,0.60)
+2026-01-26 06:29:29,318 - forcester_ts.forecaster - INFO - [TS_MODEL] SERIES diagnostics :: adf_pvalue=0.3803754445208181, kpss_pvalue=0.01, length=219
+2026-01-26 06:29:29,319 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_start
+2026-01-26 06:29:29,321 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_complete :: regime=CRISIS, confidence=0.5579608029022778, features={'realized_volatility': 0.5163556045915728, 'vol_of_vol': 0.022193162143198455, 'trend_strength': 0.11592160580455567, 'hurst_exponent': 0.19854771561687848, 'adf_pvalue': 3.5000756783756256e-12, 'skewness': 1.295694535592651, 'kurtosis': 8.640972008366742, 'mean_return': -0.0010891353706067345}
+2026-01-26 06:29:29,321 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detected :: regime=CRISIS, confidence=0.558, vol=0.516, trend=0.116, hurst=0.199
+2026-01-26 06:29:29,321 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_start :: points=219, first=2024-08-05 00:00:00, last=2025-06-05 00:00:00
+2026-01-26 06:29:29,325 - forcester_ts.sarimax - INFO - Selecting optimal SARIMAX order...
+2026-01-26 06:30:14,740 - forcester_ts.sarimax - INFO - Selected order (2, 1, 0) seasonal (0, 0, 0, 0) with AIC 364.62
+2026-01-26 06:30:15,044 - forcester_ts.sarimax - WARNING - Primary SARIMAX fit did not converge; retrying with relaxed constraints.
+2026-01-26 06:30:15,283 - forcester_ts.sarimax - INFO - Fallback SARIMAX fit converged with relaxed constraints.
+2026-01-26 06:30:15,283 - forcester_ts.sarimax - INFO - SARIMAX model fitted successfully (order=(2, 1, 0), seasonal=(0, 0, 0, 0))
+2026-01-26 06:30:15,284 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_complete :: order=(2, 1, 0), seasonal=(0, 0, 0, 0)
+2026-01-26 06:30:15,284 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_start :: points=219, first=2024-08-05 00:00:00, last=2025-06-05 00:00:00
+2026-01-26 06:30:15,289 - forcester_ts.samossa - INFO - SAMOSSA fit complete (matrix=page, window=14, components=6, EVR=0.976)
+2026-01-26 06:30:15,289 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_complete :: explained_variance=0.9757023190572665, components=6, window=14
+2026-01-26 06:30:15,290 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_start :: points=219
+2026-01-26 06:30:15,295 - forcester_ts.mssa_rl - INFO - MSSARL fit complete (window=30, rank=2, change_points=44)
+2026-01-26 06:30:15,296 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_complete :: change_points=44, rank=2
+2026-01-26 06:30:15,297 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_start :: points=209
+2026-01-26 06:30:15,498 - forcester_ts.garch - INFO - GARCH(1,3) model fitted successfully (vol=GARCH, dist=normal)
+2026-01-26 06:30:15,498 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_complete :: order={'p': 1, 'q': 3}, aic=837.6479237671076, bic=857.7019292788965
+2026-01-26 06:30:15,499 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_start :: horizon=30
+2026-01-26 06:30:15,509 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_complete
+2026-01-26 06:30:15,510 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_start :: horizon=30
+2026-01-26 06:30:15,511 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_complete
+2026-01-26 06:30:15,512 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_start :: horizon=30
+2026-01-26 06:30:15,512 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_complete
+2026-01-26 06:30:15,512 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_start :: horizon=30
+2026-01-26 06:30:15,513 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_complete
+2026-01-26 06:30:15,514 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME candidate_reorder :: regime=CRISIS, original_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, preferred_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}
+2026-01-26 06:30:15,514 - forcester_ts.ensemble - INFO - Ensemble summaries keys=['garch', 'mssa_rl', 'samossa', 'sarimax'] regression_metrics_present={'garch': False, 'mssa_rl': False, 'samossa': False, 'sarimax': False}
+2026-01-26 06:30:15,515 - forcester_ts.ensemble - INFO - Calibrated confidence (Phase 7.4 quantile-based): raw={'sarimax': 0.6065306597126334, 'garch': 0.6065306597126334, 'samossa': 0.95, 'mssa_rl': 0.2163852410888379} calibrated={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:30:15,515 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} normalized={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} score=1.0000
+2026-01-26 06:30:15,515 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} normalized={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} score=1.0000
+2026-01-26 06:30:15,515 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 1.0} normalized={'garch': 1.0} score=1.0000
+2026-01-26 06:30:15,516 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} normalized={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} score=1.0000
+2026-01-26 06:30:15,516 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.6, 'samossa': 0.4} normalized={'sarimax': 0.6, 'samossa': 0.4} score=1.0000
+2026-01-26 06:30:15,516 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.5, 'mssa_rl': 0.5} normalized={'sarimax': 0.5, 'mssa_rl': 0.5} score=1.0000
+2026-01-26 06:30:15,517 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} normalized={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} score=1.0000
+2026-01-26 06:30:15,517 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'samossa': 1.0} normalized={'samossa': 1.0} score=1.0000
+2026-01-26 06:30:15,517 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'mssa_rl': 1.0} normalized={'mssa_rl': 1.0} score=1.0000
+2026-01-26 06:30:15,522 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE build_complete :: weights={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, confidence={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:30:15,541 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE holdout_wait :: effective_audits=1, required_audits=20
+2026-01-26 06:30:15,541 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE policy_decision :: status=RESEARCH_ONLY, reason=no margin lift (required >= 0.020), ratio=1.0542400034018162, effective_audits=1, required_audits=20
+2026-01-26 06:30:15,541 - forcester_ts.cross_validation - INFO - Rolling-window CV completed (2 folds, horizon=30)
+2026-01-26 06:30:15,680 - etl.visualizer - INFO - Created time series overview for 1 columns
+2026-01-26 06:30:15,971 - models.time_series_signal_generator - INFO - Quant validation FAILED for AAPL; demoting BUY signal to HOLD to protect PnL.
+2026-01-26 06:30:15,974 - models.time_series_signal_generator - INFO - Generated HOLD signal for AAPL: confidence=0.98, expected_return=9.64%, risk=0.25
+2026-01-26 06:30:15,975 - etl.database_manager - INFO - Saved trading signal for AAPL on 2026-01-26 (source=TIME_SERIES, ID: 22)
+2026-01-26 06:30:15,975 - __main__ - INFO -   OK AAPL: HOLD signal (confidence=0.98, expected_return=9.64%, risk=0.25)
+2026-01-26 06:30:15,976 - __main__ - INFO - OK Generated 0 Time Series signal(s)
+2026-01-26 06:30:16,013 - etl.checkpoint_manager - INFO - Checkpoint saved: pipeline_20260126_062641_time_series_signal_generation_20260126_063015 (stage=time_series_signal_generation, shape=(389, 6), hash=751e0db307357d10)
+2026-01-26 06:30:16,014 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:30:16.014182", "event_type": "checkpoint_saved", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_signal_generation", "status": "success", "metadata": {"checkpoint_id": "pipeline_20260126_062641_time_series_signal_generation_20260126_063015"}}
+2026-01-26 06:30:16,014 - pipeline - INFO - [checkpoint_saved] Pipeline: pipeline_20260126_062641, Stage: time_series_signal_generation, Status: success
+2026-01-26 06:30:16,015 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:30:16.015582", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_signal_generation", "status": "success", "metadata": {"duration_seconds": 82.10156798362732}}
+2026-01-26 06:30:16,016 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: time_series_signal_generation, Status: success
+2026-01-26 06:30:16,016 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:30:16.016750", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "time_series_signal_generation", "status": "success", "metadata": {"duration_seconds": 82.10156798362732}}
+2026-01-26 06:30:16,017 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: time_series_signal_generation, Status: success
+2026-01-26 06:30:16,018 - __main__ - INFO - 
+2026-01-26 06:30:16,018 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:30:16.018301", "event_type": "stage_start", "pipeline_id": "pipeline_20260126_062641", "stage": "signal_router", "status": "info", "metadata": {}}
+2026-01-26 06:30:16,018 - __main__ - INFO - Routing signals (Time Series primary, LLM fallback)...
+2026-01-26 06:30:16,038 - models.time_series_signal_generator - INFO - Time Series Signal Generator initialized (confidence_threshold=0.55, min_return=0.30%, max_risk=0.70, quant_validation=on)
+2026-01-26 06:30:16,047 - models.signal_router - INFO - Signal Router initialized: TS_primary=True, LLM_fallback=True, LLM_redundancy=False
+2026-01-26 06:30:16,088 - forcester_ts.forecaster - INFO - Creating EnsembleConfig with kwargs keys: ['confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:30:16,089 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME_DETECTION enabled :: lookback=60, vol_thresholds=(0.15,0.30), trend_thresholds=(0.30,0.60)
+2026-01-26 06:30:16,103 - forcester_ts.forecaster - INFO - [TS_MODEL] SERIES diagnostics :: adf_pvalue=0.3078056682870591, kpss_pvalue=0.09611270292073494, length=188
+2026-01-26 06:30:16,104 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_start
+2026-01-26 06:30:16,107 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_complete :: regime=HIGH_VOL_TRENDING, confidence=0.8341351415032443, features={'realized_volatility': 0.5184662552173483, 'vol_of_vol': 0.021793144917702248, 'trend_strength': 0.6682702830064886, 'hurst_exponent': 0.1751766330858692, 'adf_pvalue': 1.311467076456643e-12, 'skewness': 1.184323216594578, 'kurtosis': 8.351504509441389, 'mean_return': -0.0014236930728035225}
+2026-01-26 06:30:16,107 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detected :: regime=HIGH_VOL_TRENDING, confidence=0.834, vol=0.518, trend=0.668, hurst=0.175
+2026-01-26 06:30:16,108 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_start :: points=188, first=2024-08-05 00:00:00, last=2025-04-23 00:00:00
+2026-01-26 06:30:16,114 - forcester_ts.sarimax - INFO - Selecting optimal SARIMAX order...
+2026-01-26 06:30:58,799 - forcester_ts.sarimax - INFO - Selected order (2, 1, 0) seasonal (0, 0, 0, 0) with AIC 318.55
+2026-01-26 06:30:59,054 - forcester_ts.sarimax - WARNING - Primary SARIMAX fit did not converge; retrying with relaxed constraints.
+2026-01-26 06:30:59,264 - forcester_ts.sarimax - INFO - Fallback SARIMAX fit converged with relaxed constraints.
+2026-01-26 06:30:59,264 - forcester_ts.sarimax - INFO - SARIMAX model fitted successfully (order=(2, 1, 0), seasonal=(0, 0, 0, 0))
+2026-01-26 06:30:59,265 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_complete :: order=(2, 1, 0), seasonal=(0, 0, 0, 0)
+2026-01-26 06:30:59,265 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_start :: points=188, first=2024-08-05 00:00:00, last=2025-04-23 00:00:00
+2026-01-26 06:30:59,268 - forcester_ts.samossa - INFO - SAMOSSA fit complete (matrix=page, window=13, components=6, EVR=0.974)
+2026-01-26 06:30:59,268 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_complete :: explained_variance=0.9735757629755383, components=6, window=13
+2026-01-26 06:30:59,269 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_start :: points=188
+2026-01-26 06:30:59,272 - forcester_ts.mssa_rl - INFO - MSSARL fit complete (window=30, rank=2, change_points=37)
+2026-01-26 06:30:59,273 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_complete :: change_points=37, rank=2
+2026-01-26 06:30:59,274 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_start :: points=179
+2026-01-26 06:30:59,432 - forcester_ts.garch - INFO - GARCH(1,3) model fitted successfully (vol=GARCH, dist=normal)
+2026-01-26 06:30:59,433 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_complete :: order={'p': 1, 'q': 3}, aic=708.7252395357079, bic=727.8495543707525
+2026-01-26 06:30:59,433 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_start :: horizon=30
+2026-01-26 06:30:59,443 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_complete
+2026-01-26 06:30:59,443 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_start :: horizon=30
+2026-01-26 06:30:59,445 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_complete
+2026-01-26 06:30:59,445 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_start :: horizon=30
+2026-01-26 06:30:59,446 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_complete
+2026-01-26 06:30:59,446 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_start :: horizon=30
+2026-01-26 06:30:59,448 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_complete
+2026-01-26 06:30:59,449 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME candidate_reorder :: regime=HIGH_VOL_TRENDING, original_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, preferred_top={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2}
+2026-01-26 06:30:59,449 - forcester_ts.ensemble - INFO - Ensemble summaries keys=['garch', 'mssa_rl', 'samossa', 'sarimax'] regression_metrics_present={'garch': False, 'mssa_rl': False, 'samossa': False, 'sarimax': False}
+2026-01-26 06:30:59,450 - forcester_ts.ensemble - INFO - Calibrated confidence (Phase 7.4 quantile-based): raw={'sarimax': 0.6065306597126334, 'garch': 0.6065306597126334, 'samossa': 0.95, 'mssa_rl': 0.5156850648999721} calibrated={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:30:59,450 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} normalized={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} score=1.0000
+2026-01-26 06:30:59,450 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} normalized={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} score=1.0000
+2026-01-26 06:30:59,450 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'samossa': 1.0} normalized={'samossa': 1.0} score=1.0000
+2026-01-26 06:30:59,451 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'mssa_rl': 1.0} normalized={'mssa_rl': 1.0} score=1.0000
+2026-01-26 06:30:59,451 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.5, 'mssa_rl': 0.5} normalized={'sarimax': 0.5, 'mssa_rl': 0.5} score=1.0000
+2026-01-26 06:30:59,451 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.6, 'samossa': 0.4} normalized={'sarimax': 0.6, 'samossa': 0.4} score=1.0000
+2026-01-26 06:30:59,452 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} normalized={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} score=1.0000
+2026-01-26 06:30:59,452 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} normalized={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} score=1.0000
+2026-01-26 06:30:59,452 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 1.0} normalized={'garch': 1.0} score=1.0000
+2026-01-26 06:30:59,456 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE build_complete :: weights={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2}, confidence={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:30:59,481 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE holdout_wait :: effective_audits=1, required_audits=20
+2026-01-26 06:30:59,481 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE policy_decision :: status=DISABLE_DEFAULT, reason=rmse regression (ratio=1.813 > 1.100), ratio=1.8134440138329906, effective_audits=1, required_audits=20
+2026-01-26 06:30:59,482 - forcester_ts.forecaster - INFO - Creating EnsembleConfig with kwargs keys: ['confidence_scaling', 'candidate_weights', 'minimum_component_weight'], candidate_weights count: 9
+2026-01-26 06:30:59,482 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME_DETECTION enabled :: lookback=60, vol_thresholds=(0.15,0.30), trend_thresholds=(0.30,0.60)
+2026-01-26 06:30:59,500 - forcester_ts.forecaster - INFO - [TS_MODEL] SERIES diagnostics :: adf_pvalue=0.3803754445208181, kpss_pvalue=0.01, length=219
+2026-01-26 06:30:59,502 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_start
+2026-01-26 06:30:59,505 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detect_complete :: regime=CRISIS, confidence=0.5579608029022778, features={'realized_volatility': 0.5163556045915728, 'vol_of_vol': 0.022193162143198455, 'trend_strength': 0.11592160580455567, 'hurst_exponent': 0.19854771561687848, 'adf_pvalue': 3.5000756783756256e-12, 'skewness': 1.295694535592651, 'kurtosis': 8.640972008366742, 'mean_return': -0.0010891353706067345}
+2026-01-26 06:30:59,506 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME detected :: regime=CRISIS, confidence=0.558, vol=0.516, trend=0.116, hurst=0.199
+2026-01-26 06:30:59,506 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_start :: points=219, first=2024-08-05 00:00:00, last=2025-06-05 00:00:00
+2026-01-26 06:30:59,513 - forcester_ts.sarimax - INFO - Selecting optimal SARIMAX order...
+2026-01-26 06:31:53,938 - forcester_ts.sarimax - INFO - Selected order (2, 1, 0) seasonal (0, 0, 0, 0) with AIC 364.62
+2026-01-26 06:31:54,249 - forcester_ts.sarimax - WARNING - Primary SARIMAX fit did not converge; retrying with relaxed constraints.
+2026-01-26 06:31:54,511 - forcester_ts.sarimax - INFO - Fallback SARIMAX fit converged with relaxed constraints.
+2026-01-26 06:31:54,511 - forcester_ts.sarimax - INFO - SARIMAX model fitted successfully (order=(2, 1, 0), seasonal=(0, 0, 0, 0))
+2026-01-26 06:31:54,512 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX fit_complete :: order=(2, 1, 0), seasonal=(0, 0, 0, 0)
+2026-01-26 06:31:54,512 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_start :: points=219, first=2024-08-05 00:00:00, last=2025-06-05 00:00:00
+2026-01-26 06:31:54,517 - forcester_ts.samossa - INFO - SAMOSSA fit complete (matrix=page, window=14, components=6, EVR=0.976)
+2026-01-26 06:31:54,517 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA fit_complete :: explained_variance=0.9757023190572665, components=6, window=14
+2026-01-26 06:31:54,518 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_start :: points=219
+2026-01-26 06:31:54,523 - forcester_ts.mssa_rl - INFO - MSSARL fit complete (window=30, rank=2, change_points=44)
+2026-01-26 06:31:54,523 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL fit_complete :: change_points=44, rank=2
+2026-01-26 06:31:54,525 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_start :: points=209
+2026-01-26 06:31:54,725 - forcester_ts.garch - INFO - GARCH(1,3) model fitted successfully (vol=GARCH, dist=normal)
+2026-01-26 06:31:54,726 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH fit_complete :: order={'p': 1, 'q': 3}, aic=837.6479237671076, bic=857.7019292788965
+2026-01-26 06:31:54,726 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_start :: horizon=30
+2026-01-26 06:31:54,737 - forcester_ts.forecaster - INFO - [TS_MODEL] SARIMAX forecast_complete
+2026-01-26 06:31:54,738 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_start :: horizon=30
+2026-01-26 06:31:54,740 - forcester_ts.forecaster - INFO - [TS_MODEL] SAMOSSA forecast_complete
+2026-01-26 06:31:54,740 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_start :: horizon=30
+2026-01-26 06:31:54,742 - forcester_ts.forecaster - INFO - [TS_MODEL] MSSA_RL forecast_complete
+2026-01-26 06:31:54,742 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_start :: horizon=30
+2026-01-26 06:31:54,744 - forcester_ts.forecaster - INFO - [TS_MODEL] GARCH forecast_complete
+2026-01-26 06:31:54,744 - forcester_ts.forecaster - INFO - [TS_MODEL] REGIME candidate_reorder :: regime=CRISIS, original_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, preferred_top={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}
+2026-01-26 06:31:54,745 - forcester_ts.ensemble - INFO - Ensemble summaries keys=['garch', 'mssa_rl', 'samossa', 'sarimax'] regression_metrics_present={'garch': False, 'mssa_rl': False, 'samossa': False, 'sarimax': False}
+2026-01-26 06:31:54,745 - forcester_ts.ensemble - INFO - Calibrated confidence (Phase 7.4 quantile-based): raw={'sarimax': 0.6065306597126334, 'garch': 0.6065306597126334, 'samossa': 0.95, 'mssa_rl': 0.2163852410888379} calibrated={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:31:54,746 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} normalized={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05} score=1.0000
+2026-01-26 06:31:54,746 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} normalized={'garch': 0.6, 'sarimax': 0.25, 'samossa': 0.15} score=1.0000
+2026-01-26 06:31:54,746 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 1.0} normalized={'garch': 1.0} score=1.0000
+2026-01-26 06:31:54,746 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} normalized={'garch': 0.7, 'samossa': 0.2, 'mssa_rl': 0.1} score=1.0000
+2026-01-26 06:31:54,747 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.6, 'samossa': 0.4} normalized={'sarimax': 0.6, 'samossa': 0.4} score=1.0000
+2026-01-26 06:31:54,747 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.5, 'mssa_rl': 0.5} normalized={'sarimax': 0.5, 'mssa_rl': 0.5} score=1.0000
+2026-01-26 06:31:54,747 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} normalized={'sarimax': 0.45, 'samossa': 0.35, 'mssa_rl': 0.2} score=1.0000
+2026-01-26 06:31:54,748 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'samossa': 1.0} normalized={'samossa': 1.0} score=1.0000
+2026-01-26 06:31:54,748 - forcester_ts.ensemble - INFO - Candidate evaluation: raw={'mssa_rl': 1.0} normalized={'mssa_rl': 1.0} score=1.0000
+2026-01-26 06:31:54,754 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE build_complete :: weights={'garch': 0.85, 'sarimax': 0.1, 'samossa': 0.05}, confidence={'sarimax': 0.6, 'garch': 0.6, 'samossa': 0.8999999999999999, 'mssa_rl': 0.3}
+2026-01-26 06:31:54,776 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE holdout_wait :: effective_audits=1, required_audits=20
+2026-01-26 06:31:54,777 - forcester_ts.forecaster - INFO - [TS_MODEL] ENSEMBLE policy_decision :: status=RESEARCH_ONLY, reason=no margin lift (required >= 0.020), ratio=1.0542400034018162, effective_audits=1, required_audits=20
+2026-01-26 06:31:54,777 - forcester_ts.cross_validation - INFO - Rolling-window CV completed (2 folds, horizon=30)
+2026-01-26 06:31:54,870 - etl.visualizer - INFO - Created time series overview for 1 columns
+2026-01-26 06:31:55,133 - models.time_series_signal_generator - INFO - Quant validation FAILED for AAPL; demoting BUY signal to HOLD to protect PnL.
+2026-01-26 06:31:55,137 - models.time_series_signal_generator - INFO - Generated HOLD signal for AAPL: confidence=0.98, expected_return=9.64%, risk=0.25
+2026-01-26 06:31:55,137 - __main__ - INFO -   OK AAPL: Routed HOLD signal (source=TIME_SERIES, fallback=no)
+2026-01-26 06:31:55,137 - __main__ - INFO - OK Routed signals for 1 ticker(s)
+2026-01-26 06:31:55,138 - __main__ - INFO - Routing statistics: {'time_series_signals': 1, 'llm_fallback_signals': 0, 'redundancy_signals': 0, 'failed_routes': 0}
+2026-01-26 06:31:55,183 - etl.checkpoint_manager - INFO - Checkpoint saved: pipeline_20260126_062641_signal_router_20260126_063155 (stage=signal_router, shape=(389, 6), hash=751e0db307357d10)
+2026-01-26 06:31:55,183 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:31:55.183442", "event_type": "checkpoint_saved", "pipeline_id": "pipeline_20260126_062641", "stage": "signal_router", "status": "success", "metadata": {"checkpoint_id": "pipeline_20260126_062641_signal_router_20260126_063155"}}
+2026-01-26 06:31:55,184 - pipeline - INFO - [checkpoint_saved] Pipeline: pipeline_20260126_062641, Stage: signal_router, Status: success
+2026-01-26 06:31:55,185 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:31:55.185056", "event_type": "stage_complete", "pipeline_id": "pipeline_20260126_062641", "stage": "signal_router", "status": "success", "metadata": {"duration_seconds": 99.16675400733948}}
+2026-01-26 06:31:55,185 - pipeline - INFO - [stage_complete] Pipeline: pipeline_20260126_062641, Stage: signal_router, Status: success
+2026-01-26 06:31:55,186 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:31:55.186431", "event_type": "performance_metric", "pipeline_id": "pipeline_20260126_062641", "stage": "signal_router", "status": "success", "metadata": {"duration_seconds": 99.16675400733948}}
+2026-01-26 06:31:55,186 - pipeline - INFO - [performance_metric] Pipeline: pipeline_20260126_062641, Stage: signal_router, Status: success
+2026-01-26 06:31:55,188 - __main__ - INFO - ======================================================================
+2026-01-26 06:31:55,188 - __main__ - INFO - OK Pipeline completed successfully
+2026-01-26 06:31:55,188 - __main__ - INFO - ======================================================================
+2026-01-26 06:31:55,188 - pipeline_events - INFO - {"timestamp": "2026-01-26T06:31:55.188896", "event_type": "pipeline_complete", "pipeline_id": "pipeline_20260126_062641", "stage": null, "status": "success", "metadata": {"execution_mode": "auto", "dataset_id": null, "generator_version": null}}
+2026-01-26 06:31:55,189 - pipeline - INFO - [pipeline_complete] Pipeline: pipeline_20260126_062641, Status: success
+2026-01-26 06:31:55,194 - __main__ - INFO - Wrote DB provenance artifact: logs/automation/db_provenance_pipeline_20260126_062641.json
+2026-01-26 06:31:56,143 - etl.pipeline_logger - INFO - Deleted old log file: logs/live_runs/pipeline_live_20260118_171921.log
+2026-01-26 06:31:56,147 - etl.pipeline_logger - INFO - Deleted old log file: logs/live_runs/pipeline_live_20260118_231112.log
+2026-01-26 06:31:57,160 - etl.pipeline_logger - INFO - ✓ Cleaned 2 old log file(s)
+2026-01-26 06:31:57,172 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_data_extraction_20260118_172239
+2026-01-26 06:31:57,179 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_time_series_forecasting_20260118_174556
+2026-01-26 06:31:57,187 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_time_series_signal_generation_20260118_174827
+2026-01-26 06:31:57,193 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_signal_router_20260118_175104
+2026-01-26 06:31:57,200 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_llm_market_analysis_20260118_175114
+2026-01-26 06:31:57,207 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_llm_signal_generation_20260118_175115
+2026-01-26 06:31:57,215 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_171938_llm_risk_assessment_20260118_175125
+2026-01-26 06:31:57,223 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_data_extraction_20260118_230455
+2026-01-26 06:31:57,232 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_time_series_forecasting_20260118_232614
+2026-01-26 06:31:57,241 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_time_series_signal_generation_20260118_233233
+2026-01-26 06:31:57,249 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_signal_router_20260118_233839
+2026-01-26 06:31:57,258 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_llm_market_analysis_20260118_233857
+2026-01-26 06:31:57,267 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_llm_signal_generation_20260118_233904
+2026-01-26 06:31:57,274 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_230443_llm_risk_assessment_20260118_233913
+2026-01-26 06:31:57,282 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_data_extraction_20260118_231357
+2026-01-26 06:31:57,289 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_time_series_forecasting_20260119_024041
+2026-01-26 06:31:57,297 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_time_series_signal_generation_20260119_025320
+2026-01-26 06:31:57,305 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_signal_router_20260119_030527
+2026-01-26 06:31:57,312 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_llm_market_analysis_20260119_030540
+2026-01-26 06:31:57,319 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_llm_signal_generation_20260119_030540
+2026-01-26 06:31:57,326 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260118_231130_llm_risk_assessment_20260119_030554
+2026-01-26 06:31:57,334 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_data_extraction_20260119_054326
+2026-01-26 06:31:57,341 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_time_series_forecasting_20260119_055951
+2026-01-26 06:31:57,349 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_time_series_signal_generation_20260119_060331
+2026-01-26 06:31:57,357 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_signal_router_20260119_060708
+2026-01-26 06:31:57,365 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_llm_market_analysis_20260119_060723
+2026-01-26 06:31:57,372 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_llm_signal_generation_20260119_060729
+2026-01-26 06:31:57,380 - etl.checkpoint_manager - INFO - Deleted old checkpoint: pipeline_20260119_054325_llm_risk_assessment_20260119_060735
+2026-01-26 06:31:57,393 - etl.checkpoint_manager - INFO - Cleaned 28 old checkpoint(s)
+2026-01-26 06:31:57,442 - etl.database_manager - INFO - Synchronized mirror database /tmp/portfolio_maximizer.db.wsl back to /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/data/portfolio_maximizer.db
+2026-01-26 06:31:57,442 - etl.database_manager - INFO - Database connection closed

@@ -1,0 +1,83 @@
+forecaster_monitoring:
+  quant_validation:
+    # Production thresholds used for per-ticker alerts and
+    # GREEN tier classification in summarize_quant_validation.py.
+    min_profit_factor: 1.1
+    min_win_rate: 0.52
+    min_annual_return: 0.0
+    min_pass_rate: 0.05
+
+    # Global ceilings used by check_quant_validation_health.py
+    # to gate CI/brutal runs. With these values, a global
+    # FAIL fraction above 90% or more than half of entries
+    # having negative expected_profit will trip the hard gate
+    # and mark the run RED.
+    max_fail_fraction: 0.90
+    max_negative_expected_profit_fraction: 0.5
+
+    # Softer global warning band used to classify runs as
+    # YELLOW when they are better than the hard RED gate but
+    # still outside the comfortable GREEN zone. These do not
+    # cause CI/brutal to fail, but should be treated as
+    # "research / needs attention" in dashboards.
+    warn_fail_fraction: 0.80
+    warn_negative_expected_profit_fraction: 0.40
+
+    # Softer "research-ok" thresholds used for YELLOW tier.
+    # Regimes that clear these but fail the production bars
+    # can be treated as promising but not yet production ready.
+    warn_profit_factor: 1.0
+    warn_win_rate: 0.48
+    warn_annual_return: -0.05
+    warn_pass_rate: 0.02
+  regression_metrics:
+    max_rmse_ratio_vs_baseline: 1.1
+    max_violation_rate: 0.25
+  per_ticker:
+    AAPL:
+      min_profit_factor: 1.15
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+      warn_profit_factor: 1.05
+      warn_win_rate: 0.50
+      warn_annual_return: -0.02
+      warn_pass_rate: 0.03
+    MSFT:
+      min_profit_factor: 1.15
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+      warn_profit_factor: 1.05
+      warn_win_rate: 0.50
+      warn_annual_return: -0.02
+      warn_pass_rate: 0.03
+    CL=F:
+      min_profit_factor: 1.3
+      min_win_rate: 0.55
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true
+    GC=F:
+      min_profit_factor: 1.1
+      min_win_rate: 0.52
+      min_annual_return: 0.0
+      min_pass_rate: 0.02
+    BTC-USD:
+      min_profit_factor: 1.3
+      min_win_rate: 0.55
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true
+    EURUSD=X:
+      min_profit_factor: 1.2
+      min_win_rate: 0.53
+      min_annual_return: 0.0
+      min_pass_rate: 0.03
+      disable_time_series: true
+    SOL:
+      min_profit_factor: 1.5
+      min_win_rate: 0.60
+      min_annual_return: 0.05
+      min_pass_rate: 0.05
+      disable_time_series: true

@@ -1,0 +1,181 @@
+# LLM Configuration - Local GPU AI Integration
+# Phase 5.2: Production LLM for Portfolio Analysis
+# Cost: $0/month (local GPU via Ollama)
+
+llm:
+  # Ollama server configuration
+  server:
+    host: "http://localhost:11434"
+    timeout_seconds: 30  # Max wait for LLM response (fast-fail)
+    health_check_on_init: true  # Validate on startup (fail-fast)
+
+  # Model selection (per TO_DO_LLM_local.mdc)
+  models:
+    # PRIMARY MODEL: Qwen 14B for complex quantitative analysis ⭐ UPDATED
+    primary:
+      name: "qwen:14b-chat-q4_K_M"
+      use_case: "Complex financial reasoning and quantitative analysis"
+      expected_speed: "20-25 tokens/sec"
+      memory_requirement: "9.4GB RAM"
+      quality: "excellent"
+      priority: 1
+
+    # FALLBACK 1: DeepSeek for fast inference
+    fallback_1:
+      name: "deepseek-coder:6.7b-instruct-q4_K_M"
+      use_case: "Fast inference backup"
+      expected_speed: "15-20 tokens/sec"
+      memory_requirement: "4.1GB RAM"
+      quality: "very_good"
+      priority: 2
+
+    # FALLBACK 2: CodeLlama for quick iterations
+    fallback_2:
+      name: "codellama:13b-instruct-q4_K_M"
+      use_case: "Fast coding and quick iterations"
+      expected_speed: "25-35 tokens/sec"
+      memory_requirement: "7.9GB RAM"
+      quality: "good"
+      priority: 3
+
+  # Active model (FIXED to use available model)
+  active_model: "deepseek-coder:6.7b-instruct-q4_K_M"
+
+  # Generation parameters
+  generation:
+    temperature: 0.1  # Low for consistency (0.0-1.0)
+    max_tokens: 768  # Limit output length for latency control
+    max_prompt_chars: 2800  # Trim prompts to reduce latency
+    top_p: 0.9  # Nucleus sampling threshold
+    top_k: 40  # Top-k sampling
+    repeat_penalty: 1.1  # Penalize repetition
+
+  # Market analyzer settings
+  market_analyzer:
+    enabled: true
+    system_prompt: "You are a quantitative financial analyst. Provide concise, data-driven market analysis. Output valid JSON only."
+    temperature: 0.1
+    required_fields:
+      - trend  # bullish, bearish, neutral
+      - strength  # 1-10 scale
+      - regime  # trending, ranging, volatile, stable
+      - summary  # Brief 2-sentence analysis
+
+  # Signal generator settings
+  signal_generator:
+    enabled: true
+    system_prompt: "You are a quantitative trading strategist. Generate trading signals based on data analysis. Be conservative. Output valid JSON only."
+    temperature: 0.05  # Very low for signal consistency
+    required_fields:
+      - action  # BUY, SELL, HOLD
+      - confidence  # 0.0-1.0
+      - reasoning  # Justification
+      - risk_level  # low, medium, high
+
+    # Signal validation rules (per AGENT_INSTRUCTION.md)
+    validation:
+      version: v2  # Activate advanced SignalValidator integration
+      min_confidence_for_action: 0.75  # Require 75% confidence for BUY/SELL
+      require_reasoning: true
+      conservative_bias: true  # Default to HOLD unless strong signal
+      max_volatility_percentile: 0.95  # Reject signals in top 5% volatility regimes
+      max_position_size: 0.02  # Cap at 2% of portfolio
+      transaction_cost: 0.001  # 10 bps transaction cost assumption
+      portfolio_notional: 10000  # Default portfolio size for sizing checks
+
+  # Risk assessor settings
+  risk_assessor:
+    enabled: true
+    system_prompt: "You are a quantitative risk analyst. Assess portfolio risk based on statistical metrics. Output valid JSON only."
+    temperature: 0.1
+    required_fields:
+      - risk_level  # low, medium, high, extreme
+      - risk_score  # 0-100
+      - concerns  # List of risk factors
+      - recommendation  # Position sizing advice
+
+  # Performance tracking
+  performance:
+    log_latency: true
+    log_token_count: true
+    log_model_used: true
+    enable_cache: true  # Keep in-memory response cache active
+    track_cache_usage: true  # Log cache utilisation metrics
+    cache_max_size: 64
+    cache_ttl_seconds: 300  # Expire cached generations after 5 minutes
+    default_use_case: fast  # Optimizer biases towards latency
+    latency_failover_threshold: 6.0  # Seconds before switching to faster model
+    token_rate_failover_threshold: 12.0  # Tokens/sec floor before attempting fallback
+
+  # Error handling
+  error_handling:
+    on_connection_error: "fail"  # Pipeline stops if Ollama unavailable
+    on_parse_error: "default"  # Use safe default values
+    on_timeout: "retry_once"  # Retry once then fail
+    log_errors: true
+    error_log_path: "logs/llm_errors.log"
+
+  # Cost tracking (local GPU = $0/month)
+  cost:
+    api_cost_per_request: 0.0  # Free (local GPU)
+    electricity_cost_estimate: 0.0  # Negligible
+    total_monthly_budget: 0.0  # No API costs
+
+  # Data privacy (critical requirement)
+  privacy:
+    data_leaves_local_machine: false  # All processing local
+    no_external_api_calls: true
+    sensitive_data_handling: "local_only"
+    compliance: "full_data_privacy"
+
+# Hardware requirements (per TO_DO_LLM_local.mdc)
+hardware:
+  gpu:
+    model: "RTX 4060 Ti 16GB"  # Or equivalent
+    vram_required: "16GB minimum"
+    vram_available: true
+
+  ram:
+    minimum: "16GB"
+    recommended: "32GB"
+    for_33b_model: "20GB"
+
+  storage:
+    model_size_33b: "~19GB"
+    model_size_13b: "~7GB"
+    model_size_14b: "~8GB"
+    total_required: "~35GB for all models"
+
+# Installation instructions
+installation:
+  ollama:
+    install_command: "curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh"
+    start_command: "ollama serve"
+
+  models:
+    pull_primary: "ollama pull deepseek-coder:33b-instruct-q4_K_M"
+    pull_fast: "ollama pull codellama:13b-instruct-q4_K_M"
+    pull_reasoning: "ollama pull qwen:14b-chat-q4_K_M"
+
+# Validation rules (per AGENT_INSTRUCTION.md)
+validation:
+  # CRITICAL: LLM signals are advisory only
+  signals_require_backtesting: true
+  min_backtest_days: 30
+  min_annual_return: 0.10  # 10% minimum
+  must_beat_buy_and_hold: true
+
+  # NO TRADING until proven profitable
+  trading_enabled: false  # Set true only after validation
+  paper_trading_first: true
+  live_trading_minimum_capital: 10000  # $10K minimum
+
+# Metadata
+metadata:
+  created_by: "Portfolio Maximizer v5.2"
+  created_date: "2025-10-12"
+  phase: "5.2 - Local LLM Integration"
+  status: "Production Ready"
+  cost_per_month: "$0 (local GPU)"
+  data_privacy: "100% local processing"
+
