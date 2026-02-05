@@ -1,6 +1,6 @@
 # Review Verification Verdict — Phase 7.9
 
-**Date**: 2026-02-03
+**Date**: 2026-02-04
 **Input**: "Production-Grade Institutional Trading System Review" (7 Critical / 8 High / 12 Medium)
 **Method**: Each claim cross-referenced against live codebase with exact file + line evidence
 **Author**: Automated verification via codebase reads
@@ -47,9 +47,9 @@ The review expects DQN forward passes, experience-replay buffers, and portfolio-
 
 ### C2 — "Ensemble Policy Stuck in RESEARCH_ONLY Mode"
 
-**Verdict: OUTDATED**
+**Verdict: MISLEADING**
 
-RESEARCH\_ONLY is a valid intermediate policy state ([forcester_ts/forecaster.py](forcester_ts/forecaster.py) line 1286):
+RESEARCH\_ONLY is a valid intermediate **policy label** computed per forecast window ([forcester_ts/forecaster.py](forcester_ts/forecaster.py) line ~1286):
 
 ```python
 elif promotion_margin > 0 and ratio > (1.0 - promotion_margin):
@@ -57,29 +57,33 @@ elif promotion_margin > 0 and ratio > (1.0 - promotion_margin):
     reason = f"no margin lift (required >= {promotion_margin:.3f})"
 ```
 
-Historical evidence supports the review: `Documentation/BARBELL_POLICY_TEST_PLAN.md` records "RESEARCH_ONLY: 11 forecasts (73%)" in one test run.
+Two different “statuses” get conflated in the review:
+1) The **per-forecast policy label** (`KEEP` / `RESEARCH_ONLY` / `DISABLE_DEFAULT`) recorded in forecaster metadata/events.
+2) The **aggregate audit gate decision** printed by `scripts/check_forecast_audits.py` (`Decision: KEEP` on pass; exits non-zero on failure).
 
-**Current state**: audit sprint `20260201_200344` gate log shows:
+**Important**: the per-forecast label does **not** currently disable the ensemble forecast bundle; the forecaster still returns the ensemble as `mean_forecast` when the ensemble build succeeds. See [ENSEMBLE_MODEL_STATUS.md](ENSEMBLE_MODEL_STATUS.md).
 
-```
-Effective audits with RMSE: 22
-Violation rate: 13.64% (max allowed 25.00%)
-Decision: KEEP (lift demonstrated during holding period)
-```
+Historical evidence supports that RESEARCH\_ONLY can appear frequently when `promotion_margin=0.02` and ratios cluster near 1.00-1.02: `Documentation/BARBELL_POLICY_TEST_PLAN.md`.
 
-The policy is now **KEEP**, not RESEARCH\_ONLY. The 20-audit holding period (`config/forecaster_monitoring.yml:48`: `holding_period_audits: 20`) has been satisfied. The review's claim reflects a prior run.
+**Current state (aggregate gate)**: running:
+
+`simpleTrader_env/bin/python scripts/check_forecast_audits.py --audit-dir logs/forecast_audits --config-path config/forecaster_monitoring.yml --max-files 500`
+
+reports (2026-02-04): **25 effective audits**, **12.00% violation rate**, **Decision: KEEP**.
 
 ---
 
 ### C3 — "Database Schema Migration Failure: holding\_bars column missing"
 
-**Verdict: FALSE — confusion of concepts**
+**Verdict: OUTDATED**
 
-`holding_bars` is not a database column. It is a runtime integer computed in `_evaluate_exit_reason` inside [execution/paper_trading_engine.py](execution/paper_trading_engine.py) by counting bars between `last_bar_timestamp` and `current_bar_timestamp`.
+`holding_bars` exists in two places:
+- Runtime: a bar counter in the in-memory portfolio state used by bar-aware exits ([execution/paper_trading_engine.py](execution/paper_trading_engine.py)).
+- Database: a persisted integer in `portfolio_state` so cross-session resumes can reconstruct bar-aware holding state ([etl/database_manager.py](etl/database_manager.py) `portfolio_state` schema + migration guards).
 
-The database has `holding_period_days INTEGER` in the `trade_executions` CREATE TABLE ([etl/database_manager.py](etl/database_manager.py) lines 735-777).
+If a DB created before this migration is used, loading portfolio state may warn about missing `holding_bars` until the schema is upgraded. New DBs created via `DatabaseManager` include the fields.
 
-The **bug** the review may be referencing was a frequency-mismatch in the holding-bars gap computation: daily-opened positions counted 7 hourly bars in the intraday pass, exceeding `max_holding_days=5`. This was fixed in commit `668ee26` with calendar-gap-aware frequency detection.
+Separately, a frequency-mismatch issue existed where daily-opened positions could count multiple intraday bars and trigger premature exits; this was fixed in the bar-aware gap scaling logic in the paper trading engine.
 
 The 8 new attribution columns (entry\_price, exit\_price, close\_size, position\_before, position\_after, is\_close, bar\_timestamp, exit\_reason) all have proper ALTER TABLE migration guards at [etl/database_manager.py](etl/database_manager.py) lines 828-842.
 
@@ -100,7 +104,7 @@ Two layers exist:
 
 The gap is isolated to the paper-trading PnL calculation. Signals ARE cost-aware at the routing stage, but the execution layer does not deduct costs from realized PnL.
 
-**Status**: Identified as P0 fix in [Documentation/PNL_ROOT_CAUSE_AUDIT.md](Documentation/PNL_ROOT_CAUSE_AUDIT.md) Root Cause #1.
+**Status**: Identified as P0 fix in [PNL_ROOT_CAUSE_AUDIT.md](PNL_ROOT_CAUSE_AUDIT.md) Root Cause #1.
 
 ---
 
@@ -141,7 +145,7 @@ The review is correct that frontier markets are not active in current production
 
 **Verdict: TRUE**
 
-No `mlflow`, `model_registry`, `drift_detect`, or `mlops` found in any active code. Single mention of MLflow in [Documentation/QUANT_TIME_SERIES_STACK.md](Documentation/QUANT_TIME_SERIES_STACK.md) line 24 as a Tier-2 future consideration.
+No `mlflow`, `model_registry`, `drift_detect`, or `mlops` found in any active code. Single mention of MLflow in [QUANT_TIME_SERIES_STACK.md](QUANT_TIME_SERIES_STACK.md) as a Tier-2 future consideration.
 
 Current model governance is handled through the audit-sprint / forecast-gate mechanism (`check_forecast_audits.py` + `forecaster_monitoring.yml`). This is a custom lightweight governance loop, not a general-purpose MLOps stack. Whether a full MLOps stack is needed depends on operational scale.
 
@@ -208,7 +212,7 @@ This is intentional: audit sprints require fresh market data to avoid stale-pric
 
 **Verdict: TRUE — known, P0 fix pending**
 
-[config/signal_routing_config.yml](config/signal_routing_config.yml) line 21: `min_expected_return: 0.0005` (5 bps). With ~15 bps actual roundtrip friction, this provides only 33% cost coverage. Identified as Root Cause #2 in [Documentation/PNL_ROOT_CAUSE_AUDIT.md](Documentation/PNL_ROOT_CAUSE_AUDIT.md). Recommended fix: raise to 0.0030 (30 bps = 2x cost buffer).
+[config/signal_routing_config.yml](config/signal_routing_config.yml) line 21: `min_expected_return: 0.0005` (5 bps). With ~15 bps actual roundtrip friction, this provides only 33% cost coverage. Identified as Root Cause #2 in [PNL_ROOT_CAUSE_AUDIT.md](PNL_ROOT_CAUSE_AUDIT.md). Recommended fix: raise to 0.0030 (30 bps = 2x cost buffer).
 
 Note: the signal generator's own default is higher — [models/time_series_signal_generator.py](models/time_series_signal_generator.py) line 148: `min_expected_return: float = 0.003` (30 bps). The gap is in the routing config override.
 
@@ -220,9 +224,15 @@ Note: the signal generator's own default is higher — [models/time_series_signa
 
 ### M3 — "Regime detection adds RMSE regression"
 
-**Verdict: TRUE — +42%, documented**
+**Verdict: OUTDATED — historical evidence exists, current gate is the source of truth**
 
-Phase 7.5 validation: regime-adjusted RMSE 1.483 vs baseline 1.043. Identified as Root Cause #5. Config currently has `regime_detection.enabled: true` in [config/pipeline_config.yml](config/pipeline_config.yml).
+Older Phase 7.5-era artifacts referenced RMSE 1.483 vs 1.043 on one window. That is useful as historical context, but should not be presented as the *current* system-wide state.
+
+Current ensemble governance should be judged via:
+- `scripts/check_forecast_audits.py` over `logs/forecast_audits`
+- the interpretation guide in [ENSEMBLE_MODEL_STATUS.md](ENSEMBLE_MODEL_STATUS.md)
+
+If regime detection is suspected to be harmful, run an A/B sprint and compare the gate outputs + realized PnL rather than relying on the Phase 7.5 single-window number.
 
 ### M4 — "Position sizing too aggressive in exploration/red regimes"
 
@@ -252,7 +262,7 @@ Signal routing assumes ~1.5 bps roundtrip slippage; actual execution shows ~10 b
 
 ## Actionable Items From This Verification
 
-All confirmed gaps are already tracked in [Documentation/PNL_ROOT_CAUSE_AUDIT.md](Documentation/PNL_ROOT_CAUSE_AUDIT.md). No new action items were introduced by the review. The P0 fixes remain:
+All confirmed gaps are already tracked in [PNL_ROOT_CAUSE_AUDIT.md](PNL_ROOT_CAUSE_AUDIT.md). No new action items were introduced by the review. The P0 fixes remain:
 
 1. `config/signal_routing_config.yml:21` — `min_expected_return: 0.0005` → `0.0030`
 2. `execution/paper_trading_engine.py:153` — `transaction_cost_pct: 0.0` → `0.00015`

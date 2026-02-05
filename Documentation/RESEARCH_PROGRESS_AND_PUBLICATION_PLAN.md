@@ -9,7 +9,9 @@
 **Intended audience**: Future MIT‑level Master’s thesis / publication in quantitative finance / algorithmic trading
 **Last updated**: 2026-01-29
 **Current status (2026-01-29)**: Engineering is unblocked; Phase 7.8 complete; holdout audits at **2/20**; recent-window MVS still FAIL. Use `Documentation/PROJECT_STATUS.md` as the canonical status source.
-**Ensemble gate (2026-01-11)**: Research-profile RMSE gate on 27 effective audits, violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **DISABLE ensemble as default**. `config/forecasting_config.yml` has `ensemble.enabled: false`; BEST_SINGLE remains source of truth until lift is demonstrated over ≥20 effective audits.
+**Ensemble gate (historical: 2026-01-11)**: Research-profile RMSE gate on 27 effective audits, violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **DISABLE ensemble as default**. Historical note: at the time, `config/forecasting_config.yml` was set to `ensemble.enabled: false`.
+
+**Ensemble status (canonical, current)**: `ENSEMBLE_MODEL_STATUS.md` is the single source of truth for the latest aggregate audit gate decision and correct interpretation of per-forecast `KEEP`/`RESEARCH_ONLY` labels.
 
 **Parameter learning policy (research runs)**: TS models must learn their hyperparameters from the data (SARIMAX `(p,d,q,P,D,Q,s,trend)`, SAMOSSA components/AR lags, GARCH `(p,q)`), with performance controlled via caps/compact search — no manual orders in evaluation claims. SARIMAX-X is enabled by default (exogenous features are logged via instrumentation).
 

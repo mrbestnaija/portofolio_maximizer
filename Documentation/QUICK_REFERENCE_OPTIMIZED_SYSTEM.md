@@ -1,15 +1,15 @@
 ﻿# Quick Reference - Optimized Portfolio Maximizer
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
-**Version**: 2.0  
-**Date**: 2025-10-14  
-**Primary Model**: **Qwen 14B Chat (q4_K_M)**  
+**Version**: 2.0
+**Date**: 2025-10-14
+**Primary Model**: **Qwen 14B Chat (q4_K_M)**
 **Focus**: **Quantifiable Profit on Trade**
 
 ---
@@ -62,6 +62,8 @@ from forcester_ts.forecaster import TimeSeriesForecasterConfig
 from pathlib import Path
 
 cfg = TimeSeriesForecasterConfig(ensemble_kwargs={"audit_log_dir": "logs/forecast_audits"})
+
+> For canonical interpretation of ensemble status (per-forecast policy label vs aggregate audit gate) and current evidence, see `ENSEMBLE_MODEL_STATUS.md`.
 forecaster = TimeSeriesForecaster(config=cfg)
 # ... fit + forecast with your series, then:
 forecaster.save_audit_report(Path("logs/forecast_audits/manual_audit.json"))
@@ -95,13 +97,13 @@ SELECT * FROM performance_metrics ORDER BY metric_date DESC LIMIT 1;
 SELECT SUM(realized_pnl) FROM trade_executions;
 
 -- Win Rate (%)
-SELECT 
-    COUNT(CASE WHEN realized_pnl > 0 THEN 1 END) * 100.0 / COUNT(*) 
+SELECT
+    COUNT(CASE WHEN realized_pnl > 0 THEN 1 END) * 100.0 / COUNT(*)
 FROM trade_executions;
 
 -- Profit Factor
-SELECT 
-    SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl END) / 
+SELECT
+    SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl END) /
     ABS(SUM(CASE WHEN realized_pnl < 0 THEN realized_pnl END))
 FROM trade_executions;
 ```
@@ -208,7 +210,7 @@ Must pass ALL:
 ### **Performance Summary**
 ```sql
 -- Overall stats
-SELECT 
+SELECT
     COUNT(*) as total_trades,
     SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
     SUM(realized_pnl) as total_profit,
@@ -221,19 +223,19 @@ FROM trade_executions;
 ### **LLM Performance**
 ```sql
 -- Latency by task
-SELECT 
+SELECT
     'Analysis' as task,
     AVG(latency_seconds) as avg_latency,
     MAX(latency_seconds) as max_latency
 FROM llm_analyses
 UNION ALL
-SELECT 
+SELECT
     'Signals',
     AVG(latency_seconds),
     MAX(latency_seconds)
 FROM llm_signals
 UNION ALL
-SELECT 
+SELECT
     'Risk',
     AVG(latency_seconds),
     MAX(latency_seconds)
@@ -243,7 +245,7 @@ FROM llm_risks;
 ### **Signal Accuracy**
 ```sql
 -- Validated signals
-SELECT 
+SELECT
     action,
     COUNT(*) as count,
     AVG(confidence) as avg_confidence,
@@ -457,10 +459,10 @@ python scripts/generate_llm_report.py --format json > monthly_metrics.json
 ## 🎓 **Success Formula**
 
 ```
-PROFIT = (Qwen 14B Reasoning) × 
-         (Persistent Data) × 
-         (Quantifiable Criteria) × 
-         (Standardized Reporting) × 
+PROFIT = (Qwen 14B Reasoning) ×
+         (Persistent Data) ×
+         (Quantifiable Criteria) ×
+         (Standardized Reporting) ×
          (Continuous Validation)
 
 MEASURE EVERYTHING.
@@ -470,10 +472,7 @@ PROFIT IS THE ONLY TRUE SUCCESS METRIC.
 
 ---
 
-**STATUS**: ✅ **OPTIMIZED AND PRODUCTION READY**  
-**MODEL**: **Qwen 14B Chat (q4_K_M)**  
-**DATABASE**: **SQLite with 7 tables**  
+**STATUS**: ✅ **OPTIMIZED AND PRODUCTION READY**
+**MODEL**: **Qwen 14B Chat (q4_K_M)**
+**DATABASE**: **SQLite with 7 tables**
 **FOCUS**: **QUANTIFIABLE PROFIT ON TRADE**
-
-
-

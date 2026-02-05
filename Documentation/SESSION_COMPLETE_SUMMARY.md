@@ -373,3 +373,18 @@ grep "ENSEMBLE build_complete" logs/*.log | tail -5
 **Achievement:** 🎉 GARCH confidence breakthrough!
 **Next Step:** Adjust ensemble selection to favor GARCH
 **ETA to Full Success:** <1 hour
+
+---
+
+## Deep Audit Sprint Investigation (2026-02-02)
+
+Verified investigation + remediation notes are recorded in:
+- `Documentation/DEEP_AUDIT_SPRINT_INVESTIGATION.md`
+
+Current verified status (command: `simpleTrader_env/bin/python scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`):
+- Effective audits with RMSE: **23**
+- Violations: **3** (13.04% vs max allowed 25.00%)
+- Decision: **KEEP**
+
+Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
+- **727 passed, 5 skipped, 7 xfailed** (exit code 0)

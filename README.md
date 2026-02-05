@@ -743,7 +743,7 @@ If you use this work in academic research, please cite:
 - **Regimes Identified**: 6 market regimes based on volatility, trend strength, Hurst exponent
 - **Adaptation Performance**: 53% of forecasts switched to regime-specific weights
 - **Cross-Ticker Validation**: Consistent regime detection across 3 tickers
-- **Robustness Trade-off**: +42% RMSE regression for increased ensemble diversity
+- **Historical note**: early regime-weight experiments showed RMSE regressions on some windows; current governance is driven by the forecast-audit gate (see `scripts/check_forecast_audits.py` and `Documentation/ENSEMBLE_MODEL_STATUS.md`).
 
 ### Replication Instructions
 
@@ -806,7 +806,7 @@ If you use this work in academic research, please cite:
 
 **Known Limitations**:
 - Only 3/6 regimes optimized (remaining regimes lack samples in the current AAPL window)
-- RMSE regression trade-off: +42% for robustness (target: <25% after further audits/weight refinement)
+- Ensemble governance labels can mark individual windows `RESEARCH_ONLY` when the 2% promotion margin is not met; this is a monitoring/promotion label, not proof the ensemble forecast is unused (see `Documentation/ENSEMBLE_MODEL_STATUS.md`).
 - Limited to US equity markets (frontier markets in synthetic mode)
 - No live broker integration (paper trading engine)
 
@@ -825,9 +825,9 @@ If you use this work in academic research, please cite:
 - ✅ Phase 7.8: All-regime optimization (3/6 regimes optimized; SAMOSSA dominance confirmed)
 
 **Current**:
-- Phase 7.9: Holdout audit accumulation (currently 2/20 audits)
-  - Validate optimized weights on fresh holdouts
-  - Target: Reduce RMSE regression from +42% to <25% and build deployment evidence
+- Phase 7.9: Forecast-audit accumulation (holding period met)
+  - As of 2026-02-04: `scripts/check_forecast_audits.py` reports **25** effective audits with RMSE and **Decision: KEEP**
+  - Evidence + interpretation: `Documentation/ENSEMBLE_MODEL_STATUS.md`
 
 **Upcoming**:
 - Phase 7.10: Production deployment with full regime coverage

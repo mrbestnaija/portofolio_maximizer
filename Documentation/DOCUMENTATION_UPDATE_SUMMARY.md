@@ -1,8 +1,8 @@
 # Documentation Update Summary
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
@@ -47,6 +47,7 @@
 ## 2025-12-19 – Monetization guardrails + synthetic-first policy
 
 - New `Documentation/MONITIZATION.md` centralizes the monetization gate (READY/EXPERIMENTAL/BLOCKED thresholds), synthetic-first pre-prod requirement, and usage-tracking expectations from `REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
+- New `ENSEMBLE_MODEL_STATUS.md` is the single source of truth for ensemble behaviour and reporting language (per-forecast policy labels vs aggregate audit gate).
 - CLIs noted: `python -m tools.check_monetization_gate --window 365`, `python -m tools.push_daily_signals --config config/monetization.yml`, `python -m tools.monetization_reality_check`.
 - Reinforces that alerts/reports remain blocked when gate says BLOCKED and that pre-prod stays synthetic until quant health turns GREEN/YELLOW on live data.
 - Synthetic generator Phase 2/3 hooks landed: `config/synthetic_data_config.yml` gains microstructure depth/order-imbalance knobs and liquidity shock events; `etl/synthetic_extractor.py` now emits Depth/OrderImbalance channels to better emulate illiquid markets without live feeds.

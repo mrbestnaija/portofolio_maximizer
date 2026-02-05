@@ -644,10 +644,10 @@ python scripts/validate_profitability_proof.py
 - AAPL override of 15.0 is mathematically impossible for small moves
 - Result: even accurate forecasts fail validation
 
-**Secondary blocker: insufficient data + disabled ensemble**
+**Secondary blocker: insufficient data / missing `regression_metrics` for forecast-edge validation**
 
 - System has 109 bars but needs 194+ for rolling CV
-- Ensemble disabled → no `regression_metrics` → `forecast_edge` validation fails
+- Missing `regression_metrics` ⇒ `forecast_edge` validation fails (root causes include insufficient bars for rolling CV, and in older snapshots an intentionally disabled ensemble). Canonical ensemble status + audit gate: `ENSEMBLE_MODEL_STATUS.md`.
 - Log evidence: “Insufficient data for rolling CV (need >= 194, received 109)”
 
 **Tertiary issues**
@@ -720,18 +720,11 @@ ticker_overrides:
 
 Impact: Pass rate 0% → 25%
 
-Re-enable ensemble:
+Ensemble status / governance gate:
 
-```yaml
-# forecasting_config.yml
-ensemble:
-  enabled: true  # Was false
-  weights:
-    samossa: 0.7
-    mssa_rl: 0.3
-```
-
-Impact: Enables `regression_metrics` → pass rate 25% → 40%
+- Do not treat a feature toggle as a “quick win”. As of 2026-02-04, `config/forecasting_config.yml` already has `forecasting.ensemble.enabled: true` and uses candidate-weight lists (not the simplified `weights:` mapping shown in older notes).
+- If `regression_metrics` are missing and `forecast_edge` validation is blocked, treat it as a data sufficiency / evaluation pipeline issue (e.g., insufficient bars for rolling CV or missing lagged backfill evaluation), not an “ensemble disabled” issue.
+- Canonical ensemble status + audit gate: `ENSEMBLE_MODEL_STATUS.md`.
 
 Extend data lookback:
 

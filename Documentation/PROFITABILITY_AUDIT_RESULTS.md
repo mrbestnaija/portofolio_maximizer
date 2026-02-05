@@ -135,7 +135,7 @@ yfinance:    31 trades (ZERO realized P&L - all open positions)
 ### Model Health
 - **Signal Pass Rate:** 0% (12/12 failed validation)
 - **Primary Blocker:** `min_expected_profit` thresholds too strict
-- **Secondary Blocker:** Ensemble disabled, insufficient data
+- **Secondary Blocker:** insufficient `regression_metrics` / insufficient bars for rolling CV on recent windows (this can block `forecast_edge` validation even when the ensemble is enabled). Canonical ensemble status and audit gate: `ENSEMBLE_MODEL_STATUS.md`.
 - **Tertiary Issues:** Transaction costs too conservative
 
 ---
@@ -149,9 +149,9 @@ yfinance:    31 trades (ZERO realized P&L - all open positions)
    - `min_expected_profit`: 5.0 → 2.0 (achievable after costs)
    - AAPL override: 15.0 → 5.0 (3x reduction)
 
-2. Re-enable ensemble in `forecasting_config.yml`:
-   - `ensemble.enabled`: false → true
-   - Enables regression_metrics for validation
+2. Confirm ensemble status and governance gate (do not guess):
+   - Canonical: `ENSEMBLE_MODEL_STATUS.md`
+   - Current `config/forecasting_config.yml` has `ensemble.enabled: true`; if `regression_metrics` are missing, treat it as a data sufficiency / evaluation issue (e.g., insufficient bars for rolling CV), not a feature-toggle fix.
 
 3. Extend data lookback:
    - `--start 2024-07-01` → `2023-07-01` (18 months)

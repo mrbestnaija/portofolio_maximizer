@@ -8,9 +8,11 @@
 
 ---
 
+> **Update (2026-02-04)**: `config/forecasting_config.yml` now defaults `forecasting.regime_detection.enabled: true`. For current ensemble status and the latest audit gate decision, cite `ENSEMBLE_MODEL_STATUS.md`. This completion summary reflects the feature being shipped behind a feature flag at the time.
+
 ## Executive Summary
 
-Phase 7.5 successfully integrated the regime detection system into the ensemble forecaster, enabling adaptive model selection based on market conditions. The implementation includes 6 distinct market regimes, 8 detection features, and automatic candidate reordering. The feature is production-ready but disabled by default via feature flag, allowing safe deployment and gradual rollout.
+Phase 7.5 successfully integrated the regime detection system into the ensemble forecaster, enabling adaptive model selection based on market conditions. The implementation includes 6 distinct market regimes, 8 detection features, and automatic candidate reordering. The feature was shipped behind a feature flag for safe deployment and gradual rollout.
 
 **Key Achievement**: Adaptive ensemble weights based on detected market regimes (low-vol rangebound → GARCH dominant, high-vol trending → SAMoSSA preferred).
 

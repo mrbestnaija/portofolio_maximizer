@@ -1,10 +1,18 @@
 # Production Deployment Roadmap — Phase 7.9
 
-**Date**: 2026-02-03
+**Date**: 2026-02-04
 **Basis**: Verified against live codebase; reconciled with [PNL_ROOT_CAUSE_AUDIT.md](PNL_ROOT_CAUSE_AUDIT.md) and [REVIEW_VERIFICATION_VERDICT.md](REVIEW_VERIFICATION_VERDICT.md)
 **Go/No-Go Gates**: 5 phases, each with measurable pass criteria
 
 ---
+
+## Ensemble Model Status (Read This First)
+
+The time-series **ensemble is active** and is the primary TS forecast output when the ensemble build succeeds. However, you will see:
+- **Per-forecast policy labels** (`KEEP` / `RESEARCH_ONLY` / `DISABLE_DEFAULT`) logged by the forecaster.
+- A separate **aggregate audit gate decision** (`scripts/check_forecast_audits.py`).
+
+Do not conflate these; see [ENSEMBLE_MODEL_STATUS.md](ENSEMBLE_MODEL_STATUS.md) for the canonical explanation and current evidence.
 
 ## What Was Dropped From the Proposed Roadmap — and Why
 
@@ -12,9 +20,9 @@ The user-supplied roadmap contained several phases built on premises the verific
 
 | Dropped Section | Reason | Verdict Ref |
 |-----------------|--------|-------------|
-| Phase 0.1 "Create holding\_bars migration" | `holding_bars` is a runtime bar-count in `_evaluate_exit_reason`, not a DB column. Attribution migration (8 columns) is already committed. Adding a `holding_bars` column would be dead code. | C3: FALSE |
+| Phase 0.1 "Create holding\_bars migration" | Portfolio state now persists `holding_bars` and bar timestamps for bar-aware resumes via `etl/database_manager.py` schema + migration guards. A *separate* migration script file is unnecessary, but the schema must remain consistent. | C3: OUTDATED |
 | Phase 0.2 "Emergency relaxed thresholds" (confidence→0.45, min\_expected\_return→8 bps) | Lowers `min_expected_return` from 5 bps to 8 bps. The audit proves it must go UP to 30 bps to cover 15 bps roundtrip friction. The proposed change would deepen the -0.14% per-trade loss. | C4, M1 |
-| Phase 0.3 "Fix ensemble policy gate" (line ~847, add PRODUCTION status) | (a) Actual policy logic is at lines 1250-1312, not 847. (b) The gate already shows `Decision: KEEP`. (c) "PRODUCTION" is not a valid status — the system uses KEEP / RESEARCH\_ONLY / DISABLE\_DEFAULT. Applying this patch would break policy semantics. | C2: OUTDATED |
+| Phase 0.3 "Fix ensemble policy gate" (line ~847, add PRODUCTION status) | (a) Actual policy logic is at lines ~1250-1312, not 847. (b) “Decision: KEEP” is an aggregate **audit gate** result; per-forecast labels may still show RESEARCH\_ONLY when `promotion_margin=0.02` is not met. (c) "PRODUCTION" is not a valid status — the system uses KEEP / RESEARCH\_ONLY / DISABLE\_DEFAULT. | C2: MISLEADING |
 | Phase 1 "DQN Agent" (entire section: network, agent, replay buffer) | DQN is explicitly deferred to Phase 12+ per `Documentation/AGENT_INSTRUCTION.md:215`. Prerequisites include $100k+ live capital. The section also references `agents/` directory, `main.py`, `agents.forecasting.samossa_core.SAMoSSAEngine` — none of which exist. RL is already handled by MSSA-RL (tabular Q-learning). | C1: FALSE |
 | Phase 1.2 "SAMoSSA-DQN Coordinator" | Same as Phase 1. References non-existent modules. | C1: FALSE |
 | Phase 1.3 "Integration with main.py" | `main.py` does not exist. Entry points are `scripts/run_auto_trader.py` and `scripts/run_etl_pipeline.py`. | Structural |
@@ -249,7 +257,7 @@ PROOF_MODE=1 ENABLE_DATA_CACHE=0 bash/run_20_audit_sprint.sh --audits 100 --tick
 Gate check after every 20-audit block:
 ```bash
 python scripts/check_forecast_audits.py
-# Monitor: violation rate, Decision status (KEEP vs RESEARCH_ONLY)
+# Monitor: violation rate, effective audits, Decision status (KEEP on pass; non-zero exit on failure)
 ```
 
 ### 4.2 Regime detection A/B evaluation
@@ -266,14 +274,14 @@ REGIME_ENABLED=1 bash/run_20_audit_sprint.sh --audits 20 --tickers AAPL
 REGIME_ENABLED=0 bash/run_20_audit_sprint.sh --audits 20 --tickers AAPL
 ```
 
-**Decision rule**: If Arm B (regime off) PnL is better by > 10% relative, disable regime detection in production config until 100+ audits are available for weight re-optimization. Current evidence ([Documentation/PHASE_7.5_VALIDATION.md](PHASE_7.5_VALIDATION.md)) shows +42% RMSE regression with regime detection on.
+**Decision rule**: If Arm B (regime off) PnL is better by > 10% relative, disable regime detection in production config until 100+ audits are available for weight re-optimization. Treat older “+42% RMSE regression” notes as historical evidence; always re-measure with the current audit gate outputs before changing production flags.
 
 ### 4.3 Phase 4 Gate
 
 | Metric | Pass Threshold |
 |--------|----------------|
 | Effective audits accumulated | >= 100 |
-| Forecast gate status | KEEP (not RESEARCH\_ONLY) |
+| Forecast gate status | KEEP (aggregate audit gate) |
 | Regime A/B verdict | Clear winner identified; config updated accordingly |
 | Win rate (rolling 20-trade window) | >= 50% |
 
@@ -323,4 +331,4 @@ The current RL component (MSSA-RL, tabular Q-learning in [forcester_ts/mssa_rl.p
 
 ---
 
-*Reconciled against codebase on 2026-02-03. Commits in scope: up through cda18ac.*
+*Reconciled against codebase on 2026-02-04. Commits in scope: local working tree.*

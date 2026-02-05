@@ -1,5 +1,7 @@
 # Status Update: 2026-01-23
 
+**Ensemble status (canonical, current)**: `ENSEMBLE_MODEL_STATUS.md` (per-forecast policy labels vs aggregate audit gate). Use this as the single source of truth for external-facing ensemble claims.
+
 **Session**: Multi-Ticker Validation + Requirements Update
 **Status**: ⏸️ Run Incomplete / 📦 Requirements Updated
 

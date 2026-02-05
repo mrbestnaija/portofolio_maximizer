@@ -6,6 +6,8 @@
 
 ---
 
+> **Note (2026-02-04)**: This document captures a historical calibration run. For current ensemble status and the latest aggregate audit gate decision, cite `ENSEMBLE_MODEL_STATUS.md`. Do not infer today’s “ensemble active/disabled” state from a past per-run policy label.
+
 ## Executive Summary
 
 **✅ Quantile Calibration Working**: Rank-based normalization successfully reduces SAMoSSA dominance from 0.95 → 0.9, elevates GARCH/SARIMAX from ~0.60 → 0.6.

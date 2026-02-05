@@ -1,12 +1,12 @@
 # Critical Quantitative Review – Portfolio Maximizer v45
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
-**Date**: October 22, 2025 (Updated)  
-**Reviewer**: AI Quantitative Analyst  
-**Scope**: Mathematical foundations, statistical rigor, production readiness  
+**Date**: October 22, 2025 (Updated)
+**Reviewer**: AI Quantitative Analyst
+**Scope**: Mathematical foundations, statistical rigor, production readiness
 **Standard**: Institutional-grade quantitative finance systems
 
 ---
@@ -100,6 +100,7 @@
 ### ✅ 2025-11-24 TS Monitoring & Hyperopt Implementation Status
 - **Shared monitoring config** – `config/forecaster_monitoring.yml` now centralises explicit numeric thresholds for `profit_factor`, `win_rate`, `annual_return`, and RMSE ratio vs baseline, with optional per‑ticker overrides (AAPL, MSFT, CL=F, GC=F, BTC-USD, EURUSD=X).
 - **Brutal / CLI integration** – `scripts/summarize_quant_validation.py` and `scripts/check_forecast_audits.py` ingest this config to surface ticker‑level PF/WR/AnnRet alerts and RMSE violations with human‑readable CLI tables, making forecaster health visible in every brutal run.
+- **Ensemble status (canonical)** – when reporting whether the ensemble is “active”, “research-only”, or “passing”, cite `ENSEMBLE_MODEL_STATUS.md` (per-forecast policy labels vs aggregate audit gate).
 - **Hyperopt / strategy optimizer gating** – `bash/run_post_eval.sh` (hyperopt scoring) and `scripts/run_strategy_optimization.py` (evaluation_fn) now apply these thresholds: candidates from regimes where the TS ensemble fails PF/WR or RMSE checks have their `total_return` score driven to zero, so “profitable regimes” in hyperopt must come from statistically and economically healthy TS periods.
 
 ### ✅ 2025-12-07 TS Model Candidates & Institutional-Grade Search

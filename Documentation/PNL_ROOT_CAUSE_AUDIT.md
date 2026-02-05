@@ -1,6 +1,6 @@
 # Comprehensive PnL Root Cause Audit — Phase 7.9
 
-**Date**: 2026-02-03
+**Date**: 2026-02-04
 **Status**: ✅ Complete — 5 critical root causes identified
 **Impact**: Consistent -0.14-0.15% loss per trade across all audit runs
 
@@ -14,7 +14,7 @@ The systematic negative PnL is caused by **5 interacting root causes** that crea
 2. **Threshold Mismatch** (CRITICAL): min_expected_return = 5 bps vs 15 bps actual cost (30% coverage)
 3. **Position Sizing** (HIGH): 0.25-1.2x multipliers reduce notional below profitability threshold
 4. **Forecast-Holding Mismatch** (MEDIUM): 30-day forecasts for 3-5 day holds
-5. **Ensemble Regression** (MEDIUM): Regime detection adds +42% RMSE error
+5. **Ensemble Governance Label Confusion** (MEDIUM): “RESEARCH_ONLY” is a per-window policy label, not proof the ensemble is unused
 
 ---
 
@@ -121,22 +121,20 @@ effective_return = expected_return * (actual_holding_days / forecast_horizon_day
 
 ---
 
-## Root Cause #5: Ensemble Regime Weights Regression (MEDIUM)
+## Root Cause #5: Ensemble Governance Label Confusion (MEDIUM)
 
-**Location**: `config/forecasting_config.yml:84-112`
+**Location**: `forcester_ts/forecaster.py` (`_enforce_ensemble_safety`) + `scripts/check_forecast_audits.py`
 
-**Finding from Phase 7.5 validation**:
-- Regime-adjusted ensemble: RMSE 1.483
-- Baseline (no regime): RMSE 1.043
-- **Regression: +42% error**
+**Problem**: External/internal reports have treated `RESEARCH_ONLY` as “ensemble disabled / discarded”.
 
-**Issue**: Weights optimized on small sample (25 obs), generalize poorly.
+**Reality (current code)**:
+- The ensemble forecast bundle is still emitted as the primary TS `mean_forecast` when the ensemble build succeeds.
+- `RESEARCH_ONLY` is a **policy label** triggered when `promotion_margin=0.02` is not met for the current window; it does not automatically replace the ensemble forecast in the returned bundle.
+- The aggregate audit gate (`scripts/check_forecast_audits.py`) is the correct place to judge whether the recent ensemble evidence passes governance thresholds.
 
-**Fix**: Disable regime detection until more validation:
-```yaml
-regime_detection:
-  enabled: false  # Temporarily disable until 100+ audits
-```
+**Current evidence** (2026-02-04): `scripts/check_forecast_audits.py` over `logs/forecast_audits` reports **Decision: KEEP** with **25 effective audits**, **12.00% violation rate**, and **12.00% lift fraction** (>= 10% required). See [ENSEMBLE_MODEL_STATUS.md](ENSEMBLE_MODEL_STATUS.md).
+
+**Action**: Do not list “ensemble regression” as a primary PnL root cause unless it is re-measured on the current audit artifacts and shows a persistent failure (violation-rate exceed or no-lift failure after holding period).
 
 ---
 
@@ -208,8 +206,8 @@ Run summary: PnL $-37.25 (-0.15%) | PF 0.00 | Win rate 0.0%
    - Multi-day (5-30 days): require 30-50 bps edge
 
 9. **Disable regime detection** until validation improves:
-   - Currently adds +42% RMSE error
-   - Need 100+ audits for stable weights
+   - Historical evidence showed regressions on some windows; re-measure via `scripts/check_forecast_audits.py` and A/B sprints before changing defaults
+   - Prefer evidence-driven toggles over static claims (see `ENSEMBLE_MODEL_STATUS.md`)
 
 ---
 

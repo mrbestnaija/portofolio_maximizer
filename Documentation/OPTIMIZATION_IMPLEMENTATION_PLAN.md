@@ -34,17 +34,20 @@
 
 ## 📊 EXECUTIVE SUMMARY
 
+> **Ensemble status (canonical, current)**: `ENSEMBLE_MODEL_STATUS.md` is the single source of truth for whether the time-series ensemble is active, how to interpret `KEEP` vs `RESEARCH_ONLY`, and the latest audit gate decision. Do not cite ensemble status from older snapshots in this plan.
+
 ### Current State Assessment
 - **Mathematical Foundation**: B+ (Solid but incomplete)
 - **Statistical Rigor**: B (Needs enhancement)
 - **Production Readiness**: B (Good but not institutional-grade)
 - **Test Coverage**: A (Excellent - 529 tests; latest full suite green per `Documentation/PROJECT_STATUS.md`)
 
-### 2026-01-11 Ensemble Gate Decision (evidence)
+### Ensemble Gate Decision (Historical + Current SoT)
 - Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits:
   - Violations: 1 (3.7% <= 25% cap), lift_fraction: 0% (<10% required) ⇒ **Decision: DISABLE ensemble as default** (insufficient lift vs BEST_SINGLE).
-  - `config/forecasting_config.yml` updated: `ensemble.enabled: false`; BEST_SINGLE remains the source of truth until lift is demonstrated.
-- Action: keep ensemble research-only; revisit when lift_fraction ≥ 10% with RMSE ratio within tolerance over ≥20 effective audits.
+  - Historical note: at the time, `config/forecasting_config.yml` was set to `ensemble.enabled: false`.
+- **Update (2026-02-04)**: The aggregate audit gate currently passes (Decision `KEEP`). See `ENSEMBLE_MODEL_STATUS.md` for the reproducible command + exact numbers, and the “per-forecast policy label vs aggregate audit gate” interpretation.
+- Historical action (2026-01-11): keep ensemble research-only; revisit when lift_fraction ≥ 10% with RMSE ratio within tolerance over ≥20 effective audits. Current decision is governed by `ENSEMBLE_MODEL_STATUS.md`.
 
 ### Target State
 - **Mathematical Foundation**: A+ (Institutional-grade)

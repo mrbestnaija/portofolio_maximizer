@@ -5,6 +5,8 @@
 
 ---
 
+> **Note (2026-02-04)**: This is a historical run report (Phase 7.3). For current ensemble status and the latest audit gate decision, cite `ENSEMBLE_MODEL_STATUS.md` (per-forecast policy labels vs aggregate gate).
+
 ## Executive Summary
 
 **OUTCOME: Partial Success - Root Cause Identified**

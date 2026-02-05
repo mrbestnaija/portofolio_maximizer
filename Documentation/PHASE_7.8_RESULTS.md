@@ -228,7 +228,7 @@ python scripts/run_etl_pipeline.py \
 
 ### Phase 7.9: Holdout Audit Accumulation
 
-**Current**: 2/20 audits complete
+**Current (as of 2026-02-04)**: 25/20 effective audits with RMSE (holding period met; audit gate currently reports `Decision: KEEP`)
 **Target**: 20 audits for production deployment
 
 **Plan**:

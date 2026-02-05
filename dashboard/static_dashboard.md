@@ -1,5 +1,7 @@
 # 📊 Live Ensemble Performance Dashboard
 
+> **Ensemble status (canonical, current)**: `../Documentation/ENSEMBLE_MODEL_STATUS.md` is the single source of truth for whether the time-series ensemble is currently active and what the audit gate decision is. This dashboard is a historical snapshot (see “Generated” timestamp) and should not be treated as current system status.
+
 **Status**: Phase 7.3 GARCH Integration - Multi-Ticker Validation
 **Generated**: 2026-01-21 19:45:00
 **Auto-Refresh**: Every pipeline run updates this dashboard

@@ -3,6 +3,8 @@
 **Last Updated**: 2026-01-21 (Phase 7.3 Complete)
 **System Status**: ✅ Production-Ready, Multi-Ticker Validated
 
+**Ensemble status (canonical, current)**: `Documentation/ENSEMBLE_MODEL_STATUS.md` (per-forecast policy labels vs aggregate audit gate). Use this as the single source of truth for external-facing ensemble claims.
+
 ---
 
 ## 🚀 Quick Start Commands

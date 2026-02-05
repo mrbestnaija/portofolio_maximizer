@@ -353,7 +353,8 @@ CYCLES=1 SLEEP_SECONDS=0 ENABLE_LLM=0 bash bash/run_auto_trader.sh
 
 ### 9.3 Ensemble gate outcome (2026-01-11)
 
-- Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits: violation_rate=3.7% (<=25% cap) but lift_fraction=0% (<10% required) ⇒ **Decision: DISABLE ensemble as default**. `config/forecasting_config.yml` now sets `ensemble.enabled: false`; BEST_SINGLE baseline remains the source of truth until lift is demonstrated over ≥20 effective audits with sufficient lift.
+- Historical snapshot (2026-01-11): Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits: violation_rate=3.7% (<=25% cap) but lift_fraction=0% (<10% required) ⇒ **Decision: DISABLE ensemble as default**.
+- **Canonical (current)**: `ENSEMBLE_MODEL_STATUS.md` is the single source of truth for ensemble status, including the latest aggregate audit gate decision and how to interpret per-forecast `KEEP`/`RESEARCH_ONLY` labels.
 - **Parameter learning policy**: TS models run in auto-learned mode only (no manual SARIMAX/GARCH orders). Performance is controlled via capped/compact search (`order_search_mode`, `max_p/max_q/...`). SARIMAX-X exogenous features are wired by default in `forcester_ts/forecaster.py`.
 
 ---

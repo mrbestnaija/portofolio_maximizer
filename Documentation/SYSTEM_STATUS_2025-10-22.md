@@ -1,14 +1,16 @@
 ﻿# System Status Report - Portfolio Maximizer v45
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
-**Date**: November 9, 2025  
-**Status**: 🟠 **DEGRADED (Latency + Scheduler pending)**  
+> **Ensemble status (canonical, current)**: `ENSEMBLE_MODEL_STATUS.md` explains per-forecast policy labels vs the aggregate audit gate and should be cited in any external-facing status claims about the ensemble.
+
+**Date**: November 9, 2025
+**Status**: 🟠 **DEGRADED (Latency + Scheduler pending)**
 **Last Updated**: 2025-11-09 23:00 UTC
 
 ---
@@ -76,7 +78,7 @@ The core ETL + Time Series stack remains production ready, but the **LLM monitor
 Stage                Duration    Status
 ─────────────────────────────────────────
 data_extraction      35.99s     ✅ SUCCESS
-data_validation      0.002s     ✅ SUCCESS  
+data_validation      0.002s     ✅ SUCCESS
 data_preprocessing    0.014s     ✅ SUCCESS
 data_storage         0.109s     ✅ SUCCESS
 ─────────────────────────────────────────
@@ -268,8 +270,7 @@ TOTAL                0.44s      ✅ SUCCESS
 
 ---
 
-**System Status**: 🟢 **PRODUCTION READY**  
-**Recommendation**: **APPROVED FOR LIVE TRADING**  
-**Next Review**: Monitor LLM performance in live scenarios  
+**System Status**: 🟢 **PRODUCTION READY**
+**Recommendation**: **APPROVED FOR LIVE TRADING**
+**Next Review**: Monitor LLM performance in live scenarios
 **Critical Path**: Validate signal generation accuracy
-

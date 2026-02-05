@@ -1,28 +1,29 @@
 ﻿# UNIFIED ROADMAP: Portfolio Maximizer v45
 
-> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**  
-> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).  
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.  
+> **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
+> Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 > **Current verified snapshot (2025-12-26):** `Documentation/PROJECT_STATUS.md` (engineering unblocked; paper-window MVS now PASS, live/paper still gated).
+> **Ensemble status (canonical, current)**: `ENSEMBLE_MODEL_STATUS.md` explains how to interpret per-forecast policy labels (KEEP/RESEARCH_ONLY/DISABLE_DEFAULT) vs the aggregate audit gate. Cite this doc in any external-facing ensemble claims.
 
 **Production-Ready Autonomous Profit Machine**
 
-**Last Updated**: November 6, 2025  
-**Status**: Phase 5.4 Complete → Production Ready  
-**Test Coverage**: 246 tests (100% passing) - 196 existing + 50 new (38 unit + 12 integration)  
-**Codebase**: ~8,480 lines of production code (+900 lines for Time Series signal generation)  
-**LLM Integration**: ✅ Complete (3 models operational)  
+**Last Updated**: November 6, 2025
+**Status**: Phase 5.4 Complete → Production Ready
+**Test Coverage**: 246 tests (100% passing) - 196 existing + 50 new (38 unit + 12 integration)
+**Codebase**: ~8,480 lines of production code (+900 lines for Time Series signal generation)
+**LLM Integration**: ✅ Complete (3 models operational)
 **Time Series Signal Generation**: 🟡 Implemented (Nov 6, 2025) - **ROBUST TESTING REQUIRED** - Primary signal source with LLM fallback
 **Autonomous Trading Loop**: ✅ `scripts/run_auto_trader.py` runs the profit engine end-to-end (data → forecasts → execution) with optional LLM redundancy
 
 **📋 NEW**: Comprehensive stub implementation review completed. See **`Documentation/STUB_IMPLEMENTATION_PLAN.md`** for complete list of missing/incomplete implementations that must be completed before production deployment.
 
-**🔀 Barbell & Options Migration Status (2025-11-24)**  
-- `config/options_config.yml` is the master options/derivatives config with `options_trading.enabled` (master toggle, default `false`) and barbell-style risk caps (`max_options_weight`, `max_premium_pct_nav`, per-asset-class limits).  
-- `Documentation/BARBELL_OPTIONS_MIGRATION.md` defines the phased migration (O1–O4) from spot-only portfolios to Taleb-style barbell portfolios with long OTM options/synthetic convexity in the risk leg.  
+**🔀 Barbell & Options Migration Status (2025-11-24)**
+- `config/options_config.yml` is the master options/derivatives config with `options_trading.enabled` (master toggle, default `false`) and barbell-style risk caps (`max_options_weight`, `max_premium_pct_nav`, per-asset-class limits).
+- `Documentation/BARBELL_OPTIONS_MIGRATION.md` defines the phased migration (O1–O4) from spot-only portfolios to Taleb-style barbell portfolios with long OTM options/synthetic convexity in the risk leg.
 - `config/barbell.yml` and `risk/barbell_policy.py` now provide a global barbell shell (safe/risk buckets with min/max weights, feature flags, and helper `BarbellConstraint`), but **barbell allocation is disabled by default** so existing spot behaviour remains unchanged until explicitly enabled.
 
 ### Nov 12, 2025 Delta
@@ -135,7 +136,7 @@ PHASE A: DEPLOY EXISTING LLM (Weeks 1-6)
   → Operationalize existing ai_llm/ infrastructure
   → Get to paper trading with LLM signals
   → Generate real-world performance baseline
-  
+
 PHASE B: UPGRADE TIME-SERIES MODELS (Weeks 7-10) 🟡 IMPLEMENTED (Nov 6, 2025) - **ROBUST TESTING REQUIRED**
   → 🟡 Deployed SAMOSSA, SARIMAX, GARCH, and MSSA-RL as primary signal source - **TESTING REQUIRED**
   → 🟡 Time Series ensemble is now DEFAULT signal generator - **TESTING REQUIRED**
@@ -162,47 +163,47 @@ PHASE B: UPGRADE TIME-SERIES MODELS (Weeks 7-10) 🟡 IMPLEMENTED (Nov 6, 2025) 
 # NEW: ai_llm/signal_validator.py (250 lines)
 class SignalValidator:
     """Production-grade 5-layer signal validation"""
-    
+
     def __init__(self):
         # Reuse existing portfolio_math.py for calculations
         self.portfolio_math = PortfolioMath()
         self.db_manager = DatabaseManager()
-        
+
     def validate_llm_signal(self, signal: Signal, market_data: pd.DataFrame) -> ValidationResult:
         """5-layer validation before execution"""
-        
+
         # Layer 1: Statistical validation
         stats_valid = self._validate_statistics(signal, market_data)
-        
+
         # Layer 2: Market regime alignment
         regime_valid = self._validate_regime(signal, market_data)
-        
+
         # Layer 3: Risk-adjusted position sizing
         position_valid = self._validate_position_size(signal)
-        
+
         # Layer 4: Portfolio correlation impact
         correlation_valid = self._validate_correlation(signal)
-        
+
         # Layer 5: Transaction cost feasibility
         cost_valid = self._validate_transaction_costs(signal)
-        
+
         return ValidationResult(
-            is_valid=all([stats_valid, regime_valid, position_valid, 
+            is_valid=all([stats_valid, regime_valid, position_valid,
                          correlation_valid, cost_valid]),
             confidence_score=self._calculate_confidence(),
             warnings=self._collect_warnings()
         )
-    
+
     def backtest_signal_quality(self, lookback_days: int = 30) -> BacktestReport:
         """Rolling 30-day backtest of signal accuracy"""
         # Use existing LLM signals from database
         signals = self.db_manager.get_llm_signals(lookback_days)
-        
+
         # Calculate performance metrics
         hit_rate = self._calculate_hit_rate(signals)
         profit_factor = self._calculate_profit_factor(signals)
         sharpe = self._calculate_sharpe(signals)
-        
+
         return BacktestReport(
             hit_rate=hit_rate,
             profit_factor=profit_factor,
@@ -225,30 +226,30 @@ class SignalValidator:
 # NEW: etl/real_time_extractor.py (300 lines)
 class RealTimeExtractor(BaseExtractor):
     """Real-time streaming for signal validation"""
-    
+
     def __init__(self):
         # Reuse existing Alpha Vantage/Finnhub clients
         self.av_client = AlphaVantageExtractor()
         self.fh_client = FinnhubExtractor()
-        
-    def stream_market_data(self, tickers: List[str], 
+
+    def stream_market_data(self, tickers: List[str],
                           update_frequency: str = "1min") -> Generator:
         """Real-time data with 1-minute freshness"""
-        
+
         while True:
             try:
                 # Use existing cache infrastructure
                 for ticker in tickers:
                     data = self.av_client.get_intraday_quote(ticker)
-                    
+
                     # Circuit breaker for extreme volatility
                     if self._detect_volatility_spike(data):
                         yield VolatilityAlert(ticker, data)
-                        
+
                     yield MarketData(ticker, data, timestamp=datetime.now())
-                    
+
                 time.sleep(60)  # 1-minute updates
-                
+
             except Exception as e:
                 self.logger.error(f"Streaming error: {e}")
                 self._handle_failover()
@@ -267,30 +268,30 @@ class RealTimeExtractor(BaseExtractor):
 # NEW: portfolio/impact_analyzer.py (250 lines)
 class PortfolioImpactAnalyzer:
     """Analyze trade impact on portfolio metrics"""
-    
-    def analyze_trade_impact(self, signal: Signal, 
+
+    def analyze_trade_impact(self, signal: Signal,
                             current_portfolio: Portfolio) -> ImpactReport:
         """Project how signal affects portfolio"""
-        
+
         # Reuse existing portfolio_math.py
         pm = PortfolioMath()
-        
+
         # Current metrics
         current_sharpe = pm.calculate_sharpe_ratio(current_portfolio)
         current_drawdown = pm.calculate_max_drawdown(current_portfolio)
-        
+
         # Projected metrics after trade
         projected_portfolio = self._simulate_trade(signal, current_portfolio)
         projected_sharpe = pm.calculate_sharpe_ratio(projected_portfolio)
         projected_drawdown = pm.calculate_max_drawdown(projected_portfolio)
-        
+
         # Position sizing based on ML confidence
         optimal_size = self._kelly_position_sizing(
             signal.confidence_score,
             signal.expected_return,
             signal.risk_estimate
         )
-        
+
         return ImpactReport(
             sharpe_change=projected_sharpe - current_sharpe,
             drawdown_change=projected_drawdown - current_drawdown,
@@ -313,25 +314,25 @@ class PortfolioImpactAnalyzer:
 # NEW: execution/paper_trading_engine.py (400 lines)
 class PaperTradingEngine:
     """Realistic paper trading with market simulation"""
-    
+
     def __init__(self):
         self.db_manager = DatabaseManager()
         self.portfolio_math = PortfolioMath()
         self.signal_validator = SignalValidator()
-        
-    def execute_signal(self, signal: Signal, 
+
+    def execute_signal(self, signal: Signal,
                       portfolio: Portfolio) -> ExecutionResult:
         """Execute signal with realistic simulation"""
-        
+
         # Validate signal first
         validation = self.signal_validator.validate_llm_signal(signal, market_data)
         if not validation.is_valid:
             return ExecutionResult(status='REJECTED', reason=validation.warnings)
-        
+
         # Simulate realistic execution
         entry_price = self._simulate_entry_price(signal, slippage=0.001)
         transaction_cost = entry_price * signal.shares * 0.001  # 0.1%
-        
+
         # Execute trade
         trade = Trade(
             ticker=signal.ticker,
@@ -342,24 +343,24 @@ class PaperTradingEngine:
             timestamp=datetime.now(),
             is_paper_trade=True
         )
-        
+
         # Store in database
         self.db_manager.record_trade_execution(trade)
-        
+
         # Update portfolio
         updated_portfolio = self._update_portfolio(portfolio, trade)
-        
+
         return ExecutionResult(
             status='EXECUTED',
             trade=trade,
             portfolio=updated_portfolio,
             performance_impact=self._calculate_performance_impact(trade, portfolio)
         )
-    
+
     def _simulate_entry_price(self, signal: Signal, slippage: float) -> float:
         """Simulate realistic entry price with slippage"""
         market_price = self._get_current_market_price(signal.ticker)
-        
+
         # Slippage direction depends on action
         if signal.action == 'BUY':
             return market_price * (1 + slippage)
@@ -381,45 +382,45 @@ class PaperTradingEngine:
 # NEW: risk/real_time_risk_manager.py (350 lines)
 class RealTimeRiskManager:
     """Real-time risk monitoring with circuit breakers"""
-    
+
     def __init__(self):
         self.portfolio_math = PortfolioMath()
         self.alert_system = AlertSystem()
-        
+
     def monitor_portfolio_risk(self, portfolio: Portfolio) -> RiskReport:
         """Continuous risk monitoring"""
-        
+
         # Calculate key risk metrics
         current_drawdown = self.portfolio_math.calculate_max_drawdown(portfolio)
         portfolio_volatility = self.portfolio_math.calculate_volatility(portfolio)
         var_95 = self.portfolio_math.calculate_var(portfolio, confidence=0.95)
-        
+
         # Check circuit breaker triggers
         alerts = []
-        
+
         # Drawdown circuit breakers
         if current_drawdown > 0.15:  # 15% max drawdown
-            alerts.append(Alert('CRITICAL', 'Maximum drawdown exceeded', 
+            alerts.append(Alert('CRITICAL', 'Maximum drawdown exceeded',
                                action='CLOSE_ALL_POSITIONS'))
         elif current_drawdown > 0.10:  # 10% warning
             alerts.append(Alert('WARNING', 'Drawdown approaching limit',
                                action='REDUCE_POSITIONS'))
-        
+
         # Volatility spike detection
         if self._detect_volatility_spike(portfolio_volatility):
             alerts.append(Alert('WARNING', 'Volatility spike detected',
                                action='TIGHTEN_STOPS'))
-        
+
         # Correlation breakdown
         if self._detect_correlation_breakdown(portfolio):
             alerts.append(Alert('WARNING', 'Diversification breakdown',
                                action='REBALANCE'))
-        
+
         # Send alerts
         for alert in alerts:
             self.alert_system.send_alert(alert)
             self._execute_automatic_action(alert.action, portfolio)
-        
+
         return RiskReport(
             current_drawdown=current_drawdown,
             volatility=portfolio_volatility,
@@ -427,7 +428,7 @@ class RealTimeRiskManager:
             alerts=alerts,
             status='HEALTHY' if not alerts else 'AT_RISK'
         )
-    
+
     def _execute_automatic_action(self, action: str, portfolio: Portfolio):
         """Automatic risk mitigation"""
         if action == 'CLOSE_ALL_POSITIONS':
@@ -455,18 +456,18 @@ class RealTimeRiskManager:
 # NEW: monitoring/performance_dashboard.py (300 lines)
 class PerformanceDashboard:
     """Real-time performance monitoring"""
-    
+
     def generate_live_metrics(self) -> Dashboard:
         """Generate real-time dashboard"""
-        
+
         db = DatabaseManager()
         pm = PortfolioMath()
-        
+
         # Get recent performance
         trades = db.get_recent_trades(days=30)
         portfolio = db.get_current_portfolio()
         llm_signals = db.get_llm_signals(days=30)
-        
+
         # Calculate metrics
         metrics = {
             # Trading performance
@@ -474,22 +475,22 @@ class PerformanceDashboard:
             'win_rate': pm.calculate_win_rate(trades),
             'profit_factor': pm.calculate_profit_factor(trades),
             'sharpe_ratio': pm.calculate_sharpe_ratio(portfolio),
-            
+
             # LLM signal quality
             'signal_accuracy': self._calculate_signal_accuracy(llm_signals, trades),
             'avg_confidence': np.mean([s.confidence for s in llm_signals]),
-            
+
             # Risk metrics
             'current_drawdown': pm.calculate_current_drawdown(portfolio),
             'portfolio_volatility': pm.calculate_volatility(portfolio),
             'var_95': pm.calculate_var(portfolio, 0.95),
-            
+
             # System health
             'uptime': self._calculate_uptime(),
             'data_quality': self._calculate_data_quality(),
             'latency_ms': self._calculate_avg_latency()
         }
-        
+
         return Dashboard(
             metrics=metrics,
             charts=self._generate_charts(trades, portfolio),
@@ -545,33 +546,33 @@ print(placement.status, placement.order_id)
 # NEW: execution/order_manager.py (450 lines)
 class OrderManager:
     """Complete order lifecycle management"""
-    
+
     def manage_order_lifecycle(self, order: Order) -> LifecycleResult:
         """Pre-trade → Execution → Post-trade"""
-        
+
         # Pre-trade checks
         pre_trade = self._pre_trade_checks(order)
         if not pre_trade.passed:
             return LifecycleResult(status='REJECTED', reason=pre_trade.failure_reason)
-        
+
         # Execute
         execution = self.ctrader_client.place_order(order.signal)
-        
+
         # Monitor fills
         fill_status = self._monitor_fills(execution.order_id)
-        
+
         # Post-trade reconciliation
         reconciliation = self._reconcile_trade(execution, fill_status)
-        
+
         # Update database
         self.db_manager.record_trade_execution(reconciliation)
-        
+
         return LifecycleResult(
             status='COMPLETE',
             execution=execution,
             reconciliation=reconciliation
         )
-    
+
     def _pre_trade_checks(self, order: Order) -> PreTradeResult:
         """Validate order before execution"""
         checks = {
@@ -580,7 +581,7 @@ class OrderManager:
             'daily_trade_limit': self._check_daily_trades(),
             'circuit_breaker': self._check_circuit_breakers()
         }
-        
+
         passed = all(checks.values())
         return PreTradeResult(passed=passed, checks=checks)
 ```
@@ -601,37 +602,37 @@ class OrderManager:
 # NEW: deployment/production_deploy.py (400 lines)
 class ProductionDeployer:
     """Production deployment with health checks"""
-    
+
     def deploy_trading_system(self) -> DeploymentResult:
         """Deploy with comprehensive validation"""
-        
+
         # Environment validation
         env_validator = EnvironmentValidator()
         if not env_validator.validate():
-            return DeploymentResult(status='FAILED', 
+            return DeploymentResult(status='FAILED',
                                    reason='Environment validation failed')
-        
+
         # API key validation
         api_validator = APIKeyValidator()
         if not api_validator.validate_all_keys():
             return DeploymentResult(status='FAILED',
                                    reason='API keys invalid')
-        
+
         # System health check
         health = self._system_health_check()
         if health.status != 'HEALTHY':
             return DeploymentResult(status='FAILED',
                                    reason=f'Health check failed: {health.issues}')
-        
+
         # Deploy components
         self._deploy_signal_validator()
         self._deploy_paper_trading_engine()
         self._deploy_risk_manager()
         self._deploy_performance_dashboard()
-        
+
         # Start monitoring
         self._start_monitoring_services()
-        
+
         return DeploymentResult(status='SUCCESS',
                                components_deployed=4,
                                health_status=health)
@@ -651,38 +652,38 @@ class ProductionDeployer:
 # NEW: recovery/disaster_recovery.py (350 lines)
 class DisasterRecovery:
     """Automated disaster recovery"""
-    
+
     def handle_system_failure(self, failure: SystemFailure) -> RecoveryResult:
         """Automatic recovery procedures"""
-        
+
         if failure.type == 'MODEL_FAILURE':
             # Fallback to simpler models
             return self._fallback_to_simple_model()
-            
+
         elif failure.type == 'DATA_FAILURE':
             # Switch to backup data source
             return self._failover_data_source()
-            
+
         elif failure.type == 'BROKER_FAILURE':
             # Close positions if can't connect
             return self._emergency_position_closure()
-            
+
         elif failure.type == 'RISK_BREACH':
             # Automatic position reduction
             return self._automatic_risk_reduction()
-    
+
     def _failover_data_source(self) -> RecoveryResult:
         """Fail over to backup data source"""
         # Use existing DataSourceManager
         dsm = DataSourceManager()
-        
+
         # Try data sources in priority order
         for source in ['yfinance', 'alpha_vantage', 'finnhub']:
             if dsm.test_data_source(source):
                 dsm.set_primary_source(source)
                 return RecoveryResult(status='RECOVERED',
                                      action=f'Switched to {source}')
-        
+
         return RecoveryResult(status='FAILED',
                              action='All data sources unavailable')
 ```
@@ -774,10 +775,10 @@ class SignalRouter:
         # Downstream consumers see unchanged interface
 `
 
-> **Implementation Notes (Nov 05, 2025)**  
-> • SAMOSSA SSA + residual ARIMA is live inside `etl/time_series_forecaster.py`, emitting explained-variance diagnostics and residual forecasts.  
-> • CUSUM change-point scoring and Q-learning intervention loops remain gated until paper-trading metrics meet `QUANTIFIABLE_SUCCESS_CRITERIA.md` thresholds.  
-> • GPU acceleration (CuPy/Numba) is documented in `mSSA_with_RL_changPoint_detection.json`; profiling will determine when to prioritise the optimisation backlog.  
+> **Implementation Notes (Nov 05, 2025)**
+> • SAMOSSA SSA + residual ARIMA is live inside `etl/time_series_forecaster.py`, emitting explained-variance diagnostics and residual forecasts.
+> • CUSUM change-point scoring and Q-learning intervention loops remain gated until paper-trading metrics meet `QUANTIFIABLE_SUCCESS_CRITERIA.md` thresholds.
+> • GPU acceleration (CuPy/Numba) is documented in `mSSA_with_RL_changPoint_detection.json`; profiling will determine when to prioritise the optimisation backlog.
 
 ### **Week 9: Cross-Validation + Evaluation Framework**
 `python
@@ -847,16 +848,16 @@ PHASE_A_CRITERIA = {
     # Signal Quality
     'llm_signal_accuracy': '>55% on 30-day backtest',
     'signal_validation_rate': '>80% signals pass 5-layer validation',
-    
+
     # Paper Trading
     'paper_trades_executed': '>50 successful trades',
     'paper_trading_uptime': '>99% system availability',
     'paper_trading_sharpe': '>0.8 risk-adjusted returns',
-    
+
     # Risk Management
     'max_drawdown': '<15% in paper trading',
     'circuit_breakers_tested': 'All scenarios validated',
-    
+
     # System Reliability
     'dashboard_operational': 'Live metrics updating',
     'disaster_recovery_tested': 'All failure modes tested',
@@ -992,12 +993,7 @@ CAPITAL_SCHEDULE = {
 
 ---
 
-**STATUS**: ✅ READY FOR PHASE A.1 IMPLEMENTATION  
-**Next Action**: Implement signal validator (`ai_llm/signal_validator.py`)  
-**Timeline**: 12 weeks to production ML trading system  
+**STATUS**: ✅ READY FOR PHASE A.1 IMPLEMENTATION
+**Next Action**: Implement signal validator (`ai_llm/signal_validator.py`)
+**Timeline**: 12 weeks to production ML trading system
 **Success Probability**: 60% (conservative estimate)
-
-
-
-
-

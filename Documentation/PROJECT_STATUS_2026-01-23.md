@@ -439,6 +439,8 @@ git push origin master
 **Expected**: Normal for new system, will transition to production after more runs
 **No Action Needed**: This is designed behavior
 
+**Update (2026-02-04)**: For current ensemble governance + evidence (audit gate `Decision: KEEP`, effective audits, violation rate), see `ENSEMBLE_MODEL_STATUS.md`. This 2026-01-23 note is historical context for early holding-period behaviour.
+
 ### 3. Regression Metrics Absence (By Design)
 **Observation**: `regression_metrics_present={'garch': False, ...}` in all builds
 **Reason**: CV evaluation doesn't generate regression metrics (only holdout does)

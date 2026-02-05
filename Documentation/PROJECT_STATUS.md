@@ -10,6 +10,16 @@
 
 **Sequenced optimization roadmap (2026-01)**: `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` (bar-aware trading loop, horizon-consistent TS signals, execution cost alignment, run-local reporting).
 
+## Ensemble Status (Canonical)
+
+For any external-facing statement about the **time-series ensemble** (SAMOSSA/MSSA-RL/GARCH/SARIMAX), use `ENSEMBLE_MODEL_STATUS.md` as the single source of truth.
+
+This matters because the system exposes:
+- A **per-forecast policy label** (`KEEP` / `RESEARCH_ONLY` / `DISABLE_DEFAULT`) recorded by the forecaster, and
+- A separate **aggregate audit gate decision** produced by `scripts/check_forecast_audits.py`.
+
+Do not conflate these.
+
 ## Verified Now
 
 - Code compiles cleanly (`python -m compileall` on core packages)

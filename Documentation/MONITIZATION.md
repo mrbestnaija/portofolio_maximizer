@@ -2,6 +2,7 @@
 
 - **States**: `READY`, `EXPERIMENTAL`, `BLOCKED`. Default remains `BLOCKED` until quant health is GREEN on live/paper.
 - **Inputs**: quant health (`scripts/check_quant_validation_health.py`), usage tracking, profitability metrics from DB (paper/live), synthetic regressions.
+- **Ensemble governance evidence**: forecast audit gate (`scripts/check_forecast_audits.py`). Interpretation + current status must reference `ENSEMBLE_MODEL_STATUS.md`.
 - **Synthetic-first**: While feeds are shallow, pre-prod stays synthetic (`ENABLE_SYNTHETIC_PROVIDER=1`, `--execution-mode synthetic`). Monetization reports must never include synthetic-only PnL.
 - **Controls**:
   - BLOCKED: no alerts/exports; LLM-heavy jobs disabled; only synthetic/brutal allowed.

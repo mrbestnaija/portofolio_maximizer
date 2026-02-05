@@ -23,7 +23,7 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 - `Documentation/implementation_checkpoint.md` (chronological log + verification evidence)
 - `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md` (research questions + hypotheses)
 - `Documentation/INTEGRATION_TESTING_COMPLETE.md` (integration test evidence)
-- Ensemble gate (research profile, 2026-01-11): 27 effective audits, violation_rate=3.7%, lift_fraction=0% ⇒ **ensemble disabled as default** (fallback to BEST_SINGLE). Config: `config/forecasting_config.yml` has `ensemble.enabled: false`.
+- Ensemble status (canonical): `ENSEMBLE_MODEL_STATUS.md` (explains per-forecast policy labels vs the aggregate audit gate, and records current evidence).
 - `logs/brutal/results_20260103_220403/test.log` (brutal suite summary)
 - `logs/brutal/results_20260103_220403/stage_summary.csv` (timing summary)
 **All Core Phases Complete**: ETL + Analysis + Visualization + Caching + k-fold CV + Multi-Source + Config-Driven + Checkpointing & Logging + Error Monitoring + Performance Optimization + Remote Synchronization Enhancements (LLM now operates purely as fallback/redundancy per TIME_SERIES_FORECASTING_IMPLEMENTATION.md)

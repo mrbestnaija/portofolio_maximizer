@@ -170,12 +170,16 @@ Reporting guidance:
 - average rank per model across folds,
 - a stability score in `[0, 1]` indicating whether model ordering is preserved across folds.
 
-### 6.3 Ensemble gate status (2026-01-11)
+### 6.3 Ensemble gate status (historical) and canonical SoT
+
+> **Canonical (current)**: `ENSEMBLE_MODEL_STATUS.md` is the single source of truth for ensemble status and the latest aggregate audit gate decision.
 
 - Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) with 27 effective audits:
   - violation_rate=3.7% (<=25% cap)
   - lift_fraction=0% (<10% required)
-  - **Decision: DISABLE ensemble as default**; config sets `config/forecasting_config.yml` `ensemble.enabled: false`; BEST_SINGLE remains the default until lift is demonstrated over ≥20 effective audits with required lift fraction.
+  - **Decision: DISABLE ensemble as default** (historical snapshot).
+
+- **Update (2026-02-04)**: the aggregate audit gate currently passes (Decision `KEEP`). For exact numbers and the correct interpretation of `KEEP` vs `RESEARCH_ONLY`, cite `ENSEMBLE_MODEL_STATUS.md`.
 
 ---
 

@@ -52,7 +52,9 @@ The nightly validation wrapper `schedule_backfill.bat` is registered in Windows 
 
 **Verification (2026-01-11)**: Research-profile RMSE gate (`scripts/check_forecast_audits.py --config-path config/forecaster_monitoring.yml --max-files 500`) on 27 effective audits:
 - violation_rate=3.7% (<=25% cap), lift_fraction=0% (<10% required) ⇒ **Decision: DISABLE ensemble as default** (insufficient lift vs BEST_SINGLE).
-- Config applied: `config/forecasting_config.yml` now has `ensemble.enabled: false`; ensemble remains research-only until lift is demonstrated over ≥20 effective audits.
+- Historical note: at the time, `config/forecasting_config.yml` was set to `ensemble.enabled: false`.
+
+**Verification (2026-02-04)**: Ensemble status is governed by `ENSEMBLE_MODEL_STATUS.md` (canonical SoT; includes the reproducible `scripts/check_forecast_audits.py` command + output). Current `config/forecasting_config.yml` has `ensemble.enabled: true`.
 
 **Verification (2026-01-06)**: Roadmap Phase 2 + 3.1 commenced (bar-aware trader + horizon-end TS target). Focused checks:
 - `./simpleTrader_env/bin/python -m py_compile scripts/run_auto_trader.py models/time_series_signal_generator.py`
