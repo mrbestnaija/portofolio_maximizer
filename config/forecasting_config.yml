@@ -82,7 +82,7 @@ forecasting:
 
   # Phase 7.5: Regime Detection for Adaptive Model Selection
   regime_detection:
-    enabled: true  # Phase 7.7: Enabled to test optimized MODERATE_TRENDING weights
+    enabled: true  # Phase 7.9: regime kept ON; A/B test (2026-02-05) showed no >10% PnL lift from disabling.
     lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
 
     # Volatility thresholds (annualized)
