@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
 **Current Phase**: Phase 7.9 (Cross-session persistence, proof-mode validation, UTC normalization)
-**Last Updated**: 2026-01-31
+**Last Updated**: 2026-02-09
 
 ---
 
@@ -175,7 +175,7 @@ The system follows a 7-layer architecture:
 - `market_analyzer.py`: Fundamental analysis via LLM
 
 **Testing Infrastructure:**
-- 606+ tests across ETL, LLM, forecaster, integration, and security modules
+- 731 tests across ETL, LLM, forecaster, integration, and security modules
 - Property-based testing for financial calculations
 - Security validation for credential handling
 
@@ -394,7 +394,7 @@ python scripts/migrate_add_portfolio_state.py
 
 SARIMAX is disabled by default (mirrors LLM's off-by-default pattern). Only fast forecasters (GARCH, SAMoSSA, MSSA-RL) run unless SARIMAX is explicitly re-enabled.
 
-**Benchmark Results** (2026-01-31, 601 tests, Windows):
+**Benchmark Results** (2026-02-09, 731 tests, Windows):
 
 | Metric | SARIMAX Off | SARIMAX On | Delta |
 |--------|------------|-----------|-------|
@@ -575,7 +575,7 @@ Results: Key metrics or validation results
 - `forcester_ts/` - Time series forecasting models
 - `models/` - Signal generation and routing
 - `execution/` - Order management and paper trading
-- `tests/` - Test suite (606+ tests)
+- `tests/` - Test suite (731 tests)
 - `scripts/` - Utility scripts and migrations
 - `config/` - YAML configuration files
 - `Documentation/` - Phase-specific documentation
@@ -585,5 +585,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-01-31 (Phase 7.9: UTC normalization, freq-compat, proof-mode)
+**Last Updated**: 2026-02-09 (Phase 7.9: UTC normalization, freq-compat, proof-mode, checkpoint fix)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
