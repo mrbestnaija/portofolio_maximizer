@@ -226,8 +226,8 @@ class CheckpointManager:
         if not checkpoints:
             return None
 
-        # Return most recent
-        latest = max(checkpoints, key=lambda x: x['timestamp'])
+        # Return most recent (use enumerate to break timestamp ties by insertion order)
+        _, latest = max(enumerate(checkpoints), key=lambda x: (x[1]['timestamp'], x[0]))
         return latest['checkpoint_id']
 
     def list_checkpoints(self, pipeline_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -370,7 +370,7 @@ class CheckpointManager:
             }
 
         stages = [cp['stage'] for cp in checkpoints]
-        latest = max(checkpoints, key=lambda x: x['timestamp'])
+        _, latest = max(enumerate(checkpoints), key=lambda x: (x[1]['timestamp'], x[0]))
 
         return {
             'pipeline_id': pipeline_id,
