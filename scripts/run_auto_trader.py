@@ -70,6 +70,11 @@ MIN_LOOKBACK_DAYS_DAILY = 365
 MIN_LOOKBACK_DAYS_INTRADAY = 30
 MIN_SERIES_POINTS = 120
 MIN_QUALITY_SCORE = 0.50
+# Quick-fail thresholds for in-cycle early exit
+QUICK_FAIL_MAX_DRAWDOWN_PCT = 0.15  # 15% drawdown from initial capital
+QUICK_FAIL_MIN_TRADES_BEFORE_CHECK = 5  # Need at least 5 realized trades
+QUICK_FAIL_MIN_PROFIT_FACTOR = 0.5  # Below 0.5 PF = clearly losing
+QUICK_FAIL_MIN_WIN_RATE = 0.20  # Below 20% win rate = clearly losing
 EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
 RUN_SUMMARY_LOG_PATH = ROOT_PATH / "logs" / "automation" / "run_summary.jsonl"
 _NO_TRADE_WINDOWS = None
@@ -1258,19 +1263,37 @@ def _execute_signal(
 
     # Proof-mode overrides: tighter exits for guaranteed round trips.
     if proof_mode:
-        proof_horizon = 6 if is_intraday else 5
-        primary_payload["forecast_horizon"] = proof_horizon
-        # ATR-based stops/targets (wider, symmetric, realistic).
+        default_horizon = 6 if is_intraday else 5
+        proof_horizon = default_horizon
+        # ATR-based stops/targets and adaptive holding period.
         if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14:
             atr = (market_data['High'] - market_data['Low']).rolling(14).mean().iloc[-1]
-            if pd.notna(atr) and atr > 0:
+            if pd.notna(atr) and atr > 0 and current_price and current_price > 0:
+                atr_pct = atr / current_price
+                # Adaptive holding: high-ATR stocks exit sooner, low-ATR hold longer
+                if atr_pct > 0.03:       # ATR > 3% of price -> volatile
+                    proof_horizon = 3 if not is_intraday else 4
+                elif atr_pct > 0.015:    # ATR 1.5-3% -> moderate
+                    proof_horizon = default_horizon
+                else:                    # ATR < 1.5% -> calm
+                    proof_horizon = (default_horizon + 2) if not is_intraday else (default_horizon + 1)
                 sig_action = primary_payload.get("action", "").upper()
+                # Tighter stops/targets scaled to ATR regime
+                stop_mult = 1.0 if atr_pct > 0.03 else 1.25
+                target_mult = 1.5 if atr_pct > 0.03 else 1.75
                 if sig_action == "BUY":
-                    primary_payload["stop_loss"] = current_price - 1.5 * atr
-                    primary_payload["target_price"] = current_price + 2.0 * atr
+                    primary_payload["stop_loss"] = current_price - stop_mult * atr
+                    primary_payload["target_price"] = current_price + target_mult * atr
                 elif sig_action == "SELL":
-                    primary_payload["stop_loss"] = current_price + 1.5 * atr
-                    primary_payload["target_price"] = current_price - 2.0 * atr
+                    primary_payload["stop_loss"] = current_price + stop_mult * atr
+                    primary_payload["target_price"] = current_price - target_mult * atr
+                logger.info(
+                    "[PROOF_MODE] %s: ATR=%.2f (%.1f%%), horizon=%d (default=%d), "
+                    "stop_mult=%.2f, target_mult=%.2f",
+                    ticker, atr, atr_pct * 100, proof_horizon, default_horizon,
+                    stop_mult, target_mult,
+                )
+        primary_payload["forecast_horizon"] = proof_horizon
         logger.info(
             "[PROOF_MODE] %s: horizon=%d, stop=%s, target=%s",
             ticker, proof_horizon,
@@ -1281,9 +1304,10 @@ def _execute_signal(
         primary_payload, market_data, proof_mode=proof_mode,
     )
     logger.info(
-        "Execution result for %s: %s",
+        "Execution result for %s: %s%s",
         ticker,
         result.status,
+        f" | reason={result.reason}" if result.status != "EXECUTED" and result.reason else "",
     )
 
     mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
@@ -2219,7 +2243,56 @@ def main(
 
         equity_points.append({"t": f"cycle_{cycle}", "v": summary["total_value"]})
 
+        # --- Quick-fail check: prune clearly unprofitable runs early ---
         if cycle < cycles:
+            quick_fail_triggered = False
+            try:
+                # Drawdown check (unrealized)
+                drawdown_pct = abs(summary["pnl_pct"]) if summary["pnl_pct"] < 0 else 0.0
+                if drawdown_pct >= QUICK_FAIL_MAX_DRAWDOWN_PCT:
+                    logger.warning(
+                        "[QUICK-FAIL] Drawdown %.1f%% exceeds %.1f%% threshold; stopping early.",
+                        drawdown_pct * 100,
+                        QUICK_FAIL_MAX_DRAWDOWN_PCT * 100,
+                    )
+                    quick_fail_triggered = True
+
+                # Realized performance check (only if enough trades)
+                if not quick_fail_triggered and hasattr(trading_engine, "db_manager"):
+                    mid_perf = trading_engine.db_manager.get_performance_summary(
+                        run_id=run_id
+                    )
+                    mid_trades = int(mid_perf.get("total_trades") or 0)
+                    if mid_trades >= QUICK_FAIL_MIN_TRADES_BEFORE_CHECK:
+                        mid_pf = float(mid_perf.get("profit_factor") or 0.0)
+                        mid_wr = float(mid_perf.get("win_rate") or 0.0)
+                        if mid_pf < QUICK_FAIL_MIN_PROFIT_FACTOR:
+                            logger.warning(
+                                "[QUICK-FAIL] Profit factor %.2f < %.2f after %d trades; stopping early.",
+                                mid_pf,
+                                QUICK_FAIL_MIN_PROFIT_FACTOR,
+                                mid_trades,
+                            )
+                            quick_fail_triggered = True
+                        elif mid_wr < QUICK_FAIL_MIN_WIN_RATE:
+                            logger.warning(
+                                "[QUICK-FAIL] Win rate %.1f%% < %.1f%% after %d trades; stopping early.",
+                                mid_wr * 100,
+                                QUICK_FAIL_MIN_WIN_RATE * 100,
+                                mid_trades,
+                            )
+                            quick_fail_triggered = True
+            except Exception:
+                logger.debug("Quick-fail check error; continuing", exc_info=True)
+
+            if quick_fail_triggered:
+                logger.info(
+                    "[QUICK-FAIL] Exiting cycle loop at cycle %d/%d to save time.",
+                    cycle,
+                    cycles,
+                )
+                break
+
             logger.info("Sleeping %s seconds before next cycle...", sleep_seconds)
             time.sleep(sleep_seconds)
 

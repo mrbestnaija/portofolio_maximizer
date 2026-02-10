@@ -286,6 +286,10 @@ class OpenBBExtractor(BaseExtractor):
         # Load configuration
         self.config = OpenBBConfig.from_yaml(self.config_path)
 
+        # Pop keys that DataSourceManager may pass but we handle ourselves
+        kwargs.pop("name", None)
+        kwargs.pop("config_path", None)
+
         # Initialize BaseExtractor
         super().__init__(
             name="openbb",
