@@ -181,6 +181,23 @@ def load_finnhub_key() -> Optional[str]:
     return load_secret('FINNHUB_API_KEY', 'FINNHUB_API_KEY_FILE')
 
 
+def load_polygon_key() -> Optional[str]:
+    """Load Polygon.io API key (stored as MASSIVE_API_KEY in .env)."""
+    return load_secret('MASSIVE_API_KEY', 'MASSIVE_API_KEY_FILE')
+
+
+def load_luno_credentials() -> Dict[str, Optional[str]]:
+    """Load LUNO API credentials (key + id).
+
+    Returns:
+        Dict with 'api_key' and 'api_id' values (or None if not found).
+    """
+    return {
+        'api_key': load_secret('API_KEY_LUNO', 'API_KEY_LUNO_FILE'),
+        'api_id': load_secret('API_ID_LUNO', 'API_ID_LUNO_FILE'),
+    }
+
+
 def load_xtb_username() -> Optional[str]:
     """Load XTB username."""
     return load_secret('XTB_USERNAME', 'XTB_USERNAME_FILE')

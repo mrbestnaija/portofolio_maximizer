@@ -114,6 +114,18 @@ python scripts/migrate_add_portfolio_state.py
 sqlite3 data/portfolio_maximizer.db "SELECT DISTINCT model_type FROM time_series_forecasts;"
 ```
 
+### OpenBB Multi-Provider Extraction
+```bash
+# Extract data via OpenBB (yfinance -> polygon -> alpha_vantage -> finnhub fallback)
+python etl/openbb_extractor.py --tickers AAPL,MSFT --start 2024-01-01 --end 2024-06-01
+
+# Skip cache (force fresh fetch)
+python etl/openbb_extractor.py --tickers AAPL --start 2024-01-01 --end 2024-06-01 --no-cache
+
+# Run OpenBB extractor tests
+pytest tests/etl/test_openbb_extractor.py -v
+```
+
 ### Synthetic Data and Testing
 ```bash
 # Generate synthetic data for testing
@@ -135,6 +147,7 @@ The system follows a 7-layer architecture:
 
 1. **Extraction Layer** (`etl/`): Multi-source data extraction with intelligent caching
    - `yfinance_extractor.py`: Yahoo Finance with 20x speedup caching
+   - `openbb_extractor.py`: Multi-provider via OpenBB SDK (yfinance/polygon/alpha_vantage/finnhub fallback chain)
    - `data_source_manager.py`: Multi-source coordination with failover
    - `synthetic_extractor.py`: Synthetic data generation for testing
 
@@ -585,5 +598,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-09 (Phase 7.9: UTC normalization, freq-compat, proof-mode, checkpoint fix)
+**Last Updated**: 2026-02-09 (Phase 7.9: OpenBB multi-provider extractor, UTC normalization, freq-compat, proof-mode, checkpoint fix)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git

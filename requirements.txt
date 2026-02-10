@@ -45,6 +45,7 @@ networkx==3.6.1; python_version >= "3.11" and python_version < "3.13"
 numpy==2.4.0; python_version >= "3.11" and python_version < "3.13"
 numpy==1.26.4; python_version < "3.11"
 ollama==0.6.0
+openbb>=4.0.0
 packaging==25.0
 pandas==2.3.3
 pandas-datareader==0.10.0
