@@ -30,10 +30,16 @@ data_sources:
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
+    - name: "openbb"
+      type: "market_data"
+      enabled: true  # Multi-provider via OpenBB SDK (yfinance, polygon, alpha_vantage, finnhub)
+      priority: 5
+      config_file: "config/openbb_config.yml"
+
     - name: "ctrader"
       type: "market_data"
       enabled: true  # cTrader Open API OHLCV source (demo-first per ctrader_config.yml)
-      priority: 5
+      priority: 6
       config_file: "config/ctrader_config.yml"
 
   # Data source selection strategy
@@ -125,6 +131,7 @@ data_sources:
       yfinance: "etl.yfinance_extractor.YFinanceExtractor"
       alpha_vantage: "etl.alpha_vantage_extractor.AlphaVantageExtractor"
       finnhub: "etl.finnhub_extractor.FinnhubExtractor"
+      openbb: "etl.openbb_extractor.OpenBBExtractor"
       ctrader: "etl.ctrader_extractor.CTraderExtractor"
       synthetic: "etl.synthetic_extractor.SyntheticExtractor"
       # Deprecated adapters removed during v4.5 cleanup

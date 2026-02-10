@@ -1,0 +1,69 @@
+# OpenBB Platform Configuration
+# Multi-provider data extraction with priority-based fallback
+# Last updated: 2026-02-09
+
+openbb:
+  # Provider chain - tried in priority order (lower = higher priority)
+  providers:
+    - name: "yfinance"
+      enabled: true
+      priority: 1
+      credentials_env: null  # Free, no key needed
+      rate_limit_rpm: 60
+
+    - name: "polygon"
+      enabled: true
+      priority: 2
+      credentials_env: "MASSIVE_API_KEY"  # Polygon.io via massive.com
+      rate_limit_rpm: 5  # Free tier: 5 calls/minute
+
+    - name: "alpha_vantage"
+      enabled: true
+      priority: 3
+      credentials_env: "ALPHA_VANTAGE_API_KEY"
+      rate_limit_rpm: 5  # Free tier: 5 calls/minute, 500/day
+
+    - name: "finnhub"
+      enabled: true
+      priority: 4
+      credentials_env: "FINNHUB_API_KEY"
+      rate_limit_rpm: 60  # Free tier: 60 calls/minute
+
+  # Cache configuration
+  cache:
+    enabled: true
+    cache_hours: 24
+    cache_dir: "data/raw"  # Reuses existing raw data directory
+    format: "parquet"
+
+  # Data quality thresholds
+  validation:
+    min_rows: 10
+    max_missing_rate: 0.05  # 5% max missing values
+    max_gap_days: 5  # Flag gaps > 5 trading days
+    price_must_be_positive: true
+
+  # Retry configuration
+  retry:
+    max_retries: 2
+    base_delay_seconds: 2.0
+    max_delay_seconds: 30.0
+
+  # Nigeria market settings
+  nigeria:
+    enabled: true
+    ticker_suffix: ".NG"
+    exchange: "NGX"  # Nigerian Exchange Group
+    luno_pairs:
+      - "XBTNGN"  # Bitcoin/Naira
+      - "ETHNGN"  # Ethereum/Naira
+      - "XRPNGN"  # Ripple/Naira
+    luno_credentials:
+      api_key_env: "API_KEY_LUNO"
+      api_id_env: "API_ID_LUNO"
+
+  # Logging
+  logging:
+    log_provider_attempts: true
+    log_fallback_events: true
+    ascii_only: true  # Windows console compatibility
