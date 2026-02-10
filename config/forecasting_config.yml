@@ -87,29 +87,33 @@ forecasting:
 
     # Volatility thresholds (annualized)
     vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
-    vol_threshold_high: 0.30  # Above 30% annual vol = high volatility regime
+    vol_threshold_high: 0.40  # Above 40% annual vol = high volatility (raised from 0.30 to reduce false HIGH_VOL triggers, Phase 7.9 tuning)
 
     # Trend strength thresholds (0-1 scale, based on R² from linear regression)
     trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
     trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
 
-    # Phase 7.8: Regime-specific ensemble candidate weights (optimized via rolling CV)
-    # When present, these replace forecasting.ensemble.candidate_weights for the detected regime.
-    # Generated via: python scripts/optimize_ensemble_weights.py --source rolling_cv
-    # Phase 7.8 Results (2026-01-27): 3 regimes optimized with SAMOSSA-dominant weights
+    # Phase 7.9: Regime-specific ensemble candidate weights (GARCH-floor tuning)
+    # Constraint: GARCH >= 40% in first candidate to preserve Phase 7.4 RMSE baseline (1.043).
+    # With confidence_scaling=false, first candidate always wins -- GARCH floor prevents
+    # the +42% RMSE regression seen with SAMOSSA-dominant overrides in Phase 7.5/7.8.
     regime_candidate_weights:
       CRISIS:
-        # Optimized for 50%+ volatility, weak trend, 5 CV folds, 25 samples
-        # RMSE: 17.15 -> 6.74 (+60.69% improvement)
-        - {garch: 0.23, samossa: 0.72, mssa_rl: 0.05}
+        # Defensive: GARCH-led for volatility forecasting, SAMOSSA support
+        - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
+        - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
       MODERATE_MIXED:
-        # Optimized for 26-30% volatility, mixed trend (R²=0.00-0.30), 4 CV folds, 20 samples
-        # RMSE: 17.63 -> 16.52 (+6.30% improvement)
-        - {garch: 0.05, samossa: 0.73, mssa_rl: 0.22}
+        # Balanced: GARCH anchor with SAMOSSA/MSSA diversity
+        - {garch: 0.45, samossa: 0.35, mssa_rl: 0.20}
+        - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
       MODERATE_TRENDING:
-        # Optimized for 18-23% volatility, strong trend (R²>0.73), 10 CV folds, 50 samples
-        # RMSE: 20.86 -> 7.29 (+65.07% improvement)
-        - {garch: 0.05, samossa: 0.90, mssa_rl: 0.05}
+        # Trend-aware but GARCH-anchored
+        - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
+        - {garch: 0.55, samossa: 0.35, mssa_rl: 0.10}
+      HIGH_VOL_TRENDING:
+        # High vol: GARCH for vol forecasting, SAMOSSA for pattern decomposition
+        - {garch: 0.45, samossa: 0.40, mssa_rl: 0.15}
+        - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
 
     # Regime-specific model preferences (optional overrides)
     # If not specified, uses RegimeDetector's built-in recommendations
