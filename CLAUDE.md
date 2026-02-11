@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.9 (Cross-session persistence, proof-mode validation, UTC normalization)
-**Last Updated**: 2026-02-09
+**Current Phase**: Phase 7.9 (Cross-session persistence, proof-mode validation, UTC normalization, PnL integrity enforcement)
+**Last Updated**: 2026-02-11
 
 ---
 
@@ -359,7 +359,7 @@ regime_detection:
 
 Phase 7.9 adds cross-session position persistence, proof-mode validation, UTC-aware timestamps, and pandas frequency compatibility.
 
-**Status**: In progress (30 closed trades validated, audit accumulation ongoing)
+**Status**: In progress (20 closed trades validated, PnL integrity framework deployed)
 
 ### Phase 7.9 Key Features
 
@@ -386,6 +386,218 @@ python scripts/migrate_add_portfolio_state.py
 ### Phase 7.9 Documentation
 
 - [EXIT_ELIGIBILITY_AND_PROOF_MODE.md](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md): Exit diagnosis + proof-mode spec
+
+---
+
+## PnL Integrity Enforcement Framework (Phase 7.9+)
+
+**Status**: ✅ DEPLOYED (2026-02-11)
+
+The PnL Integrity Enforcement Framework provides structural prevention of double-counting, orphaned positions, diagnostic contamination, and artificial trade legs through database-level constraints and canonical metric views.
+
+### Core Invariants
+
+1. **Opening legs** (is_close=0) MUST have realized_pnl IS NULL. Only closing legs carry PnL.
+2. **Closing legs** (is_close=1) MUST link to their opening leg via entry_trade_id (round-trip audit trail).
+3. **Diagnostic trades** (is_diagnostic=1) MUST be excluded from production metrics. Cannot appear in execution_mode='live'.
+4. **Synthetic trades** (is_synthetic=1) MUST be excluded from production metrics. Cannot appear in execution_mode='live'.
+
+### New Database Columns (trade_executions)
+
+```sql
+is_diagnostic INTEGER DEFAULT 0           -- trade executed under DIAGNOSTIC_MODE
+is_synthetic INTEGER DEFAULT 0            -- trade from synthetic data source
+confidence_calibrated REAL                -- calibrated confidence (future use)
+entry_trade_id INTEGER                    -- links closing leg to opening leg
+bar_open REAL                             -- OHLC of bar used for fill price
+bar_high REAL
+bar_low REAL
+bar_close REAL
+```
+
+### Canonical Views
+
+**production_closed_trades**: Single source of truth for PnL reporting
+```sql
+SELECT * FROM trade_executions
+WHERE is_close = 1
+  AND COALESCE(is_diagnostic, 0) = 0
+  AND COALESCE(is_synthetic, 0) = 0
+```
+
+**round_trips**: Closing legs joined to opening legs via entry_trade_id
+```sql
+SELECT c.id AS close_id, o.id AS open_id, c.ticker,
+       o.trade_date AS entry_date, c.trade_date AS exit_date,
+       o.price AS entry_price, c.exit_price,
+       c.realized_pnl, c.holding_period_days, c.exit_reason
+FROM trade_executions c
+LEFT JOIN trade_executions o ON c.entry_trade_id = o.id
+WHERE c.is_close = 1
+```
+
+### Key Module: `integrity/pnl_integrity_enforcer.py`
+
+**PnLIntegrityEnforcer class** provides:
+- `get_canonical_metrics()` -- single source of truth for PnL reporting (uses production_closed_trades view)
+- `run_full_integrity_audit()` -- 6 integrity checks with severity levels
+- `fix_opening_legs_pnl(dry_run=True)` -- NULL out realized_pnl on opening legs
+- `backfill_entry_trade_ids(dry_run=True)` -- link closing legs to opening legs
+- `backfill_diagnostic_flag(dry_run=True)` -- flag diagnostic-mode trades
+- `print_report()` -- comprehensive integrity report
+
+**Usage**:
+```python
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+
+with PnLIntegrityEnforcer('data/portfolio_maximizer.db') as enforcer:
+    metrics = enforcer.get_canonical_metrics()
+    print(f"Total PnL: ${metrics.total_realized_pnl:+,.2f}")
+    print(f"Win rate: {metrics.win_rate:.1%}")
+
+    violations = enforcer.run_full_integrity_audit()
+    if violations:
+        print(f"Found {len(violations)} violations")
+```
+
+**CLI**:
+```bash
+# Report only
+python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db
+
+# Fix double-counting (dry run)
+python -m integrity.pnl_integrity_enforcer --fix-opening-pnl
+
+# Apply all fixes
+python -m integrity.pnl_integrity_enforcer --fix-all --apply
+```
+
+### Database Migration
+
+```bash
+# Add integrity columns to existing databases (safe to run multiple times)
+python scripts/migrate_add_integrity_columns.py
+
+# Outputs:
+#   - Added 8 new columns to trade_executions
+#   - Created production_closed_trades view
+#   - Created round_trips view
+```
+
+### Integration with PaperTradingEngine
+
+**Automatic tagging** (execution/paper_trading_engine.py lines 574-580, 1255-1264):
+- `is_diagnostic` set from EXECUTION_DIAGNOSTIC_MODE env var
+- `is_synthetic` set from data_source field (if contains "synthetic")
+- Opening legs automatically get realized_pnl=NULL (enforcement guard)
+- Closing legs populated with realized_pnl, entry_trade_id
+
+**Trade dataclass** (lines 94-98):
+```python
+@dataclass
+class Trade:
+    # ... existing fields ...
+    is_diagnostic: int = 0
+    is_synthetic: int = 0
+```
+
+### CI Gate
+
+**scripts/ci_integrity_gate.py** -- fails CI if CRITICAL/HIGH violations found
+
+```bash
+# Run integrity checks as CI gate
+python scripts/ci_integrity_gate.py
+
+# Exit codes:
+#   0 = all checks passed
+#   1 = CRITICAL or HIGH violations found
+#   2 = database error
+
+# Strict mode (also fails on MEDIUM)
+python scripts/ci_integrity_gate.py --strict
+```
+
+**Integration with bash/run_20_audit_sprint.sh**:
+```bash
+# After audit sprint completes, run integrity gate
+python scripts/ci_integrity_gate.py || {
+    echo "[ERROR] PnL integrity violations detected"
+    exit 1
+}
+```
+
+### Integrity Checks (6 checks, 4 severity levels)
+
+1. **OPENING_LEG_HAS_PNL** (CRITICAL): Opening legs must not carry realized_pnl
+2. **ORPHANED_POSITION** (HIGH): BUY rows with no SELL close and no entry_trade_id linkage
+3. **DIAGNOSTIC_NOT_FLAGGED** (HIGH): execution_mode contains 'diagnostic' but is_diagnostic=0
+4. **DUPLICATE_CLOSE_FOR_ENTRY** (HIGH): Opening leg closed multiple times (PnL duplication)
+5. **CLOSE_WITHOUT_ENTRY_LINK** (MEDIUM): Closing leg has no entry_trade_id
+6. **PNL_ARITHMETIC_MISMATCH** (MEDIUM): realized_pnl doesn't match (exit - entry) * size - commission
+
+### Corrected Baseline Metrics (Post-Fix)
+
+**Before enforcement** (with double-counting):
+- 44 "closed trades" (24 BUY + 20 SELL)
+- $1,345.87 total PnL (inflated by backfilled BUY PnL)
+
+**After enforcement** (production_closed_trades only):
+- 20 round-trips (is_close=1 rows only)
+- $909.18 total PnL
+- 60% win rate (12W/8L)
+- Profit factor: 2.78
+- Largest win: $497.83
+- Avg holding days: 0.0 (intraday)
+
+### Dashboard Integration
+
+**Always use `PnLIntegrityEnforcer.get_canonical_metrics()`** for PnL reporting:
+- DO NOT query trade_executions directly for metrics
+- DO NOT use is_close=0 rows in PnL calculations
+- DO NOT mix diagnostic and production trades
+
+**Example**:
+```python
+# WRONG
+total_pnl = db.execute(
+    "SELECT SUM(realized_pnl) FROM trade_executions WHERE realized_pnl IS NOT NULL"
+).fetchone()[0]
+
+# CORRECT
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+with PnLIntegrityEnforcer('data/portfolio_maximizer.db') as enforcer:
+    metrics = enforcer.get_canonical_metrics()
+    total_pnl = metrics.total_realized_pnl
+```
+
+### Files Added/Modified
+
+**New files**:
+- `integrity/__init__.py` -- module init
+- `integrity/pnl_integrity_enforcer.py` -- 600+ lines, enforcer class + CLI
+- `scripts/migrate_add_integrity_columns.py` -- migration script
+- `scripts/ci_integrity_gate.py` -- CI integrity gate
+
+**Modified files**:
+- `etl/database_manager.py` -- added 8 integrity columns to schema + save_trade_execution signature
+- `execution/paper_trading_engine.py` -- Trade dataclass + is_diagnostic/is_synthetic tagging + enforcement guard
+
+### Testing Strategy
+
+**Zero regression requirement**:
+- All 731 existing tests must pass
+- New tests validate integrity enforcement
+- CI gate runs on all future commits
+
+**Manual validation**:
+```bash
+# Run enforcer on existing database
+python -m integrity.pnl_integrity_enforcer
+
+# Verify corrected metrics match expected baseline
+# Expected: 20 round-trips, $909.18 PnL, 60% WR
+```
 
 ---
 
@@ -598,5 +810,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-09 (Phase 7.9: OpenBB multi-provider extractor, UTC normalization, freq-compat, proof-mode, checkpoint fix)
+**Last Updated**: 2026-02-11 (Phase 7.9: PnL integrity enforcement framework, OpenBB multi-provider extractor, UTC normalization, freq-compat, proof-mode, checkpoint fix)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git

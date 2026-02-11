@@ -93,6 +93,9 @@ class Trade:
     barbell_multiplier: Optional[float] = None
     base_confidence: Optional[float] = None
     effective_confidence: Optional[float] = None
+    # PnL integrity enforcement fields (Phase 7.9+)
+    is_diagnostic: int = 0
+    is_synthetic: int = 0
 
     def __post_init__(self):
         if self.trade_id is None:
@@ -572,6 +575,8 @@ class PaperTradingEngine:
             barbell_multiplier=signal.get("barbell_multiplier"),
             base_confidence=signal.get("base_confidence"),
             effective_confidence=signal.get("confidence"),
+            is_diagnostic=1 if diag_mode else 0,
+            is_synthetic=1 if data_source and "synthetic" in str(data_source).lower() else 0,
         )
         mid_price_hint = signal.get("mid_price_hint")
         try:
@@ -1248,6 +1253,16 @@ class PaperTradingEngine:
                         holding_period_days = max(0, (trade.timestamp.date() - entry_ts.date()).days)
             if is_close_ref is None:
                 is_close_ref = False
+
+            # PnL integrity enforcement: opening legs must NOT carry realized_pnl
+            if not is_close_ref:
+                realized_pnl = None
+                realized_pct = None
+                entry_price_ref = None
+                exit_price_ref = None
+                close_size_ref = None
+                holding_period_days = None
+
             # Instrument metadata – currently spot/crypto only, but the Trade
             # dataclass allows options/synthetic extensions once feature flags
             # are enabled.
@@ -1291,6 +1306,8 @@ class PaperTradingEngine:
                 is_close=is_close_ref,
                 bar_timestamp=trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
                 exit_reason=trade.exit_reason,
+                is_diagnostic=trade.is_diagnostic,
+                is_synthetic=trade.is_synthetic,
             )
 
             logger.debug("Trade stored in database: %s", trade.trade_id)

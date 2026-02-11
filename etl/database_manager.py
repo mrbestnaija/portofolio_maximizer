@@ -784,6 +784,15 @@ class DatabaseManager:
                 barbell_multiplier REAL,
                 base_confidence REAL,
                 effective_confidence REAL,
+                -- PnL integrity enforcement columns (Phase 7.9+)
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                confidence_calibrated REAL,
+                entry_trade_id INTEGER,
+                bar_open REAL,
+                bar_high REAL,
+                bar_low REAL,
+                bar_close REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 {fk_clause}
             )
@@ -852,6 +861,31 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_timestamp TEXT")
         if "exit_reason" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN exit_reason TEXT")
+        # PnL integrity enforcement columns (Phase 7.9+)
+        if "is_diagnostic" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN is_diagnostic INTEGER DEFAULT 0"
+            )
+        if "is_synthetic" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN is_synthetic INTEGER DEFAULT 0"
+            )
+        if "confidence_calibrated" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN confidence_calibrated REAL"
+            )
+        if "entry_trade_id" not in trade_cols:
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN entry_trade_id INTEGER"
+            )
+        if "bar_open" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_open REAL")
+        if "bar_high" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_high REAL")
+        if "bar_low" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_low REAL")
+        if "bar_close" not in trade_cols:
+            self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_close REAL")
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -1958,6 +1992,14 @@ class DatabaseManager:
         is_close: Optional[bool] = None,
         bar_timestamp: Optional[str] = None,
         exit_reason: Optional[str] = None,
+        is_diagnostic: int = 0,
+        is_synthetic: int = 0,
+        confidence_calibrated: Optional[float] = None,
+        entry_trade_id: Optional[int] = None,
+        bar_open: Optional[float] = None,
+        bar_high: Optional[float] = None,
+        bar_low: Optional[float] = None,
+        bar_close: Optional[float] = None,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -2004,6 +2046,14 @@ class DatabaseManager:
                     "barbell_multiplier",
                     "base_confidence",
                     "effective_confidence",
+                    "is_diagnostic",
+                    "is_synthetic",
+                    "confidence_calibrated",
+                    "entry_trade_id",
+                    "bar_open",
+                    "bar_high",
+                    "bar_low",
+                    "bar_close",
                 ]
                 values = [
                     ticker,
@@ -2042,6 +2092,14 @@ class DatabaseManager:
                     float(barbell_multiplier) if barbell_multiplier is not None else None,
                     float(base_confidence) if base_confidence is not None else None,
                     float(effective_confidence) if effective_confidence is not None else None,
+                    int(is_diagnostic) if is_diagnostic else 0,
+                    int(is_synthetic) if is_synthetic else 0,
+                    float(confidence_calibrated) if confidence_calibrated is not None else None,
+                    int(entry_trade_id) if entry_trade_id is not None else None,
+                    float(bar_open) if bar_open is not None else None,
+                    float(bar_high) if bar_high is not None else None,
+                    float(bar_low) if bar_low is not None else None,
+                    float(bar_close) if bar_close is not None else None,
                 ]
                 placeholders = ", ".join(["?"] * len(columns))
                 sql = f"INSERT INTO trade_executions ({', '.join(columns)}) VALUES ({placeholders})"
