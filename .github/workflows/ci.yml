@@ -41,6 +41,14 @@ jobs:
       - name: Run tests
         run: pytest -v --tb=short -m "not gpu"
 
+      - name: Verify ensemble routing integration (blocking)
+        run: pytest -v --tb=short tests/integration/test_ensemble_routing.py
+
+      - name: Reset warning log for convergence budget gate
+        run: |
+          mkdir -p logs/warnings
+          rm -f logs/warnings/warning_events.log
+
       - name: Run adversarial forecaster gate (blocking)
         env:
           TS_FORECAST_AUDIT_DIR: "0"
@@ -50,6 +58,13 @@ jobs:
             --monitor-config config/forecaster_monitoring_ci.yml \
             --enforce-thresholds \
             --output reports/adversarial_forecaster/ci_suite_${{ github.run_id }}.json
+
+      - name: Enforce SARIMAX convergence budget (blocking)
+        run: |
+          python scripts/check_sarimax_convergence_budget.py \
+            --monitor-config config/forecaster_monitoring_ci.yml \
+            --warning-log logs/warnings/warning_events.log \
+            --suite-report reports/adversarial_forecaster/ci_suite_${{ github.run_id }}.json
 
       - name: Upload adversarial suite artifact
         if: always()
