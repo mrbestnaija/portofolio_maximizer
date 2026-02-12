@@ -696,6 +696,7 @@ pytest tests/ -v --tb=short
 - **[logs/README.md](logs/README.md)** (380 lines): Log structure, search patterns, retention policies
 - **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
 - **[Cron Automation](Documentation/CRON_AUTOMATION.md)**: Production-style scheduling + evidence freshness wiring
+- **[Production Security + Profitability Runbook](Documentation/PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md)**: strict CVE defaults, temporary overrides, and gate-clearance workflow
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status
 
 ---
