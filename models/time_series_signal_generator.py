@@ -305,16 +305,45 @@ class TimeSeriesSignalGenerator:
         """Safely determine whether a forecast payload contains information."""
         return self._normalize_forecast_payload(payload) is not None
 
-    def _resolve_primary_forecast(self, forecast_bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _resolve_primary_forecast(
+        self,
+        forecast_bundle: Dict[str, Any],
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
         """
-        Resolve the primary forecast container with graceful fallback to mean or SARIMAX.
-        Returns a dict payload with at least a 'forecast' Series when available.
+        Resolve the primary forecast payload and selected source key.
+
+        Routing contract:
+        - Use `ensemble_forecast` when the forecaster default is ENSEMBLE.
+        - Use `mean_forecast` when default routing points to a single model.
+        - Fall back through available model payloads defensively.
         """
-        for key in ("ensemble_forecast", "mean_forecast", "sarimax_forecast"):
+        default_model = str(forecast_bundle.get("default_model") or "").strip().upper()
+        ensemble_meta = forecast_bundle.get("ensemble_metadata") or {}
+        allow_ensemble_default = bool(ensemble_meta.get("allow_as_default", True))
+
+        ordered_keys: List[str] = []
+        if default_model == "ENSEMBLE" and allow_ensemble_default:
+            ordered_keys.append("ensemble_forecast")
+        ordered_keys.append("mean_forecast")
+        ordered_keys.extend(
+            [
+                "ensemble_forecast",
+                "sarimax_forecast",
+                "samossa_forecast",
+                "mssa_rl_forecast",
+                "garch_forecast",
+            ]
+        )
+
+        seen: set[str] = set()
+        for key in ordered_keys:
+            if key in seen:
+                continue
+            seen.add(key)
             normalized = self._normalize_forecast_payload(forecast_bundle.get(key))
             if normalized:
-                return normalized
-        return None
+                return normalized, key
+        return None, ""
 
     def generate_signal(self,
                        forecast_bundle: Dict[str, Any],
@@ -334,14 +363,14 @@ class TimeSeriesSignalGenerator:
             TimeSeriesSignal with action, confidence, and risk metrics
         """
         try:
-            # Extract ensemble forecast (primary signal source)
-            ensemble_forecast = self._resolve_primary_forecast(forecast_bundle)
-            if ensemble_forecast is None:
-                logger.warning(f"No ensemble forecast available for {ticker}, returning HOLD")
+            # Resolve forecast source selected by the forecaster routing contract.
+            primary_forecast, forecast_source = self._resolve_primary_forecast(forecast_bundle)
+            if primary_forecast is None:
+                logger.warning(f"No primary forecast available for {ticker}, returning HOLD")
                 return self._create_hold_signal(ticker, current_price, "No forecast available")
 
             # Get forecast target value (horizon-consistent: horizon-end by default).
-            forecast_value = self._extract_forecast_value(ensemble_forecast)
+            forecast_value = self._extract_forecast_value(primary_forecast)
             if forecast_value is None:
                 return self._create_hold_signal(ticker, current_price, "Invalid forecast value")
             if current_price <= 0:
@@ -379,7 +408,7 @@ class TimeSeriesSignalGenerator:
             else:
                 volatility = self._to_scalar(volatility_forecast)
 
-            lower_ci, upper_ci = self._extract_ci_bounds(ensemble_forecast)
+            lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
             snr = self._estimate_signal_to_noise(
                 current_price=current_price,
                 expected_return=expected_return,
@@ -455,7 +484,10 @@ class TimeSeriesSignalGenerator:
             )
 
             # Extract provenance metadata
-            provenance = self._extract_provenance(forecast_bundle)
+            provenance = self._extract_provenance(
+                forecast_bundle,
+                selected_source=forecast_source,
+            )
 
             provenance["execution_friction"] = friction
             provenance["thresholds"] = {
@@ -1129,10 +1161,10 @@ class TimeSeriesSignalGenerator:
                 risk -= 0.15
 
         # Factor 2: Confidence interval width (wider = riskier)
-        ensemble_forecast = self._resolve_primary_forecast(forecast_bundle)
-        if ensemble_forecast:
-            lower_ci, upper_ci = self._extract_ci_bounds(ensemble_forecast)
-            forecast_price = self._extract_forecast_value(ensemble_forecast)
+        primary_forecast, _ = self._resolve_primary_forecast(forecast_bundle)
+        if primary_forecast:
+            lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
+            forecast_price = self._extract_forecast_value(primary_forecast)
 
             if lower_ci is not None and upper_ci is not None and forecast_price is not None:
                 ci_width_price = float(upper_ci - lower_ci)
@@ -1222,7 +1254,12 @@ class TimeSeriesSignalGenerator:
                         risk_score: float,
                         forecast_bundle: Dict[str, Any]) -> str:
         """Build human-readable reasoning for signal"""
-        model_type = forecast_bundle.get('ensemble_metadata', {}).get('primary_model', 'ENSEMBLE')
+        model_type = (
+            forecast_bundle.get("default_model")
+            or forecast_bundle.get("ensemble_metadata", {}).get("default_model")
+            or forecast_bundle.get("ensemble_metadata", {}).get("primary_model")
+            or "ENSEMBLE"
+        )
 
         reasoning = (
             f"Time Series {model_type} forecast indicates {action} signal. "
@@ -1240,19 +1277,34 @@ class TimeSeriesSignalGenerator:
 
         return reasoning.strip()
 
-    def _extract_provenance(self, forecast_bundle: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_provenance(
+        self,
+        forecast_bundle: Dict[str, Any],
+        *,
+        selected_source: str = "",
+    ) -> Dict[str, Any]:
         """Extract provenance metadata from forecast bundle"""
+        ensemble_metadata = forecast_bundle.get("ensemble_metadata") or {}
+        default_model = (
+            forecast_bundle.get("default_model")
+            or ensemble_metadata.get("default_model")
+            or ensemble_metadata.get("primary_model")
+            or "ENSEMBLE"
+        )
+
         provenance = {
             'model_type': 'TIME_SERIES_ENSEMBLE',
             'timestamp': utc_now().isoformat(),
-            'forecast_horizon': forecast_bundle.get('horizon', 30)
+            'forecast_horizon': forecast_bundle.get('horizon', 30),
+            'primary_model': str(default_model).upper(),
+            'selected_forecast_source': selected_source or None,
         }
 
         # Add model-specific metadata
-        ensemble_metadata = forecast_bundle.get('ensemble_metadata', {})
         if ensemble_metadata:
             provenance.update({
-                'primary_model': ensemble_metadata.get('primary_model', 'ENSEMBLE'),
+                'ensemble_primary_model': ensemble_metadata.get('primary_model', 'ENSEMBLE'),
+                'ensemble_default_model': ensemble_metadata.get('default_model'),
                 'model_weights': ensemble_metadata.get('weights', {}),
                 'aic': ensemble_metadata.get('aic'),
                 'bic': ensemble_metadata.get('bic')

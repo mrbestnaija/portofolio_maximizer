@@ -86,6 +86,10 @@ _GPU_PARALLEL_ENABLED: Optional[bool] = None
 _INTRADAY_SARIMAX_PROFILE_LOGGED = False
 
 
+class ConfigurationError(click.UsageError):
+    """Raised when runtime configuration violates production safety requirements."""
+
+
 def _configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
@@ -573,6 +577,29 @@ def _get_forecasting_config() -> Dict[str, Any]:
     return _FORECASTING_CONFIG
 
 
+def validate_production_ensemble_config(
+    *,
+    ensemble_kwargs: Dict[str, Any],
+    execution_mode: str,
+) -> None:
+    """Enforce production-safe ensemble settings."""
+    mode = str(execution_mode or "").strip().lower()
+    if mode != "live":
+        return
+
+    raw_scaling = ensemble_kwargs.get("confidence_scaling", True)
+    if isinstance(raw_scaling, str):
+        confidence_scaling = raw_scaling.strip().lower() in {"1", "true", "yes", "y", "on"}
+    else:
+        confidence_scaling = bool(raw_scaling)
+
+    if not confidence_scaling:
+        raise ConfigurationError(
+            "Production requires confidence_scaling=true. "
+            "See Documentation/PRIORITY_ANALYSIS_20260212.md"
+        )
+
+
 def _sarimax_kwargs_for_interval(interval: Optional[str]) -> Dict[str, Any]:
     """
     Return SARIMAX kwargs appropriate for the current yfinance interval.
@@ -787,14 +814,27 @@ def _generate_time_series_forecast(
 
         sarimax_cfg = fcfg.get("sarimax", {})
         sarimax_enabled = sarimax_cfg.get("enabled", False)
+        sarimax_kwargs = {k: v for k, v in sarimax_cfg.items() if k != "enabled"}
+        sarimax_kwargs.update(_sarimax_kwargs_for_interval(resolved_interval))
+        garch_cfg = fcfg.get("garch", {})
+        samossa_cfg = fcfg.get("samossa", {})
+        mssa_cfg = fcfg.get("mssa_rl", {})
 
         forecaster = TimeSeriesForecaster(
             config=TimeSeriesForecasterConfig(
                 forecast_horizon=horizon,
                 sarimax_enabled=sarimax_enabled,
-                sarimax_kwargs=_sarimax_kwargs_for_interval(resolved_interval),
-                samossa_kwargs={"forecast_horizon": int(horizon)},
+                garch_enabled=bool(garch_cfg.get("enabled", True)),
+                samossa_enabled=bool(samossa_cfg.get("enabled", True)),
+                mssa_rl_enabled=bool(mssa_cfg.get("enabled", True)),
+                sarimax_kwargs=sarimax_kwargs,
+                garch_kwargs={k: v for k, v in garch_cfg.items() if k != "enabled"},
+                samossa_kwargs={
+                    **{k: v for k, v in samossa_cfg.items() if k != "enabled"},
+                    "forecast_horizon": int(horizon),
+                },
                 mssa_rl_kwargs={
+                    **{k: v for k, v in mssa_cfg.items() if k != "enabled"},
                     "forecast_horizon": int(horizon),
                     "use_gpu": bool(mssa_use_gpu),
                 },
@@ -1013,6 +1053,10 @@ def _extract_forecast_scalar(payload: Any) -> Tuple[Optional[float], Optional[fl
     if not isinstance(payload, dict) or not payload:
         return None, None, None
     series = payload.get("forecast")
+    if series is None and isinstance(payload.get("mean_forecast"), pd.Series):
+        # Legacy GARCH payload fallback (returns series) when price-level
+        # forecast has not been enriched.
+        series = payload.get("mean_forecast")
     forecast_value: Optional[float] = None
     if isinstance(series, pd.Series) and not series.empty:
         cleaned = series.dropna()
@@ -1054,15 +1098,23 @@ def _persist_forecast_snapshots(
     forecast_date = bar_ts.date().isoformat() if hasattr(bar_ts, "date") else str(bar_ts)
     horizon = int(forecast_bundle.get("horizon") or 0) or None
 
-    ensemble_payload = forecast_bundle.get("ensemble_forecast")
-    samossa_payload = forecast_bundle.get("samossa_forecast")
-    sarimax_payload = forecast_bundle.get("sarimax_forecast")
+    payloads = {
+        "COMBINED": forecast_bundle.get("ensemble_forecast"),
+        "SAMOSSA": forecast_bundle.get("samossa_forecast"),
+        "SARIMAX": forecast_bundle.get("sarimax_forecast"),
+        "MSSA_RL": forecast_bundle.get("mssa_rl_forecast"),
+        "GARCH": forecast_bundle.get("garch_forecast"),
+    }
+    metrics_map = forecast_bundle.get("regression_metrics", {})
+    metrics_alias = {
+        "COMBINED": "ensemble",
+        "SAMOSSA": "samossa",
+        "SARIMAX": "sarimax",
+        "MSSA_RL": "mssa_rl",
+        "GARCH": "garch",
+    }
 
-    for model_type, payload in (
-        ("COMBINED", ensemble_payload),
-        ("SAMOSSA", samossa_payload),
-        ("SARIMAX", sarimax_payload),
-    ):
+    for model_type, payload in payloads.items():
         if not isinstance(payload, dict) or not payload:
             continue
         forecast_value, lower_ci, upper_ci = _extract_forecast_scalar(payload)
@@ -1080,8 +1132,8 @@ def _persist_forecast_snapshots(
                 "model_errors": forecast_bundle.get("model_errors") or {},
             },
             # regression_metrics will be populated via lagged evaluation.
-            "regression_metrics": forecast_bundle.get("regression_metrics", {}).get(model_type.lower())
-            if isinstance(forecast_bundle.get("regression_metrics"), dict)
+            "regression_metrics": metrics_map.get(metrics_alias.get(model_type, model_type.lower()))
+            if isinstance(metrics_map, dict)
             else None,
         }
         try:
@@ -1107,7 +1159,7 @@ def _backfill_forecast_regression_metrics(
     """
     if not db_manager or close_series is None or close_series.empty:
         return 0
-    types = model_types or ["COMBINED", "SAMOSSA"]
+    types = model_types or ["COMBINED", "SAMOSSA", "SARIMAX", "MSSA_RL", "GARCH"]
     rows = db_manager.get_forecasts(ticker, model_types=types, limit=500)  # type: ignore[arg-type]
     if not rows:
         return 0
@@ -1719,6 +1771,21 @@ def main(
     execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
     if execution_mode not in {"live", "synthetic", "auto"}:
         execution_mode = "live"
+    forecasting_cfg = _get_forecasting_config()
+    ensemble_cfg = (
+        forecasting_cfg.get("ensemble", {})
+        if isinstance(forecasting_cfg, dict)
+        else {}
+    )
+    ensemble_kwargs = (
+        {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
+        if isinstance(ensemble_cfg, dict)
+        else {}
+    )
+    validate_production_ensemble_config(
+        ensemble_kwargs=ensemble_kwargs,
+        execution_mode=execution_mode,
+    )
     enable_data_cache = _env_flag("ENABLE_DATA_CACHE")
     if enable_data_cache is None:
         enable_data_cache = False

@@ -63,6 +63,13 @@ class SARIMAXForecaster:
     Seasonal ARIMA forecaster with automatic order selection and diagnostics.
     """
 
+    _CONVERGENCE_LOG_CHECKPOINTS: Tuple[int, ...] = (1, 5, 10, 25, 50, 100)
+    _CONVERGENCE_EVENT_COUNTS: Dict[str, int] = {
+        "primary_nonconverged": 0,
+        "fallback_nonconverged": 0,
+        "fallback_converged": 0,
+    }
+
     def __init__(
         self,
         max_p: int = 3,
@@ -120,6 +127,7 @@ class SARIMAXForecaster:
         self._season_period_hint: Optional[int] = None
         self._log_shift: Optional[float] = None
         self._frequency_hint_valid: bool = False
+        self._fit_metadata: Dict[str, Any] = {}
 
     def _fit_model_instance(
         self,
@@ -151,8 +159,48 @@ class SARIMAXForecaster:
             issubclass(warning.category, ConvergenceWarning) for warning in caught
         )
         mle_retvals = getattr(result, "mle_retvals", {}) or {}
-        converged = bool(mle_retvals.get("converged", True)) and not triggered_warning
+        converged = bool(mle_retvals.get("converged", True))
+        if triggered_warning and converged:
+            log_warning(
+                "ConvergenceWarning emitted while optimizer reported converged=True; "
+                "treating as soft warning.",
+                "SARIMAXForecaster.fit_model_instance",
+            )
         return result, converged
+
+    @classmethod
+    def _record_convergence_event(cls, event: str) -> int:
+        count = int(cls._CONVERGENCE_EVENT_COUNTS.get(event, 0)) + 1
+        cls._CONVERGENCE_EVENT_COUNTS[event] = count
+        return count
+
+    @classmethod
+    def _is_warning_checkpoint(cls, count: int) -> bool:
+        return int(count) in cls._CONVERGENCE_LOG_CHECKPOINTS
+
+    @staticmethod
+    def _safe_aic(result: Any) -> float:
+        try:
+            aic = float(getattr(result, "aic", np.inf))
+        except Exception:
+            return float(np.inf)
+        return aic if np.isfinite(aic) else float(np.inf)
+
+    @classmethod
+    def _select_preferred_fit(
+        cls,
+        candidates: List[Tuple[str, Any, Any]],
+    ) -> Tuple[str, Any, Any]:
+        if not candidates:
+            raise ValueError("At least one candidate fit is required")
+        best_label, best_model, best_result = candidates[0]
+        best_aic = cls._safe_aic(best_result)
+        for label, model, result in candidates[1:]:
+            aic = cls._safe_aic(result)
+            if aic < best_aic:
+                best_label, best_model, best_result = label, model, result
+                best_aic = aic
+        return best_label, best_model, best_result
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -634,51 +682,146 @@ class SARIMAXForecaster:
             dates=dates_arg,
             freq=freq_arg,
         )
-        primary_result, converged = self._fit_model_instance(primary_model)
+        primary_result, primary_converged = self._fit_model_instance(
+            primary_model,
+            maxiter=250,
+        )
 
-        if converged:
-            self.model = primary_model
-            self.fitted_model = primary_result
-        else:
-            logger.warning(
-                "Primary SARIMAX fit did not converge; retrying with relaxed constraints."
-            )
-            fallback_model = SARIMAX(
-                prepared,
-                order=self.best_order,
-                seasonal_order=self.best_seasonal_order,
-                trend=self.trend,
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-                exog=aligned_exog,
-                dates=dates_arg,
-                freq=freq_arg,
-            )
-            fallback_result, fallback_converged = self._fit_model_instance(
-                fallback_model,
-                maxiter=500,
-                method="powell",
-            )
+        selected_label = "primary_strict"
+        selected_model = primary_model
+        selected_result = primary_result
+        powell_retry_attempted = False
+        powell_retry_converged = False
+        fallback_attempted = False
+        fallback_converged = False
+
+        if not primary_converged:
+            occurrence = self._record_convergence_event("primary_nonconverged")
             log_warning(
-                "Fallback SARIMAX fit used relaxed stationarity/invertibility constraints",
-                "SARIMAXForecaster.fit",
+                f"event=primary_nonconverged occurrence={occurrence}",
+                "SARIMAXForecaster.convergence_budget",
             )
-
-            if fallback_converged:
-                logger.info("Fallback SARIMAX fit converged with relaxed constraints.")
-                self.model = fallback_model
-                self.fitted_model = fallback_result
-            else:
+            if self._is_warning_checkpoint(occurrence):
                 logger.warning(
-                    "Fallback SARIMAX fit still failed to converge; proceeding with primary fit outputs."
+                    "Primary SARIMAX fit did not converge; retrying with strict/powell "
+                    "optimizer (occurrence=%d).",
+                    occurrence,
                 )
-                self.model = primary_model
-                self.fitted_model = primary_result
+            else:
+                logger.debug(
+                    "Primary SARIMAX fit non-converged; strict/powell retry "
+                    "(occurrence=%d).",
+                    occurrence,
+                )
+
+            powell_retry_attempted = True
+            retry_result = None
+            try:
+                retry_result, powell_retry_converged = self._fit_model_instance(
+                    primary_model,
+                    maxiter=350,
+                    method="powell",
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Strict SARIMAX powell retry failed: %s", exc)
+                retry_result = None
+                powell_retry_converged = False
+
+            if powell_retry_converged and retry_result is not None:
+                selected_label = "strict_powell_retry"
+                selected_model = primary_model
+                selected_result = retry_result
+            else:
+                fallback_attempted = True
+                fallback_model = SARIMAX(
+                    prepared,
+                    order=self.best_order,
+                    seasonal_order=self.best_seasonal_order,
+                    trend=self.trend,
+                    enforce_stationarity=False,
+                    enforce_invertibility=False,
+                    exog=aligned_exog,
+                    dates=dates_arg,
+                    freq=freq_arg,
+                )
+                fallback_result = None
+                try:
+                    fallback_result, fallback_converged = self._fit_model_instance(
+                        fallback_model,
+                        maxiter=350,
+                        method="powell",
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Relaxed SARIMAX fallback fit failed: %s", exc)
+                    fallback_result = None
+                    fallback_converged = False
+
+                log_warning(
+                    "Fallback SARIMAX fit used relaxed stationarity/invertibility constraints",
+                    "SARIMAXForecaster.fit",
+                )
+
+                if fallback_converged and fallback_result is not None:
+                    event_count = self._record_convergence_event("fallback_converged")
+                    log_warning(
+                        f"event=fallback_converged occurrence={event_count}",
+                        "SARIMAXForecaster.convergence_budget",
+                    )
+                    if self._is_warning_checkpoint(event_count):
+                        logger.info(
+                            "Fallback SARIMAX fit converged with relaxed constraints "
+                            "(occurrence=%d).",
+                            event_count,
+                        )
+                    selected_label = "relaxed_powell_fallback"
+                    selected_model = fallback_model
+                    selected_result = fallback_result
+                else:
+                    occurrence = self._record_convergence_event("fallback_nonconverged")
+                    log_warning(
+                        f"event=fallback_nonconverged occurrence={occurrence}",
+                        "SARIMAXForecaster.convergence_budget",
+                    )
+                    if self._is_warning_checkpoint(occurrence):
+                        logger.warning(
+                            "Fallback SARIMAX fit failed to converge; selecting best "
+                            "available fit output (occurrence=%d).",
+                            occurrence,
+                        )
+                    else:
+                        logger.debug(
+                            "Fallback SARIMAX non-converged; selecting best available "
+                            "fit output (occurrence=%d).",
+                            occurrence,
+                        )
+                    candidates: List[Tuple[str, Any, Any]] = [
+                        ("primary_strict", primary_model, primary_result)
+                    ]
+                    if retry_result is not None:
+                        candidates.append(("strict_powell_retry", primary_model, retry_result))
+                    if fallback_result is not None:
+                        candidates.append(("relaxed_powell_fallback", fallback_model, fallback_result))
+                    selected_label, selected_model, selected_result = self._select_preferred_fit(candidates)
+
+        self.model = selected_model
+        self.fitted_model = selected_result
+        self._fit_metadata = {
+            "fit_strategy": selected_label,
+            "primary_converged": bool(primary_converged),
+            "powell_retry_attempted": bool(powell_retry_attempted),
+            "powell_retry_converged": bool(powell_retry_converged),
+            "fallback_attempted": bool(fallback_attempted),
+            "fallback_converged": bool(fallback_converged),
+            "selected_constraints": "relaxed"
+            if str(selected_label).startswith("relaxed")
+            else "strict",
+        }
 
         logger.info(
-            "SARIMAX model fitted successfully (order=%s, seasonal=%s)",
+            "SARIMAX model fitted successfully (order=%s, seasonal=%s, strategy=%s)",
             self.best_order,
             self.best_seasonal_order,
+            self._fit_metadata.get("fit_strategy"),
         )
         return self
 
@@ -756,9 +899,11 @@ class SARIMAXForecaster:
             "steps": steps,
             "model_order": self.best_order,
             "seasonal_order": self.best_seasonal_order,
+            "fit_strategy": self._fit_metadata.get("fit_strategy"),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "diagnostics": diagnostics,
+            "convergence": dict(self._fit_metadata),
         }
         return self.forecast_results
 
@@ -768,9 +913,11 @@ class SARIMAXForecaster:
         return {
             "order": self.best_order,
             "seasonal_order": self.best_seasonal_order,
+            "fit_strategy": self._fit_metadata.get("fit_strategy"),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "log_likelihood": float(self.fitted_model.llf),
             "n_observations": int(self.fitted_model.nobs),
             "log_shift": self._log_shift,
+            "convergence": dict(self._fit_metadata),
         }

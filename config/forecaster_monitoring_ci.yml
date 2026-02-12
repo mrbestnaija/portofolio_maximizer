@@ -31,3 +31,10 @@ forecaster_monitoring:
   quant_validation:
     max_fail_fraction: 0.90
     max_negative_expected_profit_fraction: 0.5
+
+  # SARIMAX convergence-budget gate (blocking in CI).
+  # Rates are computed against adversarial suite total runs.
+  sarimax_convergence_budget:
+    max_primary_nonconverged_rate: 0.50
+    max_fallback_nonconverged_rate: 0.20
+    max_fallback_usage_rate: 0.50

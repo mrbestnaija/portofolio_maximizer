@@ -46,7 +46,9 @@ DEFAULT_SCENARIOS = [
 ]
 DEFAULT_SEEDS = [101, 202, 303]
 DEFAULT_VARIANTS = [
-    "prod_like_conf_off",
+    # RESEARCH-ONLY: confidence_scaling=false is excluded from blocking defaults.
+    # See Documentation/PRIORITY_ANALYSIS_20260212.md.
+    # "prod_like_conf_off",
     "prod_like_conf_on",
     "sarimax_augmented_conf_on",
 ]
