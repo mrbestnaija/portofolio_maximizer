@@ -110,6 +110,7 @@ class Portfolio:
     entry_prices: Dict[str, float] = field(default_factory=dict)  # ticker -> avg entry price
     entry_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened timestamp
     entry_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened bar timestamp
+    entry_trade_ids: Dict[str, int] = field(default_factory=dict)  # ticker -> opening trade ID (for audit linkage)
     last_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> last evaluated bar timestamp
     holding_bars: Dict[str, int] = field(default_factory=dict)  # ticker -> bars held since entry
     stop_losses: Dict[str, float] = field(default_factory=dict)  # ticker -> stop loss price
@@ -1269,7 +1270,17 @@ class PaperTradingEngine:
             asset_class = trade.asset_class or _infer_asset_class_from_ticker(trade.ticker)
             instrument_type = trade.instrument_type or "spot"
 
-            self.db_manager.save_trade_execution(
+            # Retrieve entry_trade_id when closing position (for audit linkage)
+            entry_trade_id_ref = None
+            if is_close_ref:
+                entry_trade_id_ref = self.portfolio.entry_trade_ids.get(trade.ticker)
+                if not entry_trade_id_ref:
+                    logger.warning(
+                        "Closing %s position but no entry_trade_id found - audit trail incomplete",
+                        trade.ticker
+                    )
+
+            trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
                 trade_date=trade.timestamp.date(),
                 action=trade.action,
@@ -1304,11 +1315,22 @@ class PaperTradingEngine:
                 position_before=position_before,
                 position_after=position_after,
                 is_close=is_close_ref,
+                entry_trade_id=entry_trade_id_ref,
                 bar_timestamp=trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
                 exit_reason=trade.exit_reason,
                 is_diagnostic=trade.is_diagnostic,
                 is_synthetic=trade.is_synthetic,
             )
+
+            # Store entry_trade_id when opening position (for future close linkage)
+            if not is_close_ref and trade_id:
+                self.portfolio.entry_trade_ids[trade.ticker] = trade_id
+                logger.debug("Stored entry_trade_id=%d for %s position", trade_id, trade.ticker)
+
+            # Clean up entry_trade_id when position fully closed
+            if is_close_ref and position_after == 0 and trade.ticker in self.portfolio.entry_trade_ids:
+                del self.portfolio.entry_trade_ids[trade.ticker]
+                logger.debug("Removed entry_trade_id for %s (position fully closed)", trade.ticker)
 
             logger.debug("Trade stored in database: %s", trade.trade_id)
             return realized_pnl if realized_pct is not None else None, realized_pct
