@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
+import numpy as np
 
 from ._freq_compat import normalize_freq
 
@@ -154,12 +155,22 @@ class TimeSeriesForecaster:
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
         self._sarimax_exog_columns: list[str] = []
+        self._last_price: Optional[float] = None
+        self._last_timestamp: Optional[pd.Timestamp] = None
+        self._series_freq_hint: Optional[str] = None
         audit_dir = None
         if isinstance(self.config.ensemble_kwargs, dict) and "audit_log_dir" in self.config.ensemble_kwargs:
             audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
         else:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
-        self._audit_dir: Optional[Path] = Path(audit_dir).expanduser() if audit_dir else None
+        if audit_dir is None:
+            self._audit_dir = Path("logs/forecast_audits")
+        else:
+            audit_text = str(audit_dir).strip()
+            if audit_text.lower() in {"", "0", "off", "none", "false"}:
+                self._audit_dir = None
+            else:
+                self._audit_dir = Path(audit_text).expanduser()
         cfg_path = os.environ.get("TS_FORECAST_MONITOR_CONFIG", "config/forecaster_monitoring.yml")
         self._rmse_monitor_cfg: Dict[str, Any] = self._load_rmse_monitoring_config(Path(cfg_path))
 
@@ -407,6 +418,13 @@ class TimeSeriesForecaster:
         returns_series: Optional[pd.Series] = None,
     ) -> "TimeSeriesForecaster":
         price_series = self._ensure_series(price_series)
+        cleaned_price = price_series.dropna()
+        if not cleaned_price.empty:
+            self._last_price = float(cleaned_price.iloc[-1])
+            self._last_timestamp = pd.to_datetime(cleaned_price.index[-1])
+        self._series_freq_hint = str(
+            getattr(price_series.index, "freqstr", None) or price_series.attrs.get("_pm_freq_hint") or "B"
+        )
         self._series_diagnostics = self._capture_series_diagnostics(price_series)
         self._model_events.clear()
         self._model_errors.clear()
@@ -658,7 +676,7 @@ class TimeSeriesForecaster:
                 self._record_model_event("garch", "forecast_start", horizon=horizon)
                 with self._instrumentation.track("garch", "forecast", horizon=horizon) as meta:
                     garch_result = self._garch.forecast(steps=horizon)
-                    results["garch_forecast"] = garch_result
+                    results["garch_forecast"] = self._enrich_garch_forecast(garch_result)
                     volatility_payload = {
                         "volatility": garch_result.get("volatility"),
                         "variance": garch_result.get("variance_forecast"),
@@ -688,11 +706,29 @@ class TimeSeriesForecaster:
         if ensemble:
             results["ensemble_forecast"] = ensemble["forecast_bundle"]
             results["ensemble_metadata"] = ensemble["metadata"]
-            results["mean_forecast"] = ensemble["forecast_bundle"]
             self._instrumentation.record_artifact(
                 "ensemble_weights", ensemble["metadata"].get("weights", {})
             )
             ensemble_meta = ensemble["metadata"]
+            allow_as_default = bool(ensemble_meta.get("allow_as_default", True))
+            if allow_as_default:
+                results["mean_forecast"] = ensemble["forecast_bundle"]
+                results["default_model"] = "ENSEMBLE"
+            else:
+                preferred_default = ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
+                default_model, default_payload = self._select_default_single_forecast(
+                    results,
+                    preferred_model=preferred_default,
+                )
+                if default_payload is not None:
+                    results["mean_forecast"] = default_payload
+                    results["default_model"] = default_model
+                    ensemble_meta["default_model"] = default_model
+                else:
+                    # Defensive fallback: preserve non-empty output even when no
+                    # single-model forecast payload is available.
+                    results["mean_forecast"] = ensemble["forecast_bundle"]
+                    results["default_model"] = "ENSEMBLE"
             self._record_model_event(
                 "ensemble",
                 "build_complete",
@@ -706,8 +742,11 @@ class TimeSeriesForecaster:
             # falling back to SARIMAX for backward compatibility.
             if results.get("samossa_forecast") is not None:
                 results["mean_forecast"] = results.get("samossa_forecast")
+                results["default_model"] = "SAMOSSA"
             else:
                 results["mean_forecast"] = results.get("sarimax_forecast")
+                if results["mean_forecast"] is not None:
+                    results["default_model"] = "SARIMAX"
 
         # Phase 7.5: Add regime metadata to results
         if self._regime_result:
@@ -730,6 +769,72 @@ class TimeSeriesForecaster:
             audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
             self.save_audit_report(audit_path)
         return results
+
+    def _build_forecast_index(self, horizon: int) -> pd.Index:
+        if horizon <= 0:
+            return pd.RangeIndex(0, 0)
+        if self._last_timestamp is None:
+            return pd.RangeIndex(start=1, stop=horizon + 1, step=1)
+
+        freq = normalize_freq(str(self._series_freq_hint or "B"))
+        try:
+            future = pd.date_range(
+                start=self._last_timestamp,
+                periods=int(horizon) + 1,
+                freq=freq,
+            )
+            return pd.DatetimeIndex(future[1:])
+        except Exception:
+            future = pd.date_range(
+                start=self._last_timestamp,
+                periods=int(horizon) + 1,
+                freq="B",
+            )
+            return pd.DatetimeIndex(future[1:])
+
+    def _enrich_garch_forecast(self, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        out = dict(payload)
+        mean_ret = payload.get("mean_forecast")
+        variance = payload.get("variance_forecast")
+        if not isinstance(mean_ret, pd.Series) or mean_ret.empty:
+            return out
+
+        horizon = int(payload.get("steps") or len(mean_ret) or self.config.forecast_horizon)
+        idx = self._build_forecast_index(horizon)
+        ret_vals = pd.to_numeric(mean_ret, errors="coerce").to_numpy(dtype=float)
+        if ret_vals.size == 0:
+            return out
+
+        start_price = float(self._last_price) if isinstance(self._last_price, (int, float)) else 100.0
+        prices: list[float] = []
+        cur = start_price
+        for r in ret_vals:
+            if not np.isfinite(r):
+                r = 0.0
+            cur = cur * (1.0 + float(r))
+            prices.append(cur)
+
+        forecast = pd.Series(prices, index=idx[: len(prices)], name="garch_price_forecast")
+        out["forecast"] = forecast
+
+        if isinstance(variance, pd.Series) and not variance.empty:
+            sigma = np.sqrt(pd.to_numeric(variance, errors="coerce")).to_numpy(dtype=float)
+            sigma = sigma[: len(prices)]
+            lower = []
+            upper = []
+            # Approximate return CI transformed into price CI.
+            z = 1.96
+            for i, p in enumerate(prices[: len(sigma)]):
+                s = sigma[i] if np.isfinite(sigma[i]) else 0.0
+                lower.append(max(0.0, p * (1.0 - z * s)))
+                upper.append(p * (1.0 + z * s))
+            out["lower_ci"] = pd.Series(lower, index=forecast.index[: len(lower)], name="garch_lower_ci")
+            out["upper_ci"] = pd.Series(upper, index=forecast.index[: len(upper)], name="garch_upper_ci")
+
+        return out
 
     def get_component_summaries(self) -> Dict[str, Any]:
         summaries = {
@@ -947,14 +1052,64 @@ class TimeSeriesForecaster:
             "selection_score": score,
             "primary_model": primary_model,
         }
+        preselection_gate = self._preselection_default_gate()
+        metadata["preselection_gate"] = preselection_gate
+        metadata["allow_as_default"] = bool(preselection_gate.get("allow_as_default", True))
+        if metadata["allow_as_default"]:
+            metadata.setdefault("ensemble_status", "KEEP")
+            metadata.setdefault("ensemble_decision_reason", "preselection gate passed")
+        else:
+            reason = str(preselection_gate.get("reason", "recent RMSE ratio gate"))
+            metadata["ensemble_status"] = "DISABLE_DEFAULT"
+            metadata["ensemble_decision_reason"] = f"preselection gate: {reason}"
+            if primary_model:
+                metadata["default_model"] = primary_model
+            self._record_model_event(
+                "ensemble",
+                "preselection_gate_blocked",
+                reason=reason,
+                recent_rmse_ratio=preselection_gate.get("recent_rmse_ratio"),
+                threshold=preselection_gate.get("threshold"),
+                effective_audits=preselection_gate.get("effective_n"),
+            )
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
+
+    def _select_default_single_forecast(
+        self,
+        results: Dict[str, Any],
+        *,
+        preferred_model: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        order: list[str] = []
+        if isinstance(preferred_model, str) and preferred_model.strip():
+            order.append(preferred_model.strip().lower())
+        for model in ("samossa", "sarimax", "garch", "mssa_rl"):
+            if model not in order:
+                order.append(model)
+
+        for model in order:
+            payload = results.get(f"{model}_forecast")
+            if not isinstance(payload, dict):
+                continue
+            if self._extract_series(payload) is None:
+                continue
+            return model.upper(), payload
+        return None, None
 
     @staticmethod
     def _extract_series(forecast_payload: Optional[Dict[str, Any]], key: str = "forecast") -> Optional[pd.Series]:
         if not isinstance(forecast_payload, dict):
             return None
         series = forecast_payload.get(key)
-        return series if isinstance(series, pd.Series) else None
+        if isinstance(series, pd.Series):
+            return series
+        # Backward compatibility: some historical GARCH payloads expose
+        # `mean_forecast` instead of a price-level `forecast`.
+        if key == "forecast":
+            fallback = forecast_payload.get("mean_forecast")
+            if isinstance(fallback, pd.Series):
+                return fallback
+        return None
 
     @staticmethod
     def _rmse_from_metrics(metrics: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -1073,6 +1228,56 @@ class TimeSeriesForecaster:
             "lift_fraction": lift_fraction,
             "ratios": ratios,
         }
+
+    def _preselection_default_gate(self) -> Dict[str, Any]:
+        """
+        Decide whether the ensemble is allowed as the default forecast source.
+
+        This gate runs during forecast selection (pre-holdout for the current
+        window) using recent audit history. When the recent RMSE ratio of
+        ensemble vs best single model is above threshold, the ensemble remains
+        available for diagnostics but is not allowed as the default source.
+        """
+        cfg = self._rmse_monitor_cfg or {}
+        enabled = bool(cfg.get("strict_preselection_gate_enabled", True))
+        threshold = float(cfg.get("strict_preselection_max_rmse_ratio", 1.0))
+        recent_window = max(1, int(cfg.get("strict_preselection_recent_window", 5) or 5))
+        min_effective = max(1, int(cfg.get("strict_preselection_min_effective_audits", 1) or 1))
+
+        history = self._audit_history_stats(limit=max(200, recent_window))
+        ratios = list(history.get("ratios") or [])
+        recent = ratios[:recent_window]
+        recent_ratio = float(np.mean(recent)) if recent else None
+        effective_n = int(history.get("effective_n", 0) or 0)
+
+        decision = {
+            "enabled": enabled,
+            "allow_as_default": True,
+            "reason": "preselection gate passed",
+            "threshold": threshold,
+            "effective_n": effective_n,
+            "recent_window": recent_window,
+            "recent_rmse_ratio": recent_ratio,
+            "recent_ratios": recent,
+        }
+        if not enabled:
+            decision["reason"] = "preselection gate disabled"
+            return decision
+        if recent_ratio is None:
+            decision["reason"] = "no recent audit RMSE ratios"
+            return decision
+        if effective_n < min_effective:
+            decision["reason"] = (
+                f"insufficient effective audits ({effective_n} < {min_effective})"
+            )
+            return decision
+        if recent_ratio > threshold:
+            decision["allow_as_default"] = False
+            decision["reason"] = (
+                f"recent RMSE ratio {recent_ratio:.3f} > {threshold:.3f}"
+            )
+            return decision
+        return decision
 
     def evaluate(self, actual_series: pd.Series) -> Dict[str, Dict[str, float]]:
         """
