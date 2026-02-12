@@ -66,6 +66,14 @@ forecaster_monitoring:
     # Minimum fraction of effective audits that must show lift; otherwise we
     # recommend disbanding the ensemble as default source of truth.
     min_lift_fraction: 0.10
+
+    # Preselection hard gate (forecast-time): block ensemble from being the
+    # default forecast source when recent ensemble/best-single RMSE ratio is
+    # above this strict threshold.
+    strict_preselection_gate_enabled: true
+    strict_preselection_max_rmse_ratio: 1.0
+    strict_preselection_recent_window: 10
+    strict_preselection_min_effective_audits: 5
   per_ticker:
     AAPL:
       min_profit_factor: 1.15

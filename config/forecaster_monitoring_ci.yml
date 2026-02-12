@@ -15,6 +15,19 @@ forecaster_monitoring:
     min_lift_rmse_ratio: 0.00
     min_lift_fraction: 0.10
 
+    # Preselection hard gate in CI profile.
+    strict_preselection_gate_enabled: true
+    strict_preselection_max_rmse_ratio: 1.0
+    strict_preselection_recent_window: 5
+    strict_preselection_min_effective_audits: 3
+
+    # Adversarial-suite thresholds (blocking in CI).
+    adversarial_suite:
+      max_ensemble_under_best_rate: 1.00
+      max_avg_ensemble_ratio_vs_best: 1.20
+      max_ensemble_worse_than_rw_rate: 0.30
+      require_zero_errors: true
+
   quant_validation:
     max_fail_fraction: 0.90
     max_negative_expected_profit_fraction: 0.5

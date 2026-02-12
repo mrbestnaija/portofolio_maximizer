@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,4 +40,21 @@ jobs:
 
       - name: Run tests
         run: pytest -v --tb=short -m "not gpu"
+
+      - name: Run adversarial forecaster gate (blocking)
+        env:
+          TS_FORECAST_AUDIT_DIR: "0"
+          TS_FORECAST_MONITOR_CONFIG: config/forecaster_monitoring_ci.yml
+        run: |
+          python scripts/run_adversarial_forecaster_suite.py \
+            --monitor-config config/forecaster_monitoring_ci.yml \
+            --enforce-thresholds \
+            --output reports/adversarial_forecaster/ci_suite_${{ github.run_id }}.json
+
+      - name: Upload adversarial suite artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-forecaster-suite
+          path: reports/adversarial_forecaster/*.json
 
