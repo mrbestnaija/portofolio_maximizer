@@ -2683,6 +2683,94 @@ def main(
     except Exception:
         logger.error("Failed to persist portfolio state", exc_info=True)
 
+    # PnL Integrity Report (Phase 7.9: Hard DB constraints)
+    try:
+        from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+
+        db_path = trading_engine.db_manager.db_path
+        with PnLIntegrityEnforcer(db_path, auto_create_views=False) as enforcer:
+            # Get canonical metrics (single source of truth)
+            metrics = enforcer.get_canonical_metrics()
+
+            # Run integrity audit
+            violations = enforcer.run_full_integrity_audit()
+
+            # Build integrity report
+            integrity_report = {
+                "canonical_metrics": {
+                    "closed_trades": metrics.total_round_trips,
+                    "total_pnl": round(metrics.total_realized_pnl, 2),
+                    "win_rate": round(metrics.win_rate, 4),
+                    "wins": metrics.win_count,
+                    "losses": metrics.loss_count,
+                    "avg_win": round(metrics.avg_win, 2),
+                    "avg_loss": round(metrics.avg_loss, 2),
+                    "profit_factor": round(metrics.profit_factor, 2),
+                    "contamination_audit": {
+                        "diagnostic_trades_excluded": metrics.diagnostic_trades_excluded,
+                        "synthetic_trades_excluded": metrics.synthetic_trades_excluded,
+                        "production_trades_counted": metrics.total_round_trips,
+                    },
+                    "double_counting_check": {
+                        "opening_legs_with_pnl": metrics.opening_legs_with_pnl,
+                        "status": "PASS" if metrics.opening_legs_with_pnl == 0 else "FAIL",
+                    },
+                },
+                "integrity_checks": {
+                    v.check_name: {
+                        "severity": v.severity,
+                        "description": v.description,
+                        "count": v.count,
+                        "status": "FAIL" if v.severity in {"CRITICAL", "HIGH"} else "WARN",
+                    }
+                    for v in violations
+                },
+                "overall_status": "HEALTHY" if not any(
+                    v.severity in {"CRITICAL", "HIGH"} for v in violations
+                ) else "CRITICAL_FAIL",
+            }
+
+            # Write integrity report artifact
+            integrity_artifact = ROOT_PATH / "logs" / "automation" / f"integrity_{run_id}.json"
+            integrity_artifact.parent.mkdir(parents=True, exist_ok=True)
+            integrity_artifact.write_text(json.dumps(integrity_report, indent=2))
+            logger.info("PnL Integrity Report: %s", integrity_artifact)
+
+            # Log summary to console
+            print()
+            print("=" * 70)
+            print("PnL INTEGRITY REPORT (CANONICAL METRICS)")
+            print("=" * 70)
+            print(f"  Round-trips:       {metrics.total_round_trips}")
+            print(f"  Total PnL:         ${metrics.total_realized_pnl:+,.2f}")
+            print(f"  Win rate:          {metrics.win_rate:.1%}")
+            print(f"  Profit factor:     {metrics.profit_factor:.2f}")
+            print(f"  Diagnostic excl:   {metrics.diagnostic_trades_excluded}")
+            print(f"  Synthetic excl:    {metrics.synthetic_trades_excluded}")
+            print(f"  Double-count chk:  {metrics.opening_legs_with_pnl} (must be 0)")
+
+            if violations:
+                print()
+                print(f"Integrity violations: {len(violations)}")
+                for v in violations:
+                    status = "FAIL" if v.severity in {"CRITICAL", "HIGH"} else "WARN"
+                    print(f"  [{status}] [{v.severity}] {v.check_name}: {v.count}")
+            else:
+                print()
+                print("[OK] All integrity checks passed")
+            print("=" * 70)
+            print()
+
+            # Exit with error if critical violations
+            if integrity_report["overall_status"] == "CRITICAL_FAIL":
+                logger.error("CRITICAL integrity violations detected - review required")
+                sys.exit(1)
+
+    except ImportError:
+        logger.warning("PnLIntegrityEnforcer not available - skipping integrity report")
+    except Exception:
+        logger.error("Failed to generate PnL integrity report", exc_info=True)
+
     # Close to flush + sync any WSL mirror back to the canonical DB path.
     try:
         trading_engine.db_manager.close()
