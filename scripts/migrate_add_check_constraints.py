@@ -168,10 +168,31 @@ def create_constrained_table(conn: sqlite3.Connection):
 
 
 def copy_data(conn: sqlite3.Connection):
-    """Copy data from old table to new table with constraints."""
-    conn.execute("""
-        INSERT INTO trade_executions_new
-        SELECT * FROM trade_executions
+    """Copy data from old table to new table with constraints.
+
+    CRITICAL: Must use explicit column names to prevent misalignment.
+    The old table has created_at at position 37, new table at position 45.
+    Using SELECT * would cause column misalignment and data corruption.
+    """
+    # Get column list from old table (excluding new integrity columns)
+    old_columns = [
+        'id', 'ticker', 'trade_date', 'action', 'shares', 'price', 'total_value',
+        'commission', 'mid_price', 'mid_slippage_bps', 'signal_id', 'data_source',
+        'execution_mode', 'synthetic_dataset_id', 'synthetic_generator_version',
+        'run_id', 'realized_pnl', 'realized_pnl_pct', 'holding_period_days',
+        'entry_price', 'exit_price', 'close_size', 'position_before', 'position_after',
+        'is_close', 'bar_timestamp', 'exit_reason', 'asset_class', 'instrument_type',
+        'underlying_ticker', 'strike', 'expiry', 'multiplier', 'barbell_bucket',
+        'barbell_multiplier', 'base_confidence', 'effective_confidence', 'created_at',
+        'is_diagnostic', 'is_synthetic', 'confidence_calibrated', 'entry_trade_id',
+        'bar_open', 'bar_high', 'bar_low', 'bar_close'
+    ]
+
+    # Build INSERT with explicit column mapping
+    col_list = ', '.join(old_columns)
+    conn.execute(f"""
+        INSERT INTO trade_executions_new ({col_list})
+        SELECT {col_list} FROM trade_executions
     """)
 
 
@@ -332,22 +353,29 @@ def migrate(db_path: str = DB_PATH, dry_run: bool = False):
         sys.exit(1)
     print()
 
-    # Step 5: Rename tables
-    print("Step 4: Swapping tables...")
+    # Step 5: Drop views before renaming tables (they reference trade_executions)
+    print("Step 4: Dropping views temporarily...")
+    conn.execute("DROP VIEW IF EXISTS production_closed_trades")
+    conn.execute("DROP VIEW IF EXISTS round_trips")
+    print("[OK] Views dropped")
+    print()
+
+    # Step 6: Rename tables
+    print("Step 5: Swapping tables...")
     conn.execute("ALTER TABLE trade_executions RENAME TO trade_executions_legacy")
     conn.execute("ALTER TABLE trade_executions_new RENAME TO trade_executions")
     print("[OK] trade_executions now has CHECK constraints")
     print("[OK] Old table preserved as trade_executions_legacy")
     print()
 
-    # Step 6: Create triggers (on new table)
-    print("Step 5: Creating enforcement triggers...")
+    # Step 7: Create triggers (on new table)
+    print("Step 6: Creating enforcement triggers...")
     create_triggers(conn)
     print("[OK] Triggers created")
     print()
 
-    # Step 7: Recreate views
-    print("Step 6: Recreating views...")
+    # Step 8: Recreate views
+    print("Step 7: Recreating views...")
     recreate_views(conn)
     print("[OK] Views recreated")
     print()
