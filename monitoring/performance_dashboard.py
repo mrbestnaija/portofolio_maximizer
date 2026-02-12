@@ -146,9 +146,11 @@ class PerformanceDashboard:
         limit: int = 500,
         start_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        # Use production_closed_trades view (canonical metrics, Phase 7.9)
+        # Excludes diagnostic/synthetic trades and only counts closing legs
         query = """
             SELECT trade_date, realized_pnl, realized_pnl_pct, ticker, action
-            FROM trade_executions
+            FROM production_closed_trades
             WHERE realized_pnl IS NOT NULL
         """
         params: List[Any] = []
