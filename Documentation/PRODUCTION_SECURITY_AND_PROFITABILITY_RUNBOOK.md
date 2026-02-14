@@ -94,3 +94,68 @@ Every run produces auditable artifacts:
 - Dashboard status: `logs/audit_gate/dashboard_status_*.json`
 - Production gate artifact: `logs/audit_gate/production_gate_*.json` (or scheduled-task equivalent)
 
+## 7) SQLite Runtime Guardrails (PRAGMA/DDL Hardening)
+
+Operational Python DB connections now apply SQLite guardrails by default:
+
+- defensive DB config (`SQLITE_DBCONFIG_DEFENSIVE=1`)
+- trusted schema disabled (`SQLITE_DBCONFIG_TRUSTED_SCHEMA=0`)
+- extension loading disabled
+- authorizer sandbox blocks:
+  - dangerous PRAGMAs (including `ignore_check_constraints`)
+  - `ATTACH` / `DETACH`
+  - runtime schema mutation (`CREATE` / `ALTER` / `DROP`) on hardened connections
+
+Environment controls:
+
+- `SECURITY_SQLITE_GUARDRAILS=1` (default; set `0` only for controlled maintenance)
+- `SECURITY_SQLITE_GUARDRAILS_HARD_FAIL=1` (default; if guardrails fail to install, abort)
+
+These guardrails are applied to operational paths, including:
+
+- `etl/database_manager.py`
+- `integrity/pnl_integrity_enforcer.py`
+- `scripts/dashboard_db_bridge.py`
+- `scripts/validate_profitability_proof.py`
+
+## 8) Optional Gate-Lift Replay (Default Off)
+
+`run_daily_trader.bat` now supports an optional historical replay stage to
+accumulate holdout-style evidence with real market data (`--as-of-date`) while
+keeping default live behavior unchanged.
+
+Defaults:
+
+- `ENABLE_GATE_LIFT_REPLAY=0`
+- `GATE_LIFT_REPLAY_DAYS=0`
+- `GATE_LIFT_REPLAY_START_OFFSET_DAYS=1`
+- `GATE_LIFT_REPLAY_INTERVAL=1d`
+- `GATE_LIFT_REPLAY_STRICT=0`
+
+Enable example:
+
+```bat
+set ENABLE_GATE_LIFT_REPLAY=1
+set GATE_LIFT_REPLAY_DAYS=5
+set GATE_LIFT_REPLAY_START_OFFSET_DAYS=1
+set GATE_LIFT_REPLAY_INTERVAL=1d
+run_daily_trader.bat
+```
+
+Replay artifact:
+
+- `logs/audit_gate/gate_lift_replay_<RUN_ID>.json`
+
+Related helper:
+
+- `scripts/run_gate_lift_replay.py`
+
+## 9) Orphan Position Gate Policy Knobs
+
+The orphan-position integrity gate now reconciles BUY/SELL inventory first and
+supports explicit policy controls:
+
+- `INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS` (default `3`)
+- `INTEGRITY_ORPHAN_WHITELIST_IDS` (comma-separated trade IDs)
+
+Use these only with documented justification and audit trail.

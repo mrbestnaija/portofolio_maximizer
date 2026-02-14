@@ -17,6 +17,7 @@ set "SCRIPT_DIR=%~dp0"
 set "ROOT_DIR=%SCRIPT_DIR:~0,-1%"
 set "PYTHON_BIN=%SCRIPT_DIR%simpleTrader_env\Scripts\python.exe"
 set "AUTO_TRADER_SCRIPT=%SCRIPT_DIR%scripts\run_auto_trader.py"
+set "GATE_LIFT_REPLAY_SCRIPT=%SCRIPT_DIR%scripts\run_gate_lift_replay.py"
 set "PRODUCTION_GATE_SCRIPT=%SCRIPT_DIR%scripts\production_audit_gate.py"
 set "AUDIT_SCRIPT=%SCRIPT_DIR%scripts\run_audit_event.py"
 set "DASHBOARD_MANAGER_SCRIPT=%SCRIPT_DIR%scripts\windows_dashboard_manager.py"
@@ -57,6 +58,13 @@ if "%SECURITY_STRICT%"=="" set "SECURITY_STRICT=1"
 if "%SECURITY_REQUIRE_PIP_AUDIT%"=="" set "SECURITY_REQUIRE_PIP_AUDIT=1"
 if "%SECURITY_HARD_FAIL%"=="" set "SECURITY_HARD_FAIL=1"
 if "%SECURITY_IGNORE_VULN_IDS%"=="" set "SECURITY_IGNORE_VULN_IDS="
+if "%SECURITY_SQLITE_GUARDRAILS%"=="" set "SECURITY_SQLITE_GUARDRAILS=1"
+if "%SECURITY_SQLITE_GUARDRAILS_HARD_FAIL%"=="" set "SECURITY_SQLITE_GUARDRAILS_HARD_FAIL=1"
+if "%ENABLE_GATE_LIFT_REPLAY%"=="" set "ENABLE_GATE_LIFT_REPLAY=0"
+if "%GATE_LIFT_REPLAY_DAYS%"=="" set "GATE_LIFT_REPLAY_DAYS=0"
+if "%GATE_LIFT_REPLAY_START_OFFSET_DAYS%"=="" set "GATE_LIFT_REPLAY_START_OFFSET_DAYS=1"
+if "%GATE_LIFT_REPLAY_INTERVAL%"=="" set "GATE_LIFT_REPLAY_INTERVAL=1d"
+if "%GATE_LIFT_REPLAY_STRICT%"=="" set "GATE_LIFT_REPLAY_STRICT=0"
 
 REM Security-oriented Python runtime hardening for all subprocesses.
 set "PYTHONNOUSERSITE=1"
@@ -101,6 +109,10 @@ if not exist "%SECURITY_PREFLIGHT_SCRIPT%" (
     echo [ERROR] Security preflight script not found at %SECURITY_PREFLIGHT_SCRIPT%
     exit /b 1
 )
+if "%ENABLE_GATE_LIFT_REPLAY%"=="1" if not exist "%GATE_LIFT_REPLAY_SCRIPT%" (
+    echo [ERROR] Gate-lift replay script not found at %GATE_LIFT_REPLAY_SCRIPT%
+    exit /b 1
+)
 
 set "STAMP="
 for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do if not "%%I"=="" set "STAMP=%%I"
@@ -119,6 +131,7 @@ set "GATE_JSON=%GATE_DIR%\production_gate_%RUN_ID%.json"
 set "DASHBOARD_STATUS_JSON=%GATE_DIR%\dashboard_status_%RUN_ID%.json"
 set "AUDIT_FILE=%AUDIT_DIR%\run_daily_trader_%RUN_ID%.jsonl"
 set "SECURITY_JSON=%SECURITY_DIR%\security_preflight_%RUN_ID%.json"
+set "REPLAY_JSON=%GATE_DIR%\gate_lift_replay_%RUN_ID%.json"
 set /a SUBPROC_SEQ=0
 
 set "PROOF_ARG="
@@ -140,6 +153,7 @@ echo [CONFIG] TICKERS=%TICKERS% >> "%LOG_FILE%"
 echo [CONFIG] DASHBOARD_API=%ENABLE_DASHBOARD_API% AUTO_OPEN=%AUTO_OPEN_DASHBOARD% PORT=%DASHBOARD_PORT% >> "%LOG_FILE%"
 echo [CONFIG] SECURITY_CHECKS=%ENABLE_SECURITY_CHECKS% STRICT=%SECURITY_STRICT% REQUIRE_PIP_AUDIT=%SECURITY_REQUIRE_PIP_AUDIT% >> "%LOG_FILE%"
 echo [CONFIG] SECURITY_IGNORE_VULN_IDS=%SECURITY_IGNORE_VULN_IDS% >> "%LOG_FILE%"
+echo [CONFIG] GATE_LIFT_REPLAY=%ENABLE_GATE_LIFT_REPLAY% DAYS=%GATE_LIFT_REPLAY_DAYS% START_OFFSET=%GATE_LIFT_REPLAY_START_OFFSET_DAYS% STRICT=%GATE_LIFT_REPLAY_STRICT% >> "%LOG_FILE%"
 
 call :audit_event "RUN_START" "STARTED" "bootstrap" "" "0" "Daily trader started"
 
@@ -307,6 +321,49 @@ if "%PASS2_RC%"=="0" (
     call :audit_event "STEP_END" "FAIL" "pass2_intraday_signals" "!SUBPROC_ID!" "%PASS2_RC%" "Intraday signal pass failed"
 )
 if not "%PASS2_RC%"=="0" set "EXIT_CODE=%PASS2_RC%"
+
+set "RUN_GATE_LIFT_REPLAY=0"
+if "%ENABLE_GATE_LIFT_REPLAY%"=="1" if not "%GATE_LIFT_REPLAY_DAYS%"=="0" set "RUN_GATE_LIFT_REPLAY=1"
+
+if "%RUN_GATE_LIFT_REPLAY%"=="1" (
+    set /a SUBPROC_SEQ+=1
+    set "SUBPROC_ID=%RUN_ID%_S!SUBPROC_SEQ!"
+    call :audit_event "STEP_START" "RUNNING" "gate_lift_replay" "!SUBPROC_ID!" "0" "Running historical replay for gate-lift evidence"
+    echo [REPLAY] Running gate-lift replay (days=%GATE_LIFT_REPLAY_DAYS%, start_offset=%GATE_LIFT_REPLAY_START_OFFSET_DAYS%) >> "%LOG_FILE%"
+    set "REPLAY_STRICT_ARG="
+    if "%GATE_LIFT_REPLAY_STRICT%"=="1" set "REPLAY_STRICT_ARG=--strict"
+    "%PYTHON_BIN%" "%GATE_LIFT_REPLAY_SCRIPT%" ^
+        --python-bin "%PYTHON_BIN%" ^
+        --auto-trader-script "%AUTO_TRADER_SCRIPT%" ^
+        --tickers "%TICKERS%" ^
+        --lookback-days %LOOKBACK_DAYS% ^
+        --initial-capital %INITIAL_CAPITAL% ^
+        --days %GATE_LIFT_REPLAY_DAYS% ^
+        --start-offset-days %GATE_LIFT_REPLAY_START_OFFSET_DAYS% ^
+        --yfinance-interval %GATE_LIFT_REPLAY_INTERVAL% ^
+        %PROOF_ARG% ^
+        --resume ^
+        --run-id "%RUN_ID%" ^
+        --parent-run-id "%PARENT_RUN_ID%" ^
+        --audit-file "%AUDIT_FILE%" ^
+        --log-file "%LOG_FILE%" ^
+        --output-json "%REPLAY_JSON%" ^
+        !REPLAY_STRICT_ARG! >> "%LOG_FILE%" 2>&1
+    set "REPLAY_RC=!ERRORLEVEL!"
+    echo [REPLAY] Exit code: !REPLAY_RC! >> "%LOG_FILE%"
+    if "!REPLAY_RC!"=="0" (
+        call :audit_event "STEP_END" "SUCCESS" "gate_lift_replay" "!SUBPROC_ID!" "!REPLAY_RC!" "Gate-lift replay completed"
+    ) else (
+        call :audit_event "STEP_END" "FAIL" "gate_lift_replay" "!SUBPROC_ID!" "!REPLAY_RC!" "Gate-lift replay failed"
+        if "%GATE_LIFT_REPLAY_STRICT%"=="1" set "EXIT_CODE=!REPLAY_RC!"
+    )
+) else (
+    if "%ENABLE_GATE_LIFT_REPLAY%"=="1" (
+        call :audit_event "STEP_END" "SKIPPED" "gate_lift_replay" "" "0" "Gate-lift replay enabled but days=0"
+    ) else (
+        call :audit_event "STEP_END" "SKIPPED" "gate_lift_replay" "" "0" "Gate-lift replay disabled by configuration"
+    )
+)
 
 if "%SKIP_PRODUCTION_GATE%"=="1" (
     echo [GATE] Skipped ^(SKIP_PRODUCTION_GATE=1^) >> "%LOG_FILE%"

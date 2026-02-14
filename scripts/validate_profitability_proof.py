@@ -10,12 +10,21 @@ Usage:
 """
 
 import argparse
-import sqlite3
 import json
+import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from integrity.sqlite_guardrails import guarded_sqlite_connect
+except ModuleNotFoundError:  # pragma: no cover - direct script fallback
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def load_requirements(config_path: str = "config/profitability_proof_requirements.yml") -> Dict[str, Any]:
@@ -158,7 +167,10 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     warnings = []
     recommendations = []
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(
+        db_path,
+        allow_schema_changes=False,
+    )
     cursor = conn.cursor()
 
     # Get trade statistics
@@ -184,7 +196,7 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
                 "synthetic_ticker_count": 0
             },
             "recommendations": recommendations,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
     # 1. Data Source Coverage
@@ -261,7 +273,7 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
             "synthetic_ticker_count": synthetic_count
         },
         "recommendations": recommendations,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 

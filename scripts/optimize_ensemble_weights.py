@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover - optional dependency for optimisation
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -42,17 +44,15 @@ def _connect_sqlite_readonly(db_path: str):
     We prefer immutable URI mode to avoid file-locking edge-cases when the DB
     lives on `/mnt/c` (Windows filesystem mount).
     """
-    import sqlite3
-
     path = Path(db_path).expanduser()
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
 
     uri = f"file:{path.as_posix()}?mode=ro&immutable=1"
     try:
-        return sqlite3.connect(uri, uri=True)
+        return guarded_sqlite_connect(uri, uri=True)
     except Exception:
-        return sqlite3.connect(str(path))
+        return guarded_sqlite_connect(str(path))
 
 
 class EnsembleWeightOptimizer:

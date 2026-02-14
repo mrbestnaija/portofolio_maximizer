@@ -4,9 +4,16 @@ Analyze the most recent pipeline run to diagnose signal pass rates and blockers.
 """
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from collections import defaultdict, Counter
 from datetime import datetime
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 def analyze_quant_validation(log_path: Path, since_timestamp: str = None):
     """Analyze quant validation log file."""
@@ -93,7 +100,7 @@ def check_database_trades(db_path: Path, since_date: str = None):
         print(f"⚠️  Database not found: {db_path}")
         return None
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(str(db_path))
     cursor = conn.cursor()
 
     query = "SELECT COUNT(*) FROM trade_executions"

@@ -15,12 +15,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import click
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def _group_key(ticker: str) -> str:
@@ -82,7 +89,7 @@ def _extract_hour(ts_val: str | None) -> int | None:
     help="Execution log with mid-price slippage (emitted by run_auto_trader.py).",
 )
 def main(db_path: str, output: str, execution_log: str) -> None:
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute(

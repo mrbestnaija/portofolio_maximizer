@@ -13,6 +13,45 @@ else
     exit 1
 fi
 
+# === Concurrent process guard ===
+# Prevents multiple sprint/auto_trader instances from clobbering portfolio state.
+LOCKFILE="${ROOT_DIR}/data/.sprint.lock"
+
+acquire_lock() {
+    if [[ -f "${LOCKFILE}" ]]; then
+        local stale_pid
+        stale_pid="$(cat "${LOCKFILE}" 2>/dev/null || echo "")"
+        if [[ -n "${stale_pid}" ]] && kill -0 "${stale_pid}" 2>/dev/null; then
+            echo "[ERROR] Another sprint/auto_trader is running (PID ${stale_pid}). Aborting."
+            echo "[ERROR] If this is stale, remove ${LOCKFILE} manually."
+            exit 1
+        fi
+        echo "[WARN] Removing stale lockfile (PID ${stale_pid} no longer running)."
+        rm -f "${LOCKFILE}"
+    fi
+    echo $$ > "${LOCKFILE}"
+}
+
+release_lock() {
+    rm -f "${LOCKFILE}"
+}
+
+acquire_lock
+
+# Kill any rogue auto_trader Python processes using production DB.
+# This prevents the concurrent-write bug that wiped portfolio state in sprint 20260212.
+rogue_pids="$(pgrep -f 'run_auto_trader.py' 2>/dev/null || true)"
+if [[ -n "${rogue_pids}" ]]; then
+    for pid in ${rogue_pids}; do
+        # Don't kill ourselves
+        if [[ "${pid}" != "$$" ]]; then
+            echo "[WARN] Killing rogue auto_trader process PID=${pid}"
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+fi
+
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 AUDIT_RUNS="${AUDIT_RUNS:-20}"
 LOG_DIR="${ROOT_DIR}/logs/audit_sprint/${RUN_TAG}"
@@ -169,6 +208,7 @@ start_gpu_monitor() {
 
 cleanup() {
     local exit_code=$?
+    release_lock
     if [[ -n "${GPU_MONITOR_PID}" ]] && kill -0 "${GPU_MONITOR_PID}" >/dev/null 2>&1; then
         kill "${GPU_MONITOR_PID}" >/dev/null 2>&1 || true
     fi

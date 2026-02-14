@@ -13,6 +13,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import pandas as pd
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
@@ -90,6 +92,13 @@ class LLMDatabaseManager:
         except OSError:  # pragma: no cover - best effort on Windows/WSL
             logger.debug("Unable to update permissions for %s", self._db_file)
 
+    def _connect(self, *, allow_schema_changes: bool = False) -> sqlite3.Connection:
+        conn = guarded_sqlite_connect(
+            self._db_path_str,
+            allow_schema_changes=allow_schema_changes,
+        )
+        return conn
+
     # ------------------------------------------------------------------ #
     # Utility helpers (backward compatibility for legacy schemas)
     # ------------------------------------------------------------------ #
@@ -139,7 +148,7 @@ class LLMDatabaseManager:
     
     def _ensure_tables_exist(self):
         """Create LLM-specific tables if they don't exist"""
-        with sqlite3.connect(self._db_path_str) as conn:
+        with self._connect(allow_schema_changes=True) as conn:
             cursor = conn.cursor()
             
             # LLM Signals table
@@ -290,7 +299,7 @@ class LLMDatabaseManager:
     def save_llm_signal(self, signal: LLMSignal) -> int:
         """Save LLM signal to database"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute("""
@@ -325,7 +334,7 @@ class LLMDatabaseManager:
     def save_risk_assessment(self, assessment: LLMRiskAssessment) -> int:
         """Save LLM risk assessment to database"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 risk_level = _normalise_risk_level(assessment.risk_level)
                 
@@ -361,7 +370,7 @@ class LLMDatabaseManager:
                                error_message: Optional[str] = None) -> int:
         """Save LLM performance metrics to database"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cursor.execute("""
@@ -390,7 +399,7 @@ class LLMDatabaseManager:
     def get_recent_signals(self, hours: int = 24) -> List[LLMSignal]:
         """Get recent LLM signals"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -436,7 +445,7 @@ class LLMDatabaseManager:
     def get_recent_risk_assessments(self, hours: int = 24) -> List[LLMRiskAssessment]:
         """Get recent LLM risk assessments"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -481,7 +490,7 @@ class LLMDatabaseManager:
     def get_performance_summary(self, hours: int = 24) -> Dict[str, Any]:
         """Get LLM performance summary"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 cutoff_time = datetime.now() - timedelta(hours=hours)
@@ -541,7 +550,7 @@ class LLMDatabaseManager:
     def cleanup_old_data(self, days_to_keep: int = 30):
         """Clean up old LLM data to prevent database bloat"""
         try:
-            with sqlite3.connect(self._db_path_str) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 cutoff_date = datetime.now().replace(day=datetime.now().day - days_to_keep)

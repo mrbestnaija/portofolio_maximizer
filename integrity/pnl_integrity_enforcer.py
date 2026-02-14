@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -125,16 +127,54 @@ class PnLIntegrityEnforcer:
         If True, create/replace canonical views on init.
     """
 
-    def __init__(self, db_path: str, auto_create_views: bool = True):
+    def __init__(
+        self,
+        db_path: str,
+        auto_create_views: bool = True,
+        allow_schema_changes: bool = False,
+    ):
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Database not found: {db_path}")
 
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = guarded_sqlite_connect(
+            db_path,
+            enable_guardrails=False,
+        )
         self.conn.row_factory = sqlite3.Row
+        self._guardrails_enabled = (
+            os.environ.get("SECURITY_SQLITE_GUARDRAILS", "1").strip() != "0"
+        )
+        self._guardrails_hard_fail = (
+            os.environ.get("SECURITY_SQLITE_GUARDRAILS_HARD_FAIL", "1").strip() != "0"
+        )
+        self._allow_schema_changes = bool(allow_schema_changes)
+
+        # Phase 1: bootstrap policy (may allow DDL for view setup).
+        self._apply_guardrails(allow_schema_changes=bool(auto_create_views or allow_schema_changes))
 
         if auto_create_views:
             self._ensure_views()
+
+        # Phase 2: strict runtime policy.
+        self._apply_guardrails(allow_schema_changes=bool(allow_schema_changes))
+
+    def _apply_guardrails(self, *, allow_schema_changes: bool) -> None:
+        if not self._guardrails_enabled:
+            return
+        try:
+            apply_sqlite_guardrails(
+                self.conn,
+                allow_schema_changes=allow_schema_changes,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to apply SQLite guardrails for PnLIntegrityEnforcer (%s): %s",
+                self.db_path,
+                exc,
+            )
+            if self._guardrails_hard_fail:
+                raise RuntimeError(f"SQLite guardrails setup failed: {exc}") from exc
 
     def close(self):
         """Close the database connection."""
@@ -283,61 +323,185 @@ class PnLIntegrityEnforcer:
         )]
 
     def _check_orphaned_positions(self) -> List[IntegrityViolation]:
-        """HIGH: BUY rows with no matching SELL and no realized_pnl.
+        """HIGH: stale BUY entries that cannot be reconciled to open inventory.
 
-        CI Gate Logic:
-        - Whitelists known historical artifacts from position scaling (Feb 10)
-        - Exempts recent positions (<=3 days old) as expected open positions
-        - Fails only on NEW orphans older than 3 days
+        Guardrail intent:
+        - Do not fail on active open inventory or recent opens.
+        - Do fail on stale, unreconciled opens that indicate lifecycle/linkage drift.
         """
-        # Known historical artifacts (Feb 10 position scaling/accumulation)
-        KNOWN_HISTORICAL_ORPHANS = {5, 6, 11, 13}
+        # Historical artifacts accepted by policy; additional ids can be supplied
+        # via INTEGRITY_ORPHAN_WHITELIST_IDS=1,2,3.
+        known_historical = {5, 6, 11, 13}
+        raw_whitelist = os.getenv("INTEGRITY_ORPHAN_WHITELIST_IDS", "")
+        if raw_whitelist.strip():
+            for token in raw_whitelist.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    known_historical.add(int(token))
+                except ValueError:
+                    logger.debug("Ignoring non-numeric orphan whitelist token: %s", token)
 
-        rows = self.conn.execute(
-            "SELECT id, ticker, trade_date FROM trade_executions "
+        max_open_age_days = 3
+        raw_max_age = os.getenv("INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS", "").strip()
+        if raw_max_age:
+            try:
+                max_open_age_days = max(0, int(raw_max_age))
+            except ValueError:
+                logger.debug(
+                    "Invalid INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS=%s; using default %s",
+                    raw_max_age,
+                    max_open_age_days,
+                )
+
+        # All BUY opening legs that should either be linked-to-close or still open.
+        buy_rows = self.conn.execute(
+            "SELECT id, ticker, trade_date, COALESCE(shares, 0.0) AS qty "
+            "FROM trade_executions "
             "WHERE action = 'BUY' AND is_close = 0 "
-            "  AND realized_pnl IS NULL "
-            "  AND id NOT IN ("
-            "    SELECT COALESCE(entry_trade_id, -1) FROM trade_executions "
-            "    WHERE is_close = 1"
-            "  )"
+            "  AND COALESCE(is_diagnostic, 0) = 0 "
+            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "ORDER BY trade_date, id"
+        ).fetchall()
+        if not buy_rows:
+            return []
+
+        # Closing SELL legs consume BUY inventory in FIFO order.
+        close_rows = self.conn.execute(
+            "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty "
+            "FROM trade_executions "
+            "WHERE action = 'SELL' AND is_close = 1 "
+            "  AND COALESCE(is_diagnostic, 0) = 0 "
+            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "ORDER BY trade_date, id"
         ).fetchall()
 
-        if not rows:
+        # Track BUY inventory remaining after FIFO close consumption.
+        fifo_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+        buy_by_id: Dict[int, Dict[str, Any]] = {}
+        for row in buy_rows:
+            qty = float(row["qty"] or 0.0)
+            if qty <= 0:
+                continue
+            payload = {
+                "id": int(row["id"]),
+                "ticker": str(row["ticker"]),
+                "trade_date": row["trade_date"],
+                "remaining_qty": qty,
+            }
+            fifo_by_ticker.setdefault(str(row["ticker"]), []).append(payload)
+            buy_by_id[int(row["id"])] = payload
+
+        for row in close_rows:
+            symbol = str(row["ticker"])
+            remaining_close = float(row["qty"] or 0.0)
+            if remaining_close <= 0:
+                continue
+            queue = fifo_by_ticker.get(symbol) or []
+            idx = 0
+            while remaining_close > 1e-9 and idx < len(queue):
+                buy_leg = queue[idx]
+                consume = min(remaining_close, float(buy_leg["remaining_qty"]))
+                buy_leg["remaining_qty"] = float(buy_leg["remaining_qty"]) - consume
+                remaining_close -= consume
+                if float(buy_leg["remaining_qty"]) <= 1e-9:
+                    idx += 1
+            if idx > 0:
+                fifo_by_ticker[symbol] = queue[idx:]
+
+        # Optional portfolio-level reconciliation: if portfolio_positions exists
+        # and reports open shares, treat those as expected active inventory first.
+        open_shares_by_ticker: Dict[str, float] = {}
+        try:
+            has_positions = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_positions' LIMIT 1"
+            ).fetchone()
+            if has_positions:
+                open_rows = self.conn.execute(
+                    "SELECT ticker, COALESCE(shares, 0.0) AS shares FROM portfolio_positions"
+                ).fetchall()
+                for row in open_rows:
+                    qty = float(row["shares"] or 0.0)
+                    if qty <= 0:
+                        continue
+                    open_shares_by_ticker[str(row["ticker"])] = qty
+        except Exception:
+            logger.debug("Skipping portfolio_positions reconciliation for orphan checks", exc_info=True)
+
+        now_utc = datetime.utcnow()
+        problematic: List[Dict[str, Any]] = []
+        covered_as_active = 0
+        covered_as_recent = 0
+        covered_as_whitelist = 0
+
+        for symbol, queue in fifo_by_ticker.items():
+            # Unmatched BUY qty may be expected if still represented in open positions.
+            expected_open_qty = float(open_shares_by_ticker.get(symbol, 0.0))
+            for buy_leg in queue:
+                orphan_id = int(buy_leg["id"])
+                remaining_qty = float(buy_leg["remaining_qty"] or 0.0)
+                if remaining_qty <= 1e-9:
+                    continue
+
+                if orphan_id in known_historical:
+                    covered_as_whitelist += 1
+                    continue
+
+                if expected_open_qty > 1e-9:
+                    covered = min(remaining_qty, expected_open_qty)
+                    expected_open_qty -= covered
+                    remaining_qty -= covered
+                    if remaining_qty <= 1e-9:
+                        covered_as_active += 1
+                        continue
+
+                trade_date_raw = buy_leg.get("trade_date")
+                trade_dt: Optional[datetime] = None
+                if isinstance(trade_date_raw, datetime):
+                    trade_dt = trade_date_raw
+                elif isinstance(trade_date_raw, str) and trade_date_raw.strip():
+                    raw = trade_date_raw.strip()
+                    try:
+                        trade_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    except ValueError:
+                        try:
+                            trade_dt = datetime.strptime(raw[:10], "%Y-%m-%d")
+                        except ValueError:
+                            trade_dt = None
+
+                if trade_dt is None:
+                    age_days = max_open_age_days + 1
+                else:
+                    age_days = max(0, (now_utc.date() - trade_dt.date()).days)
+
+                if age_days <= max_open_age_days:
+                    covered_as_recent += 1
+                    continue
+
+                problematic.append(
+                    {
+                        "id": orphan_id,
+                        "ticker": symbol,
+                        "remaining_qty": round(remaining_qty, 6),
+                        "age_days": int(age_days),
+                    }
+                )
+
+        if not problematic:
             return []
 
-        # Filter out known historical artifacts
-        filtered_rows = [r for r in rows if r["id"] not in KNOWN_HISTORICAL_ORPHANS]
-
-        if not filtered_rows:
-            # Only historical artifacts remain (accepted)
-            return []
-
-        # Filter out recent orphans (<=3 days = current open positions, expected)
-        from datetime import datetime, timedelta
-        cutoff_date = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-
-        new_problematic_orphans = [
-            r for r in filtered_rows
-            if r["trade_date"] < cutoff_date
-        ]
-
-        if not new_problematic_orphans:
-            # All remaining orphans are recent (expected open positions)
-            return []
-
-        # Found NEW problematic orphans (older than 3 days, not whitelisted)
         return [IntegrityViolation(
             check_name="ORPHANED_POSITION",
             severity="HIGH",
             description=(
-                f"{len(new_problematic_orphans)} NEW orphaned BUY entries (older than 3 days) "
-                "have no matching SELL close and no entry_trade_id linkage. "
-                f"These are distinct from {len(KNOWN_HISTORICAL_ORPHANS)} accepted historical artifacts "
-                f"and {len(filtered_rows) - len(new_problematic_orphans)} recent open positions."
+                f"{len(problematic)} stale orphaned BUY legs are not reconciled to active inventory "
+                f"(max_open_age_days={max_open_age_days}). "
+                f"Exemptions: whitelist={covered_as_whitelist}, active_inventory={covered_as_active}, "
+                f"recent_open={covered_as_recent}."
             ),
-            affected_ids=[r["id"] for r in new_problematic_orphans],
-            count=len(new_problematic_orphans),
+            affected_ids=[int(r["id"]) for r in problematic],
+            count=len(problematic),
         )]
 
     def _check_diagnostic_contamination(self) -> List[IntegrityViolation]:
@@ -686,7 +850,7 @@ def main():
 
     dry_run = not args.apply
 
-    with PnLIntegrityEnforcer(args.db) as enforcer:
+    with PnLIntegrityEnforcer(args.db, allow_schema_changes=True) as enforcer:
         # Ensure schema columns exist
         added = enforcer.ensure_integrity_columns()
         if added:

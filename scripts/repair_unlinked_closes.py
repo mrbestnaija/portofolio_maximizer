@@ -24,6 +24,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "portfolio_maximizer.db"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def find_unlinked_closes(conn: sqlite3.Connection) -> list:
@@ -109,7 +113,7 @@ def repair_linkage(db_path: Path, dry_run: bool = True):
         print(f"[ERROR] Database not found: {db_path}")
         return 1
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(str(db_path))
 
     print("=" * 70)
     print("REPAIR UNLINKED CLOSES")
@@ -197,7 +201,7 @@ def repair_linkage(db_path: Path, dry_run: bool = True):
     # Verify repairs
     print()
     print("Verifying repairs...")
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(str(db_path))
     remaining = find_unlinked_closes(conn)
     conn.close()
 

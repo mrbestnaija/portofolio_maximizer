@@ -4,11 +4,18 @@ Analyze Phase 7.3 model improvement results.
 """
 import sqlite3
 import json
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 def analyze_forecast_audits():
     """Check forecast RMSE ratios from today's run."""
-    conn = sqlite3.connect('data/portfolio_maximizer.db')
+    conn = guarded_sqlite_connect('data/portfolio_maximizer.db')
     cursor = conn.cursor()
 
     # Get today's forecast audits

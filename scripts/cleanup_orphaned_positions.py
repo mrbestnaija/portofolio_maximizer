@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "portfolio_maximizer.db")
 
@@ -120,7 +122,7 @@ def main(dry_run: bool = True) -> None:
         print(f"[ERROR] Database not found: {DB_PATH}")
         sys.exit(1)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = guarded_sqlite_connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
     # ---- Gather orphan BUYs (realized_pnl IS NULL) ----

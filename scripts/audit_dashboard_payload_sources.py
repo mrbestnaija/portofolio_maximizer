@@ -22,6 +22,11 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 DEFAULT_DB = Path("data/portfolio_maximizer.db")
 DEFAULT_AUDIT_DB = Path("data/dashboard_audit.db")
 DEFAULT_DASH_JSON = Path("visualizations/dashboard_data.json")
@@ -30,9 +35,9 @@ DEFAULT_DASH_JSON = Path("visualizations/dashboard_data.json")
 def _connect(db_path: Path, *, ro: bool) -> sqlite3.Connection:
     if ro:
         uri = f"file:{db_path.as_posix()}?mode=ro"
-        con = sqlite3.connect(uri, uri=True, timeout=2.0)
+        con = guarded_sqlite_connect(uri, uri=True, timeout=2.0)
     else:
-        con = sqlite3.connect(str(db_path), timeout=2.0)
+        con = guarded_sqlite_connect(str(db_path), timeout=2.0)
     con.row_factory = sqlite3.Row
     return con
 

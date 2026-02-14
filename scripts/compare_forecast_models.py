@@ -23,7 +23,7 @@ import json
 import sys
 import site
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 site.addsitedir(str(ROOT_PATH))
@@ -35,15 +35,23 @@ from etl.database_manager import DatabaseManager
 
 def _aggregate_by_ticker(
     db: DatabaseManager,
-    model_type: str,
+    model_type: str | Sequence[str],
     start_date: Optional[str],
     end_date: Optional[str],
 ) -> Dict[str, Dict[str, float]]:
     """
     Aggregate regression_metrics per ticker for a given model_type.
     """
-    params: list[Any] = [model_type]
-    where_clauses = ["model_type = ?"]
+    if isinstance(model_type, str):
+        model_types = [model_type]
+    else:
+        model_types = [str(m) for m in model_type if str(m).strip()]
+    if not model_types:
+        return {}
+
+    params: list[Any] = list(model_types)
+    placeholders = ", ".join(["?"] * len(model_types))
+    where_clauses = [f"model_type IN ({placeholders})"]
 
     if start_date:
         where_clauses.append("forecast_date >= ?")
@@ -157,7 +165,7 @@ def main() -> None:
 
     ensemble = _aggregate_by_ticker(
         db=db,
-        model_type="COMBINED",
+        model_type=["COMBINED", "ENSEMBLE"],
         start_date=args.start_date,
         end_date=args.end_date,
     )

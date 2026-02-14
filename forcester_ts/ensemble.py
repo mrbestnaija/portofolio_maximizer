@@ -28,6 +28,11 @@ class EnsembleConfig:
     enabled: bool = True
     confidence_scaling: bool = True
     regime_detection_enabled: bool = True  # Phase 7.4: Enable regime-aware selection
+    # Prefer diversified candidates when they are close in quality to a
+    # concentrated winner. This prevents brittle winner-takes-all selections
+    # unless the single model is materially better.
+    prefer_diversified_candidate: bool = True
+    diversity_tolerance: float = 0.35
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
             {"garch": 0.85, "samossa": 0.10, "mssa_rl": 0.05},
@@ -73,8 +78,7 @@ class EnsembleCoordinator:
             self.selection_score = 0.0
             return self.selected_weights, self.selection_score
 
-        best_score = float("-inf")
-        best_weights: Dict[str, float] = {}
+        scored_candidates: List[Tuple[Dict[str, float], float]] = []
 
         for candidate in self.config.candidate_weights:
             normalized = self._normalize(candidate)
@@ -91,17 +95,13 @@ class EnsembleCoordinator:
                     continue
             normalized = self._apply_minimum_component_weight(normalized)
 
-            # Phase 7.3 FIX: When confidence_scaling is disabled, score candidates purely
-            # on config weights (first viable candidate wins) rather than confidence-adjusted scores
-            if self.config.confidence_scaling:
-                score = sum(
-                    normalized.get(model, 0.0) * model_confidence.get(model, 0.0)
-                    for model in normalized.keys()
-                )
-            else:
-                # Score = sum of weights (should be ~1.0 after normalization)
-                # This makes all candidates equal, so first in config wins
-                score = sum(normalized.values())
+            # Always rank candidates by confidence-weighted expected quality.
+            # `confidence_scaling` controls whether candidate *weights* are
+            # scaled, not whether selection quality should ignore confidence.
+            score = sum(
+                normalized.get(model, 0.0) * model_confidence.get(model, 0.5)
+                for model in normalized.keys()
+            )
 
             # Phase 7.3 DEBUG: Log candidate evaluation
             logger.info(
@@ -110,13 +110,29 @@ class EnsembleCoordinator:
                 normalized,
                 score,
             )
+            scored_candidates.append((normalized, score))
 
-            if score > best_score:
-                best_score = score
-                best_weights = normalized
+        if not scored_candidates:
+            self.selected_weights = {}
+            self.selection_score = 0.0
+            return self.selected_weights, self.selection_score
+
+        scored_candidates.sort(key=lambda item: item[1], reverse=True)
+        best_weights, best_score = scored_candidates[0]
+
+        if self.config.prefer_diversified_candidate and len(best_weights) <= 1:
+            tolerance = float(np.clip(self.config.diversity_tolerance, 0.0, 0.95))
+            min_allowed = best_score * (1.0 - tolerance)
+            diversified = [
+                (weights, score)
+                for weights, score in scored_candidates
+                if len(weights) >= 2 and score >= min_allowed
+            ]
+            if diversified:
+                best_weights, best_score = diversified[0]
 
         self.selected_weights = best_weights
-        self.selection_score = best_score if best_score != float("-inf") else 0.0
+        self.selection_score = best_score
         return self.selected_weights, self.selection_score
 
     @staticmethod

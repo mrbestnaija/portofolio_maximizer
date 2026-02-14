@@ -1,0 +1,95 @@
+# Inbox Workflows Configuration
+#
+# Goals:
+# - Keep credentials local (prefer .env / *_FILE secrets; never commit real values here).
+# - Support Gmail inbox workflows (IMAP read, SMTP send).
+# - Support Proton Mail via Proton Mail Bridge (local IMAP/SMTP endpoints).
+# - Default to safe limits; increase over time once you trust the automation.
+#
+# Notes:
+# - Gmail: requires IMAP enabled in Gmail settings + an App Password (recommended).
+# - Proton Mail: requires Proton Mail Bridge running locally. Copy host/ports from Bridge settings.
+#
+# Related docs:
+# - Documentation/INBOX_WORKFLOWS.md
+# - Documentation/API_KEYS_SECURITY.md
+
+version: 1
+
+limits:
+  # Max messages to fetch per account per scan.
+  max_messages_per_account: 10
+
+  # If true, fetch a small snippet of the message body (still local-only unless you forward it).
+  include_body_snippet: false
+  max_snippet_chars: 400
+
+  # If true, mark messages as seen during scan (default: false).
+  mark_seen: false
+
+  # If true, allow send operations from scripts (default: false).
+  # You can also override at runtime with PMX_INBOX_ALLOW_SEND=1.
+  allow_send: false
+
+notifications:
+  # Optional: send scan summaries via OpenClaw.
+  # This is a no-op until OPENCLAW_TO is configured in your environment.
+  openclaw:
+    enabled: true
+    max_message_chars: 1500
+
+scan:
+  mailbox: "INBOX"
+  # IMAP search criteria. Examples:
+  # - ["UNSEEN"]
+  # - ["UNSEEN", "SINCE", "01-Feb-2026"]
+  search_criteria:
+    - "UNSEEN"
+
+accounts:
+  # Gmail via IMAP/SMTP (app password recommended).
+  gmail:
+    enabled: true
+    label: "Gmail"
+    capabilities:
+      read: true
+      send: true
+    imap:
+      host: "imap.gmail.com"
+      port: 993
+      ssl: true
+      starttls: false
+    smtp:
+      host: "smtp.gmail.com"
+      port: 587
+      ssl: false
+      starttls: true
+    secrets:
+      # These env var names are looked up via etl/secret_loader.py (supports *_FILE).
+      # By default we reuse the same vars as error-monitor SMTP alerts.
+      username_env: "PMX_EMAIL_USERNAME"
+      password_env: "PMX_EMAIL_PASSWORD"
+      from_env: "PMX_EMAIL_FROM"
+
+  # Proton Mail via Proton Mail Bridge (local IMAP/SMTP).
+  # Proton does not provide direct IMAP/SMTP; Bridge is the standard approach.
+  proton_bridge:
+    enabled: false
+    label: "Proton Mail Bridge"
+    capabilities:
+      read: true
+      send: true
+    imap:
+      host: "127.0.0.1"
+      port: 1143
+      ssl: false
+      starttls: true
+    smtp:
+      host: "127.0.0.1"
+      port: 1025
+      ssl: false
+      starttls: true
+    secrets:
+      username_env: "PMX_PROTON_BRIDGE_USERNAME"
+      password_env: "PMX_PROTON_BRIDGE_PASSWORD"
+      from_env: "PMX_PROTON_FROM"

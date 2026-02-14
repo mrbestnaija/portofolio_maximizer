@@ -5,29 +5,29 @@
 openbb:
   # Provider chain - tried in priority order (lower = higher priority)
   providers:
-    - name: "yfinance"
-      enabled: true
-      priority: 1
-      credentials_env: null  # Free, no key needed
-      rate_limit_rpm: 60
-
     - name: "polygon"
       enabled: true
-      priority: 2
+      priority: 1
       credentials_env: "MASSIVE_API_KEY"  # Polygon.io via massive.com
       rate_limit_rpm: 5  # Free tier: 5 calls/minute
 
     - name: "alpha_vantage"
       enabled: true
-      priority: 3
+      priority: 2
       credentials_env: "ALPHA_VANTAGE_API_KEY"
       rate_limit_rpm: 5  # Free tier: 5 calls/minute, 500/day
 
     - name: "finnhub"
       enabled: true
-      priority: 4
+      priority: 3
       credentials_env: "FINNHUB_API_KEY"
       rate_limit_rpm: 60  # Free tier: 60 calls/minute
+
+    - name: "yfinance"
+      enabled: true
+      priority: 4
+      credentials_env: null  # Free, no key needed
+      rate_limit_rpm: 60
 
   # Cache configuration
   cache:

@@ -28,6 +28,7 @@ not intended for authoritative PnL reporting.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -38,6 +39,11 @@ import datetime
 import yaml
 
 from etl.synthetic_pricer import load_synthetic_legs, compute_synthetic_mtm
+ROOT_PATH = Path(__file__).resolve().parents[1]
+if str(ROOT_PATH) not in sys.path:
+    sys.path.insert(0, str(ROOT_PATH))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 try:
     import yfinance as yf
@@ -283,7 +289,7 @@ def _mark_to_market(
             try:
                 # We assume spot_prices came from DB/vendor; for volatility we
                 # reload DB via a short-lived connection.
-                conn = sqlite3.connect(root / "data" / "portfolio_maximizer.db")
+                conn = guarded_sqlite_connect(str(root / "data" / "portfolio_maximizer.db"))
             except Exception:
                 return intrinsic
             try:
@@ -334,7 +340,7 @@ def _mark_to_market(
         root = Path(__file__).resolve().parent.parent
         db_path = root / "data" / "portfolio_maximizer.db"
         try:
-            conn = sqlite3.connect(db_path)
+            conn = guarded_sqlite_connect(str(db_path))
         except Exception:
             # If we cannot open the DB, fall back to entry price.
             return entry
@@ -411,7 +417,7 @@ def main(db_path: str, pricing_policy: str) -> None:
     if not path.exists():
         raise SystemExit(f"DB not found: {db_path}")
 
-    conn = sqlite3.connect(path)
+    conn = guarded_sqlite_connect(str(path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 

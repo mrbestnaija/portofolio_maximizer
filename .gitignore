@@ -185,6 +185,11 @@ logs/**/*.pid
 logs/brutal/
 logs/audit_sprint/
 logs/phase7.8/
+logs/inbox/
+logs/inbox/*
+
+# Email artifacts (can contain sensitive content)
+*.eml
 
 # Generated dashboard artifacts
 visualizations/dashboard_data.json

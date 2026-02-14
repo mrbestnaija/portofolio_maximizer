@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -32,6 +33,10 @@ import click
 from risk.barbell_policy import BarbellConfig
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
+if str(ROOT_PATH) not in sys.path:
+    sys.path.insert(0, str(ROOT_PATH))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 @dataclass
@@ -69,7 +74,7 @@ class SleeveMetrics:
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 

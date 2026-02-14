@@ -1313,6 +1313,15 @@ def _execute_signal(
         except Exception:
             logger.debug("Skipping barbell sizing overlay for %s", ticker, exc_info=True)
 
+    # Anchor execution timestamps to the last observed market bar for auditable
+    # historical replay and trading-day evidence accounting.
+    last_bar_ts = _extract_last_bar_timestamp(market_data)
+    if last_bar_ts is not None:
+        bar_iso = _format_bar_timestamp(last_bar_ts)
+        if bar_iso:
+            primary_payload["signal_timestamp"] = bar_iso
+            primary_payload["bar_timestamp"] = bar_iso
+
     # Proof-mode overrides: tighter exits for guaranteed round trips.
     if proof_mode:
         default_horizon = 6 if is_intraday else 5
@@ -1404,6 +1413,8 @@ def _execute_signal(
         "quality": quality,
         "data_source": data_source,
         "timestamp": executed_at,
+        "signal_timestamp": primary_payload.get("signal_timestamp"),
+        "bar_timestamp": primary_payload.get("bar_timestamp"),
         "realized_pnl": realized_pnl,
         "realized_pnl_pct": realized_pnl_pct,
         "mid_price": mid_px,
@@ -1723,6 +1734,22 @@ def main(
     run_started_at = datetime.now(UTC)
     run_id = run_started_at.strftime("%Y%m%d_%H%M%S")
     _configure_logging(verbose)
+
+    # Concurrent process guard: warn if an audit sprint holds the DB lock.
+    _sprint_lockfile = Path(__file__).resolve().parents[1] / "data" / ".sprint.lock"
+    if _sprint_lockfile.exists():
+        try:
+            _lock_pid = _sprint_lockfile.read_text().strip()
+            import signal as _sig
+            os.kill(int(_lock_pid), 0)  # check if alive (raises OSError if dead)
+            logging.getLogger(__name__).warning(
+                "Audit sprint is running (PID %s). This auto_trader instance "
+                "may clobber portfolio state. Use --no-resume or wait for the sprint to finish.",
+                _lock_pid,
+            )
+        except (OSError, ValueError):
+            pass  # stale lock or unreadable — ignore
+
     companion_config = _load_ai_companion_config()
     _activate_ai_companion_guardrails(companion_config)
 

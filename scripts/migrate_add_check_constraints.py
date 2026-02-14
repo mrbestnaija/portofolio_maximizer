@@ -33,6 +33,10 @@ from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "portfolio_maximizer.db")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def check_already_migrated(conn: sqlite3.Connection) -> bool:
@@ -277,7 +281,10 @@ def migrate(db_path: str = DB_PATH, dry_run: bool = False):
         print(f"[ERROR] Database not found: {db_path}")
         sys.exit(1)
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(
+        db_path,
+        allow_schema_changes=True,
+    )
     conn.row_factory = sqlite3.Row
 
     print("=" * 70)
