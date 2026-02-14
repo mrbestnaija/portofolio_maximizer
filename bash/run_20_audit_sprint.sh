@@ -111,6 +111,19 @@ if [[ "${IS_HOLDOUT_AUDIT}" == "1" || "${IS_LOCAL_AUDIT}" == "1" ]]; then
     ALLOW_GATE_CONTEXT=1
 fi
 
+# Integrity gate: orphaned-position max-age sensitivity.
+# - Live runs: keep strict default (3 days) so stale opens trip the HIGH gate quickly.
+# - Holdout/local runs: widen the window to avoid false positives from historical "as-of" dates.
+if [[ -z "${INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS:-}" ]]; then
+    if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
+        export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS="60"
+    else
+        export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS="3"
+    fi
+else
+    export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS
+fi
+
 if [[ -z "${ALLOW_FORECAST_GATE_FAILURE}" ]]; then
     if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
         ALLOW_FORECAST_GATE_FAILURE="1"
