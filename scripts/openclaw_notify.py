@@ -2,15 +2,22 @@
 """
 Send a notification via OpenClaw CLI.
 
-This is a small wrapper around `openclaw message send ...` so Portfolio Maximizer
-automation can optionally deliver alerts through a user's OpenClaw gateway.
+This is a small wrapper around:
+- `openclaw message send ...` (plain notifications)
+- `openclaw agent ...` (prompt an agent; optionally deliver the reply)
+
+If `OPENCLAW_TO` is not set, the script can (optionally) infer a WhatsApp
+"message yourself" target from `openclaw status --json`.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to path
@@ -22,9 +29,79 @@ from utils.openclaw_cli import send_message  # noqa: E402
 
 def _read_stdin() -> str:
     try:
+        if sys.stdin is None or sys.stdin.closed or sys.stdin.isatty():
+            return ""
         return sys.stdin.read()
     except Exception:
         return ""
+
+
+def _mask_target(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"[+][0-9]{6,15}", text):
+        # Keep country prefix-ish + first digits and last 4 for debugging.
+        if len(text) <= 8:
+            return text
+        return text[:5] + "***" + text[-4:]
+    if ":" in text:
+        prefix = text.split(":", 1)[0]
+        return prefix + ":***"
+    return "***"
+
+
+def _redact_text(text: str) -> str:
+    payload = text or ""
+    secret_markers = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+    for name, value in os.environ.items():
+        if not value or len(value) < 8:
+            continue
+        upper = name.upper()
+        if any(marker in upper for marker in secret_markers):
+            payload = payload.replace(value, "[REDACTED]")
+    payload = re.sub(r"(Bearer\\s+)[A-Za-z0-9\\-\\._~\\+/]+=*", r"\\1[REDACTED]", payload)
+    return payload
+
+
+def _write_run_log(*, mode: str, to: str, channel: str | None, message_len: int, result) -> None:
+    """Best-effort run logging (never blocks the main action)."""
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        out_dir = (PROJECT_ROOT / "logs" / "openclaw_notify").resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_mode = re.sub(r"[^a-zA-Z0-9_-]+", "_", mode or "run").strip("_") or "run"
+        status = "ok" if bool(getattr(result, "ok", False)) else "fail"
+        path = out_dir / f"openclaw_notify_{stamp}_{safe_mode}_{status}.json"
+
+        raw_cmd = list(getattr(result, "command", []) or [])
+        cmd = list(raw_cmd)
+        # Prevent logging full targets/messages in command args.
+        redact_next_as_target = {"--target", "-t", "--to", "--reply-to"}
+        redact_next_as_message = {"--message", "-m"}
+        for i, arg in enumerate(list(cmd)):
+            if i + 1 >= len(cmd):
+                continue
+            if arg in redact_next_as_target:
+                cmd[i + 1] = _mask_target(cmd[i + 1])
+            elif arg in redact_next_as_message:
+                cmd[i + 1] = f"<redacted len={int(message_len)}>"
+
+        payload = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "mode": mode,
+            "to_masked": _mask_target(to),
+            "channel": channel or "",
+            "message_len": int(message_len),
+            "ok": bool(getattr(result, "ok", False)),
+            "returncode": int(getattr(result, "returncode", -1)),
+            "command": cmd,
+            "stdout": _redact_text(str(getattr(result, "stdout", "") or "")),
+            "stderr": _redact_text(str(getattr(result, "stderr", "") or "")),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
 
 
 def main() -> int:
@@ -49,9 +126,52 @@ def main() -> int:
         help="OpenClaw target (e.g., +15551234567, discord:..., slack:...). Can also be set via OPENCLAW_TO.",
     )
     parser.add_argument(
+        "--channel",
+        default=os.getenv("OPENCLAW_CHANNEL", ""),
+        help="OpenClaw channel (e.g., whatsapp, telegram, discord). Can also be set via OPENCLAW_CHANNEL.",
+    )
+    parser.add_argument(
         "--message",
         default="",
         help="Message text. If omitted, reads from stdin.",
+    )
+    parser.add_argument(
+        "--prompt",
+        action="store_true",
+        help="Run an OpenClaw agent turn instead of sending a plain notification (uses `openclaw agent`).",
+    )
+    parser.add_argument(
+        "--deliver",
+        dest="deliver",
+        action="store_true",
+        default=None,
+        help="(Prompt mode) Deliver the agent's reply back to the selected channel/target.",
+    )
+    parser.add_argument(
+        "--no-deliver",
+        dest="deliver",
+        action="store_false",
+        help="(Prompt mode) Do not deliver; only run the agent turn.",
+    )
+    parser.add_argument(
+        "--agent-id",
+        default="",
+        help="(Prompt mode) Optional OpenClaw agent id to route to (maps to `openclaw agent --agent`).",
+    )
+    parser.add_argument(
+        "--thinking",
+        default="",
+        help="(Prompt mode) Thinking level: off|minimal|low|medium|high (maps to `openclaw agent --thinking`).",
+    )
+    parser.add_argument(
+        "--local-agent",
+        action="store_true",
+        help="(Prompt mode) Run embedded agent locally (`openclaw agent --local`). Requires model provider keys.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="(Send mode) Print payload and skip sending (passes `--dry-run` to OpenClaw CLI).",
     )
     parser.add_argument(
         "--command",
@@ -62,14 +182,41 @@ def main() -> int:
         "--timeout-seconds",
         type=float,
         default=_env_float("OPENCLAW_TIMEOUT_SECONDS", 20.0),
-        help="Command timeout in seconds (default: 20).",
+        help="(Send mode) Command timeout in seconds (default: 20).",
+    )
+    parser.add_argument(
+        "--agent-timeout-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_AGENT_TIMEOUT_SECONDS", 600.0),
+        help="(Prompt mode) Command timeout in seconds (default: 600).",
+    )
+    parser.add_argument(
+        "--infer-to",
+        dest="infer_to",
+        action="store_true",
+        default=True,
+        help="If --to/OPENCLAW_TO is missing, try to infer a WhatsApp self-target from `openclaw status --json`.",
+    )
+    parser.add_argument(
+        "--no-infer-to",
+        dest="infer_to",
+        action="store_false",
+        help="Disable inferring a default target from OpenClaw status.",
+    )
+    parser.add_argument(
+        "--prompt-to",
+        dest="prompt_to",
+        action="store_true",
+        default=None,
+        help="If target is missing, prompt interactively (only when stdin is a TTY).",
+    )
+    parser.add_argument(
+        "--no-prompt-to",
+        dest="prompt_to",
+        action="store_false",
+        help="Never prompt interactively for a missing target.",
     )
     args = parser.parse_args()
-
-    to = (args.to or "").strip()
-    if not to:
-        print("[openclaw_notify] Missing --to (or OPENCLAW_TO).", file=sys.stderr)
-        return 2
 
     message = args.message if args.message else _read_stdin()
     message = (message or "").strip()
@@ -83,12 +230,84 @@ def main() -> int:
     if os.name == "nt" and (command or "").strip().lower() == "echo":
         command = "cmd /c echo"
 
-    result = send_message(
+    channel = (args.channel or "").strip() or None
+
+    to = (args.to or "").strip()
+    if not to and bool(args.infer_to):
+        try:
+            from utils.openclaw_cli import infer_linked_whatsapp_target
+
+            inferred = infer_linked_whatsapp_target(command=command, cwd=PROJECT_ROOT, timeout_seconds=10.0)
+            if inferred:
+                to = inferred
+        except Exception:
+            pass
+
+    prompt_to = args.prompt_to if args.prompt_to is not None else bool(sys.stdin.isatty())
+    if not to and prompt_to:
+        try:
+            to = input("OpenClaw target (e.g. +15551234567): ").strip()
+        except Exception:
+            to = ""
+
+    if not to:
+        print(
+            "[openclaw_notify] Missing --to (or OPENCLAW_TO). "
+            "Set OPENCLAW_TO in .env, pass --to, or enable inference/prompting.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Default to WhatsApp when the target looks like an E.164 phone number.
+    # (OpenClaw can route this without an explicit --channel, but being explicit
+    # makes behavior less surprising when multiple channels are configured.)
+    if channel is None and re.fullmatch(r"[+][0-9]{6,15}", to or ""):
+        channel = "whatsapp"
+
+    if bool(args.prompt) and bool(args.dry_run):
+        print("[openclaw_notify] --dry-run is only supported in send mode (omit --prompt).", file=sys.stderr)
+        return 2
+
+    if bool(args.prompt):
+        try:
+            from utils.openclaw_cli import run_agent_turn
+
+            deliver = bool(args.deliver) if args.deliver is not None else True
+            agent_id = (args.agent_id or "").strip() or None
+            thinking = (args.thinking or "").strip() or None
+            result = run_agent_turn(
+                to=to,
+                message=message,
+                command=command,
+                cwd=PROJECT_ROOT,
+                timeout_seconds=float(args.agent_timeout_seconds),
+                deliver=deliver,
+                channel=channel,
+                agent_id=agent_id,
+                thinking=thinking,
+                local=bool(args.local_agent),
+            )
+        except Exception as exc:
+            print(f"[openclaw_notify] FAILED (agent mode): {exc}", file=sys.stderr)
+            return 1
+    else:
+        extra_args = ["--dry-run"] if bool(args.dry_run) else None
+        result = send_message(
+            to=to,
+            message=message,
+            command=command,
+            cwd=PROJECT_ROOT,
+            timeout_seconds=args.timeout_seconds,
+            extra_args=extra_args,
+            channel=channel,
+        )
+
+    _write_run_log(
+        mode=("agent" if bool(args.prompt) else "message"),
         to=to,
-        message=message,
-        command=command,
-        cwd=PROJECT_ROOT,
-        timeout_seconds=args.timeout_seconds,
+        channel=channel,
+        message_len=len(message),
+        result=result,
     )
 
     if result.ok:
@@ -99,6 +318,28 @@ def main() -> int:
     stderr_tail = "\n".join((result.stderr or "").splitlines()[-20:])
     stdout_tail = "\n".join((result.stdout or "").splitlines()[-20:])
     print(f"[openclaw_notify] FAILED (exit={result.returncode})", file=sys.stderr)
+    if bool(args.prompt):
+        combined = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+        missing_provider = "no api key found for provider" in combined
+        gateway_unreachable = (
+            "econnrefused" in combined
+            or "connect refused" in combined
+            or "connection refused" in combined
+            or "gateway closed" in combined
+            or "connect econnrefused" in combined
+        )
+        if gateway_unreachable:
+            print(
+                "[openclaw_notify] Hint: OpenClaw Gateway may not be running/reachable. "
+                "Try `openclaw gateway --force` (or run `openclaw onboard`) then retry.",
+                file=sys.stderr,
+            )
+        if missing_provider:
+            print(
+                "[openclaw_notify] Hint: OpenClaw agent could not find model provider credentials. "
+                "Run `openclaw configure` (or `openclaw onboard`) to set up providers, then retry.",
+                file=sys.stderr,
+            )
     if stderr_tail:
         print("[openclaw_notify] stderr (tail):", file=sys.stderr)
         print(stderr_tail, file=sys.stderr)

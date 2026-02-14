@@ -29,9 +29,12 @@ Configure targets via environment variables (recommended so you do not hardcode 
 
 - `OPENCLAW_COMMAND` (default: `openclaw`)  
   Examples: `openclaw`, `wsl openclaw`
-- `OPENCLAW_TO` (required for notifications)  
+- `OPENCLAW_CHANNEL` (optional)  
+  Examples: `whatsapp`, `telegram`, `discord`  
+- `OPENCLAW_TO` (recommended for notifications)  
   Examples: `+15551234567`, `discord:...`, `slack:...`
 - `OPENCLAW_TIMEOUT_SECONDS` (default: `20`)
+- `OPENCLAW_AGENT_TIMEOUT_SECONDS` (default: `600`) (prompt mode)
 
 ### Error Monitor Alerts (Default: Enabled, No-Op Until Configured)
 
@@ -56,6 +59,48 @@ Defaults:
 For ad-hoc testing, you can send a message directly:
 
 - `python scripts/openclaw_notify.py --to "<target>" --message "Hello from Portfolio Maximizer"`
+
+If `OPENCLAW_TO` is not set, the helper will try to infer a WhatsApp "message yourself" target from:
+
+- `openclaw status --json`
+
+This enables the simple workflow:
+
+- `python scripts/openclaw_notify.py --message "Hello from Portfolio Maximizer"`
+
+### WhatsApp Prompting (Agent Turns)
+
+If you want to *prompt* your OpenClaw agent and (optionally) deliver the reply back to WhatsApp:
+
+- `python scripts/openclaw_notify.py --prompt --message "Summarize today's gate status"`
+
+Notes:
+
+- `openclaw agent` uses the OpenClaw Gateway. If prompting fails with connection refused, start the gateway (see `openclaw --help` examples like `openclaw gateway --force`) and re-run.
+
+## Running OpenClaw With Repo `.env` Loaded
+
+PMX scripts already load the repo's `.env` (best-effort) via `etl/secret_loader.py`.
+
+If you want the OpenClaw CLI itself to run with the same `.env` context, use:
+
+- `python scripts/openclaw_env.py status --json`
+- `python scripts/openclaw_env.py message send --channel whatsapp --target +15551234567 --message "Hi"`
+
+## Log Location (Optional: Move To D:)
+
+OpenClaw gateway logs on Windows commonly land under:
+
+- `C:\tmp\openclaw\`
+
+PMX script logs land under:
+
+- `<repo>\logs\`
+
+If you want both redirected to D: without changing code, run:
+
+- `powershell -ExecutionPolicy Bypass -File scripts/redirect_logs_to_d.ps1 -DryRun`
+- `powershell -ExecutionPolicy Bypass -File scripts/redirect_logs_to_d.ps1`
 
 ## Gmail / Email Alerts (Optional)
 
