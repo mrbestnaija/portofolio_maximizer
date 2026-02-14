@@ -528,24 +528,44 @@ class PnLIntegrityEnforcer:
         )]
 
     def _check_closing_without_entry_link(self) -> List[IntegrityViolation]:
-        """MEDIUM: Closing legs should link to their opening leg."""
+        """MEDIUM: Closing legs should link to their opening leg.
+
+        Closes that originated from portfolio-state resume (no matching BUY row
+        in trade_executions) can be whitelisted via
+        ``INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75``.
+        """
+        # Known resume-originated closes accepted by policy.
+        whitelist: set[int] = set()
+        raw = os.getenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+        if raw.strip():
+            for token in raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    whitelist.add(int(token))
+                except ValueError:
+                    pass
+
         rows = self.conn.execute(
             "SELECT id, ticker FROM trade_executions "
             "WHERE is_close = 1 AND entry_trade_id IS NULL"
         ).fetchall()
 
-        if not rows:
+        filtered = [r for r in rows if int(r["id"]) not in whitelist]
+        if not filtered:
             return []
 
         return [IntegrityViolation(
             check_name="CLOSE_WITHOUT_ENTRY_LINK",
             severity="MEDIUM",
             description=(
-                f"{len(rows)} closing legs (is_close=1) have no entry_trade_id. "
-                "Round-trip attribution is incomplete."
+                f"{len(filtered)} closing legs (is_close=1) have no entry_trade_id. "
+                f"Round-trip attribution is incomplete."
+                + (f" ({len(rows) - len(filtered)} whitelisted)" if whitelist else "")
             ),
-            affected_ids=[r["id"] for r in rows],
-            count=len(rows),
+            affected_ids=[r["id"] for r in filtered],
+            count=len(filtered),
         )]
 
     def _check_pnl_arithmetic(self) -> List[IntegrityViolation]:

@@ -69,7 +69,7 @@ forecasting:
     # NOTE: Setting confidence_scaling=false is RESEARCH-ONLY mode.
     # See Documentation/PRIORITY_ANALYSIS_20260212.md.
     prefer_diversified_candidate: true
-    diversity_tolerance: 0.35
+    diversity_tolerance: 0.15  # Phase 7.9: lowered from 0.35 to let pure candidates win more often (reduces blend dilution that causes RMSE violations)
     candidate_weights:
       - {sarimax: 0.45, garch: 0.35, samossa: 0.15, mssa_rl: 0.05}
       - {sarimax: 0.40, samossa: 0.30, garch: 0.20, mssa_rl: 0.10}
@@ -80,6 +80,9 @@ forecasting:
       - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}  # Balanced GARCH blend
       - {samossa: 0.60, mssa_rl: 0.40}                # SSA-dominant
       - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}  # Balanced SSA
+      # Phase 7.9: mssa_rl-dominant blends (addresses audit violations where mssa_rl > ensemble)
+      - {mssa_rl: 0.70, garch: 0.30}                  # MSSA-RL led with GARCH vol support
+      - {mssa_rl: 0.70, samossa: 0.30}                # MSSA-RL led with SAMoSSA diversity
       # Pure model fallbacks
       - {garch: 1.0}
       - {samossa: 1.0}

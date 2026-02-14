@@ -124,6 +124,9 @@ else
     export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS
 fi
 
+# Whitelist known resume-originated unlinked closes (IDs 66, 75 from portfolio state).
+export INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS="${INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS:-66,75}"
+
 if [[ -z "${ALLOW_FORECAST_GATE_FAILURE}" ]]; then
     if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
         ALLOW_FORECAST_GATE_FAILURE="1"

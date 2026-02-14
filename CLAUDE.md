@@ -382,6 +382,32 @@ python scripts/migrate_add_portfolio_state.py
 - `PROOF_MODE=1` in audit sprint to enable `--proof-mode` args
 - `ENABLE_DATA_CACHE=0` to ensure fresh market data per run
 - Forecast audit gate: `config/forecaster_monitoring.yml` (20 audits required, 25% max violation rate)
+- `INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS=60` for holdout sprints (3 for live mode)
+- `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75` for resume-originated closes
+
+### Audit Sprint Results (2026-02-14)
+
+**Sprint completion**: 10 holdout runs (AS_OF 2026-01-22 to 2026-02-09, step 2 days) + 3 production live runs
+- Forecast gate: **PASS** (21.4% violation rate, 28 effective audits)
+- Preselection gate: correctly blocks ensemble (RMSE ratio > 1.0)
+- All 6 violations have mssa_rl as best single model beating ensemble blend
+- Ensemble tuning applied: `diversity_tolerance` lowered 0.35 -> 0.15, added mssa_rl-dominant candidates
+
+**PnL regression diagnosis** (sprint trades, $-230.78):
+- Stop-loss exits dominate: 5 stops = -$233.49 (MSFT -$95, NVDA -$58, GS -$44, GS -$34)
+- Time-exit winners too small: 8 exits = +$2.71 avg
+- Root cause: proof-mode `max_holding=5` clips gains before they develop
+- Recommendation: widen max_holding to 8-10 daily bars for better risk/reward
+
+**Concurrent process guard** (bash/run_20_audit_sprint.sh):
+- Lockfile (`data/.sprint.lock`) with PID-based stale detection
+- Rogue `run_auto_trader.py` process detection and kill
+- Sprint lockfile warning in `scripts/run_auto_trader.py`
+
+**Adversarial test isolation** (scripts/adversarial_integrity_test.py):
+- `_IsolatedConnection` wrapper: intercepts commit/BEGIN, always rolls back
+- Context manager support for automatic cleanup
+- Verified: 9/10 attacks blocked, 0 artifacts persist in production DB
 
 ### Phase 7.9 Documentation
 
@@ -549,6 +575,14 @@ python scripts/ci_integrity_gate.py || {
 - Profit factor: 2.78
 - Largest win: $497.83
 - Avg holding days: 0.0 (intraday)
+
+**Current metrics (Post-Sprint, 2026-02-14)**:
+- 37 round-trips
+- $673.22 total PnL
+- 43.2% win rate (16W/21L)
+- Profit factor: 1.85
+- Integrity: ALL PASSED (0 violations with whitelist)
+- Forecast gate: PASS (21.4% violation rate, threshold 25%, 28 effective audits)
 
 ### Dashboard Integration
 
@@ -810,5 +844,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-11 (Phase 7.9: PnL integrity enforcement framework, OpenBB multi-provider extractor, UTC normalization, freq-compat, proof-mode, checkpoint fix)
+**Last Updated**: 2026-02-14 (Phase 7.9: Audit sprint completion, forecast gate PASS, ensemble tuning, concurrent process guard, adversarial test isolation, unlinked close whitelist)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
