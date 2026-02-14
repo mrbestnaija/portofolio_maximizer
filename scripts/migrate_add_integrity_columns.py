@@ -24,6 +24,10 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "portfolio_maximizer.db")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def migrate(db_path: str = DB_PATH) -> None:
@@ -31,7 +35,10 @@ def migrate(db_path: str = DB_PATH) -> None:
         print(f"[ERROR] Database not found: {db_path}")
         sys.exit(1)
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(
+        db_path,
+        allow_schema_changes=True,
+    )
     conn.row_factory = sqlite3.Row
     cur = conn.execute("PRAGMA table_info(trade_executions)")
     existing = {row["name"] for row in cur.fetchall()}

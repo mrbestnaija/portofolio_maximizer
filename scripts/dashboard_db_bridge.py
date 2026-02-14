@@ -17,16 +17,23 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = Path(os.getenv("PORTFOLIO_DB_PATH") or (ROOT / "data" / "portfolio_maximizer.db"))
 DEFAULT_OUTPUT_PATH = ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_AUDIT_DB_PATH = ROOT / "data" / "dashboard_audit.db"
+
+try:
+    from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+except ModuleNotFoundError:  # pragma: no cover - direct script fallback
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
 
 def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
     if os.name != "posix":
@@ -91,18 +98,29 @@ def _utc_now_iso() -> str:
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.as_posix()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    conn = guarded_sqlite_connect(
+        uri,
+        uri=True,
+        timeout=2.0,
+        enable_guardrails=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=2000")
+    apply_sqlite_guardrails(conn, allow_schema_changes=False)
     return conn
 
 
 def _connect_rw(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    conn = guarded_sqlite_connect(
+        str(db_path),
+        timeout=5.0,
+        enable_guardrails=False,
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    apply_sqlite_guardrails(conn, allow_schema_changes=False)
     return conn
 
 

@@ -79,6 +79,21 @@ def main(argv: List[str]) -> int:
     ctrader_ok = user_ok and pwd_ok and app_ok
     ok = ok and ctrader_ok
 
+    # OpenClaw notifications (optional)
+    oc_ok, oc_line = _report_group("openclaw_to", ["OPENCLAW_TO"])
+    lines.append(oc_line)
+
+    # Email alerts (optional, Gmail supported)
+    email_user_ok, email_user_line = _report_group("email_username", ["PMX_EMAIL_USERNAME"])
+    email_pwd_ok, email_pwd_line = _report_group("email_password", ["PMX_EMAIL_PASSWORD"])
+    email_to_ok, email_to_line = _report_group("email_to", ["PMX_EMAIL_TO", "PMX_EMAIL_RECIPIENTS"])
+    lines.extend([email_user_line, email_pwd_line, email_to_line])
+
+    # Inbox workflows (optional) - Proton Mail Bridge
+    proton_user_ok, proton_user_line = _report_group("proton_bridge_username", ["PMX_PROTON_BRIDGE_USERNAME"])
+    proton_pwd_ok, proton_pwd_line = _report_group("proton_bridge_password", ["PMX_PROTON_BRIDGE_PASSWORD"])
+    lines.extend([proton_user_line, proton_pwd_line])
+
     # GitHub automation (optional)
     gh_ok, gh_line = _report_group("github_projects_token", ["PROJECTS_TOKEN"])
     lines.append(gh_line)

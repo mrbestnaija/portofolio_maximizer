@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,6 +26,10 @@ import click
 
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
+if str(ROOT_PATH) not in sys.path:
+    sys.path.insert(0, str(ROOT_PATH))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 @dataclass
@@ -50,7 +55,7 @@ class CandidateSummary:
 
 
 def _load_candidates(db_path: Path) -> List[sqlite3.Row]:
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()

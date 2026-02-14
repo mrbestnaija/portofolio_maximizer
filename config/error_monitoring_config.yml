@@ -31,16 +31,21 @@ alerts:
   
   # Email alerts (optional)
   email:
-    enabled: false
+    enabled: true
     smtp_server: "smtp.gmail.com"
     smtp_port: 587
     use_tls: true
+    # Prefer env vars (and *_FILE secrets) over committing credentials:
+    # - PMX_EMAIL_USERNAME / PMX_EMAIL_USERNAME_FILE
+    # - PMX_EMAIL_PASSWORD / PMX_EMAIL_PASSWORD_FILE (Gmail: app password recommended)
+    # - PMX_EMAIL_FROM
+    # - PMX_EMAIL_TO (comma-separated recipients)
     username: ""
     password: ""
-    from_address: "portfolio-maximizer@company.com"
-    recipients:
-      - "admin@company.com"
-      - "dev-team@company.com"
+    from_address: ""
+    recipients: []
+    timeout_seconds: 10
+    max_body_chars: 5000
   
   # Slack alerts (optional)
   slack:
@@ -48,6 +53,16 @@ alerts:
     webhook_url: ""
     channel: "#alerts"
     username: "Portfolio Maximizer Bot"
+
+  # OpenClaw alerts (optional)
+  # Uses `openclaw message send` to deliver alerts to any OpenClaw-connected channel.
+  # Prefer setting targets via env vars in .env (OPENCLAW_TO / OPENCLAW_COMMAND).
+  openclaw:
+    enabled: true
+    command: "openclaw"   # e.g. "openclaw" or "wsl openclaw" on Windows
+    to: ""                # e.g. "+15551234567" or "discord:..." or "slack:..."
+    timeout_seconds: 20
+    max_message_chars: 1500
   
   # Webhook alerts (optional)
   webhook:
@@ -98,7 +113,7 @@ performance:
 # Notification templates
 templates:
   error_alert:
-    subject: "🚨 Bestman's Portfolio Maximizer Error Alert"
+    subject: "Portfolio Maximizer Error Alert"
     body: |
       Error Alert - Bestman's Portfolio Maximizer v45
       =====================================
@@ -117,7 +132,7 @@ templates:
       Please investigate and resolve as soon as possible.
   
   system_health:
-    subject: "📊 Portfolio Maximizer System Health Report"
+    subject: "Portfolio Maximizer System Health Report"
     body: |
       System Health Report - Portfolio Maximizer v45
       =============================================

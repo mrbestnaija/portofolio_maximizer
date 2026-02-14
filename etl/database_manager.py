@@ -39,6 +39,15 @@ except ModuleNotFoundError:  # pragma: no cover - CLI fallback
         sys.path.insert(0, str(project_root))
     from etl.security_utils import sanitize_error
 
+try:
+    from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+except ModuleNotFoundError:  # pragma: no cover - CLI fallback
+    current_dir = Path(__file__).resolve().parent
+    project_root = current_dir.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+
 logger = logging.getLogger(__name__)
 
 # Updated in Phase 5.x to support extreme risk classification
@@ -101,10 +110,22 @@ class DatabaseManager:
         self._busy_timeout_ms = 10000  # Reduce disk I/O contention on Windows
         self._mirror_path: Optional[Path] = None
         self._active_db_path: Path = self.db_path
+        self._schema_initialization_in_progress = False
+        self._sqlite_guardrails_enabled = (
+            os.environ.get("SECURITY_SQLITE_GUARDRAILS", "1").strip() != "0"
+        )
+        self._sqlite_guardrails_hard_fail = (
+            os.environ.get("SECURITY_SQLITE_GUARDRAILS_HARD_FAIL", "1").strip() != "0"
+        )
         if self.backend == "sqlite":
             self._ensure_sqlite_path_exists()
         self._connect()
-        self._initialize_schema()
+        self._schema_initialization_in_progress = True
+        try:
+            self._initialize_schema()
+        finally:
+            self._schema_initialization_in_progress = False
+        self._apply_runtime_sqlite_guardrails()
 
         logger.info(f"Database initialized at: {self.db_path}")
 
@@ -118,7 +139,7 @@ class DatabaseManager:
         3. Create/secure the SQLite file on disk with owner-only permissions.
         """
         if getattr(self, "_sqlite_in_memory", False):
-            # Keep the special value untouched so sqlite3.connect(":memory:") works.
+            # Keep the special value untouched so SQLite in-memory mode works.
             self.db_path = Path(":memory:")
             self._active_db_path = self.db_path
             logger.debug("Configured DatabaseManager to use in-memory SQLite database.")
@@ -285,7 +306,11 @@ class DatabaseManager:
 
     def _establish_connection(self, target_path: Path, use_wal: bool, connect_kwargs: Dict[str, Any]) -> None:
         """Open a SQLite connection to the desired path."""
-        self.conn = sqlite3.connect(str(target_path), **connect_kwargs)
+        self.conn = guarded_sqlite_connect(
+            str(target_path),
+            enable_guardrails=False,
+            **connect_kwargs,
+        )
         self.conn.row_factory = sqlite3.Row  # Return rows as dictionaries
         self.cursor = self.conn.cursor()
         self._active_db_path = target_path
@@ -326,6 +351,41 @@ class DatabaseManager:
             )
             return False
 
+    def _apply_runtime_sqlite_guardrails(self) -> None:
+        """
+        Harden operational SQLite connections against PRAGMA/DDL bypasses.
+
+        Guardrails are applied only after schema initialization so migrations and
+        CREATE/ALTER flows can still run during bootstrap.
+        """
+        if not self._sqlite_guardrails_enabled:
+            return
+        if self.backend != "sqlite" or self.conn is None:
+            return
+        if self._schema_initialization_in_progress:
+            return
+
+        try:
+            result = apply_sqlite_guardrails(
+                self.conn,
+                allow_schema_changes=False,
+            )
+            logger.debug(
+                "SQLite runtime guardrails active on %s: %s",
+                self._active_db_path,
+                result,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to apply SQLite runtime guardrails on %s: %s",
+                self._active_db_path,
+                exc,
+            )
+            if self._sqlite_guardrails_hard_fail:
+                raise RuntimeError(
+                    f"SQLite runtime guardrails could not be applied: {exc}"
+                ) from exc
+
     def _should_skip_wal(self, target_path: Path) -> bool:
         """WSL Windows mounts (/mnt/*) do not support SQLite WAL reliably."""
         if os.name != "posix":
@@ -362,7 +422,11 @@ class DatabaseManager:
         def _quick_check(candidate: Path) -> bool:
             """Return True when PRAGMA quick_check reports ok for the candidate DB."""
             try:
-                conn = sqlite3.connect(str(candidate), timeout=1.0)
+                conn = guarded_sqlite_connect(
+                    str(candidate),
+                    timeout=1.0,
+                    enable_guardrails=False,
+                )
                 cur = conn.cursor()
                 cur.execute("PRAGMA quick_check(1)")
                 row = cur.fetchone()
@@ -468,7 +532,11 @@ class DatabaseManager:
             return
         def _quick_check(candidate: Path) -> bool:
             try:
-                conn = sqlite3.connect(str(candidate), timeout=1.0)
+                conn = guarded_sqlite_connect(
+                    str(candidate),
+                    timeout=1.0,
+                    enable_guardrails=False,
+                )
                 cur = conn.cursor()
                 cur.execute("PRAGMA quick_check(1)")
                 row = cur.fetchone()
@@ -517,6 +585,8 @@ class DatabaseManager:
         """Reset SQLite connection (used after disk I/O errors)."""
         self._close_safely()
         self._connect()
+        if not self._schema_initialization_in_progress:
+            self._apply_runtime_sqlite_guardrails()
 
     def _rebuild_sqlite_store(self) -> None:
         """Backup the corrupted database, recreate the file, and reload schema."""
@@ -528,7 +598,12 @@ class DatabaseManager:
         )
         self._ensure_sqlite_path_exists()
         self._connect()
-        self._initialize_schema()
+        self._schema_initialization_in_progress = True
+        try:
+            self._initialize_schema()
+        finally:
+            self._schema_initialization_in_progress = False
+        self._apply_runtime_sqlite_guardrails()
 
     def _recover_sqlite_failure(self, exc: Exception, context: str) -> bool:
         """Attempt recovery steps for SQLite write failures."""
@@ -1016,7 +1091,7 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT NOT NULL,
                 forecast_date DATE NOT NULL,
-                model_type TEXT NOT NULL CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'SAMOSSA', 'MSSA_RL')),
+                model_type TEXT NOT NULL CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSSA_RL')),
                 forecast_horizon INTEGER NOT NULL,  -- Steps ahead
                 forecast_value REAL NOT NULL,
                 lower_ci REAL,
@@ -1040,8 +1115,13 @@ class DatabaseManager:
         """)
         table_info = self.cursor.fetchone()
         table_sql = table_info['sql'] if table_info else None
-        if table_sql and ('SAMOSSA' not in table_sql or 'MSSA_RL' not in table_sql or 'COMBINED' not in table_sql):
-            logger.info("Upgrading time_series_forecasts schema to include SAMOSSA/MSSA_RL model types")
+        if table_sql and (
+            'SAMOSSA' not in table_sql
+            or 'MSSA_RL' not in table_sql
+            or 'COMBINED' not in table_sql
+            or 'ENSEMBLE' not in table_sql
+        ):
+            logger.info("Upgrading time_series_forecasts schema to include ENSEMBLE/SAMOSSA/MSSA_RL model types")
             self.cursor.execute("ALTER TABLE time_series_forecasts RENAME TO time_series_forecasts_old")
             self.cursor.execute(forecast_table_sql)
             self.cursor.execute("""
@@ -2356,7 +2436,7 @@ class DatabaseManager:
             ticker: Stock ticker
             forecast_date: Forecast generation date
             forecast_data: Dictionary with forecast information:
-                - model_type: 'SARIMAX', 'GARCH', 'SAMOSSA', or 'COMBINED'
+                - model_type: 'SARIMAX', 'GARCH', 'SAMOSSA', 'MSSA_RL', 'COMBINED', or 'ENSEMBLE'
                 - forecast_horizon: Number of steps ahead
                 - forecast_value: Forecasted value
                 - lower_ci: Lower confidence interval (optional)
@@ -2553,8 +2633,13 @@ class DatabaseManager:
         import json
 
         try:
-            where_clauses = ["model_type = ?"]
-            params: list[Any] = [model_type]
+            requested_type = str(model_type or "COMBINED").upper()
+            if requested_type in {"COMBINED", "ENSEMBLE"}:
+                where_clauses = ["model_type IN (?, ?)"]
+                params: list[Any] = ["COMBINED", "ENSEMBLE"]
+            else:
+                where_clauses = ["model_type = ?"]
+                params = [requested_type]
 
             if start_date:
                 where_clauses.append("forecast_date >= ?")
@@ -2597,7 +2682,7 @@ class DatabaseManager:
             def _mean(xs: list[float]) -> Optional[float]:
                 return float(sum(xs) / len(xs)) if xs else None
 
-            alias = "ensemble" if model_type == "COMBINED" else model_type.lower()
+            alias = "ensemble" if requested_type in {"COMBINED", "ENSEMBLE"} else requested_type.lower()
             return {
                 alias: {
                     "rmse": _mean(rmse_vals),
@@ -2610,7 +2695,8 @@ class DatabaseManager:
             logger.error(
                 "Failed to aggregate forecast regression metrics: %s", safe_error
             )
-            alias = "ensemble" if model_type == "COMBINED" else model_type.lower()
+            requested_type = str(model_type or "COMBINED").upper()
+            alias = "ensemble" if requested_type in {"COMBINED", "ENSEMBLE"} else requested_type.lower()
             return {alias: {"rmse": None, "smape": None, "tracking_error": None}}
 
     def save_trading_signal(

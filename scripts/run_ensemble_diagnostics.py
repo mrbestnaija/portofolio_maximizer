@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 from forcester_ts.ensemble_diagnostics import (
     EnsembleDiagnostics,
     ModelPerformance,
@@ -50,7 +51,7 @@ def extract_forecast_data_from_db(
     Returns:
         Tuple of (model_forecasts dict, actual_values series)
     """
-    conn = sqlite3.connect('data/portfolio_maximizer.db')
+    conn = guarded_sqlite_connect('data/portfolio_maximizer.db')
 
     # Build query (note: column is model_type not model_name in schema)
     query = f"""

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -86,6 +87,16 @@ def _summary_matches_audit_dir(summary: Dict[str, Any], audit_dir: Path) -> bool
 
 
 def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    # Load `.env` safely (best-effort) without printing or overwriting existing env vars.
+    try:
+        from etl.secret_loader import bootstrap_dotenv
+
+        bootstrap_dotenv()
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(
         description="Run production lift + profitability proof gates.",
     )
@@ -135,9 +146,28 @@ def main() -> int:
         default="logs/audit_gate/production_gate_latest.json",
         help="Output path for latest gate artifact.",
     )
+    parser.add_argument(
+        "--notify-openclaw",
+        action="store_true",
+        help="Send gate summary via OpenClaw CLI (requires OPENCLAW_TO or --openclaw-to).",
+    )
+    parser.add_argument(
+        "--openclaw-command",
+        default=os.getenv("OPENCLAW_COMMAND", "openclaw"),
+        help='OpenClaw command (default: "openclaw"). Use "wsl openclaw" on Windows if needed.',
+    )
+    parser.add_argument(
+        "--openclaw-to",
+        default=os.getenv("OPENCLAW_TO", ""),
+        help="OpenClaw target string. Can also be set via OPENCLAW_TO.",
+    )
+    parser.add_argument(
+        "--openclaw-timeout-seconds",
+        type=float,
+        default=20.0,
+        help="OpenClaw command timeout in seconds (default: 20).",
+    )
     args = parser.parse_args()
-
-    repo_root = Path(__file__).resolve().parents[1]
     python_bin = str(Path(args.python_bin))
     db_path = _resolve_path(repo_root, args.db)
     audit_dir = _resolve_path(repo_root, args.audit_dir)
@@ -273,9 +303,62 @@ def main() -> int:
     print(f"Artifact       : {output_path}")
     print(f"Artifact (run) : {stamped_output}")
 
+    def _truthy(value: str) -> bool:
+        return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    openclaw_to = (args.openclaw_to or "").strip()
+    notify_openclaw = bool(args.notify_openclaw)
+    if not notify_openclaw:
+        raw_default = (os.getenv("PMX_NOTIFY_OPENCLAW") or "").strip()
+        if raw_default:
+            notify_openclaw = _truthy(raw_default)
+        else:
+            # Default: if OPENCLAW_TO is configured, send the summary.
+            notify_openclaw = bool(openclaw_to)
+
+    if notify_openclaw:
+        if not openclaw_to:
+            print(
+                "OpenClaw notify requested but no target configured (set --openclaw-to or OPENCLAW_TO).",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                from utils.openclaw_cli import send_message
+
+                lift_decision = payload["lift_gate"].get("decision")
+                lift_reason = payload["lift_gate"].get("decision_reason")
+                proof_pnl = payload["profitability_proof"].get("total_pnl")
+                proof_pf = payload["profitability_proof"].get("profit_factor")
+                proof_wr = payload["profitability_proof"].get("win_rate")
+
+                msg_lines = [
+                    f"[PMX] Production audit gate: {gate_status}",
+                    f"UTC: {timestamp_utc}",
+                    f"Lift: {lift_status} pass={lift_pass} decision={lift_decision} reason={lift_reason}",
+                    f"Proof: {proof_status} pnl={proof_pnl} pf={proof_pf} win_rate={proof_wr}",
+                    f"Artifact: {output_path}",
+                ]
+                message = "\n".join([line for line in msg_lines if line is not None])
+
+                result = send_message(
+                    to=openclaw_to,
+                    message=message,
+                    command=str(args.openclaw_command or "openclaw"),
+                    cwd=repo_root,
+                    timeout_seconds=float(args.openclaw_timeout_seconds),
+                )
+                if not result.ok:
+                    print(
+                        f"OpenClaw notify failed (exit={result.returncode}): "
+                        f"{(result.stderr or result.stdout or '').strip()[:200]}",
+                        file=sys.stderr,
+                    )
+            except Exception as exc:
+                print(f"OpenClaw notify failed: {exc}", file=sys.stderr)
+
     return 0 if gate_pass else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

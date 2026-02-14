@@ -15,9 +15,16 @@ WARNING:
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 import click
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 @click.command()
@@ -32,7 +39,7 @@ def main(db_path: str) -> None:
     if not path.exists():
         raise SystemExit(f"DB not found: {db_path}")
 
-    conn = sqlite3.connect(path)
+    conn = guarded_sqlite_connect(str(path))
     cur = conn.cursor()
     cur.execute(
         """

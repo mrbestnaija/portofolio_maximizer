@@ -101,3 +101,21 @@ class TestDatabaseSecurityIntegration:
             file_stat = os.stat(db_path)
             permissions = stat.filemode(file_stat.st_mode)
             assert permissions == '-rw-------'
+
+    def test_runtime_guardrails_block_dangerous_pragma(self, tmp_path, monkeypatch):
+        """Operational DB connections should block dangerous PRAGMA toggles."""
+        monkeypatch.setenv("SECURITY_SQLITE_GUARDRAILS", "1")
+        monkeypatch.setenv("SECURITY_SQLITE_GUARDRAILS_HARD_FAIL", "1")
+        db_path = tmp_path / "guardrails_pragma.db"
+        manager = DatabaseManager(str(db_path))
+        with pytest.raises(sqlite3.DatabaseError):
+            manager.conn.execute("PRAGMA ignore_check_constraints=ON")
+
+    def test_runtime_guardrails_block_schema_drop(self, tmp_path, monkeypatch):
+        """Operational DB connections should deny destructive schema operations."""
+        monkeypatch.setenv("SECURITY_SQLITE_GUARDRAILS", "1")
+        monkeypatch.setenv("SECURITY_SQLITE_GUARDRAILS_HARD_FAIL", "1")
+        db_path = tmp_path / "guardrails_drop.db"
+        manager = DatabaseManager(str(db_path))
+        with pytest.raises(sqlite3.DatabaseError):
+            manager.conn.execute("DROP TABLE trade_executions")

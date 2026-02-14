@@ -9,7 +9,14 @@ Usage:
 import argparse
 import sqlite3
 import json
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 def check_ensemble_weights(ticker: str):
     """Check ensemble weights and model RMSE from database."""
@@ -19,7 +26,7 @@ def check_ensemble_weights(ticker: str):
         print(f"ERROR: Database not found at {db_path}")
         return
 
-    conn = sqlite3.connect(str(db_path))
+    conn = guarded_sqlite_connect(str(db_path))
     cursor = conn.cursor()
 
     print("=" * 80)

@@ -16,6 +16,8 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from integrity.sqlite_guardrails import guarded_sqlite_connect
+
 DB_PATH = Path("data/portfolio_maximizer.db")
 BUSY_TIMEOUT_MS = 5000
 
@@ -26,8 +28,11 @@ def migrate_database():
         print(f"ERROR: Database not found at {DB_PATH}")
         return False
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=BUSY_TIMEOUT_MS / 1000.0)
-    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn = guarded_sqlite_connect(
+        str(DB_PATH),
+        timeout=BUSY_TIMEOUT_MS / 1000.0,
+        allow_schema_changes=True,
+    )
     cursor = conn.cursor()
 
     try:

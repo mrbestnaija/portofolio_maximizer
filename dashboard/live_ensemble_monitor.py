@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pandas as pd
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 class EnsembleDashboard:
@@ -56,7 +57,11 @@ class EnsembleDashboard:
             raise FileNotFoundError(f"Database not found: {db_path}")
         uri = f"file:{db_path.as_posix()}?mode=ro"
         try:
-            return sqlite3.connect(uri, uri=True)
+            return guarded_sqlite_connect(
+                uri,
+                uri=True,
+                allow_schema_changes=False,
+            )
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
             if "disk i/o error" not in msg:
@@ -72,7 +77,11 @@ class EnsembleDashboard:
                 pass
             if mirror.exists():
                 mirror_uri = f"file:{mirror.as_posix()}?mode=ro"
-                return sqlite3.connect(mirror_uri, uri=True)
+                return guarded_sqlite_connect(
+                    mirror_uri,
+                    uri=True,
+                    allow_schema_changes=False,
+                )
             raise
 
     def fetch_recent_forecasts(self, hours: int = 24) -> pd.DataFrame:

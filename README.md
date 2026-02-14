@@ -672,6 +672,10 @@ pytest tests/ -v --tb=short
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
 - **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
+- **[OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md)**: OpenClaw workspace skill + optional notifications (https://openclaw.ai)
+- **[Pluggable Feature Engineering Pipeline](Documentation/PLUGGABLE_FEATURE_ENGINEERING_PIPELINE.md)**: Add-ons policy, gating, compute budgets
+- **[Sentiment Feature Add-on](Documentation/SENTIMENT_FEATURE_ADDON.md)**: Sentiment feature spec (profit-gated, compute-aware)
+- **[Feature Add-on Promotion Checklist](Documentation/FEATURE_ADDON_PROMOTION_CHECKLIST.md)**: Evidence template + promotion bar
 
 ### Phase 7 Documentation (Regime Detection & Optimization)
 

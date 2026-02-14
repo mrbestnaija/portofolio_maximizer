@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = ROOT / "data" / "portfolio_maximizer.db"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def _utc_now_iso() -> str:
@@ -55,7 +59,10 @@ class DatabaseCleanup:
         self.conn: sqlite3.Connection | None = None
 
     def __enter__(self):
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = guarded_sqlite_connect(
+            str(self.db_path),
+            allow_schema_changes=True,
+        )
         self.conn.row_factory = sqlite3.Row
         return self
 

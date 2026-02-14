@@ -19,6 +19,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "data" / "portfolio_maximizer.db"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def migrate(db_path: Path, dry_run: bool = True):
@@ -27,7 +31,10 @@ def migrate(db_path: Path, dry_run: bool = True):
         print(f"[ERROR] Database not found: {db_path}")
         return 1
 
-    conn = sqlite3.connect(db_path)
+    conn = guarded_sqlite_connect(
+        str(db_path),
+        allow_schema_changes=True,
+    )
 
     print("=" * 70)
     print("RELAX IMMUTABLE LEDGER TRIGGER")

@@ -6,11 +6,18 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 DEFAULT_DB = Path("data/portfolio_maximizer.db")
@@ -71,7 +78,7 @@ def main() -> None:
     if args.export_deduped:
         args.export_deduped.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(args.db)
+    conn = guarded_sqlite_connect(str(args.db))
     try:
         for ticker in tickers:
             df = _load_ohlcv(conn, args.table, ticker)

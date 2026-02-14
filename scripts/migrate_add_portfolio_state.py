@@ -16,6 +16,11 @@ import sys
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "portfolio_maximizer.db"
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def migrate(db_path: Path = DB_PATH):
@@ -23,7 +28,10 @@ def migrate(db_path: Path = DB_PATH):
         print(f"[ERROR] Database not found at {db_path}")
         sys.exit(1)
 
-    conn = sqlite3.connect(str(db_path))
+    conn = guarded_sqlite_connect(
+        str(db_path),
+        allow_schema_changes=True,
+    )
     cur = conn.cursor()
 
     cur.execute("""

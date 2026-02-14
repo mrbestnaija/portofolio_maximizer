@@ -11,6 +11,7 @@ Credentials include (non-exhaustive):
 - Market data provider keys (Alpha Vantage, Finnhub, etc.)
 - Brokerage credentials (cTrader, XTB, etc.)
 - GitHub automation tokens (Projects PATs)
+- Notification credentials/targets (SMTP passwords, OpenClaw targets)
 
 ## Source Of Truth (Implementation)
 
@@ -23,9 +24,9 @@ Credentials are resolved through:
 ## Loading Order (Deterministic)
 
 For any secret named `KEY`:
-1. `KEY_FILE` (Docker secret / local secret file path) — first non-empty, non-comment line
+1. `KEY_FILE` (Docker secret / local secret file path) - first non-empty, non-comment line
 2. `KEY` from environment
-3. Missing → feature should degrade gracefully or fail with a clear missing-key message
+3. Missing -> feature should degrade gracefully or fail with a clear missing-key message
 
 ## Local Development: `.env` (Git-Ignored)
 
