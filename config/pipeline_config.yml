@@ -307,12 +307,16 @@ pipeline:
     ensemble:
       enabled: true
       confidence_scaling: false
+      diversity_tolerance: 0.15  # Phase 7.9: lowered from default to reduce blend dilution
       candidate_weights:
         - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
         - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
         - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
         - {samossa: 0.60, mssa_rl: 0.40}
         - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
+        # Phase 7.9: mssa_rl-dominant blends (addresses audit violations)
+        - {mssa_rl: 0.70, garch: 0.30}
+        - {mssa_rl: 0.70, samossa: 0.30}
         - {garch: 1.0}
         - {samossa: 1.0}
         - {mssa_rl: 1.0}
