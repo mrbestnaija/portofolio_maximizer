@@ -21,7 +21,7 @@ Once your OpenClaw workspace points at the repo root, the skill becomes availabl
 
 If you have the OpenClaw CLI installed/configured, Portfolio Maximizer can send notifications via:
 
-- `openclaw message send --to ... --message ...`
+- `openclaw message send --target ... --message ...`
 
 ### Environment Variables
 

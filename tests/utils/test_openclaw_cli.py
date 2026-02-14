@@ -5,8 +5,9 @@ from utils.openclaw_cli import build_message_send_command, send_message
 
 def test_build_message_send_command_basic() -> None:
     cmd = build_message_send_command(command="openclaw", to="target", message="hello")
-    assert cmd[:3] == ["openclaw", "message", "send"]
-    assert "--to" in cmd
+    idx = cmd.index("message")
+    assert cmd[idx : idx + 2] == ["message", "send"]
+    assert "--target" in cmd
     assert "--message" in cmd
 
 
@@ -19,4 +20,3 @@ def test_send_message_missing_binary_is_handled() -> None:
     )
     assert result.ok is False
     assert result.returncode == 127
-
