@@ -12,13 +12,14 @@ Outputs a machine-readable artifact for operators and batch wrappers.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _resolve_path(root: Path, raw_path: str) -> Path:
@@ -42,6 +43,228 @@ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _run_command_quiet(cmd: list[str], cwd: Path) -> Tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+    except Exception as exc:
+        return 127, "", str(exc)
+
+
+def _sha256_file(path: Path, *, max_bytes: int = 5 * 1024 * 1024) -> Tuple[Optional[str], Optional[str]]:
+    """Return (sha256, skip_reason). Never raises."""
+    try:
+        size = int(path.stat().st_size)
+    except Exception:
+        return None, "stat_failed"
+
+    if max_bytes > 0 and size > max_bytes:
+        return None, f"too_large>{max_bytes}"
+
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            remaining = size
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+        return digest.hexdigest(), None
+    except Exception:
+        return None, "read_failed"
+
+
+def _looks_like_secret_path(path: Path) -> bool:
+    name = path.name.lower()
+    if name.startswith(".env") or name.endswith(".env") or name == ".env":
+        return True
+    markers = ("secret", "token", "password", "apikey", "api_key", "credential", "private")
+    if any(m in name for m in markers):
+        return True
+    if path.suffix.lower() in {".key", ".pem", ".p12", ".pfx", ".crt", ".cer", ".der"}:
+        return True
+    return False
+
+
+def _parse_git_status_porcelain(text: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for raw in (text or "").splitlines():
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+
+        if line.startswith("?? "):
+            path_raw = line[3:].strip()
+            entries.append(
+                {
+                    "kind": "untracked",
+                    "code": "??",
+                    "path": path_raw,
+                    "path_orig": None,
+                }
+            )
+            continue
+
+        code = line[:2]
+        path_raw = line[3:].strip() if len(line) > 3 else ""
+        path_orig = None
+        path = path_raw
+        if "->" in path_raw:
+            left, right = path_raw.split("->", 1)
+            path_orig = left.strip() or None
+            path = right.strip()
+        entries.append(
+            {
+                "kind": "tracked",
+                "code": code,
+                "path": path,
+                "path_orig": path_orig,
+            }
+        )
+    return entries
+
+
+def _collect_git_state(repo_root: Path) -> Dict[str, Any]:
+    """Capture current repo + worktree state (paths only; no contents)."""
+    git_dir = repo_root / ".git"
+    if not git_dir.exists():
+        return {"available": False, "reason": "no .git directory"}
+
+    def _git(args: list[str]) -> Tuple[int, str, str]:
+        return _run_command_quiet(["git", *args], cwd=repo_root)
+
+    def _git1(args: list[str]) -> Optional[str]:
+        rc, out, _ = _git(args)
+        if rc != 0:
+            return None
+        return (out or "").strip() or None
+
+    branch = _git1(["rev-parse", "--abbrev-ref", "HEAD"])
+    head = _git1(["rev-parse", "HEAD"])
+    upstream = _git1(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+
+    ahead = behind = None
+    if upstream:
+        rc, out, _ = _git(["rev-list", "--left-right", "--count", f"HEAD...{upstream}"])
+        if rc == 0:
+            parts = (out or "").strip().split()
+            if len(parts) >= 2:
+                try:
+                    ahead = int(parts[0])
+                    behind = int(parts[1])
+                except Exception:
+                    ahead = behind = None
+
+    rc, out, err = _git(["status", "--porcelain"])
+    status_text = (out or "") if rc == 0 else ""
+    entries = _parse_git_status_porcelain(status_text)
+
+    tracked = [e for e in entries if e.get("kind") == "tracked"]
+    untracked = [e for e in entries if e.get("kind") == "untracked"]
+
+    staged = 0
+    unstaged = 0
+    for e in tracked:
+        code = str(e.get("code") or "  ")
+        if len(code) >= 1 and code[0] not in {" ", "?"}:
+            staged += 1
+        if len(code) >= 2 and code[1] != " ":
+            unstaged += 1
+
+    file_meta: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for e in entries:
+        rel = str(e.get("path") or "").strip()
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+
+        meta: Dict[str, Any] = {"path": rel}
+        p = (repo_root / rel)
+        try:
+            stat = p.stat()
+        except Exception:
+            meta.update({"exists": False})
+            file_meta.append(meta)
+            continue
+
+        meta.update(
+            {
+                "exists": True,
+                "bytes": int(stat.st_size),
+                "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                # NOTE: On Windows this is creation time; on POSIX it's metadata-change time.
+                "ctime_utc": datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+        if e.get("kind") != "tracked":
+            # Untracked files may include personal notes or secrets; do not hash by default.
+            meta.update(
+                {
+                    "sha256": None,
+                    "sha256_skipped": True,
+                    "sha256_skip_reason": "untracked_not_hashed",
+                }
+            )
+        elif _looks_like_secret_path(p):
+            meta.update(
+                {
+                    "sha256": None,
+                    "sha256_skipped": True,
+                    "sha256_skip_reason": "possible_secret_path",
+                }
+            )
+        else:
+            sha, skip_reason = _sha256_file(p)
+            meta.update(
+                {
+                    "sha256": sha,
+                    "sha256_skipped": sha is None,
+                    "sha256_skip_reason": skip_reason,
+                }
+            )
+
+        if e.get("kind") == "tracked":
+            last = _git1(["log", "-1", "--format=%H|%cI", "--", rel])
+            if last and "|" in last:
+                commit, committed_at = last.split("|", 1)
+                meta.update({"last_commit": commit or None, "last_committed_at": committed_at or None})
+            else:
+                meta.update({"last_commit": None, "last_committed_at": None})
+
+        file_meta.append(meta)
+
+    return {
+        "available": True,
+        "branch": branch,
+        "head": head,
+        "upstream": upstream,
+        "ahead": ahead,
+        "behind": behind,
+        "status": {
+            "tracked_changed": len(tracked),
+            "untracked": len(untracked),
+            "staged": staged,
+            "unstaged": unstaged,
+            "entries": entries,
+        },
+        "files": file_meta,
+        "attribution_note": (
+            "This captures current git state only. To attribute changes to a session, capture a baseline "
+            "at session start and compare later (git alone cannot prove who/what changed files)."
+        ),
+    }
 
 
 def _tail_lines(text: str, *, limit: int = 40) -> str:
@@ -149,7 +372,7 @@ def main() -> int:
     parser.add_argument(
         "--notify-openclaw",
         action="store_true",
-        help="Send gate summary via OpenClaw CLI (requires OPENCLAW_TO or --openclaw-to).",
+        help="Send gate summary via OpenClaw CLI (requires OPENCLAW_TARGETS/OPENCLAW_TO or --openclaw-to).",
     )
     parser.add_argument(
         "--openclaw-command",
@@ -158,8 +381,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--openclaw-to",
-        default=os.getenv("OPENCLAW_TO", ""),
-        help="OpenClaw target string. Can also be set via OPENCLAW_TO.",
+        default=os.getenv("OPENCLAW_TARGETS") or os.getenv("OPENCLAW_TO", ""),
+        help=(
+            "OpenClaw target(s). Supports a single target or a comma-separated list. "
+            'Items may be "channel:target" (e.g. "whatsapp:+1555..., telegram:@mychat"). '
+            "Can also be set via OPENCLAW_TARGETS or OPENCLAW_TO."
+        ),
     )
     parser.add_argument(
         "--openclaw-timeout-seconds",
@@ -238,6 +465,7 @@ def main() -> int:
 
     payload: Dict[str, Any] = {
         "timestamp_utc": timestamp_utc,
+        "repo_state": _collect_git_state(repo_root),
         "inputs": {
             "db": str(db_path),
             "audit_dir": str(audit_dir),
@@ -302,29 +530,47 @@ def main() -> int:
     print(f"Gate status    : {gate_status}")
     print(f"Artifact       : {output_path}")
     print(f"Artifact (run) : {stamped_output}")
+    try:
+        state = payload.get("repo_state") if isinstance(payload.get("repo_state"), dict) else {}
+        if state.get("available") and isinstance(state.get("status"), dict):
+            st = state["status"]
+            print(
+                "Repo state     : "
+                f"tracked_changed={st.get('tracked_changed')} untracked={st.get('untracked')} "
+                f"ahead={state.get('ahead')} behind={state.get('behind')}"
+            )
+    except Exception:
+        pass
 
     def _truthy(value: str) -> bool:
         return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    openclaw_to = (args.openclaw_to or "").strip()
+    openclaw_to_raw = (args.openclaw_to or "").strip()
+    try:
+        from utils.openclaw_cli import parse_openclaw_targets
+
+        default_channel = (os.getenv("OPENCLAW_CHANNEL") or "").strip() or None
+        openclaw_targets = parse_openclaw_targets(openclaw_to_raw, default_channel=default_channel)
+    except Exception:
+        openclaw_targets = []
     notify_openclaw = bool(args.notify_openclaw)
     if not notify_openclaw:
         raw_default = (os.getenv("PMX_NOTIFY_OPENCLAW") or "").strip()
         if raw_default:
             notify_openclaw = _truthy(raw_default)
         else:
-            # Default: if OPENCLAW_TO is configured, send the summary.
-            notify_openclaw = bool(openclaw_to)
+            # Default: if OPENCLAW_TARGETS/OPENCLAW_TO is configured, send the summary.
+            notify_openclaw = bool(openclaw_targets)
 
     if notify_openclaw:
-        if not openclaw_to:
+        if not openclaw_targets:
             print(
-                "OpenClaw notify requested but no target configured (set --openclaw-to or OPENCLAW_TO).",
+                "OpenClaw notify requested but no targets configured (set --openclaw-to or OPENCLAW_TARGETS/OPENCLAW_TO).",
                 file=sys.stderr,
             )
         else:
             try:
-                from utils.openclaw_cli import send_message
+                from utils.openclaw_cli import send_message_multi
 
                 lift_decision = payload["lift_gate"].get("decision")
                 lift_reason = payload["lift_gate"].get("decision_reason")
@@ -341,14 +587,16 @@ def main() -> int:
                 ]
                 message = "\n".join([line for line in msg_lines if line is not None])
 
-                result = send_message(
-                    to=openclaw_to,
+                results = send_message_multi(
+                    targets=openclaw_targets,
                     message=message,
                     command=str(args.openclaw_command or "openclaw"),
                     cwd=repo_root,
                     timeout_seconds=float(args.openclaw_timeout_seconds),
                 )
-                if not result.ok:
+                for result in results:
+                    if result.ok:
+                        continue
                     print(
                         f"OpenClaw notify failed (exit={result.returncode}): "
                         f"{(result.stderr or result.stdout or '').strip()[:200]}",
