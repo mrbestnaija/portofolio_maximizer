@@ -14,8 +14,8 @@ This repo is designed to be operated by automation (humans + coding agents + Ope
 
 - OpenClaw + SMTP email alert delivery is enabled by default in `config/error_monitoring_config.yml`, but is a **no-op until configured**.
 - OpenClaw notifications:
-  - Configure `OPENCLAW_TO` (and optionally `OPENCLAW_COMMAND`).
-  - `scripts/production_audit_gate.py` auto-notifies if `OPENCLAW_TO` is set (disable with `PMX_NOTIFY_OPENCLAW=0`).
+  - Configure `OPENCLAW_TARGETS` (recommended) or `OPENCLAW_TO` (and optionally `OPENCLAW_COMMAND`).
+  - `scripts/production_audit_gate.py` auto-notifies if `OPENCLAW_TARGETS`/`OPENCLAW_TO` is set (disable with `PMX_NOTIFY_OPENCLAW=0`).
 - Gmail/email alerts (SMTP):
   - Configure `PMX_EMAIL_USERNAME`, `PMX_EMAIL_PASSWORD` (app password recommended), and `PMX_EMAIL_TO`.
 

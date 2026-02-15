@@ -33,6 +33,10 @@ def _extract_keys(path: Path) -> list[str]:
 
 def _placeholder_for(key: str) -> str:
     upper = key.upper()
+    # Docker secrets convention.
+    if upper.endswith("_FILE"):
+        base = key[:-5].lower()
+        return f"/run/secrets/{base}"
     # Secrets first: some keys contain both EMAIL and PASSWORD (e.g., OPENAI_EMAIL_PASSWORD).
     if any(tok in upper for tok in ("PASSWORD", "SECRET", "TOKEN", "KEY")):
         return f"your_{key.lower()}_here"
@@ -59,6 +63,33 @@ def _append_missing_keys(
     if not missing_keys:
         return
 
+    # If the target already contains this header (common when syncing iteratively),
+    # insert the new keys into the existing block instead of creating duplicate blocks.
+    try:
+        existing_lines = target_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        marker = header.strip()
+        marker_idxs = [i for i, line in enumerate(existing_lines) if line.strip() == marker]
+        if marker_idxs:
+            start_idx = marker_idxs[-1]
+            insert_at = None
+            for j in range(start_idx + 1, len(existing_lines)):
+                if existing_lines[j].strip() == "":
+                    insert_at = j
+                    break
+            if insert_at is None:
+                insert_at = len(existing_lines)
+
+            to_add = []
+            for k in missing_keys:
+                val = _placeholder_for(k) if placeholder else ""
+                to_add.append(f"{k}={val}")
+
+            merged = existing_lines[:insert_at] + to_add + existing_lines[insert_at:]
+            target_path.write_text("\n".join(merged) + "\n", encoding="utf-8", newline="\n")
+            return
+    except Exception:
+        pass
+
     lines: list[str] = []
     lines.append("")
     lines.append("# ============================================")
@@ -83,7 +114,11 @@ def main() -> int:
     parser.add_argument("--env", default=".env", help="Path to .env")
     parser.add_argument("--template", default=".env.template", help="Path to .env.template")
     parser.add_argument("--write", action="store_true", help="Apply changes (otherwise dry-run).")
+    parser.add_argument("--dry-run", action="store_true", help="Print differences only (default).")
     args = parser.parse_args()
+
+    if args.write and args.dry_run:
+        raise SystemExit("Choose one: --write or --dry-run (default).")
 
     env_path = Path(args.env)
     tpl_path = Path(args.template)

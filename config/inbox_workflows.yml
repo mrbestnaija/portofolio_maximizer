@@ -33,7 +33,7 @@ limits:
 
 notifications:
   # Optional: send scan summaries via OpenClaw.
-  # This is a no-op until OPENCLAW_TO is configured in your environment.
+  # This is a no-op until OPENCLAW_TARGETS/OPENCLAW_TO is configured in your environment.
   openclaw:
     enabled: true
     max_message_chars: 1500

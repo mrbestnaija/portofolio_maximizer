@@ -75,7 +75,7 @@ Promotion decisions should be sent to OpenClaw AI by default (if configured) so 
 
 Configure (see `Documentation/OPENCLAW_INTEGRATION.md`):
 
-- `OPENCLAW_TO`
+- `OPENCLAW_TARGETS` (recommended) or `OPENCLAW_TO`
 - optional `OPENCLAW_COMMAND`
 
 Manual send helper:

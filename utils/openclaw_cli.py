@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterable, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,32 @@ class OpenClawResult:
 
 # E.164 style phone number, e.g. +15551234567
 _E164_IN_TEXT_RE = re.compile(r"([+][0-9]{6,15})")
+_E164_EXACT_RE = re.compile(r"[+][0-9]{6,15}$")
+
+# Allowed channel prefixes for `channel:target` parsing.
+# Keep this in sync (loosely) with `openclaw agent --help` channel list.
+_KNOWN_CHANNEL_PREFIXES = {
+    "last",
+    "telegram",
+    "whatsapp",
+    "discord",
+    "irc",
+    "googlechat",
+    "slack",
+    "signal",
+    "imessage",
+    "feishu",
+    "nostr",
+    "msteams",
+    "mattermost",
+    "nextcloud-talk",
+    "matrix",
+    "bluebubbles",
+    "line",
+    "zalo",
+    "zalouser",
+    "tlon",
+}
 
 
 def _split_command(command: str) -> list[str]:
@@ -77,7 +103,15 @@ def _wrap_windows_command(parts: list[str]) -> list[str]:
     return parts
 
 
-def build_message_send_command(*, command: str, to: str, message: str, channel: Optional[str] = None) -> list[str]:
+def build_message_send_command(
+    *,
+    command: str,
+    to: str,
+    message: Optional[str] = None,
+    media: Optional[str] = None,
+    channel: Optional[str] = None,
+    silent: bool = False,
+) -> list[str]:
     base = _split_command(command)
     # `to` is an OpenClaw target string (phone number, channel id, etc).
     # Newer OpenClaw CLIs use `--target`. We'll fall back to `--to` in send_message
@@ -85,7 +119,14 @@ def build_message_send_command(*, command: str, to: str, message: str, channel: 
     cmd = [*base, "message", "send"]
     if channel:
         cmd.extend(["--channel", str(channel)])
-    cmd.extend(["--target", str(to), "--message", str(message)])
+    if silent:
+        cmd.append("--silent")
+    cmd.extend(["--target", str(to)])
+    msg = (message or "").strip()
+    if msg:
+        cmd.extend(["--message", str(message)])
+    if media:
+        cmd.extend(["--media", str(media)])
     return cmd
 
 
@@ -178,13 +219,15 @@ def send_message(
     *,
     to: str,
     message: str,
+    media: Optional[str] = None,
     command: str = "openclaw",
     cwd: Optional[Path] = None,
     timeout_seconds: float = 20.0,
     extra_args: Optional[Sequence[str]] = None,
     channel: Optional[str] = None,
+    silent: bool = False,
 ) -> OpenClawResult:
-    cmd = build_message_send_command(command=command, to=to, message=message, channel=channel)
+    cmd = build_message_send_command(command=command, to=to, message=message, media=media, channel=channel, silent=silent)
     if extra_args:
         cmd.extend([str(arg) for arg in extra_args])
 
@@ -196,6 +239,14 @@ def send_message(
         return "unknown option" in text and needle in text
 
     try:
+        if not (message or "").strip() and not (media or "").strip():
+            return OpenClawResult(
+                ok=False,
+                returncode=2,
+                command=cmd,
+                stdout="",
+                stderr="Missing message/media (OpenClaw requires --message unless --media is set).",
+            )
         env = dict(os.environ)
         env.setdefault("NODE_NO_WARNINGS", "1")
         proc = subprocess.run(
@@ -257,10 +308,14 @@ def build_agent_turn_command(
     message: str,
     deliver: bool = False,
     channel: Optional[str] = None,
+    reply_channel: Optional[str] = None,
+    reply_to: Optional[str] = None,
+    reply_account: Optional[str] = None,
     agent_id: Optional[str] = None,
     session_id: Optional[str] = None,
     thinking: Optional[str] = None,
     local: bool = False,
+    json_output: bool = False,
 ) -> list[str]:
     base = _split_command(command)
     cmd: list[str] = [*base, "agent"]
@@ -275,8 +330,16 @@ def build_agent_turn_command(
     if session_id:
         cmd.extend(["--session-id", str(session_id)])
     cmd.extend(["--to", str(to), "--message", str(message)])
+    if reply_account:
+        cmd.extend(["--reply-account", str(reply_account)])
+    if reply_channel:
+        cmd.extend(["--reply-channel", str(reply_channel)])
+    if reply_to:
+        cmd.extend(["--reply-to", str(reply_to)])
     if thinking:
         cmd.extend(["--thinking", str(thinking)])
+    if json_output:
+        cmd.append("--json")
     return cmd
 
 
@@ -289,10 +352,14 @@ def run_agent_turn(
     timeout_seconds: float = 600.0,
     deliver: bool = False,
     channel: Optional[str] = None,
+    reply_channel: Optional[str] = None,
+    reply_to: Optional[str] = None,
+    reply_account: Optional[str] = None,
     agent_id: Optional[str] = None,
     session_id: Optional[str] = None,
     thinking: Optional[str] = None,
     local: bool = False,
+    json_output: bool = False,
 ) -> OpenClawResult:
     cmd = build_agent_turn_command(
         command=command,
@@ -300,10 +367,14 @@ def run_agent_turn(
         message=message,
         deliver=deliver,
         channel=channel,
+        reply_channel=reply_channel,
+        reply_to=reply_to,
+        reply_account=reply_account,
         agent_id=agent_id,
         session_id=session_id,
         thinking=thinking,
         local=local,
+        json_output=json_output,
     )
     try:
         env = dict(os.environ)
@@ -341,3 +412,112 @@ def run_agent_turn(
             stdout=stdout,
             stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
         )
+
+
+def parse_openclaw_targets(raw: str, *, default_channel: Optional[str] = None) -> list[tuple[Optional[str], str]]:
+    """
+    Parse OpenClaw targets from a comma/semicolon/newline-separated string.
+
+    Supported forms:
+    - +15551234567                 (E.164; implies whatsapp)
+    - whatsapp:+15551234567        (explicit channel)
+    - telegram:@my_channel         (explicit channel)
+    - discord:channel:1234567890   (explicit channel; target may contain colons)
+
+    If a target has no explicit channel prefix:
+    - E.164 implies channel="whatsapp"
+    - otherwise, uses default_channel when provided (else leaves channel=None)
+    """
+
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    normalized = text.replace("\r\n", "\n").replace("\n", ",").replace(";", ",")
+    parts = [p.strip() for p in normalized.split(",") if p and p.strip()]
+
+    out: list[tuple[Optional[str], str]] = []
+    for part in parts:
+        channel: Optional[str] = None
+        target = part
+
+        if ":" in part:
+            prefix, rest = part.split(":", 1)
+            prefix_norm = prefix.strip().lower()
+            if prefix_norm in _KNOWN_CHANNEL_PREFIXES:
+                channel = prefix_norm
+                target = rest.strip()
+
+        if not target:
+            continue
+
+        if channel is None and _E164_EXACT_RE.fullmatch(target):
+            channel = "whatsapp"
+        if channel is None:
+            dc = (default_channel or "").strip()
+            channel = dc or None
+
+        out.append((channel, target))
+
+    return out
+
+
+def _coerce_targets(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        # Support YAML configs that choose `to: [ ... ]`.
+        items = [str(x).strip() for x in value if str(x).strip()]
+        return ", ".join(items)
+    return str(value)
+
+
+def resolve_openclaw_targets(
+    *,
+    env_targets: Optional[str] = None,
+    env_to: Optional[str] = None,
+    cfg_to=None,
+    default_channel: Optional[str] = None,
+) -> list[tuple[Optional[str], str]]:
+    """
+    Resolve target specs from env/config, returning a parsed list.
+
+    Precedence:
+    - env_targets (OPENCLAW_TARGETS)
+    - env_to (OPENCLAW_TO)
+    - cfg_to (alerts.openclaw.to)
+    """
+
+    raw = (env_targets or "").strip() or (env_to or "").strip() or _coerce_targets(cfg_to).strip()
+    return parse_openclaw_targets(raw, default_channel=default_channel)
+
+
+def send_message_multi(
+    *,
+    targets: Iterable[tuple[Optional[str], str]],
+    message: str,
+    media: Optional[str] = None,
+    command: str = "openclaw",
+    cwd: Optional[Path] = None,
+    timeout_seconds: float = 20.0,
+    extra_args: Optional[Sequence[str]] = None,
+    silent: bool = False,
+) -> list[OpenClawResult]:
+    results: list[OpenClawResult] = []
+    for channel, to in targets:
+        results.append(
+            send_message(
+                to=to,
+                message=message,
+                media=media,
+                command=command,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                extra_args=extra_args,
+                channel=channel,
+                silent=silent,
+            )
+        )
+    return results
