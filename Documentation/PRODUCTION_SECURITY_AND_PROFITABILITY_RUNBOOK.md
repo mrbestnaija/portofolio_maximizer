@@ -94,6 +94,30 @@ Every run produces auditable artifacts:
 - Dashboard status: `logs/audit_gate/dashboard_status_*.json`
 - Production gate artifact: `logs/audit_gate/production_gate_*.json` (or scheduled-task equivalent)
 
+### 6.1) Worktree Provenance (repo_state)
+
+`scripts/production_audit_gate.py` records a `repo_state` block inside the production gate JSON artifact.
+This captures the repo/worktree state at the time the gate ran (branch, ahead/behind, modified + untracked path list,
+and per-path timestamps). This enables reproducible, time-bounded claims like:
+
+- "At T0 we had X modified + Y untracked files; at T1 we had X' and Y'; these exact paths were added/removed/changed."
+
+It does not attempt to attribute changes to a specific person/agent; it only snapshots state.
+
+Compare two timestamped gate artifacts:
+
+```powershell
+.\simpleTrader_env\Scripts\python.exe scripts\compare_gate_artifacts.py `
+  --a D:\pmx\logs\audit_gate\production_gate_latest_YYYYMMDD_HHMMSS.json `
+  --b D:\pmx\logs\audit_gate\production_gate_latest_YYYYMMDD_HHMMSS.json
+```
+
+JSON output (for tooling/CI):
+
+```powershell
+.\simpleTrader_env\Scripts\python.exe scripts\compare_gate_artifacts.py --json --a <A.json> --b <B.json>
+```
+
 ## 7) SQLite Runtime Guardrails (PRAGMA/DDL Hardening)
 
 Operational Python DB connections now apply SQLite guardrails by default:
