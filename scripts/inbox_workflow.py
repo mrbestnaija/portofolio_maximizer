@@ -8,7 +8,7 @@ This script is intentionally conservative:
 - Credentials are loaded locally via etl/secret_loader.py (supports *_FILE).
 
 OpenClaw integration:
-- If OPENCLAW_TO is configured, a scan summary can be sent via OpenClaw.
+- If OPENCLAW_TARGETS/OPENCLAW_TO is configured, a scan summary can be sent via OpenClaw.
 """
 
 from __future__ import annotations
@@ -77,8 +77,22 @@ def _maybe_notify_openclaw(summary: str, *, config: Dict[str, Any]) -> None:
     if (os.getenv("PMX_NOTIFY_OPENCLAW") or "").strip() == "0":
         return
 
-    to = (os.getenv("OPENCLAW_TO") or "").strip()
-    if not to:
+    default_channel = (os.getenv("OPENCLAW_CHANNEL") or "").strip() or None
+    env_targets = (os.getenv("OPENCLAW_TARGETS") or "").strip()
+    env_to = (os.getenv("OPENCLAW_TO") or "").strip()
+    try:
+        from utils.openclaw_cli import resolve_openclaw_targets
+
+        targets = resolve_openclaw_targets(
+            env_targets=env_targets,
+            env_to=env_to,
+            cfg_to=oc_cfg.get("to"),
+            default_channel=default_channel,
+        )
+    except Exception:
+        targets = []
+
+    if not targets:
         return
 
     try:
@@ -97,10 +111,10 @@ def _maybe_notify_openclaw(summary: str, *, config: Dict[str, Any]) -> None:
         timeout_seconds = 20.0
 
     try:
-        from utils.openclaw_cli import send_message
+        from utils.openclaw_cli import send_message_multi
 
-        send_message(
-            to=to,
+        send_message_multi(
+            targets=targets,
             message=message,
             command=command,
             cwd=PROJECT_ROOT,

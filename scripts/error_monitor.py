@@ -252,9 +252,26 @@ Error Breakdown:
         if not bool(cfg.get("enabled", False)):
             return
 
-        to = (os.getenv("OPENCLAW_TO") or cfg.get("to") or "").strip()
-        if not to:
-            logger.info("OpenClaw alerts enabled but no target configured (OPENCLAW_TO / alerts.openclaw.to).")
+        default_channel = (os.getenv("OPENCLAW_CHANNEL") or cfg.get("channel") or "").strip() or None
+        env_targets = (os.getenv("OPENCLAW_TARGETS") or "").strip()
+        env_to = (os.getenv("OPENCLAW_TO") or "").strip()
+
+        try:
+            from utils.openclaw_cli import resolve_openclaw_targets
+
+            targets = resolve_openclaw_targets(
+                env_targets=env_targets,
+                env_to=env_to,
+                cfg_to=cfg.get("to"),
+                default_channel=default_channel,
+            )
+        except Exception:
+            targets = []
+
+        if not targets:
+            logger.info(
+                "OpenClaw alerts enabled but no targets configured (OPENCLAW_TARGETS / OPENCLAW_TO / alerts.openclaw.to)."
+            )
             return
 
         command = (os.getenv("OPENCLAW_COMMAND") or cfg.get("command") or "openclaw").strip() or "openclaw"
@@ -275,16 +292,18 @@ Error Breakdown:
         message = self._redact_outbound_text(message)
 
         try:
-            from utils.openclaw_cli import send_message
+            from utils.openclaw_cli import send_message_multi
 
-            result = send_message(
-                to=to,
+            results = send_message_multi(
+                targets=targets,
                 message=message,
                 command=command,
                 cwd=project_root,
                 timeout_seconds=timeout_seconds,
             )
-            if not result.ok:
+            for result in results:
+                if result.ok:
+                    continue
                 logger.warning(
                     "OpenClaw alert failed (exit=%s): %s",
                     result.returncode,

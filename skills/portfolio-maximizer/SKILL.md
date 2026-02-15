@@ -31,7 +31,7 @@ Use this skill when the user asks you to run/inspect Portfolio Maximizer locally
 ### Audit Gates
 
 - Run the production gate: `python scripts/production_audit_gate.py`
-- OpenClaw notify: auto-sends if `OPENCLAW_TO` is set (disable via `PMX_NOTIFY_OPENCLAW=0`); can also force with `python scripts/production_audit_gate.py --notify-openclaw`
+- OpenClaw notify: auto-sends if `OPENCLAW_TARGETS`/`OPENCLAW_TO` is set (disable via `PMX_NOTIFY_OPENCLAW=0`); can also force with `python scripts/production_audit_gate.py --notify-openclaw`
 
 ### Health Checks
 
@@ -43,13 +43,24 @@ Use this skill when the user asks you to run/inspect Portfolio Maximizer locally
 This repo includes:
 
 - `scripts/openclaw_notify.py` (manual send helper)
+- `scripts/pmx_investigate.py` (search the repo + optional OpenClaw notify)
+- `scripts/pmx_tts_notify.py` (Windows TTS -> WAV -> OpenClaw media notify)
 - `scripts/error_monitor.py` (optional OpenClaw alert delivery if enabled)
 - `scripts/production_audit_gate.py --notify-openclaw` (optional gate delivery)
 
 Recommended env vars:
 
 - `OPENCLAW_COMMAND` (default: `openclaw`, or `wsl openclaw` on Windows)
-- `OPENCLAW_TO` (target string)
+- `OPENCLAW_TARGETS` (recommended; multi-target) or `OPENCLAW_TO` (single target)
 - `OPENCLAW_TIMEOUT_SECONDS` (default: `20`)
 
 See `Documentation/OPENCLAW_INTEGRATION.md`.
+
+Quick examples:
+
+- Investigate and notify:
+  - `python scripts/pmx_investigate.py --query "No API key found" --notify`
+- Send a media file (image/audio/document) via OpenClaw:
+  - `python scripts/openclaw_notify.py --media "path\\to\\file.png" --message "See attached"`
+- Windows TTS audio notify:
+  - `python scripts/pmx_tts_notify.py --text "Run complete. Check the dashboard."`

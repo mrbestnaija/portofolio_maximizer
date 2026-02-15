@@ -56,7 +56,7 @@ alerts:
 
   # OpenClaw alerts (optional)
   # Uses `openclaw message send` to deliver alerts to any OpenClaw-connected channel.
-  # Prefer setting targets via env vars in .env (OPENCLAW_TO / OPENCLAW_COMMAND).
+  # Prefer setting targets via env vars in .env (OPENCLAW_TARGETS / OPENCLAW_TO / OPENCLAW_COMMAND).
   openclaw:
     enabled: true
     command: "openclaw"   # e.g. "openclaw" or "wsl openclaw" on Windows

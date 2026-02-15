@@ -39,6 +39,14 @@ def main(argv: List[str]) -> int:
         lines.append(line)
         ok = ok and group_ok
 
+    # LLM providers (optional)
+    openai_ok, openai_line = _report_group("openai_api_key", ["OPENAI_API_KEY"])
+    lines.append(openai_line)
+    anthropic_ok, anthropic_line = _report_group("anthropic_api_key", ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"])
+    lines.append(anthropic_line)
+    qwen_ok, qwen_line = _report_group("qwen_api_key", ["DASHSCOPE_API_KEY", "QWEN_API_KEY"])
+    lines.append(qwen_line)
+
     # cTrader (live execution readiness)
     user_ok, user_line = _report_group(
         "ctrader_username",
@@ -80,8 +88,15 @@ def main(argv: List[str]) -> int:
     ok = ok and ctrader_ok
 
     # OpenClaw notifications (optional)
-    oc_ok, oc_line = _report_group("openclaw_to", ["OPENCLAW_TO"])
+    oc_ok, oc_line = _report_group("openclaw_targets", ["OPENCLAW_TARGETS", "OPENCLAW_TO"])
     lines.append(oc_line)
+
+    # OpenClaw optional remote channels (optional)
+    tg_ok, tg_line = _report_group("telegram_bot_token", ["TELEGRAM_BOT_TOKEN"])
+    dc_ok, dc_line = _report_group("discord_bot_token", ["DISCORD_BOT_TOKEN"])
+    sb_ok, sb_line = _report_group("slack_bot_token", ["SLACK_BOT_TOKEN"])
+    sa_ok, sa_line = _report_group("slack_app_token", ["SLACK_APP_TOKEN"])
+    lines.extend([tg_line, dc_line, sb_line, sa_line])
 
     # Email alerts (optional, Gmail supported)
     email_user_ok, email_user_line = _report_group("email_username", ["PMX_EMAIL_USERNAME"])

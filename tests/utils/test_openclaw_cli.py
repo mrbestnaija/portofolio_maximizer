@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from utils.openclaw_cli import build_message_send_command, send_message
+from utils.openclaw_cli import build_message_send_command, parse_openclaw_targets, send_message
 
 
 def test_build_message_send_command_basic() -> None:
@@ -20,3 +20,18 @@ def test_send_message_missing_binary_is_handled() -> None:
     )
     assert result.ok is False
     assert result.returncode == 127
+
+
+def test_parse_openclaw_targets_e164_implies_whatsapp() -> None:
+    targets = parse_openclaw_targets("+15551234567")
+    assert targets == [("whatsapp", "+15551234567")]
+
+
+def test_parse_openclaw_targets_channel_prefix_is_respected() -> None:
+    targets = parse_openclaw_targets("telegram:@mychannel, discord:channel:123")
+    assert targets == [("telegram", "@mychannel"), ("discord", "channel:123")]
+
+
+def test_parse_openclaw_targets_default_channel_applies_to_bare_targets() -> None:
+    targets = parse_openclaw_targets("@me", default_channel="telegram")
+    assert targets == [("telegram", "@me")]

@@ -84,7 +84,7 @@ python scripts/inbox_workflow.py send --account gmail --to "recipient@example.co
 
 ## OpenClaw Notifications (Optional)
 
-If `OPENCLAW_TO` is configured, `scan` will auto-send a short scan summary via OpenClaw unless disabled:
+If `OPENCLAW_TARGETS`/`OPENCLAW_TO` is configured, `scan` will auto-send a short scan summary via OpenClaw unless disabled:
 
 - Disable for all scripts: `PMX_NOTIFY_OPENCLAW=0`
 - Disable for inbox scans only: `PMX_INBOX_NOTIFY_OPENCLAW=0`
