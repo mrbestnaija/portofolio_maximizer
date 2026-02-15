@@ -7,3 +7,12 @@ repos:
       - id: mixed-line-ending
         args: ["--fix=lf"]
         exclude: \.(bat|cmd|ps1)$
+
+  - repo: local
+    hooks:
+      - id: pmx-secrets-guard
+        name: PMX secrets guard (block secrets in staged changes/remotes)
+        entry: python tools/secrets_guard.py scan --staged
+        language: python
+        pass_filenames: false
+        stages: [commit, push]

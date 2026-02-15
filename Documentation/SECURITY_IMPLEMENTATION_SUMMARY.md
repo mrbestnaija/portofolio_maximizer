@@ -12,6 +12,14 @@
 
 ---
 
+## ✅ 2026-02-15 Addendum: Secrets/PAT Leak Prevention
+
+- Added `tools/secrets_guard.py` to block accidentally staging credentials (PATs, API keys, passwords, private keys) and to detect credential-bearing git remotes.
+- Integrated as a `pre-commit` hook via `.pre-commit-config.yaml` (`pmx-secrets-guard`).
+- Recommended usage:
+  - `python tools/secrets_guard.py scan --staged` before any push
+  - `python tools/secrets_guard.py scan --tracked --strict` in CI / periodic audits
+
 ### Frontier Market Coverage Alignment (2025-11-15)
 - All multi-ticker scripts now use `--include-frontier-tickers` so Nigeria → Bulgaria symbols outlined in `etl/frontier_markets.py` are exercised during synthetic tests. Security controls (key rotation, access logging, jurisdictional checks) must treat those datasets the same way as US tickers before enabling live feeds; reference `Documentation/arch_tree.md` for the canonical list.
 

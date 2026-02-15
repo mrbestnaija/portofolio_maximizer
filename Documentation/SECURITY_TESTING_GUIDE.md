@@ -23,6 +23,21 @@ pytest tests/integration/test_security_integration.py -v
 python tests/run_security_tests.py
 ```
 
+### Secret Leak Guard (Recommended Before Any Push)
+
+This repo includes a local secrets/PAT guard that blocks accidentally staging credentials and also detects credential-bearing git remote URLs.
+
+```bash
+# Scan staged changes only (fast, best signal)
+python tools/secrets_guard.py scan --staged
+
+# Strict mode (also fails on WARN)
+python tools/secrets_guard.py scan --staged --strict
+
+# CI / deep check: scan tracked files for high-confidence token patterns
+python tools/secrets_guard.py scan --tracked --strict
+```
+
 ---
 
 ## 📋 TEST SUITE OVERVIEW
