@@ -22,6 +22,7 @@ Please do **not** open a public GitHub issue for security reports.
 
 - This project treats credentials as **local-only secrets**; see `Documentation/API_KEYS_SECURITY.md`.
 - Never commit or print secrets (e.g., `.env`, `scripts/.env`, tokens, broker creds).
+- Before any push, run the local leak guard: `python tools/secrets_guard.py scan --staged` (also available as a `pre-commit` hook: `pmx-secrets-guard`).
 
 ### Primary reporting channel (preferred)
 Use **GitHub Security Advisories** for all vulnerability reports:

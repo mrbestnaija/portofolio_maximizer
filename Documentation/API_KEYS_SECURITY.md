@@ -101,6 +101,8 @@ Security note:
 - No staged secrets:
   - `git diff --cached`
   - `rg -n "(api[_ -]?key|token|secret|password)\\s*=" -S .`
+- Recommended automated check:
+  - `python tools/secrets_guard.py scan --staged`
 
 ## Incident Response (If A Secret Leaks)
 

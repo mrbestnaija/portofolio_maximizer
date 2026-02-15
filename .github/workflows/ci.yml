@@ -38,6 +38,9 @@ jobs:
           pip install -r requirements.txt
           pip check
 
+      - name: Secrets guard (blocking)
+        run: python tools/secrets_guard.py scan --tracked --strict
+
       - name: Run tests
         run: pytest -v --tb=short -m "not gpu"
 

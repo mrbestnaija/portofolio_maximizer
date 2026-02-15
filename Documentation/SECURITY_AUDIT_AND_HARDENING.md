@@ -554,6 +554,9 @@ To be considered SaaS-ready, the system must have:
 - **GitGuardian** - Secret detection in git
 - **TruffleHog** - Secret scanning
 - **GitHub Secret Scanning** - Built-in GitHub feature
+- **PMX Secrets Guard (local)** - blocks staging secrets and credential-bearing remotes:
+  - `python tools/secrets_guard.py scan --staged`
+  - Hook: `.pre-commit-config.yaml` (`pmx-secrets-guard`); install with `pre-commit install` (+ `pre-commit install --hook-type pre-push`)
 
 ### **Dependency Scanning**
 - **Safety** - Python dependency checker

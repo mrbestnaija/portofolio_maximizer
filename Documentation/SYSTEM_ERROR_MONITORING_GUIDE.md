@@ -11,6 +11,8 @@
 
 This guide provides comprehensive information about the enhanced error monitoring and management system implemented for the Portfolio Maximizer v45 project.
 
+**Security note (logs/outputs):** do not paste raw `.env` or credential-bearing command output into issues/PRs/chats. If you need to share command output for debugging, use the redacting wrapper: `python tools/secrets_guard.py run -- <command ...>`.
+
 ### Time Series Forecast Health Monitors (2025-11-27)
 - `scripts/check_quant_validation_health.py` scans `logs/signals/quant_validation.jsonl` and fails CI/brutal runs when too many TS signals register `status: "FAIL"` or negative `expected_profit`, turning quant validation into a first-class health gate.
 - `scripts/compare_forecast_models.py` compares the TS ensemble (`model_type='COMBINED'`) against the SAMOSSA (or SARIMAX) baseline on RMSE and `directional_accuracy` per ticker; the “Ensemble vs SAMOSSA Regression Check” in `bash/comprehensive_brutal_test.sh` escalates or fails when the underperforming fraction breaches configured limits.

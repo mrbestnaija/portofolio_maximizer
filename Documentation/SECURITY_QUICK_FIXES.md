@@ -242,6 +242,19 @@ See `SECURITY_AUDIT_AND_HARDENING.md` for complete roadmap.
 4. **Document all changes** for future reference
 5. **Review git history** to ensure no secrets were committed
 
+## Secrets/PAT Leak Guard (Recommended)
+
+This repo includes a local guard to prevent accidentally staging credentials (PATs, API keys, passwords, private keys) and to detect credential-bearing git remote URLs.
+
+```bash
+# One-time setup
+pre-commit install
+pre-commit install --hook-type pre-push
+
+# Manual scan (recommended before any push)
+python tools/secrets_guard.py scan --staged
+```
+
 ---
 
 **Status**: 🔴 **ACTION REQUIRED - Complete before production deployment**
