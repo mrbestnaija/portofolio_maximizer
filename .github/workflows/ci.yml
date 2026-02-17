@@ -36,10 +36,36 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pip-audit
           pip check
+
+      - name: Security preflight (blocking)
+        run: |
+          mkdir -p reports/security
+          python scripts/security_preflight.py \
+            --require-pip-audit \
+            --output-json reports/security/security_preflight_${{ github.run_id }}.json
 
       - name: Secrets guard (blocking)
         run: python tools/secrets_guard.py scan --tracked --strict
+
+      - name: OpenClaw + orchestration smoke (blocking)
+        run: |
+          python scripts/llm_multi_model_orchestrator.py health
+          python scripts/openclaw_self_improve.py index
+          python scripts/openclaw_models.py status
+          python scripts/pmx_interactions_api.py --check
+
+      - name: Integrity CI gate (blocking)
+        run: python scripts/ci_integrity_gate.py --strict
+
+      - name: Adversarial integrity suite (blocking when DB exists)
+        run: |
+          if [ -f data/portfolio_maximizer.db ]; then
+            python scripts/adversarial_integrity_test.py --db data/portfolio_maximizer.db
+          else
+            echo "Skipping adversarial_integrity_test.py (data/portfolio_maximizer.db missing)."
+          fi
 
       - name: Run tests
         run: pytest -v --tb=short -m "not gpu"
@@ -75,4 +101,11 @@ jobs:
         with:
           name: adversarial-forecaster-suite
           path: reports/adversarial_forecaster/*.json
+
+      - name: Upload security preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-preflight
+          path: reports/security/*.json
 

@@ -11,7 +11,7 @@ import os
 import warnings
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -765,7 +765,7 @@ class TimeSeriesForecaster:
         results["model_events"] = list(self._model_events)
         results["instrumentation_report"] = self._instrumentation.export()
         if self._audit_dir:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
             self.save_audit_report(audit_path)
         return results
@@ -1440,7 +1440,7 @@ class TimeSeriesForecaster:
             metadata["regression_metrics"] = metrics_map["ensemble"]
 
         if self._audit_dir:
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
             self.save_audit_report(audit_path)
 

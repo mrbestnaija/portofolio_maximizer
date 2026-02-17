@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -8,6 +9,28 @@ from typing import Iterable, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from etl.secret_loader import load_secret
+
+
+_PLACEHOLDER_SECRETS = {
+    "your_interactions_api_key_here",
+    "your_api_key_here",
+    "changeme",
+    "change_me",
+    "replace_me",
+    "replace-me",
+    "todo",
+}
+
+
+def _looks_like_placeholder_secret(value: str) -> bool:
+    v = (value or "").strip().lower()
+    if not v:
+        return True
+    if v in _PLACEHOLDER_SECRETS:
+        return True
+    if v.startswith("your_") and v.endswith("_here"):
+        return True
+    return False
 
 
 def _first_present(keys: Iterable[str]) -> Optional[str]:
@@ -90,6 +113,51 @@ def main(argv: List[str]) -> int:
     # OpenClaw notifications (optional)
     oc_ok, oc_line = _report_group("openclaw_targets", ["OPENCLAW_TARGETS", "OPENCLAW_TO"])
     lines.append(oc_line)
+
+    # Interactions API (optional)
+    interactions_key = (load_secret("INTERACTIONS_API_KEY") or "").strip()
+    if not interactions_key:
+        lines.append("[WARN] interactions_api_key: missing (INTERACTIONS_API_KEY)")
+    elif _looks_like_placeholder_secret(interactions_key):
+        lines.append("[WARN] interactions_api_key: present but looks like template placeholder (INTERACTIONS_API_KEY)")
+    elif len(interactions_key) < 16:
+        lines.append("[WARN] interactions_api_key: present but weak (<16 chars) (INTERACTIONS_API_KEY)")
+    else:
+        lines.append("[OK] interactions_api_key: present (INTERACTIONS_API_KEY)")
+
+    interactions_url = (os.getenv("INTERACTIONS_ENDPOINT_URL") or "").strip()
+    verify_url = (os.getenv("LINKED_ROLES_VERIFICATION_URL") or "").strip()
+    lines.append(
+        "[OK] interactions_endpoint_url: present (INTERACTIONS_ENDPOINT_URL)"
+        if interactions_url
+        else "[WARN] interactions_endpoint_url: missing (INTERACTIONS_ENDPOINT_URL)"
+    )
+    lines.append(
+        "[OK] linked_roles_verification_url: present (LINKED_ROLES_VERIFICATION_URL)"
+        if verify_url
+        else "[WARN] linked_roles_verification_url: missing (LINKED_ROLES_VERIFICATION_URL)"
+    )
+
+    auth0_domain = (os.getenv("AUTH0_DOMAIN") or "").strip()
+    auth0_audience = (os.getenv("AUTH0_AUDIENCE") or "").strip()
+    lines.append(
+        "[OK] auth0_jwt: configured (AUTH0_DOMAIN / AUTH0_AUDIENCE)"
+        if (auth0_domain and auth0_audience)
+        else "[WARN] auth0_jwt: missing (AUTH0_DOMAIN / AUTH0_AUDIENCE)"
+    )
+
+    tos_url = (os.getenv("TERMS_OF_SERVICE_URL") or "").strip()
+    pp_url = (os.getenv("PRIVACY_POLICY_URL") or "").strip()
+    lines.append(
+        "[OK] terms_of_service_url: present (TERMS_OF_SERVICE_URL)"
+        if tos_url
+        else "[WARN] terms_of_service_url: missing (TERMS_OF_SERVICE_URL)"
+    )
+    lines.append(
+        "[OK] privacy_policy_url: present (PRIVACY_POLICY_URL)"
+        if pp_url
+        else "[WARN] privacy_policy_url: missing (PRIVACY_POLICY_URL)"
+    )
 
     # OpenClaw optional remote channels (optional)
     tg_ok, tg_line = _report_group("telegram_bot_token", ["TELEGRAM_BOT_TOKEN"])

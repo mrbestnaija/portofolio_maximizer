@@ -193,10 +193,13 @@ def _discover_ollama_models(base_url: str, timeout_seconds: float = 3.0) -> list
 
 def _default_ollama_model_order() -> list[str]:
     # Keep aligned with config/llm_config.yml defaults.
+    # Strategy: reasoning models first, then tool-calling model.
     return [
+        "deepseek-r1:8b",       # fast reasoning (primary)
+        "deepseek-r1:32b",      # heavy reasoning (fallback)
+        "qwen3:8b",             # tool-calling / function-calling orchestrator
         "qwen:14b-chat-q4_K_M",
         "deepseek-coder:6.7b-instruct-q4_K_M",
-        "codellama:13b-instruct-q4_K_M",
     ]
 
 
@@ -210,13 +213,15 @@ def _pick_primary(preferred: list[str], available: list[str]) -> Optional[str]:
 
 def _ollama_model_def(model_id: str) -> dict[str, Any]:
     low = (model_id or "").lower()
+    is_reasoning = ("r1" in low) or ("r2" in low) or ("reasoning" in low)
+    is_tool_capable = ("qwen3" in low) or ("qwen2.5" in low) or ("llama3" in low and "tool" in low)
     return {
         "id": model_id,
         "name": model_id,
-        "reasoning": ("r1" in low) or ("reasoning" in low),
+        "reasoning": is_reasoning,
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        "contextWindow": 65536,
+        "contextWindow": 65536 if not is_tool_capable else 32768,
         "maxTokens": 8192,
     }
 

@@ -1,0 +1,68 @@
+# Centralized Logging Configuration - Portfolio Maximizer
+# Phase 7.9+: UTC timestamps, log rotation, structured output
+#
+# Usage:
+#   from utils.logging_setup import configure_logging
+#   configure_logging()  # Call once at application startup
+
+logging:
+  # Global settings
+  version: 1
+  disable_existing_loggers: false
+
+  # All timestamps in UTC
+  use_utc: true
+
+  formatters:
+    standard:
+      format: "%(asctime)s [%(name)s] %(levelname)s - %(message)s"
+      datefmt: "%Y-%m-%dT%H:%M:%S"
+    json:
+      format: '{"timestamp":"%(asctime)s","logger":"%(name)s","level":"%(levelname)s","message":"%(message)s"}'
+      datefmt: "%Y-%m-%dT%H:%M:%SZ"
+
+  # Rotation policies
+  rotation:
+    # Size-based rotation (general logs)
+    size_based:
+      max_bytes: 10485760  # 10MB per file
+      backup_count: 5      # Keep 5 rotated files
+
+    # Time-based rotation (daily logs)
+    time_based:
+      when: "midnight"
+      interval: 1
+      backup_count: 14     # Keep 14 days
+
+    # Cleanup policy
+    cleanup:
+      enabled: true
+      max_age_days: 30     # Delete logs older than 30 days
+      exempt_dirs:          # Never auto-clean these
+        - "audit_sprint"
+        - "llm_activity"
+
+  # Log directory structure
+  paths:
+    root: "logs"
+    pipeline: "logs/pipeline.log"
+    automation: "logs/automation/execution.jsonl"
+    summary: "logs/automation/run_summary.jsonl"
+    performance: "logs/performance/metrics.jsonl"
+    llm_errors: "logs/llm_errors.log"
+    openclaw_notify: "logs/openclaw_notify"
+    llm_activity: "logs/llm_activity"
+    ollama: "logs/ollama"
+    security: "logs/security_audit.jsonl"
+
+  # Per-module log levels
+  levels:
+    root: "INFO"
+    etl: "INFO"
+    ai_llm: "INFO"
+    execution: "INFO"
+    forcester_ts: "WARNING"
+    integrity: "INFO"
+    models: "INFO"
+    scripts: "INFO"
+    utils: "WARNING"

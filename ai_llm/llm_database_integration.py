@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -120,7 +120,7 @@ class LLMDatabaseManager:
         if isinstance(value, str):
             raw = value.strip()
             if not raw:
-                return datetime.now()
+                return datetime.now(timezone.utc)
             try:
                 return datetime.fromisoformat(raw)
             except ValueError:
@@ -132,7 +132,7 @@ class LLMDatabaseManager:
                         return datetime.strptime(raw, fmt)
                     except ValueError:
                         continue
-        return datetime.now()
+        return datetime.now(timezone.utc)
 
     def _safe_json_load(self, raw_value: Any, default):
         """Safely decode JSON content with fallback default."""
@@ -384,7 +384,7 @@ class LLMDatabaseManager:
                     tokens_per_second,
                     success,
                     error_message,
-                    datetime.now()
+                    datetime.now(timezone.utc)
                 ))
                 
                 metrics_id = cursor.lastrowid
@@ -402,7 +402,7 @@ class LLMDatabaseManager:
             with self._connect() as conn:
                 cursor = conn.cursor()
 
-                cutoff_time = datetime.now() - timedelta(hours=hours)
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
                 time_column = self._resolve_column(cursor, 'llm_signals', ['timestamp', 'created_at'])
                 query = f"""
@@ -448,7 +448,7 @@ class LLMDatabaseManager:
             with self._connect() as conn:
                 cursor = conn.cursor()
 
-                cutoff_time = datetime.now() - timedelta(hours=hours)
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
                 time_column = self._resolve_column(cursor, 'llm_risk_assessments', ['timestamp', 'created_at'])
                 query = f"""
@@ -493,7 +493,7 @@ class LLMDatabaseManager:
             with self._connect() as conn:
                 cursor = conn.cursor()
 
-                cutoff_time = datetime.now() - timedelta(hours=hours)
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
                 perf_time_column = self._resolve_column(cursor, 'llm_performance_metrics', ['timestamp', 'created_at'])
                 cursor.execute(f"""
@@ -553,7 +553,7 @@ class LLMDatabaseManager:
             with self._connect() as conn:
                 cursor = conn.cursor()
                 
-                cutoff_date = datetime.now().replace(day=datetime.now().day - days_to_keep)
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
                 
                 # Clean up old signals
                 cursor.execute("""
@@ -607,7 +607,7 @@ def save_llm_signal(ticker: str, signal_type: str, confidence: float,
         expected_return=expected_return,
         risk_estimate=risk_estimate,
         model_used=model_used,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         market_data_snapshot=market_data_snapshot or {}
     )
     return get_llm_db_manager().save_llm_signal(signal)
@@ -627,7 +627,7 @@ def save_risk_assessment(portfolio_id: str, risk_score: float,
         risk_factors=risk_factors,
         recommendations=recommendations,
         model_used=model_used,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         market_conditions=market_conditions or {},
         confidence=confidence
     )

@@ -3,17 +3,26 @@ OpenClaw CLI integration helpers.
 
 This module is intentionally tiny: it shells out to the `openclaw` CLI (or a
 user-supplied wrapper like `wsl openclaw`) and returns structured results.
+
+Includes:
+- Retry with exponential backoff for transient failures
+- Rate limiting (token bucket) to prevent message flooding
+- Message deduplication to prevent auto-reply loops
+- Session error detection for prekey bundle issues
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -25,6 +34,131 @@ class OpenClawResult:
     command: list[str]
     stdout: str
     stderr: str
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter (token bucket)
+# ---------------------------------------------------------------------------
+
+class _RateLimiter:
+    """Thread-safe token-bucket rate limiter for outbound messages."""
+
+    def __init__(self, max_per_minute: int = 10, burst: int = 3):
+        self._max_per_minute = max(1, max_per_minute)
+        self._burst = max(1, burst)
+        self._tokens = float(burst)
+        self._last_refill = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self, timeout: float = 5.0) -> bool:
+        """Try to acquire a send token. Returns False if rate-limited."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last_refill
+                self._tokens = min(
+                    self._burst,
+                    self._tokens + elapsed * (self._max_per_minute / 60.0),
+                )
+                self._last_refill = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
+
+
+# Global rate limiter: 10 messages/minute, burst of 3
+_rate_limiter = _RateLimiter(
+    max_per_minute=int(os.getenv("OPENCLAW_RATE_LIMIT_PER_MINUTE", "10")),
+    burst=int(os.getenv("OPENCLAW_RATE_LIMIT_BURST", "3")),
+)
+
+
+# ---------------------------------------------------------------------------
+# Message deduplication (prevents auto-reply loops)
+# ---------------------------------------------------------------------------
+
+class _MessageDeduplicator:
+    """Tracks recently sent messages to prevent loops and duplicate sends."""
+
+    def __init__(self, window_seconds: float = 30.0, max_entries: int = 100):
+        self._window = window_seconds
+        self._max = max_entries
+        self._seen: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _fingerprint(self, to: str, message: str) -> str:
+        raw = f"{to}:{message[:200]}".encode("utf-8", errors="replace")
+        return hashlib.md5(raw).hexdigest()
+
+    def is_duplicate(self, to: str, message: str) -> bool:
+        fp = self._fingerprint(to, message)
+        now = time.monotonic()
+        with self._lock:
+            # Prune expired entries
+            expired = [k for k, t in self._seen.items() if now - t > self._window]
+            for k in expired:
+                del self._seen[k]
+            # Prune if too large
+            if len(self._seen) > self._max:
+                oldest = sorted(self._seen.items(), key=lambda x: x[1])
+                for k, _ in oldest[: len(self._seen) - self._max // 2]:
+                    del self._seen[k]
+            if fp in self._seen:
+                return True
+            self._seen[fp] = now
+            return False
+
+
+_deduplicator = _MessageDeduplicator(
+    window_seconds=float(os.getenv("OPENCLAW_DEDUP_WINDOW_SECONDS", "30")),
+)
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+def _is_retryable_error(result: OpenClawResult) -> bool:
+    """Check if the error is transient and worth retrying."""
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    retryable_patterns = [
+        "econnrefused",
+        "connection refused",
+        "gateway closed",
+        "timeout",
+        "timed out",
+        "bad mac",
+        "session error",
+        "socket hang up",
+        "econnreset",
+        "network error",
+    ]
+    # Do NOT retry: auth errors, bad requests, missing config
+    non_retryable = [
+        "does not support tools",
+        "api key",
+        "not configured",
+        "unknown option",
+        "missing required",
+    ]
+    if any(p in combined for p in non_retryable):
+        return False
+    return any(p in combined for p in retryable_patterns)
+
+
+def _is_session_error(result: OpenClawResult) -> bool:
+    """Detect WhatsApp session/prekey bundle errors."""
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    return any(p in combined for p in [
+        "prekey bundle",
+        "closed session",
+        "bad mac",
+        "session error",
+    ])
 
 
 # E.164 style phone number, e.g. +15551234567
@@ -226,10 +360,35 @@ def send_message(
     extra_args: Optional[Sequence[str]] = None,
     channel: Optional[str] = None,
     silent: bool = False,
+    max_retries: int = 2,
+    skip_dedup: bool = False,
+    skip_rate_limit: bool = False,
 ) -> OpenClawResult:
     cmd = build_message_send_command(command=command, to=to, message=message, media=media, channel=channel, silent=silent)
     if extra_args:
         cmd.extend([str(arg) for arg in extra_args])
+
+    # --- Deduplication guard ---
+    if not skip_dedup and not any(a == "--dry-run" for a in (extra_args or [])):
+        if _deduplicator.is_duplicate(to, message or ""):
+            return OpenClawResult(
+                ok=True,
+                returncode=0,
+                command=cmd,
+                stdout="[dedup] Duplicate message suppressed (same target+content within window)",
+                stderr="",
+            )
+
+    # --- Rate limiting guard ---
+    if not skip_rate_limit and not any(a == "--dry-run" for a in (extra_args or [])):
+        if not _rate_limiter.acquire(timeout=3.0):
+            return OpenClawResult(
+                ok=False,
+                returncode=429,
+                command=cmd,
+                stdout="",
+                stderr="Rate limited: too many messages in short period. Wait and retry.",
+            )
 
     def _is_unknown_option(output: str, flag: str) -> bool:
         text = (output or "").lower()
@@ -238,67 +397,99 @@ def send_message(
             return False
         return "unknown option" in text and needle in text
 
-    try:
-        if not (message or "").strip() and not (media or "").strip():
-            return OpenClawResult(
-                ok=False,
-                returncode=2,
-                command=cmd,
-                stdout="",
-                stderr="Missing message/media (OpenClaw requires --message unless --media is set).",
-            )
-        env = dict(os.environ)
-        env.setdefault("NODE_NO_WARNINGS", "1")
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            timeout=float(timeout_seconds),
-            env=env,
-        )
-        if proc.returncode != 0 and _is_unknown_option((proc.stderr or proc.stdout), "--target"):
-            legacy = list(cmd)
-            try:
-                idx = legacy.index("--target")
-                legacy[idx] = "--to"
-            except ValueError:
-                legacy = [arg if arg != "--target" else "--to" for arg in legacy]
-
+    def _try_send(send_cmd: list[str]) -> OpenClawResult:
+        try:
+            if not (message or "").strip() and not (media or "").strip():
+                return OpenClawResult(
+                    ok=False,
+                    returncode=2,
+                    command=send_cmd,
+                    stdout="",
+                    stderr="Missing message/media (OpenClaw requires --message unless --media is set).",
+                )
+            env = dict(os.environ)
+            env.setdefault("NODE_NO_WARNINGS", "1")
             proc = subprocess.run(
-                legacy,
+                send_cmd,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
                 timeout=float(timeout_seconds),
                 env=env,
             )
-            cmd = legacy
-        return OpenClawResult(
-            ok=proc.returncode == 0,
-            returncode=int(proc.returncode),
-            command=cmd,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
+            if proc.returncode != 0 and _is_unknown_option((proc.stderr or proc.stdout), "--target"):
+                legacy = list(send_cmd)
+                try:
+                    idx = legacy.index("--target")
+                    legacy[idx] = "--to"
+                except ValueError:
+                    legacy = [arg if arg != "--target" else "--to" for arg in legacy]
+
+                proc = subprocess.run(
+                    legacy,
+                    cwd=str(cwd) if cwd else None,
+                    capture_output=True,
+                    text=True,
+                    timeout=float(timeout_seconds),
+                    env=env,
+                )
+                send_cmd = legacy
+            return OpenClawResult(
+                ok=proc.returncode == 0,
+                returncode=int(proc.returncode),
+                command=send_cmd,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+            )
+        except FileNotFoundError as exc:
+            return OpenClawResult(
+                ok=False,
+                returncode=127,
+                command=send_cmd,
+                stdout="",
+                stderr=str(exc),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            return OpenClawResult(
+                ok=False,
+                returncode=124,
+                command=send_cmd,
+                stdout=stdout,
+                stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
+            )
+
+    # --- Retry loop with exponential backoff ---
+    last_result = _try_send(cmd)
+    if last_result.ok:
+        return last_result
+
+    for attempt in range(max_retries):
+        if not _is_retryable_error(last_result):
+            break
+        delay = min(2.0 * (2 ** attempt), 10.0)  # 2s, 4s, capped at 10s
+        time.sleep(delay)
+        last_result = _try_send(cmd)
+        if last_result.ok:
+            return last_result
+
+    # --- Session error detection ---
+    if _is_session_error(last_result):
+        last_result = OpenClawResult(
+            ok=last_result.ok,
+            returncode=last_result.returncode,
+            command=last_result.command,
+            stdout=last_result.stdout,
+            stderr=(
+                last_result.stderr
+                + "\n[PMX] Session/prekey error detected. "
+                "This is typically caused by WhatsApp Web re-keying. "
+                "Try: openclaw gateway restart"
+            ),
         )
-    except FileNotFoundError as exc:
-        return OpenClawResult(
-            ok=False,
-            returncode=127,
-            command=cmd,
-            stdout="",
-            stderr=str(exc),
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        return OpenClawResult(
-            ok=False,
-            returncode=124,
-            command=cmd,
-            stdout=stdout,
-            stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
-        )
+
+    return last_result
 
 
 def build_agent_turn_command(
@@ -360,6 +551,7 @@ def run_agent_turn(
     thinking: Optional[str] = None,
     local: bool = False,
     json_output: bool = False,
+    max_retries: int = 1,
 ) -> OpenClawResult:
     cmd = build_agent_turn_command(
         command=command,
@@ -376,42 +568,59 @@ def run_agent_turn(
         local=local,
         json_output=json_output,
     )
-    try:
-        env = dict(os.environ)
-        env.setdefault("NODE_NO_WARNINGS", "1")
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            timeout=float(timeout_seconds),
-            env=env,
-        )
-        return OpenClawResult(
-            ok=proc.returncode == 0,
-            returncode=int(proc.returncode),
-            command=cmd,
-            stdout=proc.stdout or "",
-            stderr=proc.stderr or "",
-        )
-    except FileNotFoundError as exc:
-        return OpenClawResult(
-            ok=False,
-            returncode=127,
-            command=cmd,
-            stdout="",
-            stderr=str(exc),
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        return OpenClawResult(
-            ok=False,
-            returncode=124,
-            command=cmd,
-            stdout=stdout,
-            stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
-        )
+
+    def _try_run() -> OpenClawResult:
+        try:
+            env = dict(os.environ)
+            env.setdefault("NODE_NO_WARNINGS", "1")
+            proc = subprocess.run(
+                cmd,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                text=True,
+                timeout=float(timeout_seconds),
+                env=env,
+            )
+            return OpenClawResult(
+                ok=proc.returncode == 0,
+                returncode=int(proc.returncode),
+                command=cmd,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+            )
+        except FileNotFoundError as exc:
+            return OpenClawResult(
+                ok=False,
+                returncode=127,
+                command=cmd,
+                stdout="",
+                stderr=str(exc),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            return OpenClawResult(
+                ok=False,
+                returncode=124,
+                command=cmd,
+                stdout=stdout,
+                stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
+            )
+
+    last_result = _try_run()
+    if last_result.ok:
+        return last_result
+
+    for attempt in range(max_retries):
+        if not _is_retryable_error(last_result):
+            break
+        delay = min(3.0 * (2 ** attempt), 15.0)
+        time.sleep(delay)
+        last_result = _try_run()
+        if last_result.ok:
+            return last_result
+
+    return last_result
 
 
 def parse_openclaw_targets(raw: str, *, default_channel: Optional[str] = None) -> list[tuple[Optional[str], str]]:
