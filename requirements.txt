@@ -26,7 +26,7 @@ fastapi==0.128.6
 fonttools==4.61.1
 frozendict==2.4.6
 frozenlist==1.8.0
-fsspec==2025.12.0
+fsspec==2026.2.0
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
