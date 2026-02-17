@@ -33,9 +33,9 @@ Configure targets via environment variables (recommended so you do not hardcode 
   Examples: `whatsapp`, `telegram`, `discord`  
 - `OPENCLAW_TARGETS` (optional, multi-target)  
   Comma-separated list. Items may be `channel:target`.  
-  Example: `whatsapp:+15551234567,telegram:@mychat,discord:channel:123456789012345678`
+  Example: `whatsapp:+2347042437712,telegram:@mychat,discord:channel:123456789012345678`
 - `OPENCLAW_TO` (recommended for notifications)  
-  Examples: `+15551234567`, `discord:...`, `slack:...`
+  Examples: `+2347042437712`, `discord:...`, `slack:...`
 - `OPENCLAW_TIMEOUT_SECONDS` (default: `20`)
 - `OPENCLAW_AGENT_TIMEOUT_SECONDS` (default: `600`) (prompt mode)
 - `OPENCLAW_REPLY_CHANNEL` / `OPENCLAW_REPLY_TO` / `OPENCLAW_REPLY_ACCOUNT` (prompt mode optional)  
@@ -64,10 +64,6 @@ Defaults:
 For ad-hoc testing, you can send a message directly:
 
 - `python scripts/openclaw_notify.py --to "<target>" --message "Hello from Portfolio Maximizer"`
-
-To attach a file (image/audio/video/document):
-
-- `python scripts/openclaw_notify.py --to "<target>" --media "path\\to\\file.png" --message "See attached"`
 
 If `OPENCLAW_TARGETS`/`OPENCLAW_TO` is not set, the helper will try to infer a WhatsApp "message yourself" target from:
 
@@ -129,12 +125,6 @@ OpenClaw supports multiple channels. On Windows, the most reliable "remote" opti
 - `python scripts/openclaw_notify.py --channel telegram --to "@mychat" --message "PMX test"`
 - `python scripts/openclaw_notify.py --channel discord --to channel:123456789012345678 --message "PMX test"`
 
-## Audio Notifications (Windows TTS)
-
-If you're on Windows, this repo includes a small helper that generates a WAV via `System.Speech` and sends it as OpenClaw media:
-
-- `python scripts/pmx_tts_notify.py --text "Run completed. Check the dashboard."`
-
 ## WhatsApp Connectivity Troubleshooting (408 Handshake Timeout)
 
 If `openclaw channels status` shows WhatsApp `stopped/disconnected` with an "Opening handshake has timed out" error:
@@ -161,54 +151,6 @@ If you want the OpenClaw CLI itself to run with the same `.env` context, use:
 
 - `python scripts/openclaw_env.py status --json`
 - `python scripts/openclaw_env.py message send --channel whatsapp --target +15551234567 --message "Hi"`
-
-## Model Provider Failover (Local + Remote, Avoid Lock-In)
-
-You cannot bypass paid provider access, but you *can* avoid single-provider lock-in by configuring OpenClaw to fail over to **local open-source models** (Ollama) when a remote provider is down or keys are unavailable.
-
-Key points:
-
-- OpenClaw supports a **primary model** plus **fallbacks** (`agents.defaults.model.primary` + `agents.defaults.model.fallbacks`).
-- On Windows, the OpenClaw Gateway runs as a **Scheduled Task**, so it may not inherit your repo `.env`. If you want OpenAI/Anthropic keys to work from gateway-run prompting, you must sync them into OpenClaw’s local auth store.
-- OpenClaw currently expects an API key to be resolvable for the **Ollama** provider even for localhost. `scripts/openclaw_models.py` writes a harmless placeholder (`ollama:default=local`) into the OpenClaw auth store so local failover works.
-- OpenClaw also maintains a **model allowlist** (`agents.defaults.models`). Fallbacks will be ignored unless they are allowlisted; `scripts/openclaw_models.py apply` updates the allowlist automatically.
-
-### Quick Start (Recommended: Auto Strategy)
-
-1. Ensure Ollama is running and at least one model is installed.
-   - See: `Documentation/LLM_INTEGRATION.md`
-   - Recommended (RTX 4060 Ti 16GB class):
-     - `ollama pull qwen:14b-chat-q4_K_M`
-     - `ollama pull deepseek-coder:6.7b-instruct-q4_K_M`
-     - `ollama pull codellama:13b-instruct-q4_K_M`
-2. Inspect current OpenClaw model config:
-   - `python scripts/openclaw_models.py status --list-ollama-models`
-3. Apply failover config (auto chooses local-first only when Ollama is reachable):
-   - `python scripts/openclaw_models.py apply --strategy auto --restart-gateway`
-
-### Local-First (Option A)
-
-If you want local to be the default even when Ollama is temporarily down (OpenClaw will fall back to Qwen Portal):
-
-- `python scripts/openclaw_models.py apply --strategy local-first --restart-gateway`
-
-### Enable Paid Providers As Optional Fallbacks (OpenAI / Claude)
-
-1. Put keys in repo `.env` (git-ignored): `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`).
-2. Sync keys into OpenClaw auth store and configure providers + fallbacks:
-   - `python scripts/openclaw_models.py apply --sync-auth --enable-openai-provider --enable-anthropic-provider --restart-gateway`
-
-### Custom Model Chain (Explicit)
-
-Set these in `.env` (see `.env.template`), then apply:
-
-- `OPENCLAW_MODEL_STRATEGY=custom`
-- `OPENCLAW_MODEL_PRIMARY=...`
-- `OPENCLAW_MODEL_FALLBACKS=...`
-
-Then:
-
-- `python scripts/openclaw_models.py apply --restart-gateway`
 
 ## Log Location (Optional: Move To D:)
 
@@ -257,3 +199,182 @@ Inbox workflows have their own safe limits:
 - Sending is disabled by default; enable with `PMX_INBOX_ALLOW_SEND=1` (or `limits.allow_send: true`).
 
 See: `Documentation/INBOX_WORKFLOWS.md`
+
+## Cron Automation (Updated 2026-02-17)
+
+OpenClaw runs 9 audit-aligned cron jobs via `agentTurn` mode. The local LLM (qwen3:8b)
+receives the cron message, executes the specified PMX script via `exec` tool, and either
+reports anomalies or responds `NO_REPLY` (suppressing the notification).
+
+### Job Definitions
+
+Jobs are stored in `~/.openclaw/cron/jobs.json` (not in the repo). Each job uses
+`sessionTarget: "isolated"` for clean execution context and `delivery.mode: "announce"`
+(except Weekly Session Cleanup which uses `"none"`).
+
+| Job | Priority | Schedule | Script |
+|-----|----------|----------|--------|
+| PnL Integrity Audit | P0 | `0 */4 * * *` (every 4h) | `python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db` |
+| Production Gate Check | P0 | `0 7 * * *` (daily 7 AM) | `python scripts/production_audit_gate.py` |
+| Quant Validation Health | P0 | `30 7 * * *` (daily 7:30 AM) | Inline Python analyzing `logs/signals/quant_validation.jsonl` |
+| Signal Linkage Monitor | P1 | `0 8 * * *` (daily 8 AM) | Inline Python querying DB for NULL signal_id, orphans |
+| Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL and consecutive losses |
+| GARCH Unit-Root Guard | P2 | `0 9 * * 1` (Mon 9 AM) | Inline Python scanning forecast audits for alpha+beta >= 0.98 |
+| Overnight Hold Monitor | P2 | `0 9 * * 5` (Fri 9 AM) | Inline Python comparing intraday vs overnight PnL |
+| System Health Check | -- | `0 */6 * * *` (every 6h) | `python scripts/llm_multi_model_orchestrator.py status` + `python scripts/error_monitor.py --check` |
+| Weekly Session Cleanup | -- | `0 3 * * 0` (Sun 3 AM) | Cleans stale session files (silent) |
+
+### Announcement Rules
+
+Each cron job message includes explicit rules for when to announce vs stay silent:
+- **Core principle**: Only announce anomalies. Routine success = NO_REPLY.
+- P0 jobs announce on CRITICAL/HIGH violations, gate FAIL, or FAIL rate >= 90%.
+- P1 jobs announce on orphan detections, consecutive losses, or PnL thresholds.
+- P2 jobs announce on unit-root or overnight drag thresholds.
+- System Health Check announces any model offline or error monitor issues.
+
+### Management Commands
+
+```bash
+# List all cron jobs with status
+openclaw cron list
+
+# Force-run a specific job (2-minute timeout)
+openclaw cron run <job-id> --timeout 120000
+
+# Enable/disable a job
+openclaw cron enable <job-id>
+openclaw cron disable <job-id>
+
+# Check gateway health
+openclaw gateway status
+```
+
+### Schema Notes
+
+The cron job schema uses:
+- `schedule.kind: "cron"` with `schedule.expr: "0 */4 * * *"` (NOT `cron` or `expression`)
+- `delivery.mode: "announce"` or `"none"` (NOT `"silent"`)
+- `payload.kind: "agentTurn"` for LLM-driven script execution
+- `sessionTarget: "isolated"` for clean execution context
+- Job IDs must be UUIDs
+
+## 3-Model Local LLM Strategy (Updated 2026-02-16)
+
+Portfolio Maximizer uses three specialized local models via Ollama, each with a
+distinct role in the inference pipeline:
+
+| Model | Role | Capabilities | VRAM | Speed |
+|-------|------|-------------|------|-------|
+| **deepseek-r1:8b** | Fast reasoning | Chain-of-thought, math, code-gen | 5.5GB | 25-35 tok/s |
+| **deepseek-r1:32b** | Heavy reasoning | Deep multi-step analysis, long-context | 20GB | 10-15 tok/s |
+| **qwen3:8b** | Tool orchestrator | Function-calling, structured output, thinking mode | 5.5GB | 30-40 tok/s |
+
+### Task-to-Model Routing
+
+| Task | Model |
+|------|-------|
+| Market analysis, signal generation, regime detection | deepseek-r1:8b |
+| Portfolio optimization, adversarial audits | deepseek-r1:32b |
+| Tool/function calling, API orchestration, social media | qwen3:8b |
+
+### How It Works
+
+**qwen3:8b** acts as the orchestrator: it receives requests via OpenClaw
+social media channels (WhatsApp/Telegram/Discord) and can dispatch reasoning
+tasks to the deepseek-r1 models as "tools" via Ollama's native tool-calling API.
+
+```
+User (WhatsApp/Telegram/Discord)
+  -> OpenClaw Gateway
+    -> qwen3:8b (orchestrator, tool-calling)
+      -> deepseek-r1:8b (fast reasoning)
+      -> deepseek-r1:32b (heavy reasoning)
+    <- structured response
+  <- notification to user
+```
+
+### Setup
+
+```bash
+# Pull all 3 models
+ollama pull deepseek-r1:8b
+ollama pull deepseek-r1:32b
+ollama pull qwen3:8b
+
+# Apply to OpenClaw (local-first strategy with all 3 models)
+python scripts/openclaw_models.py apply --strategy local-first --restart-gateway
+
+# Verify
+python scripts/openclaw_models.py status --list-ollama-models
+```
+
+### Multi-Model Orchestration CLI
+
+```bash
+# Check model availability
+python scripts/llm_multi_model_orchestrator.py status
+
+# Route a task to the best model
+python scripts/llm_multi_model_orchestrator.py route --task "Analyze AAPL regime"
+
+# Run orchestrated query (qwen3 dispatches to deepseek-r1 models)
+python scripts/llm_multi_model_orchestrator.py orchestrate --prompt "Summarize gate status and suggest next actions"
+```
+
+### Override via Environment
+
+Set `OPENCLAW_OLLAMA_MODEL_ORDER` in `.env` to override the default priority:
+
+```
+OPENCLAW_OLLAMA_MODEL_ORDER=deepseek-r1:8b,deepseek-r1:32b,qwen3:8b
+```
+
+## Interactions API Security Modes
+
+The Interactions API (`scripts/pmx_interactions_api.py`) supports three auth
+modes, controlled by `INTERACTIONS_AUTH_MODE`:
+
+| Mode | Accepts API Key | Accepts JWT | Use Case |
+|------|-----------------|-------------|----------|
+| `any` (default) | Yes | Yes | Development, flexible auth |
+| `jwt-only` | No | Yes | Production with Auth0 |
+| `api-key-only` | Yes | No | Simple deployments |
+
+### Configuration
+
+```bash
+# In .env:
+INTERACTIONS_AUTH_MODE=jwt-only
+
+# Requires Auth0 config:
+AUTH0_DOMAIN=your-tenant.us.auth0.com
+AUTH0_AUDIENCE=your-api-identifier
+```
+
+### Minimum Key Length
+
+The minimum API key length defaults to 16 characters and can be raised
+(never lowered) via `INTERACTIONS_MIN_KEY_LENGTH`:
+
+```bash
+INTERACTIONS_MIN_KEY_LENGTH=32
+```
+
+### CORS
+
+Set `INTERACTIONS_CORS_ORIGINS` to a comma-separated list of allowed origins:
+
+```bash
+INTERACTIONS_CORS_ORIGINS=http://localhost:3000,https://yourdomain.com
+```
+
+Omit the variable entirely to disable CORS headers (default).
+
+### ngrok Integration
+
+`scripts/start_ngrok_interactions.ps1` respects `INTERACTIONS_AUTH_MODE`:
+- In `jwt-only` mode, it requires `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` (API key alone
+  is not sufficient).
+- In `api-key-only` mode, it requires a strong `INTERACTIONS_API_KEY`.
+- In `any` mode (default), either is accepted.

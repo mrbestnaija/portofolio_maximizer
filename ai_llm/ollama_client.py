@@ -96,7 +96,7 @@ class OllamaClient:
         self._session = http_client if http_client is not None else requests.Session()
         self._owns_session = http_client is None and hasattr(self._session, "close")
         self._explicit_model = model is not None
-        resolved_model = model or "deepseek-coder:6.7b-instruct-q4_K_M"
+        resolved_model = model or "deepseek-r1:8b"
         self._last_inference_stats: Optional[Dict[str, Any]] = None
 
         if self.optimizer and not self._explicit_model:
@@ -224,9 +224,11 @@ class OllamaClient:
         
         # Fallback to any available cached model
         preferred_fallbacks = [
-            "deepseek-coder:6.7b-instruct-q4_K_M",
-            "codellama:13b-instruct-q4_K_M",
+            "deepseek-r1:8b",
+            "deepseek-r1:32b",
+            "qwen3:8b",
             "qwen:14b-chat-q4_K_M",
+            "deepseek-coder:6.7b-instruct-q4_K_M",
         ]
         for candidate in preferred_fallbacks:
             if candidate in candidate_list:
@@ -703,6 +705,82 @@ class OllamaClient:
         except Exception as e:
             logger.warning(f"Failed to get model info: {e}")
             return {}
+
+    def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list,
+        system: Optional[str] = None,
+        temperature: float = 0.1,
+        tool_model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a response using Ollama's chat API with tool/function calling.
+
+        Qwen3:8b supports native tool calling via the /api/chat endpoint.
+        This method sends the prompt with tool definitions and returns the
+        model's response including any tool_calls.
+
+        Args:
+            prompt: User message text.
+            tools: List of tool definitions in OpenAI-compatible format.
+            system: Optional system prompt.
+            temperature: Sampling temperature.
+            tool_model: Override model for tool calling (default: qwen3:8b if available).
+
+        Returns:
+            Dict with keys: "content" (str), "tool_calls" (list), "model" (str).
+        """
+        model = tool_model or "qwen3:8b"
+
+        messages: list = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature},
+        }
+        if tools:
+            payload["tools"] = tools
+
+        start_time = time.perf_counter()
+        try:
+            response = self._session.post(
+                f"{self.host}/api/chat",
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+            message = result.get("message", {})
+            duration = time.perf_counter() - start_time
+
+            logger.info(
+                "Tool-calling generation: %.1fs (model=%s, tools=%d)",
+                duration,
+                model,
+                len(tools),
+            )
+
+            return {
+                "content": message.get("content", ""),
+                "tool_calls": message.get("tool_calls", []),
+                "model": model,
+                "inference_time": duration,
+            }
+        except Exception as e:
+            logger.error("Tool-calling generation failed: %s", e)
+            return {
+                "content": "",
+                "tool_calls": [],
+                "model": model,
+                "inference_time": time.perf_counter() - start_time,
+                "error": str(e),
+            }
 
     def get_last_inference_stats(self) -> Optional[Dict[str, Any]]:
         """Return metrics captured during the most recent inference attempt."""

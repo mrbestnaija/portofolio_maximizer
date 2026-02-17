@@ -106,7 +106,15 @@ data/training/*
 data/validation/**
 data/testing/*
 
-
+# OpenClaw files (config contains channel tokens - NEVER commit)
+IDENTITY.*
+SOUL.*
+TOOLS.*
+USER.*
+openclaw.json
+openclaw.json.bak
+auth-profiles.json
+.openclaw/
 
 
 
@@ -187,6 +195,8 @@ logs/audit_sprint/
 logs/phase7.8/
 logs/inbox/
 logs/inbox/*
+logs/llm_activity/
+logs/ollama/
 
 # Email artifacts (can contain sensitive content)
 *.eml

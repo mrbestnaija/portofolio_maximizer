@@ -17,7 +17,7 @@ import pickle
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import pandas as pd
 import numpy as np
@@ -44,8 +44,8 @@ class CheckpointManager:
         if not self.metadata_file.exists():
             self._save_metadata({
                 'checkpoints': {},
-                'created_at': datetime.now().isoformat(),
-                'last_updated': datetime.now().isoformat()
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'last_updated': datetime.now(timezone.utc).isoformat()
             })
 
     def _save_metadata(self, metadata: Dict[str, Any]) -> None:
@@ -104,7 +104,7 @@ class CheckpointManager:
             Checkpoint ID
         """
         # Generate checkpoint ID
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         data_hash = self._compute_data_hash(data)
         checkpoint_id = f"{pipeline_id}_{stage}_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -147,7 +147,7 @@ class CheckpointManager:
             'data_shape': data.shape,
             'data_hash': data_hash
         })
-        meta['last_updated'] = datetime.now().isoformat()
+        meta['last_updated'] = datetime.now(timezone.utc).isoformat()
         self._save_metadata(meta)
 
         logger.info(
@@ -263,7 +263,7 @@ class CheckpointManager:
         Returns:
             Number of checkpoints deleted
         """
-        cutoff = datetime.now() - timedelta(days=retention_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         meta = self._load_metadata()
         checkpoints = meta.get('checkpoints', {})
 
@@ -297,7 +297,7 @@ class CheckpointManager:
 
         # Update metadata
         meta['checkpoints'] = updated_checkpoints
-        meta['last_updated'] = datetime.now().isoformat()
+        meta['last_updated'] = datetime.now(timezone.utc).isoformat()
         self._save_metadata(meta)
 
         if deleted_count > 0:
@@ -343,7 +343,7 @@ class CheckpointManager:
                 del meta['checkpoints'][pipeline_id]
 
         if updated:
-            meta['last_updated'] = datetime.now().isoformat()
+            meta['last_updated'] = datetime.now(timezone.utc).isoformat()
             self._save_metadata(meta)
             logger.info("Deleted checkpoint: %s", checkpoint_id)
 

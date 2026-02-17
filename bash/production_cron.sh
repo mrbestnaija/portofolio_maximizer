@@ -208,6 +208,67 @@ PY
     fi
     ;;
 
+  llm_orchestrator_health)
+    # Periodic health snapshot for the multi-model qwen/deepseek orchestrator.
+    if [[ -f "scripts/llm_multi_model_orchestrator.py" ]]; then
+      run_with_logging "llm_orchestrator_health: llm_multi_model_orchestrator.py health" \
+        "${PYTHON_BIN}" scripts/llm_multi_model_orchestrator.py health
+    else
+      run_with_logging "llm_orchestrator_health: stub (script missing)" \
+        echo "llm_multi_model_orchestrator.py not present; skipping."
+    fi
+    ;;
+
+  openclaw_models_status)
+    # Snapshot OpenClaw provider/model configuration state.
+    if [[ -f "scripts/openclaw_models.py" ]]; then
+      run_with_logging "openclaw_models_status: openclaw_models.py status" \
+        "${PYTHON_BIN}" scripts/openclaw_models.py status
+    else
+      run_with_logging "openclaw_models_status: stub (script missing)" \
+        echo "openclaw_models.py not present; skipping."
+    fi
+    ;;
+
+  openclaw_self_improve_index)
+    # Refresh PMX source index used by the self-improvement assistant workflow.
+    if [[ -f "scripts/openclaw_self_improve.py" ]]; then
+      run_with_logging "openclaw_self_improve_index: openclaw_self_improve.py index" \
+        "${PYTHON_BIN}" scripts/openclaw_self_improve.py index
+    else
+      run_with_logging "openclaw_self_improve_index: stub (script missing)" \
+        echo "openclaw_self_improve.py not present; skipping."
+    fi
+    ;;
+
+  interactions_api_sanity)
+    # Validate Interactions API config without starting the long-running server.
+    if [[ -f "scripts/pmx_interactions_api.py" ]]; then
+      run_with_logging "interactions_api_sanity: pmx_interactions_api.py --check" \
+        "${PYTHON_BIN}" scripts/pmx_interactions_api.py --check
+    else
+      run_with_logging "interactions_api_sanity: stub (script missing)" \
+        echo "pmx_interactions_api.py not present; skipping."
+    fi
+    ;;
+
+  adversarial_integrity)
+    # Periodic adversarial integrity attack simulation.
+    if [[ -f "scripts/adversarial_integrity_test.py" ]]; then
+      ADV_DB="${CRON_ADV_DB_PATH:-data/portfolio_maximizer.db}"
+      if [[ -f "${ADV_DB}" ]]; then
+        run_with_logging "adversarial_integrity: adversarial_integrity_test.py" \
+          "${PYTHON_BIN}" scripts/adversarial_integrity_test.py --db "${ADV_DB}"
+      else
+        run_with_logging "adversarial_integrity: skipped (db missing)" \
+          echo "Database not found at ${ADV_DB}; skipping adversarial integrity test."
+      fi
+    else
+      run_with_logging "adversarial_integrity: stub (script missing)" \
+        echo "adversarial_integrity_test.py not present; skipping."
+    fi
+    ;;
+
   env_sanity)
     # Environment sanity check before trading hours.
     if [[ -f "scripts/validate_environment.py" ]]; then
@@ -243,6 +304,11 @@ Usage:
 Tasks:
   daily_etl            Run full ETL pipeline once (default live mode).
   auto_trader          Invoke scripts/run_auto_trader.py (paper trading loop).
+  llm_orchestrator_health  Run scripts/llm_multi_model_orchestrator.py health.
+  openclaw_models_status   Run scripts/openclaw_models.py status snapshot.
+  openclaw_self_improve_index  Refresh scripts/openclaw_self_improve.py index.
+  interactions_api_sanity  Validate scripts/pmx_interactions_api.py config/runtime.
+  adversarial_integrity   Run scripts/adversarial_integrity_test.py against DB.
   nightly_backfill     Run signal validation backfill (stub until modernised).
   monitoring           Run LLM/pipeline monitoring (if available).
   env_sanity           Run environment validation checks (if available).

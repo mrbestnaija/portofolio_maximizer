@@ -1,279 +1,204 @@
 # Portfolio Maximizer - Quick Reference Card
 
-**Last Updated**: 2026-01-21 (Phase 7.3 Complete)
-**System Status**: ✅ Production-Ready, Multi-Ticker Validated
+**Last Updated**: 2026-02-17 (Phase 7.9 Complete)
+**System Status**: Research Phase - Adversarial findings under review
 
 **Ensemble status (canonical, current)**: `Documentation/ENSEMBLE_MODEL_STATUS.md` (per-forecast policy labels vs aggregate audit gate). Use this as the single source of truth for external-facing ensemble claims.
 
 ---
 
-## 🚀 Quick Start Commands
+## Quick Start Commands
 
 ### Run Pipeline (Multi-Ticker)
 ```bash
 python scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT,NVDA \
   --start 2024-07-01 \
-  --end 2026-01-18 \
-  --execution-mode live
+  --end 2026-02-17 \
+  --execution-mode auto
 ```
 
-### View Live Dashboard
+### Launch Autonomous Trading
 ```bash
-python dashboard/live_ensemble_monitor.py
+python scripts/run_auto_trader.py \
+  --tickers AAPL,MSFT,NVDA \
+  --lookback-days 365 \
+  --cycles 5 \
+  --sleep-seconds 900
 ```
 
-### Analyze Results
+### Run PnL Integrity Audit
 ```bash
-python scripts/analyze_multi_ticker_results.py logs/phase7.3_multi_ticker_validation.log
+python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db
 ```
 
-### Run Diagnostics
+### Check Production Gate
 ```bash
-python scripts/run_ensemble_diagnostics.py --ticker AAPL
+python scripts/production_audit_gate.py
 ```
 
-### Fresh Data + Regime Validation
+### Check Canonical Metrics (Correct Way)
 ```bash
-python scripts/fetch_fresh_data.py --tickers AAPL,MSFT,NVDA --start 2024-07-01 --end 2026-01-18 --output-dir data/raw
-python scripts/validate_regime_on_fresh_data.py --tickers AAPL,MSFT,NVDA --output-dir data/raw --regimes MODERATE_TRENDING,HIGH_VOL_TRENDING,CRISIS
-python scripts/audit_ohlcv_duplicates.py --tickers AAPL,MSFT,NVDA --export-deduped data/raw
+python -c "
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+with PnLIntegrityEnforcer('data/portfolio_maximizer.db') as e:
+    m = e.get_canonical_metrics()
+    print(f'Round-trips: {m.total_trades}, PnL: \${m.total_realized_pnl:+,.2f}')
+    print(f'Win rate: {m.win_rate:.1%}, Profit factor: {m.profit_factor:.2f}')
+"
+```
+
+### Run Proof-Mode Audit Sprint
+```bash
+PROOF_MODE=1 RISK_MODE=research_production bash bash/run_20_audit_sprint.sh
 ```
 
 ---
 
-## 📊 Current Performance (Phase 7.3)
+## Current Performance (Phase 7.9)
 
-| Ticker | RMSE Ratio | Status | GARCH Weight |
-|--------|------------|--------|--------------|
-| MSFT | 1.037 | ✅ TARGET | 85% |
-| AAPL | 1.470 | ⚠️ 36% to go | 85% |
-| NVDA | 1.453 | ⚠️ 39% to go | 0% (SAMoSSA) |
-| **Avg** | **1.386** | **🎯 51%** | **14%** |
+### Production Metrics (2026-02-14)
 
-**Target**: <1.100 RMSE ratio
-**Baseline**: 1.682 RMSE ratio
-**Improvement**: 17.6% overall
+| Metric | Value |
+|--------|-------|
+| Round-trips | 37 |
+| Total PnL | $673.22 |
+| Win Rate | 43.2% (16W/21L) |
+| Profit Factor | 1.85 |
+| Avg Win | $91.59 |
+| Avg Loss | $34.54 |
+| Win/Loss Ratio | 2.65x |
+| Largest Win | $497.83 |
+| Integrity | ALL PASSED (0 violations) |
+| Forecast Gate | PASS (21.4%, threshold 25%) |
+
+### Adversarial Findings (2026-02-16)
+
+| Finding | Severity | Status |
+|---------|----------|--------|
+| 94.2% quant FAIL rate (0.8% from RED gate) | P0 | Open |
+| Ensemble worse than best single 92% of time | P0 | Open |
+| Directional accuracy below coin-flip (41% WR) | P0 | Open |
+| Confidence calibration broken (0.9+ -> 41% WR) | P1 | Open |
+| AAPL -$325 drag, GS 0-for-5 | P1 | Open |
+| signal_id NULL for all trades | P2 | Open |
+
+Full details: [ADVERSARIAL_AUDIT_20260216.md](Documentation/ADVERSARIAL_AUDIT_20260216.md)
 
 ---
 
-## 🔧 System Architecture
+## System Architecture
 
-### Ensemble Models (Phase 7.3)
+### Forecasting Models
 - **GARCH**: Volatility forecasting (best for liquid, range-bound)
-- **SARIMAX**: Linear time series (baseline)
-- **SAMoSSA**: Spectral decomposition (trending markets)
-- **MSSA-RL**: Change-point detection + RL
+- **SARIMAX**: Linear time series (off by default, 15x speedup)
+- **SAMoSSA**: Spectral decomposition (trending markets, dominates all regimes)
+- **MSSA-RL**: Change-point detection + RL (under-weighted at 8.7%)
 
-### Upcoming Models (Phase 8)
-- **PatchTST**: Transformer for 1-hour intraday
-- **NHITS**: Fast MLP baseline
-- **XGBoost GPU**: Feature-based directional edge
-- **Chronos-Bolt**: Zero-shot benchmark
+### LLM Models (3-Model Local Strategy)
+- **deepseek-r1:8b**: Fast reasoning (chain-of-thought, math, code-gen)
+- **deepseek-r1:32b**: Heavy reasoning (deep analysis, long-context)
+- **qwen3:8b**: Tool orchestrator (function-calling, structured output)
+
+### OpenClaw Cron Jobs (9 active)
+
+| Job | Schedule | Announce When |
+|-----|----------|---------------|
+| [P0] PnL Integrity Audit | Every 4h | CRITICAL/HIGH violations |
+| [P0] Production Gate Check | Daily 7 AM | Gate FAIL or RED |
+| [P0] Quant Validation Health | Daily 7:30 AM | FAIL rate >= 90% |
+| [P1] Signal Linkage Monitor | Daily 8 AM | Orphan opens/unlinked closes |
+| [P1] Ticker Health Monitor | Daily 8:30 AM | 3+ consecutive losses or PnL < -$300 |
+| [P2] GARCH Unit-Root Guard | Weekly Mon 9 AM | Unit-root rate >= 35% |
+| [P2] Overnight Hold Monitor | Weekly Fri 9 AM | Overnight drag > 25% |
+| System Health Check | Every 6h | Model offline or errors |
+| Weekly Session Cleanup | Sunday 3 AM | Never (silent) |
 
 ---
 
-## 📁 Key File Locations
+## Key File Locations
 
-### Code
+### Core Code
 - `forcester_ts/forecaster.py` - Main forecasting engine
 - `forcester_ts/ensemble.py` - Ensemble coordinator
-- `forcester_ts/garch.py` - GARCH implementation
-- `config/pipeline_config.yml` - Main configuration
+- `integrity/pnl_integrity_enforcer.py` - PnL integrity (6 checks, CI gate)
+- `execution/paper_trading_engine.py` - Paper trading engine
+- `models/time_series_signal_generator.py` - Signal router
+- `config/forecasting_config.yml` - Model parameters + ensemble config
+
+### Operations
+- `scripts/production_audit_gate.py` - Production readiness gate
+- `scripts/ci_integrity_gate.py` - CI integrity gate
+- `scripts/openclaw_models.py` - OpenClaw model management
+- `scripts/pmx_interactions_api.py` - Interactions API (FastAPI)
+- `scripts/llm_multi_model_orchestrator.py` - Multi-model orchestrator
+- `bash/run_20_audit_sprint.sh` - Audit sprint with lockfile
 
 ### Documentation
-- `Documentation/PHASE_7.3_COMPLETE.md` - GARCH integration details
-- `Documentation/PHASE_7.3_MULTI_TICKER_VALIDATION.md` - Validation results
-- `Documentation/PHASE_8_NEURAL_FORECASTER_PLAN.md` - Neural roadmap
-- `Documentation/SESSION_SUMMARY_2026_01_21.md` - Latest session summary
-
-### Dashboard
-- `dashboard/live_ensemble_monitor.py` - Self-iterative monitoring
-- `dashboard/static_dashboard.md` - Reference dashboard
-
-### Logs
-- `logs/phase7.3_FINAL_TEST.log` - Single ticker test
-- `logs/phase7.3_multi_ticker_validation.log` - Multi-ticker validation
+- `Documentation/ADVERSARIAL_AUDIT_20260216.md` - Current adversarial findings
+- `Documentation/OPENCLAW_INTEGRATION.md` - OpenClaw + LLM + Interactions API
+- `Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md` - Proof-mode spec
+- `Documentation/ENSEMBLE_MODEL_STATUS.md` - Ensemble governance labels
+- `CLAUDE.md` - Agent guidance
+- `AGENTS.md` - Agent guardrails + cron rules
 
 ---
 
-## 🎯 Next Actions by Priority
+## Troubleshooting
 
-### 🔴 HIGH - Reach Target Faster (Phase 7.4)
-**Goal**: Get 2/3 tickers to target within 1 week
-
-1. **Implement Confidence Calibration**
-   ```python
-   # In ensemble.py, replace min-max with quantile normalization
-   from scipy.stats import rankdata
-   normalized = rankdata(confidence_scores) / len(confidence_scores)
-   ```
-
-2. **Add Regime Detection**
-   ```yaml
-   # In pipeline_config.yml
-   regime_detection:
-     enabled: true
-     rules:
-       - if: "vol < 0.20 and trend < 0.4"
-         prefer: ["garch"]
-   ```
-
-3. **Optimize AAPL Weights**
-   ```python
-   # Test: {garch: 0.6, samossa: 0.3, sarimax: 0.1}
-   from scipy.optimize import minimize
-   optimal_weights = minimize(rmse_objective, x0=[0.6, 0.3, 0.1])
-   ```
-
----
-
-### 🔵 MEDIUM - Innovation (Phase 8.1)
-**Goal**: Add neural forecasters for trending markets
-
-1. **Install Dependencies**
-   ```bash
-   pip install neuralforecast skforecast xgboost[gpu] torch
-   ```
-
-2. **Test GPU Acceleration**
-   ```bash
-   python -c "import torch; print('CUDA:', torch.cuda.is_available())"
-   nvidia-smi
-   ```
-
-3. **Create PatchTST Adapter**
-   ```python
-   # forcester_ts/neural_forecaster.py
-   from neuralforecast import NeuralForecast
-   from neuralforecast.models import PatchTST
-   ```
-
----
-
-## 🐛 Troubleshooting
-
-### GARCH Not Appearing in Ensemble
-**Symptom**: `weights={'samossa': 1.0}` (no GARCH)
-**Fix**: Check confidence scores are normalized properly
+### PnL Integrity Violations
 ```bash
-grep "Normalized confidence" logs/*.log
-# Should show: garch: 0.XX, samossa: 1.0
+# Run full audit
+python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db
+
+# Fix opening legs with PnL (dry run)
+python -m integrity.pnl_integrity_enforcer --fix-opening-pnl
+
+# Apply all fixes
+python -m integrity.pnl_integrity_enforcer --fix-all --apply
 ```
 
-### Pipeline Fails with "Config not loaded"
-**Symptom**: `EnsembleConfig with kwargs keys: []`
-**Fix**: Ensure forecasting config in `pipeline_config.yml` (lines 250-320)
+### OpenClaw Issues
 ```bash
-grep -A5 "forecasting:" config/pipeline_config.yml
+# Check cron status
+openclaw cron list
+
+# Force-run a job
+openclaw cron run <job-id> --timeout 120000
+
+# Check gateway
+openclaw gateway status
+
+# Check models
+python scripts/openclaw_models.py status --list-ollama-models
 ```
 
-### RMSE Ratio Regressing
-**Symptom**: Ratio increases after changes
-**Fix**: Run diagnostics and check model health
+### Pipeline Failures
 ```bash
-python scripts/run_ensemble_diagnostics.py --analyze-errors
+# Validate environment
+python scripts/validate_environment.py
+
+# Validate credentials (no values shown)
+python scripts/validate_credentials.py
+
+# Check LLM health
+python scripts/llm_multi_model_orchestrator.py status
 ```
 
 ---
 
-## 📞 Support Resources
-
-### Documentation
-- [Phase 7.3 Complete](Documentation/PHASE_7.3_COMPLETE.md) - Full implementation
-- [Multi-Ticker Validation](Documentation/PHASE_7.3_MULTI_TICKER_VALIDATION.md) - Performance analysis
-- [Phase 8 Plan](Documentation/PHASE_8_NEURAL_FORECASTER_PLAN.md) - Next steps
-- [CLAUDE.md](CLAUDE.md) - Project overview for Claude Code
-
-### Scripts
-- `scripts/analyze_multi_ticker_results.py` - Parse logs, generate metrics
-- `scripts/run_ensemble_diagnostics.py` - Model health checks
-- `dashboard/live_ensemble_monitor.py` - Real-time monitoring
-
-### Logs Analysis
-```bash
-# Check ensemble weights
-grep "ENSEMBLE build_complete.*garch" logs/*.log
-
-# Check RMSE ratios
-grep "ENSEMBLE policy_decision.*ratio" logs/*.log
-
-# Check confidence scores
-grep "Normalized confidence" logs/*.log
-
-# Check candidate evaluation
-grep "Candidate evaluation.*garch" logs/*.log
-```
-
----
-
-## 🎓 Key Concepts
-
-### RMSE Ratio
-```
-RMSE Ratio = Ensemble RMSE / Best Single Model RMSE
-Target: <1.1 (ensemble ≤10% worse than best)
-Current: 1.386 (38.6% worse than best)
-```
-
-### Confidence Scoring
-- **GARCH**: AIC/BIC-based (~0.60 raw, ~0.28 normalized)
-- **SAMoSSA**: Explained Variance Ratio (~0.95 raw, ~1.0 normalized)
-- **Normalization**: Maps raw scores to 0-1 range
-- **Issue**: SAMoSSA always normalizes to 1.0 (highest raw score)
-
-### Regime Detection
-- **Liquid, Range-Bound**: GARCH optimal (MSFT)
-- **Trending, High-Vol**: SAMoSSA/Neural optimal (NVDA)
-- **Need**: Explicit rules to prefer GARCH in appropriate regimes
-
----
-
-## 🔗 Quick Links
-
-- **GitHub Issues**: [Report bugs](https://github.com/anthropics/claude-code/issues)
-- **GPU Specs**: NVIDIA RTX 4060 Ti (16GB VRAM), CUDA 12.9
-- **Python Version**: 3.10+
-- **Virtual Env**: `simpleTrader_env/`
-
----
-
-## 📊 Dashboard Access
-
-### Static Dashboard
-```bash
-# Open in editor/browser
-cat dashboard/static_dashboard.md
-```
-
-### Live Dashboard
-```bash
-# One-time view
-python dashboard/live_ensemble_monitor.py
-
-# Continuous monitoring (60s refresh)
-python dashboard/live_ensemble_monitor.py --watch
-
-# Export to JSON
-python dashboard/live_ensemble_monitor.py --export
-# Output: dashboard/metrics.json
-```
-
----
-
-## 🎯 Success Metrics
+## Success Metrics
 
 | Metric | Current | Target | Status |
 |--------|---------|--------|--------|
-| Avg RMSE Ratio | 1.386 | <1.100 | 🟨 51% |
-| Tickers at Target | 1/3 | 3/3 | 🟥 33% |
-| GARCH Selection | 14.3% | 30-50% | 🟥 29% |
-| Improvement | +17.6% | +30% | 🟨 59% |
-
-**Legend**: 🟩 Achieved | 🟨 In Progress | 🟥 Not Started
+| Forecast Gate | 21.4% | <25% | PASS |
+| PnL Integrity | 0 violations | 0 violations | PASS |
+| Win Rate | 43.2% | >50% | Needs work |
+| Profit Factor | 1.85 | >2.0 | Close |
+| Quant FAIL Rate | 94.2% | <90% | P0 priority |
+| Ensemble vs Best Single | Worse 92% | Worse <50% | P0 priority |
 
 ---
 
-**Version**: Phase 7.3 (GARCH Integration Complete)
-**Status**: Production-Ready, Multi-Ticker Validated
-**Next**: Phase 7.4 (Confidence Calibration) or Phase 8.1 (Neural Setup)
+**Version**: Phase 7.9 Complete
+**Next**: Phase 7.10 (Production Hardening - address adversarial findings)

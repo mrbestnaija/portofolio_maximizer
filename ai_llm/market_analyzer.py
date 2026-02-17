@@ -9,7 +9,7 @@ Provides LLM-based analysis of market data at ETL extraction stage.
 import pandas as pd
 import logging
 from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 import os
@@ -112,7 +112,7 @@ class LLMMarketAnalyzer:
             # Add metadata
             analysis.update({
                 'ticker': ticker,
-                'analysis_timestamp': datetime.now().isoformat(),
+                'analysis_timestamp': datetime.now(timezone.utc).isoformat(),
                 'data_period': period_info,
                 'statistics': stats,
                 'fallback': False,
@@ -185,7 +185,7 @@ class LLMMarketAnalyzer:
             "key_levels": [stats.get("low_52w", 0.0), stats.get("high_52w", 0.0)],
             "summary": summary,
             "ticker": ticker,
-            "analysis_timestamp": datetime.now().isoformat(),
+            "analysis_timestamp": datetime.now(timezone.utc).isoformat(),
             "data_period": period_info,
             "statistics": stats,
             "fallback": True,

@@ -2,16 +2,16 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.9 In Progress](https://img.shields.io/badge/Phase%207.9-In%20Progress-blue.svg)](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md)
+[![Phase 7.9 Complete](https://img.shields.io/badge/Phase%207.9-Complete-green.svg)](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md)
 [![Tests: 731](https://img.shields.io/badge/tests-731%20(718%20passing)-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 4.2
-**Status**: Phase 7.9 In Progress - Cross-session persistence, proof-mode validation, UTC normalization
-**Last Updated**: 2026-02-09
+**Version**: 4.3
+**Status**: Phase 7.9 Complete - PnL integrity enforcement, adversarial audit, OpenClaw automation
+**Last Updated**: 2026-02-17
 
 ---
 
@@ -19,30 +19,29 @@
 
 Portfolio Maximizer is a self-directed trading stack that marries institutional-grade ETL with autonomous execution. It continuously extracts, validates, preprocesses, forecasts, and trades financial time series so profit-focused decisions are generated without human babysitting.
 
-### Current Phase & Scope (Jan 2026)
+### Current Phase & Scope (Feb 2026)
 
-**Phase 7.8 Complete** - All-Regime Weight Optimization:
+**Phase 7.9 Complete** - PnL Integrity Enforcement, Adversarial Audit, OpenClaw Automation:
 
-- **3/6 regimes optimized** with SAMOSSA-dominant weights:
-  - **CRISIS**: 60.69% RMSE improvement (17.15 → 6.74), 72% SAMOSSA
-  - **MODERATE_MIXED**: 6.30% improvement (17.63 → 16.52), 73% SAMOSSA
-  - **MODERATE_TRENDING**: 65.07% improvement (20.86 → 7.29), 90% SAMOSSA
-- **Key Finding**: SAMOSSA dominates ALL regimes (72-90%), contradicting initial GARCH hypothesis
-- **Method**: Rolling cross-validation with scipy.optimize.minimize (3+ years of AAPL data)
-- **Validation**: 2/20 holdout audits complete
+- **PnL Integrity Framework**: Database-level constraints preventing double-counting, orphaned positions, and diagnostic contamination
+- **Adversarial Audit**: 10-finding stress test revealing 94.2% quant FAIL rate, broken confidence calibration, ensemble underperformance
+- **Forecast Audit Gate**: PASS (21.4% violation rate, 28 effective audits, threshold 25%)
+- **OpenClaw Cron Automation**: 9 audit-aligned cron jobs (P0-P2 priority) with real script execution via agentTurn mode
+- **Interactions API**: Security-hardened FastAPI with auth mode enforcement (JWT/API-key/any), CORS, rate limiting
+- **3-Model Local LLM**: deepseek-r1:8b (fast reasoning), deepseek-r1:32b (heavy reasoning), qwen3:8b (tool orchestrator)
 
-**Phase 7.9 In Progress** - Holdout Audit Accumulation:
-
-- Current: 2/20 audits complete
-- Target: 20 audits for production deployment decision
-- 3 regimes not optimized (insufficient samples): HIGH_VOL_TRENDING, MODERATE_RANGEBOUND, LIQUID_RANGEBOUND
+**Production Metrics (2026-02-14)**:
+- 37 round-trips, $673.22 total PnL, 43.2% win rate, 1.85 profit factor
+- Integrity: ALL PASSED (0 violations with whitelist)
+- System survives on magnitude asymmetry (avg win $91.59 vs avg loss $34.54 = 2.65x ratio)
 
 **System Architecture**:
 - Regime-aware ensemble routing with adaptive model selection
-- 4 forecasting models: SARIMAX, GARCH, SAMOSSA, MSSA-RL
+- 4 forecasting models: SARIMAX (off by default), GARCH, SAMOSSA, MSSA-RL
 - Quantile-based confidence calibration (Phase 7.4)
-- Rolling cross-validation optimization framework
-- Comprehensive logging with phase-organized structure
+- PnL integrity enforcement with canonical views (Phase 7.9)
+- OpenClaw-driven monitoring and notifications
+- SARIMAX disabled by default for 15x single-forecast speedup
 
 ### Key Features
 
@@ -50,7 +49,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **📊 Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
 - **📈 Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
-- **✅ Comprehensive Testing**: 141+ tests with high coverage across ETL, LLM, and integration modules
+- **✅ Comprehensive Testing**: 731 tests with high coverage across ETL, LLM, forecaster, execution, and security modules
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
 - **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, neural/TS stages, and ticker discovery with auditable logging
 - **🔐 Resilient Data Access**: Hardened Yahoo Finance extraction with pooling to reduce transient failures
@@ -58,28 +57,31 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-### Latest Enhancements (Jan 2026)
+### Latest Enhancements (Feb 2026)
+
+**Phase 7.9 Achievements**:
+
+- **PnL Integrity Enforcement**: Database-level constraints (opening legs NULL PnL, entry_trade_id linkage, diagnostic/synthetic flags), canonical views (`production_closed_trades`, `round_trips`), CI gate
+- **Adversarial Audit**: 10-finding stress test documented in [ADVERSARIAL_AUDIT_20260216.md](Documentation/ADVERSARIAL_AUDIT_20260216.md)
+- **OpenClaw Cron Automation**: 9 priority-ranked cron jobs running real PMX scripts (P0: PnL integrity every 4h, production gate daily; P1: signal linkage, ticker health; P2: GARCH unit-root, overnight hold)
+- **Interactions API**: FastAPI with auth mode enforcement (`jwt-only`/`api-key-only`/`any`), CORS, rate limiting, ngrok integration
+- **3-Model Local LLM Stack**: deepseek-r1:8b + deepseek-r1:32b + qwen3:8b via Ollama with multi-model orchestration
+- **Cross-session persistence**: portfolio_state + portfolio_cash_state tables via `--resume`
+- **Proof mode**: Tight max_holding, ATR stops/targets, flatten-before-reverse for round-trip validation
+- **SARIMAX off by default**: 15x single-forecast speedup (0.18s vs 2.74s)
+- **Secrets leak guard**: Pre-commit hook + CI check preventing credential leaks
 
 **Phase 7.8 Achievements**:
 
-- All-regime weight optimization (3/6 regimes) with ~60-65% RMSE improvement for CRISIS/MODERATE_TRENDING and +6.30% for MODERATE_MIXED
+- All-regime weight optimization (3/6 regimes) with ~60-65% RMSE improvement for CRISIS/MODERATE_TRENDING
 - SAMOSSA dominance finding: 72-90% across ALL optimized regimes
-- CRISIS regime optimization contradicts initial GARCH hypothesis
-- Updated configuration files with data-driven weights
 - Comprehensive documentation: [PHASE_7.8_RESULTS.md](Documentation/PHASE_7.8_RESULTS.md)
 
-**Phase 7.7 Achievements**:
-
-- Per-regime weight optimization framework established
-- Organized log directory structure with phase-specific subdirectories
-- Automated log organization script ([bash/organize_logs.sh](bash/organize_logs.sh))
-
 **Infrastructure Improvements**:
-- ENSEMBLE DB migration: CHECK constraint updated, busy_timeout for write resilience
-- Enhanced confidence scoring with model key canonicalization
+- Security hardening: secrets_guard pre-commit hook, API key rotation, credential validation
 - SQLite read-only connections with immutable URI mode (WSL/DrvFS robustness)
-- Position-based forecast alignment fallback for calendar vs business day handling
-- Regime detection feature flag with instant enable/disable capability
+- Concurrent process guard with lockfile + PID-based stale detection
+- Adversarial test isolation with `_IsolatedConnection` wrapper (always rolls back)
 
 ## Academic Rigor & Reproducibility (MIT-style)
 
@@ -154,40 +156,49 @@ regime_candidate_weights:
 
 ---
 
-## 🚀 Phase 7.9: Cross-Session Persistence & Proof Mode
+## 🚀 Phase 7.9: Complete (PnL Integrity & Automation)
 
 ### Objective
 
-Establish reliable round-trip trade execution with cross-session position persistence, enabling profitability validation and holdout audit accumulation.
+Establish reliable round-trip trade execution with cross-session persistence, PnL integrity enforcement, adversarial validation, and autonomous monitoring via OpenClaw.
 
-### Current Status
+### Final Status (2026-02-17)
 
-- **Closed trades**: 30 validated (proof-mode TIME_EXIT)
-- **Holdout audits**: 9/20 (forecast audit gate active at 25% max violation rate)
-- **UTC normalization**: Complete across execution and persistence layers
-- **Frequency compatibility**: Deprecated pandas aliases (`'H'` -> `'h'`) resolved
+- **Round-trips**: 37 validated, $673.22 total PnL, 43.2% win rate, 1.85 profit factor
+- **Forecast audit gate**: PASS (21.4% violation rate, 28 effective audits, threshold 25%)
+- **PnL integrity**: ALL PASSED (0 CRITICAL/HIGH violations)
+- **OpenClaw cron**: 9 jobs active (P0-P2 priority, agentTurn mode)
+- **Adversarial audit**: 10 findings documented, structural weaknesses identified
 
 ### Key Components
 
+- **PnL Integrity Enforcer**: `integrity/pnl_integrity_enforcer.py` -- 6 integrity checks, canonical metrics, CI gate
 - **Cross-session persistence**: `portfolio_state` + `portfolio_cash_state` tables via `--resume`
 - **Proof mode** (`--proof-mode`): Tight max_holding (5d/6h), ATR stops/targets, flatten-before-reverse
-- **Audit sprint**: `bash/run_20_audit_sprint.sh` with gate enforcement (forecast, quant health, dashboard)
-- **UTC timestamps**: `etl/timestamp_utils.py` (`ensure_utc()`, `utc_now()`, `ensure_utc_index()`)
+- **Audit sprint**: `bash/run_20_audit_sprint.sh` with lockfile + gate enforcement
+- **OpenClaw Cron**: 9 audit-aligned jobs running via `agentTurn` (P0 every 4h, P1 daily, P2 weekly)
+- **Interactions API**: `scripts/pmx_interactions_api.py` with auth mode enforcement + ngrok tunnel
+- **3-Model LLM**: deepseek-r1:8b/32b for reasoning, qwen3:8b for tool orchestration
 
 ### Validation Commands
 
 ```bash
-# Run proof-mode audit sprint
-PROOF_MODE=1 RISK_MODE=research_production bash bash/run_20_audit_sprint.sh
+# Run PnL integrity audit
+python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db
 
-# Check closed trades
+# Check production gate
+python scripts/production_audit_gate.py
+
+# Check canonical metrics (correct way)
 python -c "
-import sqlite3
-conn = sqlite3.connect('data/portfolio_maximizer.db')
-closed = conn.execute('SELECT COUNT(*) FROM trade_executions WHERE realized_pnl IS NOT NULL').fetchone()[0]
-print(f'Closed trades with realized PnL: {closed}')
-conn.close()
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+with PnLIntegrityEnforcer('data/portfolio_maximizer.db') as e:
+    m = e.get_canonical_metrics()
+    print(f'Round-trips: {m.total_trades}, PnL: \${m.total_realized_pnl:+,.2f}, WR: {m.win_rate:.1%}')
 "
+
+# Check OpenClaw cron status
+openclaw cron list
 ```
 
 ### Success Criteria
@@ -195,16 +206,19 @@ conn.close()
 - [x] Cross-session position persistence working
 - [x] Proof mode creates guaranteed round trips
 - [x] UTC-aware timestamps across all layers
-- [ ] 20/20 holdout audits accumulated
-- [ ] Forecast audit gate violation rate < 25%
+- [x] Forecast audit gate: PASS (28 audits, 21.4% violation rate)
+- [x] PnL integrity enforcement deployed with CI gate
+- [x] OpenClaw cron automation with audit-aligned jobs
+- [x] Adversarial audit documented
 
-### Phase 7.10: Production Deployment (Future)
+### Phase 7.10: Production Hardening (Next)
 
 Prerequisites:
 
-- 20/20 audits passed
-- All 3 optimized regimes show consistent improvement
-- Overall RMSE regression confirmed <25%
+- Address adversarial findings (94.2% quant FAIL rate, ensemble underperformance)
+- Improve directional accuracy (currently below coin-flip at 41% WR)
+- Fix confidence calibration (0.9+ confidence yields only 41% win rate)
+- Widen proof-mode max_holding (5 -> 8-10 bars) for better risk/reward
 
 ---
 
@@ -263,11 +277,11 @@ Prerequisites:
 - Python 3.10-3.12
 - pip package manager
 - Virtual environment (recommended)
-- **Ollama** (optional, for LLM features): Local LLM server for market analysis and signal generation
+- **Ollama** (optional, for LLM features): Local LLM server for market analysis, signal generation, and OpenClaw orchestration
   - Installation: `curl -s https://raw.githubusercontent.com/ollama/ollama/main/install.sh | sh`
   - Start server: `ollama serve`
-  - Pull models: `ollama pull deepseek-coder:6.7b-instruct-q4_K_M`
-  - See [LLM Configuration](#llm-integration) for details
+  - Pull models: `ollama pull deepseek-r1:8b && ollama pull deepseek-r1:32b && ollama pull qwen3:8b`
+  - See [OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md) for the 3-model strategy
 
 ### Setup
 
@@ -544,60 +558,90 @@ viz.plot_comprehensive_dashboard(
 portfolio_maximizer/
 │
 ├── config/                          # Configuration files (YAML)
-│   ├── analysis_config.yml          # Time series analysis parameters
-│   ├── preprocessing_config.yml     # Preprocessing settings
+│   ├── pipeline_config.yml          # Main pipeline orchestration
+│   ├── forecasting_config.yml       # Model parameters + ensemble config
+│   ├── llm_config.yml              # LLM integration (3-model strategy)
+│   ├── quant_success_config.yml    # Trading success criteria
+│   ├── signal_routing_config.yml   # Signal routing logic
 │   └── yfinance_config.yml         # Yahoo Finance settings
 │
 ├── data/                            # Data storage (organized by ETL stage)
 │   ├── raw/                         # Original extracted data + cache
-│   ├── processed/                   # Cleaned and transformed data
 │   ├── training/                    # Training set (70%)
 │   ├── validation/                  # Validation set (15%)
-│   └── testing/                     # Test set (15%)
+│   ├── testing/                     # Test set (15%)
+│   └── portfolio_maximizer.db      # SQLite database
 │
-├── Documentation/                   # Comprehensive documentation
-│   ├── arch_tree.md                # Architecture documentation
-│   ├── CACHING_IMPLEMENTATION.md   # Caching mechanism guide
-│   ├── GIT_WORKFLOW.md             # Git workflow (local-first)
-│   └── implementation_checkpoint.md # Implementation status
-│
-├── .local_automation/              # Local automation helpers (kept private)
-│   ├── developer_notes.md          # Automation & tooling playbook
-│   └── settings.local.json         # Local agent settings
+├── Documentation/                   # Comprehensive documentation (174 files)
+│   ├── ADVERSARIAL_AUDIT_20260216.md # Current adversarial audit findings
+│   ├── OPENCLAW_INTEGRATION.md     # OpenClaw + LLM + Interactions API
+│   ├── EXIT_ELIGIBILITY_AND_PROOF_MODE.md # Proof-mode spec
+│   └── PHASE_7.*.md               # Phase-specific documentation
 │
 ├── etl/                             # ETL pipeline modules
 │   ├── yfinance_extractor.py       # Yahoo Finance extraction
+│   ├── openbb_extractor.py         # Multi-provider via OpenBB SDK
 │   ├── data_validator.py           # Data quality validation
 │   ├── preprocessor.py             # Data preprocessing
 │   ├── data_storage.py             # Data persistence
-│   ├── portfolio_math.py           # Financial calculations
-│   ├── time_series_analyzer.py     # Time series analysis
-│   └── visualizer.py               # Visualization engine
+│   ├── database_manager.py         # SQLite with integrity columns
+│   ├── timestamp_utils.py          # UTC-aware timestamp utilities
+│   └── time_series_analyzer.py     # Time series analysis
+│
+├── integrity/                       # PnL integrity enforcement (Phase 7.9)
+│   ├── __init__.py
+│   └── pnl_integrity_enforcer.py   # 6 integrity checks, canonical metrics, CI gate
+│
+├── forcester_ts/                    # Time series forecasting models
+│   ├── forecaster.py               # Main forecasting engine
+│   ├── ensemble.py                 # Ensemble coordinator
+│   ├── garch.py                    # GARCH implementation
+│   └── _freq_compat.py            # Pandas frequency compatibility
+│
+├── models/                          # Signal generation and routing
+│   └── time_series_signal_generator.py  # Signal router
+│
+├── execution/                       # Order management and paper trading
+│   ├── paper_trading_engine.py     # Risk-managed paper trading
+│   └── order_manager.py           # Order lifecycle management
+│
+├── ai_llm/                         # LLM integration
+│   ├── ollama_client.py            # Local LLM server integration
+│   ├── signal_generator.py         # LLM-powered signal generation
+│   └── market_analyzer.py          # Fundamental analysis via LLM
 │
 ├── scripts/                         # Executable scripts
 │   ├── run_etl_pipeline.py         # Main ETL orchestration
 │   ├── run_auto_trader.py          # Autonomous profit loop
-│   ├── analyze_dataset.py          # Analysis CLI
-│   ├── visualize_dataset.py        # Visualization CLI
-│   └── validate_environment.py     # Environment validation
+│   ├── production_audit_gate.py    # Production readiness gate
+│   ├── ci_integrity_gate.py        # CI integrity gate
+│   ├── openclaw_models.py          # OpenClaw model management
+│   ├── pmx_interactions_api.py     # Interactions API (FastAPI)
+│   ├── llm_multi_model_orchestrator.py  # Multi-model LLM orchestrator
+│   ├── start_ngrok_interactions.ps1     # ngrok tunnel launcher
+│   ├── validate_credentials.py     # Credential validation (no values)
+│   └── migrate_*.py               # Database migrations
+│
+├── tools/                           # Development tools
+│   ├── secrets_guard.py            # Pre-commit secrets leak guard
+│   └── pmx_git_askpass.py          # Git credential helper
 │
 ├── tests/                           # Test suite (731 tests)
 │   ├── etl/                        # ETL module tests
-│   │   ├── test_yfinance_cache.py
-│   │   ├── test_preprocessor.py
-│   │   ├── test_data_storage.py
-│   │   ├── test_portfolio_math.py
-│   │   └── test_time_series_analyzer.py
-│   └── integration/                # Integration tests
+│   ├── forecaster/                 # Forecaster tests
+│   ├── execution/                  # Execution tests
+│   ├── integration/                # Integration tests
+│   ├── security/                   # Security tests
+│   └── utils/                      # Utility tests (OpenClaw CLI, etc.)
 │
-├── visualizations/                  # Generated visualizations
-│   └── training/                    # Training data plots
+├── bash/                            # Shell scripts
+│   ├── run_20_audit_sprint.sh      # Audit sprint with lockfile
+│   ├── run_pipeline_live.sh        # Live pipeline shortcut
+│   └── run_auto_trader.sh          # Auto-trader defaults
 │
-├── workflows/                       # Pipeline orchestration (YAML)
-│   ├── etl_pipeline.yml            # Main ETL workflow
-│
-├── .gitignore                       # Git ignore rules
-├── pytest.ini                       # Pytest configuration
+├── CLAUDE.md                        # Agent guidance (Claude Code)
+├── AGENTS.md                        # Agent guardrails + cron rules
+├── .env.template                    # Environment variable template
 ├── requirements.txt                 # Python dependencies
 └── README.md                        # This file
 ```
@@ -670,37 +714,33 @@ pytest tests/ -v --tb=short
 - **[Core Project Documentation](Documentation/CORE_PROJECT_DOCUMENTATION.md)**: Canonical docs, evidence standards, and verification ladder
 - **[Metrics & Evaluation](Documentation/METRICS_AND_EVALUATION.md)**: Unambiguous metric definitions (PF/WR/Sharpe/DM-style tests)
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
-- **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
+- **[OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md)**: OpenClaw + 3-model LLM strategy + Interactions API security
+- **[Adversarial Audit](Documentation/ADVERSARIAL_AUDIT_20260216.md)**: 10-finding stress test with P0-P3 recommendations
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
-- **[OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md)**: OpenClaw workspace skill + optional notifications (https://openclaw.ai)
-- **[Pluggable Feature Engineering Pipeline](Documentation/PLUGGABLE_FEATURE_ENGINEERING_PIPELINE.md)**: Add-ons policy, gating, compute budgets
-- **[Sentiment Feature Add-on](Documentation/SENTIMENT_FEATURE_ADDON.md)**: Sentiment feature spec (profit-gated, compute-aware)
-- **[Feature Add-on Promotion Checklist](Documentation/FEATURE_ADDON_PROMOTION_CHECKLIST.md)**: Evidence template + promotion bar
+
+### Phase 7.9 Documentation (Current)
+
+- **[EXIT_ELIGIBILITY_AND_PROOF_MODE.md](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md)**: Exit diagnosis + proof-mode specification
+- **[ADVERSARIAL_AUDIT_20260216.md](Documentation/ADVERSARIAL_AUDIT_20260216.md)**: Production stress test findings
+- **[INTEGRITY_STATUS_20260212.md](Documentation/INTEGRITY_STATUS_20260212.md)**: PnL integrity framework status
+- **[SECURITY_AUDIT_AND_HARDENING.md](Documentation/SECURITY_AUDIT_AND_HARDENING.md)**: Security hardening plan
 
 ### Phase 7 Documentation (Regime Detection & Optimization)
 
-**Phase 7.7 - Per-Regime Optimization**:
-- **[PHASE_7.7_WEIGHT_OPTIMIZATION.md](Documentation/PHASE_7.7_WEIGHT_OPTIMIZATION.md)** (380 lines): Complete optimization analysis and results
-- **[PHASE_7.7_FINAL_SUMMARY.md](Documentation/PHASE_7.7_FINAL_SUMMARY.md)** (403 lines): Handoff summary and system state
-- **[LOG_ORGANIZATION_SUMMARY.md](Documentation/LOG_ORGANIZATION_SUMMARY.md)**: Log structure and best practices
-
-**Phase 7.8 - All-Regime Optimization (Complete)**:
-- **[PHASE_7.8_RESULTS.md](Documentation/PHASE_7.8_RESULTS.md)**: Final results, weights, and validation plan
-- **[PHASE_7.8_MANUAL_RUN_GUIDE.md](Documentation/PHASE_7.8_MANUAL_RUN_GUIDE.md)**: Reproduction/manual execution guide
+**Phase 7.7-7.8 - Regime Optimization**:
+- **[PHASE_7.8_RESULTS.md](Documentation/PHASE_7.8_RESULTS.md)**: All-regime optimization results and weights
+- **[PHASE_7.7_FINAL_SUMMARY.md](Documentation/PHASE_7.7_FINAL_SUMMARY.md)**: Per-regime optimization handoff
 
 **Phase 7.5 - Regime Detection Integration**:
-- **[PHASE_7.5_VALIDATION.md](Documentation/PHASE_7.5_VALIDATION.md)** (340 lines): Single-ticker validation results
-- **[PHASE_7.5_MULTI_TICKER_RESULTS.md](Documentation/PHASE_7.5_MULTI_TICKER_RESULTS.md)** (340 lines): Multi-ticker analysis
-
-**Phase 7.6 - Threshold Tuning**:
-- **[PHASE_7.6_THRESHOLD_TUNING.md](Documentation/PHASE_7.6_THRESHOLD_TUNING.md)**: Threshold optimization experiment
+- **[PHASE_7.5_VALIDATION.md](Documentation/PHASE_7.5_VALIDATION.md)**: Single-ticker validation results
+- **[PHASE_7.5_MULTI_TICKER_RESULTS.md](Documentation/PHASE_7.5_MULTI_TICKER_RESULTS.md)**: Multi-ticker analysis
 
 ### Operational Documentation
 
-- **[logs/README.md](logs/README.md)** (380 lines): Log structure, search patterns, retention policies
-- **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
+- **[AGENTS.md](AGENTS.md)**: Agent guardrails, cron notification rules, tool-use protocol
+- **[logs/README.md](logs/README.md)**: Log structure, search patterns, retention policies
 - **[Cron Automation](Documentation/CRON_AUTOMATION.md)**: Production-style scheduling + evidence freshness wiring
-- **[Production Security + Profitability Runbook](Documentation/PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md)**: strict CVE defaults, temporary overrides, and gate-clearance workflow
+- **[Production Security + Profitability Runbook](Documentation/PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md)**: CVE defaults, overrides, gate-clearance workflow
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status
 
 ---
@@ -730,9 +770,9 @@ If you use this work in academic research, please cite:
   title={Portfolio Maximizer: Autonomous Quantitative Trading with Regime-Adaptive Ensemble},
   author={Bestman, Ezekwu Enock},
   year={2026},
-  version={4.2},
+  version={4.3},
   url={https://github.com/mrbestnaija/portofolio_maximizer},
-  note={Phase 7.9: Cross-session persistence, proof-mode validation, UTC normalization}
+  note={Phase 7.9: PnL integrity enforcement, adversarial audit, OpenClaw automation}
 }
 ```
 
@@ -820,23 +860,19 @@ If you use this work in academic research, please cite:
 
 ## 🛣️ Roadmap
 
-### Phase 7: Regime Detection & Ensemble Optimization (In Progress)
+### Phase 7: Regime Detection & Ensemble Optimization (Complete)
 
-**Completed**:
+**All Phases Completed**:
 - ✅ Phase 7.3: GARCH ensemble integration with confidence calibration
 - ✅ Phase 7.4: Quantile-based confidence calibration (29% RMSE improvement)
 - ✅ Phase 7.5: Regime detection integration (6 market regimes, multi-ticker validation)
 - ✅ Phase 7.6: Threshold tuning experiments
 - ✅ Phase 7.7: Per-regime weight optimization (65% RMSE reduction for MODERATE_TRENDING)
 - ✅ Phase 7.8: All-regime optimization (3/6 regimes optimized; SAMOSSA dominance confirmed)
+- ✅ Phase 7.9: PnL integrity enforcement, adversarial audit, OpenClaw automation, forecast gate PASS
 
-**Current**:
-- Phase 7.9: Forecast-audit accumulation (holding period met)
-  - As of 2026-02-04: `scripts/check_forecast_audits.py` reports **25** effective audits with RMSE and **Decision: KEEP**
-  - Evidence + interpretation: `Documentation/ENSEMBLE_MODEL_STATUS.md`
-
-**Upcoming**:
-- Phase 7.10: Production deployment with full regime coverage
+**Next**:
+- Phase 7.10: Production hardening (address adversarial findings, improve directional accuracy)
 
 ### Phase 8: Neural Forecasters & GPU Acceleration (Planned)
 
@@ -957,11 +993,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Code Metrics
 
-- **Total Production Code**: 10,000+ lines
+- **Total Production Code**: 15,000+ lines
 - **Test Code**: 5,000+ lines
 - **Test Suite**: 731 tests (718 passing, 6 skipped, 7 xfailed)
 - **Test Coverage**: Comprehensive across all modules
-- **Documentation**: 90+ comprehensive files
+- **Documentation**: 174 files in Documentation/ + root guides
 
 ### Performance Metrics
 
@@ -973,11 +1009,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Phase 7 Progress
 
-- **Phases Completed**: 9 (7.0 - 7.8)
-- **Current Phase**: 7.9 (Cross-session persistence, proof-mode validation)
+- **Phases Completed**: 10 (7.0 - 7.9)
+- **Current Phase**: 7.10 (Production hardening, planned)
 - **Regimes Optimized**: 3/6 (CRISIS, MODERATE_MIXED, MODERATE_TRENDING)
-- **Closed Trades**: 30 validated (proof-mode TIME_EXIT)
-- **Audit Progress**: 9/20 (production deployment gate)
+- **Round-Trips**: 37 validated ($673.22 PnL, 43.2% WR, 1.85 PF)
+- **Forecast Gate**: PASS (21.4% violation rate, 28 effective audits)
+- **PnL Integrity**: ALL PASSED (0 CRITICAL/HIGH violations)
 
 ---
 
@@ -1031,30 +1068,32 @@ For questions or issues:
 
 ## 🎯 Current Status Summary
 
-**Phase 7.7**: ✅ Complete (Per-Regime Optimization)
-**Phase 7.8**: ✅ Complete (All-Regime Optimization)
-**Phase 7.9**: 🔄 In Progress (Cross-session persistence, proof-mode, 9/20 audits)
-**Production Status**: Research Phase (awaiting audit gate - 9/20 complete)
+**Phase 7.9**: ✅ Complete (PnL integrity, adversarial audit, OpenClaw automation)
+**Production Status**: Research Phase (addressing adversarial findings before production deployment)
 
 **Latest Achievements**:
-- 3/6 regimes optimized with data-driven weights (SAMOSSA dominance confirmed)
-- CRISIS and MODERATE_TRENDING regimes: ~60-65% RMSE reduction (MODERATE_MIXED: +6.30%)
-- Cross-session position persistence via portfolio_state tables
-- Proof-mode validation with 30 closed trades
-- UTC-aware timestamps across all system layers
+- PnL integrity enforcement with canonical views and CI gate
+- Adversarial audit: 10 findings documented with P0-P3 recommendations
+- Forecast audit gate: PASS (21.4% violation rate, 28 effective audits)
+- OpenClaw cron: 9 audit-aligned jobs with real script execution
+- Interactions API: Auth mode enforcement, CORS, rate limiting, ngrok
+- 3-model LLM stack: deepseek-r1:8b/32b + qwen3:8b
+- 37 round-trips validated ($673.22 PnL, 1.85 profit factor)
 - SARIMAX disabled by default (15x single-forecast speedup)
+- Secrets leak guard with pre-commit hook + CI check
 - 731 tests collected (718 passing)
 
-**Next Steps**:
-1. Accumulate remaining holdout audits (target: 20/20, currently 9/20)
-2. Validate RMSE regression targets and per-regime stability
-3. Expand optimization coverage with multi-ticker data (for rare regimes)
-4. Production deployment decision gate
+**Next Steps** (Phase 7.10):
+1. Address 94.2% quant FAIL rate (0.8% from RED gate)
+2. Fix ensemble underperformance (worse than best single 92% of the time)
+3. Improve directional accuracy (41% WR below coin-flip)
+4. Fix confidence calibration (0.9+ confidence yields 41% WR)
+5. Widen proof-mode max_holding for better risk/reward
 
 ---
 
 **Built with Python, NumPy, Pandas, and SciPy**
 
-**Version**: 4.2
-**Status**: Phase 7.9 In Progress - Cross-session persistence & proof-mode validation
-**Last Updated**: 2026-02-09
+**Version**: 4.3
+**Status**: Phase 7.9 Complete - PnL integrity enforcement, adversarial audit, OpenClaw automation
+**Last Updated**: 2026-02-17

@@ -9,37 +9,64 @@ llm:
     timeout_seconds: 30  # Max wait for LLM response (fast-fail)
     health_check_on_init: true  # Validate on startup (fail-fast)
 
-  # Model selection (per TO_DO_LLM_local.mdc)
+  # Model selection - 3-model local strategy (2026-02-16)
+  # deepseek-r1 = reasoning/CoT, qwen3 = tool-calling orchestrator
   models:
-    # PRIMARY MODEL: Qwen 14B for complex quantitative analysis ⭐ UPDATED
+    # REASONING MODEL: DeepSeek R1 8B for fast chain-of-thought
     primary:
-      name: "qwen:14b-chat-q4_K_M"
-      use_case: "Complex financial reasoning and quantitative analysis"
-      expected_speed: "20-25 tokens/sec"
-      memory_requirement: "9.4GB RAM"
+      name: "deepseek-r1:8b"
+      role: "reasoning"
+      use_case: "Fast reasoning for quantitative analysis, regime detection, signal validation"
+      expected_speed: "25-35 tokens/sec"
+      memory_requirement: "5.5GB VRAM"
       quality: "excellent"
+      capabilities: ["chain-of-thought", "math", "code-generation"]
       priority: 1
 
-    # FALLBACK 1: DeepSeek for fast inference
+    # HEAVY REASONING: DeepSeek R1 32B for deep analysis
     fallback_1:
-      name: "deepseek-coder:6.7b-instruct-q4_K_M"
-      use_case: "Fast inference backup"
-      expected_speed: "15-20 tokens/sec"
-      memory_requirement: "4.1GB RAM"
-      quality: "very_good"
+      name: "deepseek-r1:32b"
+      role: "heavy_reasoning"
+      use_case: "Deep multi-step financial analysis, adversarial audits, complex forecasting"
+      expected_speed: "10-15 tokens/sec"
+      memory_requirement: "20GB VRAM"
+      quality: "excellent"
+      capabilities: ["chain-of-thought", "math", "code-generation", "long-context"]
       priority: 2
 
-    # FALLBACK 2: CodeLlama for quick iterations
+    # TOOLING MODEL: Qwen3 8B for function-calling and orchestration
     fallback_2:
-      name: "codellama:13b-instruct-q4_K_M"
-      use_case: "Fast coding and quick iterations"
-      expected_speed: "25-35 tokens/sec"
-      memory_requirement: "7.9GB RAM"
-      quality: "good"
+      name: "qwen3:8b"
+      role: "tooling"
+      use_case: "Tool/function calling, structured output, API orchestration, social media automation"
+      expected_speed: "30-40 tokens/sec"
+      memory_requirement: "5.5GB VRAM"
+      quality: "excellent"
+      capabilities: ["tool-calling", "function-calling", "structured-output", "thinking-mode"]
       priority: 3
 
-  # Active model (FIXED to use available model)
-  active_model: "deepseek-coder:6.7b-instruct-q4_K_M"
+  # Active model (default for general inference)
+  active_model: "deepseek-r1:8b"
+
+  # Multi-model routing: qwen3 orchestrates, deepseek reasons
+  routing:
+    # Use qwen3:8b when the task needs tool-calling or structured output
+    tool_calling_model: "qwen3:8b"
+    # Use deepseek-r1:8b for fast reasoning tasks
+    reasoning_model: "deepseek-r1:8b"
+    # Use deepseek-r1:32b for complex multi-step analysis
+    heavy_reasoning_model: "deepseek-r1:32b"
+    # Task-to-model mapping
+    task_routing:
+      market_analysis: "deepseek-r1:8b"
+      signal_generation: "deepseek-r1:8b"
+      risk_assessment: "deepseek-r1:8b"
+      portfolio_optimization: "deepseek-r1:32b"
+      adversarial_audit: "deepseek-r1:32b"
+      api_orchestration: "qwen3:8b"
+      notification_formatting: "qwen3:8b"
+      data_extraction: "qwen3:8b"
+      social_media_automation: "qwen3:8b"
 
   # Generation parameters
   generation:
@@ -153,9 +180,9 @@ installation:
     start_command: "ollama serve"
 
   models:
-    pull_primary: "ollama pull deepseek-coder:33b-instruct-q4_K_M"
-    pull_fast: "ollama pull codellama:13b-instruct-q4_K_M"
-    pull_reasoning: "ollama pull qwen:14b-chat-q4_K_M"
+    pull_reasoning: "ollama pull deepseek-r1:8b"
+    pull_heavy: "ollama pull deepseek-r1:32b"
+    pull_tooling: "ollama pull qwen3:8b"
 
 # Validation rules (per AGENT_INSTRUCTION.md)
 validation:

@@ -1,0 +1,50 @@
+name: Dependency Recency And Security
+
+on:
+  schedule:
+    - cron: "15 6 * * 1" # Every Monday 06:15 UTC
+  workflow_dispatch:
+
+jobs:
+  security-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENCLAW_TARGETS: ${{ secrets.OPENCLAW_TARGETS }}
+      OPENCLAW_TO: ${{ secrets.OPENCLAW_TO }}
+      OPENCLAW_COMMAND: ${{ secrets.OPENCLAW_COMMAND }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit
+
+      - name: Run dependency security preflight (blocking)
+        run: |
+          mkdir -p reports/security
+          python scripts/security_preflight.py \
+            --require-pip-audit \
+            --output-json reports/security/security_preflight_scheduled_${{ github.run_id }}.json
+
+      - name: Upload security preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-preflight-scheduled
+          path: reports/security/*.json
+
+      - name: Notify OpenClaw on failure
+        if: failure() && (env.OPENCLAW_TARGETS != '' || env.OPENCLAW_TO != '')
+        continue-on-error: true
+        run: |
+          python scripts/openclaw_notify.py \
+            --message "[PMX] Scheduled dependency/security preflight FAILED on run ${{ github.run_id }}. Check workflow artifacts: security-preflight-scheduled."

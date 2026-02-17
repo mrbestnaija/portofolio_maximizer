@@ -50,6 +50,14 @@ _SECRET_REGEX_RULES: List[Tuple[str, str, re.Pattern[str]]] = [
     ("google_api_key", "ERROR", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
     # AWS access key id.
     ("aws_access_key_id", "ERROR", re.compile(r"AKIA[0-9A-Z]{16}")),
+    # Telegram Bot Token (numeric:alphanumeric).
+    ("telegram_bot_token", "ERROR", re.compile(r"\b[0-9]{8,10}:[A-Za-z0-9_-]{35,}\b")),
+    # Discord bot/user token (base64-ish, 50+ chars).
+    ("discord_token", "ERROR", re.compile(r"[A-Za-z0-9]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}")),
+    # Discord token (hex, 64+ chars - custom bot tokens).
+    ("discord_hex_token", "WARN", re.compile(r"\b[0-9a-f]{64,}\b")),
+    # OpenClaw gateway auth token (hex, 48 chars).
+    ("openclaw_gateway_token", "WARN", re.compile(r'"token"\s*:\s*"[0-9a-f]{48}"')),
     # Private key blocks (PEM/OpenSSH/PGP).
     # Anchor to whole line to avoid flagging source code/docs that mention the marker.
     ("private_key_block", "ERROR", re.compile(r"^\s*-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----\s*$", re.MULTILINE)),

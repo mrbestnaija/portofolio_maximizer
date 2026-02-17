@@ -1,0 +1,3 @@
+{"auth": "api_key", "method": "POST", "ok": true, "path": "/interactions", "principal": "a55875b41053fc77", "ts": "2026-02-15T12:54:22.600260+00:00"}
+{"auth": "unknown", "method": "POST", "ok": false, "path": "/interactions", "principal": "", "status": 401, "ts": "2026-02-15T12:54:22.602588+00:00"}
+{"auth": "unknown", "method": "POST", "ok": false, "path": "/interactions", "principal": "", "status": 413, "ts": "2026-02-15T12:54:22.607758+00:00"}

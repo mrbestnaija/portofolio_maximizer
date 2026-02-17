@@ -23,7 +23,7 @@ import logging
 import os
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -429,7 +429,7 @@ class PnLIntegrityEnforcer:
         except Exception:
             logger.debug("Skipping portfolio_positions reconciliation for orphan checks", exc_info=True)
 
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
         problematic: List[Dict[str, Any]] = []
         covered_as_active = 0
         covered_as_recent = 0

@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.9 (Cross-session persistence, proof-mode validation, UTC normalization, PnL integrity enforcement)
-**Last Updated**: 2026-02-11
+**Current Phase**: Phase 7.9 Complete (PnL integrity enforcement, adversarial audit, OpenClaw automation, Interactions API)
+**Last Updated**: 2026-02-17
 
 ---
 
@@ -635,6 +635,118 @@ python -m integrity.pnl_integrity_enforcer
 
 ---
 
+## OpenClaw Integration & Cron Automation (Phase 7.9+)
+
+**Status**: DEPLOYED (2026-02-17)
+
+OpenClaw provides autonomous monitoring via 9 audit-aligned cron jobs running real PMX scripts. The local LLM (qwen3:8b) executes commands via `exec` tool in `agentTurn` mode and only announces anomalies.
+
+### Cron Jobs
+
+| Job | Schedule | Script | Announce When |
+|-----|----------|--------|---------------|
+| [P0] PnL Integrity Audit | Every 4h | `python -m integrity.pnl_integrity_enforcer` | CRITICAL/HIGH violations |
+| [P0] Production Gate Check | Daily 7 AM | `python scripts/production_audit_gate.py` | Gate FAIL or RED |
+| [P0] Quant Validation Health | Daily 7:30 AM | Inline Python (quant_validation.jsonl) | FAIL rate >= 90% |
+| [P1] Signal Linkage Monitor | Daily 8 AM | Inline Python (DB query) | Orphan opens/unlinked closes |
+| [P1] Ticker Health Monitor | Daily 8:30 AM | Inline Python (DB query) | 3+ consecutive losses or PnL < -$300 |
+| [P2] GARCH Unit-Root Guard | Weekly Mon 9 AM | Inline Python (forecast audits) | Unit-root rate >= 35% |
+| [P2] Overnight Hold Monitor | Weekly Fri 9 AM | Inline Python (DB query) | Overnight drag > 25% |
+| System Health Check | Every 6h | `llm_multi_model_orchestrator.py status` | Model offline or errors |
+| Weekly Session Cleanup | Sunday 3 AM | Session file cleanup | Never (silent) |
+
+### 3-Model Local LLM Strategy
+
+| Model | Role | Use Case |
+|-------|------|----------|
+| deepseek-r1:8b | Fast reasoning | Market analysis, signal generation, regime detection |
+| deepseek-r1:32b | Heavy reasoning | Portfolio optimization, adversarial audits |
+| qwen3:8b | Tool orchestrator | Function-calling, API orchestration, social media |
+
+### Key Commands
+
+```bash
+# Check OpenClaw cron status
+openclaw cron list
+
+# Force-run a cron job
+openclaw cron run <job-id> --timeout 120000
+
+# Check model status
+python scripts/openclaw_models.py status --list-ollama-models
+
+# Apply model config
+python scripts/openclaw_models.py apply --strategy local-first --restart-gateway
+
+# Check LLM health
+python scripts/llm_multi_model_orchestrator.py status
+```
+
+### Configuration Files
+
+- `config/llm_config.yml` -- LLM model selection (3-model strategy)
+- `~/.openclaw/cron/jobs.json` -- Cron job definitions (not in repo)
+- `AGENTS.md` -- Agent guardrails + cron notification rules
+- `Documentation/OPENCLAW_INTEGRATION.md` -- Full integration docs
+
+---
+
+## Interactions API (Phase 7.9+)
+
+**Status**: DEPLOYED (2026-02-17)
+
+The Interactions API (`scripts/pmx_interactions_api.py`) provides a FastAPI HTTP surface for local testing and external integrations (e.g., via ngrok).
+
+### Auth Modes
+
+Controlled by `INTERACTIONS_AUTH_MODE` env var:
+
+| Mode | Accepts API Key | Accepts JWT | Use Case |
+|------|-----------------|-------------|----------|
+| `any` (default) | Yes | Yes | Development |
+| `jwt-only` | No | Yes | Production with Auth0 |
+| `api-key-only` | Yes | No | Simple deployments |
+
+### Key Environment Variables
+
+```bash
+INTERACTIONS_API_KEY=...             # Required for API key auth
+INTERACTIONS_AUTH_MODE=any           # any | jwt-only | api-key-only
+INTERACTIONS_MIN_KEY_LENGTH=16       # Minimum API key length (floor 16)
+INTERACTIONS_BIND_HOST=127.0.0.1     # Bind address
+INTERACTIONS_PORT=8000               # Listen port
+INTERACTIONS_RATE_LIMIT_PER_MINUTE=60
+INTERACTIONS_CORS_ORIGINS=...        # Comma-separated origins (omit to disable)
+AUTH0_DOMAIN=...                     # Required for JWT auth
+AUTH0_AUDIENCE=...                   # Required for JWT auth
+```
+
+### Launch
+
+```bash
+# Direct
+python scripts/pmx_interactions_api.py
+
+# With ngrok tunnel (PowerShell)
+./scripts/start_ngrok_interactions.ps1
+```
+
+---
+
+## Adversarial Audit Findings (2026-02-16)
+
+**Status**: 10 findings documented in `Documentation/ADVERSARIAL_AUDIT_20260216.md`
+
+Key findings for agent awareness:
+- 94.2% quant FAIL rate (0.8% from RED gate) -- P0
+- Ensemble worse than best single model 92% of the time -- P0
+- Directional accuracy below coin-flip for all models (41% WR) -- P0
+- Confidence calibration broken: 0.9+ confidence yields 41% win rate -- P1
+- signal_id NULL for all trades (no model attribution) -- P2
+- System survives on magnitude asymmetry (avg win $91.59 vs avg loss $34.54 = 2.65x)
+
+---
+
 ## Phase 7.4 Reference (GARCH Ensemble Integration - COMPLETE)
 
 **Performance Metrics**:
@@ -824,25 +936,31 @@ Results: Key metrics or validation results
 
 ### Essential Files
 - `CLAUDE.md` - This file (agent guidance)
+- `AGENTS.md` - Agent guardrails + cron notification rules
 - `README.md` - User-facing project overview
-- `requirements.txt` - Python dependencies (updated 2026-01-31)
+- `QUICK_REFERENCE.md` - Quick command reference card
+- `requirements.txt` - Python dependencies
 - `config/pipeline_config.yml` - Main configuration
-- `Documentation/RUNTIME_GUARDRAILS.md` - Python version constraints
+- `config/llm_config.yml` - LLM model selection
+- `.env.template` - Environment variable template
 
 ### Key Directories
 - `etl/` - Data extraction, transformation, loading
 - `forcester_ts/` - Time series forecasting models
 - `models/` - Signal generation and routing
 - `execution/` - Order management and paper trading
+- `integrity/` - PnL integrity enforcement (Phase 7.9)
+- `ai_llm/` - LLM integration (Ollama client, market analyzer)
 - `tests/` - Test suite (731 tests)
-- `scripts/` - Utility scripts and migrations
+- `scripts/` - Utility scripts, migrations, APIs
+- `tools/` - Development tools (secrets guard, git askpass)
 - `config/` - YAML configuration files
-- `Documentation/` - Phase-specific documentation
+- `Documentation/` - Phase-specific documentation (174 files)
 - `logs/` - Pipeline and application logs
 
 ---
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-14 (Phase 7.9: Audit sprint completion, forecast gate PASS, ensemble tuning, concurrent process guard, adversarial test isolation, unlinked close whitelist)
+**Last Updated**: 2026-02-17 (Phase 7.9 Complete: PnL integrity enforcement, adversarial audit, OpenClaw cron automation, Interactions API, 3-model LLM strategy, secrets leak guard)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
