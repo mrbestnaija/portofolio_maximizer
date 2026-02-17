@@ -97,14 +97,14 @@ jobs:
 
       - name: Upload adversarial suite artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: adversarial-forecaster-suite
           path: reports/adversarial_forecaster/*.json
 
       - name: Upload security preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: security-preflight
           path: reports/security/*.json
