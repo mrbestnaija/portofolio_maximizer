@@ -398,21 +398,38 @@ class TestRateLimiting:
         waited = limiter.wait_if_needed("test")
         assert waited == 0.0
 
-    def test_enforces_delay(self):
-        """Second call within interval should wait."""
+    def test_enforces_delay(self, monkeypatch):
+        """Second call within interval should wait (without real sleeps)."""
         providers = [OpenBBProviderConfig("test", True, 1, None, 6)]  # 10s interval
         limiter = PerProviderRateLimiter(providers)
 
-        limiter.wait_if_needed("test")
-        limiter.record_call("test")
+        # Patch the time module used by the limiter so we don't actually sleep for 10s.
+        now = {"t": 100.0}
+        slept: list[float] = []
 
-        start = time.monotonic()
+        def _fake_monotonic() -> float:
+            return float(now["t"])
+
+        def _fake_sleep(seconds: float) -> None:
+            seconds = float(seconds)
+            slept.append(seconds)
+            now["t"] += seconds
+
+        monkeypatch.setattr("etl.openbb_extractor.time.monotonic", _fake_monotonic)
+        monkeypatch.setattr("etl.openbb_extractor.time.sleep", _fake_sleep)
+
+        limiter.wait_if_needed("test")
+        now["t"] += 0.1
+        limiter.record_call("test")
+        now["t"] += 0.1
+
         waited = limiter.wait_if_needed("test")
-        elapsed = time.monotonic() - start
 
         # Should have waited close to 10 seconds
         assert waited > 0
-        assert elapsed >= 9.0  # Allow some tolerance
+        assert slept, "Expected limiter to sleep to enforce rate limit"
+        assert slept[-1] == pytest.approx(waited, abs=1e-6)
+        assert waited == pytest.approx(9.9, abs=0.01)
 
     def test_provider_independence(self):
         """Different providers have independent rate limits."""

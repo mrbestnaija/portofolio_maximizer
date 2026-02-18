@@ -8,12 +8,15 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from etl.time_series_forecaster import (
     RollingWindowCVConfig,
     RollingWindowValidator,
     TimeSeriesForecasterConfig,
 )
+
+pytestmark = pytest.mark.slow
 
 
 def _build_price_series(start: str = "2020-01-01", periods: int = 240) -> pd.Series:
