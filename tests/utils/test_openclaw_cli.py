@@ -82,8 +82,9 @@ class TestStuckSessionDetection:
         ages = [int(m) for m in re.findall(r"stuck session:.*?age=(\d+)s", self.HEALTHY_LOG_OUTPUT)]
         assert ages == []
 
+    @patch("utils.openclaw_cli.time.sleep", return_value=None)
     @patch("utils.openclaw_cli.subprocess.run")
-    def test_clear_stuck_gateway_sessions_triggers_on_high_age(self, mock_run: MagicMock) -> None:
+    def test_clear_stuck_gateway_sessions_triggers_on_high_age(self, mock_run: MagicMock, _mock_sleep: MagicMock) -> None:
         """When a stuck session exceeds threshold, gateway must be force-restarted."""
         log_proc = MagicMock()
         log_proc.stdout = self.STUCK_LOG_OUTPUT

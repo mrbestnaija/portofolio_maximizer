@@ -15,15 +15,19 @@ import requests
 
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 def _skip_if_ollama_unavailable() -> None:
     """Skip Ollama integration tests when Ollama is unavailable.
 
-    Set `RUN_OLLAMA_TESTS=1` to force running (and failing) these tests.
+    These tests are intentionally opt-in because they depend on a local Ollama
+    daemon + model weights and can be slow/flaky across hardware configs.
+
+    Set `RUN_OLLAMA_TESTS=1` to enable running them.
     """
-    if os.getenv("RUN_OLLAMA_TESTS", "0") == "1":
-        return
+    if os.getenv("RUN_OLLAMA_TESTS", "0") != "1":
+        pytest.skip("Skipping local Ollama integration tests (set RUN_OLLAMA_TESTS=1 to enable).")
 
     try:
         response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=2)

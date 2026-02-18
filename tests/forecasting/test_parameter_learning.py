@@ -14,6 +14,8 @@ from forcester_ts.samossa import SAMOSSAForecaster
 from forcester_ts.mssa_rl import MSSARLForecaster, MSSARLConfig
 from forcester_ts.garch import GARCHForecaster
 
+pytestmark = pytest.mark.slow
+
 
 class TestParameterLearning:
     """Test that all model parameters are learned from data, not hard-coded."""
