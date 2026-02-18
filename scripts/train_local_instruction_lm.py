@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from collections import Counter
@@ -36,11 +37,53 @@ except Exception as exc:  # pragma: no cover - depends on runtime env
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+FEEDBACK_DIR = PROJECT_ROOT / "logs" / "llm_activity" / "feedback"
+PROPOSALS_DIR = PROJECT_ROOT / "logs" / "llm_activity" / "proposals" / "training"
 
 PAD = "<pad>"
 UNK = "<unk>"
 BOS = "<bos>"
 EOS = "<eos>"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_filename(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text or "").strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._")
+    return cleaned[:160] or "item"
+
+
+def _best_effort_write_json(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _torch_probe(device: str) -> dict[str, Any]:
+    if not TORCH_AVAILABLE or torch is None:
+        return {
+            "installed": False,
+            "torch_import_error": TORCH_IMPORT_ERROR,
+        }
+    device_name = None
+    if device == "cuda" and torch.cuda.is_available():  # type: ignore[union-attr]
+        try:
+            device_name = torch.cuda.get_device_name(0)  # type: ignore[union-attr]
+        except Exception:
+            device_name = None
+    return {
+        "installed": True,
+        "torch_version": getattr(torch, "__version__", ""),
+        "cuda": getattr(getattr(torch, "version", object()), "cuda", None),
+        "cuda_available": bool(torch.cuda.is_available()),  # type: ignore[union-attr]
+        "device": device,
+        "device_name": device_name,
+    }
 
 
 def _tokenize(text: str) -> list[str]:
@@ -268,6 +311,27 @@ def main(argv: list[str]) -> int:
 
     records = _load_records(dataset_path)
     if len(records) < max(1, int(args.min_samples)):
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        proposal = {
+            "type": "training_proposal",
+            "proposal_id": f"llm_train_insufficient_samples_{ts}_{os.getpid()}",
+            "proposed_at_utc": _utc_now_iso(),
+            "task": "llm_finetune_dataset_refresh",
+            "description": (
+                "LLM fine-tune training was skipped due to insufficient samples. "
+                "Generate more redacted training samples from logs/llm_activity and rerun training."
+            ),
+            "dataset_path": str(dataset_path),
+            "records_found": int(len(records)),
+            "min_samples_required": int(args.min_samples),
+            "suggested_command": (
+                "python scripts/prepare_llm_finetune_dataset.py --days 14 --max-records 5000 "
+                "--output data/training/llm_finetune/latest_dataset.jsonl --run-trainer"
+            ),
+            "status": "proposed",
+        }
+        _best_effort_write_json(PROPOSALS_DIR / f"{ts}_llm_finetune_insufficient_samples.json", proposal)
+
         print(
             f"[llm_train] insufficient samples: {len(records)} < {int(args.min_samples)}; skipping training.",
             file=sys.stderr,
@@ -333,6 +397,19 @@ def main(argv: list[str]) -> int:
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"[llm_train] checkpoint={ckpt}")
     print(f"[llm_train] summary={meta_path}")
+
+    # Sidecar feedback for automation loops (best-effort; never changes exit code).
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    feedback = {
+        "type": "training_feedback",
+        "feedback_id": f"llm_train_local_instruction_{ts}_{os.getpid()}",
+        "completed_at_utc": _utc_now_iso(),
+        "trainer": "train_local_instruction_lm.py",
+        "status": "PASS",
+        "meta": meta,
+        "torch_probe": _torch_probe(device),
+    }
+    _best_effort_write_json(FEEDBACK_DIR / f"{ts}_llm_finetune_local_instruction.json", feedback)
     return 0
 
 
