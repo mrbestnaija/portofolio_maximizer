@@ -132,6 +132,7 @@ class TimeSeriesSignal:
     volatility: Optional[float] = None
     lower_ci: Optional[float] = None
     upper_ci: Optional[float] = None
+    signal_id: Optional[int] = None  # Phase 7.10: unique ID for model attribution
 
 
 class TimeSeriesSignalGenerator:
@@ -165,6 +166,9 @@ class TimeSeriesSignalGenerator:
             quant_validation_config_path: Optional path to YAML config describing
                 quant validation thresholds (defaults to config/quant_success_config.yml)
         """
+        # Phase 7.10: monotonic signal ID counter for model attribution
+        self._signal_counter = 0
+
         # Diagnostic toggle (env DIAGNOSTIC_MODE=1 or TS_DIAGNOSTIC_MODE=1) to force more signals.
         diag_mode = str(os.getenv("TS_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
         if diag_mode:
@@ -522,6 +526,7 @@ class TimeSeriesSignalGenerator:
                 'signal_to_noise': snr,
             }
 
+            self._signal_counter += 1
             signal = TimeSeriesSignal(
                 ticker=ticker,
                 action=action,
@@ -540,6 +545,7 @@ class TimeSeriesSignalGenerator:
                 volatility=volatility,
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
+                signal_id=self._signal_counter,
             )
 
             quant_profile = self._build_quant_success_profile(
@@ -1004,10 +1010,19 @@ class TimeSeriesSignalGenerator:
             + 0.20 * self._clamp01(snr_score)
             + 0.40 * self._clamp01(edge_score)
         )
-        confidence = (0.05 + 0.95 * core) * vol_factor
+        raw_confidence = (0.05 + 0.95 * core) * vol_factor
         # Very small gross expected_return should be conservative even if other signals look good.
         if abs(float(expected_return)) < float(min_expected_return):
-            confidence *= 0.75
+            raw_confidence *= 0.75
+
+        # Phase 7.10: Empirical calibration shrinkage.
+        # Adversarial audit found 0.9+ confidence maps to 41% actual WR.
+        # Shrink raw confidence toward empirical base rate to produce
+        # calibrated values that better track actual hit rates.
+        # calibrated = base_rate + shrinkage * (raw - base_rate)
+        base_rate = 0.50   # Coin-flip prior (conservative)
+        shrinkage = 0.60   # How much to trust raw signal vs prior
+        confidence = base_rate + shrinkage * (raw_confidence - base_rate)
 
         return self._clamp01(confidence)
 

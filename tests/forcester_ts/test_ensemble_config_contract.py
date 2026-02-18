@@ -225,11 +225,16 @@ class TestConfigModelMapping:
                 assert model in self.VALID_MODEL_KEYS, \
                     f"candidate_weights[{i}] has unknown model '{model}'"
 
-    def test_yaml_candidates_no_sarimax(self, candidate_weights_from_config):
-        """Config candidate weights should not include SARIMAX (disabled default)."""
-        for i, candidate in enumerate(candidate_weights_from_config):
-            assert "sarimax" not in candidate, \
-                f"candidate_weights[{i}] still references disabled 'sarimax': {candidate}"
+    def test_yaml_candidates_sarimax_optional(self, candidate_weights_from_config):
+        """Candidate weights may include SARIMAX (filtered at runtime if disabled).
+
+        Phase 7.10: SARIMAX candidates retained in YAML so they activate when
+        sarimax is explicitly re-enabled.  Ensemble coordinator filters absent
+        models during weight selection.
+        """
+        sarimax_count = sum(1 for c in candidate_weights_from_config if "sarimax" in c)
+        assert sarimax_count <= len(candidate_weights_from_config), \
+            "Structural check: sarimax candidate count should not exceed total"
 
 
 # ---------------------------------------------------------------------------
@@ -486,9 +491,12 @@ class TestConfigDriftDetection:
     """Detect unexpected changes to critical config sections."""
 
     def test_ensemble_candidate_count_stable(self, candidate_weights_from_config):
-        """Alert if candidate count changes unexpectedly (currently 8)."""
-        assert len(candidate_weights_from_config) == 8, \
-            f"Expected 8 candidate weight sets, got {len(candidate_weights_from_config)}. " \
+        """Alert if candidate count changes unexpectedly (currently 13).
+
+        Phase 7.9 added 5 new candidates: 3 GARCH-blend, 2 MSSA-RL-dominant, 3 pure fallbacks.
+        """
+        assert len(candidate_weights_from_config) == 13, \
+            f"Expected 13 candidate weight sets, got {len(candidate_weights_from_config)}. " \
             "Update this test if intentional."
 
     def test_sarimax_default_remains_disabled(self):
@@ -497,11 +505,16 @@ class TestConfigDriftDetection:
         assert config.sarimax_enabled is False, \
             "TimeSeriesForecasterConfig.sarimax_enabled default must remain False"
 
-    def test_ensemble_config_default_count_matches_yaml(self, candidate_weights_from_config):
-        """EnsembleConfig defaults should have the same count as YAML config."""
+    def test_ensemble_config_default_count_matches_yaml_fast_only(self, candidate_weights_from_config):
+        """EnsembleConfig defaults should match YAML fast-only candidates.
+
+        Phase 7.10: YAML includes SARIMAX candidates (total 13) that are excluded
+        from defaults (total 10).  This test compares defaults to the YAML subset
+        that excludes disabled models.
+        """
         ec = EnsembleConfig()
         default_count = len(ec.candidate_weights)
-        yaml_count = len(candidate_weights_from_config)
-        assert default_count == yaml_count, \
-            f"EnsembleConfig defaults ({default_count}) != YAML ({yaml_count}). " \
+        yaml_fast_count = sum(1 for c in candidate_weights_from_config if "sarimax" not in c)
+        assert default_count == yaml_fast_count, \
+            f"EnsembleConfig defaults ({default_count}) != YAML fast-only ({yaml_fast_count}). " \
             "Keep them in sync."

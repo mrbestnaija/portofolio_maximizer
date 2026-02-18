@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -131,6 +131,7 @@ def _is_retryable_error(result: OpenClawResult) -> bool:
         "gateway closed",
         "timeout",
         "timed out",
+        "session file locked",
         "bad mac",
         "session error",
         "socket hang up",
@@ -235,6 +236,24 @@ def _wrap_windows_command(parts: list[str]) -> list[str]:
         return ["cmd", "/d", "/s", "/c", *parts]
 
     return parts
+
+
+def _parse_json_best_effort(raw: str) -> Any:
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("empty output")
+    try:
+        return json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
+        raise
 
 
 def build_message_send_command(
@@ -347,6 +366,191 @@ def infer_linked_whatsapp_target(
             return match.group(1)
 
     return None
+
+
+def _openclaw_status_json(
+    *,
+    command: str = "openclaw",
+    cwd: Optional[Path] = None,
+    timeout_seconds: float = 10.0,
+) -> Optional[dict[str, Any]]:
+    base = _split_command(command)
+    cmd = [*base, "--no-color", "status", "--json"]
+    try:
+        env = dict(os.environ)
+        env.setdefault("NODE_NO_WARNINGS", "1")
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+            env=env,
+        )
+    except Exception:
+        return None
+
+    if proc.returncode != 0:
+        return None
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        payload = _parse_json_best_effort(raw)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def infer_linked_whatsapp_account(
+    *,
+    command: str = "openclaw",
+    cwd: Optional[Path] = None,
+    timeout_seconds: float = 10.0,
+) -> Optional[str]:
+    """
+    Infer the active WhatsApp account id from `openclaw status --json`.
+
+    Typical account id is "default".
+    """
+    payload = _openclaw_status_json(command=command, cwd=cwd, timeout_seconds=timeout_seconds)
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("channelSummary")
+    if not isinstance(rows, list):
+        return None
+
+    in_whatsapp_block = False
+    for entry in rows:
+        if not isinstance(entry, str):
+            continue
+        line = entry.strip()
+        low = line.lower()
+        if line.startswith("WhatsApp:"):
+            in_whatsapp_block = True
+            continue
+        if in_whatsapp_block and line and not line.startswith("-"):
+            # Next top-level channel block started.
+            in_whatsapp_block = False
+        if not in_whatsapp_block:
+            continue
+        m = re.match(r"^-+\s*([A-Za-z0-9._-]+)\s*\(", line)
+        if m:
+            acct = (m.group(1) or "").strip()
+            if acct:
+                return acct
+    return None
+
+
+def _clear_stuck_gateway_sessions(
+    *,
+    command: str = "openclaw",
+    cwd: Optional[Path] = None,
+    max_age_seconds: int = 300,
+) -> bool:
+    """Detect and clear gateway sessions stuck in 'processing' state.
+
+    If a stuck session is found, kills the gateway node process and restarts
+    the scheduled task so the processing queue is flushed.
+
+    Returns True if a stuck session was found and the gateway was restarted.
+    """
+    try:
+        env = dict(os.environ)
+        env.setdefault("NODE_NO_WARNINGS", "1")
+        proc = subprocess.run(
+            [command, "logs", "--max-bytes", "8192"],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            env=env,
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        return False
+
+    # Parse "stuck session: ... age=NNNNs" from diagnostic output
+    import re as _re
+    ages = [int(m) for m in _re.findall(r"stuck session:.*?age=(\d+)s", output)]
+    if not ages or max(ages) < max_age_seconds:
+        return False
+
+    # Gateway has a stuck session exceeding threshold -- force-restart
+    try:
+        # Stop scheduled task
+        subprocess.run(
+            [command, "gateway", "stop"],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            env=env,
+        )
+        time.sleep(1)
+        # Kill any lingering node processes running the gateway
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "node.exe"],
+                capture_output=True,
+                timeout=5.0,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", "openclaw"],
+                capture_output=True,
+                timeout=5.0,
+            )
+        time.sleep(2)
+        # Restart
+        subprocess.run(
+            [command, "gateway", "start"],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            env=env,
+        )
+        time.sleep(5)  # Let gateway fully initialize
+        return True
+    except Exception:
+        return False
+
+
+def _is_session_lock_error(result: OpenClawResult) -> bool:
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    return "session file locked" in combined
+
+
+def _is_missing_listener_error(result: OpenClawResult) -> bool:
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    return "no active whatsapp web listener" in combined
+
+
+def _extract_agent_reply_text(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    # Prefer JSON payloads when available.
+    try:
+        payload = _parse_json_best_effort(text)
+        if isinstance(payload, dict):
+            # Common envelopes.
+            for key in ("response", "output", "content", "text"):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            msg = payload.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+            if isinstance(msg, dict):
+                for key in ("content", "text"):
+                    val = msg.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+    except Exception:
+        pass
+    return text
 
 
 def send_message(
@@ -507,6 +711,7 @@ def build_agent_turn_command(
     thinking: Optional[str] = None,
     local: bool = False,
     json_output: bool = False,
+    cli_timeout_seconds: Optional[float] = None,
 ) -> list[str]:
     base = _split_command(command)
     cmd: list[str] = [*base, "agent"]
@@ -529,6 +734,12 @@ def build_agent_turn_command(
         cmd.extend(["--reply-to", str(reply_to)])
     if thinking:
         cmd.extend(["--thinking", str(thinking)])
+    if cli_timeout_seconds is not None:
+        try:
+            seconds = int(max(1, float(cli_timeout_seconds)))
+            cmd.extend(["--timeout", str(seconds)])
+        except Exception:
+            pass
     if json_output:
         cmd.append("--json")
     return cmd
@@ -553,28 +764,51 @@ def run_agent_turn(
     json_output: bool = False,
     max_retries: int = 1,
 ) -> OpenClawResult:
+    try:
+        configured_cli_timeout = float(os.getenv("OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS", "120"))
+    except Exception:
+        configured_cli_timeout = 120.0
+    cli_timeout_seconds = min(float(timeout_seconds), max(15.0, configured_cli_timeout))
+
+    effective_reply_channel = reply_channel
+    effective_reply_to = reply_to
+    effective_reply_account = reply_account
+
+    if deliver and (channel or "").strip().lower() == "whatsapp":
+        if not effective_reply_channel:
+            effective_reply_channel = "whatsapp"
+        if not effective_reply_to:
+            effective_reply_to = to
+        if not effective_reply_account:
+            effective_reply_account = (
+                infer_linked_whatsapp_account(command=command, cwd=cwd, timeout_seconds=8.0)
+                or "default"
+            )
+
+    effective_session_id = session_id
     cmd = build_agent_turn_command(
         command=command,
         to=to,
         message=message,
         deliver=deliver,
         channel=channel,
-        reply_channel=reply_channel,
-        reply_to=reply_to,
-        reply_account=reply_account,
+        reply_channel=effective_reply_channel,
+        reply_to=effective_reply_to,
+        reply_account=effective_reply_account,
         agent_id=agent_id,
-        session_id=session_id,
+        session_id=effective_session_id,
         thinking=thinking,
         local=local,
         json_output=json_output,
+        cli_timeout_seconds=cli_timeout_seconds,
     )
 
-    def _try_run() -> OpenClawResult:
+    def _try_run(run_cmd: list[str]) -> OpenClawResult:
         try:
             env = dict(os.environ)
             env.setdefault("NODE_NO_WARNINGS", "1")
             proc = subprocess.run(
-                cmd,
+                run_cmd,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
@@ -584,7 +818,7 @@ def run_agent_turn(
             return OpenClawResult(
                 ok=proc.returncode == 0,
                 returncode=int(proc.returncode),
-                command=cmd,
+                command=run_cmd,
                 stdout=proc.stdout or "",
                 stderr=proc.stderr or "",
             )
@@ -592,7 +826,7 @@ def run_agent_turn(
             return OpenClawResult(
                 ok=False,
                 returncode=127,
-                command=cmd,
+                command=run_cmd,
                 stdout="",
                 stderr=str(exc),
             )
@@ -602,23 +836,94 @@ def run_agent_turn(
             return OpenClawResult(
                 ok=False,
                 returncode=124,
-                command=cmd,
+                command=run_cmd,
                 stdout=stdout,
                 stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
             )
 
-    last_result = _try_run()
+    # Pre-flight: detect and clear stuck gateway sessions (prevents queue blocking)
+    stuck_age_threshold = int(os.getenv("OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS", "300"))
+    if stuck_age_threshold > 0:
+        _clear_stuck_gateway_sessions(
+            command=command,
+            cwd=cwd,
+            max_age_seconds=stuck_age_threshold,
+        )
+
+    active_cmd = list(cmd)
+    last_result = _try_run(active_cmd)
     if last_result.ok:
         return last_result
+
+    if _is_session_lock_error(last_result) and not effective_session_id:
+        effective_session_id = f"pmx-{int(time.time())}-{os.getpid()}"
+        active_cmd = build_agent_turn_command(
+            command=command,
+            to=to,
+            message=message,
+            deliver=deliver,
+            channel=channel,
+            reply_channel=effective_reply_channel,
+            reply_to=effective_reply_to,
+            reply_account=effective_reply_account,
+            agent_id=agent_id,
+            session_id=effective_session_id,
+            thinking=thinking,
+            local=local,
+            json_output=json_output,
+            cli_timeout_seconds=cli_timeout_seconds,
+        )
+        last_result = _try_run(active_cmd)
+        if last_result.ok:
+            return last_result
 
     for attempt in range(max_retries):
         if not _is_retryable_error(last_result):
             break
         delay = min(3.0 * (2 ** attempt), 15.0)
         time.sleep(delay)
-        last_result = _try_run()
+        last_result = _try_run(active_cmd)
         if last_result.ok:
             return last_result
+
+    if deliver and _is_missing_listener_error(last_result):
+        no_deliver_cmd = build_agent_turn_command(
+            command=command,
+            to=to,
+            message=message,
+            deliver=False,
+            channel=channel,
+            reply_channel=effective_reply_channel,
+            reply_to=effective_reply_to,
+            reply_account=effective_reply_account,
+            agent_id=agent_id,
+            session_id=effective_session_id,
+            thinking=thinking,
+            local=local,
+            json_output=json_output,
+            cli_timeout_seconds=cli_timeout_seconds,
+        )
+        no_deliver_result = _try_run(no_deliver_cmd)
+        if no_deliver_result.ok:
+            reply_text = _extract_agent_reply_text(no_deliver_result.stdout)
+            if reply_text.strip():
+                send_result = send_message(
+                    to=(effective_reply_to or to),
+                    message=reply_text,
+                    command=command,
+                    cwd=cwd,
+                    timeout_seconds=max(20.0, min(60.0, float(timeout_seconds))),
+                    channel=effective_reply_channel or channel,
+                    skip_dedup=True,
+                )
+                if send_result.ok:
+                    return OpenClawResult(
+                        ok=True,
+                        returncode=0,
+                        command=send_result.command,
+                        stdout=no_deliver_result.stdout,
+                        stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
+                    )
 
     return last_result
 

@@ -448,6 +448,23 @@ def main() -> int:
                 file=sys.stderr,
             )
         if ("discord" in combined and "not configured" in combined) or "discord token not configured" in combined:
+            has_discord_app = all(
+                bool((os.getenv(k) or "").strip())
+                for k in (
+                    "DISCORD_APP_NAME",
+                    "DISCORD_APPLICATION_ID",
+                    "DISCORD_PUBLIC_KEY",
+                    "DISCORD_APP_INSTALL_LINK",
+                )
+            )
+            has_interactions_key = bool((os.getenv("INTERACTIONS_API_KEY") or "").strip())
+            if has_discord_app and has_interactions_key:
+                print(
+                    "[openclaw_notify] Hint: Discord app credentials are present for interaction-mode flows, "
+                    "but OpenClaw channel messaging still requires DISCORD_BOT_TOKEN. "
+                    "Set DISCORD_BOT_TOKEN for channel send, or keep using interactions endpoints.",
+                    file=sys.stderr,
+                )
             print(
                 "[openclaw_notify] Hint: Discord channel isn't configured. "
                 "Set DISCORD_BOT_TOKEN in .env, then run "

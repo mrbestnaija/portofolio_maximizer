@@ -9,7 +9,7 @@ forecasting:
 
   # SARIMAX configuration
   sarimax:
-    enabled: true
+    enabled: false  # Phase 7.10: Disabled by default (15x speedup); re-enable with --enable-sarimax
     auto_select_order: true
     max_p: 3  # Phase 7.3: Increased from 2 to capture more complex AR dynamics
     max_d: 1

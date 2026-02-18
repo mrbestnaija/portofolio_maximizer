@@ -251,6 +251,12 @@ PMX project root: `C:\\Users\\Bestman\\personal_projects\\portfolio_maximizer_v4
 4. Human reviews and approves before application
 5. Audit trail: `python scripts/openclaw_self_improve.py audit`
 
+### Tool Preference
+- For production gate/reconciliation operations, prefer orchestrator tool
+  `run_production_audit_gate` over generic shell/exec command strings.
+- Forward human review queue via `python scripts/forward_self_improvement_reviews.py`
+  (typically scheduled through `bash/production_cron.sh self_improvement_review_forward`).
+
 ### Blocked Files (security)
 - `.env`, `.env.local`, `credentials.json`, `auth-profiles.json`
 """

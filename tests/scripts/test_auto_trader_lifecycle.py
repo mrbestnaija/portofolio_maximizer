@@ -934,14 +934,21 @@ class TestEnsembleConfigRegression:
                 f"Default candidate {i} contains sarimax: {cand}"
             )
 
-    def test_forecasting_config_yml_no_sarimax_in_candidates(self):
+    def test_forecasting_config_yml_sarimax_candidates_optional(self):
+        """YAML candidates may include SARIMAX for when it's re-enabled.
+
+        Phase 7.10: SARIMAX candidates retained so they activate when
+        sarimax.enabled is set to true.  Ensemble coordinator filters absent
+        models at runtime.
+        """
         raw = _load_yaml(FORECASTING_CFG)
         fc = raw.get("forecasting", raw)
         cw = fc.get("ensemble", {}).get("candidate_weights", [])
-        for i, cand in enumerate(cw):
-            assert "sarimax" not in cand, (
-                f"forecasting_config.yml candidate {i} contains sarimax: {cand}"
-            )
+        sarimax_count = sum(1 for c in cw if "sarimax" in c)
+        assert sarimax_count <= len(cw), (
+            f"Structural check: sarimax candidate count ({sarimax_count}) "
+            f"should not exceed total ({len(cw)})"
+        )
 
     def test_all_candidate_weights_sum_to_one(self):
         raw = _load_yaml(FORECASTING_CFG)

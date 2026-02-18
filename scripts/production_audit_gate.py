@@ -45,6 +45,33 @@ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_reconcile_step(
+    *,
+    python_bin: str,
+    repo_root: Path,
+    db_path: Path,
+    close_ids: list[int],
+    apply: bool,
+) -> Dict[str, Any]:
+    """Run close-link reconciliation as an optional pre-gate step."""
+    repair_script = repo_root / "scripts" / "repair_unlinked_closes.py"
+    cmd = [python_bin, str(repair_script), "--db", str(db_path)]
+    if close_ids:
+        cmd.extend(["--close-ids", *[str(int(x)) for x in close_ids if int(x) > 0]])
+    if apply:
+        cmd.append("--apply")
+    proc = _run_command(cmd, cwd=repo_root)
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
+    return {
+        "requested": True,
+        "apply": bool(apply),
+        "close_ids": [int(x) for x in close_ids if int(x) > 0],
+        "exit_code": int(proc.returncode),
+        "status": "PASS" if int(proc.returncode) == 0 else "FAIL",
+        "output_tail": _tail_lines(output),
+    }
+
+
 def _run_command_quiet(cmd: list[str], cwd: Path) -> Tuple[int, str, str]:
     try:
         proc = subprocess.run(
@@ -370,6 +397,21 @@ def main() -> int:
         help="Output path for latest gate artifact.",
     )
     parser.add_argument(
+        "--reconcile",
+        nargs="*",
+        type=int,
+        default=None,
+        help=(
+            "Optional close IDs to reconcile via scripts/repair_unlinked_closes.py before gates run. "
+            "If provided without IDs, scans all unlinked closes."
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-apply",
+        action="store_true",
+        help="Apply reconciliation changes (default: dry-run reconciliation).",
+    )
+    parser.add_argument(
         "--notify-openclaw",
         action="store_true",
         help="Send gate summary via OpenClaw CLI (requires OPENCLAW_TARGETS/OPENCLAW_TO or --openclaw-to).",
@@ -394,7 +436,9 @@ def main() -> int:
         default=20.0,
         help="OpenClaw command timeout in seconds (default: 20).",
     )
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
     python_bin = str(Path(args.python_bin))
     db_path = _resolve_path(repo_root, args.db)
     audit_dir = _resolve_path(repo_root, args.audit_dir)
@@ -404,6 +448,17 @@ def main() -> int:
     check_script = repo_root / "scripts" / "check_forecast_audits.py"
     proof_script = repo_root / "scripts" / "validate_profitability_proof.py"
     summary_cache_path = repo_root / "logs" / "forecast_audits_cache" / "latest_summary.json"
+
+    reconcile_result: Dict[str, Any] = {"requested": False}
+    if args.reconcile is not None:
+        reconcile_ids = [int(x) for x in (args.reconcile or []) if int(x) > 0]
+        reconcile_result = _run_reconcile_step(
+            python_bin=python_bin,
+            repo_root=repo_root,
+            db_path=db_path,
+            close_ids=reconcile_ids,
+            apply=bool(args.reconcile_apply),
+        )
 
     lift_cmd = [
         python_bin,
@@ -474,7 +529,9 @@ def main() -> int:
             "require_holding_period": bool(args.require_holding_period),
             "allow_inconclusive_lift": bool(args.allow_inconclusive_lift),
             "require_profitable": bool(args.require_profitable),
+            "unknown_args_ignored": unknown,
         },
+        "reconciliation": reconcile_result,
         "lift_gate": {
             "status": lift_status,
             "pass": lift_pass,
@@ -528,6 +585,13 @@ def main() -> int:
         f"(valid={proof_is_valid}, profitable={proof_is_profitable})"
     )
     print(f"Gate status    : {gate_status}")
+    if reconcile_result.get("requested"):
+        print(
+            "Reconcile step : "
+            f"{reconcile_result.get('status')} "
+            f"(apply={bool(reconcile_result.get('apply'))}, "
+            f"close_ids={reconcile_result.get('close_ids')})"
+        )
     print(f"Artifact       : {output_path}")
     print(f"Artifact (run) : {stamped_output}")
     try:

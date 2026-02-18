@@ -47,6 +47,20 @@ def _report_group(name: str, keys: List[str]) -> Tuple[bool, str]:
     return False, f"[WARN] {name}: missing ({' / '.join(keys)})"
 
 
+def _first_env_present(keys: Iterable[str]) -> Optional[str]:
+    for key in keys:
+        if (os.getenv(key) or "").strip():
+            return key
+    return None
+
+
+def _all_env_present(keys: Iterable[str]) -> bool:
+    for key in keys:
+        if not (os.getenv(key) or "").strip():
+            return False
+    return True
+
+
 def main(argv: List[str]) -> int:
     strict = "--strict" in argv
 
@@ -63,11 +77,11 @@ def main(argv: List[str]) -> int:
         ok = ok and group_ok
 
     # LLM providers (optional)
-    openai_ok, openai_line = _report_group("openai_api_key", ["OPENAI_API_KEY"])
+    openai_ok, openai_line = _report_group("openai_api_key", ["OPENAI_API_KEY", "OPENAI_SECRET_KEY"])
     lines.append(openai_line)
     anthropic_ok, anthropic_line = _report_group("anthropic_api_key", ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"])
     lines.append(anthropic_line)
-    qwen_ok, qwen_line = _report_group("qwen_api_key", ["DASHSCOPE_API_KEY", "QWEN_API_KEY"])
+    qwen_ok, qwen_line = _report_group("qwen_api_key", ["DASHSCOPE_API_KEY", "QWEN_API_KEY", "QWEN_PASSWORD"])
     lines.append(qwen_line)
 
     # cTrader (live execution readiness)
@@ -125,60 +139,84 @@ def main(argv: List[str]) -> int:
     else:
         lines.append("[OK] interactions_api_key: present (INTERACTIONS_API_KEY)")
 
-    interactions_url = (os.getenv("INTERACTIONS_ENDPOINT_URL") or "").strip()
-    verify_url = (os.getenv("LINKED_ROLES_VERIFICATION_URL") or "").strip()
+    interactions_url_key = _first_env_present(["INTERACTIONS_ENDPOINT_URL", "INTERACTIONS_URL"])
+    verify_url_key = _first_env_present(["LINKED_ROLES_VERIFICATION_URL", "VERIFY_ROLES_URL"])
     lines.append(
-        "[OK] interactions_endpoint_url: present (INTERACTIONS_ENDPOINT_URL)"
-        if interactions_url
-        else "[WARN] interactions_endpoint_url: missing (INTERACTIONS_ENDPOINT_URL)"
+        f"[OK] interactions_endpoint_url: present ({interactions_url_key})"
+        if interactions_url_key
+        else "[WARN] interactions_endpoint_url: missing (INTERACTIONS_ENDPOINT_URL / INTERACTIONS_URL)"
     )
     lines.append(
-        "[OK] linked_roles_verification_url: present (LINKED_ROLES_VERIFICATION_URL)"
-        if verify_url
-        else "[WARN] linked_roles_verification_url: missing (LINKED_ROLES_VERIFICATION_URL)"
-    )
-
-    auth0_domain = (os.getenv("AUTH0_DOMAIN") or "").strip()
-    auth0_audience = (os.getenv("AUTH0_AUDIENCE") or "").strip()
-    lines.append(
-        "[OK] auth0_jwt: configured (AUTH0_DOMAIN / AUTH0_AUDIENCE)"
-        if (auth0_domain and auth0_audience)
-        else "[WARN] auth0_jwt: missing (AUTH0_DOMAIN / AUTH0_AUDIENCE)"
+        f"[OK] linked_roles_verification_url: present ({verify_url_key})"
+        if verify_url_key
+        else "[WARN] linked_roles_verification_url: missing (LINKED_ROLES_VERIFICATION_URL / VERIFY_ROLES_URL)"
     )
 
-    tos_url = (os.getenv("TERMS_OF_SERVICE_URL") or "").strip()
-    pp_url = (os.getenv("PRIVACY_POLICY_URL") or "").strip()
+    auth0_domain_key = _first_env_present(["AUTH0_DOMAIN", "AUTH0_TENANT_DOMAIN"])
+    auth0_audience_key = _first_env_present(["AUTH0_AUDIENCE", "AUTH0_API_AUDIENCE"])
     lines.append(
-        "[OK] terms_of_service_url: present (TERMS_OF_SERVICE_URL)"
-        if tos_url
-        else "[WARN] terms_of_service_url: missing (TERMS_OF_SERVICE_URL)"
+        "[OK] auth0_jwt: configured "
+        f"({auth0_domain_key} / {auth0_audience_key})"
+        if (auth0_domain_key and auth0_audience_key)
+        else "[WARN] auth0_jwt: missing "
+        "(AUTH0_DOMAIN / AUTH0_AUDIENCE or AUTH0_TENANT_DOMAIN / AUTH0_API_AUDIENCE)"
+    )
+
+    tos_key = _first_env_present(["TERMS_OF_SERVICE_URL", "TERMS_URL"])
+    pp_key = _first_env_present(["PRIVACY_POLICY_URL", "PRIVACY_URL"])
+    lines.append(
+        f"[OK] terms_of_service_url: present ({tos_key})"
+        if tos_key
+        else "[WARN] terms_of_service_url: missing (TERMS_OF_SERVICE_URL / TERMS_URL)"
     )
     lines.append(
-        "[OK] privacy_policy_url: present (PRIVACY_POLICY_URL)"
-        if pp_url
-        else "[WARN] privacy_policy_url: missing (PRIVACY_POLICY_URL)"
+        f"[OK] privacy_policy_url: present ({pp_key})"
+        if pp_key
+        else "[WARN] privacy_policy_url: missing (PRIVACY_POLICY_URL / PRIVACY_URL)"
+    )
+
+    discord_app_keys = [
+        "DISCORD_APP_NAME",
+        "DISCORD_APPLICATION_ID",
+        "DISCORD_PUBLIC_KEY",
+        "DISCORD_APP_INSTALL_LINK",
+    ]
+    discord_app_ok = _all_env_present(discord_app_keys)
+    interactions_for_discord_ok = bool((load_secret("INTERACTIONS_API_KEY") or "").strip())
+    lines.append(
+        "[OK] discord_interactions_app: configured "
+        "(DISCORD_APP_NAME / DISCORD_APPLICATION_ID / DISCORD_PUBLIC_KEY / DISCORD_APP_INSTALL_LINK + INTERACTIONS_API_KEY)"
+        if (discord_app_ok and interactions_for_discord_ok)
+        else "[WARN] discord_interactions_app: partial/missing "
+        "(DISCORD_APP_NAME / DISCORD_APPLICATION_ID / DISCORD_PUBLIC_KEY / DISCORD_APP_INSTALL_LINK + INTERACTIONS_API_KEY)"
     )
 
     # OpenClaw optional remote channels (optional)
     tg_ok, tg_line = _report_group("telegram_bot_token", ["TELEGRAM_BOT_TOKEN"])
-    dc_ok, dc_line = _report_group("discord_bot_token", ["DISCORD_BOT_TOKEN"])
-    sb_ok, sb_line = _report_group("slack_bot_token", ["SLACK_BOT_TOKEN"])
-    sa_ok, sa_line = _report_group("slack_app_token", ["SLACK_APP_TOKEN"])
+    dc_ok, dc_line = _report_group("discord_bot_token", ["DISCORD_BOT_TOKEN", "DISCORD_TOKEN"])
+    sb_ok, sb_line = _report_group("slack_bot_token", ["SLACK_BOT_TOKEN", "SLACK_TOKEN"])
+    sa_ok, sa_line = _report_group("slack_app_token", ["SLACK_APP_TOKEN", "SLACK_SOCKET_MODE_TOKEN"])
     lines.extend([tg_line, dc_line, sb_line, sa_line])
 
     # Email alerts (optional, Gmail supported)
-    email_user_ok, email_user_line = _report_group("email_username", ["PMX_EMAIL_USERNAME"])
-    email_pwd_ok, email_pwd_line = _report_group("email_password", ["PMX_EMAIL_PASSWORD"])
-    email_to_ok, email_to_line = _report_group("email_to", ["PMX_EMAIL_TO", "PMX_EMAIL_RECIPIENTS"])
+    email_user_ok, email_user_line = _report_group("email_username", ["PMX_EMAIL_USERNAME", "MAIN_EMAIL_GMAIL", "OPENAI_EMAIL"])
+    email_pwd_ok, email_pwd_line = _report_group("email_password", ["PMX_EMAIL_PASSWORD", "OPENAI_EMAIL_PASSWORD"])
+    email_to_ok, email_to_line = _report_group(
+        "email_to",
+        ["PMX_EMAIL_TO", "PMX_EMAIL_RECIPIENTS", "MAIN_EMAIL_GMAIL", "ALTERNATIVE_EMAIL_PROTONMAIL"],
+    )
     lines.extend([email_user_line, email_pwd_line, email_to_line])
 
     # Inbox workflows (optional) - Proton Mail Bridge
-    proton_user_ok, proton_user_line = _report_group("proton_bridge_username", ["PMX_PROTON_BRIDGE_USERNAME"])
+    proton_user_ok, proton_user_line = _report_group(
+        "proton_bridge_username",
+        ["PMX_PROTON_BRIDGE_USERNAME", "ALTERNATIVE_EMAIL_PROTONMAIL"],
+    )
     proton_pwd_ok, proton_pwd_line = _report_group("proton_bridge_password", ["PMX_PROTON_BRIDGE_PASSWORD"])
     lines.extend([proton_user_line, proton_pwd_line])
 
     # GitHub automation (optional)
-    gh_ok, gh_line = _report_group("github_projects_token", ["PROJECTS_TOKEN"])
+    gh_ok, gh_line = _report_group("github_projects_token", ["PROJECTS_TOKEN", "PROJECTS_SECRET"])
     lines.append(gh_line)
 
     print("Credential presence check (values are never printed)")

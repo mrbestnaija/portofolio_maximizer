@@ -143,6 +143,14 @@ def _csv_env(name: str) -> list[str]:
     return [p.strip() for p in normalized.split(",") if p and p.strip()]
 
 
+def _env_first(*keys: str) -> tuple[str, str]:
+    for key in keys:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return key, value
+    return "", ""
+
+
 def _hash_id(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
 
@@ -226,8 +234,8 @@ def _extract_bearer_token(auth_header: Optional[str]) -> Optional[str]:
 
 class Auth0JwtVerifier:
     def __init__(self) -> None:
-        self.domain = (os.getenv("AUTH0_DOMAIN") or "").strip()
-        self.audience = (os.getenv("AUTH0_AUDIENCE") or "").strip()
+        self.domain_env, self.domain = _env_first("AUTH0_DOMAIN", "AUTH0_TENANT_DOMAIN")
+        self.audience_env, self.audience = _env_first("AUTH0_AUDIENCE", "AUTH0_API_AUDIENCE")
         issuer = (os.getenv("AUTH0_ISSUER") or "").strip()
         self.issuer = issuer or (f"https://{self.domain}/" if self.domain else "")
         algs = (os.getenv("AUTH0_ALGORITHMS") or "RS256").strip()
@@ -239,7 +247,13 @@ class Auth0JwtVerifier:
 
     def verify(self, token: str) -> dict[str, Any]:
         if not self.enabled:
-            raise HTTPException(status_code=503, detail="Auth0 JWT validation not configured (set AUTH0_DOMAIN/AUTH0_AUDIENCE).")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Auth0 JWT validation not configured "
+                    "(set AUTH0_DOMAIN/AUTH0_AUDIENCE or AUTH0_TENANT_DOMAIN/AUTH0_API_AUDIENCE)."
+                ),
+            )
 
         try:
             import jwt  # PyJWT
@@ -449,7 +463,11 @@ async def interactions(
         if not _get_expected_api_key() and not _jwt_verifier.enabled:
             raise HTTPException(
                 status_code=503,
-                detail="No auth configured (set INTERACTIONS_API_KEY>=16 chars, or AUTH0_DOMAIN+AUTH0_AUDIENCE).",
+                detail=(
+                    "No auth configured (set INTERACTIONS_API_KEY>=16 chars, "
+                    "or AUTH0_DOMAIN+AUTH0_AUDIENCE, "
+                    "or AUTH0_TENANT_DOMAIN+AUTH0_API_AUDIENCE)."
+                ),
             )
         raise HTTPException(status_code=401, detail="Missing/invalid credentials.")
 
@@ -535,17 +553,17 @@ async def verify_roles(
 
 @app.get("/terms-of-service")
 async def terms_of_service():
-    url = (os.getenv("TERMS_OF_SERVICE_URL") or "").strip()
+    _, url = _env_first("TERMS_OF_SERVICE_URL", "TERMS_URL")
     if not url:
-        raise HTTPException(status_code=404, detail="TERMS_OF_SERVICE_URL not configured.")
+        raise HTTPException(status_code=404, detail="TERMS_OF_SERVICE_URL/TERMS_URL not configured.")
     return RedirectResponse(url=url, status_code=302)
 
 
 @app.get("/privacy-policy")
 async def privacy_policy():
-    url = (os.getenv("PRIVACY_POLICY_URL") or "").strip()
+    _, url = _env_first("PRIVACY_POLICY_URL", "PRIVACY_URL")
     if not url:
-        raise HTTPException(status_code=404, detail="PRIVACY_POLICY_URL not configured.")
+        raise HTTPException(status_code=404, detail="PRIVACY_POLICY_URL/PRIVACY_URL not configured.")
     return RedirectResponse(url=url, status_code=302)
 
 

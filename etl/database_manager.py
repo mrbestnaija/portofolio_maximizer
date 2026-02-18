@@ -1250,6 +1250,40 @@ class DatabaseManager:
             ON trading_signals(ticker, signal_date DESC)
         """)
 
+        # Canonical integrity views (Phase 7.9+)
+        self.cursor.execute("""
+            CREATE VIEW IF NOT EXISTS production_closed_trades AS
+            SELECT *
+            FROM   trade_executions
+            WHERE  is_close = 1
+              AND  COALESCE(is_diagnostic, 0) = 0
+              AND  COALESCE(is_synthetic, 0)  = 0
+        """)
+        self.cursor.execute("""
+            CREATE VIEW IF NOT EXISTS round_trips AS
+            SELECT
+                c.id            AS close_id,
+                c.ticker,
+                o.id            AS open_id,
+                o.trade_date    AS entry_date,
+                c.trade_date    AS exit_date,
+                o.price         AS entry_price,
+                c.exit_price    AS exit_price,
+                c.shares,
+                c.realized_pnl,
+                c.realized_pnl_pct,
+                c.holding_period_days,
+                c.exit_reason,
+                c.execution_mode,
+                COALESCE(c.is_diagnostic, 0) AS is_diagnostic,
+                COALESCE(c.is_synthetic, 0)  AS is_synthetic
+            FROM   trade_executions c
+            LEFT JOIN trade_executions o ON c.entry_trade_id = o.id
+            WHERE  c.is_close = 1
+        """)
+
+        self.conn.commit()
+
         self._migrate_llm_risks_table()
         self._migrate_llm_signals_table()
 

@@ -20,6 +20,29 @@ logger = logging.getLogger(__name__)
 
 _DOTENV_BOOTSTRAPPED = False
 
+# Canonical secret names -> accepted legacy aliases.
+# Keep this list narrow and explicit to avoid accidental credential mixups.
+_SECRET_ALIASES: Dict[str, tuple[str, ...]] = {
+    "OPENAI_API_KEY": ("OPENAI_SECRET_KEY",),
+    "INTERACTIONS_API_KEY": ("INTERACTIONS_KEY", "INTERACTIONS_TOKEN"),
+    "QWEN_API_KEY": ("DASHSCOPE_API_KEY", "QWEN_PASSWORD"),
+    "DASHSCOPE_API_KEY": ("QWEN_API_KEY", "QWEN_PASSWORD"),
+    "PROJECTS_TOKEN": ("PROJECTS_SECRET",),
+    "PMX_EMAIL_USERNAME": ("MAIN_EMAIL_GMAIL", "OPENAI_EMAIL"),
+    "PMX_EMAIL_PASSWORD": ("OPENAI_EMAIL_PASSWORD",),
+    "PMX_EMAIL_TO": ("MAIN_EMAIL_GMAIL", "ALTERNATIVE_EMAIL_PROTONMAIL"),
+    "PMX_EMAIL_FROM": ("MAIN_EMAIL_GMAIL", "OPENAI_EMAIL"),
+    "PMX_PROTON_BRIDGE_USERNAME": ("ALTERNATIVE_EMAIL_PROTONMAIL",),
+    "DISCORD_BOT_TOKEN": ("DISCORD_TOKEN",),
+    "DISCORD_APP_NAME": ("DISCORD_APPLICATION_NAME",),
+    "DISCORD_APPLICATION_ID": ("DISCORD_APP_ID", "DISCORD_CLIENT_ID"),
+    "DISCORD_PUBLIC_KEY": ("DISCORD_INTERACTIONS_PUBLIC_KEY",),
+    "DISCORD_APP_INSTALL_LINK": ("DISCORD_INSTALL_LINK", "DISCORD_APP_INSTALL_URL"),
+    "SLACK_BOT_TOKEN": ("SLACK_TOKEN",),
+    "SLACK_APP_TOKEN": ("SLACK_SOCKET_MODE_TOKEN",),
+    "TELEGRAM_BOT_TOKEN": ("TELEGRAM_HTTP_API_TOKEN",),
+}
+
 
 def _truthy_env(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -48,6 +71,53 @@ def _parse_env_file(path: Path) -> Dict[str, str]:
         mapping[key] = cleaned
 
     return mapping
+
+
+def _csv_env_aliases(name: str) -> list[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return []
+    normalized = raw.replace("\r\n", "\n").replace("\n", ",").replace(";", ",")
+    out: list[str] = []
+    for piece in normalized.split(","):
+        key = piece.strip()
+        if key:
+            out.append(key)
+    return out
+
+
+def _resolve_aliases(env_var_name: str) -> list[str]:
+    base = list(_SECRET_ALIASES.get(env_var_name, ()))
+    # Optional per-secret extension without code changes:
+    # Example: PMX_EMAIL_PASSWORD_ALIASES=GMAIL_APP_PASSWORD
+    base.extend(_csv_env_aliases(f"{env_var_name}_ALIASES"))
+    seen: set[str] = set()
+    out: list[str] = []
+    for key in base:
+        k = (key or "").strip()
+        if not k or k == env_var_name or k in seen:
+            continue
+        seen.add(k)
+        out.append(k)
+    return out
+
+
+def _read_secret_from_file_path(secret_file_path: str, *, env_name_for_log: str) -> Optional[str]:
+    path = (secret_file_path or "").strip()
+    if not path or not Path(path).exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                logger.debug("Loaded %s from *_FILE path: %s", env_name_for_log, path)
+                return stripped
+        logger.warning("Secret file %s is empty or contains only comments", path)
+    except Exception as e:
+        logger.warning("Failed to read secret file %s: %s", path, e)
+    return None
 
 
 def bootstrap_dotenv() -> None:
@@ -127,31 +197,36 @@ def load_secret(env_var_name: str, secret_file_env: Optional[str] = None) -> Opt
     """
     bootstrap_dotenv()
 
-    # Determine secret file path
+    aliases = _resolve_aliases(env_var_name)
+
+    # Determine secret file env names to probe.
     if secret_file_env is None:
         secret_file_env = f"{env_var_name}_FILE"
 
-    secret_file_path = (os.getenv(secret_file_env) or "").strip() or None
-    
-    # Try Docker secret file first (production)
-    if secret_file_path and Path(secret_file_path).exists():
-        try:
-            with open(secret_file_path, 'r', encoding='utf-8') as handle:
-                for raw_line in handle:
-                    stripped = raw_line.strip()
-                    if not stripped or stripped.startswith('#'):
-                        continue
-                    logger.debug("Loaded %s from *_FILE path: %s", env_var_name, secret_file_path)
-                    return stripped
-            logger.warning("Secret file %s is empty or contains only comments", secret_file_path)
-        except Exception as e:
-            logger.warning("Failed to read secret file %s: %s", secret_file_path, e)
-    
-    # Fallback to environment variable (development/local)
-    secret = (os.getenv(env_var_name) or "").strip()
-    if secret:
-        logger.debug("Loaded %s from environment variable", env_var_name)
-        return secret
+    file_env_names = [secret_file_env]
+    if secret_file_env == f"{env_var_name}_FILE":
+        file_env_names.extend(f"{alias}_FILE" for alias in aliases)
+
+    seen_file_envs: set[str] = set()
+    for file_env_name in file_env_names:
+        if not file_env_name or file_env_name in seen_file_envs:
+            continue
+        seen_file_envs.add(file_env_name)
+        secret_file_path = (os.getenv(file_env_name) or "").strip() or None
+        secret = _read_secret_from_file_path(secret_file_path or "", env_name_for_log=env_var_name)
+        if secret:
+            return secret
+
+    # Fallback to environment variables (canonical first, then aliases).
+    env_names = [env_var_name, *aliases]
+    for name in env_names:
+        secret = (os.getenv(name) or "").strip()
+        if secret:
+            source = "environment variable"
+            if name != env_var_name:
+                source += f" alias ({name})"
+            logger.debug("Loaded %s from %s", env_var_name, source)
+            return secret
     
     logger.debug("Secret %s not found in *_FILE path or environment variables", env_var_name)
     return None
@@ -206,4 +281,3 @@ def load_xtb_username() -> Optional[str]:
 def load_xtb_password() -> Optional[str]:
     """Load XTB password."""
     return load_secret('XTB_PASSWORD', 'XTB_PASSWORD_FILE')
-

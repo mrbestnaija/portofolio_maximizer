@@ -68,6 +68,90 @@ llm:
       data_extraction: "qwen3:8b"
       social_media_automation: "qwen3:8b"
 
+  # Runtime production profiles consumed by scripts/llm_multi_model_orchestrator.py
+  # Select with PMX_QWEN_PRODUCTION_PROFILE=low_latency|high_accuracy.
+  production_profiles:
+    selected_profile: "low_latency"
+    profile_aliases:
+      fast: "low_latency"
+      latency: "low_latency"
+      accurate: "high_accuracy"
+      accuracy: "high_accuracy"
+    profiles:
+      low_latency:
+        description: "Fast response profile for monitoring and operational checks."
+        sla:
+          target_p95_latency_seconds: 18
+          target_timeout_budget_seconds: 90
+          trading_target_max_error_rate: 0.42
+          trading_min_wilson_win_rate: 0.53
+        env_defaults:
+          PMX_QWEN_MAX_ROUNDS: 1
+          PMX_QWEN_MAX_TOOL_CALLS: 8
+          PMX_QWEN_FORCE_TOOL_PRIMER: true
+          PMX_QWEN_SUBAGENT_WORKFLOW: false
+          PMX_QWEN_ORCH_TIMEOUT_SECONDS: 90
+          PMX_QWEN_MODEL_ERROR_STREAK: 2
+          PMX_QWEN_MODEL_COOLDOWN_SECONDS: 120
+          PMX_QWEN_SUBAGENT_MAX_TASKS: 1
+          PMX_QWEN_SUBAGENT_DEEP_LATENCY_CUTOFF_MS: 12000
+          PMX_QWEN_TOOL_CACHE_TTL_SECONDS: 30
+          PMX_QWEN_TOOL_CACHE_MAX_ENTRIES: 128
+          PMX_QWEN_TOOL_FAILURE_MEMORY_MAX: 16
+          PMX_QWEN_TOOL_FAILURE_HINTS_MAX: 4
+          PMX_QWEN_TOOL_REPEAT_SIGNATURE_LIMIT: 2
+          PMX_QWEN_TOOL_ERROR_ROUND_STREAK_LIMIT: 2
+          PMX_QWEN_TOOL_FAILURE_FILE_MAX_LINES: 1024
+          PMX_QWEN_TOOL_FAILURE_MEMORY_PATH: logs/automation/qwen_tool_failures.jsonl
+          PMX_QWEN_CHAT_NUM_PREDICT: 320
+          PMX_QWEN_REASONING_MAX_PROMPT_CHARS: 2600
+          PMX_QWEN_CHAT_ROUND_TIMEOUT_CAP_SECONDS: 18
+          PMX_QWEN_PROGRESS_UPDATES: true
+          PMX_QWEN_PROGRESS_MIN_INTERVAL_SECONDS: 8
+          PMX_QWEN_PROGRESS_MAX_MESSAGE_CHARS: 220
+          PMX_QWEN_OBJECTIVE_MIN_TRADES: 40
+          PMX_QWEN_OBJECTIVE_TARGET_MAX_ERROR_RATE: 0.42
+          PMX_QWEN_OBJECTIVE_MIN_WILSON_WIN_RATE: 0.53
+          PMX_QWEN_OBJECTIVE_PVALUE_MAX: 0.05
+          PMX_QWEN_OBJECTIVE_WILSON_Z: 1.96
+
+      high_accuracy:
+        description: "Evidence-heavy profile for trading-critical responses."
+        sla:
+          target_p95_latency_seconds: 40
+          target_timeout_budget_seconds: 180
+          trading_target_max_error_rate: 0.35
+          trading_min_wilson_win_rate: 0.58
+        env_defaults:
+          PMX_QWEN_MAX_ROUNDS: 3
+          PMX_QWEN_MAX_TOOL_CALLS: 14
+          PMX_QWEN_FORCE_TOOL_PRIMER: true
+          PMX_QWEN_SUBAGENT_WORKFLOW: true
+          PMX_QWEN_ORCH_TIMEOUT_SECONDS: 180
+          PMX_QWEN_MODEL_ERROR_STREAK: 3
+          PMX_QWEN_MODEL_COOLDOWN_SECONDS: 180
+          PMX_QWEN_SUBAGENT_MAX_TASKS: 3
+          PMX_QWEN_SUBAGENT_DEEP_LATENCY_CUTOFF_MS: 22000
+          PMX_QWEN_TOOL_CACHE_TTL_SECONDS: 45
+          PMX_QWEN_TOOL_CACHE_MAX_ENTRIES: 192
+          PMX_QWEN_TOOL_FAILURE_MEMORY_MAX: 32
+          PMX_QWEN_TOOL_FAILURE_HINTS_MAX: 6
+          PMX_QWEN_TOOL_REPEAT_SIGNATURE_LIMIT: 2
+          PMX_QWEN_TOOL_ERROR_ROUND_STREAK_LIMIT: 2
+          PMX_QWEN_TOOL_FAILURE_FILE_MAX_LINES: 2048
+          PMX_QWEN_TOOL_FAILURE_MEMORY_PATH: logs/automation/qwen_tool_failures.jsonl
+          PMX_QWEN_CHAT_NUM_PREDICT: 900
+          PMX_QWEN_REASONING_MAX_PROMPT_CHARS: 5200
+          PMX_QWEN_CHAT_ROUND_TIMEOUT_CAP_SECONDS: 35
+          PMX_QWEN_PROGRESS_UPDATES: true
+          PMX_QWEN_PROGRESS_MIN_INTERVAL_SECONDS: 10
+          PMX_QWEN_PROGRESS_MAX_MESSAGE_CHARS: 220
+          PMX_QWEN_OBJECTIVE_MIN_TRADES: 60
+          PMX_QWEN_OBJECTIVE_TARGET_MAX_ERROR_RATE: 0.35
+          PMX_QWEN_OBJECTIVE_MIN_WILSON_WIN_RATE: 0.58
+          PMX_QWEN_OBJECTIVE_PVALUE_MAX: 0.05
+          PMX_QWEN_OBJECTIVE_WILSON_Z: 1.96
+
   # Generation parameters
   generation:
     temperature: 0.1  # Low for consistency (0.0-1.0)
