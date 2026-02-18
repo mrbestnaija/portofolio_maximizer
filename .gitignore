@@ -53,6 +53,7 @@ htmlcov/
 Thumbs.db
 *.log
 *.log.*
+nul
 
 # Database files
 *.db
@@ -79,6 +80,10 @@ local_database.db
 *.model
 
 checkpoints/
+
+# Generated local artifacts (do not commit)
+memory/
+models/llm_finetune/
 
 # Data files (cached/generated - keep structure)
 data/raw/*.parquet
