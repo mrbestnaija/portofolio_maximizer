@@ -284,9 +284,23 @@ Jobs are stored in `~/.openclaw/cron/jobs.json` (not in the repo). Each job uses
 | Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL and consecutive losses |
 | GARCH Unit-Root Guard | P2 | `0 9 * * 1` (Mon 9 AM) | Inline Python scanning forecast audits for alpha+beta >= 0.98 |
 | Overnight Hold Monitor | P2 | `0 9 * * 5` (Fri 9 AM) | Inline Python comparing intraday vs overnight PnL |
+| Model Training Autopilot | P1 | `15 */6 * * *` (every 6h) | `python scripts/openclaw_training_autopilot.py --benchmark-factor 0.989` (detaches `run_training_priority_cycle.py` when below benchmarks) |
 | System Health Check | -- | `0 */6 * * *` (every 6h) | `python scripts/llm_multi_model_orchestrator.py status` + `python scripts/error_monitor.py --check` |
 | OpenClaw Maintenance | -- | `0 3 * * 0` (Sun 3 AM) | `bash/production_cron.sh openclaw_maintenance` (stale locks + gateway/channel guard) |
 | Self-Improvement Review Forward | -- | Cron via `bash/production_cron.sh self_improvement_review_forward` | Sends sanitized pending proposal summaries to human reviewers |
+
+#### Model Training Autopilot (Benchmark-Chasing, Detached)
+
+The training autopilot is designed for OpenClaw cron: it runs fast, and when benchmarks are below target it starts a **detached** background training cycle (so OpenClaw cron sessions do not get stuck).
+
+- Script: `scripts/openclaw_training_autopilot.py`
+- Benchmarks (factor default: `0.989`):
+  - Profitability proof vs `config/profitability_proof_requirements.yml`
+  - Forecaster adversarial suite vs `config/forecaster_monitoring_ci.yml` (reads `logs/automation/training_priority/adversarial_forecaster_suite.json`)
+- State: `logs/automation/training_autopilot/state.json` (restart-safe; prevents duplicate concurrent training)
+- LLM activity logging:
+  - proposal: `logs/llm_activity/proposals/training/`
+  - feedback: `logs/llm_activity/feedback/`
 
 ### Announcement Rules
 
