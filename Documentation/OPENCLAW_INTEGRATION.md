@@ -253,10 +253,13 @@ What it does:
 - Optionally archives matching stale session `.jsonl` files.
 - Checks gateway RPC health and can restart gateway on failure.
 - Detects primary WhatsApp handshake timeout/disconnect states and restarts gateway for recovery.
+- Re-checks channel status after restart and marks unresolved primary channel failures as `WARN` (no false `PASS`).
+- Classifies DNS failures (`ENOTFOUND web.whatsapp.com`) separately from listener/session failures.
+- Optionally toggles the primary account enabled=false/true and restarts gateway to recover a missing listener.
 - Optionally disables broken non-primary channels (Telegram/Discord) when known auth/config errors persist.
 
 Run once (apply mode):
-- `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure`
+- `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure --attempt-primary-reenable --recheck-delay-seconds 8`
 
 Cron path:
 - `bash/production_cron.sh openclaw_maintenance`

@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,6 +143,88 @@ def _run_openclaw_json(
     except Exception:
         return res, None
     return res, payload
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _resolve_primary_account_id(channels_payload: dict[str, Any], primary_channel: str) -> str:
+    channel_defaults = (
+        channels_payload.get("channelDefaultAccountId")
+        if isinstance(channels_payload.get("channelDefaultAccountId"), dict)
+        else {}
+    )
+    default_account = str(channel_defaults.get(primary_channel) or "").strip()
+    if default_account:
+        return default_account
+
+    channel_accounts = (
+        channels_payload.get("channelAccounts")
+        if isinstance(channels_payload.get("channelAccounts"), dict)
+        else {}
+    )
+    rows = channel_accounts.get(primary_channel) if isinstance(channel_accounts, dict) else None
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            account_id = str(row.get("accountId") or "").strip()
+            if account_id:
+                return account_id
+    return "default"
+
+
+def _primary_channel_snapshot(channels_payload: dict[str, Any], primary_channel: str) -> dict[str, Any]:
+    channels = channels_payload.get("channels") if isinstance(channels_payload.get("channels"), dict) else {}
+    row = channels.get(primary_channel) if isinstance(channels, dict) else None
+    row = row if isinstance(row, dict) else {}
+
+    channel_accounts = (
+        channels_payload.get("channelAccounts")
+        if isinstance(channels_payload.get("channelAccounts"), dict)
+        else {}
+    )
+    account_id = _resolve_primary_account_id(channels_payload, primary_channel)
+    account_row: dict[str, Any] = {}
+    account_rows = channel_accounts.get(primary_channel) if isinstance(channel_accounts, dict) else None
+    if isinstance(account_rows, list):
+        for item in account_rows:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("accountId") or "").strip() == account_id:
+                account_row = item
+                break
+        if not account_row and account_rows and isinstance(account_rows[0], dict):
+            account_row = account_rows[0]
+            account_id = str(account_row.get("accountId") or account_id).strip() or account_id
+
+    account_last_disconnect = (
+        account_row.get("lastDisconnect") if isinstance(account_row.get("lastDisconnect"), dict) else {}
+    )
+    channel_last_disconnect = row.get("lastDisconnect") if isinstance(row.get("lastDisconnect"), dict) else {}
+    disconnect = account_last_disconnect if account_last_disconnect else channel_last_disconnect
+
+    return {
+        "configured": bool(row.get("configured")),
+        "linked": bool(row.get("linked")) if "linked" in row else bool(account_row.get("linked")),
+        "running": bool(row.get("running")),
+        "connected": bool(row.get("connected", True)),
+        "last_error": str(row.get("lastError") or ""),
+        "account_id": account_id,
+        "account_enabled": bool(account_row.get("enabled")) if account_row else None,
+        "account_running": bool(account_row.get("running")) if account_row else None,
+        "account_connected": bool(account_row.get("connected", True)) if account_row else None,
+        "account_last_error": str(account_row.get("lastError") or "") if account_row else "",
+        "disconnect_status": int(disconnect.get("status")) if str(disconnect.get("status") or "").isdigit() else None,
+        "disconnect_error": str(disconnect.get("error") or ""),
+        "disconnect_logged_out": bool(disconnect.get("loggedOut")) if disconnect else False,
+    }
 
 
 def _pid_running(pid: int) -> bool:
@@ -350,29 +433,90 @@ def _disable_broken_channels(
 
 
 def _detect_primary_channel_issue(channels_payload: dict[str, Any], primary_channel: str) -> Optional[str]:
-    channels = channels_payload.get("channels") if isinstance(channels_payload.get("channels"), dict) else {}
-    row = channels.get(primary_channel) if isinstance(channels, dict) else None
-    if not isinstance(row, dict):
-        return None
-    configured = bool(row.get("configured"))
-    if not configured:
+    snapshot = _primary_channel_snapshot(channels_payload, primary_channel)
+    if not snapshot.get("configured"):
         return None
 
-    running = bool(row.get("running"))
-    connected = bool(row.get("connected", True))
-    last_error = str(row.get("lastError") or "")
-    low = last_error.lower()
+    combined_last_error = " ".join(
+        [
+            str(snapshot.get("last_error") or ""),
+            str(snapshot.get("account_last_error") or ""),
+            str(snapshot.get("disconnect_error") or ""),
+        ]
+    ).strip()
+    low = combined_last_error.lower()
 
     if primary_channel == "whatsapp":
+        if snapshot.get("disconnect_logged_out") or "logged out" in low:
+            return "whatsapp_session_logged_out"
+        if any(tok in low for tok in ("enotfound", "getaddrinfo")) and "web.whatsapp.com" in low:
+            return "whatsapp_dns_resolution_failed"
+        if int(snapshot.get("disconnect_status") or 0) == 428:
+            return "whatsapp_handshake_timeout"
+        running = bool(snapshot.get("running"))
+        connected = bool(snapshot.get("connected", True))
         if (not running) or (not connected):
             if any(tok in low for tok in ("handshake", "request time-out", "status=408", "connection was lost")):
                 return "whatsapp_handshake_timeout"
             return "whatsapp_channel_down"
         return None
 
+    running = bool(snapshot.get("running"))
     if not running:
         return f"{primary_channel}_channel_down"
     return None
+
+
+def _set_channel_account_enabled(
+    *,
+    oc_base: list[str],
+    channel: str,
+    account_id: str,
+    enabled: bool,
+) -> _CmdResult:
+    return _run_openclaw(
+        oc_base=oc_base,
+        args=[
+            "--no-color",
+            "config",
+            "set",
+            f"channels.{channel}.accounts.{account_id}.enabled",
+            "true" if enabled else "false",
+            "--json",
+        ],
+        timeout_seconds=15.0,
+    )
+
+
+def _set_channel_enabled(
+    *,
+    oc_base: list[str],
+    channel: str,
+    enabled: bool,
+) -> _CmdResult:
+    return _run_openclaw(
+        oc_base=oc_base,
+        args=[
+            "--no-color",
+            "config",
+            "set",
+            f"channels.{channel}.enabled",
+            "true" if enabled else "false",
+            "--json",
+        ],
+        timeout_seconds=15.0,
+    )
+
+
+def _recheck_channels_status(
+    *,
+    oc_base: list[str],
+    wait_seconds: float,
+) -> tuple[_CmdResult, Optional[dict[str, Any]]]:
+    if wait_seconds > 0:
+        time.sleep(max(0.0, float(wait_seconds)))
+    res, payload = _run_openclaw_json(oc_base=oc_base, args=["channels", "status"], timeout_seconds=20.0)
+    return res, payload if isinstance(payload, dict) else None
 
 
 def _gateway_health_and_heal(
@@ -382,13 +526,22 @@ def _gateway_health_and_heal(
     primary_channel: str,
     apply: bool,
     restart_on_rpc_failure: bool,
+    recheck_delay_seconds: float,
+    attempt_primary_reenable: bool,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "rpc_ok": None,
         "service_status": None,
         "service_state": None,
         "primary_channel_issue": None,
+        "primary_channel_issue_after_restart": None,
+        "primary_channel_issue_final": None,
+        "primary_channel_status_before": _primary_channel_snapshot(channels_payload, primary_channel),
+        "primary_channel_status_after_restart": None,
+        "primary_channel_status_final": None,
         "actions": [],
+        "manual_actions": [],
+        "warnings": [],
         "errors": [],
     }
     _, gateway_payload = _run_openclaw_json(oc_base=oc_base, args=["gateway", "status"], timeout_seconds=20.0)
@@ -407,9 +560,11 @@ def _gateway_health_and_heal(
     out["primary_channel_issue"] = primary_issue
 
     should_restart = bool(primary_issue) or ((out["rpc_ok"] is False) and bool(restart_on_rpc_failure))
+    restart_ok = False
     if should_restart and apply:
         restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
         if restart.ok:
+            restart_ok = True
             out["actions"].append(
                 "gateway_restart_primary_channel_recovery"
                 if primary_issue
@@ -417,6 +572,93 @@ def _gateway_health_and_heal(
             )
         else:
             out["errors"].append(f"gateway_restart_failed:rc={restart.returncode}")
+    elif should_restart and not apply:
+        out["warnings"].append("dry_run_restart_required")
+
+    channels_after_restart: dict[str, Any] | None = None
+    issue_after_restart = primary_issue
+    if primary_issue and restart_ok:
+        _status_res, channels_after_restart = _recheck_channels_status(
+            oc_base=oc_base,
+            wait_seconds=recheck_delay_seconds,
+        )
+        if isinstance(channels_after_restart, dict):
+            issue_after_restart = _detect_primary_channel_issue(channels_after_restart, primary_channel)
+            out["primary_channel_issue_after_restart"] = issue_after_restart
+            out["primary_channel_status_after_restart"] = _primary_channel_snapshot(channels_after_restart, primary_channel)
+        else:
+            out["warnings"].append("channels_status_unavailable_after_restart")
+
+    final_channels_payload = channels_after_restart if isinstance(channels_after_restart, dict) else channels_payload
+    final_issue = issue_after_restart if restart_ok else primary_issue
+
+    if (
+        bool(apply)
+        and bool(attempt_primary_reenable)
+        and bool(final_issue)
+        and primary_channel == "whatsapp"
+        and final_issue != "whatsapp_session_logged_out"
+    ):
+        snapshot = _primary_channel_snapshot(final_channels_payload, primary_channel)
+        account_id = str(snapshot.get("account_id") or "default").strip() or "default"
+        if snapshot.get("configured") and snapshot.get("linked"):
+            disable_res = _set_channel_account_enabled(
+                oc_base=oc_base,
+                channel=primary_channel,
+                account_id=account_id,
+                enabled=False,
+            )
+            if not disable_res.ok:
+                out["warnings"].append(f"primary_account_disable_failed:{account_id}:rc={disable_res.returncode}")
+            else:
+                out["actions"].append(f"primary_account_disabled:{account_id}")
+
+            enable_res = _set_channel_account_enabled(
+                oc_base=oc_base,
+                channel=primary_channel,
+                account_id=account_id,
+                enabled=True,
+            )
+            if not enable_res.ok:
+                out["warnings"].append(f"primary_account_enable_failed:{account_id}:rc={enable_res.returncode}")
+            else:
+                out["actions"].append(f"primary_account_enabled:{account_id}")
+
+            _set_channel_enabled(oc_base=oc_base, channel=primary_channel, enabled=True)
+
+            if disable_res.ok and enable_res.ok:
+                restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
+                if restart.ok:
+                    out["actions"].append("gateway_restart_after_primary_reenable")
+                else:
+                    out["warnings"].append(f"gateway_restart_after_reenable_failed:rc={restart.returncode}")
+
+                _status_res, channels_after_reenable = _recheck_channels_status(
+                    oc_base=oc_base,
+                    wait_seconds=recheck_delay_seconds,
+                )
+                if isinstance(channels_after_reenable, dict):
+                    final_channels_payload = channels_after_reenable
+                    final_issue = _detect_primary_channel_issue(channels_after_reenable, primary_channel)
+                else:
+                    out["warnings"].append("channels_status_unavailable_after_primary_reenable")
+
+    out["primary_channel_issue_final"] = final_issue
+    out["primary_channel_status_final"] = _primary_channel_snapshot(final_channels_payload, primary_channel)
+    if final_issue:
+        out["errors"].append(f"primary_channel_unresolved:{final_issue}")
+        if final_issue == "whatsapp_dns_resolution_failed":
+            out["manual_actions"].append("verify_dns_resolution:web.whatsapp.com")
+            out["manual_actions"].append("check_network_firewall_or_proxy_for_whatsapp_web")
+        elif final_issue == "whatsapp_session_logged_out":
+            out["manual_actions"].append(
+                "run: openclaw channels login --channel whatsapp --account default --verbose"
+            )
+        elif final_issue in {"whatsapp_channel_down", "whatsapp_handshake_timeout"}:
+            out["manual_actions"].append(
+                "run: openclaw channels login --channel whatsapp --account default --verbose"
+            )
+            out["manual_actions"].append("run: openclaw channels logs --channel whatsapp --lines 200")
     return out
 
 
@@ -438,6 +680,25 @@ def main(argv: list[str]) -> int:
         "--restart-gateway-on-rpc-failure",
         action="store_true",
         help="Restart gateway when rpc.ok is false.",
+    )
+    parser.add_argument(
+        "--recheck-delay-seconds",
+        type=float,
+        default=8.0,
+        help="Delay before post-heal channel status recheck.",
+    )
+    parser.add_argument(
+        "--attempt-primary-reenable",
+        dest="attempt_primary_reenable",
+        action="store_true",
+        default=_as_bool(os.getenv("OPENCLAW_ATTEMPT_PRIMARY_REENABLE", "1"), default=True),
+        help="When primary channel stays down, toggle primary account enabled=false/true before final recheck.",
+    )
+    parser.add_argument(
+        "--no-attempt-primary-reenable",
+        dest="attempt_primary_reenable",
+        action="store_false",
+        help="Disable account toggle remediation when the primary channel stays down.",
     )
     parser.add_argument(
         "--session-stale-seconds",
@@ -500,6 +761,8 @@ def main(argv: list[str]) -> int:
         primary_channel=str(report["primary_channel"]),
         apply=bool(args.apply),
         restart_on_rpc_failure=bool(args.restart_gateway_on_rpc_failure),
+        recheck_delay_seconds=max(0.0, float(args.recheck_delay_seconds)),
+        attempt_primary_reenable=bool(args.attempt_primary_reenable),
     )
     report["steps"]["gateway_health"] = gateway_step
 
@@ -519,6 +782,8 @@ def main(argv: list[str]) -> int:
 
     if gateway_step.get("errors"):
         report["errors"].extend([str(x) for x in gateway_step.get("errors", [])])
+    if gateway_step.get("warnings"):
+        report["warnings"].extend([str(x) for x in gateway_step.get("warnings", [])])
     if isinstance(channel_step, dict) and channel_step.get("errors"):
         report["errors"].extend([str(x) for x in channel_step.get("errors", [])])
     if lock_step.get("errors"):
