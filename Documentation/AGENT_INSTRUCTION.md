@@ -29,6 +29,21 @@
 ### Integration Recovery Tracker
 - Track and update pipeline remediation tasks in `Documentation/integration_fix_plan.md` before advancing Phase 5 work or refreshing `Documentation/INTEGRATION_TESTING_COMPLETE.md`.
 
+## Concurrent Developer-Agent Coordination (Mandatory)
+
+When multiple developer-agents or humans are active in the same repository:
+
+- Start every implementation pass with `git status --porcelain`.
+- Treat pre-existing modified/untracked files as active in-progress work by default.
+- Inspect existing diffs before editing shared files (`git diff -- <file>`), and complement rather than overwrite.
+- If ownership/intent is unclear for a shared file, stop and request direction before editing.
+- Keep commits scoped to the task requested; do not bundle unrelated concurrent changes.
+- Before finalizing, run compatibility checks (compile/smoke + fast regression lane where feasible).
+- Final delivery must explicitly list:
+  - files changed for the task,
+  - files intentionally left untouched due to parallel ownership,
+  - verification commands and outcomes.
+
 ## Auto-Portfolio Trader Remediation To-Do (Critical)
 
 1. **Initial setup & scoping**: Review the auto-portfolio trader stack (`config/yfinance_config.yml`, `models/time_series_signal_generator.py`, `execution/paper_trading_engine.py`, related configs). Define the fix scope (align execution with forecast horizon, realistic cost model, live metrics) and stage iterative updates/backtests to avoid system disruption.
