@@ -854,6 +854,17 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="Exit non-zero when unresolved health/channel errors remain.",
     )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run continuously in watch mode (loop every --watch-interval seconds).",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=int,
+        default=int(os.getenv("OPENCLAW_WATCH_INTERVAL_SECONDS", "900")),
+        help="Seconds between watch cycles (default: 900 = 15 minutes).",
+    )
     args = parser.parse_args(argv)
 
     report_file = Path(str(args.report_file)).expanduser()
@@ -934,7 +945,77 @@ def main(argv: list[str]) -> int:
             print(f"[openclaw_maintenance] disabled_channels={','.join(str(x) for x in disabled)}")
 
     if args.strict and report["errors"]:
-        return 1
+        if not args.watch:
+            return 1
+
+    if not args.watch:
+        return 0
+
+    # --- Watch mode: loop continuously ---
+    interval = max(30, int(args.watch_interval))
+    print(f"[openclaw_maintenance] Watch mode active (interval={interval}s). Press Ctrl+C to stop.")
+    cycle = 1
+    while True:
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print(f"\n[openclaw_maintenance] Watch stopped after {cycle} cycles.")
+            return 0
+
+        cycle += 1
+        report = {
+            "timestamp_utc": _utc_now_iso(),
+            "apply": bool(args.apply),
+            "primary_channel": str(args.primary_channel or "whatsapp").strip().lower() or "whatsapp",
+            "command": oc_base,
+            "status": "PASS",
+            "steps": {},
+            "warnings": [],
+            "errors": [],
+            "watch_cycle": cycle,
+        }
+
+        lock_step = _cleanup_stale_session_locks(
+            apply=bool(args.apply),
+            session_stale_seconds=max(60, int(args.session_stale_seconds)),
+        )
+        report["steps"]["stale_session_cleanup"] = lock_step
+
+        _status_res, channels_payload = _run_openclaw_json(
+            oc_base=oc_base, args=["channels", "status"], timeout_seconds=20.0,
+        )
+        if isinstance(channels_payload, dict):
+            report["steps"]["channels_status_snapshot"] = {
+                "timestamp_ms": channels_payload.get("ts"),
+                "channels": channels_payload.get("channels"),
+            }
+        else:
+            report["warnings"].append("channels_status_unavailable")
+
+        gateway_step = _gateway_health_and_heal(
+            oc_base=oc_base,
+            channels_payload=channels_payload if isinstance(channels_payload, dict) else {},
+            primary_channel=str(report["primary_channel"]),
+            apply=bool(args.apply),
+            restart_on_rpc_failure=bool(args.restart_gateway_on_rpc_failure),
+            recheck_delay_seconds=max(0.0, float(args.recheck_delay_seconds)),
+            attempt_primary_reenable=bool(args.attempt_primary_reenable),
+            primary_restart_attempts=max(1, int(args.primary_restart_attempts)),
+        )
+        report["steps"]["gateway_health"] = gateway_step
+
+        if gateway_step.get("errors"):
+            report["errors"].extend([str(x) for x in gateway_step.get("errors", [])])
+        if gateway_step.get("warnings"):
+            report["warnings"].extend([str(x) for x in gateway_step.get("warnings", [])])
+
+        report["status"] = _derive_status([str(x) for x in report["errors"]])
+        _safe_write_json(report_file, report)
+        print(
+            f"[openclaw_maintenance] watch cycle={cycle} status={report['status']} "
+            f"errors={len(report['errors'])} warnings={len(report['warnings'])}"
+        )
+
     return 0
 
 

@@ -746,6 +746,53 @@ def send_message(
                 stderr="Rate limited: too many messages in short period. Wait and retry.",
             )
 
+    # --- Pre-send health probe (fast-fail on dead connections) ---
+    # Instead of waiting for the send to timeout on a dead WhatsApp connection,
+    # do a quick status check and attempt recovery proactively.
+    _presend_probe_enabled = str(
+        os.getenv("OPENCLAW_PRESEND_HEALTH_PROBE", "1")
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if _presend_probe_enabled and not skip_rate_limit:
+        try:
+            probe_status = _run_openclaw_control(
+                command=command,
+                args=["--no-color", "channels", "status", "--json"],
+                cwd=cwd,
+                timeout_seconds=5.0,
+            )
+            if _is_whatsapp_dns_error(probe_status):
+                return OpenClawResult(
+                    ok=False,
+                    returncode=1,
+                    command=cmd,
+                    stdout="",
+                    stderr=(
+                        "[PMX] Pre-send probe: DNS resolution failed for web.whatsapp.com.\n"
+                        "[PMX] Skipping send to avoid timeout. Check network/DNS/firewall."
+                    ),
+                )
+            if probe_status.ok:
+                try:
+                    probe_payload = _parse_json_best_effort(probe_status.stdout)
+                except Exception:
+                    probe_payload = None
+                if not _is_whatsapp_listener_ready(probe_payload):
+                    # Listener is down -- attempt recovery before sending.
+                    auto_recover = str(
+                        os.getenv("OPENCLAW_AUTO_RECOVER_LISTENER", "1")
+                    ).strip().lower() not in {"0", "false", "no", "off"}
+                    if auto_recover:
+                        recovered, _probe_reason = _maybe_recover_missing_whatsapp_listener(
+                            command=command, cwd=cwd,
+                        )
+                        if not recovered:
+                            logger.warning(
+                                "Pre-send probe: WhatsApp listener not ready, recovery failed (%s)",
+                                _probe_reason,
+                            )
+        except Exception:
+            pass  # Probe is best-effort; don't block sends on probe failure.
+
     def _is_unknown_option(output: str, flag: str) -> bool:
         text = (output or "").lower()
         needle = (flag or "").strip().lower()
