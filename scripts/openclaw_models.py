@@ -634,6 +634,15 @@ def _cmd_apply(args) -> int:
     env_primary = (os.getenv("OPENCLAW_MODEL_PRIMARY") or "").strip()
     env_fallbacks = _parse_csv(os.getenv("OPENCLAW_MODEL_FALLBACKS", ""))
     strategy = (args.strategy or "").strip().lower()
+    requested_strategy = strategy
+    # Hard safety: block remote/cloud models unless explicitly opted in.
+    # This prevents accidental 429 "free quota exceeded" errors.
+    local_only = (os.getenv("OPENCLAW_LOCAL_ONLY") or "1").strip().lower() in {"1", "true", "yes", "on"}
+    if local_only and strategy in {"auto", "remote-first"}:
+        strategy = "local-first"
+        print(
+            f"[openclaw_models] OPENCLAW_LOCAL_ONLY=1 forced strategy {requested_strategy!r} -> 'local-first' (remote/cloud disabled)"
+        )
     if env_primary and env_fallbacks:
         strategy = "custom"
 
@@ -673,15 +682,32 @@ def _cmd_apply(args) -> int:
         )
     else:
         # auto / local-first
-        # local-first should stay local-only by default for reliability.
-        include_remote_qwen = strategy == "auto"
-        if (os.getenv("OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        # local-first NEVER uses remote models -- prevents 429 quota errors.
+        include_remote_qwen = False
+        if strategy == "auto" and not local_only:
             include_remote_qwen = True
+        include_remote_qwen_env = (os.getenv("OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if include_remote_qwen_env:
+            if not local_only:
+                include_remote_qwen = True
+            else:
+                print(
+                    "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 ignoring OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK=1"
+                )
         have_local_now = bool(discovered)
-        if strategy == "auto" and not have_local_now:
+        if strategy == "auto" and not have_local_now and not local_only:
             primary = "qwen-portal/coder-model"
+        elif local_primary:
+            primary = f"ollama/{local_primary}"
         else:
-            primary = f"ollama/{local_primary}" if local_primary else "qwen-portal/coder-model"
+            # Even if Ollama is unreachable, set local model as primary.
+            # OpenClaw will retry when Ollama comes back online.
+            primary = f"ollama/{preferred_local[0]}" if preferred_local else "ollama/qwen3:8b"
 
         local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
             m for m in (discovered or ollama_models) if m not in set(preferred_local)
@@ -697,6 +723,10 @@ def _cmd_apply(args) -> int:
 
     # Never include primary as a fallback.
     fallbacks = [fb for fb in fallbacks if fb and fb != primary]
+
+    # Hard safety: strip ALL remote/cloud models when local_only is active.
+    if local_only:
+        fallbacks = [fb for fb in fallbacks if fb.startswith("ollama/")]
 
     model_block: dict[str, Any] = {"primary": primary}
     if fallbacks:
@@ -723,34 +753,47 @@ def _cmd_apply(args) -> int:
 
     # Image model defaults: Qwen Vision, plus optional OpenAI image-capable model.
     if bool(args.set_image_defaults):
-        image_primary = (args.image_primary or "").strip() or "qwen-portal/vision-model"
-        image_fallbacks: list[str] = []
-        if include_openai:
-            # Prefer a "4o" family model for image inputs.
-            image_openai = (args.openai_image_model or "").strip() or "gpt-4o"
-            image_fallbacks.append(f"openai/{image_openai}")
-        allow_refs.add(image_primary)
-        allow_refs.update(image_fallbacks)
-        img_block: dict[str, Any] = {"primary": image_primary}
-        if image_fallbacks:
-            img_block["fallbacks"] = image_fallbacks
-        set_res = _oc_config_set_json(
-            oc_base=oc_base,
-            path="agents.defaults.imageModel",
-            value=img_block,
-            timeout_seconds=20.0,
-            dry_run=dry_run,
-        )
-        if not set_res.ok:
-            print(f"[openclaw_models] FAILED setting agents.defaults.imageModel (exit={set_res.returncode})", file=sys.stderr)
-            tail = "\n".join((set_res.stderr or "").splitlines()[-10:])
-            if tail:
-                print(tail, file=sys.stderr)
-            return 1
-        print(
-            f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}set agents.defaults.imageModel "
-            f"primary={image_primary} fallbacks={len(image_fallbacks)}"
-        )
+        explicit_image_primary = (args.image_primary or "").strip()
+        if local_only and not explicit_image_primary:
+            print(
+                "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 skipping agents.defaults.imageModel defaults "
+                "(remote vision models disabled)."
+            )
+        else:
+            image_primary = explicit_image_primary or "qwen-portal/vision-model"
+            if local_only and not image_primary.startswith("ollama/"):
+                print(
+                    "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 forcing imageModel primary "
+                    f"{image_primary!r} -> {primary!r}"
+                )
+                image_primary = primary
+            image_fallbacks: list[str] = []
+            if include_openai and not local_only:
+                # Prefer a "4o" family model for image inputs.
+                image_openai = (args.openai_image_model or "").strip() or "gpt-4o"
+                image_fallbacks.append(f"openai/{image_openai}")
+            allow_refs.add(image_primary)
+            allow_refs.update(image_fallbacks)
+            img_block: dict[str, Any] = {"primary": image_primary}
+            if image_fallbacks:
+                img_block["fallbacks"] = image_fallbacks
+            set_res = _oc_config_set_json(
+                oc_base=oc_base,
+                path="agents.defaults.imageModel",
+                value=img_block,
+                timeout_seconds=20.0,
+                dry_run=dry_run,
+            )
+            if not set_res.ok:
+                print(f"[openclaw_models] FAILED setting agents.defaults.imageModel (exit={set_res.returncode})", file=sys.stderr)
+                tail = "\n".join((set_res.stderr or "").splitlines()[-10:])
+                if tail:
+                    print(tail, file=sys.stderr)
+                return 1
+            print(
+                f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}set agents.defaults.imageModel "
+                f"primary={image_primary} fallbacks={len(image_fallbacks)}"
+            )
 
     # Update model allowlist (agents.defaults.models) to include all referenced refs.
     existing_models = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.models", timeout_seconds=10.0)
@@ -803,8 +846,8 @@ def main(argv: list[str]) -> int:
     pa.add_argument("--agent-id", default="", help="Agent id for auth store path (default: autodetect).")
     pa.add_argument(
         "--strategy",
-        default=os.getenv("OPENCLAW_MODEL_STRATEGY", "auto"),
-        help="Failover strategy: auto|local-first|remote-first|custom (custom uses OPENCLAW_MODEL_PRIMARY/FALLBACKS).",
+        default=os.getenv("OPENCLAW_MODEL_STRATEGY", "local-first"),
+        help="Failover strategy: local-first|auto|remote-first|custom. Default: local-first (never uses remote/cloud models).",
     )
     pa.add_argument("--restart-gateway", action="store_true", help="Restart OpenClaw gateway after applying.")
 

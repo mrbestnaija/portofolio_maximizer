@@ -369,30 +369,30 @@ The cron job schema uses:
 - `sessionTarget: "isolated"` for clean execution context
 - Job IDs must be UUIDs
 
-## 3-Model Local LLM Strategy (Updated 2026-02-16)
+## 3-Model Local LLM Strategy (Updated 2026-02-18)
 
 Portfolio Maximizer uses three specialized local models via Ollama, each with a
 distinct role in the inference pipeline:
 
 | Model | Role | Capabilities | VRAM | Speed |
 |-------|------|-------------|------|-------|
-| **deepseek-r1:8b** | Fast reasoning | Chain-of-thought, math, code-gen | 5.5GB | 25-35 tok/s |
-| **deepseek-r1:32b** | Heavy reasoning | Deep multi-step analysis, long-context | 20GB | 10-15 tok/s |
-| **qwen3:8b** | Tool orchestrator | Function-calling, structured output, thinking mode | 5.5GB | 30-40 tok/s |
+| **qwen3:8b** | Primary orchestrator | Tool-calling, structured output, workflow control | 5.5GB | 30-40 tok/s |
+| **deepseek-r1:8b** | Fast reasoning delegate | Chain-of-thought, math, code-gen | 5.5GB | 25-35 tok/s |
+| **deepseek-r1:32b** | Heavy reasoning delegate | Deep multi-step analysis, long-context | 20GB | 10-15 tok/s |
 
 ### Task-to-Model Routing
 
 | Task | Model |
 |------|-------|
-| Market analysis, signal generation, regime detection | deepseek-r1:8b |
-| Portfolio optimization, adversarial audits | deepseek-r1:32b |
-| Tool/function calling, API orchestration, social media | qwen3:8b |
+| Interactive OpenClaw tasks, tool/function calls, API orchestration | qwen3:8b |
+| Fast delegated reasoning (analysis, signal checks, concise audits) | deepseek-r1:8b via `scripts/deepseek_reason.py` |
+| Heavy delegated reasoning (deep audits, long-context decomposition) | deepseek-r1:32b via `scripts/deepseek_reason.py --model deepseek-r1:32b` |
 
 ### How It Works
 
 **qwen3:8b** acts as the orchestrator: it receives requests via OpenClaw
-social media channels (WhatsApp/Telegram/Discord) and can dispatch reasoning
-tasks to the deepseek-r1 models as "tools" via Ollama's native tool-calling API.
+channels (WhatsApp/Telegram/Discord) and delegates reasoning tasks to
+deepseek-r1 models through `exec` calls to `scripts/deepseek_reason.py`.
 
 ```
 User (WhatsApp/Telegram/Discord)
@@ -437,7 +437,7 @@ python scripts/llm_multi_model_orchestrator.py orchestrate --prompt "Summarize g
 Set `OPENCLAW_OLLAMA_MODEL_ORDER` in `.env` to override the default priority:
 
 ```
-OPENCLAW_OLLAMA_MODEL_ORDER=deepseek-r1:8b,deepseek-r1:32b,qwen3:8b
+OPENCLAW_OLLAMA_MODEL_ORDER=qwen3:8b,deepseek-r1:8b,deepseek-r1:32b
 ```
 
 ## Interactions API Security Modes
@@ -488,3 +488,101 @@ Omit the variable entirely to disable CORS headers (default).
   is not sufficient).
 - In `api-key-only` mode, it requires a strong `INTERACTIONS_API_KEY`.
 - In `any` mode (default), either is accepted.
+
+## Multi-Agent Architecture (Updated 2026-02-18)
+
+Portfolio Maximizer uses 4 dedicated OpenClaw agents with isolated workspaces,
+sessions, and tool sandboxes. This eliminates the "stuck session" pattern
+caused by queue contention in a single `agent:main:main` lane.
+
+Reference: https://docs.openclaw.ai/concepts/multi-agent
+
+### Agent Definitions
+
+| Agent | Role | Tools Profile | Key Restrictions |
+|-------|------|---------------|------------------|
+| **ops** (default) | System health, cron jobs, general queries | `full` | None (full access) |
+| **trading** | PnL monitoring, signal quality, execution status | `coding` | No write/edit/messaging |
+| **training** | Model training, backtesting, heavy analysis | `coding` | No messaging/browser |
+| **notifier** | Alert delivery to WhatsApp/Telegram | `messaging` | No exec/write/edit/fs |
+
+### Routing (Bindings)
+
+Bindings use deterministic most-specific-first matching:
+
+| Channel | Account | Agent |
+|---------|---------|-------|
+| WhatsApp | default | ops |
+| Telegram | default | notifier |
+| Discord | custom-1 | ops |
+| (fallback) | * | ops (default) |
+
+Trading and training agents have no channel bindings -- they are triggered
+by cron jobs with explicit `agentId` overrides, not by inbound messages.
+
+### Per-Agent Workspaces
+
+Each agent has an isolated workspace with a tailored SOUL.md:
+
+```
+~/.openclaw/agents/ops/agent/          # ops state (agentDir)
+<project-root>/                         # ops workspace (full project access)
+
+~/.openclaw/agents/trading/agent/       # trading state
+~/.openclaw/workspace-trading/          # trading workspace (SOUL.md only)
+
+~/.openclaw/agents/training/agent/      # training state
+~/.openclaw/workspace-training/         # training workspace (SOUL.md only)
+
+~/.openclaw/agents/notifier/agent/      # notifier state
+~/.openclaw/workspace-notifier/         # notifier workspace (SOUL.md only)
+```
+
+### Tool Sandboxing
+
+Per-agent `tools.allow`/`tools.deny` lists enforce least-privilege:
+
+- **ops**: Full tool access (`profile: full`). Runs cron jobs, health checks.
+- **trading**: Read + exec only. Cannot modify code/config. Can query PnL DB.
+- **training**: Full fs + runtime. Cannot send messages. Runs training pipelines.
+- **notifier**: Messaging + web only. Sandboxed (`mode: all`). Cannot exec or write files.
+
+### agentToAgent
+
+Disabled by default. Agents do not communicate directly -- they share state
+through the filesystem (data/portfolio_maximizer.db, logs/, etc.).
+
+Enable only if explicit handoffs are needed:
+```json
+{ "tools": { "agentToAgent": { "enabled": true, "allow": ["ops", "trading"] } } }
+```
+
+### Loop Detection
+
+Enabled globally to prevent runaway agent loops:
+```json
+{ "tools": { "loopDetection": { "enabled": true, "warningThreshold": 5, "criticalThreshold": 10 } } }
+```
+
+### Cron Job Agent Assignment
+
+Assign cron jobs to specific agents to isolate workloads:
+
+| Cron Job | Agent | Rationale |
+|----------|-------|-----------|
+| PnL Integrity Audit (4h) | trading | Isolated PnL context |
+| Production Gate Check (daily) | trading | Trading-specific |
+| Quant Validation Health (daily) | trading | Signal quality |
+| Signal Linkage Monitor (daily) | trading | Trade linkage |
+| Ticker Health Monitor (daily) | trading | Per-ticker PnL |
+| GARCH Unit-Root Guard (weekly) | training | Model diagnostics |
+| Overnight Hold Monitor (weekly) | training | Strategy analysis |
+| System Health Check (6h) | ops | General health |
+| Weekly Session Cleanup (Sun 3AM) | ops | Maintenance |
+
+### Verification
+
+```bash
+python scripts/verify_openclaw_config.py   # Validates multi-agent config
+python scripts/openclaw_models.py status    # Model availability
+```

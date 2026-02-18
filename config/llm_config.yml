@@ -9,60 +9,64 @@ llm:
     timeout_seconds: 30  # Max wait for LLM response (fast-fail)
     health_check_on_init: true  # Validate on startup (fail-fast)
 
-  # Model selection - 3-model local strategy (2026-02-16)
-  # deepseek-r1 = reasoning/CoT, qwen3 = tool-calling orchestrator
+  # Model selection - Hierarchical local strategy (2026-02-18)
+  # qwen3:8b = primary orchestrator (ONLY model with tool-calling)
+  # deepseek-r1 = reasoning subordinates (called BY qwen via scripts/deepseek_reason.py)
+  # IMPORTANT: DeepSeek has NO tool-calling. Never use as OpenClaw primary or fallback.
   models:
-    # REASONING MODEL: DeepSeek R1 8B for fast chain-of-thought
+    # ORCHESTRATOR: Qwen3 8B - primary for all interactive/tool-calling tasks
     primary:
-      name: "deepseek-r1:8b"
-      role: "reasoning"
-      use_case: "Fast reasoning for quantitative analysis, regime detection, signal validation"
-      expected_speed: "25-35 tokens/sec"
-      memory_requirement: "5.5GB VRAM"
-      quality: "excellent"
-      capabilities: ["chain-of-thought", "math", "code-generation"]
-      priority: 1
-
-    # HEAVY REASONING: DeepSeek R1 32B for deep analysis
-    fallback_1:
-      name: "deepseek-r1:32b"
-      role: "heavy_reasoning"
-      use_case: "Deep multi-step financial analysis, adversarial audits, complex forecasting"
-      expected_speed: "10-15 tokens/sec"
-      memory_requirement: "20GB VRAM"
-      quality: "excellent"
-      capabilities: ["chain-of-thought", "math", "code-generation", "long-context"]
-      priority: 2
-
-    # TOOLING MODEL: Qwen3 8B for function-calling and orchestration
-    fallback_2:
       name: "qwen3:8b"
-      role: "tooling"
+      role: "orchestrator"
       use_case: "Tool/function calling, structured output, API orchestration, social media automation"
       expected_speed: "30-40 tokens/sec"
       memory_requirement: "5.5GB VRAM"
       quality: "excellent"
       capabilities: ["tool-calling", "function-calling", "structured-output", "thinking-mode"]
-      priority: 3
+      priority: 1
 
-  # Active model (default for general inference)
-  active_model: "deepseek-r1:8b"
+    # REASONING SUBORDINATE: DeepSeek R1 8B (called via exec, NOT as fallback)
+    reasoning_delegate:
+      name: "deepseek-r1:8b"
+      role: "reasoning_subordinate"
+      use_case: "Fast reasoning for quantitative analysis, regime detection, signal validation"
+      expected_speed: "25-35 tokens/sec"
+      memory_requirement: "5.5GB VRAM"
+      quality: "excellent"
+      capabilities: ["chain-of-thought", "math", "code-generation"]
+      delegation_script: "scripts/deepseek_reason.py"
+      note: "NO tool-calling. Qwen delegates via: python scripts/deepseek_reason.py 'prompt'"
 
-  # Multi-model routing: qwen3 orchestrates, deepseek reasons
+    # HEAVY REASONING SUBORDINATE: DeepSeek R1 32B (called via exec, NOT as fallback)
+    heavy_reasoning_delegate:
+      name: "deepseek-r1:32b"
+      role: "heavy_reasoning_subordinate"
+      use_case: "Deep multi-step financial analysis, adversarial audits, complex forecasting"
+      expected_speed: "10-15 tokens/sec"
+      memory_requirement: "20GB VRAM"
+      quality: "excellent"
+      capabilities: ["chain-of-thought", "math", "code-generation", "long-context"]
+      delegation_script: "scripts/deepseek_reason.py --model deepseek-r1:32b"
+      note: "NO tool-calling. Qwen delegates via: python scripts/deepseek_reason.py --model deepseek-r1:32b 'prompt'"
+
+  # Active model (default for general inference and OpenClaw agent turns)
+  active_model: "qwen3:8b"
+
+  # Hierarchical routing: qwen3 orchestrates, deepseek reasons (via delegation, not fallback)
   routing:
-    # Use qwen3:8b when the task needs tool-calling or structured output
+    # qwen3:8b handles ALL tool-calling tasks directly
     tool_calling_model: "qwen3:8b"
-    # Use deepseek-r1:8b for fast reasoning tasks
+    # deepseek-r1:8b for fast reasoning (qwen delegates via exec)
     reasoning_model: "deepseek-r1:8b"
-    # Use deepseek-r1:32b for complex multi-step analysis
+    # deepseek-r1:32b for complex multi-step analysis (qwen delegates via exec)
     heavy_reasoning_model: "deepseek-r1:32b"
-    # Task-to-model mapping
+    # Task-to-model mapping (qwen handles all directly; delegates reasoning via exec)
     task_routing:
-      market_analysis: "deepseek-r1:8b"
-      signal_generation: "deepseek-r1:8b"
-      risk_assessment: "deepseek-r1:8b"
-      portfolio_optimization: "deepseek-r1:32b"
-      adversarial_audit: "deepseek-r1:32b"
+      market_analysis: "qwen3:8b"           # qwen runs tool, delegates analysis to deepseek
+      signal_generation: "qwen3:8b"          # qwen runs tool, delegates reasoning to deepseek
+      risk_assessment: "qwen3:8b"            # qwen runs tool, delegates reasoning to deepseek
+      portfolio_optimization: "qwen3:8b"     # qwen delegates heavy reasoning to deepseek-r1:32b
+      adversarial_audit: "qwen3:8b"          # qwen delegates heavy reasoning to deepseek-r1:32b
       api_orchestration: "qwen3:8b"
       notification_formatting: "qwen3:8b"
       data_extraction: "qwen3:8b"
