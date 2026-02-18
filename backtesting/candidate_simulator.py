@@ -93,6 +93,7 @@ def _ts_signal_to_dict(signal: Any) -> Dict[str, Any]:
         "volatility": getattr(signal, "volatility", None),
         "lower_ci": getattr(signal, "lower_ci", None),
         "upper_ci": getattr(signal, "upper_ci", None),
+        "signal_id": getattr(signal, "signal_id", None),
         "source": "TIME_SERIES",
         "is_primary": True,
     }

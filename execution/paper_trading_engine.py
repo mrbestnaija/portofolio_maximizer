@@ -1043,7 +1043,11 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     horizon = None
                 if horizon is not None and horizon > 0:
-                    new_portfolio.max_holding_days[trade.ticker] = horizon
+                    # Phase 7.10: Cap max holding to avoid multi-day drag.
+                    # Adversarial audit found multi-day trades net -$229.49.
+                    # Cap at 10 bars unless proof-mode sets tighter limits.
+                    cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                    new_portfolio.max_holding_days[trade.ticker] = min(horizon, cap)
 
         # Update total value
         current_prices = {trade.ticker: trade.entry_price}

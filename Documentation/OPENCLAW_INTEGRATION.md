@@ -203,8 +203,66 @@ See: `Documentation/INBOX_WORKFLOWS.md`
 ## Cron Automation (Updated 2026-02-17)
 
 OpenClaw runs 9 audit-aligned cron jobs via `agentTurn` mode. The local LLM (qwen3:8b)
-receives the cron message, executes the specified PMX script via `exec` tool, and either
+receives the cron message, prefers structured orchestrator tools (not generic exec chaining), and either
 reports anomalies or responds `NO_REPLY` (suppressing the notification).
+
+For production gate/reconciliation requests, prompt templates now bias to:
+- `run_production_audit_gate` tool (inside `scripts/llm_multi_model_orchestrator.py`)
+- Prompt template source: `config/openclaw_prompt_templates.yml`
+
+For human review workflows, a dedicated cron-safe forwarder is available:
+- `scripts/forward_self_improvement_reviews.py`
+- Source queue: `logs/llm_activity/proposals/`
+- Delivery path: `scripts/openclaw_notify.py` with `OPENCLAW_TARGETS` fan-out (WhatsApp/Discord/Telegram)
+- No-op when `OPENCLAW_TARGETS` / `OPENCLAW_TO` is unset.
+
+### LLM Fine-Tune Command Default
+
+`PMX_LLM_FINETUNE_COMMAND` is now internalized for scheduled training runs:
+- Default is set in `config/training_priority.yml` (`training_priority.defaults.env`).
+- `scripts/prepare_llm_finetune_dataset.py --run-trainer` resolves command order as:
+  1. `--trainer-command` (CLI)
+  2. `PMX_LLM_FINETUNE_COMMAND` (environment)
+  3. internal default command template
+- Template variables supported: `{dataset}`, `{dataset_path}`, `{project_root}`, `{python_bin}`.
+
+### Progressive Task Reporting
+
+OpenClaw orchestration now supports progressive status updates during long-running tasks
+(tool priming, round execution, tool calls, fallback, completion), instead of only final replies.
+
+Controls:
+- `PMX_QWEN_PROGRESS_UPDATES` (default: `true`)
+- `PMX_QWEN_PROGRESS_MIN_INTERVAL_SECONDS` (default profile-driven: `8` low-latency, `10` high-accuracy)
+- `PMX_QWEN_PROGRESS_MAX_MESSAGE_CHARS` (default: `220`)
+
+For explicit runtime setup prompts (for example: "install torch system-wide" or "pip install pandas"),
+`openclaw_bridge` now uses a fast path that executes dependency tools directly:
+- `install_torch_runtime`
+- `install_python_package`
+
+This avoids waiting for a full qwen tool-calling round when the task is clearly operational.
+
+### OpenClaw Maintenance Guard
+
+To keep WhatsApp/dashboard operations stable over long runs, use:
+- `scripts/openclaw_maintenance.py`
+
+What it does:
+- Archives stale session lock files under `~/.openclaw/agents/*/sessions/*.jsonl.lock`.
+- Optionally archives matching stale session `.jsonl` files.
+- Checks gateway RPC health and can restart gateway on failure.
+- Detects primary WhatsApp handshake timeout/disconnect states and restarts gateway for recovery.
+- Optionally disables broken non-primary channels (Telegram/Discord) when known auth/config errors persist.
+
+Run once (apply mode):
+- `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure`
+
+Cron path:
+- `bash/production_cron.sh openclaw_maintenance`
+
+Windows Task Scheduler helper:
+- `powershell -ExecutionPolicy Bypass -File scripts/run_openclaw_maintenance.ps1`
 
 ### Job Definitions
 
@@ -215,14 +273,15 @@ Jobs are stored in `~/.openclaw/cron/jobs.json` (not in the repo). Each job uses
 | Job | Priority | Schedule | Script |
 |-----|----------|----------|--------|
 | PnL Integrity Audit | P0 | `0 */4 * * *` (every 4h) | `python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db` |
-| Production Gate Check | P0 | `0 7 * * *` (daily 7 AM) | `python scripts/production_audit_gate.py` |
+| Production Gate Check | P0 | `0 7 * * *` (daily 7 AM) | `run_production_audit_gate` tool (preferred) / `python scripts/production_audit_gate.py` fallback |
 | Quant Validation Health | P0 | `30 7 * * *` (daily 7:30 AM) | Inline Python analyzing `logs/signals/quant_validation.jsonl` |
 | Signal Linkage Monitor | P1 | `0 8 * * *` (daily 8 AM) | Inline Python querying DB for NULL signal_id, orphans |
 | Ticker Health Monitor | P1 | `30 8 * * *` (daily 8:30 AM) | Inline Python checking per-ticker PnL and consecutive losses |
 | GARCH Unit-Root Guard | P2 | `0 9 * * 1` (Mon 9 AM) | Inline Python scanning forecast audits for alpha+beta >= 0.98 |
 | Overnight Hold Monitor | P2 | `0 9 * * 5` (Fri 9 AM) | Inline Python comparing intraday vs overnight PnL |
 | System Health Check | -- | `0 */6 * * *` (every 6h) | `python scripts/llm_multi_model_orchestrator.py status` + `python scripts/error_monitor.py --check` |
-| Weekly Session Cleanup | -- | `0 3 * * 0` (Sun 3 AM) | Cleans stale session files (silent) |
+| OpenClaw Maintenance | -- | `0 3 * * 0` (Sun 3 AM) | `bash/production_cron.sh openclaw_maintenance` (stale locks + gateway/channel guard) |
+| Self-Improvement Review Forward | -- | Cron via `bash/production_cron.sh self_improvement_review_forward` | Sends sanitized pending proposal summaries to human reviewers |
 
 ### Announcement Rules
 

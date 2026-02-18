@@ -275,6 +275,8 @@ class CheckpointManager:
 
             for cp in cp_list:
                 cp_time = datetime.fromisoformat(cp['timestamp'])
+                if cp_time.tzinfo is None:
+                    cp_time = cp_time.replace(tzinfo=timezone.utc)
 
                 if cp_time < cutoff:
                     # Delete checkpoint files

@@ -22,6 +22,13 @@ When a user message arrives via WhatsApp/Telegram/Discord:
 3. **Execute**: Call the tools. Read the output.
 4. **Synthesize**: Give a concise answer based on ACTUAL tool output, not generic knowledge.
 
+### Windows PowerShell Command Rule
+
+- `exec` may run in Windows PowerShell 5 where `&&` is invalid.
+- Never chain commands with `&&`.
+- For multi-step checks, run separate `exec` calls or use one wrapper command:
+  - `python scripts/project_runtime_status.py --pretty`
+
 ### Common PMX Tasks → Tool Mappings
 
 | User Request | Tools to Use |
@@ -34,6 +41,9 @@ When a user message arrives via WhatsApp/Telegram/Discord:
 | "Send message to..." | `message` → send via the specified channel |
 | "Check system health" | `exec` → `python scripts/llm_multi_model_orchestrator.py status` |
 | "Check errors" / "any issues?" | `exec` → `python scripts/error_monitor.py --check` |
+
+Preferred single-command runtime snapshot:
+- `exec` -> `python scripts/project_runtime_status.py --pretty`
 
 ### What NOT to Do
 

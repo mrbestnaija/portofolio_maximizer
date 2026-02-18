@@ -1,0 +1,121 @@
+training_priority:
+  version: 1
+  defaults:
+    output_dir: "logs/automation/training_priority"
+    max_output_tail_lines: 40
+    env:
+      PMX_LLM_FINETUNE_COMMAND: "python scripts/train_local_instruction_lm.py --dataset {dataset_path} --output-dir models/llm_finetune/latest --epochs 2 --batch-size 8 --min-samples 8"
+  tasks:
+    - id: forecaster_model_search
+      description: "Run rolling-CV model search to refresh forecaster candidate weights."
+      profiles: ["forecasters"]
+      targets: ["local_cron"]
+      priority: 10
+      critical: true
+      timeout_seconds: 5400
+      required_paths:
+        - "data/portfolio_maximizer.db"
+      command:
+        - "scripts/run_ts_model_search.py"
+        - "--tickers"
+        - "AAPL,MSFT,GC=F,COOP"
+        - "--lookback-days"
+        - "730"
+        - "--horizon"
+        - "20"
+        - "--step-size"
+        - "20"
+        - "--max-folds"
+        - "5"
+        - "--use-profiles"
+
+    - id: forecaster_candidate_summary
+      description: "Summarize best candidate per ticker/regime for review."
+      profiles: ["forecasters"]
+      targets: ["local_cron", "ci"]
+      priority: 20
+      critical: false
+      timeout_seconds: 600
+      required_paths:
+        - "data/portfolio_maximizer.db"
+      command:
+        - "scripts/summarize_ts_candidates.py"
+        - "--db-path"
+        - "data/portfolio_maximizer.db"
+        - "--output"
+        - "logs/automation/training_priority/ts_candidate_summary.json"
+
+    - id: forecaster_config_proposals
+      description: "Generate advisory config proposals from refreshed TS candidate scores."
+      profiles: ["forecasters"]
+      targets: ["local_cron", "ci"]
+      priority: 30
+      critical: false
+      timeout_seconds: 600
+      required_paths:
+        - "data/portfolio_maximizer.db"
+      command:
+        - "scripts/generate_ts_model_config_proposals.py"
+        - "--db-path"
+        - "data/portfolio_maximizer.db"
+        - "--output"
+        - "logs/automation/training_priority/ts_model_config_proposals.json"
+
+    - id: forecaster_adversarial_suite_refresh
+      description: "Run adversarial forecaster suite to validate refreshed forecaster behavior."
+      profiles: ["forecasters"]
+      targets: ["local_cron", "ci"]
+      priority: 40
+      critical: true
+      timeout_seconds: 1800
+      required_paths:
+        - "config/forecasting_config.yml"
+        - "config/forecaster_monitoring_ci.yml"
+      command:
+        - "scripts/run_adversarial_forecaster_suite.py"
+        - "--monitor-config"
+        - "config/forecaster_monitoring_ci.yml"
+        - "--enforce-thresholds"
+        - "--output"
+        - "logs/automation/training_priority/adversarial_forecaster_suite.json"
+
+    - id: llm_finetune_dataset_refresh
+      description: "Build/redact finetune dataset from LLM activity logs."
+      profiles: ["llm"]
+      targets: ["local_cron", "ci"]
+      priority: 50
+      critical: false
+      timeout_seconds: 900
+      required_paths:
+        - "logs/llm_activity"
+      command:
+        - "scripts/prepare_llm_finetune_dataset.py"
+        - "--days"
+        - "14"
+        - "--max-records"
+        - "5000"
+        - "--output"
+        - "data/training/llm_finetune/latest_dataset.jsonl"
+        - "--summary-json"
+        - "logs/automation/training_priority/llm_finetune_dataset_summary.json"
+
+    - id: llm_finetune_train_hook
+      description: "Run local LLM finetune command via PMX_LLM_FINETUNE_COMMAND (internal default set; env can override)."
+      profiles: ["llm"]
+      targets: ["local_cron"]
+      priority: 60
+      critical: false
+      timeout_seconds: 10800
+      required_paths:
+        - "data/training/llm_finetune/latest_dataset.jsonl"
+      command:
+        - "scripts/prepare_llm_finetune_dataset.py"
+        - "--days"
+        - "14"
+        - "--max-records"
+        - "5000"
+        - "--output"
+        - "data/training/llm_finetune/latest_dataset.jsonl"
+        - "--summary-json"
+        - "logs/automation/training_priority/llm_finetune_train_hook_summary.json"
+        - "--run-trainer"

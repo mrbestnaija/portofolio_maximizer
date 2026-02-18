@@ -35,11 +35,15 @@ class EnsembleConfig:
     diversity_tolerance: float = 0.35
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
+            # Phase 7.10: Defaults exclude SARIMAX (disabled by default).
+            # YAML config adds SARIMAX candidates that activate when re-enabled.
             {"garch": 0.85, "samossa": 0.10, "mssa_rl": 0.05},
             {"garch": 0.70, "samossa": 0.20, "mssa_rl": 0.10},
             {"garch": 0.60, "samossa": 0.25, "mssa_rl": 0.15},
             {"samossa": 0.60, "mssa_rl": 0.40},
             {"samossa": 0.45, "garch": 0.35, "mssa_rl": 0.20},
+            {"mssa_rl": 0.70, "garch": 0.30},
+            {"mssa_rl": 0.70, "samossa": 0.30},
             {"garch": 1.0},
             {"samossa": 1.0},
             {"mssa_rl": 1.0},
@@ -384,7 +388,10 @@ def derive_model_confidence(
     baseline_var = mssa_summary.get("baseline_variance")
     mssa_score = None
     if baseline_var is not None:
-        mssa_score = 1.0 / (1.0 + baseline_var)
+        # Phase 7.10: Use log-scaled baseline_variance to avoid crushing score
+        # when variance is large.  Previous formula 1/(1+var) gave ~0.09 for
+        # var=10; log-scale gives ~0.30 which is fairer relative to other models.
+        mssa_score = 1.0 / (1.0 + max(0.0, float(np.log1p(baseline_var))))
     mssa_metrics = mssa_summary.get("regression_metrics", {}) or {}
     mssa_score = _combine_scores(
         mssa_score,
@@ -394,6 +401,10 @@ def derive_model_confidence(
         else None,
         _change_point_boost(mssa_summary),
     )
+    # Phase 7.10: MSSA-RL floor -- adversarial audit shows MSSA-RL is best single
+    # model 60% of the time but receives only 8.7% weight.  Ensure minimum score.
+    if mssa_score is not None:
+        mssa_score = max(mssa_score, 0.30)
     if mssa_score is not None:
         confidence["mssa_rl"] = mssa_score
 

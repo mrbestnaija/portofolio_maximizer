@@ -183,11 +183,14 @@ class TestOllamaGeneration:
             _mock_response({'response': 'fast output tokens for test'})
         ]
 
-        time_values = iter([0.0, 10.0, 10.0, 10.2, 10.3, 10.4, 10.5, 10.6])
+        time_values = iter([0.0, 10.0, 10.0, 10.0, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8])
         monkeypatch.setattr('ai_llm.ollama_client.time.time', lambda: next(time_values))
+        perf_values = iter([0.0, 10.0, 10.2, 10.4])
+        monkeypatch.setattr('ai_llm.ollama_client.time.perf_counter', lambda: next(perf_values))
 
         client = OllamaClient(
             http_client=http_client,
+            model='deepseek-coder:6.7b-instruct-q4_K_M',
             latency_failover_threshold=999.0,
             token_rate_failover_threshold=5.0,
             fallback_models=['codellama:13b-instruct-q4_K_M'],

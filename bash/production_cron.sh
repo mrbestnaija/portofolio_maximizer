@@ -241,6 +241,75 @@ PY
     fi
     ;;
 
+  openclaw_maintenance)
+    # OpenClaw maintenance guard: stale session lock cleanup + gateway health
+    # check + optional disable of broken non-primary channels.
+    MAINT_APPLY="${CRON_OPENCLAW_MAINTENANCE_APPLY:-1}"
+    MAINT_PRIMARY_CHANNEL="${CRON_OPENCLAW_PRIMARY_CHANNEL:-whatsapp}"
+    MAINT_SESSION_STALE_SECONDS="${CRON_OPENCLAW_SESSION_STALE_SECONDS:-7200}"
+    MAINT_REPORT_FILE="${CRON_OPENCLAW_REPORT_FILE:-logs/automation/openclaw_maintenance_latest.json}"
+
+    maint_args=(
+      "--primary-channel" "${MAINT_PRIMARY_CHANNEL}"
+      "--session-stale-seconds" "${MAINT_SESSION_STALE_SECONDS}"
+      "--report-file" "${MAINT_REPORT_FILE}"
+    )
+
+    if [[ "${MAINT_APPLY}" == "1" ]]; then
+      maint_args+=("--apply")
+    fi
+    if [[ "${CRON_OPENCLAW_DISABLE_BROKEN_CHANNELS:-1}" == "1" ]]; then
+      maint_args+=("--disable-broken-channels")
+    fi
+    if [[ "${CRON_OPENCLAW_RESTART_GATEWAY_ON_FAILURE:-1}" == "1" ]]; then
+      maint_args+=("--restart-gateway-on-rpc-failure")
+    fi
+    if [[ "${CRON_OPENCLAW_STRICT:-0}" == "1" ]]; then
+      maint_args+=("--strict")
+    fi
+
+    run_with_logging "openclaw_maintenance: stale-session cleanup + gateway/channel guard" \
+      "${PYTHON_BIN}" scripts/openclaw_maintenance.py "${maint_args[@]}"
+    ;;
+
+  self_improvement_review_forward)
+    # Forward pending self-improvement proposals to human reviewers via OpenClaw.
+    REVIEW_MAX_ITEMS="${CRON_REVIEW_MAX_ITEMS:-8}"
+    REVIEW_MAX_AGE_DAYS="${CRON_REVIEW_MAX_AGE_DAYS:-30}"
+    REVIEW_MIN_INTERVAL="${CRON_REVIEW_MIN_INTERVAL_MINUTES:-30}"
+    REVIEW_STATE_FILE="${CRON_REVIEW_STATE_FILE:-logs/automation/self_improve_review_forward_state.json}"
+    REVIEW_REPORT_FILE="${CRON_REVIEW_REPORT_FILE:-logs/automation/self_improve_review_forward_latest.json}"
+
+    forward_args=(
+      "--max-items" "${REVIEW_MAX_ITEMS}"
+      "--max-age-days" "${REVIEW_MAX_AGE_DAYS}"
+      "--min-interval-minutes" "${REVIEW_MIN_INTERVAL}"
+      "--state-file" "${REVIEW_STATE_FILE}"
+      "--report-file" "${REVIEW_REPORT_FILE}"
+    )
+    if [[ -n "${CRON_REVIEW_TARGETS:-}" ]]; then
+      forward_args+=("--targets" "${CRON_REVIEW_TARGETS}")
+    fi
+    if [[ -n "${CRON_REVIEW_TO:-}" ]]; then
+      forward_args+=("--to" "${CRON_REVIEW_TO}")
+    fi
+    if [[ -n "${CRON_REVIEW_CHANNEL:-}" ]]; then
+      forward_args+=("--channel" "${CRON_REVIEW_CHANNEL}")
+    fi
+    if [[ "${CRON_REVIEW_RESEND_PENDING:-0}" == "1" ]]; then
+      forward_args+=("--resend-pending")
+    fi
+    if [[ "${CRON_REVIEW_DRY_RUN:-0}" == "1" ]]; then
+      forward_args+=("--dry-run")
+    fi
+    if [[ "${CRON_REVIEW_FORCE:-0}" == "1" ]]; then
+      forward_args+=("--force")
+    fi
+
+    run_with_logging "self_improvement_review_forward: forwarding pending proposals to OpenClaw targets" \
+      "${PYTHON_BIN}" scripts/forward_self_improvement_reviews.py "${forward_args[@]}"
+    ;;
+
   interactions_api_sanity)
     # Validate Interactions API config without starting the long-running server.
     if [[ -f "scripts/pmx_interactions_api.py" ]]; then
@@ -250,6 +319,25 @@ PY
       run_with_logging "interactions_api_sanity: stub (script missing)" \
         echo "pmx_interactions_api.py not present; skipping."
     fi
+    ;;
+
+  training_priority_cycle)
+    # Prioritized forecaster/LLM training + fine-tune workflow runner.
+    TRAIN_PROFILE="${CRON_TRAINING_PROFILE:-forecasters}"   # forecasters|llm|all
+    TRAIN_TARGET="${CRON_TRAINING_TARGET:-local_cron}"
+    TRAIN_OUTPUT="${CRON_TRAINING_OUTPUT:-logs/automation/training_priority/${TRAIN_PROFILE}_latest.json}"
+    train_args=(--profile "${TRAIN_PROFILE}" --target "${TRAIN_TARGET}" --output-json "${TRAIN_OUTPUT}")
+    if [[ -n "${CRON_TRAINING_MAX_PRIORITY:-}" ]]; then
+      train_args+=(--max-priority "${CRON_TRAINING_MAX_PRIORITY}")
+    fi
+    if [[ "${CRON_TRAINING_CONTINUE_ON_ERROR:-0}" == "1" ]]; then
+      train_args+=(--continue-on-error)
+    fi
+    if [[ "${CRON_TRAINING_DRY_RUN:-0}" == "1" ]]; then
+      train_args+=(--dry-run)
+    fi
+    run_with_logging "training_priority_cycle: profile=${TRAIN_PROFILE} target=${TRAIN_TARGET}" \
+      "${PYTHON_BIN}" scripts/run_training_priority_cycle.py "${train_args[@]}"
     ;;
 
   adversarial_integrity)
@@ -307,6 +395,8 @@ Tasks:
   llm_orchestrator_health  Run scripts/llm_multi_model_orchestrator.py health.
   openclaw_models_status   Run scripts/openclaw_models.py status snapshot.
   openclaw_self_improve_index  Refresh scripts/openclaw_self_improve.py index.
+  openclaw_maintenance  Clean stale OpenClaw locks + self-heal gateway/channels.
+  self_improvement_review_forward  Forward pending proposal reviews via OpenClaw notify.
   interactions_api_sanity  Validate scripts/pmx_interactions_api.py config/runtime.
   adversarial_integrity   Run scripts/adversarial_integrity_test.py against DB.
   nightly_backfill     Run signal validation backfill (stub until modernised).
@@ -318,6 +408,7 @@ Tasks:
   transaction_costs    Estimate transaction costs grouped by ticker/asset class.
   auto_trader_core     Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP).
   synthetic_refresh    Generate synthetic dataset artifacts for offline regression.
+  training_priority_cycle  Run prioritized forecaster/LLM training-finetune task chain.
 
 Cron examples and production guidance:
   See Documentation/CRON_AUTOMATION.md.

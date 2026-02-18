@@ -136,14 +136,50 @@ class GARCHForecaster:
             )
             self.backend = "ewma"
             return self._fit_ewma(returns_clean)
+        # Phase 7.10: IGARCH / unit-root guard -- if alpha+beta >= 0.98 the
+        # variance process is non-stationary and forecasts diverge to infinity.
+        # Fall back to EWMA which is more robust in this regime.
+        persistence = self._garch_persistence()
+        if persistence is not None and persistence >= 0.98:
+            logger.warning(
+                "GARCH(%s,%s) persistence %.4f >= 0.98 (IGARCH); "
+                "falling back to EWMA to avoid infinite variance forecasts.",
+                self.p, self.q, persistence,
+            )
+            self.backend = "ewma"
+            return self._fit_ewma(returns_clean)
+
         logger.info(
-            "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s)",
+            "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s, persistence=%.4f)",
             self.p,
             self.q,
             self.vol,
             self.dist,
+            persistence if persistence is not None else 0.0,
         )
         return self
+
+    def _garch_persistence(self) -> Optional[float]:
+        """Sum of alpha + beta coefficients (persistence parameter).
+
+        Returns None if the model is not fitted or params are unavailable.
+        For stationary GARCH, persistence < 1.0; IGARCH has persistence >= 1.0.
+        """
+        if self.fitted_model is None or self.fitted_model is True:
+            return None
+        try:
+            params = self.fitted_model.params
+            alpha_sum = sum(
+                float(v) for k, v in params.items()
+                if k.startswith("alpha[") and np.isfinite(v)
+            )
+            beta_sum = sum(
+                float(v) for k, v in params.items()
+                if k.startswith("beta[") and np.isfinite(v)
+            )
+            return alpha_sum + beta_sum
+        except Exception:
+            return None
 
     def _fit_ewma(self, returns_clean: pd.Series) -> "GARCHForecaster":
         lam = 0.94
@@ -246,5 +282,6 @@ class GARCHForecaster:
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "log_likelihood": float(self.fitted_model.loglikelihood),
+            "persistence": self._garch_persistence(),
             "backend": backend,
         }

@@ -30,9 +30,25 @@ if str(ROOT) not in sys.path:
 from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
-def find_unlinked_closes(conn: sqlite3.Connection) -> list:
+def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = None) -> list:
     """Find closing legs with PnL but no entry_trade_id."""
-    cur = conn.execute("""
+    if close_ids:
+        placeholders = ",".join("?" for _ in sorted(close_ids))
+        query = f"""
+            SELECT id, ticker, trade_date, shares, price, realized_pnl,
+                   bar_timestamp, run_id
+            FROM trade_executions
+            WHERE is_close = 1
+              AND entry_trade_id IS NULL
+              AND realized_pnl IS NOT NULL
+              AND id IN ({placeholders})
+            ORDER BY trade_date, id
+        """
+        cur = conn.execute(query, tuple(sorted(close_ids)))
+        return cur.fetchall()
+
+    cur = conn.execute(
+        """
         SELECT id, ticker, trade_date, shares, price, realized_pnl,
                bar_timestamp, run_id
         FROM trade_executions
@@ -40,7 +56,8 @@ def find_unlinked_closes(conn: sqlite3.Connection) -> list:
           AND entry_trade_id IS NULL
           AND realized_pnl IS NOT NULL
         ORDER BY trade_date, id
-    """)
+        """
+    )
     return cur.fetchall()
 
 
@@ -107,7 +124,7 @@ def match_fifo(unlinked_sell, orphaned_buys):
     return best_buy_id
 
 
-def repair_linkage(db_path: Path, dry_run: bool = True):
+def repair_linkage(db_path: Path, dry_run: bool = True, close_ids: list[int] | None = None):
     """Backfill entry_trade_id for unlinked closes."""
     if not db_path.exists():
         print(f"[ERROR] Database not found: {db_path}")
@@ -120,7 +137,10 @@ def repair_linkage(db_path: Path, dry_run: bool = True):
     print("=" * 70)
     print()
 
-    unlinked = find_unlinked_closes(conn)
+    selected_ids = {int(x) for x in (close_ids or []) if int(x) > 0}
+    if selected_ids:
+        print(f"Target close IDs: {sorted(selected_ids)}")
+    unlinked = find_unlinked_closes(conn, close_ids=selected_ids or None)
     if not unlinked:
         print("[OK] No unlinked closes found")
         conn.close()
@@ -202,7 +222,7 @@ def repair_linkage(db_path: Path, dry_run: bool = True):
     print()
     print("Verifying repairs...")
     conn = guarded_sqlite_connect(str(db_path))
-    remaining = find_unlinked_closes(conn)
+    remaining = find_unlinked_closes(conn, close_ids=selected_ids or None)
     conn.close()
 
     print(f"Remaining unlinked closes: {len(remaining)}")
@@ -223,7 +243,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DB_PATH, help="Database path")
     parser.add_argument("--apply", action="store_true", help="Apply repairs (default is dry-run)")
+    parser.add_argument(
+        "--close-ids",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Optional close leg IDs to reconcile. If omitted, scans all unlinked closes.",
+    )
 
     args = parser.parse_args()
 
-    sys.exit(repair_linkage(args.db, dry_run=not args.apply))
+    sys.exit(repair_linkage(args.db, dry_run=not args.apply, close_ids=args.close_ids))

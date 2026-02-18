@@ -193,11 +193,11 @@ def _discover_ollama_models(base_url: str, timeout_seconds: float = 3.0) -> list
 
 def _default_ollama_model_order() -> list[str]:
     # Keep aligned with config/llm_config.yml defaults.
-    # Strategy: reasoning models first, then tool-calling model.
+    # OpenClaw agent turns require tool-calling support, so keep qwen3 first.
     return [
+        "qwen3:8b",             # tool-calling / function-calling orchestrator (primary for OpenClaw agent)
         "deepseek-r1:8b",       # fast reasoning (primary)
         "deepseek-r1:32b",      # heavy reasoning (fallback)
-        "qwen3:8b",             # tool-calling / function-calling orchestrator
         "qwen:14b-chat-q4_K_M",
         "deepseek-coder:6.7b-instruct-q4_K_M",
     ]
@@ -209,6 +209,29 @@ def _pick_primary(preferred: list[str], available: list[str]) -> Optional[str]:
         if cand in avail:
             return cand
     return available[0] if available else None
+
+
+def _promote_tool_primary(order: list[str]) -> list[str]:
+    """
+    Keep a tool-capable model first for OpenClaw agent turns.
+    """
+    models = [str(x).strip() for x in order if str(x).strip()]
+    if not models:
+        return models
+    if (os.getenv("OPENCLAW_RESPECT_ENV_MODEL_ORDER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return models
+
+    tool_candidates: list[str] = []
+    for m in models:
+        low = m.lower()
+        if "qwen3" in low or "qwen2.5" in low:
+            tool_candidates.append(m)
+
+    if not tool_candidates:
+        return models
+
+    first_tool = tool_candidates[0]
+    return [first_tool, *[m for m in models if m != first_tool]]
 
 
 def _ollama_model_def(model_id: str) -> dict[str, Any]:
@@ -616,6 +639,7 @@ def _cmd_apply(args) -> int:
 
     preferred_local = _default_ollama_model_order()
     preferred_local = _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODEL_ORDER", "")) or preferred_local
+    preferred_local = _promote_tool_primary(preferred_local)
     local_primary = _pick_primary(preferred_local, discovered or ollama_models)
 
     include_openai = bool(args.enable_openai_provider) and (
@@ -649,6 +673,10 @@ def _cmd_apply(args) -> int:
         )
     else:
         # auto / local-first
+        # local-first should stay local-only by default for reliability.
+        include_remote_qwen = strategy == "auto"
+        if (os.getenv("OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            include_remote_qwen = True
         have_local_now = bool(discovered)
         if strategy == "auto" and not have_local_now:
             primary = "qwen-portal/coder-model"
@@ -660,7 +688,7 @@ def _cmd_apply(args) -> int:
         ]
         fallbacks = _build_fallbacks(
             local_models_ordered=[m for m in local_ordered if f"ollama/{m}" != primary],
-            include_remote_qwen=True,
+            include_remote_qwen=include_remote_qwen,
             include_openai=include_openai,
             include_anthropic=include_anthropic,
             openai_model=openai_primary_model,

@@ -19,6 +19,13 @@ from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING, Sequence
 from datetime import datetime
 from .performance_monitor import monitor_inference
 
+# Bootstrap .env so OLLAMA_HOST / model overrides are available
+try:
+    from etl.secret_loader import bootstrap_dotenv
+    bootstrap_dotenv()
+except (ImportError, OSError):
+    pass  # Standalone usage without etl package
+
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from ai_llm.performance_optimizer import LLMPerformanceOptimizer
 
@@ -80,7 +87,7 @@ class OllamaClient:
         Raises:
             OllamaConnectionError: If Ollama is unavailable (REQUIRED per 3b)
         """
-        self.host = host.rstrip('/')
+        self.host = (os.getenv("OLLAMA_HOST") or host).rstrip('/')
         self.optimizer = optimizer
         self.optimize_use_case = optimize_use_case
         self.enable_cache = enable_cache

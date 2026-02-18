@@ -1127,7 +1127,7 @@ class TimeSeriesForecaster:
     ) -> tuple[Optional[str], Optional[float]]:
         best_model: Optional[str] = None
         best_rmse: Optional[float] = None
-        for name in ("sarimax", "samossa", "mssa_rl"):
+        for name in ("sarimax", "garch", "samossa", "mssa_rl"):
             rmse_val = TimeSeriesForecaster._rmse_from_metrics(metrics_map.get(name))
             if rmse_val is None:
                 continue

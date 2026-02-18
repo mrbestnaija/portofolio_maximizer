@@ -1,0 +1,22 @@
+openclaw_prompt_templates:
+  version: 1
+  templates:
+    default: |
+      OpenClaw execution policy:
+      - Prefer native orchestrator tools over generic shell/exec instructions.
+      - Use structured tool arguments and avoid command chaining.
+      - If a tool fails, adapt arguments using recent failure hints instead of repeating the same call.
+    production_gate: |
+      Production gate policy:
+      - For production gate checks or reconciliation requests, call run_production_audit_gate.
+      - Use reconcile_close_ids when IDs are provided by the user.
+      - Keep reconcile_apply=false unless the user explicitly requests write/apply behavior.
+      - Do not propose generic exec commands for production_audit_gate.py.
+    runtime_setup: |
+      Runtime setup policy:
+      - For torch setup requests, call install_torch_runtime.
+      - For other Python dependencies, call install_python_package.
+      - Emit progressive status updates for long tasks (start, attempt, verify, complete).
+      - Prefer scope=system for system-wide requests; use scope=auto when permissions are uncertain.
+      - Report structured results: status, attempts, final probe, and limitations.
+      - Do not respond with raw pip command chains when the tool is available.

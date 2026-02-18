@@ -899,11 +899,11 @@ class SARIMAXForecaster:
             "steps": steps,
             "model_order": self.best_order,
             "seasonal_order": self.best_seasonal_order,
-            "fit_strategy": self._fit_metadata.get("fit_strategy"),
+            "fit_strategy": getattr(self, "_fit_metadata", {}).get("fit_strategy"),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "diagnostics": diagnostics,
-            "convergence": dict(self._fit_metadata),
+            "convergence": dict(getattr(self, "_fit_metadata", {})),
         }
         return self.forecast_results
 
@@ -913,11 +913,11 @@ class SARIMAXForecaster:
         return {
             "order": self.best_order,
             "seasonal_order": self.best_seasonal_order,
-            "fit_strategy": self._fit_metadata.get("fit_strategy"),
+            "fit_strategy": getattr(self, "_fit_metadata", {}).get("fit_strategy"),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "log_likelihood": float(self.fitted_model.llf),
             "n_observations": int(self.fitted_model.nobs),
             "log_shift": self._log_shift,
-            "convergence": dict(self._fit_metadata),
+            "convergence": dict(getattr(self, "_fit_metadata", {})),
         }

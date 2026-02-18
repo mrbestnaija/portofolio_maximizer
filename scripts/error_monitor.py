@@ -362,7 +362,12 @@ Error Breakdown:
             except Exception:
                 return fallback
 
-        env_to = (os.getenv("PMX_EMAIL_TO") or os.getenv("PMX_EMAIL_RECIPIENTS") or "").strip()
+        env_to = (
+            os.getenv("PMX_EMAIL_TO")
+            or os.getenv("PMX_EMAIL_RECIPIENTS")
+            or os.getenv("MAIN_EMAIL_GMAIL")
+            or ""
+        ).strip()
         recipients: List[str] = []
         if env_to:
             recipients = [p.strip() for p in env_to.replace(";", ",").split(",") if p.strip()]

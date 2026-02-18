@@ -338,7 +338,8 @@ class SignalRouter:
             'signal_type': signal.signal_type,
             'volatility': signal.volatility,
             'lower_ci': signal.lower_ci,
-            'upper_ci': signal.upper_ci
+            'upper_ci': signal.upper_ci,
+            'signal_id': getattr(signal, 'signal_id', None),
         }
 
     def _get_routing_mode(self) -> str:
