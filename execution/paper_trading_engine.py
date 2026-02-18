@@ -204,13 +204,35 @@ class PaperTradingEngine:
                     self.portfolio.last_bar_timestamps.update(state["last_bar_timestamps"])
                 # Recalculate total value using entry prices as proxy
                 self.portfolio.update_value(state["entry_prices"])
+                # Phase 7.10: Backfill entry_trade_ids for open positions so
+                # closing legs get proper entry linkage (prevents orphan opens
+                # and unlinked closes after resume).
+                for ticker in list(state["positions"].keys()):
+                    if state["positions"][ticker] != 0 and ticker not in self.portfolio.entry_trade_ids:
+                        try:
+                            row = self.db_manager.cursor.execute(
+                                "SELECT id FROM trade_executions "
+                                "WHERE ticker = ? AND COALESCE(is_close, 0) = 0 "
+                                "ORDER BY id DESC LIMIT 1",
+                                (ticker,),
+                            ).fetchone()
+                            if row:
+                                self.portfolio.entry_trade_ids[ticker] = row[0]
+                                logger.debug(
+                                    "Backfilled entry_trade_id=%d for %s on resume",
+                                    row[0], ticker,
+                                )
+                        except Exception as exc:
+                            logger.warning("Failed to backfill entry_trade_id for %s: %s", ticker, exc)
+
                 loaded = True
                 logger.info(
                     "Resumed portfolio from DB: %d positions, cash=$%.2f, "
-                    "total_value=$%.2f",
+                    "total_value=$%.2f, entry_links=%d",
                     len(state["positions"]),
                     state["cash"],
                     self.portfolio.total_value,
+                    len(self.portfolio.entry_trade_ids),
                 )
 
         if not loaded:
