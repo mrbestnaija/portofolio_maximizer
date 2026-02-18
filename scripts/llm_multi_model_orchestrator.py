@@ -34,6 +34,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -438,6 +439,7 @@ TRADING_CRITICAL_KEYWORDS = (
     "rebalance",
 )
 TORCH_DEFAULT_VERSION = (os.getenv("PMX_TORCH_DEFAULT_VERSION") or "2.9.1").strip() or "2.9.1"
+TORCH_DEFAULT_CUDA_VARIANT = (os.getenv("PMX_TORCH_DEFAULT_CUDA_VARIANT") or "cu128").strip().lower() or "cu128"
 
 _TOOL_CACHEABLE = {
     "fast_reasoning",
@@ -961,24 +963,32 @@ REASONING_TOOLS = [
                         "type": "string",
                         "description": f"Optional torch version (default: {TORCH_DEFAULT_VERSION})",
                     },
-                    "variant": {
-                        "type": "string",
-                        "enum": ["default", "cpu"],
-                        "description": "Install source variant. default tries PyPI then CPU fallback.",
-                    },
+                     "variant": {
+                         "type": "string",
+                         "enum": ["auto", "default", "cpu", "cu118", "cu121", "cu124", "cu128"],
+                         "description": (
+                             "Install source variant. "
+                             "auto selects a CUDA build (default cu128) when an NVIDIA GPU is detected, else default. "
+                             "default installs from PyPI, cpu forces the CPU-only index, cu* forces a specific CUDA index."
+                         ),
+                     },
                     "scope": {
                         "type": "string",
                         "enum": ["auto", "system", "user"],
                         "description": "Install scope. auto uses venv/system first and falls back to --user on permission errors.",
                     },
-                    "upgrade": {
-                        "type": "boolean",
-                        "description": "When true, pass --upgrade to pip install.",
-                    },
-                    "verify_only": {
-                        "type": "boolean",
-                        "description": "Only verify torch import/version without installing.",
-                    },
+                     "upgrade": {
+                         "type": "boolean",
+                         "description": "When true, pass --upgrade to pip install.",
+                     },
+                     "force": {
+                         "type": "boolean",
+                         "description": "When true, attempt installation even if torch is already importable (default false).",
+                     },
+                     "verify_only": {
+                         "type": "boolean",
+                         "description": "Only verify torch import/version without installing.",
+                     },
                     "timeout_seconds": {
                         "type": "number",
                         "description": "Install timeout budget per attempt.",
@@ -1670,6 +1680,46 @@ def _probe_torch_runtime(timeout_seconds: float = 25.0) -> dict[str, Any]:
     return payload
 
 
+def _detect_nvidia_gpu(timeout_seconds: float = 2.0) -> dict[str, Any]:
+    """Best-effort GPU detection for torch install decisions (no hard dependency)."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return {"gpu_detected": False, "method": "nvidia-smi", "available": False}
+    try:
+        proc = subprocess.run(
+            [smi, "-L"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, float(timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"gpu_detected": False, "method": "nvidia-smi", "available": True, "error": "timeout"}
+    except Exception as exc:
+        return {
+            "gpu_detected": False,
+            "method": "nvidia-smi",
+            "available": True,
+            "error": str(exc)[:200],
+        }
+
+    out = (proc.stdout or "").strip()
+    stdout_tail_lines = [
+        re.sub(r"\(UUID:\s*[^)]+\)", "(UUID: [REDACTED])", line)
+        for line in out.splitlines()[-5:]
+    ]
+    detected = int(proc.returncode) == 0 and ("GPU" in out or "NVIDIA" in out)
+    return {
+        "gpu_detected": bool(detected),
+        "method": "nvidia-smi",
+        "available": True,
+        "exit_code": int(proc.returncode),
+        "stdout_tail": "\n".join(stdout_tail_lines),
+        "stderr_tail": "\n".join((proc.stderr or "").splitlines()[-5:]),
+    }
+
+
 def _is_permission_error_text(text: str) -> bool:
     low = str(text or "").lower()
     return any(
@@ -2023,14 +2073,23 @@ def _install_python_package_tool(arguments: dict[str, Any], *, budget_seconds: O
 def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
     args = arguments if isinstance(arguments, dict) else {}
     requested_version = str(args.get("version") or TORCH_DEFAULT_VERSION).strip() or TORCH_DEFAULT_VERSION
-    variant = str(args.get("variant") or "default").strip().lower()
-    if variant not in {"default", "cpu"}:
+    variant_raw = str(args.get("variant") or "default").strip().lower()
+    if variant_raw in {"auto", "gpu", "cuda"}:
+        variant = "auto"
+    elif variant_raw in {"default", "pypi"}:
+        variant = "default"
+    elif variant_raw == "cpu":
+        variant = "cpu"
+    elif re.fullmatch(r"cu\d+", variant_raw or ""):
+        variant = variant_raw
+    else:
         variant = "default"
     scope = str(args.get("scope") or "auto").strip().lower()
     if scope not in {"auto", "system", "user"}:
         scope = "auto"
     verify_only = _as_bool(args.get("verify_only"), False)
     upgrade = _as_bool(args.get("upgrade"), True)
+    force = _as_bool(args.get("force"), False)
 
     timeout_seconds = _bounded_timeout(
         _as_float(args.get("timeout_seconds"), 900.0),
@@ -2051,18 +2110,84 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
             indent=2,
         )
 
+    auto_detection: dict[str, Any] = {"status": "skipped"}
+    desired_variant = variant
+    if desired_variant == "auto":
+        auto_detection = _detect_nvidia_gpu(timeout_seconds=min(2.0, timeout_seconds))
+        desired_variant = TORCH_DEFAULT_CUDA_VARIANT if auto_detection.get("gpu_detected") else "default"
+
+    def _cuda_version_from_variant(v: str) -> Optional[str]:
+        m = re.fullmatch(r"cu(\d+)", str(v or "").strip().lower())
+        if not m:
+            return None
+        digits = m.group(1)
+        if len(digits) == 3:
+            return f"{digits[0:2]}.{digits[2:]}"
+        if len(digits) == 4:
+            return f"{digits[0:2]}.{digits[2:]}"
+        return None
+
+    def _variant_satisfied(probe: dict[str, Any], want: str) -> bool:
+        if not probe.get("installed"):
+            return False
+        want_norm = str(want or "default").strip().lower() or "default"
+        if want_norm == "default":
+            return True
+        cuda_text = str(probe.get("cuda") or "").strip()
+        if want_norm == "cpu":
+            return not cuda_text
+        if want_norm.startswith("cu"):
+            expected = _cuda_version_from_variant(want_norm)
+            if expected and cuda_text:
+                return cuda_text.startswith(expected)
+            return bool(cuda_text)
+        return True
+
+    if initial_probe.get("installed") and _variant_satisfied(initial_probe, desired_variant) and not force:
+        return json.dumps(
+            {
+                "status": "PASS",
+                "action": "install_torch_runtime",
+                "note": "torch already importable for this runtime; skipping install (set force=true to reinstall)",
+                "python_executable": sys.executable,
+                "in_virtualenv": in_venv,
+                "requested": {
+                    "version": requested_version,
+                    "variant": variant,
+                    "resolved_variant": desired_variant,
+                    "scope": scope,
+                    "upgrade": upgrade,
+                    "force": force,
+                },
+                "auto_detection": auto_detection,
+                "initial_probe": initial_probe,
+                "attempts": [],
+                "probe": initial_probe,
+                "limitations": [],
+            },
+            indent=2,
+        )
+
     pkg_spec = "torch"
     if requested_version and requested_version.lower() not in {"latest", "any"}:
         pkg_spec = f"torch=={requested_version}"
 
-    def _pip_cmd(*, user_flag: bool, cpu_index: bool) -> list[str]:
+    def _index_url_for_variant(want: str) -> Optional[str]:
+        want_norm = str(want or "").strip().lower()
+        if want_norm == "cpu":
+            return "https://download.pytorch.org/whl/cpu"
+        if want_norm.startswith("cu"):
+            return f"https://download.pytorch.org/whl/{want_norm}"
+        return None
+
+    def _pip_cmd(*, user_flag: bool, index_url: Optional[str]) -> list[str]:
         cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
         if upgrade:
             cmd.append("--upgrade")
         if user_flag:
             cmd.append("--user")
-        if cpu_index:
-            cmd.extend(["--index-url", "https://download.pytorch.org/whl/cpu"])
+        if index_url:
+            cmd.extend(["--index-url", index_url])
         cmd.append(pkg_spec)
         return cmd
 
@@ -2071,24 +2196,25 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
     use_system_requested = scope == "system"
     user_fallback_allowed = scope == "auto" and not in_venv
 
-    plan: list[tuple[bool, bool, str]] = []
+    plan: list[tuple[bool, Optional[str], str, str]] = []
+    primary_index = _index_url_for_variant(desired_variant)
     if use_user_requested:
-        plan.append((True, variant == "cpu", "user_scope_requested"))
+        plan.append((True, primary_index, "user_scope_requested", desired_variant))
     else:
-        plan.append((False, variant == "cpu", "primary"))
-    if variant == "default":
-        plan.append((use_user_requested, True, "cpu_fallback"))
+        plan.append((False, primary_index, "primary", desired_variant))
+    if desired_variant != "cpu":
+        plan.append((use_user_requested, _index_url_for_variant("cpu"), "cpu_fallback", "cpu"))
     if user_fallback_allowed:
-        plan.append((True, variant == "cpu", "auto_user_fallback"))
-        if variant == "default":
-            plan.append((True, True, "auto_user_cpu_fallback"))
+        plan.append((True, primary_index, "auto_user_fallback", desired_variant))
+        if desired_variant != "cpu":
+            plan.append((True, _index_url_for_variant("cpu"), "auto_user_cpu_fallback", "cpu"))
 
     seen_cmd: set[str] = set()
     chosen_result: dict[str, Any] | None = None
-    for use_user, cpu_index, label in plan:
+    for use_user, index_url, label, attempt_variant in plan:
         if use_system_requested and use_user:
             continue
-        cmd = _pip_cmd(user_flag=use_user, cpu_index=cpu_index)
+        cmd = _pip_cmd(user_flag=use_user, index_url=index_url)
         key = json.dumps(cmd, ensure_ascii=True)
         if key in seen_cmd:
             continue
@@ -2097,7 +2223,8 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
         row = _run_pip_install_attempt(cmd, timeout_seconds=timeout_seconds)
         row["attempt_label"] = label
         row["scope"] = "user" if use_user else "system_or_venv"
-        row["variant"] = "cpu" if cpu_index else "default"
+        row["variant"] = attempt_variant
+        row["index_url"] = index_url or ""
         install_attempts.append(row)
 
         if row.get("status") == "PASS":
@@ -2110,11 +2237,18 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
                 break
 
     final_probe = _probe_torch_runtime(timeout_seconds=min(30.0, timeout_seconds))
-    ok = bool(chosen_result and chosen_result.get("status") == "PASS" and final_probe.get("installed"))
+    ok = bool(
+        chosen_result
+        and chosen_result.get("status") == "PASS"
+        and final_probe.get("installed")
+        and _variant_satisfied(final_probe, desired_variant)
+    )
     status = "PASS" if ok else "FAIL"
     limitations: list[str] = []
     if not ok and not final_probe.get("installed"):
         limitations.append("torch import verification failed after install attempts")
+    if not ok and final_probe.get("installed") and not _variant_satisfied(final_probe, desired_variant):
+        limitations.append(f"torch build does not match requested variant: {desired_variant}")
     if not ok and use_system_requested:
         limitations.append("scope=system was requested; no --user fallback applied")
 
@@ -2127,9 +2261,12 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
             "requested": {
                 "version": requested_version,
                 "variant": variant,
+                "resolved_variant": desired_variant,
                 "scope": scope,
                 "upgrade": upgrade,
+                "force": force,
             },
+            "auto_detection": auto_detection,
             "initial_probe": initial_probe,
             "attempts": install_attempts,
             "probe": final_probe,
