@@ -136,14 +136,15 @@ class GARCHForecaster:
             )
             self.backend = "ewma"
             return self._fit_ewma(returns_clean)
-        # Phase 7.10: IGARCH / unit-root guard -- if alpha+beta >= 0.98 the
-        # variance process is non-stationary and forecasts diverge to infinity.
-        # Fall back to EWMA which is more robust in this regime.
+        # Phase 7.10: IGARCH / unit-root guard -- if alpha+beta >= 0.97 the
+        # variance process is near-non-stationary and forecasts diverge.
+        # Tightened from 0.98 to 0.97 because adversarial audit found 28% of
+        # fits are degenerate at the 0.98 boundary, corrupting ~11% of forecasts.
         persistence = self._garch_persistence()
-        if persistence is not None and persistence >= 0.98:
+        if persistence is not None and persistence >= 0.97:
             logger.warning(
-                "GARCH(%s,%s) persistence %.4f >= 0.98 (IGARCH); "
-                "falling back to EWMA to avoid infinite variance forecasts.",
+                "GARCH(%s,%s) persistence %.4f >= 0.97 (near-IGARCH); "
+                "falling back to EWMA to avoid divergent variance forecasts.",
                 self.p, self.q, persistence,
             )
             self.backend = "ewma"
@@ -276,6 +277,7 @@ class GARCHForecaster:
                 "bic": None,
                 "log_likelihood": None,
                 "backend": backend,
+                "igarch_fallback": True,
             }
         return {
             "params": self.fitted_model.params.to_dict(),

@@ -366,7 +366,13 @@ def derive_model_confidence(
         else None,
     )
     if garch_score is None and garch_summary:
-        garch_score = 0.35  # fallback if AIC/BIC also unavailable
+        # Phase 7.10: Lower fallback for IGARCH/EWMA cases.  Previous 0.35 was
+        # too generous when GARCH degenerates -- the EWMA fallback lacks
+        # information-criteria and is mechanically simpler.
+        if garch_summary.get("igarch_fallback"):
+            garch_score = 0.20
+        else:
+            garch_score = 0.35
     if garch_score is not None:
         confidence["garch"] = garch_score
 
@@ -403,8 +409,9 @@ def derive_model_confidence(
     )
     # Phase 7.10: MSSA-RL floor -- adversarial audit shows MSSA-RL is best single
     # model 60% of the time but receives only 8.7% weight.  Ensure minimum score.
+    # Raised from 0.30 to 0.40 to match narrowed calibration range (0.4-0.85).
     if mssa_score is not None:
-        mssa_score = max(mssa_score, 0.30)
+        mssa_score = max(mssa_score, 0.40)
     if mssa_score is not None:
         confidence["mssa_rl"] = mssa_score
 
@@ -425,43 +432,53 @@ def derive_model_confidence(
         samossa_score = min(1.0, sarimax_score + 0.05)
         confidence["samossa"] = samossa_score
 
-    # Keep scores within a bounded, non-saturating range to avoid winner-takes-all
-    clipped_confidence = {model: float(np.clip(score, 0.05, 0.95)) for model, score in confidence.items()}
+    # Phase 7.10: Floor confidence at 0.05 to avoid division-by-zero downstream.
+    floored_confidence = {
+        model: float(max(score, 0.05))
+        for model, score in confidence.items()
+    }
 
     # Phase 7.4 FIX: Quantile-based calibration instead of min-max normalization
     # This prevents SAMoSSA from always getting 1.0 and makes scores truly comparable
-    if len(clipped_confidence) > 1:
-        values = np.array(list(clipped_confidence.values()))
+    if len(floored_confidence) > 1:
+        values = np.array(list(floored_confidence.values()))
 
         # Use rank-based normalization (more robust than min-max)
         # Ranks models from 0 to 1 based on relative performance
         ranks = scipy_stats.rankdata(values, method='average')
 
-        # Normalize ranks to 0.3-0.9 range to avoid extremes
-        # This gives even the worst model some weight for diversity
+        # Phase 7.10: Narrowed from 0.3-0.9 to 0.4-0.85 to prevent
+        # winner-takes-all when confidence_scaling amplifies rank gaps.
+        # Previous 0.3-0.9 gave 3:1 ratio (MSSA-RL 8.7% weight);
+        # 0.4-0.85 gives ~2:1 ratio which allows MSSA-RL meaningful weight.
         min_rank, max_rank = ranks.min(), ranks.max()
         if max_rank > min_rank:
-            normalized_ranks = 0.3 + 0.6 * (ranks - min_rank) / (max_rank - min_rank)
+            normalized_ranks = 0.4 + 0.45 * (ranks - min_rank) / (max_rank - min_rank)
             calibrated_confidence = {
                 model: float(normalized_ranks[i])
-                for i, model in enumerate(clipped_confidence.keys())
+                for i, model in enumerate(floored_confidence.keys())
             }
-
-            logger.info(
-                "Calibrated confidence (Phase 7.4 quantile-based): raw=%s calibrated=%s",
-                clipped_confidence,
-                calibrated_confidence,
-            )
-            return calibrated_confidence
         else:
             # All models have same confidence - use uniform distribution
-            uniform_score = 0.6  # Middle of 0.3-0.9 range
-            calibrated_confidence = {model: uniform_score for model in clipped_confidence.keys()}
-            logger.info(
-                "Calibrated confidence (uniform - all equal): raw=%s calibrated=%s",
-                clipped_confidence,
-                calibrated_confidence,
-            )
-            return calibrated_confidence
+            uniform_score = 0.625  # Middle of 0.4-0.85 range
+            calibrated_confidence = {model: uniform_score for model in floored_confidence.keys()}
 
-    return clipped_confidence
+        # Phase 7.10: Cap confidence at empirical accuracy ceiling AFTER ranking.
+        # Adversarial audit: 0.9+ confidence with 41% win rate.  Downstream
+        # position sizing treats confidence as probability-of-profit, so cap at
+        # 0.65 (generous vs 41% actual) until backtested accuracy improves.
+        # Applied post-ranking to preserve relative ordering between models.
+        CONFIDENCE_ACCURACY_CAP = 0.65
+        calibrated_confidence = {
+            model: float(min(score, CONFIDENCE_ACCURACY_CAP))
+            for model, score in calibrated_confidence.items()
+        }
+
+        logger.info(
+            "Calibrated confidence (Phase 7.4 quantile-based): raw=%s calibrated=%s",
+            floored_confidence,
+            calibrated_confidence,
+        )
+        return calibrated_confidence
+
+    return floored_confidence

@@ -174,35 +174,45 @@ class RegimeDetector:
             return 1.0  # Assume non-stationary on error
 
     def _classify_regime(self, features: Dict[str, float]) -> str:
-        """Classify regime based on extracted features."""
+        """Classify regime based on extracted features.
+
+        Phase 7.10: Relaxed thresholds to reduce 90% MODERATE_MIXED/TRENDING
+        concentration.  Previous logic required ALL conditions for most regimes,
+        causing 90.3% of observations to fall into low-confidence catch-all
+        buckets with HIGH_VOL_TRENDING at 1.0% and CRISIS at 0.4%.
+        """
         vol = features['realized_volatility']
         trend = features['trend_strength']
         hurst = features['hurst_exponent']
         adf_p = features['adf_pvalue']
 
-        # Low vol, weak trend, mean-reverting → LIQUID_RANGEBOUND
-        if (vol < self.config.vol_threshold_low and
-            trend < self.config.trend_threshold_weak and
-            hurst < 0.5 and
-            adf_p < 0.05):
-            return 'LIQUID_RANGEBOUND'
-
-        # High vol, strong trend, non-stationary → HIGH_VOL_TRENDING
-        if (vol > self.config.vol_threshold_high and
-            trend > self.config.trend_threshold_strong):
-            return 'HIGH_VOL_TRENDING'
-
-        # Extreme vol (crisis) → CRISIS
-        if vol > 0.50:  # 50% annual vol = crisis
+        # Extreme vol → CRISIS (lowered from 0.50 to 0.40 to catch more
+        # volatile periods; 40% annualized vol is already severe)
+        if vol > 0.40:
             return 'CRISIS'
 
-        # Strong trend, medium vol → MODERATE_TRENDING
+        # High vol OR strong trend → HIGH_VOL_TRENDING
+        # Relaxed from AND to OR: previous required both vol > 0.40 AND
+        # trend > 0.60 which only triggered for 1% of data.
+        if (vol > self.config.vol_threshold_high and
+                trend > self.config.trend_threshold_weak):
+            return 'HIGH_VOL_TRENDING'
+        if (vol > self.config.vol_threshold_low and
+                trend > self.config.trend_threshold_strong):
+            return 'HIGH_VOL_TRENDING'
+
+        # Low vol, weak trend → LIQUID_RANGEBOUND
+        # Relaxed: removed hurst < 0.5 AND adf_p < 0.05 requirements;
+        # low vol + weak trend is sufficient for rangebound classification.
+        if (vol < self.config.vol_threshold_low and
+                trend < self.config.trend_threshold_weak):
+            if hurst < 0.5 and adf_p < 0.05:
+                return 'LIQUID_RANGEBOUND'
+            return 'MODERATE_RANGEBOUND'
+
+        # Clear trend, medium vol → MODERATE_TRENDING
         if trend > self.config.trend_threshold_weak:
             return 'MODERATE_TRENDING'
-
-        # Low vol, stationary, but some trend → MODERATE_RANGEBOUND
-        if vol < self.config.vol_threshold_low and adf_p < 0.05:
-            return 'MODERATE_RANGEBOUND'
 
         # Default: MODERATE_MIXED
         return 'MODERATE_MIXED'

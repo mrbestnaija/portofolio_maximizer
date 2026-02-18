@@ -329,7 +329,7 @@ pipeline:
 
       # Volatility thresholds (annualized)
       vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
-      vol_threshold_high: 0.40  # Above 40% annual vol = high volatility (raised from 0.30, Phase 7.9 tuning)
+      vol_threshold_high: 0.25  # Above 25% annual vol = high volatility (lowered from 0.40; Phase 7.10 audit: 90% in catch-all buckets)
 
       # Trend strength thresholds (0-1 scale, based on R² from linear regression)
       trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
