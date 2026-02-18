@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -23,6 +25,27 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "training_priority.yml"
+TRAINING_PROPOSALS_DIR = PROJECT_ROOT / "logs" / "llm_activity" / "proposals" / "training"
+TRAINING_FEEDBACK_DIR = PROJECT_ROOT / "logs" / "llm_activity" / "feedback"
+
+_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9\-\._~\+/=]{16,}\b", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
+    re.compile(r"\b(token|secret|password|api[_-]?key)\s*[:=]\s*[^,\s]+", re.IGNORECASE),
+)
+
+_ARTIFACT_FLAGS = {
+    "--output",
+    "--output-json",
+    "--summary-json",
+    "--report-file",
+    "--audit-dir",
+    "--db",
+    "--db-path",
+    "--dataset",
+    "--output-dir",
+}
 
 
 @dataclass
@@ -76,6 +99,110 @@ def _as_env_dict(raw: Any) -> dict[str, str]:
             continue
         out[key] = str(v if v is not None else "")
     return out
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _redact_text(text: str) -> str:
+    out = str(text or "")
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out
+
+
+def _safe_filename(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(text or "").strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._")
+    return cleaned[:160] or "item"
+
+
+def _safe_write_json(path: Path, payload: dict[str, Any]) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_artifact_paths(cmd: list[str]) -> list[str]:
+    """Best-effort artifact extraction from command flags. Paths are validated on disk."""
+    if not cmd:
+        return []
+    candidates: list[str] = []
+    for idx, tok in enumerate(cmd):
+        if tok not in _ARTIFACT_FLAGS:
+            continue
+        if idx + 1 >= len(cmd):
+            continue
+        nxt = str(cmd[idx + 1] or "").strip()
+        if not nxt or nxt.startswith("-"):
+            continue
+        candidates.append(nxt)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = (PROJECT_ROOT / p).resolve()
+        if not p.exists():
+            continue
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _probe_torch_runtime(timeout_seconds: float = 6.0) -> dict[str, Any]:
+    """Optional torch/cuda probe for GPU training evidence (never raises)."""
+    cmd = [
+        sys.executable,
+        "-c",
+        (
+            "import json; "
+            "import torch; "
+            "payload={"
+            "'torch_version': getattr(torch,'__version__',''),"
+            "'cuda': getattr(getattr(torch,'version',object()),'cuda',None),"
+            "'cuda_available': bool(torch.cuda.is_available()),"
+            "'device_count': int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,"
+            "'device_name': (torch.cuda.get_device_name(0) if torch.cuda.is_available() else None),"
+            "}; "
+            "print(json.dumps(payload, ensure_ascii=True))"
+        ),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, float(timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"installed": False, "error": "torch probe timeout"}
+    except Exception as exc:
+        return {"installed": False, "error": f"torch probe failed: {exc}"}
+
+    if int(proc.returncode) != 0:
+        err = _redact_text("\n".join((proc.stderr or "").splitlines()[-20:])).strip()
+        return {"installed": False, "error": err or "torch import failed"}
+
+    raw = (proc.stdout or "").strip()
+    try:
+        payload = json.loads(raw.splitlines()[-1])
+        if isinstance(payload, dict):
+            payload["installed"] = True
+            return payload
+    except Exception:
+        pass
+    return {"installed": False, "error": "torch probe produced invalid output"}
 
 
 def _normalize_tasks(config_payload: dict[str, Any]) -> tuple[list[Task], dict[str, Any], dict[str, str]]:
@@ -264,8 +391,55 @@ def main(argv: list[str]) -> int:
             continue
         selected.append(task)
 
+    cycle_id = f"training_cycle_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+    torch_probe_cached: dict[str, Any] | None = None
+    if args.profile in {"all", "llm"}:
+        torch_probe_cached = _probe_torch_runtime(timeout_seconds=6.0)
+
     results: list[dict[str, Any]] = []
     for task in selected:
+        missing_prereqs = [p for p in task.required_paths if not _path_exists(p)]
+        cmd_preview = _resolve_python_command(task.command)
+        env_keys = sorted(set(default_env.keys()).union(task.env.keys()))
+        proposal_payload: dict[str, Any] = {
+            "type": "training_proposal",
+            "proposal_id": f"{cycle_id}:{task.task_id}",
+            "proposed_at_utc": _utc_now_iso(),
+            "cycle_id": cycle_id,
+            "profile": args.profile,
+            "target": args.target,
+            "task": {
+                "id": task.task_id,
+                "description": task.description,
+                "profiles": task.profiles,
+                "targets": task.targets,
+                "priority": task.priority,
+                "critical": task.critical,
+                "enabled": task.enabled,
+                "timeout_seconds": float(task.timeout_seconds),
+            },
+            "runtime": {
+                "python_executable": sys.executable,
+                "python_version": platform.python_version(),
+                "platform": platform.platform(),
+            },
+            "command": [_redact_text(str(x)) for x in cmd_preview],
+            "expected_artifacts": _resolve_artifact_paths(cmd_preview),
+            "required_paths": task.required_paths,
+            "missing_prereqs": missing_prereqs,
+            "env_keys": env_keys,
+            "notes": (
+                "This proposal is auto-emitted by training_priority_cycle for auditability. "
+                "Feedback will be written under logs/llm_activity/feedback/ after execution."
+            ),
+        }
+        if "llm" in task.profiles or task.task_id.lower().startswith("llm_"):
+            proposal_payload["torch_probe"] = torch_probe_cached or {"status": "skipped"}
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        proposal_file = TRAINING_PROPOSALS_DIR / f"{ts}_{_safe_filename(task.task_id)}.json"
+        _safe_write_json(proposal_file, proposal_payload)
+
         row = _run_task(
             task,
             dry_run=bool(args.dry_run),
@@ -273,6 +447,45 @@ def main(argv: list[str]) -> int:
             output_tail_lines=output_tail_lines,
             base_env=default_env,
         )
+        # Sidecar feedback log for automated follow-up (best-effort; never blocks).
+        cmd_executed = row.get("command") if isinstance(row.get("command"), list) else cmd_preview
+        artifacts = _resolve_artifact_paths(cmd_executed if isinstance(cmd_executed, list) else cmd_preview)
+        feedback_payload: dict[str, Any] = {
+            "type": "training_feedback",
+            "feedback_id": f"{cycle_id}:{task.task_id}",
+            "completed_at_utc": _utc_now_iso(),
+            "cycle_id": cycle_id,
+            "profile": args.profile,
+            "target": args.target,
+            "task_id": task.task_id,
+            "priority": task.priority,
+            "critical": task.critical,
+            "status": str(row.get("status") or ""),
+            "exit_code": row.get("exit_code"),
+            "started_at_utc": row.get("started_at_utc", ""),
+            "finished_at_utc": row.get("finished_at_utc", ""),
+            "command": [_redact_text(str(x)) for x in (cmd_executed or [])],
+            "missing_prereqs": row.get("missing_prereqs", missing_prereqs),
+            "artifacts": artifacts,
+            "stdout_tail": _redact_text(str(row.get("stdout_tail") or "")),
+            "stderr_tail": _redact_text(str(row.get("stderr_tail") or "")),
+        }
+        if "llm" in task.profiles or task.task_id.lower().startswith("llm_"):
+            feedback_payload["torch_probe"] = torch_probe_cached or _probe_torch_runtime(timeout_seconds=6.0)
+
+        # If a local instruction LM trainer wrote a training summary, attach it.
+        summary_hint = PROJECT_ROOT / "models" / "llm_finetune" / "latest" / "training_summary.json"
+        if summary_hint.exists():
+            try:
+                payload = json.loads(summary_hint.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(payload, dict):
+                    feedback_payload["llm_training_summary"] = payload
+            except Exception:
+                pass
+
+        feedback_file = TRAINING_FEEDBACK_DIR / f"{ts}_{_safe_filename(task.task_id)}.json"
+        _safe_write_json(feedback_file, feedback_payload)
+
         results.append(row)
         status = str(row.get("status") or "")
         print(f"[training_cycle] p{task.priority:03d} {task.task_id}: {status}")
