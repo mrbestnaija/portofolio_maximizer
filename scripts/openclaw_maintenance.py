@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,14 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _derive_status(errors: list[str]) -> str:
+    if not errors:
+        return "PASS"
+    if any(str(err).startswith("primary_channel_unresolved:") for err in errors):
+        return "FAIL"
+    return "WARN"
 
 
 def _parse_json_best_effort(raw: str) -> Any:
@@ -152,6 +161,14 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if not raw:
         return default
     return raw not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        value = int(default)
+    return max(int(minimum), int(value))
 
 
 def _resolve_primary_account_id(channels_payload: dict[str, Any], primary_channel: str) -> str:
@@ -508,6 +525,61 @@ def _set_channel_enabled(
     )
 
 
+def _resolve_dns(hostname: str) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "hostname": hostname,
+        "ok": False,
+        "addresses": [],
+        "error": "",
+    }
+    try:
+        infos = socket.getaddrinfo(str(hostname), None)
+        addresses = sorted(
+            {
+                str(row[4][0])
+                for row in infos
+                if isinstance(row, tuple)
+                and len(row) >= 5
+                and isinstance(row[4], tuple)
+                and len(row[4]) >= 1
+                and row[4][0]
+            }
+        )
+        result["addresses"] = addresses[:8]
+        result["ok"] = bool(addresses)
+        if not addresses:
+            result["error"] = "no_addresses"
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _fetch_channel_logs_tail(
+    *,
+    oc_base: list[str],
+    channel: str,
+    lines: int = 40,
+) -> dict[str, Any]:
+    line_count = max(10, int(lines))
+    res = _run_openclaw(
+        oc_base=oc_base,
+        args=[
+            "--no-color",
+            "channels",
+            "logs",
+            "--channel",
+            str(channel),
+            "--lines",
+            str(line_count),
+        ],
+        timeout_seconds=20.0,
+    )
+    if not res.ok:
+        return {"ok": False, "error": f"channels_logs_failed:rc={res.returncode}"}
+    raw = (res.stdout or "").splitlines()
+    return {"ok": True, "lines": raw[-line_count:]}
+
+
 def _recheck_channels_status(
     *,
     oc_base: list[str],
@@ -528,11 +600,13 @@ def _gateway_health_and_heal(
     restart_on_rpc_failure: bool,
     recheck_delay_seconds: float,
     attempt_primary_reenable: bool,
+    primary_restart_attempts: int,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "rpc_ok": None,
         "service_status": None,
         "service_state": None,
+        "dns": None,
         "primary_channel_issue": None,
         "primary_channel_issue_after_restart": None,
         "primary_channel_issue_final": None,
@@ -558,29 +632,76 @@ def _gateway_health_and_heal(
 
     primary_issue = _detect_primary_channel_issue(channels_payload, primary_channel)
     out["primary_channel_issue"] = primary_issue
+    if primary_channel == "whatsapp":
+        out["dns"] = _resolve_dns("web.whatsapp.com")
 
-    should_restart = bool(primary_issue) or ((out["rpc_ok"] is False) and bool(restart_on_rpc_failure))
+    if bool(out["rpc_ok"]) and str(out["service_status"]).strip().lower() in {"stopped", "ready"}:
+        out["warnings"].append("gateway_service_runtime_mismatch")
+
+    dns_diag = out.get("dns") if isinstance(out.get("dns"), dict) else {}
+    skip_restart_for_dns = bool(
+        primary_issue == "whatsapp_dns_resolution_failed"
+        and isinstance(dns_diag, dict)
+        and not bool(dns_diag.get("ok"))
+    )
+    should_restart = (
+        bool(primary_issue) or ((out["rpc_ok"] is False) and bool(restart_on_rpc_failure))
+    ) and not skip_restart_for_dns
+    if skip_restart_for_dns:
+        out["warnings"].append("skip_restart_due_to_dns_failure")
+
     restart_ok = False
+    issue_after_restart = primary_issue
+    channels_after_restart: dict[str, Any] | None = None
+    restart_attempt_budget = 1
+    if primary_issue:
+        restart_attempt_budget = max(1, int(primary_restart_attempts))
+
     if should_restart and apply:
-        restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
-        if restart.ok:
+        for attempt in range(1, restart_attempt_budget + 1):
+            restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
+            if not restart.ok:
+                out["warnings"].append(f"gateway_restart_attempt_failed:{attempt}:rc={restart.returncode}")
+                continue
+
             restart_ok = True
             out["actions"].append(
                 "gateway_restart_primary_channel_recovery"
                 if primary_issue
                 else "gateway_restart"
             )
-        else:
-            out["errors"].append(f"gateway_restart_failed:rc={restart.returncode}")
+            if restart_attempt_budget > 1:
+                out["actions"].append(f"gateway_restart_attempt:{attempt}")
+
+            if not primary_issue:
+                break
+
+            _status_res, channels_after_restart = _recheck_channels_status(
+                oc_base=oc_base,
+                wait_seconds=recheck_delay_seconds,
+            )
+            if isinstance(channels_after_restart, dict):
+                issue_after_restart = _detect_primary_channel_issue(channels_after_restart, primary_channel)
+                out["primary_channel_issue_after_restart"] = issue_after_restart
+                out["primary_channel_status_after_restart"] = _primary_channel_snapshot(channels_after_restart, primary_channel)
+            else:
+                out["warnings"].append(f"channels_status_unavailable_after_restart_attempt:{attempt}")
+
+            if not issue_after_restart:
+                break
+            if issue_after_restart == "whatsapp_dns_resolution_failed":
+                break
+            if attempt < restart_attempt_budget:
+                out["warnings"].append(
+                    f"primary_issue_persist_after_restart_attempt:{attempt}:{issue_after_restart}"
+                )
     elif should_restart and not apply:
         out["warnings"].append("dry_run_restart_required")
 
-    channels_after_restart: dict[str, Any] | None = None
-    issue_after_restart = primary_issue
-    if primary_issue and restart_ok:
+    if primary_issue and restart_ok and out["primary_channel_status_after_restart"] is None:
         _status_res, channels_after_restart = _recheck_channels_status(
             oc_base=oc_base,
-            wait_seconds=recheck_delay_seconds,
+            wait_seconds=max(1.0, recheck_delay_seconds),
         )
         if isinstance(channels_after_restart, dict):
             issue_after_restart = _detect_primary_channel_issue(channels_after_restart, primary_channel)
@@ -598,6 +719,7 @@ def _gateway_health_and_heal(
         and bool(final_issue)
         and primary_channel == "whatsapp"
         and final_issue != "whatsapp_session_logged_out"
+        and final_issue != "whatsapp_dns_resolution_failed"
     ):
         snapshot = _primary_channel_snapshot(final_channels_payload, primary_channel)
         account_id = str(snapshot.get("account_id") or "default").strip() or "default"
@@ -647,6 +769,11 @@ def _gateway_health_and_heal(
     out["primary_channel_status_final"] = _primary_channel_snapshot(final_channels_payload, primary_channel)
     if final_issue:
         out["errors"].append(f"primary_channel_unresolved:{final_issue}")
+        logs_tail = _fetch_channel_logs_tail(oc_base=oc_base, channel=primary_channel, lines=40)
+        if bool(logs_tail.get("ok")):
+            out["channel_logs_tail"] = logs_tail.get("lines", [])
+        else:
+            out["warnings"].append(str(logs_tail.get("error") or "channels_logs_unavailable"))
         if final_issue == "whatsapp_dns_resolution_failed":
             out["manual_actions"].append("verify_dns_resolution:web.whatsapp.com")
             out["manual_actions"].append("check_network_firewall_or_proxy_for_whatsapp_web")
@@ -686,6 +813,12 @@ def main(argv: list[str]) -> int:
         type=float,
         default=8.0,
         help="Delay before post-heal channel status recheck.",
+    )
+    parser.add_argument(
+        "--primary-restart-attempts",
+        type=int,
+        default=_env_int("OPENCLAW_PRIMARY_RESTART_ATTEMPTS", 2, minimum=1),
+        help="How many gateway restart attempts to run for primary channel recovery.",
     )
     parser.add_argument(
         "--attempt-primary-reenable",
@@ -763,6 +896,7 @@ def main(argv: list[str]) -> int:
         restart_on_rpc_failure=bool(args.restart_gateway_on_rpc_failure),
         recheck_delay_seconds=max(0.0, float(args.recheck_delay_seconds)),
         attempt_primary_reenable=bool(args.attempt_primary_reenable),
+        primary_restart_attempts=max(1, int(args.primary_restart_attempts)),
     )
     report["steps"]["gateway_health"] = gateway_step
 
@@ -789,8 +923,7 @@ def main(argv: list[str]) -> int:
     if lock_step.get("errors"):
         report["warnings"].extend([str(x) for x in lock_step.get("errors", [])])
 
-    if report["errors"]:
-        report["status"] = "WARN"
+    report["status"] = _derive_status([str(x) for x in report["errors"]])
 
     _safe_write_json(report_file, report)
     print(f"[openclaw_maintenance] status={report['status']} apply={args.apply}")

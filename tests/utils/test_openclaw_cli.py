@@ -217,8 +217,16 @@ class TestErrorClassification:
         self, mock_run: MagicMock, _mock_sleep: MagicMock
     ) -> None:
         send_fail = MagicMock(returncode=1, stdout="", stderr="No active WhatsApp Web listener (account: default).")
+        status_not_ready = MagicMock(
+            returncode=0,
+            stdout=(
+                '{"channels":{"whatsapp":{"running":false,"connected":false}},'
+                '"channelAccounts":{"whatsapp":[{"enabled":true,"running":false,"connected":false}]}}'
+            ),
+            stderr="",
+        )
         restart_ok = MagicMock(returncode=0, stdout="restarted", stderr="")
-        status_ok = MagicMock(
+        status_ready = MagicMock(
             returncode=0,
             stdout=(
                 '{"channels":{"whatsapp":{"running":true,"connected":true}},'
@@ -227,18 +235,19 @@ class TestErrorClassification:
             stderr="",
         )
         send_ok = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
-        mock_run.side_effect = [send_fail, restart_ok, status_ok, send_ok]
+        mock_run.side_effect = [send_fail, status_not_ready, restart_ok, status_ready, send_ok]
 
-        with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
-            result = send_message(
-                to="+15551234567",
-                message="hello",
-                command="openclaw",
-                timeout_seconds=5.0,
-                max_retries=0,
-                skip_dedup=True,
-                skip_rate_limit=True,
-            )
+        with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
+            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+                result = send_message(
+                    to="+15551234567",
+                    message="hello",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                    max_retries=0,
+                    skip_dedup=True,
+                    skip_rate_limit=True,
+                )
 
         assert result.ok is True
         calls = [" ".join(str(x) for x in (call.args[0] if call.args else [])) for call in mock_run.call_args_list]
@@ -250,27 +259,68 @@ class TestErrorClassification:
         self, mock_run: MagicMock, _mock_sleep: MagicMock
     ) -> None:
         send_fail = MagicMock(returncode=1, stdout="", stderr="No active WhatsApp Web listener (account: default).")
-        restart_ok = MagicMock(returncode=0, stdout="restarted", stderr="")
         status_fail = MagicMock(
             returncode=1,
             stdout="",
             stderr="WebSocket Error (getaddrinfo ENOTFOUND web.whatsapp.com)",
         )
-        mock_run.side_effect = [send_fail, restart_ok, status_fail]
+        mock_run.side_effect = [send_fail, status_fail]
 
-        with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
-            result = send_message(
-                to="+15551234567",
-                message="hello",
-                command="openclaw",
-                timeout_seconds=5.0,
-                max_retries=0,
-                skip_dedup=True,
-                skip_rate_limit=True,
-            )
+        with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
+            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+                result = send_message(
+                    to="+15551234567",
+                    message="hello",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                    max_retries=0,
+                    skip_dedup=True,
+                    skip_rate_limit=True,
+                )
 
         assert result.ok is False
         assert "DNS lookup to web.whatsapp.com failed" in result.stderr
+
+    @patch("utils.openclaw_cli.time.sleep", return_value=None)
+    @patch("utils.openclaw_cli.time.monotonic", return_value=1000.0)
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_send_message_missing_listener_respects_recovery_cooldown(
+        self, mock_run: MagicMock, _mock_monotonic: MagicMock, _mock_sleep: MagicMock
+    ) -> None:
+        send_fail = MagicMock(returncode=1, stdout="", stderr="No active WhatsApp Web listener (account: default).")
+        status_not_ready = MagicMock(
+            returncode=0,
+            stdout=(
+                '{"channels":{"whatsapp":{"running":false,"connected":false}},'
+                '"channelAccounts":{"whatsapp":[{"enabled":true,"running":false,"connected":false}]}}'
+            ),
+            stderr="",
+        )
+        mock_run.side_effect = [send_fail, status_not_ready]
+
+        with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 999.0}, clear=True):
+            with patch.dict(
+                "utils.openclaw_cli.os.environ",
+                {
+                    "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
+                    "OPENCLAW_LISTENER_RECOVERY_COOLDOWN_SECONDS": "600",
+                },
+                clear=False,
+            ):
+                result = send_message(
+                    to="+15551234567",
+                    message="hello",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                    max_retries=0,
+                    skip_dedup=True,
+                    skip_rate_limit=True,
+                )
+
+        assert result.ok is False
+        assert "cooldown" in result.stderr.lower()
+        calls = [" ".join(str(x) for x in (call.args[0] if call.args else [])) for call in mock_run.call_args_list]
+        assert not any("gateway restart" in cmd for cmd in calls)
 
 
 class TestWorkspaceBootstrapContract:

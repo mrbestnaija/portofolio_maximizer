@@ -117,6 +117,9 @@ _deduplicator = _MessageDeduplicator(
     window_seconds=float(os.getenv("OPENCLAW_DEDUP_WINDOW_SECONDS", "30")),
 )
 
+# Recovery state is process-local and used to prevent gateway restart thrashing.
+_listener_recovery_state: dict[str, float] = {"last_restart_monotonic": 0.0}
+
 
 # ---------------------------------------------------------------------------
 # Retry helper
@@ -609,21 +612,11 @@ def _maybe_recover_missing_whatsapp_listener(
     command: str,
     cwd: Optional[Path],
 ) -> tuple[bool, str]:
-    restart = _run_openclaw_control(
-        command=command,
-        args=["gateway", "restart"],
-        cwd=cwd,
-        timeout_seconds=45.0,
-    )
-    if not restart.ok:
-        return False, f"gateway_restart_failed:rc={restart.returncode}"
-
-    time.sleep(2.5)
     status = _run_openclaw_control(
         command=command,
         args=["--no-color", "channels", "status", "--json"],
         cwd=cwd,
-        timeout_seconds=15.0,
+        timeout_seconds=10.0,
     )
     if _is_whatsapp_dns_error(status):
         return False, "dns_resolution_failed"
@@ -633,8 +626,57 @@ def _maybe_recover_missing_whatsapp_listener(
         except Exception:
             payload = None
         if _is_whatsapp_listener_ready(payload):
-            return True, "listener_ready_after_restart"
-    return False, "listener_not_ready_after_restart"
+            return True, "listener_ready_no_restart"
+
+    try:
+        cooldown_seconds = max(0.0, float(os.getenv("OPENCLAW_LISTENER_RECOVERY_COOLDOWN_SECONDS", "120")))
+    except Exception:
+        cooldown_seconds = 120.0
+    now = time.monotonic()
+    last_restart_at = float(_listener_recovery_state.get("last_restart_monotonic") or 0.0)
+    if cooldown_seconds > 0 and (now - last_restart_at) < cooldown_seconds:
+        return False, "recovery_cooldown_active"
+
+    try:
+        restart_attempts = max(1, int(os.getenv("OPENCLAW_LISTENER_RECOVERY_RESTART_ATTEMPTS", "2")))
+    except Exception:
+        restart_attempts = 2
+    try:
+        recheck_delay = max(1.0, float(os.getenv("OPENCLAW_LISTENER_RECOVERY_RECHECK_SECONDS", "2.5")))
+    except Exception:
+        recheck_delay = 2.5
+
+    last_reason = "listener_not_ready_after_restart"
+    for attempt in range(1, restart_attempts + 1):
+        _listener_recovery_state["last_restart_monotonic"] = time.monotonic()
+        restart = _run_openclaw_control(
+            command=command,
+            args=["gateway", "restart"],
+            cwd=cwd,
+            timeout_seconds=45.0,
+        )
+        if not restart.ok:
+            last_reason = f"gateway_restart_failed:attempt={attempt}:rc={restart.returncode}"
+            continue
+
+        time.sleep(recheck_delay * attempt)
+        status = _run_openclaw_control(
+            command=command,
+            args=["--no-color", "channels", "status", "--json"],
+            cwd=cwd,
+            timeout_seconds=15.0,
+        )
+        if _is_whatsapp_dns_error(status):
+            return False, "dns_resolution_failed"
+        if status.ok:
+            try:
+                payload = _parse_json_best_effort(status.stdout)
+            except Exception:
+                payload = None
+            if _is_whatsapp_listener_ready(payload):
+                return True, f"listener_ready_after_restart_attempt:{attempt}"
+        last_reason = f"listener_not_ready_after_restart_attempt:{attempt}"
+    return False, last_reason
 
 
 def _extract_agent_reply_text(raw: str) -> str:
@@ -808,6 +850,10 @@ def send_message(
         if reason == "dns_resolution_failed":
             note_lines.append(
                 "[PMX] DNS lookup to web.whatsapp.com failed. Verify DNS/network/firewall before retrying."
+            )
+        elif reason == "recovery_cooldown_active":
+            note_lines.append(
+                "[PMX] Listener recovery restart is in cooldown. Retrying too quickly can cause gateway churn."
             )
         note_lines.append(
             "[PMX] If this persists, relink with: openclaw channels login --channel whatsapp --account default --verbose"
