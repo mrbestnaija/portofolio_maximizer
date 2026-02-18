@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
 **Current Phase**: Phase 7.9 Complete (PnL integrity enforcement, adversarial audit, OpenClaw automation, Interactions API)
-**Last Updated**: 2026-02-17
+**Last Updated**: 2026-02-18
 
 ---
 
@@ -188,7 +188,7 @@ The system follows a 7-layer architecture:
 - `market_analyzer.py`: Fundamental analysis via LLM
 
 **Testing Infrastructure:**
-- 731 tests across ETL, LLM, forecaster, integration, and security modules
+- 810+ tests across ETL, LLM, forecaster, integration, and security modules
 - Property-based testing for financial calculations
 - Security validation for credential handling
 
@@ -765,7 +765,7 @@ Key findings for agent awareness:
 
 SARIMAX is disabled by default (mirrors LLM's off-by-default pattern). Only fast forecasters (GARCH, SAMoSSA, MSSA-RL) run unless SARIMAX is explicitly re-enabled.
 
-**Benchmark Results** (2026-02-09, 731 tests, Windows):
+**Benchmark Results** (2026-02-09, 810+ tests, Windows):
 
 | Metric | SARIMAX Off | SARIMAX On | Delta |
 |--------|------------|-----------|-------|
@@ -951,7 +951,7 @@ Results: Key metrics or validation results
 - `execution/` - Order management and paper trading
 - `integrity/` - PnL integrity enforcement (Phase 7.9)
 - `ai_llm/` - LLM integration (Ollama client, market analyzer)
-- `tests/` - Test suite (731 tests)
+- `tests/` - Test suite (810+ tests)
 - `scripts/` - Utility scripts, migrations, APIs
 - `tools/` - Development tools (secrets guard, git askpass)
 - `config/` - YAML configuration files
@@ -962,5 +962,5 @@ Results: Key metrics or validation results
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-17 (Phase 7.9 Complete: PnL integrity enforcement, adversarial audit, OpenClaw cron automation, Interactions API, 3-model LLM strategy, secrets leak guard)
+**Last Updated**: 2026-02-18 (Phase 7.9 Complete: PnL integrity enforcement, adversarial audit, OpenClaw stuck session guard, 6 test fixes, integrity views in schema, OpenClaw cron automation, Interactions API, 3-model LLM strategy, secrets leak guard)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
