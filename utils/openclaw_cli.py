@@ -527,6 +527,116 @@ def _is_missing_listener_error(result: OpenClawResult) -> bool:
     return "no active whatsapp web listener" in combined
 
 
+def _is_whatsapp_dns_error(result: OpenClawResult) -> bool:
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    return ("enotfound" in combined or "getaddrinfo" in combined) and "web.whatsapp.com" in combined
+
+
+def _run_openclaw_control(
+    *,
+    command: str,
+    args: Sequence[str],
+    cwd: Optional[Path] = None,
+    timeout_seconds: float = 20.0,
+) -> OpenClawResult:
+    cmd = [*_split_command(command), *[str(a) for a in args]]
+    try:
+        env = dict(os.environ)
+        env.setdefault("NODE_NO_WARNINGS", "1")
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+            env=env,
+        )
+        return OpenClawResult(
+            ok=proc.returncode == 0,
+            returncode=int(proc.returncode),
+            command=cmd,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+        )
+    except FileNotFoundError as exc:
+        return OpenClawResult(
+            ok=False,
+            returncode=127,
+            command=cmd,
+            stdout="",
+            stderr=str(exc),
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return OpenClawResult(
+            ok=False,
+            returncode=124,
+            command=cmd,
+            stdout=stdout,
+            stderr=stderr or f"OpenClaw command timed out after {timeout_seconds}s",
+        )
+
+
+def _is_whatsapp_listener_ready(status_payload: Any) -> bool:
+    if not isinstance(status_payload, dict):
+        return False
+    channels = status_payload.get("channels") if isinstance(status_payload.get("channels"), dict) else {}
+    whatsapp = channels.get("whatsapp") if isinstance(channels, dict) else None
+    if not isinstance(whatsapp, dict):
+        return False
+    if not bool(whatsapp.get("running")) or not bool(whatsapp.get("connected", True)):
+        return False
+
+    accounts = (
+        status_payload.get("channelAccounts")
+        if isinstance(status_payload.get("channelAccounts"), dict)
+        else {}
+    )
+    wa_accounts = accounts.get("whatsapp") if isinstance(accounts, dict) else None
+    if isinstance(wa_accounts, list):
+        for row in wa_accounts:
+            if not isinstance(row, dict):
+                continue
+            if not bool(row.get("enabled", True)):
+                continue
+            return bool(row.get("running")) and bool(row.get("connected", True))
+    return True
+
+
+def _maybe_recover_missing_whatsapp_listener(
+    *,
+    command: str,
+    cwd: Optional[Path],
+) -> tuple[bool, str]:
+    restart = _run_openclaw_control(
+        command=command,
+        args=["gateway", "restart"],
+        cwd=cwd,
+        timeout_seconds=45.0,
+    )
+    if not restart.ok:
+        return False, f"gateway_restart_failed:rc={restart.returncode}"
+
+    time.sleep(2.5)
+    status = _run_openclaw_control(
+        command=command,
+        args=["--no-color", "channels", "status", "--json"],
+        cwd=cwd,
+        timeout_seconds=15.0,
+    )
+    if _is_whatsapp_dns_error(status):
+        return False, "dns_resolution_failed"
+    if status.ok:
+        try:
+            payload = _parse_json_best_effort(status.stdout)
+        except Exception:
+            payload = None
+        if _is_whatsapp_listener_ready(payload):
+            return True, "listener_ready_after_restart"
+    return False, "listener_not_ready_after_restart"
+
+
 def _extract_agent_reply_text(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
@@ -677,6 +787,38 @@ def send_message(
         last_result = _try_send(cmd)
         if last_result.ok:
             return last_result
+
+    auto_recover_listener = str(os.getenv("OPENCLAW_AUTO_RECOVER_LISTENER", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if _is_missing_listener_error(last_result) and auto_recover_listener:
+        recovered, reason = _maybe_recover_missing_whatsapp_listener(command=command, cwd=cwd)
+        if recovered:
+            post_recovery = _try_send(cmd)
+            if post_recovery.ok:
+                return post_recovery
+            last_result = post_recovery
+        note_lines = [
+            str(last_result.stderr or "").strip(),
+            f"[PMX] Missing WhatsApp listener recovery attempted: {reason}.",
+        ]
+        if reason == "dns_resolution_failed":
+            note_lines.append(
+                "[PMX] DNS lookup to web.whatsapp.com failed. Verify DNS/network/firewall before retrying."
+            )
+        note_lines.append(
+            "[PMX] If this persists, relink with: openclaw channels login --channel whatsapp --account default --verbose"
+        )
+        last_result = OpenClawResult(
+            ok=False,
+            returncode=last_result.returncode,
+            command=last_result.command,
+            stdout=last_result.stdout,
+            stderr="\n".join(line for line in note_lines if line).strip(),
+        )
 
     # --- Session error detection ---
     if _is_session_error(last_result):
@@ -924,6 +1066,18 @@ def run_agent_turn(
                         stdout=no_deliver_result.stdout,
                         stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
                     )
+        if _is_missing_listener_error(last_result):
+            last_result = OpenClawResult(
+                ok=False,
+                returncode=last_result.returncode,
+                command=last_result.command,
+                stdout=last_result.stdout,
+                stderr=(
+                    (last_result.stderr or "").strip()
+                    + "\n[PMX] Missing WhatsApp listener. Try `openclaw gateway restart` and, if needed, "
+                    "`openclaw channels login --channel whatsapp --account default --verbose`."
+                ).strip(),
+            )
 
     return last_result
 

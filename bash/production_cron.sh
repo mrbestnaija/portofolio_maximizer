@@ -247,11 +247,13 @@ PY
     MAINT_APPLY="${CRON_OPENCLAW_MAINTENANCE_APPLY:-1}"
     MAINT_PRIMARY_CHANNEL="${CRON_OPENCLAW_PRIMARY_CHANNEL:-whatsapp}"
     MAINT_SESSION_STALE_SECONDS="${CRON_OPENCLAW_SESSION_STALE_SECONDS:-7200}"
+    MAINT_RECHECK_DELAY_SECONDS="${CRON_OPENCLAW_RECHECK_DELAY_SECONDS:-8}"
     MAINT_REPORT_FILE="${CRON_OPENCLAW_REPORT_FILE:-logs/automation/openclaw_maintenance_latest.json}"
 
     maint_args=(
       "--primary-channel" "${MAINT_PRIMARY_CHANNEL}"
       "--session-stale-seconds" "${MAINT_SESSION_STALE_SECONDS}"
+      "--recheck-delay-seconds" "${MAINT_RECHECK_DELAY_SECONDS}"
       "--report-file" "${MAINT_REPORT_FILE}"
     )
 
@@ -263,6 +265,11 @@ PY
     fi
     if [[ "${CRON_OPENCLAW_RESTART_GATEWAY_ON_FAILURE:-1}" == "1" ]]; then
       maint_args+=("--restart-gateway-on-rpc-failure")
+    fi
+    if [[ "${CRON_OPENCLAW_ATTEMPT_PRIMARY_REENABLE:-1}" == "1" ]]; then
+      maint_args+=("--attempt-primary-reenable")
+    else
+      maint_args+=("--no-attempt-primary-reenable")
     fi
     if [[ "${CRON_OPENCLAW_STRICT:-0}" == "1" ]]; then
       maint_args+=("--strict")

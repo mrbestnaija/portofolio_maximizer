@@ -432,10 +432,25 @@ def main() -> int:
             or "gateway closed" in combined
             or "connect econnrefused" in combined
         )
+        missing_whatsapp_listener = "no active whatsapp web listener" in combined
+        whatsapp_dns_failure = ("enotfound" in combined or "getaddrinfo" in combined) and "web.whatsapp.com" in combined
         if gateway_unreachable:
             print(
                 "[openclaw_notify] Hint: OpenClaw Gateway may not be running/reachable. "
                 "Try `openclaw gateway restart` then retry.",
+                file=sys.stderr,
+            )
+        if missing_whatsapp_listener:
+            print(
+                "[openclaw_notify] Hint: WhatsApp listener is not active. "
+                "Run `python scripts/openclaw_maintenance.py --apply --primary-channel whatsapp` "
+                "or relink with `openclaw channels login --channel whatsapp --account default --verbose`.",
+                file=sys.stderr,
+            )
+        if whatsapp_dns_failure:
+            print(
+                "[openclaw_notify] Hint: DNS resolution failed for web.whatsapp.com. "
+                "Check network/firewall/proxy settings, then restart gateway.",
                 file=sys.stderr,
             )
 
@@ -510,10 +525,25 @@ def main() -> int:
             or "gateway closed" in combined
             or "connect econnrefused" in combined
         )
+        missing_whatsapp_listener = "no active whatsapp web listener" in combined
+        whatsapp_dns_failure = ("enotfound" in combined or "getaddrinfo" in combined) and "web.whatsapp.com" in combined
         if gateway_unreachable:
             print(
                 "[openclaw_notify] Hint: OpenClaw Gateway may not be running/reachable. "
                 "Try `openclaw gateway restart` (or run `openclaw onboard`) then retry.",
+                file=sys.stderr,
+            )
+        if missing_whatsapp_listener:
+            print(
+                "[openclaw_notify] Hint: WhatsApp listener is not active. "
+                "Run `python scripts/openclaw_maintenance.py --apply --primary-channel whatsapp` "
+                "or relink with `openclaw channels login --channel whatsapp --account default --verbose`.",
+                file=sys.stderr,
+            )
+        if whatsapp_dns_failure:
+            print(
+                "[openclaw_notify] Hint: DNS resolution failed for web.whatsapp.com. "
+                "Check network/firewall/proxy settings, then restart gateway.",
                 file=sys.stderr,
             )
         if missing_provider:
