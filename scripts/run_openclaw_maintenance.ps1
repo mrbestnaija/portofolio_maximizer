@@ -4,6 +4,7 @@ Param(
     [bool]$RestartGatewayOnFailure = $true,
     [string]$PrimaryChannel = "whatsapp",
     [double]$RecheckDelaySeconds = 8,
+    [int]$PrimaryRestartAttempts = 2,
     [bool]$AttemptPrimaryReenable = $true
 )
 
@@ -37,6 +38,7 @@ if (Test-WslReady) {
         "CRON_OPENCLAW_DISABLE_BROKEN_CHANNELS=$([int]$DisableBrokenChannels)",
         "CRON_OPENCLAW_RESTART_GATEWAY_ON_FAILURE=$([int]$RestartGatewayOnFailure)",
         "CRON_OPENCLAW_RECHECK_DELAY_SECONDS=$RecheckDelaySeconds",
+        "CRON_OPENCLAW_PRIMARY_RESTART_ATTEMPTS=$PrimaryRestartAttempts",
         "CRON_OPENCLAW_ATTEMPT_PRIMARY_REENABLE=$([int]$AttemptPrimaryReenable)",
         "CRON_OPENCLAW_PRIMARY_CHANNEL='$PrimaryChannel'"
     )
@@ -49,7 +51,8 @@ Set-Location $repoRoot
 $args = @(
     "scripts/openclaw_maintenance.py",
     "--primary-channel", $PrimaryChannel,
-    "--recheck-delay-seconds", "$RecheckDelaySeconds"
+    "--recheck-delay-seconds", "$RecheckDelaySeconds",
+    "--primary-restart-attempts", "$PrimaryRestartAttempts"
 )
 if ($Apply) {
     $args += "--apply"

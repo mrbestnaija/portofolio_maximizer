@@ -248,12 +248,14 @@ PY
     MAINT_PRIMARY_CHANNEL="${CRON_OPENCLAW_PRIMARY_CHANNEL:-whatsapp}"
     MAINT_SESSION_STALE_SECONDS="${CRON_OPENCLAW_SESSION_STALE_SECONDS:-7200}"
     MAINT_RECHECK_DELAY_SECONDS="${CRON_OPENCLAW_RECHECK_DELAY_SECONDS:-8}"
+    MAINT_PRIMARY_RESTART_ATTEMPTS="${CRON_OPENCLAW_PRIMARY_RESTART_ATTEMPTS:-2}"
     MAINT_REPORT_FILE="${CRON_OPENCLAW_REPORT_FILE:-logs/automation/openclaw_maintenance_latest.json}"
 
     maint_args=(
       "--primary-channel" "${MAINT_PRIMARY_CHANNEL}"
       "--session-stale-seconds" "${MAINT_SESSION_STALE_SECONDS}"
       "--recheck-delay-seconds" "${MAINT_RECHECK_DELAY_SECONDS}"
+      "--primary-restart-attempts" "${MAINT_PRIMARY_RESTART_ATTEMPTS}"
       "--report-file" "${MAINT_REPORT_FILE}"
     )
 
