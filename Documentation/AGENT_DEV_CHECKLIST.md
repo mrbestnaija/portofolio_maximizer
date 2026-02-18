@@ -19,6 +19,18 @@
 > - Always report the exact test commands and outputs used to justify a commit/push decision.
 > - If tests are skipped or fail, **block the commit/push** and document the reason.
 
+> **Concurrent Agent Safety Gate (Mandatory)**
+> - Run `git status --porcelain` before edits and before staging/commit.
+> - If modified/untracked files are present from parallel work, inspect them first with `git diff -- <file>` and do not overwrite blindly.
+> - Keep your commit file list scoped to your task; leave unrelated parallel changes unstaged.
+> - Verify compatibility of concurrent work before commit:
+>   - compile/smoke checks for touched entry points,
+>   - fast regression lane (`pytest -m "not gpu and not slow"`) when feasible.
+> - In final reporting, explicitly separate:
+>   - what you changed,
+>   - what was intentionally left untouched,
+>   - what was verified and with which commands.
+
 ## Delta (2026-01-18)
 
 - Live dashboard must not fabricate results: `visualizations/live_dashboard.html` only renders from `visualizations/dashboard_data.json` (polled every 5s) and shows empty states when missing.

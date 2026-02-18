@@ -41,6 +41,27 @@ Configure targets via environment variables (recommended so you do not hardcode 
 - `OPENCLAW_REPLY_CHANNEL` / `OPENCLAW_REPLY_TO` / `OPENCLAW_REPLY_ACCOUNT` (prompt mode optional)  
   Lets prompt mode deliver the reply to a different channel/target.
 
+### Tavily API / MCP (Preferred Over Brave For Quota-Limited Search)
+
+Use Tavily as the default web grounding path for PMX automations:
+
+- Add `TAVILY_API_KEY` to `.env` (or `TAVILY_API_KEY_FILE`).
+- Run direct Tavily search from PMX:
+  - `python scripts/tavily_search.py --query "latest market regime for AAPL" --json`
+- Configure OpenClaw-side Tavily MCP wiring:
+  - `python scripts/configure_tavily_mcp.py`
+
+If your OpenClaw CLI supports MCP commands, the script runs:
+
+- `openclaw mcp add --transport http tavily https://mcp.tavily.com/mcp/?tavilyApiKey=<key>`
+
+If your OpenClaw build does not expose `mcp` commands yet, the script reports `PARTIAL`,
+writes Tavily credentials into `~/.openclaw/.env`, and leaves an audit file at:
+
+- `logs/automation/tavily_mcp_setup_latest.json`
+
+Brave can remain configured as fallback only (`BRAVE_API_KEY`), but PMX defaults should prefer Tavily.
+
 ### Error Monitor Alerts (Default: Enabled, No-Op Until Configured)
 
 1. Set at least `OPENCLAW_TARGETS` or `OPENCLAW_TO` (in `.env` or environment).
@@ -235,6 +256,17 @@ Controls:
 - `PMX_QWEN_PROGRESS_UPDATES` (default: `true`)
 - `PMX_QWEN_PROGRESS_MIN_INTERVAL_SECONDS` (default profile-driven: `8` low-latency, `10` high-accuracy)
 - `PMX_QWEN_PROGRESS_MAX_MESSAGE_CHARS` (default: `220`)
+
+### Multi-Agent Coordination (Safe Parallel Work)
+
+If multiple developer-agents are active at the same time (OpenClaw + IDE agents + humans):
+
+- Begin each task with a workspace reality check: `git status --porcelain`.
+- Treat existing modified/untracked files as potentially owned by another active agent.
+- Inspect shared-file diffs before editing (`git diff -- <file>`), then complement rather than overwrite.
+- Keep commit scopes narrow and task-specific; avoid bundling unrelated parallel edits.
+- Before finalization, run non-breaking verification (compile/smoke and fast pytest lane when feasible).
+- Report what changed, what was intentionally left untouched, and exact verification commands.
 
 For explicit runtime setup prompts (for example: "install torch system-wide" or "pip install pandas"),
 `openclaw_bridge` now uses a fast path that executes dependency tools directly:
