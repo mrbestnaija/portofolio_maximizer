@@ -4,8 +4,10 @@ OpenClaw maintenance guard for resilient messaging operations.
 
 Actions:
 - Cleans stale OpenClaw session lock files (optionally archives stale session jsonl files).
-- Checks gateway RPC health and restarts gateway when unhealthy.
+- Ensures only one maintenance runner is active at a time via a shared lock file.
+- Checks gateway RPC health and restarts gateway when unhealthy (with cooldown/backoff).
 - Optionally disables persistently broken non-primary channels to reduce noisy failures.
+- Surfaces WhatsApp delivery/session degradation signals from recent channel logs.
 
 The script is safe by default (dry-run). Use --apply to perform mutations.
 """
@@ -15,11 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import shutil
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +53,31 @@ def _split_command(command: str) -> list[str]:
         return [raw or "openclaw"]
 
 
+def _normalize_openclaw_command(command_parts: list[str]) -> tuple[list[str], str]:
+    parts = [str(x or "").strip() for x in (command_parts or [])]
+    parts = [x for x in parts if x]
+    if not parts:
+        return _split_command("openclaw"), "openclaw_command_empty_fallback"
+
+    script_name = Path(__file__).name.lower()
+    contains_self = False
+    for token in parts:
+        low = token.lower()
+        if script_name in low:
+            contains_self = True
+            break
+        try:
+            if Path(token).name.lower() == script_name:
+                contains_self = True
+                break
+        except Exception:
+            continue
+
+    if contains_self:
+        return _split_command("openclaw"), "openclaw_command_self_reference_reset"
+    return parts, ""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -70,6 +99,26 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _safe_read_json(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    if text not in items:
+        items.append(text)
 
 
 def _derive_status(errors: list[str]) -> str:
@@ -105,6 +154,21 @@ class _CmdResult:
     command: list[str]
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class _RunLock:
+    path: Path
+    token: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _RunLockAttempt:
+    acquired: bool
+    lock: Optional[_RunLock]
+    holder: dict[str, Any]
+    reason: str
 
 
 def _run_openclaw(
@@ -169,6 +233,14 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     except Exception:
         value = int(default)
     return max(int(minimum), int(value))
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except Exception:
+        value = float(default)
+    return max(float(minimum), float(value))
 
 
 def _resolve_primary_account_id(channels_payload: dict[str, Any], primary_channel: str) -> str:
@@ -269,6 +341,101 @@ def _pid_running(pid: int) -> bool:
     return False
 
 
+def _state_seconds_since(value: Any) -> Optional[float]:
+    ts = _parse_ts(value)
+    if ts is None:
+        return None
+    return max(0.0, (_utc_now() - ts).total_seconds())
+
+
+def _load_runtime_state(path: Path) -> dict[str, Any]:
+    payload = _safe_read_json(path)
+    state = payload if isinstance(payload, dict) else {}
+    state.setdefault("version", 1)
+    return state
+
+
+def _save_runtime_state(path: Path, state: dict[str, Any]) -> None:
+    payload = dict(state or {})
+    payload["updated_at_utc"] = _utc_now_iso()
+    _safe_write_json(path, payload)
+
+
+def _acquire_run_lock(
+    *,
+    lock_path: Path,
+    mode: str,
+    wait_seconds: float,
+    stale_seconds: int,
+) -> _RunLockAttempt:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    poll_seconds = 0.5
+
+    while True:
+        token = f"{os.getpid()}-{int(time.time() * 1000)}"
+        payload = {
+            "pid": int(os.getpid()),
+            "mode": str(mode or "run"),
+            "created_at_utc": _utc_now_iso(),
+            "token": token,
+            "command": " ".join(sys.argv),
+        }
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, json.dumps(payload, indent=2).encode("utf-8"))
+            finally:
+                os.close(fd)
+            return _RunLockAttempt(
+                acquired=True,
+                lock=_RunLock(path=lock_path, token=token, payload=payload),
+                holder={},
+                reason="acquired",
+            )
+        except FileExistsError:
+            holder = _safe_read_json(lock_path)
+            holder_pid = 0
+            try:
+                holder_pid = int(holder.get("pid") or 0)
+            except Exception:
+                holder_pid = 0
+            holder_age = _state_seconds_since(holder.get("created_at_utc"))
+            stale = False
+            if holder_pid > 0 and not _pid_running(holder_pid):
+                stale = True
+            elif holder_pid <= 0 and holder_age is not None and holder_age >= max(60, int(stale_seconds)):
+                stale = True
+
+            if stale:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    pass
+
+            if time.monotonic() >= deadline:
+                return _RunLockAttempt(acquired=False, lock=None, holder=holder, reason="held")
+            time.sleep(poll_seconds)
+        except Exception as exc:
+            return _RunLockAttempt(
+                acquired=False,
+                lock=None,
+                holder={"error": str(exc)},
+                reason="lock_error",
+            )
+
+
+def _release_run_lock(lock: _RunLock) -> None:
+    try:
+        holder = _safe_read_json(lock.path)
+        if str(holder.get("token") or "") != str(lock.token):
+            return
+        lock.path.unlink(missing_ok=True)
+    except Exception:
+        return
+
+
 def _archive_path(path: Path, suffix: str) -> Path:
     ts = _utc_now().strftime("%Y%m%d_%H%M%S")
     return path.with_name(f"{path.stem}.stale.{ts}.{suffix}")
@@ -292,10 +459,27 @@ def _cleanup_stale_session_locks(
         return result
 
     now = _utc_now()
-    for sessions_dir in agents_root.glob("*/sessions"):
-        if not sessions_dir.is_dir():
+    try:
+        session_dirs = list(agents_root.glob("*/sessions"))
+    except Exception as exc:
+        result["errors"].append(f"scan_sessions_root_failed:{exc}")
+        return result
+
+    for sessions_dir in session_dirs:
+        try:
+            if not sessions_dir.is_dir():
+                continue
+        except Exception as exc:
+            result["errors"].append(f"scan_session_dir_failed:{sessions_dir}:{exc}")
             continue
-        for lock_path in sessions_dir.glob("*.jsonl.lock"):
+
+        try:
+            lock_files = list(sessions_dir.glob("*.jsonl.lock"))
+        except Exception as exc:
+            result["errors"].append(f"scan_lock_glob_failed:{sessions_dir}:{exc}")
+            continue
+
+        for lock_path in lock_files:
             if ".stale." in lock_path.name:
                 continue
             result["lock_files_scanned"] += 1
@@ -505,26 +689,6 @@ def _set_channel_account_enabled(
     )
 
 
-def _set_channel_enabled(
-    *,
-    oc_base: list[str],
-    channel: str,
-    enabled: bool,
-) -> _CmdResult:
-    return _run_openclaw(
-        oc_base=oc_base,
-        args=[
-            "--no-color",
-            "config",
-            "set",
-            f"channels.{channel}.enabled",
-            "true" if enabled else "false",
-            "--json",
-        ],
-        timeout_seconds=15.0,
-    )
-
-
 def _resolve_dns(hostname: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "hostname": hostname,
@@ -552,6 +716,47 @@ def _resolve_dns(hostname: str) -> dict[str, Any]:
     except Exception as exc:
         result["error"] = str(exc)
     return result
+
+
+def _reprobe_dns(
+    hostname: str,
+    *,
+    attempts: int,
+    base_delay_seconds: float,
+) -> dict[str, Any]:
+    total_attempts = max(1, int(attempts))
+    base_delay = max(0.0, float(base_delay_seconds))
+    history: list[dict[str, Any]] = []
+
+    for idx in range(1, total_attempts + 1):
+        diag = _resolve_dns(hostname)
+        row = {
+            "attempt": idx,
+            "ok": bool(diag.get("ok")),
+            "addresses": list(diag.get("addresses") or []),
+            "error": str(diag.get("error") or ""),
+        }
+        history.append(row)
+        if row["ok"]:
+            return {
+                "hostname": hostname,
+                "ok": True,
+                "attempts": total_attempts,
+                "base_delay_seconds": base_delay,
+                "succeeded_on_attempt": idx,
+                "history": history,
+            }
+        if idx < total_attempts and base_delay > 0:
+            time.sleep(base_delay * float(2 ** (idx - 1)))
+
+    return {
+        "hostname": hostname,
+        "ok": False,
+        "attempts": total_attempts,
+        "base_delay_seconds": base_delay,
+        "succeeded_on_attempt": None,
+        "history": history,
+    }
 
 
 def _fetch_channel_logs_tail(
@@ -584,11 +789,59 @@ def _recheck_channels_status(
     *,
     oc_base: list[str],
     wait_seconds: float,
+    probe: bool = False,
 ) -> tuple[_CmdResult, Optional[dict[str, Any]]]:
     if wait_seconds > 0:
         time.sleep(max(0.0, float(wait_seconds)))
-    res, payload = _run_openclaw_json(oc_base=oc_base, args=["channels", "status"], timeout_seconds=20.0)
+    args = ["channels", "status"]
+    if probe:
+        args.append("--probe")
+    res, payload = _run_openclaw_json(oc_base=oc_base, args=args, timeout_seconds=20.0)
     return res, payload if isinstance(payload, dict) else None
+
+
+def _classify_gateway_restart_failure(res: _CmdResult) -> str:
+    text = " ".join([str(res.stdout or ""), str(res.stderr or "")]).lower()
+    if any(token in text for token in ("gateway already running", "lock timeout", "port 18789 is already in use")):
+        return "already_running_conflict"
+    if "timeout" in text:
+        return "timeout"
+    return f"rc={int(res.returncode)}"
+
+
+def _analyze_whatsapp_delivery_signals(lines: list[str]) -> dict[str, Any]:
+    counts: dict[str, int] = {
+        "closed_session_events": 0,
+        "recovery_budget_exceeded_events": 0,
+        "deferred_to_restart_events": 0,
+        "retry_wait_events": 0,
+    }
+    retry_wait_max_ms = 0
+    retry_wait_re = re.compile(r"waiting\s+(\d+)\s*ms\s+before retrying delivery", re.IGNORECASE)
+
+    for raw in lines:
+        line = str(raw or "")
+        low = line.lower()
+        if "decrypted message with closed session" in low:
+            counts["closed_session_events"] += 1
+        if "recovery time budget exceeded" in low:
+            counts["recovery_budget_exceeded_events"] += 1
+        if "deferred to next restart" in low:
+            counts["deferred_to_restart_events"] += 1
+        match = retry_wait_re.search(line)
+        if match:
+            counts["retry_wait_events"] += 1
+            try:
+                retry_wait_max_ms = max(retry_wait_max_ms, int(match.group(1)))
+            except Exception:
+                pass
+
+    signal_count = int(sum(int(v) for v in counts.values()))
+    return {
+        "signal_count": signal_count,
+        "counts": counts,
+        "retry_wait_max_ms": int(retry_wait_max_ms),
+    }
 
 
 def _gateway_health_and_heal(
@@ -601,11 +854,17 @@ def _gateway_health_and_heal(
     recheck_delay_seconds: float,
     attempt_primary_reenable: bool,
     primary_restart_attempts: int,
+    state: Optional[dict[str, Any]] = None,
+    gateway_restart_cooldown_seconds: float = 0.0,
+    primary_reenable_cooldown_seconds: float = 0.0,
+    restart_retry_base_delay_seconds: float = 2.0,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "rpc_ok": None,
         "service_status": None,
         "service_state": None,
+        "gateway_port_status": None,
+        "gateway_listener_pid": None,
         "dns": None,
         "primary_channel_issue": None,
         "primary_channel_issue_after_restart": None,
@@ -613,11 +872,14 @@ def _gateway_health_and_heal(
         "primary_channel_status_before": _primary_channel_snapshot(channels_payload, primary_channel),
         "primary_channel_status_after_restart": None,
         "primary_channel_status_final": None,
+        "delivery_recovery": None,
         "actions": [],
         "manual_actions": [],
         "warnings": [],
         "errors": [],
     }
+    state_map = state if isinstance(state, dict) else {}
+    dns_host = "web.whatsapp.com"
     _, gateway_payload = _run_openclaw_json(oc_base=oc_base, args=["gateway", "status"], timeout_seconds=20.0)
     if not isinstance(gateway_payload, dict):
         out["errors"].append("gateway_status_unavailable")
@@ -626,29 +888,89 @@ def _gateway_health_and_heal(
     rpc = gateway_payload.get("rpc") if isinstance(gateway_payload.get("rpc"), dict) else {}
     service = gateway_payload.get("service") if isinstance(gateway_payload.get("service"), dict) else {}
     runtime = service.get("runtime") if isinstance(service.get("runtime"), dict) else {}
+    port = gateway_payload.get("port") if isinstance(gateway_payload.get("port"), dict) else {}
+    listeners = port.get("listeners") if isinstance(port.get("listeners"), list) else []
+    listener = listeners[0] if listeners and isinstance(listeners[0], dict) else {}
     out["rpc_ok"] = bool(rpc.get("ok"))
     out["service_status"] = str(runtime.get("status") or "")
     out["service_state"] = str(runtime.get("state") or "")
+    out["gateway_port_status"] = str(port.get("status") or "")
+    out["gateway_listener_pid"] = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else None
 
     primary_issue = _detect_primary_channel_issue(channels_payload, primary_channel)
     out["primary_channel_issue"] = primary_issue
     if primary_channel == "whatsapp":
-        out["dns"] = _resolve_dns("web.whatsapp.com")
+        out["dns"] = _resolve_dns(dns_host)
+        before = out.get("primary_channel_status_before") if isinstance(out.get("primary_channel_status_before"), dict) else {}
+        if bool(before.get("configured")) and bool(before.get("linked")) and (
+            (not bool(before.get("running"))) or (not bool(before.get("connected", True)))
+        ):
+            _append_unique(out["warnings"], "whatsapp_provider_unavailable")
 
     if bool(out["rpc_ok"]) and str(out["service_status"]).strip().lower() in {"stopped", "ready"}:
-        out["warnings"].append("gateway_service_runtime_mismatch")
+        _append_unique(out["warnings"], "gateway_service_runtime_mismatch")
+
+    listener_conflict = bool(
+        bool(out["rpc_ok"])
+        and str(out["gateway_port_status"]).strip().lower() == "busy"
+        and str(out["service_status"]).strip().lower() in {"stopped", "ready"}
+    )
+    if listener_conflict:
+        _append_unique(out["warnings"], "gateway_detached_listener_conflict")
+        _append_unique(out["manual_actions"], "run: openclaw gateway status --json")
 
     dns_diag = out.get("dns") if isinstance(out.get("dns"), dict) else {}
+    dns_reprobe_ok: Optional[bool] = None
+    if primary_channel == "whatsapp" and primary_issue == "whatsapp_dns_resolution_failed":
+        dns_reprobe = _reprobe_dns(
+            dns_host,
+            attempts=_env_int("OPENCLAW_DNS_REPROBE_ATTEMPTS", 3, minimum=1),
+            base_delay_seconds=_env_float("OPENCLAW_DNS_REPROBE_BASE_DELAY_SECONDS", 1.0, minimum=0.0),
+        )
+        out["dns_reprobe"] = dns_reprobe
+        dns_reprobe_ok = bool(dns_reprobe.get("ok"))
+        if dns_reprobe_ok:
+            _append_unique(out["actions"], "dns_reprobe_recovered")
+            _probe_res, channels_after_probe = _recheck_channels_status(
+                oc_base=oc_base,
+                wait_seconds=0.0,
+                probe=True,
+            )
+            if isinstance(channels_after_probe, dict):
+                channels_payload = channels_after_probe
+                out["primary_channel_status_before"] = _primary_channel_snapshot(channels_payload, primary_channel)
+                primary_issue = _detect_primary_channel_issue(channels_after_probe, primary_channel)
+                out["primary_channel_issue"] = primary_issue
+            else:
+                _append_unique(out["warnings"], "channels_status_unavailable_after_dns_reprobe")
+
     skip_restart_for_dns = bool(
         primary_issue == "whatsapp_dns_resolution_failed"
-        and isinstance(dns_diag, dict)
-        and not bool(dns_diag.get("ok"))
+        and not (
+            bool(dns_reprobe_ok)
+            if dns_reprobe_ok is not None
+            else bool(isinstance(dns_diag, dict) and dns_diag.get("ok"))
+        )
+    )
+    last_restart_elapsed = _state_seconds_since(state_map.get("last_gateway_restart_at"))
+    skip_restart_for_cooldown = bool(
+        float(gateway_restart_cooldown_seconds) > 0
+        and last_restart_elapsed is not None
+        and last_restart_elapsed < float(gateway_restart_cooldown_seconds)
     )
     should_restart = (
         bool(primary_issue) or ((out["rpc_ok"] is False) and bool(restart_on_rpc_failure))
-    ) and not skip_restart_for_dns
+    ) and not skip_restart_for_dns and not listener_conflict and not skip_restart_for_cooldown
     if skip_restart_for_dns:
-        out["warnings"].append("skip_restart_due_to_dns_failure")
+        _append_unique(out["warnings"], "skip_restart_due_to_dns_failure")
+    if listener_conflict:
+        _append_unique(out["warnings"], "skip_restart_due_to_listener_conflict")
+    if skip_restart_for_cooldown:
+        remaining = max(
+            1,
+            int(round(float(gateway_restart_cooldown_seconds) - float(last_restart_elapsed or 0.0))),
+        )
+        _append_unique(out["warnings"], f"gateway_restart_cooldown_active:{remaining}s")
 
     restart_ok = False
     issue_after_restart = primary_issue
@@ -661,17 +983,29 @@ def _gateway_health_and_heal(
         for attempt in range(1, restart_attempt_budget + 1):
             restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
             if not restart.ok:
-                out["warnings"].append(f"gateway_restart_attempt_failed:{attempt}:rc={restart.returncode}")
+                reason = _classify_gateway_restart_failure(restart)
+                _append_unique(out["warnings"], f"gateway_restart_attempt_failed:{attempt}:{reason}")
+                if reason == "already_running_conflict":
+                    _append_unique(out["warnings"], "gateway_restart_conflict_detected")
+                    break
+                if attempt < restart_attempt_budget:
+                    delay = max(0.0, float(restart_retry_base_delay_seconds)) * float(2 ** (attempt - 1))
+                    if delay > 0:
+                        _append_unique(out["warnings"], f"gateway_restart_backoff_wait:{int(round(delay))}s")
+                        time.sleep(delay)
                 continue
 
             restart_ok = True
-            out["actions"].append(
+            _append_unique(
+                out["actions"],
                 "gateway_restart_primary_channel_recovery"
                 if primary_issue
-                else "gateway_restart"
+                else "gateway_restart",
             )
             if restart_attempt_budget > 1:
-                out["actions"].append(f"gateway_restart_attempt:{attempt}")
+                _append_unique(out["actions"], f"gateway_restart_attempt:{attempt}")
+            state_map["last_gateway_restart_at"] = _utc_now_iso()
+            state_map["last_gateway_restart_reason"] = str(primary_issue or "rpc_failure")
 
             if not primary_issue:
                 break
@@ -679,43 +1013,59 @@ def _gateway_health_and_heal(
             _status_res, channels_after_restart = _recheck_channels_status(
                 oc_base=oc_base,
                 wait_seconds=recheck_delay_seconds,
+                probe=(primary_channel == "whatsapp"),
             )
             if isinstance(channels_after_restart, dict):
                 issue_after_restart = _detect_primary_channel_issue(channels_after_restart, primary_channel)
                 out["primary_channel_issue_after_restart"] = issue_after_restart
                 out["primary_channel_status_after_restart"] = _primary_channel_snapshot(channels_after_restart, primary_channel)
             else:
-                out["warnings"].append(f"channels_status_unavailable_after_restart_attempt:{attempt}")
+                _append_unique(out["warnings"], f"channels_status_unavailable_after_restart_attempt:{attempt}")
 
             if not issue_after_restart:
                 break
             if issue_after_restart == "whatsapp_dns_resolution_failed":
                 break
             if attempt < restart_attempt_budget:
-                out["warnings"].append(
-                    f"primary_issue_persist_after_restart_attempt:{attempt}:{issue_after_restart}"
-                )
+                _append_unique(out["warnings"], f"primary_issue_persist_after_restart_attempt:{attempt}:{issue_after_restart}")
+                delay = max(0.0, float(restart_retry_base_delay_seconds)) * float(2 ** (attempt - 1))
+                if delay > 0:
+                    _append_unique(out["warnings"], f"gateway_restart_backoff_wait:{int(round(delay))}s")
+                    time.sleep(delay)
     elif should_restart and not apply:
-        out["warnings"].append("dry_run_restart_required")
+        _append_unique(out["warnings"], "dry_run_restart_required")
 
     if primary_issue and restart_ok and out["primary_channel_status_after_restart"] is None:
         _status_res, channels_after_restart = _recheck_channels_status(
             oc_base=oc_base,
             wait_seconds=max(1.0, recheck_delay_seconds),
+            probe=(primary_channel == "whatsapp"),
         )
         if isinstance(channels_after_restart, dict):
             issue_after_restart = _detect_primary_channel_issue(channels_after_restart, primary_channel)
             out["primary_channel_issue_after_restart"] = issue_after_restart
             out["primary_channel_status_after_restart"] = _primary_channel_snapshot(channels_after_restart, primary_channel)
         else:
-            out["warnings"].append("channels_status_unavailable_after_restart")
+            _append_unique(out["warnings"], "channels_status_unavailable_after_restart")
 
     final_channels_payload = channels_after_restart if isinstance(channels_after_restart, dict) else channels_payload
     final_issue = issue_after_restart if restart_ok else primary_issue
 
+    can_attempt_reenable = True
+    if float(primary_reenable_cooldown_seconds) > 0:
+        last_reenable_elapsed = _state_seconds_since(state_map.get("last_primary_reenable_at"))
+        if last_reenable_elapsed is not None and last_reenable_elapsed < float(primary_reenable_cooldown_seconds):
+            can_attempt_reenable = False
+            remaining = max(
+                1,
+                int(round(float(primary_reenable_cooldown_seconds) - float(last_reenable_elapsed))),
+            )
+            _append_unique(out["warnings"], f"primary_reenable_cooldown_active:{remaining}s")
+
     if (
         bool(apply)
         and bool(attempt_primary_reenable)
+        and can_attempt_reenable
         and bool(final_issue)
         and primary_channel == "whatsapp"
         and final_issue != "whatsapp_session_logged_out"
@@ -731,9 +1081,9 @@ def _gateway_health_and_heal(
                 enabled=False,
             )
             if not disable_res.ok:
-                out["warnings"].append(f"primary_account_disable_failed:{account_id}:rc={disable_res.returncode}")
+                _append_unique(out["warnings"], f"primary_account_disable_failed:{account_id}:rc={disable_res.returncode}")
             else:
-                out["actions"].append(f"primary_account_disabled:{account_id}")
+                _append_unique(out["actions"], f"primary_account_disabled:{account_id}")
 
             enable_res = _set_channel_account_enabled(
                 oc_base=oc_base,
@@ -742,50 +1092,241 @@ def _gateway_health_and_heal(
                 enabled=True,
             )
             if not enable_res.ok:
-                out["warnings"].append(f"primary_account_enable_failed:{account_id}:rc={enable_res.returncode}")
+                _append_unique(out["warnings"], f"primary_account_enable_failed:{account_id}:rc={enable_res.returncode}")
             else:
-                out["actions"].append(f"primary_account_enabled:{account_id}")
-
-            _set_channel_enabled(oc_base=oc_base, channel=primary_channel, enabled=True)
+                _append_unique(out["actions"], f"primary_account_enabled:{account_id}")
+            state_map["last_primary_reenable_at"] = _utc_now_iso()
+            # WhatsApp uses per-account enabled flags; writing channels.whatsapp.enabled
+            # can trigger schema validation errors on newer OpenClaw builds.
 
             if disable_res.ok and enable_res.ok:
                 restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
                 if restart.ok:
-                    out["actions"].append("gateway_restart_after_primary_reenable")
+                    _append_unique(out["actions"], "gateway_restart_after_primary_reenable")
+                    state_map["last_gateway_restart_at"] = _utc_now_iso()
+                    state_map["last_gateway_restart_reason"] = "primary_reenable"
                 else:
-                    out["warnings"].append(f"gateway_restart_after_reenable_failed:rc={restart.returncode}")
+                    reason = _classify_gateway_restart_failure(restart)
+                    _append_unique(out["warnings"], f"gateway_restart_after_reenable_failed:{reason}")
 
                 _status_res, channels_after_reenable = _recheck_channels_status(
                     oc_base=oc_base,
                     wait_seconds=recheck_delay_seconds,
+                    probe=(primary_channel == "whatsapp"),
                 )
                 if isinstance(channels_after_reenable, dict):
                     final_channels_payload = channels_after_reenable
                     final_issue = _detect_primary_channel_issue(channels_after_reenable, primary_channel)
                 else:
-                    out["warnings"].append("channels_status_unavailable_after_primary_reenable")
+                    _append_unique(out["warnings"], "channels_status_unavailable_after_primary_reenable")
 
     out["primary_channel_issue_final"] = final_issue
     out["primary_channel_status_final"] = _primary_channel_snapshot(final_channels_payload, primary_channel)
-    if final_issue:
-        out["errors"].append(f"primary_channel_unresolved:{final_issue}")
-        logs_tail = _fetch_channel_logs_tail(oc_base=oc_base, channel=primary_channel, lines=40)
+    logs_tail_lines: list[str] = []
+    logs_tail_available = False
+    if primary_channel == "whatsapp":
+        logs_tail = _fetch_channel_logs_tail(
+            oc_base=oc_base,
+            channel=primary_channel,
+            lines=_env_int("OPENCLAW_WHATSAPP_LOG_TAIL_LINES", 80, minimum=20),
+        )
         if bool(logs_tail.get("ok")):
-            out["channel_logs_tail"] = logs_tail.get("lines", [])
-        else:
-            out["warnings"].append(str(logs_tail.get("error") or "channels_logs_unavailable"))
+            lines = logs_tail.get("lines")
+            logs_tail_lines = [str(x) for x in lines] if isinstance(lines, list) else []
+            logs_tail_available = True
+            signal_diag = _analyze_whatsapp_delivery_signals(logs_tail_lines)
+            if int(signal_diag.get("signal_count") or 0) > 0:
+                out["delivery_recovery"] = signal_diag
+                counts = signal_diag.get("counts") if isinstance(signal_diag.get("counts"), dict) else {}
+                if int(counts.get("closed_session_events") or 0) > 0:
+                    _append_unique(out["warnings"], "whatsapp_closed_session_signal_detected")
+                    _append_unique(
+                        out["manual_actions"],
+                        "run: openclaw channels login --channel whatsapp --account default --verbose",
+                    )
+                if int(counts.get("recovery_budget_exceeded_events") or 0) > 0:
+                    _append_unique(out["warnings"], "delivery_recovery_budget_exceeded")
+                if int(counts.get("deferred_to_restart_events") or 0) > 0:
+                    _append_unique(out["warnings"], "delivery_recovery_deferred_to_restart")
+                if (
+                    int(counts.get("recovery_budget_exceeded_events") or 0) > 0
+                    or int(counts.get("deferred_to_restart_events") or 0) > 0
+                ):
+                    _append_unique(out["manual_actions"], "run: openclaw channels logs --channel whatsapp --lines 300")
+                    _append_unique(out["manual_actions"], "check_openclaw_delivery_recovery_budget_and_retry_settings")
+                    _append_unique(out["manual_actions"], "avoid_concurrent_gateway_restarts_during_delivery_recovery")
+                retry_wait_max_ms = int(signal_diag.get("retry_wait_max_ms") or 0)
+                retry_warn_ms = _env_int("OPENCLAW_DELIVERY_RETRY_WARN_MS", 20000, minimum=1000)
+                if retry_wait_max_ms >= retry_warn_ms:
+                    _append_unique(out["warnings"], f"delivery_retry_wait_high:{retry_wait_max_ms}ms")
+        elif final_issue:
+            _append_unique(out["warnings"], str(logs_tail.get("error") or "channels_logs_unavailable"))
+
+    if final_issue:
+        _append_unique(out["errors"], f"primary_channel_unresolved:{final_issue}")
+        if logs_tail_available:
+            out["channel_logs_tail"] = logs_tail_lines
         if final_issue == "whatsapp_dns_resolution_failed":
-            out["manual_actions"].append("verify_dns_resolution:web.whatsapp.com")
-            out["manual_actions"].append("check_network_firewall_or_proxy_for_whatsapp_web")
+            _append_unique(out["manual_actions"], "verify_dns_resolution:web.whatsapp.com")
+            _append_unique(out["manual_actions"], "check_network_firewall_or_proxy_for_whatsapp_web")
+            _append_unique(out["manual_actions"], "run: python scripts/openclaw_tls_dns_diagnostics.py --json")
+            _append_unique(out["manual_actions"], "run: openclaw channels status --probe --json")
         elif final_issue == "whatsapp_session_logged_out":
-            out["manual_actions"].append(
+            _append_unique(
+                out["manual_actions"],
                 "run: openclaw channels login --channel whatsapp --account default --verbose"
             )
         elif final_issue in {"whatsapp_channel_down", "whatsapp_handshake_timeout"}:
-            out["manual_actions"].append(
+            _append_unique(
+                out["manual_actions"],
                 "run: openclaw channels login --channel whatsapp --account default --verbose"
             )
-            out["manual_actions"].append("run: openclaw channels logs --channel whatsapp --lines 200")
+            _append_unique(out["manual_actions"], "run: openclaw channels logs --channel whatsapp --lines 200")
+    return out
+
+
+def _build_cycle_exception_report(
+    *,
+    apply: bool,
+    primary_channel: str,
+    oc_base: list[str],
+    lock_file: Path,
+    lock_token: str,
+    watch_cycle: Optional[int],
+    phase: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    warning = f"{phase}_exception:{type(exc).__name__}:{str(exc)}"
+    report: dict[str, Any] = {
+        "timestamp_utc": _utc_now_iso(),
+        "apply": bool(apply),
+        "primary_channel": str(primary_channel or "whatsapp").strip().lower() or "whatsapp",
+        "command": list(oc_base),
+        "status": "WARN",
+        "steps": {
+            "lock": {
+                "acquired": True,
+                "lock_file": str(lock_file),
+                "token": str(lock_token),
+                "pid": int(os.getpid()),
+            },
+            "cycle_exception": {
+                "phase": str(phase),
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(limit=20),
+            },
+        },
+        "warnings": [warning],
+        "errors": [],
+    }
+    if watch_cycle is not None:
+        report["watch_cycle"] = int(watch_cycle)
+    return report
+
+
+def _fast_supervisor_tick(
+    *,
+    oc_base: list[str],
+    primary_channel: str,
+    apply: bool,
+    state_map: dict[str, Any],
+    fast_state: dict[str, Any],
+    failure_threshold: int,
+    restart_cooldown_seconds: float,
+    probe_timeout_seconds: float,
+    post_restart_recheck_seconds: float,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "timestamp_utc": _utc_now_iso(),
+        "ok": True,
+        "action": "none",
+        "reason": "",
+        "consecutive_failures": int(fast_state.get("consecutive_failures") or 0),
+        "primary_channel": str(primary_channel or "whatsapp"),
+        "warnings": [],
+        "errors": [],
+    }
+    threshold = max(1, int(failure_threshold))
+    cooldown = max(0.0, float(restart_cooldown_seconds))
+    timeout_seconds = max(3.0, float(probe_timeout_seconds))
+    recheck_delay = max(0.0, float(post_restart_recheck_seconds))
+
+    status_res, channels_payload = _run_openclaw_json(
+        oc_base=oc_base,
+        args=["channels", "status", "--probe"],
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(channels_payload, dict):
+        out["snapshot"] = _primary_channel_snapshot(channels_payload, primary_channel)
+        issue = _detect_primary_channel_issue(channels_payload, primary_channel)
+        out["primary_issue"] = issue
+        if issue:
+            out["ok"] = False
+            out["reason"] = f"primary_issue:{issue}"
+    else:
+        out["ok"] = False
+        if status_res.ok:
+            out["reason"] = "channels_status_unavailable"
+        else:
+            out["reason"] = f"channels_status_call_failed:rc={status_res.returncode}"
+            _append_unique(out["warnings"], out["reason"])
+
+    if out["ok"]:
+        fast_state["consecutive_failures"] = 0
+        out["consecutive_failures"] = 0
+        return out
+
+    next_failures = int(fast_state.get("consecutive_failures") or 0) + 1
+    fast_state["consecutive_failures"] = next_failures
+    out["consecutive_failures"] = next_failures
+    if next_failures < threshold:
+        out["action"] = "defer_until_threshold"
+        return out
+
+    last_restart_elapsed = _state_seconds_since(state_map.get("last_fast_supervisor_restart_at"))
+    if cooldown > 0 and last_restart_elapsed is not None and last_restart_elapsed < cooldown:
+        remaining = max(1, int(round(cooldown - last_restart_elapsed)))
+        _append_unique(out["warnings"], f"fast_restart_cooldown_active:{remaining}s")
+        out["action"] = "cooldown_skip"
+        return out
+
+    if not apply:
+        _append_unique(out["warnings"], "fast_restart_required_dry_run")
+        out["action"] = "dry_run_restart_required"
+        return out
+
+    restart = _run_openclaw(oc_base=oc_base, args=["gateway", "restart"], timeout_seconds=45.0)
+    if not restart.ok:
+        reason = _classify_gateway_restart_failure(restart)
+        _append_unique(out["errors"], f"fast_gateway_restart_failed:{reason}")
+        out["action"] = "restart_failed"
+        return out
+
+    state_map["last_fast_supervisor_restart_at"] = _utc_now_iso()
+    state_map["last_fast_supervisor_restart_reason"] = str(out.get("reason") or "unknown")
+    fast_state["consecutive_failures"] = 0
+    out["consecutive_failures"] = 0
+    out["action"] = "gateway_restart_triggered"
+    _append_unique(out["warnings"], "fast_gateway_restart_triggered")
+
+    if recheck_delay > 0:
+        time.sleep(recheck_delay)
+    _, post_payload = _run_openclaw_json(
+        oc_base=oc_base,
+        args=["channels", "status", "--probe"],
+        timeout_seconds=timeout_seconds,
+    )
+    if isinstance(post_payload, dict):
+        post_issue = _detect_primary_channel_issue(post_payload, primary_channel)
+        out["post_restart_primary_issue"] = post_issue
+        if post_issue:
+            _append_unique(out["warnings"], f"fast_post_restart_primary_issue:{post_issue}")
+        else:
+            _append_unique(out["warnings"], "fast_post_restart_primary_recovered")
+    else:
+        _append_unique(out["warnings"], "fast_post_restart_channels_unavailable")
+
     return out
 
 
@@ -845,6 +1386,46 @@ def main(argv: list[str]) -> int:
         help="Path to write JSON report.",
     )
     parser.add_argument(
+        "--state-file",
+        default="logs/automation/openclaw_maintenance_state.json",
+        help="Path to shared runtime state used for cooldown/backoff controls.",
+    )
+    parser.add_argument(
+        "--lock-file",
+        default="logs/automation/openclaw_maintenance.lock.json",
+        help="Path to process lock file that prevents concurrent maintenance loops.",
+    )
+    parser.add_argument(
+        "--lock-wait-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_MAINTENANCE_LOCK_WAIT_SECONDS", 0.0, minimum=0.0),
+        help="How long to wait for an existing maintenance lock before skipping this run.",
+    )
+    parser.add_argument(
+        "--lock-stale-seconds",
+        type=int,
+        default=_env_int("OPENCLAW_MAINTENANCE_LOCK_STALE_SECONDS", 1800, minimum=60),
+        help="Treat lock files older than this as stale when owner PID is not valid.",
+    )
+    parser.add_argument(
+        "--gateway-restart-cooldown-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_GATEWAY_RESTART_COOLDOWN_SECONDS", 120.0, minimum=0.0),
+        help="Minimum time between gateway restart actions across maintenance cycles.",
+    )
+    parser.add_argument(
+        "--primary-reenable-cooldown-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_PRIMARY_REENABLE_COOLDOWN_SECONDS", 300.0, minimum=0.0),
+        help="Minimum time between primary-account disable/enable remediation attempts.",
+    )
+    parser.add_argument(
+        "--restart-retry-base-delay-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_RESTART_RETRY_BASE_DELAY_SECONDS", 2.0, minimum=0.0),
+        help="Base delay for exponential backoff between restart attempts.",
+    )
+    parser.add_argument(
         "--command",
         default=os.getenv("OPENCLAW_COMMAND", "openclaw"),
         help="OpenClaw command. Example: openclaw or wsl openclaw",
@@ -865,115 +1446,139 @@ def main(argv: list[str]) -> int:
         default=int(os.getenv("OPENCLAW_WATCH_INTERVAL_SECONDS", "900")),
         help="Seconds between watch cycles (default: 900 = 15 minutes).",
     )
+    parser.add_argument(
+        "--fast-supervisor",
+        dest="fast_supervisor",
+        action="store_true",
+        default=_as_bool(os.getenv("OPENCLAW_FAST_SUPERVISOR_ENABLED", "1"), default=True),
+        help="Enable fast health/restart checks between full watch cycles.",
+    )
+    parser.add_argument(
+        "--no-fast-supervisor",
+        dest="fast_supervisor",
+        action="store_false",
+        help="Disable fast health/restart checks between full watch cycles.",
+    )
+    parser.add_argument(
+        "--fast-supervisor-interval-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_FAST_SUPERVISOR_INTERVAL_SECONDS", 5.0, minimum=1.0),
+        help="Fast supervisor probe interval while in watch mode.",
+    )
+    parser.add_argument(
+        "--fast-supervisor-failure-threshold",
+        type=int,
+        default=_env_int("OPENCLAW_FAST_SUPERVISOR_FAILURE_THRESHOLD", 2, minimum=1),
+        help="Consecutive failed fast probes required before restart.",
+    )
+    parser.add_argument(
+        "--fast-supervisor-restart-cooldown-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_FAST_SUPERVISOR_RESTART_COOLDOWN_SECONDS", 20.0, minimum=0.0),
+        help="Minimum seconds between fast supervisor restart actions.",
+    )
+    parser.add_argument(
+        "--fast-supervisor-probe-timeout-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_FAST_SUPERVISOR_PROBE_TIMEOUT_SECONDS", 8.0, minimum=3.0),
+        help="Timeout per fast supervisor probe.",
+    )
+    parser.add_argument(
+        "--fast-supervisor-post-restart-recheck-seconds",
+        type=float,
+        default=_env_float("OPENCLAW_FAST_SUPERVISOR_POST_RESTART_RECHECK_SECONDS", 4.0, minimum=0.0),
+        help="Delay before fast supervisor post-restart channel recheck.",
+    )
     args = parser.parse_args(argv)
 
     report_file = Path(str(args.report_file)).expanduser()
     if not report_file.is_absolute():
         report_file = (PROJECT_ROOT / report_file).resolve()
+    state_file = Path(str(args.state_file)).expanduser()
+    if not state_file.is_absolute():
+        state_file = (PROJECT_ROOT / state_file).resolve()
+    lock_file = Path(str(args.lock_file)).expanduser()
+    if not lock_file.is_absolute():
+        lock_file = (PROJECT_ROOT / lock_file).resolve()
 
-    oc_base = _split_command(str(args.command))
-
-    report: dict[str, Any] = {
-        "timestamp_utc": _utc_now_iso(),
-        "apply": bool(args.apply),
-        "primary_channel": str(args.primary_channel or "whatsapp").strip().lower() or "whatsapp",
-        "command": oc_base,
-        "status": "PASS",
-        "steps": {},
-        "warnings": [],
-        "errors": [],
-    }
-
-    lock_step = _cleanup_stale_session_locks(
-        apply=bool(args.apply),
-        session_stale_seconds=max(60, int(args.session_stale_seconds)),
+    oc_base_raw = _split_command(str(args.command))
+    oc_base, command_warning = _normalize_openclaw_command(oc_base_raw)
+    lock_attempt = _acquire_run_lock(
+        lock_path=lock_file,
+        mode="watch" if bool(args.watch) else "run_once",
+        wait_seconds=max(0.0, float(args.lock_wait_seconds)),
+        stale_seconds=max(60, int(args.lock_stale_seconds)),
     )
-    report["steps"]["stale_session_cleanup"] = lock_step
+    if not lock_attempt.acquired or lock_attempt.lock is None:
+        holder = lock_attempt.holder if isinstance(lock_attempt.holder, dict) else {}
+        holder_pid = 0
+        try:
+            holder_pid = int(holder.get("pid") or 0)
+        except Exception:
+            holder_pid = 0
+        warning = "maintenance_lock_unavailable"
+        if lock_attempt.reason == "held":
+            mode = str(holder.get("mode") or "unknown")
+            warning = f"maintenance_lock_held:pid={holder_pid}:mode={mode}"
+        elif lock_attempt.reason == "lock_error":
+            warning = f"maintenance_lock_error:{str(holder.get('error') or 'unknown')}"
 
-    _status_res, channels_payload = _run_openclaw_json(oc_base=oc_base, args=["channels", "status"], timeout_seconds=20.0)
-    if isinstance(channels_payload, dict):
-        report["steps"]["channels_status_snapshot"] = {
-            "timestamp_ms": channels_payload.get("ts"),
-            "channels": channels_payload.get("channels"),
+        report: dict[str, Any] = {
+            "timestamp_utc": _utc_now_iso(),
+            "apply": bool(args.apply),
+            "primary_channel": str(args.primary_channel or "whatsapp").strip().lower() or "whatsapp",
+            "command": oc_base,
+            "status": "WARN",
+            "steps": {
+                "lock": {
+                    "acquired": False,
+                    "reason": lock_attempt.reason,
+                    "lock_file": str(lock_file),
+                    "holder": holder,
+                }
+            },
+            "warnings": [warning],
+            "errors": [],
         }
-    else:
-        report["warnings"].append("channels_status_unavailable")
-
-    gateway_step = _gateway_health_and_heal(
-        oc_base=oc_base,
-        channels_payload=channels_payload if isinstance(channels_payload, dict) else {},
-        primary_channel=str(report["primary_channel"]),
-        apply=bool(args.apply),
-        restart_on_rpc_failure=bool(args.restart_gateway_on_rpc_failure),
-        recheck_delay_seconds=max(0.0, float(args.recheck_delay_seconds)),
-        attempt_primary_reenable=bool(args.attempt_primary_reenable),
-        primary_restart_attempts=max(1, int(args.primary_restart_attempts)),
-    )
-    report["steps"]["gateway_health"] = gateway_step
-
-    channel_step: dict[str, Any] = {
-        "skipped": True,
-        "reason": "disabled_by_flag",
-        "primary_channel": report["primary_channel"],
-    }
-    if bool(args.disable_broken_channels):
-        channel_step = _disable_broken_channels(
-            oc_base=oc_base,
-            channels_payload=channels_payload if isinstance(channels_payload, dict) else {},
-            primary_channel=str(report["primary_channel"]),
-            apply=bool(args.apply),
-        )
-    report["steps"]["broken_channel_disable"] = channel_step
-
-    if gateway_step.get("errors"):
-        report["errors"].extend([str(x) for x in gateway_step.get("errors", [])])
-    if gateway_step.get("warnings"):
-        report["warnings"].extend([str(x) for x in gateway_step.get("warnings", [])])
-    if isinstance(channel_step, dict) and channel_step.get("errors"):
-        report["errors"].extend([str(x) for x in channel_step.get("errors", [])])
-    if lock_step.get("errors"):
-        report["warnings"].extend([str(x) for x in lock_step.get("errors", [])])
-
-    report["status"] = _derive_status([str(x) for x in report["errors"]])
-
-    _safe_write_json(report_file, report)
-    print(f"[openclaw_maintenance] status={report['status']} apply={args.apply}")
-    print(f"[openclaw_maintenance] report={report_file}")
-    if isinstance(channel_step, dict):
-        disabled = channel_step.get("disabled") if isinstance(channel_step.get("disabled"), list) else []
-        if disabled:
-            print(f"[openclaw_maintenance] disabled_channels={','.join(str(x) for x in disabled)}")
-
-    if args.strict and report["errors"]:
-        if not args.watch:
-            return 1
-
-    if not args.watch:
+        if command_warning:
+            report["warnings"].append(command_warning)
+        _safe_write_json(report_file, report)
+        print(f"[openclaw_maintenance] status={report['status']} apply={args.apply}")
+        print(f"[openclaw_maintenance] report={report_file}")
+        print(f"[openclaw_maintenance] skipped_reason={warning}")
         return 0
 
-    # --- Watch mode: loop continuously ---
-    interval = max(30, int(args.watch_interval))
-    print(f"[openclaw_maintenance] Watch mode active (interval={interval}s). Press Ctrl+C to stop.")
-    cycle = 1
-    while True:
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            print(f"\n[openclaw_maintenance] Watch stopped after {cycle} cycles.")
-            return 0
+    state = _load_runtime_state(state_file)
 
-        cycle += 1
-        report = {
+    def _run_cycle(
+        *,
+        watch_cycle: Optional[int],
+        include_disable: bool,
+        fast_tick: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        report: dict[str, Any] = {
             "timestamp_utc": _utc_now_iso(),
             "apply": bool(args.apply),
             "primary_channel": str(args.primary_channel or "whatsapp").strip().lower() or "whatsapp",
             "command": oc_base,
             "status": "PASS",
-            "steps": {},
+            "steps": {
+                "lock": {
+                    "acquired": True,
+                    "lock_file": str(lock_file),
+                    "token": lock_attempt.lock.token,
+                    "pid": int(os.getpid()),
+                }
+            },
             "warnings": [],
             "errors": [],
-            "watch_cycle": cycle,
         }
+        if watch_cycle is not None:
+            report["watch_cycle"] = int(watch_cycle)
+        if command_warning:
+            _append_unique(report["warnings"], command_warning)
+        if isinstance(fast_tick, dict) and fast_tick:
+            report["steps"]["fast_supervisor"] = dict(fast_tick)
 
         lock_step = _cleanup_stale_session_locks(
             apply=bool(args.apply),
@@ -982,7 +1587,9 @@ def main(argv: list[str]) -> int:
         report["steps"]["stale_session_cleanup"] = lock_step
 
         _status_res, channels_payload = _run_openclaw_json(
-            oc_base=oc_base, args=["channels", "status"], timeout_seconds=20.0,
+            oc_base=oc_base,
+            args=["channels", "status", "--probe"],
+            timeout_seconds=20.0,
         )
         if isinstance(channels_payload, dict):
             report["steps"]["channels_status_snapshot"] = {
@@ -990,7 +1597,7 @@ def main(argv: list[str]) -> int:
                 "channels": channels_payload.get("channels"),
             }
         else:
-            report["warnings"].append("channels_status_unavailable")
+            _append_unique(report["warnings"], "channels_status_unavailable")
 
         gateway_step = _gateway_health_and_heal(
             oc_base=oc_base,
@@ -1001,22 +1608,162 @@ def main(argv: list[str]) -> int:
             recheck_delay_seconds=max(0.0, float(args.recheck_delay_seconds)),
             attempt_primary_reenable=bool(args.attempt_primary_reenable),
             primary_restart_attempts=max(1, int(args.primary_restart_attempts)),
+            state=state,
+            gateway_restart_cooldown_seconds=max(0.0, float(args.gateway_restart_cooldown_seconds)),
+            primary_reenable_cooldown_seconds=max(0.0, float(args.primary_reenable_cooldown_seconds)),
+            restart_retry_base_delay_seconds=max(0.0, float(args.restart_retry_base_delay_seconds)),
         )
         report["steps"]["gateway_health"] = gateway_step
+
+        channel_step: dict[str, Any] = {
+            "skipped": True,
+            "reason": "disabled_by_flag_or_watch_mode",
+            "primary_channel": report["primary_channel"],
+        }
+        if include_disable and bool(args.disable_broken_channels):
+            channel_step = _disable_broken_channels(
+                oc_base=oc_base,
+                channels_payload=channels_payload if isinstance(channels_payload, dict) else {},
+                primary_channel=str(report["primary_channel"]),
+                apply=bool(args.apply),
+            )
+        report["steps"]["broken_channel_disable"] = channel_step
 
         if gateway_step.get("errors"):
             report["errors"].extend([str(x) for x in gateway_step.get("errors", [])])
         if gateway_step.get("warnings"):
             report["warnings"].extend([str(x) for x in gateway_step.get("warnings", [])])
+        if isinstance(channel_step, dict) and channel_step.get("errors"):
+            report["errors"].extend([str(x) for x in channel_step.get("errors", [])])
+        if isinstance(channel_step, dict) and channel_step.get("warnings"):
+            report["warnings"].extend([str(x) for x in channel_step.get("warnings", [])])
+        if lock_step.get("errors"):
+            report["warnings"].extend([str(x) for x in lock_step.get("errors", [])])
 
         report["status"] = _derive_status([str(x) for x in report["errors"]])
-        _safe_write_json(report_file, report)
-        print(
-            f"[openclaw_maintenance] watch cycle={cycle} status={report['status']} "
-            f"errors={len(report['errors'])} warnings={len(report['warnings'])}"
-        )
+        return report
 
-    return 0
+    try:
+        try:
+            report = _run_cycle(watch_cycle=None, include_disable=True)
+        except Exception as exc:
+            report = _build_cycle_exception_report(
+                apply=bool(args.apply),
+                primary_channel=str(args.primary_channel or "whatsapp"),
+                oc_base=oc_base,
+                lock_file=lock_file,
+                lock_token=lock_attempt.lock.token,
+                watch_cycle=None,
+                phase="initial_cycle",
+                exc=exc,
+            )
+            _safe_write_json(report_file, report)
+            print(f"[openclaw_maintenance] status={report['status']} apply={args.apply}")
+            print(f"[openclaw_maintenance] report={report_file}")
+            print(f"[openclaw_maintenance] warning={report['warnings'][0]}")
+            if not args.watch:
+                return 1
+        else:
+            _save_runtime_state(state_file, state)
+            _safe_write_json(report_file, report)
+            print(f"[openclaw_maintenance] status={report['status']} apply={args.apply}")
+            print(f"[openclaw_maintenance] report={report_file}")
+            channel_step = report["steps"].get("broken_channel_disable")
+            if isinstance(channel_step, dict):
+                disabled = channel_step.get("disabled") if isinstance(channel_step.get("disabled"), list) else []
+                if disabled:
+                    print(f"[openclaw_maintenance] disabled_channels={','.join(str(x) for x in disabled)}")
+
+            if args.strict and report["errors"] and not args.watch:
+                return 1
+
+            if not args.watch:
+                return 0
+
+        interval = max(30, int(args.watch_interval))
+        fast_enabled = bool(args.fast_supervisor)
+        fast_interval = max(1.0, float(args.fast_supervisor_interval_seconds))
+        fast_state: dict[str, Any] = {"consecutive_failures": 0, "last_tick": {}}
+        next_full_cycle_at = time.monotonic() + float(interval)
+        print(
+            f"[openclaw_maintenance] Watch mode active (interval={interval}s, "
+            f"fast_supervisor={fast_enabled}, fast_interval={fast_interval:.1f}s). Press Ctrl+C to stop."
+        )
+        cycle = 1
+        while True:
+            sleep_for = max(0.5, float(interval))
+            if fast_enabled:
+                remaining = max(0.5, float(next_full_cycle_at - time.monotonic()))
+                sleep_for = max(0.5, min(fast_interval, remaining))
+            try:
+                time.sleep(sleep_for)
+            except KeyboardInterrupt:
+                print(f"\n[openclaw_maintenance] Watch stopped after {cycle} cycles.")
+                return 0
+
+            fast_tick: Optional[dict[str, Any]] = None
+            if fast_enabled:
+                try:
+                    fast_tick = _fast_supervisor_tick(
+                        oc_base=oc_base,
+                        primary_channel=str(args.primary_channel or "whatsapp").strip().lower() or "whatsapp",
+                        apply=bool(args.apply),
+                        state_map=state,
+                        fast_state=fast_state,
+                        failure_threshold=max(1, int(args.fast_supervisor_failure_threshold)),
+                        restart_cooldown_seconds=max(0.0, float(args.fast_supervisor_restart_cooldown_seconds)),
+                        probe_timeout_seconds=max(3.0, float(args.fast_supervisor_probe_timeout_seconds)),
+                        post_restart_recheck_seconds=max(
+                            0.0, float(args.fast_supervisor_post_restart_recheck_seconds)
+                        ),
+                    )
+                    fast_state["last_tick"] = dict(fast_tick)
+                    if str(fast_tick.get("action") or "") not in {"none", "defer_until_threshold"}:
+                        print(
+                            f"[openclaw_maintenance] fast action={fast_tick.get('action')} "
+                            f"reason={fast_tick.get('reason')} warnings={len(fast_tick.get('warnings') or [])} "
+                            f"errors={len(fast_tick.get('errors') or [])}"
+                        )
+                        _save_runtime_state(state_file, state)
+                except Exception as exc:
+                    print(f"[openclaw_maintenance] fast supervisor exception: {type(exc).__name__}: {exc}")
+
+            if time.monotonic() < next_full_cycle_at:
+                continue
+            cycle += 1
+            try:
+                report = _run_cycle(
+                    watch_cycle=cycle,
+                    include_disable=False,
+                    fast_tick=fast_state.get("last_tick") if fast_enabled else None,
+                )
+            except Exception as exc:
+                report = _build_cycle_exception_report(
+                    apply=bool(args.apply),
+                    primary_channel=str(args.primary_channel or "whatsapp"),
+                    oc_base=oc_base,
+                    lock_file=lock_file,
+                    lock_token=lock_attempt.lock.token,
+                    watch_cycle=cycle,
+                    phase="watch_cycle",
+                    exc=exc,
+                )
+                _safe_write_json(report_file, report)
+                print(
+                    f"[openclaw_maintenance] watch cycle={cycle} status={report['status']} "
+                    f"warning={report['warnings'][0]}"
+                )
+                continue
+
+            _save_runtime_state(state_file, state)
+            _safe_write_json(report_file, report)
+            print(
+                f"[openclaw_maintenance] watch cycle={cycle} status={report['status']} "
+                f"errors={len(report['errors'])} warnings={len(report['warnings'])}"
+            )
+            next_full_cycle_at = time.monotonic() + float(interval)
+    finally:
+        _release_run_lock(lock_attempt.lock)
 
 
 if __name__ == "__main__":
