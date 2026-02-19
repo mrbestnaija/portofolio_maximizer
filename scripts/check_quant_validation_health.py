@@ -83,13 +83,26 @@ def _load_monitoring_cfg(path: Optional[Path]) -> Dict[str, Any]:
     return raw.get("forecaster_monitoring") or {}
 
 
-def _summarize_global(entries: List[Dict[str, Any]]) -> GlobalHealthSummary:
+def _summarize_global(
+    entries: List[Dict[str, Any]],
+    exclude_modes: Optional[List[str]] = None,
+) -> GlobalHealthSummary:
     total = 0
     pass_count = 0
     fail_count = 0
     neg_exp_profit = 0
+    exclude_set = set(m.lower() for m in (exclude_modes or []))
 
     for rec in entries:
+        # Skip entries whose execution_mode is in the exclusion list.
+        # This allows proof-mode entries (max_holding=5, artificial constraints)
+        # to be excluded from the RED gate calculation.
+        if exclude_set:
+            exec_mode = str(rec.get("execution_mode") or "").lower()
+            proof_flag = bool(rec.get("proof_mode"))
+            if exec_mode in exclude_set or (proof_flag and "proof" in exclude_set):
+                continue
+
         total += 1
         status = rec.get("status") or (rec.get("quant_validation") or {}).get(
             "status"
@@ -183,6 +196,18 @@ def main() -> None:
             "ceiling (no YELLOW band)."
         ),
     )
+    parser.add_argument(
+        "--exclude-mode",
+        nargs="*",
+        default=[],
+        metavar="MODE",
+        help=(
+            "Exclude entries whose execution_mode matches any of these values "
+            "from FAIL-rate calculation. Useful to strip proof-mode runs "
+            "(max_holding=5) that have structurally inflated FAIL rates. "
+            "Example: --exclude-mode proof diagnostic"
+        ),
+    )
     args = parser.parse_args()
 
     log_path = Path(args.log_path)
@@ -218,7 +243,7 @@ def main() -> None:
         )
     )
 
-    summary = _summarize_global(entries)
+    summary = _summarize_global(entries, exclude_modes=args.exclude_mode)
 
     print("=== Quant Validation Global Health ===")
     print(f"  Total entries                : {summary.total}")

@@ -1,5 +1,11 @@
 """
 GARCH volatility model implementation moved from the ETL layer.
+
+Phase 7.10b improvements:
+  - AR(1) conditional mean model for directional signal (was 'Zero' / volatility only)
+  - skewt distribution for fat tails + negative skew (was 'normal')
+  - ADF stationarity test; auto-difference if unit root detected
+  - GJR-GARCH asymmetric vol fallback before EWMA when persistence >= 0.97
 """
 
 from __future__ import annotations
@@ -18,6 +24,14 @@ except Exception:  # pragma: no cover - defensive
     arch_model = None  # type: ignore[assignment]
     ARCH_AVAILABLE = False
 
+try:
+    from statsmodels.tsa.stattools import adfuller as _adfuller  # type: ignore[import]
+
+    STATSMODELS_ADF_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _adfuller = None  # type: ignore[assignment]
+    STATSMODELS_ADF_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,17 +43,23 @@ class GARCHForecaster:
         p: int = 1,
         q: int = 1,
         vol: str = "GARCH",
-        dist: str = "normal",
+        dist: str = "skewt",
+        mean: str = "AR",
         backend: Optional[str] = None,
         *,
         auto_select: bool = True,
         max_p: int = 3,
         max_q: int = 3,
+        enforce_stationarity: bool = True,
+        igarch_fallback: str = "gjr",
     ) -> None:
         self.p = p
         self.q = q
         self.vol = vol
         self.dist = dist
+        self.mean = mean  # Phase 7.10b: AR(1) mean model for directional signal
+        self.enforce_stationarity = bool(enforce_stationarity)  # ADF pre-check
+        self.igarch_fallback = str(igarch_fallback).lower()  # 'gjr' or 'ewma'
         self.backend = (backend or ("arch" if ARCH_AVAILABLE else "ewma")).lower()
         self.auto_select = bool(auto_select)
         self.max_p = int(max_p)
@@ -55,6 +75,7 @@ class GARCHForecaster:
         self.forecast_results: Optional[Dict[str, Any]] = None
         self._scale_factor = 1.0  # Track scaling factor for rescaling forecasts
         self._fallback_state: Optional[Dict[str, Any]] = None
+        self._differenced: bool = False  # Track if series was differenced for stationarity
 
     def fit(self, returns: pd.Series) -> "GARCHForecaster":
         if not getattr(self, "auto_select", True):
@@ -89,6 +110,25 @@ class GARCHForecaster:
             # unit tests while still reacting to recent volatility.
             return self._fit_ewma(returns_clean)
 
+        # Phase 7.10b: ADF stationarity check. Financial returns are generally
+        # stationary, but some series (especially level prices fed incorrectly)
+        # may have a unit root. Auto-difference once if detected.
+        if getattr(self, "enforce_stationarity", True) and STATSMODELS_ADF_AVAILABLE:
+            try:
+                adf_result = _adfuller(returns_clean.values, autolag="AIC")
+                adf_pvalue = float(adf_result[1])
+                if adf_pvalue > 0.05:
+                    logger.warning(
+                        "ADF test: unit root detected (p=%.4f); differencing returns once.",
+                        adf_pvalue,
+                    )
+                    returns_clean = returns_clean.diff().dropna()
+                    self._differenced = True
+                    if returns_clean.empty:
+                        raise ValueError("Returns series empty after ADF-motivated differencing")
+            except Exception as adf_exc:  # pragma: no cover
+                logger.debug("ADF stationarity check failed (%s); skipping.", adf_exc)
+
         # Scale returns to improve GARCH convergence (recommended by arch library).
         mean_abs = returns_clean.abs().mean()
         if mean_abs < 1.0 or mean_abs > 1000.0:
@@ -104,28 +144,41 @@ class GARCHForecaster:
         best_aic = np.inf
         best_order = (self.p, self.q)
 
+        # Phase 7.10b: Use configurable mean model (AR for directional signal).
+        # 'AR' adds an AR(1) conditional mean; 'Zero' is the old default.
+        mean_model = str(getattr(self, "mean", "AR"))
+        # skewt may fail if arch version doesn't support it; fall back to 't' then 'normal'.
+        dist_candidates = [self.dist]
+        if self.dist == "skewt":
+            dist_candidates += ["t", "normal"]
+        elif self.dist == "t":
+            dist_candidates += ["normal"]
+
         max_p = max(1, int(getattr(self, "max_p", self.p)))
         max_q = max(1, int(getattr(self, "max_q", self.q)))
         for p_candidate in range(1, max_p + 1):
             for q_candidate in range(1, max_q + 1):
-                try:
-                    model = arch_model(
-                        returns_scaled,
-                        vol=self.vol,
-                        p=p_candidate,
-                        q=q_candidate,
-                        dist=self.dist,
-                        rescale=False,  # We handle scaling manually
-                    )
-                    fitted = model.fit(disp="off")
-                    aic = float(getattr(fitted, "aic", np.inf))
-                    if np.isfinite(aic) and aic < best_aic:
-                        best_aic = aic
-                        best_model = model
-                        best_fit = fitted
-                        best_order = (p_candidate, q_candidate)
-                except Exception:  # pragma: no cover - best-effort search
-                    continue
+                for dist_try in dist_candidates:
+                    try:
+                        model = arch_model(
+                            returns_scaled,
+                            mean=mean_model,
+                            vol=self.vol,
+                            p=p_candidate,
+                            q=q_candidate,
+                            dist=dist_try,
+                            rescale=False,  # We handle scaling manually
+                        )
+                        fitted = model.fit(disp="off")
+                        aic = float(getattr(fitted, "aic", np.inf))
+                        if np.isfinite(aic) and aic < best_aic:
+                            best_aic = aic
+                            best_model = model
+                            best_fit = fitted
+                            best_order = (p_candidate, q_candidate)
+                        break  # Use first dist that fits
+                    except Exception:  # pragma: no cover - best-effort search
+                        continue
 
         self.p, self.q = best_order
         self.model = best_model
@@ -136,16 +189,50 @@ class GARCHForecaster:
             )
             self.backend = "ewma"
             return self._fit_ewma(returns_clean)
-        # Phase 7.10: IGARCH / unit-root guard -- if alpha+beta >= 0.97 the
+        # Phase 7.10b: IGARCH / unit-root guard -- if alpha+beta >= 0.97 the
         # variance process is near-non-stationary and forecasts diverge.
-        # Tightened from 0.98 to 0.97 because adversarial audit found 28% of
-        # fits are degenerate at the 0.98 boundary, corrupting ~11% of forecasts.
+        # Try GJR-GARCH (asymmetric volatility; better for equity fat tails) first;
+        # only fall back to EWMA if GJR also degenerates.
         persistence = self._garch_persistence()
         if persistence is not None and persistence >= 0.97:
+            igarch_fallback = str(getattr(self, "igarch_fallback", "gjr")).lower()
+            if igarch_fallback == "gjr" and ARCH_AVAILABLE:
+                logger.warning(
+                    "GARCH(%s,%s) persistence %.4f >= 0.97 (near-IGARCH); "
+                    "attempting GJR-GARCH asymmetric model.",
+                    self.p, self.q, persistence,
+                )
+                try:
+                    gjr_model = arch_model(
+                        returns_scaled,
+                        mean=mean_model,
+                        vol="GARCH",
+                        p=self.p,
+                        o=1,  # GJR leverage term
+                        q=self.q,
+                        dist=dist_candidates[0],
+                        rescale=False,
+                    )
+                    gjr_fit = gjr_model.fit(disp="off")
+                    gjr_persistence = sum(
+                        float(v) for k, v in gjr_fit.params.items()
+                        if k.startswith(("alpha[", "beta[")) and np.isfinite(float(v))
+                    )
+                    if gjr_persistence < 0.97:
+                        self.model = gjr_model
+                        self.fitted_model = gjr_fit
+                        self.vol = "GJR-GARCH"
+                        logger.info(
+                            "GJR-GARCH fitted (persistence=%.4f); using asymmetric model.",
+                            gjr_persistence,
+                        )
+                        return self
+                except Exception as gjr_exc:
+                    logger.debug("GJR-GARCH attempt failed (%s); falling back to EWMA.", gjr_exc)
             logger.warning(
-                "GARCH(%s,%s) persistence %.4f >= 0.97 (near-IGARCH); "
+                "GARCH persistence %.4f >= 0.97; GJR unavailable or also degenerate; "
                 "falling back to EWMA to avoid divergent variance forecasts.",
-                self.p, self.q, persistence,
+                persistence,
             )
             self.backend = "ewma"
             return self._fit_ewma(returns_clean)
@@ -286,4 +373,7 @@ class GARCHForecaster:
             "log_likelihood": float(self.fitted_model.loglikelihood),
             "persistence": self._garch_persistence(),
             "backend": backend,
+            "mean_model": getattr(self, "mean", "AR"),
+            "dist": self.dist,
+            "differenced": bool(getattr(self, "_differenced", False)),
         }

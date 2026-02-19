@@ -27,33 +27,39 @@ forecasting:
     enabled: true
     p: 1  # ARCH order
     q: 1  # GARCH order
-    vol: "GARCH"  # Options: 'GARCH', 'EGARCH', 'GJR-GARCH'
-    dist: "normal"  # Options: 'normal', 't', 'skewt'
+    vol: "GARCH"               # Options: 'GARCH', 'EGARCH', 'EGARCH'
+    dist: "skewt"              # Phase 7.10b: skewt handles fat tails + negative skew (was 'normal')
+    mean: "AR"                 # Phase 7.10b: AR(1) conditional mean for directional signal (was 'Zero')
+    enforce_stationarity: true # ADF test before fit; difference if unit root detected
+    igarch_fallback: "gjr"     # Phase 7.10b: try GJR-GARCH (asymmetric vol) before EWMA
 
   # SAMOSSA configuration
   samossa:
     enabled: true
-    window_length: 60        # Phase 7.3: Increased from 40 for richer trajectory matrix
+    window_length: null      # Phase 7.10b: Auto = min(T//3, 40); paper recommends <= T/3 (was fixed 60)
     n_components: 8          # Phase 7.3: Increased from 6 for complex patterns (or -1 for auto)
-    use_residual_arima: true # Fit ARIMA on residual component
+    use_residual_arima: true # Fit ARIMA on residual component (now actually used via statsmodels)
     arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
     seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
     min_series_length: 120   # Minimum observations required before fit
     max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
     reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
+    trend_slope_bars: 10     # Phase 7.10b: Bars over which to compute directional slope signal
 
   # MSSA-RL configuration (change-point + RL forecaster)
   mssa_rl:
     enabled: true
     window_length: 30              # Window for mSSA Page matrix
     rank: null                     # Let MSSARLConfig choose rank to hit ~90% variance
-    change_point_threshold: 3.5    # Phase 7.3: Increased from 2.5 to reduce false change-points
+    change_point_threshold: 4.0    # Phase 7.10b: Raised from 3.5 to reduce false change-points (audit: oversensitive)
     q_learning_alpha: 0.3
     q_learning_gamma: 0.85
     q_learning_epsilon: 0.1
     use_gpu: true            # Optional CuPy acceleration; keep false on Tier-1 CPU runs but changed to true to speed up on Tier-2+GPU
     min_series_length: 150   # Minimum observations required before fit
     max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL
+    use_q_strategy_selection: true  # Phase 7.10b: Wire Q-values to forecast direction (activates dead code)
+    reward_mode: "directional_pnl" # Phase 7.10b: reward = sign(forecast) * realized_return
 
   # Combined forecasting
   combined:
@@ -68,6 +74,7 @@ forecasting:
     confidence_scaling: true  # REQUIRED in production
     # NOTE: Setting confidence_scaling=false is RESEARCH-ONLY mode.
     # See Documentation/PRIORITY_ANALYSIS_20260212.md.
+    track_directional_accuracy: true  # Phase 7.10b: inject auto_directional candidate using per-model CV hit rates
     prefer_diversified_candidate: true
     diversity_tolerance: 0.15  # Phase 7.9: lowered from 0.35 to let pure candidates win more often (reduces blend dilution that causes RMSE violations)
     candidate_weights:

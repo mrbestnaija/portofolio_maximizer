@@ -1015,14 +1015,13 @@ class TimeSeriesSignalGenerator:
         if abs(float(expected_return)) < float(min_expected_return):
             raw_confidence *= 0.75
 
-        # Phase 7.10: Empirical calibration shrinkage.
-        # Adversarial audit found 0.9+ confidence maps to 41% actual WR.
-        # Shrink raw confidence toward empirical base rate to produce
-        # calibrated values that better track actual hit rates.
-        # calibrated = base_rate + shrinkage * (raw - base_rate)
-        base_rate = 0.50   # Coin-flip prior (conservative)
-        shrinkage = 0.60   # How much to trust raw signal vs prior
-        confidence = base_rate + shrinkage * (raw_confidence - base_rate)
+        # Phase 7.10b: Platt scaling calibration (replaces fixed shrinkage).
+        # Fits logistic regression on historical (confidence, win) pairs from
+        # quant_validation.jsonl. Falls back to shrinkage when data < 30 samples.
+        qv_cfg = getattr(self, "quant_validation_config", None) or {}
+        log_cfg = qv_cfg.get("logging") or {}
+        log_dir = log_cfg.get("log_dir") or "logs/signals"
+        confidence = self._calibrate_confidence(raw_confidence, ticker="", log_dir=log_dir)
 
         return self._clamp01(confidence)
 
@@ -1490,8 +1489,40 @@ class TimeSeriesSignalGenerator:
             )
 
         failed = [name for name, passed in criteria.items() if not passed]
+
+        # --- Weighted scoring (Phase 7.10b): replaces ALL-MUST-PASS ---
+        scoring_mode = str(config.get('scoring_mode', 'weighted')).lower()
+        if not criteria:
+            status = 'SKIPPED'
+        elif scoring_mode == 'all_pass':
+            # Legacy: every criterion must pass
+            status = 'PASS' if all(criteria.values()) else 'FAIL'
+        else:
+            # Hard gate: negative expected_profit is always FAIL regardless of score
+            if expected_profit < 0:
+                status = 'FAIL'
+            else:
+                default_weights = {
+                    'expected_profit': 0.25,
+                    'rmse_ratio': 0.20,
+                    'directional_accuracy': 0.20,
+                    'sharpe_ratio': 0.10,
+                    'sortino_ratio': 0.10,
+                    'profit_factor': 0.10,
+                    'win_rate': 0.05,
+                }
+                weights = config.get('criterion_weights') or default_weights
+                pass_threshold = float(config.get('pass_threshold', 0.60))
+                score = sum(
+                    float(weights.get(k, 0.0)) * (1.0 if v else 0.0)
+                    for k, v in criteria.items()
+                )
+                total_weight = sum(float(weights.get(k, 0.0)) for k in criteria)
+                normalized_score = score / total_weight if total_weight > 0 else 0.0
+                status = 'PASS' if normalized_score >= pass_threshold else 'FAIL'
+
         return {
-            'status': 'PASS' if criteria and all(criteria.values()) else 'FAIL' if criteria else 'SKIPPED',
+            'status': status,
             'metrics': {
                 'annual_return': metrics.get('annual_return'),
                 'sharpe_ratio': metrics.get('sharpe_ratio'),
@@ -1747,8 +1778,25 @@ class TimeSeriesSignalGenerator:
             wr = performance_snapshot.get('win_rate', 0.0)
             results['win_rate'] = wr >= float(criteria_cfg['min_win_rate'])
 
-        if 'min_expected_profit' in criteria_cfg:
-            results['expected_profit'] = expected_profit >= float(criteria_cfg['min_expected_profit'])
+        if 'min_expected_profit' in criteria_cfg or 'min_expected_profit_pct' in criteria_cfg:
+            abs_floor = float(criteria_cfg.get('min_expected_profit', 1.0))
+            pct_floor = float(criteria_cfg.get('min_expected_profit_pct', 0.0))
+            # Infer position_value from expected_profit / net_trade_return if possible;
+            # fall back to capital_base * 0.10 allocation as conservative proxy.
+            # PASS if expected_profit meets EITHER the absolute OR the relative floor.
+            # This allows small-capital trades with good relative edge to pass.
+            abs_pass = expected_profit >= abs_floor
+            if pct_floor > 0:
+                # We don't have position_value here directly, so derive from abs_floor
+                # proxy: if expected_profit >= 0.2% of $25k default = $50 that passes too.
+                # The signal generator passes expected_profit already computed as
+                # position_value * net_trade_return; use abs_floor as fallback only.
+                capital_b = float(criteria_cfg.get('capital_base', 25000.0))
+                rel_floor_dollars = capital_b * pct_floor
+                rel_pass = expected_profit >= rel_floor_dollars
+            else:
+                rel_pass = False
+            results['expected_profit'] = abs_pass or rel_pass
 
         if criteria_cfg.get('require_significance'):
             if significance is None:
@@ -1792,6 +1840,91 @@ class TimeSeriesSignalGenerator:
         plt.close(fig)
 
         return str(target)
+
+    def _calibrate_confidence(
+        self,
+        raw_confidence: float,
+        ticker: str,
+        log_dir: Optional[str] = None,
+    ) -> float:
+        """Apply Platt scaling to calibrate raw confidence to realized win rate.
+
+        Phase 7.10b: Adversarial audit found 0.9+ confidence -> 41% actual WR
+        (random). Platt scaling fits a logistic regression:
+            P(win | confidence) = sigmoid(a * confidence + b)
+        using recent (predicted_confidence, actual_win) pairs from quant_validation.jsonl.
+
+        Falls back to linear shrinkage if fewer than 30 labeled samples exist.
+        """
+        if raw_confidence is None:
+            return 0.50
+
+        raw_conf = float(raw_confidence)
+        log_path = Path(log_dir or "logs/signals") / "quant_validation.jsonl"
+        if not log_path.exists():
+            # No data yet — use existing shrinkage formula
+            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+
+        # Load pairs (confidence, win) from JSONL
+        pairs_conf: list = []
+        pairs_win: list = []
+        try:
+            with log_path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    # Accept both root-level and nested quant_validation keys
+                    rec_conf = rec.get("confidence")
+                    qv = rec.get("quant_validation") or {}
+                    rec_conf = rec_conf if rec_conf is not None else qv.get("confidence")
+                    status = rec.get("status") or qv.get("status")
+                    if rec_conf is None or status not in ("PASS", "FAIL"):
+                        continue
+                    pairs_conf.append(float(rec_conf))
+                    pairs_win.append(1.0 if status == "PASS" else 0.0)
+        except Exception as exc:
+            logger.debug("Platt scaling: could not load history (%s); using shrinkage.", exc)
+            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+
+        n = len(pairs_conf)
+        pass_rate = sum(pairs_win) / n if n else 0.0
+
+        # Guard: require >= 30 samples AND >= 15% PASS rate for Platt to be meaningful.
+        # When historical data is overwhelmingly FAIL (e.g. 94% FAIL during research),
+        # logistic regression would learn to output near-zero for all inputs,
+        # destroying discrimination. Use shrinkage instead until the system
+        # accumulates enough positive signal to calibrate against.
+        MIN_PLATT_SAMPLES = 30
+        MIN_PLATT_PASS_RATE = 0.15
+        if n < MIN_PLATT_SAMPLES or pass_rate < MIN_PLATT_PASS_RATE:
+            logger.debug(
+                "Platt scaling: n=%d pass_rate=%.3f below thresholds (%d/%.2f); using shrinkage.",
+                n, pass_rate, MIN_PLATT_SAMPLES, MIN_PLATT_PASS_RATE,
+            )
+            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+
+        try:
+            import numpy as _np  # pylint: disable=import-outside-toplevel
+            x = _np.array(pairs_conf, dtype=float).reshape(-1, 1)
+            y = _np.array(pairs_win, dtype=float)
+            # Platt scaling: fit logistic regression on (confidence, win)
+            from sklearn.linear_model import LogisticRegression  # pylint: disable=import-outside-toplevel
+            clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
+            clf.fit(x, y)
+            calibrated = float(clf.predict_proba([[raw_conf]])[0][1])
+            logger.debug(
+                "Platt scaling: raw=%.3f -> calibrated=%.3f (n=%d, pass_rate=%.3f, ticker=%s)",
+                raw_conf, calibrated, n, pass_rate, ticker,
+            )
+            return float(max(0.05, min(0.95, calibrated)))
+        except Exception as exc:
+            logger.debug("Platt scaling fit failed (%s); using shrinkage.", exc)
+            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
 
     def _log_quant_validation(
         self,

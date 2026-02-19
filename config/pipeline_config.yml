@@ -273,11 +273,14 @@ pipeline:
       p: 1
       q: 1
       vol: "GARCH"
-      dist: "normal"
+      dist: "skewt"              # Phase 7.10b: skewt for fat tails (was normal)
+      mean: "AR"                 # Phase 7.10b: AR(1) conditional mean for directional signal
+      enforce_stationarity: true
+      igarch_fallback: "gjr"     # Phase 7.10b: GJR asymmetric fallback before EWMA
 
     samossa:
       enabled: true
-      window_length: 60
+      window_length: null        # Phase 7.10b: Auto = min(T//3, 40)
       n_components: 8
       use_residual_arima: true
       arima_order: [1, 0, 1]
@@ -285,18 +288,21 @@ pipeline:
       min_series_length: 120
       max_forecast_steps: 63
       reconstruction_method: "diagonal_averaging"
+      trend_slope_bars: 10
 
     mssa_rl:
       enabled: true
       window_length: 30
       rank: null
-      change_point_threshold: 3.5
+      change_point_threshold: 4.0  # Phase 7.10b: raised from 3.5 (reduces false change-points)
       q_learning_alpha: 0.3
       q_learning_gamma: 0.85
       q_learning_epsilon: 0.1
       use_gpu: true
       min_series_length: 150
       max_forecast_steps: 30
+      use_q_strategy_selection: true
+      reward_mode: "directional_pnl"
 
     combined:
       enabled: true

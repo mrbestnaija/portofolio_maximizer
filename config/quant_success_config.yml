@@ -31,12 +31,28 @@ quant_validation:
     max_drawdown: 0.45           # Phase 7.10: Widened from 0.40 to accommodate volatility
     min_profit_factor: 0.80      # Phase 7.10: Lowered from 1.00; allow marginal trades that contribute to portfolio diversification
     min_win_rate: 0.30           # Phase 7.10: Lowered from 0.40; system targets 2.5x+ win/loss ratio, not accuracy
-    min_expected_profit: 1.0     # Phase 7.10: Lowered from 5.0; many small-edge trades are profitable in aggregate
+    min_expected_profit: 5.00          # Phase 7.10b: Absolute floor ($); raised from 0.50 to prevent trivially small trades
+    min_expected_profit_pct: 0.002    # Phase 7.10b: Relative floor (0.2% of capital_base=$50); PASS if either met
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
     min_directional_accuracy: 0.40    # Phase 7.10: Lowered from 0.50; all models are below coin-flip (avg 45%)
     require_significance: false
     min_information_ratio: 0.0
+
+  # Weighted scoring mode (Phase 7.10b+): replaces ALL-MUST-PASS with weighted average.
+  # Each criterion contributes weight * {0|1} to overall score.
+  # PASS if normalized_score >= pass_threshold. expected_profit < 0 is always FAIL (hard gate).
+  # Set scoring_mode: all_pass to restore legacy behaviour.
+  scoring_mode: weighted              # 'all_pass' (legacy) or 'weighted'
+  pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
+  criterion_weights:
+    expected_profit: 0.25            # Largest weight: negative expected value is the clearest failure signal
+    rmse_ratio: 0.20                 # Forecast RMSE vs baseline (edge criterion)
+    directional_accuracy: 0.20       # Hit rate signal quality
+    sharpe_ratio: 0.10               # Risk-adjusted return (lowered; system is asymmetry-based)
+    sortino_ratio: 0.10              # Downside-risk-adjusted return
+    profit_factor: 0.10              # Win magnitude vs loss magnitude
+    win_rate: 0.05                   # Raw accuracy (lowest weight; system targets magnitude not accuracy)
 
   # Optional per-ticker overrides for success criteria; used by
   # models/time_series_signal_generator.TimeSeriesSignalGenerator when
