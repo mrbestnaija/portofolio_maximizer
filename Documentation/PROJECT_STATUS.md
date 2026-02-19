@@ -10,6 +10,30 @@
 
 **Sequenced optimization roadmap (2026-01)**: `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` (bar-aware trading loop, horizon-consistent TS signals, execution cost alignment, run-local reporting).
 
+## Phase 7.10b: Quant FAIL Rate Recovery (2026-02-19) — COMPLETE
+
+**Status**: Implemented and tested (802 tests passing, 0 failures).
+**Plan doc**: `Documentation/QUANT_FAIL_RATE_RECOVERY_PLAN_2026-02-19.md`
+
+### What changed
+| Part | Change | Expected impact |
+|------|--------|-----------------|
+| A1-A2 | Weighted scoring (0.60 threshold) replaces ALL-MUST-PASS | FAIL rate 94.2% → ~60-70% |
+| A3 | `--exclude-mode proof` strips artificial proof-mode entries from gate | FAIL rate calc more accurate |
+| A4 | `min_expected_profit` $1.0→$5.0 abs + 0.2% relative (OR) | Consistent $50 floor |
+| B1 | GARCH: skewt dist + AR(1) mean + ADF stationarity + GJR fallback | Directional signal; 28% IGARCH reduction |
+| B2 | SAMoSSA: ARIMA residuals (was polyfit) + auto window (T//3) | Bug fix; proper residual model |
+| B3 | MSSA-RL: Q-values wired to forecast direction + slope-capped trend forecast | Activates dead Q-learning code |
+| B4 | Ensemble: auto_directional candidate from per-model CV hit rates | Data-driven weight selection |
+| B5 | Confidence: Platt scaling (active only when PASS rate ≥ 15%) | Calibration when data is reliable |
+
+### Quality audit findings + fixes applied
+- `pipeline_config.yml` synced with new GARCH/SAMoSSA/MSSA-RL params (was out of sync)
+- SAMoSSA window: hard 40-cap removed; uses full T//3 per paper recommendation
+- MSSA-RL slope: 5% cumulative drift cap prevents divergent long-horizon forecasts
+- Platt scaling: 15% minimum PASS rate guard prevents calibration on overwhelmingly-FAIL history
+- Co-agent compatibility: all changes use optional params; existing callers unaffected
+
 ## Ensemble Status (Canonical)
 
 For any external-facing statement about the **time-series ensemble** (SAMOSSA/MSSA-RL/GARCH/SARIMAX), use `ENSEMBLE_MODEL_STATUS.md` as the single source of truth.

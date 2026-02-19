@@ -20,12 +20,20 @@ try:
 except Exception:  # pragma: no cover - optional dependency guard
     AutoReg = None
 
+try:
+    from statsmodels.tsa.arima.model import ARIMA as _ARIMA  # type: ignore[import]
+
+    ARIMA_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency guard
+    _ARIMA = None  # type: ignore[assignment]
+    ARIMA_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class SAMOSSAConfig:
-    window_length: int = 40
+    window_length: int = 40    # 0 = auto: min(T//3, 40); phase 7.10b: paper recommends <= T/3
     n_components: int = 6
     auto_select: bool = False
     variance_target: float = 0.90
@@ -35,6 +43,8 @@ class SAMOSSAConfig:
     normalize: bool = True
     ar_order: int = 5
     matrix_type: Literal["page", "hankel"] = "page"
+    arima_order: Tuple[int, int, int] = (1, 0, 1)  # Phase 7.10b: ARMA(1,1) on residuals
+    trend_slope_bars: int = 10  # Phase 7.10b: bars over which directional slope signal is computed
 
 
 class SAMOSSAForecaster:
@@ -59,6 +69,8 @@ class SAMOSSAForecaster:
         normalize: bool = True,
         ar_order: int = 5,
         matrix_type: Literal["page", "hankel"] = "page",
+        arima_order: Tuple[int, int, int] = (1, 0, 1),
+        trend_slope_bars: int = 10,
     ) -> None:
         self.config = SAMOSSAConfig(
             window_length=window_length,
@@ -71,6 +83,8 @@ class SAMOSSAForecaster:
             normalize=normalize,
             ar_order=ar_order,
             matrix_type=matrix_type,
+            arima_order=tuple(arima_order) if arima_order else (1, 0, 1),  # type: ignore[arg-type]
+            trend_slope_bars=max(3, int(trend_slope_bars)),
         )
         self._fitted = False
         self._reconstructed: Optional[pd.Series] = None
@@ -178,41 +192,67 @@ class SAMOSSAForecaster:
             return np.zeros(steps)
         if self._residual_model is not None:
             try:
+                # ARIMA fitted model: use forecast() for out-of-sample steps.
+                # AutoReg fitted model: use predict(start, end).
+                # Try forecast() first (ARIMA API), then predict() (AutoReg API).
+                if hasattr(self._residual_model, "forecast"):
+                    fc = self._residual_model.forecast(steps=steps)
+                    return np.asarray(fc)
                 start = len(residuals)
                 end = start + steps - 1
                 forecast = self._residual_model.predict(start=start, end=end)
                 return np.asarray(forecast)
             except Exception as exc:  # pragma: no cover - fallback
-                logger.debug("AutoReg residual forecast failed: %s", exc)
-        x = np.arange(len(residuals))
-        coeffs = np.polyfit(x, residuals.values, deg=min(2, len(residuals) - 1))
-        poly = np.poly1d(coeffs)
-        future_x = np.arange(len(residuals), len(residuals) + steps)
-        return poly(future_x)
+                logger.debug("Residual model forecast failed: %s", exc)
+        # Last-resort: simple linear extrapolation from the last k residuals.
+        # This replaces the old polyfit to avoid overfitting with degree-2 polynomial.
+        k = min(20, len(residuals))
+        recent = residuals.values[-k:]
+        slope = float(np.polyfit(np.arange(k), recent, deg=1)[0]) if k >= 2 else 0.0
+        return np.arange(1, steps + 1) * slope
 
     def _fit_residual_model(self, residuals: pd.Series) -> None:
-        if not self.config.use_residual_arima or AutoReg is None:
+        if not self.config.use_residual_arima:
+            self._residual_model = None
+            return
+        if len(residuals) < 5:
+            self._residual_model = None
+            return
+
+        residuals_plain = residuals.copy()
+        residuals_plain.index = pd.RangeIndex(start=0, stop=len(residuals_plain), step=1)
+
+        # Phase 7.10b: Use ARIMA(p,d,q) from config instead of AutoReg.
+        # This actually uses the arima_order parameter (previously ignored despite config).
+        if ARIMA_AVAILABLE and _ARIMA is not None:
+            arima_order = getattr(self.config, "arima_order", (1, 0, 1))
+            try:
+                arima_fit = _ARIMA(residuals_plain, order=arima_order).fit()
+                self._residual_model = arima_fit
+                logger.debug(
+                    "SAMOSSA: ARIMA%s residual model fitted on %d observations.",
+                    arima_order,
+                    len(residuals_plain),
+                )
+                return
+            except Exception as arima_exc:
+                logger.debug(
+                    "ARIMA%s residual fit failed (%s); falling back to AutoReg.",
+                    arima_order,
+                    arima_exc,
+                )
+
+        # Fallback: AutoReg (original behaviour)
+        if AutoReg is None:
             self._residual_model = None
             return
         max_order = min(self.config.ar_order, max(1, len(residuals) // 4))
         if max_order < 1:
             self._residual_model = None
             return
-        residuals = residuals.copy()
-        residuals.index = pd.DatetimeIndex(residuals.index).tz_localize(None)
-        freq = normalize_freq(
-            self._target_freq or residuals.index.freqstr or residuals.index.inferred_freq
-        )
-        if freq:
-            try:
-                residuals.index = residuals.index.asfreq(freq)
-            except Exception:
-                residuals.index = pd.RangeIndex(start=0, stop=len(residuals), step=1)
-        else:
-            residuals.index = pd.RangeIndex(start=0, stop=len(residuals), step=1)
         try:
             self._residual_model = AutoReg(
-                residuals, lags=max_order, old_names=False
+                residuals_plain, lags=max_order, old_names=False
             ).fit()
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("AutoReg fitting failed for SAMOSSA residuals: %s", exc)
@@ -273,8 +313,23 @@ class SAMOSSAForecaster:
                 "std": float(normalized.std()) if len(normalized) > 1 else 1.0,
             }
 
-        window_cap = max(5, int(np.sqrt(len(normalized))))
-        window = min(self.config.window_length, window_cap)
+        # Phase 7.10b: SAMoSSA paper recommends window_length <= T/3.
+        # Auto mode (window_length=0/null): use T//3 directly.
+        # Configured mode: cap at T//3 to enforce paper constraint; log override.
+        series_t = len(normalized)
+        paper_cap = max(5, series_t // 3)  # Paper hard limit; no arbitrary secondary cap
+        configured_w = int(self.config.window_length) if self.config.window_length else 0
+        if configured_w <= 0:
+            # Auto mode: use paper recommendation directly
+            window = paper_cap
+        else:
+            window = min(configured_w, paper_cap)
+            if configured_w > paper_cap:
+                logger.debug(
+                    "SAMOSSA: configured window_length=%d exceeds T//3=%d; "
+                    "capping at %d per paper constraint.",
+                    configured_w, paper_cap, window,
+                )
         if window < 5:
             window = 5
         self.config.window_length = window
@@ -353,6 +408,21 @@ class SAMOSSAForecaster:
         forecast_series = pd.Series(combined, index=future_index)
         noise_level = float(self._residuals.std()) if self._residuals is not None else 0.0
 
+        # Phase 7.10b: Directional slope signal from reconstructed trend component.
+        # Use last trend_slope_bars bars of the reconstructed series to compute slope.
+        # Positive slope -> BUY signal; negative -> SELL. Confidence = |slope|/noise.
+        directional_signal = 0.0  # -1 / 0 / +1
+        directional_confidence = 0.0
+        if self._reconstructed is not None and len(self._reconstructed) >= 3:
+            slope_bars = getattr(self.config, "trend_slope_bars", 10)
+            k = min(slope_bars, len(self._reconstructed))
+            recon_tail = self._reconstructed.values[-k:]
+            if k >= 2:
+                slope_val = float(np.polyfit(np.arange(k), recon_tail, deg=1)[0])
+                noise_proxy = noise_level if noise_level > 0 else (float(np.std(recon_tail)) + 1e-8)
+                directional_confidence = min(1.0, abs(slope_val) / noise_proxy)
+                directional_signal = float(np.sign(slope_val))
+
         return {
             "forecast": forecast_series,
             "lower_ci": forecast_series - noise_level,
@@ -361,6 +431,8 @@ class SAMOSSAForecaster:
             "window_length_used": self.config.window_length,
             "n_components": self.config.n_components,
             "residual_model_order": getattr(self._residual_model, "k_ar", 0) if self._residual_model is not None else 0,
+            "directional_signal": directional_signal,
+            "directional_confidence": directional_confidence,
         }
 
     def get_model_summary(self) -> Dict[str, Any]:

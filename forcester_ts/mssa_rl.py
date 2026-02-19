@@ -115,7 +115,7 @@ logger = logging.getLogger(__name__)
 class MSSARLConfig:
     window_length: int = 30
     rank: Optional[int] = None
-    change_point_threshold: float = 2.5
+    change_point_threshold: float = 4.0   # Phase 7.10b: raised from 3.5 (was 2.5); reduces false change-points
     q_learning_alpha: float = 0.3
     q_learning_gamma: float = 0.85
     q_learning_epsilon: float = 0.1
@@ -124,6 +124,9 @@ class MSSARLConfig:
     # PHASE 7.3 FIX: Accept additional params from YAML config
     min_series_length: int = 150
     max_forecast_steps: int = 30
+    # Phase 7.10b: Q-strategy selection wires Q-values into forecast direction
+    use_q_strategy_selection: bool = True
+    reward_mode: str = "directional_pnl"  # 'variance_reduction' (legacy) or 'directional_pnl'
 
 
 class MSSARLForecaster:
@@ -222,10 +225,26 @@ class MSSARLForecaster:
 
         return pd.DatetimeIndex(change_points)
 
-    def _update_q_table(self, variance_ratio: float, state: int, action: int) -> None:
+    def _update_q_table(
+        self,
+        variance_ratio: float,
+        state: int,
+        action: int,
+        realized_return: Optional[float] = None,
+    ) -> None:
         key = (state, action)
         current_q = self._q_table.get(key, 0.0)
-        reward = 1.0 - variance_ratio
+
+        reward_mode = str(getattr(self.config, "reward_mode", "directional_pnl")).lower()
+        if reward_mode == "directional_pnl" and realized_return is not None:
+            # Phase 7.10b: reward = sign(forecast_direction) * realized_return.
+            # action 0=mean_revert, 1=hold, 2=trend_follow
+            action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
+            forecast_sign = action_to_sign.get(action, 0.0)
+            reward = forecast_sign * float(realized_return)
+        else:
+            # Legacy: variance reduction reward
+            reward = 1.0 - variance_ratio
 
         best_future = max(
             (self._q_table.get((action, next_action), 0.0) for next_action in range(3)),
@@ -300,9 +319,17 @@ class MSSARLForecaster:
         )
         state_series = np.digitize(variance_ratio, bins=[0.8, 1.0, 1.2])
 
-        for state, ratio in zip(state_series, variance_ratio):
+        # Phase 7.10b: realized returns for directional PnL reward signal.
+        # Derived from the input price series (1-period pct change).
+        realized_returns_arr = cleaned.pct_change().fillna(0.0).reindex(variance_ratio.index).fillna(0.0)
+
+        for (state, ratio), realized_ret in zip(
+            zip(state_series, variance_ratio), realized_returns_arr
+        ):
             action = min(2, state)  # simple policy: act proportionally
-            self._update_q_table(float(ratio), int(state), action)
+            self._update_q_table(
+                float(ratio), int(state), action, realized_return=float(realized_ret)
+            )
 
         logger.info(
             "MSSARL fit complete (window=%s, rank=%s, change_points=%s)",
@@ -331,7 +358,48 @@ class MSSARLForecaster:
             if scale > 0 and self._last_reconstruction_error <= 1.5 * scale:
                 base_value = 0.85 * base_value + 0.15 * last_recon
 
-        baseline_forecast = np.full(steps, base_value)
+        # Phase 7.10b: Replace naive constant forecast with trend-adjusted forecast.
+        # Compute slope from last window_length bars of reconstructed series.
+        recon_arr = self._reconstruction.values if self._reconstruction is not None else np.array([base_value])
+        slope = 0.0
+        if len(recon_arr) >= 3:
+            k = min(self.config.window_length, len(recon_arr))
+            slope_arr = recon_arr[-k:]
+            if k >= 2:
+                slope = float(np.polyfit(np.arange(k), slope_arr, deg=1)[0])
+
+        # Phase 7.10b: Q-strategy selection — use Q-table to determine direction signal.
+        # States: {0=low_vol, 1=normal_vol, 2=high_vol}
+        # Actions: {0=mean_revert, 1=hold, 2=trend_follow}
+        # Q-driven direction overrides or reinforces the slope direction.
+        q_direction_weight = 0.0  # how much Q-learning shifts slope
+        if getattr(self.config, "use_q_strategy_selection", True) and self._q_table:
+            # Determine current state from recent variance ratio
+            try:
+                recent_var = float(np.var(recon_arr[-min(10, len(recon_arr)):]))
+                var_ratio = recent_var / max(self._baseline_variance, 1e-12)
+                current_state = int(np.digitize([var_ratio], bins=[0.8, 1.2])[0])
+                # Best action = argmax Q(state, .)
+                q_vals = {a: self._q_table.get((current_state, a), 0.0) for a in range(3)}
+                best_action = max(q_vals, key=q_vals.__getitem__)
+                # action 0=mean_revert (-slope), 1=hold (no change), 2=trend_follow (+slope)
+                action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
+                q_direction_weight = action_to_sign[best_action]
+            except Exception as qe:
+                logger.debug("Q-strategy selection error: %s", qe)
+
+        # Blend slope from reconstruction with Q-strategy signal.
+        # When Q-table has no data (new model), q_direction_weight == 0 -> pure slope.
+        effective_slope = slope + q_direction_weight * abs(slope) * 0.5
+
+        # Slope magnitude cap: cumulative drift over `steps` bars capped at 5% of base_value.
+        # Prevents divergent long-horizon forecasts when slope is large (e.g. sharp trends).
+        if base_value != 0 and steps > 0:
+            max_total_drift = abs(base_value) * 0.05  # 5% max cumulative drift
+            max_slope_abs = max_total_drift / steps
+            effective_slope = float(np.clip(effective_slope, -max_slope_abs, max_slope_abs))
+
+        baseline_forecast = base_value + effective_slope * np.arange(1, steps + 1)
 
         if self._change_points is not None and len(self._change_points) > 0:
             apply_decay = False

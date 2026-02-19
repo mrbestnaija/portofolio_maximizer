@@ -28,6 +28,9 @@ class EnsembleConfig:
     enabled: bool = True
     confidence_scaling: bool = True
     regime_detection_enabled: bool = True  # Phase 7.4: Enable regime-aware selection
+    # Phase 7.10b: Track per-model directional accuracy and generate a
+    # directional-accuracy-weighted candidate during selection.
+    track_directional_accuracy: bool = True
     # Prefer diversified candidates when they are close in quality to a
     # concentrated winner. This prevents brittle winner-takes-all selections
     # unless the single model is materially better.
@@ -76,15 +79,38 @@ class EnsembleCoordinator:
     def select_weights(
         self,
         model_confidence: Dict[str, float],
+        model_directional_accuracy: Optional[Dict[str, float]] = None,
     ) -> Tuple[Dict[str, float], float]:
         if not self.config.enabled or not self.config.candidate_weights:
             self.selected_weights = {}
             self.selection_score = 0.0
             return self.selected_weights, self.selection_score
 
+        # Phase 7.10b: Build directional-accuracy-weighted candidate when tracking is enabled.
+        # This adds a data-driven candidate whose weights are proportional to each model's
+        # CV directional accuracy (hit rate above 0.5 baseline).
+        candidate_list = list(self.config.candidate_weights)
+        if getattr(self.config, "track_directional_accuracy", True) and model_directional_accuracy:
+            da_weights: Dict[str, float] = {}
+            for model in TRACKED_MODELS:
+                da = float(model_directional_accuracy.get(model, 0.5))
+                # Map [0.4, 0.6] to [0.01, 1.0] — weight = max(0, da - 0.4) / 0.2
+                da_weight = max(0.0, (da - 0.40) / 0.20)
+                if da_weight > 0:
+                    da_weights[model] = da_weight
+            if da_weights:
+                candidate_list = [{"auto_directional": 0.0, **da_weights}] + candidate_list
+                logger.info(
+                    "Ensemble: auto_directional candidate=%s (from DA=%s)",
+                    da_weights,
+                    {m: f"{v:.3f}" for m, v in model_directional_accuracy.items()},
+                )
+
         scored_candidates: List[Tuple[Dict[str, float], float]] = []
 
-        for candidate in self.config.candidate_weights:
+        for candidate in candidate_list:
+            # Strip meta-keys like 'auto_directional' before normalizing
+            candidate = {k: v for k, v in candidate.items() if k != "auto_directional"}
             normalized = self._normalize(candidate)
             if not normalized:
                 continue
