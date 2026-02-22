@@ -41,26 +41,117 @@ Configure targets via environment variables (recommended so you do not hardcode 
 - `OPENCLAW_REPLY_CHANNEL` / `OPENCLAW_REPLY_TO` / `OPENCLAW_REPLY_ACCOUNT` (prompt mode optional)  
   Lets prompt mode deliver the reply to a different channel/target.
 
-### Tavily API / MCP (Preferred Over Brave For Quota-Limited Search)
+### Autonomous-Run Security Guard (Prompt Injection + Sensitive Actions)
 
-Use Tavily as the default web grounding path for PMX automations:
+Prompt-mode runs (`python scripts/openclaw_notify.py --prompt ...`) now enforce a guard in
+`utils/openclaw_cli.py` before any `openclaw agent` call:
+
+- Blocks high-risk requests unless approval token is present:
+  - secret exfiltration/entry requests
+  - irreversible financial/account actions
+  - CAPTCHA bypass requests
+- Prefixes each agent request with `[PMX_AUTONOMY_POLICY]` so untrusted
+  webpage/email instructions are treated as potential prompt injection.
+
+Guard env vars:
+- `OPENCLAW_AUTONOMY_GUARD_ENABLED` (default: `1`)
+- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN` (default: `1`)
+- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN` (default: `PMX_APPROVE_HIGH_RISK`)
+- `OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED` (default: `1`)
+- `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS` (default: `0`, recommended `1` for unattended runs)
+
+Recommended hardened profile for autonomous hosts:
+- `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`
+- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`
+- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
+- `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`
+
+### Tavily API (Preferred Over Brave For Quota-Limited Search)
+
+Use Tavily as the default web grounding path for PMX automations, with robust
+fallback to free providers:
 
 - Add `TAVILY_API_KEY` to `.env` (or `TAVILY_API_KEY_FILE`).
 - Run direct Tavily search from PMX:
   - `python scripts/tavily_search.py --query "latest market regime for AAPL" --json`
-- Configure OpenClaw-side Tavily MCP wiring:
-  - `python scripts/configure_tavily_mcp.py`
+  - Optional provider order override:
+    - `python scripts/tavily_search.py --query "..." --providers "tavily,duckduckgo,wikipedia" --json`
+Tavily MCP wiring is archived for this repo. PMX uses direct Tavily API search for web grounding.
 
-If your OpenClaw CLI supports MCP commands, the script runs:
+Brave can remain configured as fallback only (`BRAVE_API_KEY`), but PMX defaults should prefer Tavily API.
 
-- `openclaw mcp add --transport http tavily https://mcp.tavily.com/mcp/?tavilyApiKey=<key>`
+Default search provider chain:
+- `tavily -> duckduckgo -> wikipedia`
+- Override with env: `PMX_WEB_SEARCH_PROVIDERS`
+- Bridge fast-path now routes explicit online-search prompts (`web search`, `online search`, `search online`, `web lookup`, `internet lookup`, `look up online`, `find on the web`, `google`, `duckduckgo`, `wikipedia`, `tavily`) to `search_web_tavily` so WhatsApp/Discord requests can use robust fallback without Brave dependency.
 
-If your OpenClaw build does not expose `mcp` commands yet, the script reports `PARTIAL`,
-writes Tavily credentials into `~/.openclaw/.env`, and leaves an audit file at:
+If an agent replies with a Brave-key prompt (for example: "`web_search` requires `BRAVE_API_KEY`"), treat it as tool-routing drift and force PMX search path:
 
-- `logs/automation/tavily_mcp_setup_latest.json`
+- `python scripts/tavily_search.py --query "your question" --json`
+- Ensure `TAVILY_API_KEY` (or `TAVILY_API_KEY_FILE`) is present for Tavily depth.
+- If no Tavily key is available, free-provider fallback still works.
+- Re-run the same request with explicit instruction: "use PMX search tool, not web_search/Brave".
 
-Brave can remain configured as fallback only (`BRAVE_API_KEY`), but PMX defaults should prefer Tavily.
+### WhatsApp Search Routing Prompt (Corrected To Current Project State)
+
+Use this exact runbook for "web search ..." interactions over WhatsApp.
+
+1. Restart gateway with the real command path:
+- `openclaw gateway restart`
+
+2. Verify provider fallback search works (no Brave dependency):
+- `python scripts/tavily_search.py --query "OpenAI API docs" --providers "duckduckgo,wikipedia" --json`
+
+3. Trigger PMX bridge on WhatsApp:
+- `python scripts/llm_multi_model_orchestrator.py openclaw-bridge --channel whatsapp --reply-to +2347042437712 --message "web search latest OpenClaw docs"`
+
+4. Validate event evidence in activity logs:
+- `bridge_incoming`
+- `bridge_web_fast_path_start`
+- `bridge_web_fast_path_complete`
+
+Compatibility note:
+- Older runs may show `bridge_status_fast_path_start/complete` for status-only flow.
+- Web-search fast-path validation should prefer `bridge_web_fast_path_*`.
+
+5. One-command end-to-end validator (recommended):
+- `python scripts/openclaw_search_routing_e2e.py --json --require-web-events --allow-legacy-status-events`
+
+Important corrections:
+- Do not use `python openclaw_agent.py restart` (not a project command).
+- Do not use `python tavily_search.py ...` from repo root; use `python scripts/tavily_search.py ...`.
+- WhatsApp integration here uses OpenClaw WhatsApp Web provider; Twilio webhook setup is not required for this repo path.
+- "Discord via WhatsApp" is not a routing model in PMX. Use channel-specific routing (`whatsapp`, `discord`, `telegram`) explicitly.
+- For quant-validation fail-rate checks, do not generate inline multiline `python -c` payloads on PowerShell. Use:
+  - `python scripts/quant_validation_headroom.py --json`
+  - `python scripts/check_quant_validation_health.py`
+
+### GitHub Repository Check Path (WhatsApp-Friendly)
+
+For WhatsApp requests like "check this project repo on GitHub", prefer the local deterministic command path:
+
+- `python scripts/check_github_repo_status.py --pretty`
+
+This avoids dependence on `web_search` provider credentials and returns:
+- local branch/head/dirty state
+- upstream tracking/ahead-behind
+- parsed GitHub remote slug
+- GitHub API repo/default-branch head checks (when reachable)
+
+Bridge hardening (current behavior):
+- `scripts/llm_multi_model_orchestrator.py` includes a dedicated repo fast-path (`check_github_repo_status`).
+- Repo/GitHub requests are evaluated before generic health/status fast-path.
+- A WhatsApp query like "check project repository on GitHub status" now returns repo branch/head/ahead-behind/issues instead of generic system health.
+
+### Source-Code Attribution Tooling (Local LLM)
+
+The orchestrator now exposes a safe source-inspection tool:
+- Tool: `inspect_source_code`
+- Purpose: read allowlisted PMX files and return attributable snippets with `path:line` citations.
+- Index source: `logs/llm_activity/source_index.json` (auto-built via `python scripts/openclaw_self_improve.py index` when needed).
+
+Practical prompt pattern:
+- "Inspect source code for X, cite `path:line`, then propose an improvement."
 
 ### Error Monitor Alerts (Default: Enabled, No-Op Until Configured)
 
@@ -162,6 +253,35 @@ If `openclaw channels status` shows WhatsApp `stopped/disconnected` with an "Ope
 3. If it still fails, relink WhatsApp (interactive):
 
 - `openclaw channels login --channel whatsapp --verbose`
+
+## Tool-Call Failure Hardening (PowerShell + Edit Schema)
+
+When gateway logs show patterns like:
+- `ScriptBlock should only be specified as a value of the Command parameter`
+- `The term 'True' is not recognized ... CommandNotFoundException`
+- `edit failed: Missing required parameter: newText`
+
+apply this sequence (aligned to OpenClaw troubleshooting guidance):
+
+1. Run diagnostics and auto-fix:
+- `openclaw doctor`
+- `openclaw doctor --fix`
+
+2. Validate channel/runtime health:
+- `python scripts/openclaw_env.py gateway status --json`
+- `python scripts/openclaw_env.py channels status`
+
+3. Apply PMX maintenance healer:
+- `python scripts/openclaw_maintenance.py --apply --primary-channel whatsapp --restart-gateway-on-rpc-failure --attempt-primary-reenable`
+
+4. If listener remains down, relink WhatsApp:
+- `openclaw channels login --channel whatsapp --account default --verbose`
+
+Operational guardrails (backward-compatible defaults):
+- Use PowerShell-native syntax (`$true`/`$false`), never Python booleans in `exec`.
+- Do not nest `powershell -Command` inside an existing PowerShell shell.
+- Avoid unbounded `while` loops in tool execution paths.
+- For edit tools, send complete payloads: `path` + `oldText` + `newText` (or `new_string`).
 
 
 ## Running OpenClaw With Repo `.env` Loaded
@@ -283,14 +403,18 @@ To keep WhatsApp/dashboard operations stable over long runs, use:
 What it does:
 - Archives stale session lock files under `~/.openclaw/agents/*/sessions/*.jsonl.lock`.
 - Optionally archives matching stale session `.jsonl` files.
+- Enforces a cross-process maintenance lock (`logs/automation/openclaw_maintenance.lock.json`) so only one healing loop runs at a time.
 - Checks gateway RPC health and can restart gateway on failure.
 - Detects primary WhatsApp handshake timeout/disconnect states and restarts gateway for recovery.
 - Re-checks channel status after restart so unresolved primary channel failures are never reported as `PASS`.
 - Classifies DNS failures (`ENOTFOUND web.whatsapp.com`) separately from listener/session failures.
+- Detects detached-listener conflicts (`rpc.ok=true` while service state is `Ready/Stopped` and port remains busy) and avoids restart storms.
 - Uses configurable restart attempts (`--primary-restart-attempts`, default 2) for transient primary-channel recovery.
+- Applies restart cooldown/backoff controls to reduce restart thrashing across watchdog/task overlaps.
 - Marks unresolved primary channel failures as `FAIL` in maintenance reports to make outages explicit.
 - Optionally toggles the primary account enabled=false/true and restarts gateway to recover a missing listener.
 - Optionally disables broken non-primary channels (Telegram/Discord) when known auth/config errors persist.
+- Parses recent WhatsApp channel logs for delivery/session signals (`closed session`, deferred recovery budget, retry wait inflation) and surfaces targeted manual actions.
 
 Run once (apply mode):
 - `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure --attempt-primary-reenable --recheck-delay-seconds 8 --primary-restart-attempts 2`
@@ -300,6 +424,78 @@ Cron path:
 
 Windows Task Scheduler helper:
 - `powershell -ExecutionPolicy Bypass -File scripts/run_openclaw_maintenance.ps1`
+
+Persistent gateway + WhatsApp watchdog (recommended on Windows):
+- `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1`
+- Optional tuning: `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1 -WatchIntervalSeconds 120 -EnsureIntervalMinutes 5`
+- If you intentionally need older one-shot schedulers kept, use: `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1 -KeepLegacyMaintenanceTask`
+- Remove later: `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1 -Uninstall`
+
+The installer creates two idempotent tasks:
+- `PMX-OpenClaw-Guardian-Logon` (start guardian on logon)
+- `PMX-OpenClaw-Guardian-KeepAlive` (re-run guardian launcher every few minutes)
+
+Important:
+- Do not run legacy `PMX-OpenClaw-Maintenance` and guardian watch mode in parallel unless you explicitly accept overlap risk.
+- The watchdog installer now disables `PMX-OpenClaw-Maintenance` by default to prevent restart lock/port contention loops.
+
+### Verified Recovery Runbook (Non-Dry Install + Live WhatsApp E2E)
+
+Use this runbook when WhatsApp appears connected but interactions are unreliable, or when overlapping scheduler tasks may be causing restart contention.
+
+1. Apply watchdog installer in non-dry mode:
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1`
+
+Expected:
+- `PMX-OpenClaw-Guardian-KeepAlive` updated.
+- `PMX-OpenClaw-Maintenance` disabled (or already disabled).
+- `PMX-OpenClaw-Guardian-Logon` may warn `Access is denied` in non-elevated shells; rerun elevated if task creation/update is required.
+
+2. Verify scheduler state:
+- `Get-ScheduledTask -TaskName 'PMX-OpenClaw-Guardian-KeepAlive','PMX-OpenClaw-Guardian-Logon','PMX-OpenClaw-Maintenance' | Select-Object TaskName,State,@{Name='Enabled';Expression={$_.Settings.Enabled}} | Format-Table -AutoSize`
+
+Expected:
+- `PMX-OpenClaw-Guardian-KeepAlive`: `Ready`, `Enabled=True`
+- `PMX-OpenClaw-Guardian-Logon`: `Ready`, `Enabled=True`
+- `PMX-OpenClaw-Maintenance`: `Disabled`, `Enabled=False`
+
+3. Verify gateway and WhatsApp runtime health:
+- `python scripts/openclaw_env.py gateway status --json`
+- `openclaw channels status --json`
+
+Expected:
+- `gateway.rpc.ok=true`
+- WhatsApp account `running=true`, `connected=true`, `lastError=null`
+
+4. Execute live outbound send:
+- `openclaw message send --channel whatsapp --target +2347042437712 --message "[PMX E2E <timestamp>] Reply with ACK" --json`
+
+Capture:
+- `messageId`
+- `toJid`
+
+5. Prove inbound path (end-to-end):
+- Note: `openclaw message read --channel whatsapp` is not supported.
+- Correlate logs directly:
+- `openclaw channels logs --channel whatsapp --lines 120`
+- `Select-String -Path C:\tmp\openclaw\openclaw-YYYY-MM-DD.log -Pattern 'Sent message <MESSAGE_ID>|\"body\":\"ACK\"|web-auto-reply'`
+
+Expected proof points:
+- Outbound line with `Sent message <MESSAGE_ID> -> ...`
+- Inbound ACK line (`"body":"ACK"` or equivalent inbound text)
+- `web-auto-reply` line showing reply context that references the same `<MESSAGE_ID>` (for strict linkage)
+
+6. Confirm post-send receive activity via channel timestamps:
+- `openclaw channels status --json`
+- Check WhatsApp account timestamps:
+- `lastInboundAt` should advance after your send window.
+- `lastError` should remain null.
+
+If checks fail:
+- Gateway not healthy: `openclaw gateway restart`
+- WhatsApp disconnected/handshake timeout: `openclaw channels login --channel whatsapp --account default --verbose`
+- No inbound after repeated sends: inspect `C:\tmp\openclaw\openclaw-YYYY-MM-DD.log` for session-closure/decryption and deferred-recovery signals, then run:
+- `python scripts/openclaw_maintenance.py --apply --primary-channel whatsapp --restart-gateway-on-rpc-failure --attempt-primary-reenable`
 
 ### Job Definitions
 
@@ -559,7 +755,12 @@ Enable only if explicit handoffs are needed:
 
 ### Loop Detection
 
-Enabled globally to prevent runaway agent loops:
+Optional and version-dependent. Some OpenClaw builds reject this key.
+Check support first with:
+- `openclaw doctor`
+- `openclaw doctor --fix` (if unknown keys are reported)
+
+Enable only when your installed OpenClaw build supports it:
 ```json
 { "tools": { "loopDetection": { "enabled": true, "warningThreshold": 5, "criticalThreshold": 10 } } }
 ```

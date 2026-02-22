@@ -19,6 +19,8 @@ When a user message arrives via WhatsApp/Telegram/Discord:
 
 1. **Parse intent**: What does the user actually want? (status check? code change? analysis? notification?)
 2. **Plan tool calls**: Which tools will get the answer? (`read` for files, `exec` for commands, `python scripts/tavily_search.py --query ... --json` for external info)
+   - For external web lookup: **do not use native OpenClaw `web_search`** in this repo workflow. Always use Tavily via `exec`.
+   - If the user explicitly says "`web_search`", map it to Tavily command execution and continue.
 3. **Execute**: Call the tools. Read the output.
 4. **Synthesize**: Give a concise answer based on ACTUAL tool output, not generic knowledge.
 
@@ -45,7 +47,9 @@ When multiple developer-agents or humans are working in the same workspace:
 ### Windows PowerShell Command Rule
 
 - `exec` may run in Windows PowerShell 5 where `&&` is invalid.
-- Never chain commands with `&&`.
+- In PowerShell: no nested `powershell -Command`, use `$true`/`$false`, avoid unbounded loops.
+- For Python diagnostics, do not embed multiline code in `python -c "..."` with literal `\n`; use checked-in scripts (`python scripts/...`) with flags.
+- For `edit` calls, always include `path` + `oldText` + `newText` (or `new_string`); on schema failure, retry once then switch strategy.
 - For multi-step checks, run separate `exec` calls or use one wrapper command:
   - `python scripts/project_runtime_status.py --pretty`
 
@@ -56,8 +60,10 @@ When multiple developer-agents or humans are working in the same workspace:
 | "Check PnL" / "portfolio status" | `exec` → `python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db` |
 | "Run tests" | `exec` → `python -m pytest tests/ --tb=short -q` |
 | "Check gate" / "audit status" | `exec` → `python scripts/production_audit_gate.py` |
+| "Quant validation health" / "fail rate headroom" | `exec` → `python scripts/quant_validation_headroom.py --json` (or `python scripts/check_quant_validation_health.py`) |
 | "Read file X" | `read` → read the file, summarize key points |
 | "What's the market doing?" | `exec` → `python scripts/tavily_search.py --query "<market question>" --json` |
+| "Check project repo on GitHub" | `exec` → `python scripts/check_github_repo_status.py --pretty` |
 | "Send message to..." | `message` → send via the specified channel |
 | "Check system health" | `exec` → `python scripts/llm_multi_model_orchestrator.py status` |
 | "Check errors" / "any issues?" | `exec` → `python scripts/error_monitor.py --check` |
@@ -72,6 +78,7 @@ Preferred single-command runtime snapshot:
 - Do NOT produce empty thinking blocks that just restate the question.
 - Do NOT use emojis excessively. One per message max.
 - Do NOT offer to do things you weren't asked to do.
+- Do NOT use native `web_search` that requests `BRAVE_API_KEY`; use `python scripts/tavily_search.py --query ... --json`.
 
 ## Non-Negotiables (Secrets)
 

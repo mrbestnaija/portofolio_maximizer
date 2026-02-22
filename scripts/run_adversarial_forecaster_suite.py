@@ -198,11 +198,13 @@ def run_one(series: pd.Series, cfg: TimeSeriesForecasterConfig, horizon: int):
     forecaster.forecast(steps=horizon)
     model_metrics = forecaster.evaluate(test)
 
-    meta = forecaster._latest_results.get("ensemble_metadata", {}) if isinstance(forecaster._latest_results, dict) else {}
+    latest = forecaster._latest_results if isinstance(forecaster._latest_results, dict) else {}
+    meta = latest.get("ensemble_metadata", {}) if isinstance(latest, dict) else {}
     weights = meta.get("weights", {}) if isinstance(meta, dict) else {}
     status = meta.get("ensemble_status") if isinstance(meta, dict) else None
+    default_model = latest.get("default_model") if isinstance(latest, dict) else None
 
-    return rw_metrics, model_metrics, weights, status
+    return rw_metrics, model_metrics, weights, status, default_model
 
 
 def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -212,11 +214,21 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "model_presence": Counter(),
         "ensemble_under_best_count": 0,
         "ensemble_worse_than_rw_count": 0,
+        "effective_worse_than_rw_count": 0,
         "ensemble_rmse_ratio_vs_best": [],
         "sarimax_rmse_ratio_vs_rw": [],
         "ensemble_status_counts": Counter(),
+        "effective_model_counts": Counter(),
         "weight_patterns": Counter(),
-        "scenario_breakdown": defaultdict(lambda: {"n": 0, "ens_under_best": 0, "ens_worse_rw": 0, "ens_ratio": []}),
+        "scenario_breakdown": defaultdict(
+            lambda: {
+                "n": 0,
+                "ens_under_best": 0,
+                "ens_worse_rw": 0,
+                "effective_worse_rw": 0,
+                "ens_ratio": [],
+            }
+        ),
     }
 
     for row in run_rows:
@@ -243,6 +255,22 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         ens_rmse = (metrics_map.get("ensemble") or {}).get("rmse") if isinstance(metrics_map.get("ensemble"), dict) else None
         rw_rmse = rw.get("rmse") if isinstance(rw, dict) else None
+        default_model = str(row.get("default_model") or "ensemble").strip().lower()
+        canonical_default = (
+            "mssa_rl"
+            if default_model in {"mssa", "mssa-rl", "mssa_rl"}
+            else ("samossa" if default_model in {"samossa", "samossa_forecast"} else default_model)
+        )
+        if canonical_default not in {"ensemble", "sarimax", "garch", "samossa", "mssa_rl"}:
+            canonical_default = "ensemble"
+        out["effective_model_counts"][canonical_default] += 1
+        effective_rmse = (
+            (metrics_map.get(canonical_default) or {}).get("rmse")
+            if isinstance(metrics_map.get(canonical_default), dict)
+            else None
+        )
+        if effective_rmse is None:
+            effective_rmse = ens_rmse
         best_single = None
         for model_name in ("sarimax", "garch", "samossa", "mssa_rl"):
             rmse = (metrics_map.get(model_name) or {}).get("rmse") if isinstance(metrics_map.get(model_name), dict) else None
@@ -262,6 +290,11 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 out["ensemble_worse_than_rw_count"] += 1
                 out["scenario_breakdown"][scenario]["ens_worse_rw"] += 1
 
+        if isinstance(effective_rmse, (int, float)) and isinstance(rw_rmse, (int, float)) and rw_rmse > 0:
+            if float(effective_rmse) > float(rw_rmse):
+                out["effective_worse_than_rw_count"] += 1
+                out["scenario_breakdown"][scenario]["effective_worse_rw"] += 1
+
         srmse = (metrics_map.get("sarimax") or {}).get("rmse") if isinstance(metrics_map.get("sarimax"), dict) else None
         if isinstance(srmse, (int, float)) and isinstance(rw_rmse, (int, float)) and rw_rmse > 0:
             out["sarimax_rmse_ratio_vs_rw"].append(float(srmse) / float(rw_rmse))
@@ -269,6 +302,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     n_ok = max(1, out["runs"] - out["errors"])
     out["ensemble_under_best_rate"] = out["ensemble_under_best_count"] / n_ok
     out["ensemble_worse_than_rw_rate"] = out["ensemble_worse_than_rw_count"] / n_ok
+    out["effective_worse_than_rw_rate"] = out["effective_worse_than_rw_count"] / n_ok
     out["avg_ensemble_ratio_vs_best"] = (
         sum(out["ensemble_rmse_ratio_vs_best"]) / len(out["ensemble_rmse_ratio_vs_best"])
         if out["ensemble_rmse_ratio_vs_best"]
@@ -287,6 +321,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "runs": details["n"],
             "ensemble_under_best_rate": details["ens_under_best"] / n,
             "ensemble_worse_than_rw_rate": details["ens_worse_rw"] / n,
+            "effective_worse_than_rw_rate": details["effective_worse_rw"] / n,
             "avg_ens_ratio_vs_best": (
                 sum(details["ens_ratio"]) / len(details["ens_ratio"])
                 if details["ens_ratio"]
@@ -301,6 +336,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     out["model_presence"] = dict(out["model_presence"])
     out["ensemble_status_counts"] = dict(out["ensemble_status_counts"])
+    out["effective_model_counts"] = dict(out["effective_model_counts"])
     return out
 
 
@@ -315,18 +351,35 @@ def _load_thresholds(path: Path) -> Dict[str, Any]:
         "max_ensemble_under_best_rate": float(suite_cfg.get("max_ensemble_under_best_rate", 1.0)),
         "max_avg_ensemble_ratio_vs_best": float(suite_cfg.get("max_avg_ensemble_ratio_vs_best", 1.2)),
         "max_ensemble_worse_than_rw_rate": float(suite_cfg.get("max_ensemble_worse_than_rw_rate", 0.3)),
+        "max_effective_worse_than_rw_rate": float(
+            suite_cfg.get(
+                "max_effective_worse_than_rw_rate",
+                suite_cfg.get("max_ensemble_worse_than_rw_rate", 0.3),
+            )
+        ),
+        "use_effective_default_path_metric": bool(
+            suite_cfg.get("use_effective_default_path_metric", False)
+        ),
         "require_zero_errors": bool(suite_cfg.get("require_zero_errors", True)),
     }
 
 
 def evaluate_thresholds(summary: Dict[str, Any], thresholds: Dict[str, Any]) -> List[str]:
     breaches: List[str] = []
+    use_effective_metric = bool(thresholds.get("use_effective_default_path_metric", False))
     for variant, payload in summary.items():
         errors = int(payload.get("errors", 0) or 0)
         under_best = float(payload.get("ensemble_under_best_rate", 0.0) or 0.0)
         ratio = payload.get("avg_ensemble_ratio_vs_best")
         ratio = float(ratio) if isinstance(ratio, (int, float)) else None
-        worse_rw = float(payload.get("ensemble_worse_than_rw_rate", 0.0) or 0.0)
+        if use_effective_metric and "effective_worse_than_rw_rate" in payload:
+            worse_rw_metric = "effective_worse_than_rw_rate"
+            worse_rw = float(payload.get("effective_worse_than_rw_rate", 0.0) or 0.0)
+            worse_rw_threshold = float(thresholds.get("max_effective_worse_than_rw_rate", 0.3))
+        else:
+            worse_rw_metric = "ensemble_worse_than_rw_rate"
+            worse_rw = float(payload.get("ensemble_worse_than_rw_rate", 0.0) or 0.0)
+            worse_rw_threshold = float(thresholds.get("max_ensemble_worse_than_rw_rate", 0.3))
 
         if thresholds.get("require_zero_errors", True) and errors > 0:
             breaches.append(f"{variant}: errors={errors} (require_zero_errors=true)")
@@ -338,9 +391,9 @@ def evaluate_thresholds(summary: Dict[str, Any], thresholds: Dict[str, Any]) -> 
             breaches.append(
                 f"{variant}: avg_ensemble_ratio_vs_best={ratio:.4f} > {float(thresholds.get('max_avg_ensemble_ratio_vs_best')):.4f}"
             )
-        if worse_rw > float(thresholds.get("max_ensemble_worse_than_rw_rate", 0.3)):
+        if worse_rw > worse_rw_threshold:
             breaches.append(
-                f"{variant}: ensemble_worse_than_rw_rate={worse_rw:.4f} > {float(thresholds.get('max_ensemble_worse_than_rw_rate')):.4f}"
+                f"{variant}: {worse_rw_metric}={worse_rw:.4f} > {worse_rw_threshold:.4f}"
             )
     return breaches
 
@@ -361,7 +414,7 @@ def _run_variants(
             for seed in seeds:
                 series = gen_series(scenario, n_points, seed)
                 try:
-                    rw, metrics, weights, status = run_one(series, cfg, horizon)
+                    rw, metrics, weights, status, default_model = run_one(series, cfg, horizon)
                     results[variant].append(
                         {
                             "scenario": scenario,
@@ -370,6 +423,7 @@ def _run_variants(
                             "metrics": metrics,
                             "weights": weights,
                             "status": status,
+                            "default_model": default_model,
                             "error": None,
                         }
                     )
@@ -382,6 +436,7 @@ def _run_variants(
                             "metrics": {},
                             "weights": {},
                             "status": None,
+                            "default_model": None,
                             "error": str(exc),
                         }
                     )

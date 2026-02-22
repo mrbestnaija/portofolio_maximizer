@@ -64,6 +64,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **PnL Integrity Enforcement**: Database-level constraints (opening legs NULL PnL, entry_trade_id linkage, diagnostic/synthetic flags), canonical views (`production_closed_trades`, `round_trips`), CI gate
 - **Adversarial Audit**: 10-finding stress test documented in [ADVERSARIAL_AUDIT_20260216.md](Documentation/ADVERSARIAL_AUDIT_20260216.md)
 - **OpenClaw Cron Automation**: 9 priority-ranked cron jobs running real PMX scripts (P0: PnL integrity every 4h, production gate daily; P1: signal linkage, ticker health; P2: GARCH unit-root, overnight hold)
+- **Tavily Search Integration**: `scripts/tavily_search.py` for quota-safe web grounding without Brave dependency
 - **Interactions API**: FastAPI with auth mode enforcement (`jwt-only`/`api-key-only`/`any`), CORS, rate limiting, ngrok integration
 - **3-Model Local LLM Stack**: deepseek-r1:8b + deepseek-r1:32b + qwen3:8b via Ollama with multi-model orchestration
 - **Cross-session persistence**: portfolio_state + portfolio_cash_state tables via `--resume`

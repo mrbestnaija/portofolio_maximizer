@@ -265,6 +265,7 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
         "warnings": warnings,
         "metrics": {
             **stats,
+            "closed_trades": closed_trades,
             "buy_count": buy_count,
             "sell_count": sell_count,
             "hold_count": actions.get("HOLD", 0),

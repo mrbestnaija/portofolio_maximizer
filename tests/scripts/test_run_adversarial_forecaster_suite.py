@@ -47,3 +47,25 @@ def test_load_thresholds_from_monitor_config(tmp_path: Path) -> None:
     assert thresholds["max_ensemble_worse_than_rw_rate"] == 0.20
     assert thresholds["require_zero_errors"] is True
 
+
+def test_evaluate_thresholds_can_use_effective_default_path_metric() -> None:
+    summary = {
+        "prod_like_conf_on": {
+            "errors": 0,
+            "ensemble_under_best_rate": 0.90,
+            "avg_ensemble_ratio_vs_best": 1.10,
+            "ensemble_worse_than_rw_rate": 0.60,
+            "effective_worse_than_rw_rate": 0.15,
+        }
+    }
+    thresholds = {
+        "max_ensemble_under_best_rate": 1.0,
+        "max_avg_ensemble_ratio_vs_best": 1.2,
+        "max_ensemble_worse_than_rw_rate": 0.3,
+        "max_effective_worse_than_rw_rate": 0.2,
+        "use_effective_default_path_metric": True,
+        "require_zero_errors": True,
+    }
+    breaches = mod.evaluate_thresholds(summary, thresholds)
+    # Raw ensemble_worse_than_rw_rate would breach; effective metric should pass.
+    assert not any("worse_than_rw_rate" in item for item in breaches)

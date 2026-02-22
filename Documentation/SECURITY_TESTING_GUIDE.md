@@ -38,6 +38,26 @@ python tools/secrets_guard.py scan --staged --strict
 python tools/secrets_guard.py scan --tracked --strict
 ```
 
+### Autonomous Agent Guard Tests (OpenClaw)
+
+This repo now includes an OpenClaw autonomous-action guard in `utils/openclaw_cli.py`.
+It blocks high-risk autonomous requests unless an explicit human approval token is present,
+and it prepends an anti-prompt-injection policy to agent turns.
+
+```bash
+# Focused autonomy guard tests
+pytest tests/utils/test_openclaw_cli.py -k "autonomy_guard or AutonomyGuard" -v
+
+# Validate OpenClaw config/env hardening alignment
+python scripts/verify_openclaw_config.py
+```
+
+High-value assertions:
+- High-risk requests (credential exfiltration, irreversible trade/account actions) return `403` without approval token.
+- Same requests pass only when the approval token is present.
+- Agent-turn prompts include policy prefix `[PMX_AUTONOMY_POLICY]` unless explicitly disabled.
+- Optional strict mode (`OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`) blocks prompt-injection phrases.
+
 ---
 
 ## 📋 TEST SUITE OVERVIEW
@@ -193,6 +213,8 @@ Before deploying:
 - [ ] Check database permissions are set correctly
 - [ ] Verify integration tests pass
 - [ ] Run full test suite: `pytest -v`
+- [ ] Run OpenClaw autonomy guard tests: `pytest tests/utils/test_openclaw_cli.py -k "autonomy_guard or AutonomyGuard" -v`
+- [ ] Verify OpenClaw hardening flags/config: `python scripts/verify_openclaw_config.py`
 
 ---
 

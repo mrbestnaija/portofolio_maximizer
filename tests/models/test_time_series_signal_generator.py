@@ -762,6 +762,9 @@ class TestTimeSeriesSignalGenerator:
         assert payload['ticker'] == 'AAPL'
         assert payload['quant_validation']['status']
         assert payload['market_context']['rows'] == len(sample_market_data)
+        assert payload.get('run_id')
+        assert payload.get('pipeline_id')
+        assert payload.get('execution_mode')
 
     def test_per_ticker_min_expected_profit_override(self,
                                                      sample_forecast_bundle,

@@ -78,19 +78,14 @@ forecasting:
     prefer_diversified_candidate: true
     diversity_tolerance: 0.15  # Phase 7.9: lowered from 0.35 to let pure candidates win more often (reduces blend dilution that causes RMSE violations)
     candidate_weights:
-      - {sarimax: 0.45, garch: 0.35, samossa: 0.15, mssa_rl: 0.05}
-      - {sarimax: 0.40, samossa: 0.30, garch: 0.20, mssa_rl: 0.10}
-      - {sarimax: 0.35, samossa: 0.35, garch: 0.20, mssa_rl: 0.10}
-      # Additional candidate profiles (retain pure/fallback candidates below).
-      - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}  # GARCH-dominant for liquid tickers
-      - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}  # GARCH-heavy with SSA
-      - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}  # Balanced GARCH blend
-      - {samossa: 0.60, mssa_rl: 0.40}                # SSA-dominant
-      - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}  # Balanced SSA
-      # Phase 7.9: mssa_rl-dominant blends (addresses audit violations where mssa_rl > ensemble)
-      - {mssa_rl: 0.70, garch: 0.30}                  # MSSA-RL led with GARCH vol support
-      - {mssa_rl: 0.70, samossa: 0.30}                # MSSA-RL led with SAMoSSA diversity
-      # Pure model fallbacks
+      # SARIMAX is disabled by default; keep ensemble candidates aligned with active models.
+      - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
+      - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
+      - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
+      - {samossa: 0.60, mssa_rl: 0.40}
+      - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
+      - {mssa_rl: 0.70, garch: 0.30}
+      - {mssa_rl: 0.70, samossa: 0.30}
       - {garch: 1.0}
       - {samossa: 1.0}
       - {mssa_rl: 1.0}

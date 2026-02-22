@@ -14,6 +14,7 @@ Per refactoring plan:
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -216,6 +217,27 @@ class TimeSeriesSignalGenerator:
             # Disable quant validation in diagnostic mode to avoid gating signals.
             self._quant_validation_enabled = False
 
+        runtime_execution_mode = self._coerce_nonempty_str(
+            os.getenv("EXECUTION_MODE") or os.getenv("PMX_EXECUTION_MODE")
+        )
+        if runtime_execution_mode is None:
+            runtime_execution_mode = "paper" if _pmx_env_flag("PMX_PROOF_MODE") else "live"
+        self._runtime_execution_mode = runtime_execution_mode.lower()
+
+        runtime_run_id = self._coerce_nonempty_str(
+            os.getenv("PMX_RUN_ID") or os.getenv("RUN_ID")
+        )
+        if runtime_run_id is None:
+            runtime_run_id = f"pmx_ts_{utc_now().strftime('%Y%m%dT%H%M%SZ')}_{os.getpid()}"
+        self._runtime_run_id = runtime_run_id
+
+        runtime_pipeline_id = self._coerce_nonempty_str(
+            os.getenv("PORTFOLIO_MAXIMIZER_PIPELINE_ID") or os.getenv("PIPELINE_ID")
+        )
+        if runtime_pipeline_id is None:
+            runtime_pipeline_id = self._runtime_run_id
+        self._runtime_pipeline_id = runtime_pipeline_id
+
         # Phase 7.4 FIX: Load forecasting config to preserve ensemble_kwargs during CV
         self._forecasting_config_path = (
             Path(forecasting_config_path).expanduser()
@@ -394,6 +416,32 @@ class TimeSeriesSignalGenerator:
             confidence_threshold = thresholds["confidence_threshold"]
             min_expected_return = thresholds["min_expected_return"]
             max_risk_score = thresholds["max_risk_score"]
+            execution_mode = self._coerce_nonempty_str(
+                forecast_bundle.get("execution_mode")
+                or os.getenv("EXECUTION_MODE")
+                or os.getenv("PMX_EXECUTION_MODE")
+            )
+            if execution_mode is None:
+                execution_mode = self._runtime_execution_mode
+            execution_mode = execution_mode.lower()
+            proof_mode_raw = forecast_bundle.get("proof_mode")
+            if proof_mode_raw is None:
+                proof_mode_raw = _pmx_env_flag("PMX_PROOF_MODE")
+            proof_mode = self._to_bool(proof_mode_raw, default=False)
+            run_id = self._coerce_nonempty_str(
+                forecast_bundle.get("run_id")
+                or os.getenv("PMX_RUN_ID")
+                or os.getenv("RUN_ID")
+            )
+            if run_id is None:
+                run_id = self._runtime_run_id
+            pipeline_id = self._coerce_nonempty_str(
+                forecast_bundle.get("pipeline_id")
+                or os.getenv("PORTFOLIO_MAXIMIZER_PIPELINE_ID")
+                or os.getenv("PIPELINE_ID")
+            )
+            if pipeline_id is None:
+                pipeline_id = self._runtime_pipeline_id or run_id
 
             friction = self._estimate_roundtrip_friction(
                 ticker=ticker,
@@ -435,6 +483,7 @@ class TimeSeriesSignalGenerator:
                 model_agreement=model_agreement,
                 diagnostics_score=float(diagnostics.get("score", 0.5)),
                 snr=snr,
+                ticker=ticker,
             )
 
             # Calculate risk score
@@ -512,6 +561,11 @@ class TimeSeriesSignalGenerator:
                 provenance["decision_context_snr"] = snr
             if change_point_info:
                 provenance["mssa_rl_change_points"] = change_point_info
+            provenance["execution_mode"] = execution_mode
+            provenance["proof_mode"] = proof_mode
+            provenance["pipeline_id"] = str(pipeline_id) if pipeline_id is not None else None
+            if run_id is not None:
+                provenance["run_id"] = str(run_id)
 
             provenance['decision_context'] = {
                 'expected_return': expected_return,
@@ -524,6 +578,10 @@ class TimeSeriesSignalGenerator:
                 'risk_score': risk_score,
                 'volatility': volatility,
                 'signal_to_noise': snr,
+                'execution_mode': execution_mode,
+                'proof_mode': proof_mode,
+                'pipeline_id': str(pipeline_id) if pipeline_id is not None else None,
+                'run_id': str(run_id) if run_id is not None else None,
             }
 
             self._signal_counter += 1
@@ -675,6 +733,23 @@ class TimeSeriesSignalGenerator:
         if isinstance(value, (np.generic, float, int)):
             return float(value)
         return None
+
+    @staticmethod
+    def _to_bool(value: Any, *, default: bool = False) -> bool:
+        """Convert mixed env/config values to boolean."""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "y"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "n"}:
+                return False
+        return default
 
     def _resolve_thresholds_for_ticker(self, ticker: str) -> Dict[str, Any]:
         """Resolve per-ticker overrides for routing thresholds."""
@@ -968,6 +1043,7 @@ class TimeSeriesSignalGenerator:
         model_agreement: float,
         diagnostics_score: float,
         snr: Optional[float],
+        ticker: str,
     ) -> float:
         """
         Discriminative confidence score (0.0..1.0).
@@ -1015,13 +1091,23 @@ class TimeSeriesSignalGenerator:
         if abs(float(expected_return)) < float(min_expected_return):
             raw_confidence *= 0.75
 
-        # Phase 7.10b: Platt scaling calibration (replaces fixed shrinkage).
-        # Fits logistic regression on historical (confidence, win) pairs from
-        # quant_validation.jsonl. Falls back to shrinkage when data < 30 samples.
+        if not self._quant_validation_enabled:
+            return self._clamp01(raw_confidence)
+
+        # Calibrate confidence from realised trade outcomes in trade_executions.
         qv_cfg = getattr(self, "quant_validation_config", None) or {}
-        log_cfg = qv_cfg.get("logging") or {}
-        log_dir = log_cfg.get("log_dir") or "logs/signals"
-        confidence = self._calibrate_confidence(raw_confidence, ticker="", log_dir=log_dir)
+        calibration_cfg = qv_cfg.get("calibration") if isinstance(qv_cfg, dict) else {}
+        calibration_cfg = calibration_cfg if isinstance(calibration_cfg, dict) else {}
+        db_path = (
+            calibration_cfg.get("db_path")
+            or os.getenv("PORTFOLIO_DB_PATH")
+            or "data/portfolio_maximizer.db"
+        )
+        confidence = self._calibrate_confidence(
+            raw_confidence,
+            ticker=ticker,
+            db_path=db_path,
+        )
 
         return self._clamp01(confidence)
 
@@ -1216,7 +1302,7 @@ class TimeSeriesSignalGenerator:
             return 'HOLD'
 
         # net_trade_return is always non-negative and already clears estimated friction.
-        if net_trade_return < min_expected_return:
+        if net_trade_return + 1e-12 < min_expected_return:
             return 'HOLD'
 
         if risk_score > max_risk_score:
@@ -1456,6 +1542,8 @@ class TimeSeriesSignalGenerator:
             performance_snapshot=performance_snapshot,
             significance=significance,
             expected_profit=expected_profit,
+            position_value=position_value,
+            action=action,
         )
         drift_criteria = dict(criteria) if isinstance(criteria, dict) else {}
 
@@ -1474,9 +1562,13 @@ class TimeSeriesSignalGenerator:
                 # Edge criteria are the primary gate; keep drift-proxy criteria
                 # available in metrics but do not require them unless explicitly requested.
                 include_drift = bool(criteria_cfg.get("include_drift_proxy_criteria", False))
-                criteria = {"expected_profit": drift_criteria.get("expected_profit", True), **edge_criteria}
+                criteria = dict(edge_criteria)
+                if "expected_profit" in drift_criteria:
+                    criteria = {"expected_profit": drift_criteria.get("expected_profit"), **criteria}
                 if include_drift:
                     criteria.update({f"drift_{k}": v for k, v in drift_criteria.items() if k != "expected_profit"})
+
+        criteria = self._canonicalize_criteria(criteria)
 
         viz_cfg = config.get('visualization') or {}
         visualization_result = None
@@ -1489,37 +1581,58 @@ class TimeSeriesSignalGenerator:
             )
 
         failed = [name for name, passed in criteria.items() if not passed]
-
-        # --- Weighted scoring (Phase 7.10b): replaces ALL-MUST-PASS ---
         scoring_mode = str(config.get('scoring_mode', 'weighted')).lower()
-        if not criteria:
-            status = 'SKIPPED'
-        elif scoring_mode == 'all_pass':
-            # Legacy: every criterion must pass
-            status = 'PASS' if all(criteria.values()) else 'FAIL'
+        pass_threshold = float(config.get('pass_threshold', 0.60))
+        strict_weight_coverage = self._to_bool(
+            config.get("strict_weight_coverage"),
+            default=True,
+        )
+        normalized_score = None
+        total_weight = 0.0
+        weight_validation: Dict[str, Any] = {
+            "strict_weight_coverage": strict_weight_coverage,
+            "missing_weight_keys": [],
+            "unused_weight_keys": [],
+            "coverage_ok": True,
+        }
+
+        if action == "HOLD":
+            # HOLD is non-actionable for trade-health metrics; keep as SKIPPED.
+            status = "SKIPPED"
+        elif not criteria:
+            status = "SKIPPED"
+        elif criteria.get("expected_profit") is False:
+            # Expected-profit floor is an economic viability gate; failing it is always FAIL.
+            status = "FAIL"
+        elif scoring_mode == "all_pass":
+            # Legacy: every criterion must pass.
+            status = "PASS" if all(criteria.values()) else "FAIL"
         else:
-            # Hard gate: negative expected_profit is always FAIL regardless of score
+            # Hard gate: negative expected_profit is always FAIL regardless of score.
             if expected_profit < 0:
-                status = 'FAIL'
+                status = "FAIL"
             else:
-                default_weights = {
-                    'expected_profit': 0.25,
-                    'rmse_ratio': 0.20,
-                    'directional_accuracy': 0.20,
-                    'sharpe_ratio': 0.10,
-                    'sortino_ratio': 0.10,
-                    'profit_factor': 0.10,
-                    'win_rate': 0.05,
-                }
-                weights = config.get('criterion_weights') or default_weights
-                pass_threshold = float(config.get('pass_threshold', 0.60))
-                score = sum(
-                    float(weights.get(k, 0.0)) * (1.0 if v else 0.0)
-                    for k, v in criteria.items()
+                resolved_weights, missing_keys, unused_keys = self._resolve_weighted_scoring_weights(
+                    criteria=criteria,
+                    configured_weights=config.get("criterion_weights"),
                 )
-                total_weight = sum(float(weights.get(k, 0.0)) for k in criteria)
-                normalized_score = score / total_weight if total_weight > 0 else 0.0
-                status = 'PASS' if normalized_score >= pass_threshold else 'FAIL'
+                weight_validation["missing_weight_keys"] = missing_keys
+                weight_validation["unused_weight_keys"] = unused_keys
+                weight_validation["coverage_ok"] = not missing_keys
+
+                if missing_keys and strict_weight_coverage:
+                    status = "FAIL"
+                else:
+                    score = sum(
+                        float(resolved_weights.get(k, 0.0)) * (1.0 if v else 0.0)
+                        for k, v in criteria.items()
+                    )
+                    total_weight = sum(float(resolved_weights.get(k, 0.0)) for k in criteria)
+                    if total_weight <= 0:
+                        status = "FAIL" if strict_weight_coverage else "SKIPPED"
+                    else:
+                        normalized_score = score / total_weight
+                        status = "PASS" if normalized_score >= pass_threshold else "FAIL"
 
         return {
             'status': status,
@@ -1536,6 +1649,13 @@ class TimeSeriesSignalGenerator:
             'bootstrap': bootstrap_stats,
             'criteria': criteria,
             'failed_criteria': failed,
+            'weight_validation': weight_validation,
+            'scoring': {
+                'mode': scoring_mode,
+                'pass_threshold': pass_threshold,
+                'normalized_score': normalized_score,
+                'total_weight': total_weight,
+            },
             'significance': significance,
             'lookback_bars': int(len(price_series)),
             'expected_profit': expected_profit,
@@ -1544,6 +1664,12 @@ class TimeSeriesSignalGenerator:
             'estimated_shares': position_value / safe_price if safe_price else None,
             'performance_snapshot': performance_snapshot,
             'visualization': {'path': visualization_result} if visualization_result else {},
+            'execution_mode': (signal.provenance or {}).get("execution_mode"),
+            'proof_mode': self._to_bool((signal.provenance or {}).get("proof_mode"), default=False),
+            'run_id': (
+                (signal.provenance or {}).get("run_id")
+                or ((signal.provenance or {}).get("decision_context") or {}).get("run_id")
+            ),
         }
 
     def _evaluate_forecast_edge(
@@ -1745,12 +1871,107 @@ class TimeSeriesSignalGenerator:
         }
 
     @staticmethod
+    def _canonical_criterion_key(raw_key: str) -> str:
+        """Normalize criterion aliases so weighted scoring and schema keys stay aligned."""
+        key = str(raw_key or "").strip().lower().replace("-", "_")
+        prefix = ""
+        if key.startswith("drift_"):
+            prefix = "drift_"
+            key = key[len(prefix):]
+
+        aliases = {
+            "rmse_ratio": "rmse_ratio_vs_baseline",
+            "rmse": "rmse_ratio_vs_baseline",
+        }
+        return prefix + aliases.get(key, key)
+
+    def _canonicalize_criteria(self, criteria: Dict[str, bool]) -> Dict[str, bool]:
+        if not isinstance(criteria, dict):
+            return {}
+        normalized: Dict[str, bool] = {}
+        for raw_key, passed in criteria.items():
+            key = self._canonical_criterion_key(str(raw_key))
+            if not key:
+                continue
+            if key in normalized:
+                # Conservative merge for duplicate aliases: both must pass.
+                normalized[key] = bool(normalized[key]) and bool(passed)
+            else:
+                normalized[key] = bool(passed)
+        return normalized
+
+    @staticmethod
+    def _default_weighted_criterion_weights() -> Dict[str, float]:
+        """Default weighted schema kept aligned with emitted quant criteria."""
+        return {
+            "expected_profit": 0.23,
+            "rmse_ratio_vs_baseline": 0.20,
+            "directional_accuracy": 0.16,
+            "annual_return": 0.08,
+            "max_drawdown": 0.07,
+            "sharpe_ratio": 0.08,
+            "sortino_ratio": 0.08,
+            "profit_factor": 0.06,
+            "win_rate": 0.04,
+        }
+
+    def _resolve_weighted_scoring_weights(
+        self,
+        *,
+        criteria: Dict[str, bool],
+        configured_weights: Any,
+    ) -> Tuple[Dict[str, float], List[str], List[str]]:
+        """
+        Resolve weights for weighted scoring with strict key-coverage diagnostics.
+
+        Returns:
+            (resolved_weights_by_criterion, missing_criterion_weights, unused_weight_keys)
+        """
+        defaults = self._default_weighted_criterion_weights()
+        normalized_config: Dict[str, float] = {}
+        if isinstance(configured_weights, dict):
+            for raw_key, raw_weight in configured_weights.items():
+                key = self._canonical_criterion_key(str(raw_key))
+                if not key:
+                    continue
+                try:
+                    weight = float(raw_weight)
+                except (TypeError, ValueError):
+                    continue
+                if weight <= 0:
+                    continue
+                normalized_config[key] = weight
+
+        criteria_keys = [self._canonical_criterion_key(k) for k in criteria]
+        criteria_keys = [k for k in criteria_keys if k]
+
+        resolved: Dict[str, float] = {}
+        missing: List[str] = []
+        for key in criteria_keys:
+            if key in normalized_config:
+                resolved[key] = float(normalized_config[key])
+                continue
+            if key in defaults:
+                resolved[key] = float(defaults[key])
+            else:
+                resolved[key] = 0.0
+            if isinstance(configured_weights, dict):
+                missing.append(key)
+
+        unused = sorted(
+            key for key in normalized_config.keys() if key not in set(criteria_keys)
+        )
+        return resolved, sorted(set(missing)), unused
+
+    @staticmethod
     def _evaluate_success_criteria(
         criteria_cfg: Optional[Dict[str, Any]],
         metrics: Dict[str, float],
         performance_snapshot: Dict[str, float],
         significance: Optional[Dict[str, Any]],
         expected_profit: float,
+        position_value: Optional[float] = None,
+        action: str = "HOLD",
     ) -> Dict[str, bool]:
         """Evaluate metrics vs configuration thresholds."""
         if not isinstance(criteria_cfg, dict) or not criteria_cfg:
@@ -1778,22 +1999,20 @@ class TimeSeriesSignalGenerator:
             wr = performance_snapshot.get('win_rate', 0.0)
             results['win_rate'] = wr >= float(criteria_cfg['min_win_rate'])
 
-        if 'min_expected_profit' in criteria_cfg or 'min_expected_profit_pct' in criteria_cfg:
+        action_upper = str(action or "HOLD").upper()
+        if action_upper != "HOLD" and ('min_expected_profit' in criteria_cfg or 'min_expected_profit_pct' in criteria_cfg):
             abs_floor = float(criteria_cfg.get('min_expected_profit', 1.0))
             pct_floor = float(criteria_cfg.get('min_expected_profit_pct', 0.0))
-            # Infer position_value from expected_profit / net_trade_return if possible;
-            # fall back to capital_base * 0.10 allocation as conservative proxy.
             # PASS if expected_profit meets EITHER the absolute OR the relative floor.
-            # This allows small-capital trades with good relative edge to pass.
             abs_pass = expected_profit >= abs_floor
             if pct_floor > 0:
-                # We don't have position_value here directly, so derive from abs_floor
-                # proxy: if expected_profit >= 0.2% of $25k default = $50 that passes too.
-                # The signal generator passes expected_profit already computed as
-                # position_value * net_trade_return; use abs_floor as fallback only.
-                capital_b = float(criteria_cfg.get('capital_base', 25000.0))
-                rel_floor_dollars = capital_b * pct_floor
-                rel_pass = expected_profit >= rel_floor_dollars
+                # Relative floor is per-trade notional, not global capital base.
+                try:
+                    trade_notional = float(position_value) if position_value is not None else 0.0
+                except (TypeError, ValueError):
+                    trade_notional = 0.0
+                rel_floor_dollars = trade_notional * pct_floor
+                rel_pass = rel_floor_dollars > 0 and expected_profit >= rel_floor_dollars
             else:
                 rel_pass = False
             results['expected_profit'] = abs_pass or rel_pass
@@ -1845,86 +2064,135 @@ class TimeSeriesSignalGenerator:
         self,
         raw_confidence: float,
         ticker: str,
-        log_dir: Optional[str] = None,
+        db_path: Optional[str] = None,
     ) -> float:
-        """Apply Platt scaling to calibrate raw confidence to realized win rate.
-
-        Phase 7.10b: Adversarial audit found 0.9+ confidence -> 41% actual WR
-        (random). Platt scaling fits a logistic regression:
-            P(win | confidence) = sigmoid(a * confidence + b)
-        using recent (predicted_confidence, actual_win) pairs from quant_validation.jsonl.
-
-        Falls back to linear shrinkage if fewer than 30 labeled samples exist.
-        """
+        """Calibrate raw confidence using realized win/loss outcomes from trade_executions."""
         if raw_confidence is None:
             return 0.50
 
         raw_conf = float(raw_confidence)
-        log_path = Path(log_dir or "logs/signals") / "quant_validation.jsonl"
-        if not log_path.exists():
-            # No data yet — use existing shrinkage formula
-            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+        db_file = Path(
+            db_path
+            or os.getenv("PORTFOLIO_DB_PATH")
+            or "data/portfolio_maximizer.db"
+        )
+        pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+            db_file=db_file,
+            ticker=ticker,
+            limit=1200,
+        )
 
-        # Load pairs (confidence, win) from JSONL
-        pairs_conf: list = []
-        pairs_win: list = []
-        try:
-            with log_path.open(encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    # Accept both root-level and nested quant_validation keys
-                    rec_conf = rec.get("confidence")
-                    qv = rec.get("quant_validation") or {}
-                    rec_conf = rec_conf if rec_conf is not None else qv.get("confidence")
-                    status = rec.get("status") or qv.get("status")
-                    if rec_conf is None or status not in ("PASS", "FAIL"):
-                        continue
-                    pairs_conf.append(float(rec_conf))
-                    pairs_win.append(1.0 if status == "PASS" else 0.0)
-        except Exception as exc:
-            logger.debug("Platt scaling: could not load history (%s); using shrinkage.", exc)
-            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+        if len(pairs_conf) < 30 and ticker:
+            # Fallback to global history when ticker-local sample is too small.
+            pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                db_file=db_file,
+                ticker="",
+                limit=2000,
+            )
 
         n = len(pairs_conf)
-        pass_rate = sum(pairs_win) / n if n else 0.0
-
-        # Guard: require >= 30 samples AND >= 15% PASS rate for Platt to be meaningful.
-        # When historical data is overwhelmingly FAIL (e.g. 94% FAIL during research),
-        # logistic regression would learn to output near-zero for all inputs,
-        # destroying discrimination. Use shrinkage instead until the system
-        # accumulates enough positive signal to calibrate against.
-        MIN_PLATT_SAMPLES = 30
-        MIN_PLATT_PASS_RATE = 0.15
-        if n < MIN_PLATT_SAMPLES or pass_rate < MIN_PLATT_PASS_RATE:
-            logger.debug(
-                "Platt scaling: n=%d pass_rate=%.3f below thresholds (%d/%.2f); using shrinkage.",
-                n, pass_rate, MIN_PLATT_SAMPLES, MIN_PLATT_PASS_RATE,
-            )
-            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+        wins = int(sum(pairs_win))
+        losses = int(n - wins)
+        if n < 30 or wins < 5 or losses < 5:
+            return float(max(0.05, min(0.95, raw_conf)))
 
         try:
             import numpy as _np  # pylint: disable=import-outside-toplevel
             x = _np.array(pairs_conf, dtype=float).reshape(-1, 1)
             y = _np.array(pairs_win, dtype=float)
-            # Platt scaling: fit logistic regression on (confidence, win)
             from sklearn.linear_model import LogisticRegression  # pylint: disable=import-outside-toplevel
             clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
             clf.fit(x, y)
             calibrated = float(clf.predict_proba([[raw_conf]])[0][1])
+            qv_cfg = getattr(self, "quant_validation_config", None) or {}
+            calibration_cfg = qv_cfg.get("calibration") if isinstance(qv_cfg, dict) else {}
+            calibration_cfg = calibration_cfg if isinstance(calibration_cfg, dict) else {}
+            try:
+                raw_weight = float(calibration_cfg.get("raw_weight", 0.80))
+            except (TypeError, ValueError):
+                raw_weight = 0.80
+            raw_weight = max(0.0, min(1.0, raw_weight))
+            try:
+                max_downside = float(calibration_cfg.get("max_downside_adjustment", 0.15))
+            except (TypeError, ValueError):
+                max_downside = 0.15
+            max_downside = max(0.0, min(1.0, max_downside))
+            blended = (raw_weight * raw_conf) + ((1.0 - raw_weight) * calibrated)
+            blended = max(blended, raw_conf - max_downside)
             logger.debug(
-                "Platt scaling: raw=%.3f -> calibrated=%.3f (n=%d, pass_rate=%.3f, ticker=%s)",
-                raw_conf, calibrated, n, pass_rate, ticker,
+                (
+                    "Outcome calibration: raw=%.3f model=%.3f blended=%.3f "
+                    "(n=%d wins=%d losses=%d ticker=%s raw_weight=%.2f)"
+                ),
+                raw_conf, calibrated, blended, n, wins, losses, ticker, raw_weight,
             )
-            return float(max(0.05, min(0.95, calibrated)))
+            return float(max(0.05, min(0.95, blended)))
         except Exception as exc:
-            logger.debug("Platt scaling fit failed (%s); using shrinkage.", exc)
-            return max(0.05, min(0.95, 0.50 + 0.60 * (raw_conf - 0.50)))
+            logger.debug("Outcome calibration fit failed (%s); using raw confidence.", exc)
+            return float(max(0.05, min(0.95, raw_conf)))
+
+    def _load_realized_outcome_pairs(
+        self,
+        *,
+        db_file: Path,
+        ticker: str,
+        limit: int,
+    ) -> Tuple[List[float], List[float]]:
+        pairs_conf: List[float] = []
+        pairs_win: List[float] = []
+        if not db_file.exists():
+            return pairs_conf, pairs_win
+
+        query = [
+            "SELECT",
+            "  COALESCE(confidence_calibrated, effective_confidence, base_confidence) AS conf,",
+            "  realized_pnl",
+            "FROM trade_executions",
+            "WHERE realized_pnl IS NOT NULL",
+            "  AND action IN ('BUY', 'SELL')",
+            "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) IS NOT NULL",
+            "  AND (is_close = 1 OR is_close IS NULL)",
+        ]
+        params: List[Any] = []
+        ticker_norm = str(ticker or "").strip().upper()
+        if ticker_norm:
+            query.append("  AND UPPER(ticker) = ?")
+            params.append(ticker_norm)
+        query.append("ORDER BY id DESC")
+        query.append("LIMIT ?")
+        params.append(int(max(limit, 50)))
+
+        conn = None
+        try:
+            conn = sqlite3.connect(str(db_file), timeout=2.0)
+            cur = conn.cursor()
+            cur.execute("\n".join(query), params)
+            rows = cur.fetchall()
+        except Exception as exc:
+            logger.debug("Outcome calibration: unable to read %s (%s)", db_file, exc)
+            return pairs_conf, pairs_win
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        for row in rows:
+            if not row or len(row) < 2:
+                continue
+            conf_raw, pnl_raw = row[0], row[1]
+            try:
+                conf_val = float(conf_raw)
+                pnl_val = float(pnl_raw)
+            except (TypeError, ValueError):
+                continue
+            if pnl_val == 0:
+                continue
+            pairs_conf.append(conf_val)
+            pairs_win.append(1.0 if pnl_val > 0 else 0.0)
+
+        return pairs_conf, pairs_win
 
     def _log_quant_validation(
         self,
@@ -1943,10 +2211,6 @@ class TimeSeriesSignalGenerator:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / logging_cfg.get('filename', 'quant_validation.jsonl')
 
-        pipeline_id = (
-            os.environ.get('PORTFOLIO_MAXIMIZER_PIPELINE_ID')
-            or os.environ.get('PIPELINE_ID')
-        )
         visualization_path = (
             (quant_profile.get('visualization') or {}).get('path')
             if isinstance(quant_profile, dict)
@@ -1975,11 +2239,58 @@ class TimeSeriesSignalGenerator:
         if hasattr(market_data, 'attrs'):
             market_context['data_source'] = market_data.attrs.get('source')
 
+        signal_provenance = signal.provenance if isinstance(signal.provenance, dict) else {}
+        signal_ctx = signal_provenance.get("decision_context") if isinstance(signal_provenance, dict) else {}
+        signal_ctx = signal_ctx if isinstance(signal_ctx, dict) else {}
+        pipeline_id = self._coerce_nonempty_str(
+            quant_profile.get("pipeline_id")
+            or signal_provenance.get("pipeline_id")
+            or signal_ctx.get("pipeline_id")
+            or os.environ.get("PORTFOLIO_MAXIMIZER_PIPELINE_ID")
+            or os.environ.get("PIPELINE_ID")
+        )
+        if pipeline_id is None:
+            pipeline_id = self._runtime_pipeline_id
+        execution_mode = (
+            quant_profile.get("execution_mode")
+            or signal_provenance.get("execution_mode")
+            or signal_ctx.get("execution_mode")
+            or os.environ.get("EXECUTION_MODE")
+            or os.environ.get("PMX_EXECUTION_MODE")
+        )
+        execution_mode = self._coerce_nonempty_str(execution_mode) or self._runtime_execution_mode
+        execution_mode = execution_mode.lower()
+        proof_mode = quant_profile.get("proof_mode")
+        if proof_mode is None:
+            proof_mode = signal_provenance.get("proof_mode")
+        if proof_mode is None:
+            proof_mode = signal_ctx.get("proof_mode")
+        run_id = self._coerce_nonempty_str(
+            quant_profile.get("run_id")
+            or signal_provenance.get("run_id")
+            or signal_ctx.get("run_id")
+            or os.environ.get("PMX_RUN_ID")
+            or os.environ.get("RUN_ID")
+        )
+        if run_id is None:
+            run_id = self._runtime_run_id or pipeline_id
+        if pipeline_id is None:
+            pipeline_id = run_id or self._runtime_pipeline_id
+
+        quant_profile = dict(quant_profile or {})
+        quant_profile.setdefault("execution_mode", execution_mode)
+        quant_profile.setdefault("proof_mode", self._to_bool(proof_mode, default=False))
+        quant_profile.setdefault("pipeline_id", pipeline_id)
+        quant_profile.setdefault("run_id", run_id)
+
         entry = {
             'timestamp': utc_now().isoformat(),
-            'pipeline_id': pipeline_id,
+            'pipeline_id': str(pipeline_id) if pipeline_id is not None else None,
+            'run_id': str(run_id) if run_id is not None else None,
             'ticker': ticker,
             'action': signal.action,
+            'execution_mode': execution_mode,
+            'proof_mode': self._to_bool(proof_mode, default=False),
             'confidence': signal.confidence,
             'expected_return': signal.expected_return,
             'risk_score': signal.risk_score,
@@ -1998,6 +2309,13 @@ class TimeSeriesSignalGenerator:
                 handle.write(json.dumps(entry, default=self._json_serializer) + "\n")
         except Exception as exc:  # pragma: no cover - logging must not break signals
             logger.warning("Unable to persist quant validation log for %s: %s", ticker, exc)
+
+    @staticmethod
+    def _coerce_nonempty_str(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text if text else None
 
     @staticmethod
     def _json_serializer(obj: Any) -> Any:

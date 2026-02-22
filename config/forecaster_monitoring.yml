@@ -50,6 +50,10 @@ forecaster_monitoring:
     # ensemble performance; the actual forecasts use best single model.
     # 0.35 accommodates periods where mssa_rl systematically beats blends.
     max_violation_rate: 0.35
+    # Fresh-window stability guard: do not let broad historical passes mask
+    # current degradation.
+    recent_window_audits: 10
+    recent_window_max_violation_rate: 0.35
 
     # Holding period: only enforce ensemble lift/no-lift decisions once we have
     # enough effective audits with RMSE values. Until then, checks are

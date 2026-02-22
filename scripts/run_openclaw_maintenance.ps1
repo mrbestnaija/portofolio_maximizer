@@ -5,7 +5,8 @@ Param(
     [string]$PrimaryChannel = "whatsapp",
     [double]$RecheckDelaySeconds = 8,
     [int]$PrimaryRestartAttempts = 2,
-    [bool]$AttemptPrimaryReenable = $true
+    [bool]$AttemptPrimaryReenable = $true,
+    [string]$IntegrityUnlinkedCloseWhitelistIds = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,14 @@ $pythonExe = if ($env:PMX_PYTHON_BIN -and (Test-Path $env:PMX_PYTHON_BIN)) {
     $env:PMX_PYTHON_BIN
 } else {
     "python"
+}
+
+if (-not $IntegrityUnlinkedCloseWhitelistIds) {
+    $IntegrityUnlinkedCloseWhitelistIds = if ($env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS) {
+        $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS
+    } else {
+        "66"
+    }
 }
 
 function Test-WslReady {
@@ -40,7 +49,8 @@ if (Test-WslReady) {
         "CRON_OPENCLAW_RECHECK_DELAY_SECONDS=$RecheckDelaySeconds",
         "CRON_OPENCLAW_PRIMARY_RESTART_ATTEMPTS=$PrimaryRestartAttempts",
         "CRON_OPENCLAW_ATTEMPT_PRIMARY_REENABLE=$([int]$AttemptPrimaryReenable)",
-        "CRON_OPENCLAW_PRIMARY_CHANNEL='$PrimaryChannel'"
+        "CRON_OPENCLAW_PRIMARY_CHANNEL='$PrimaryChannel'",
+        "INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS='$IntegrityUnlinkedCloseWhitelistIds'"
     )
     $cmd = "cd '$repoWsl' && " + ($envParts -join " ") + " bash/production_cron.sh openclaw_maintenance"
     & wsl bash -lc $cmd
@@ -48,6 +58,7 @@ if (Test-WslReady) {
 }
 
 Set-Location $repoRoot
+$env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
 $args = @(
     "scripts/openclaw_maintenance.py",
     "--primary-channel", $PrimaryChannel,

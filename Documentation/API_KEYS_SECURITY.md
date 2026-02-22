@@ -9,6 +9,7 @@ This project treats credentials as **local-only secrets**. They must never be co
 
 Credentials include (non-exhaustive):
 - Market data provider keys (Alpha Vantage, Finnhub, etc.)
+- Web search provider keys (Tavily, Brave, Perplexity/OpenRouter)
 - Brokerage credentials (cTrader, XTB, etc.)
 - GitHub automation tokens (Projects PATs)
 - Notification credentials/targets (SMTP passwords, OpenClaw targets)
@@ -54,6 +55,22 @@ from etl.secret_loader import load_secret
 
 alpha_key = load_secret("ALPHA_VANTAGE_API_KEY")  # auto-detects ALPHA_VANTAGE_API_KEY_FILE too
 ```
+
+## Autonomous Agent Secret-Exfiltration Guard (OpenClaw)
+
+OpenClaw prompt-mode execution (`openclaw agent`) is now guarded in
+`utils/openclaw_cli.py`:
+- High-risk requests (credential exfiltration/entry, irreversible financial/account actions, CAPTCHA bypass) are blocked by default.
+- High-risk execution requires explicit approval token (default: `PMX_APPROVE_HIGH_RISK`).
+- Agent prompts are prefixed with `[PMX_AUTONOMY_POLICY]` so untrusted page/email instructions are treated as potential prompt injection.
+
+Recommended env defaults for automation hosts:
+- `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`
+- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`
+- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
+- `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` (strict mode for unattended autonomous runs)
+
+Do not place the approval token in chat content unless a human has reviewed and approved that exact action.
 
 ## GitHub Authentication (Local Only)
 
@@ -103,6 +120,8 @@ Security note:
   - `rg -n "(api[_ -]?key|token|secret|password)\\s*=" -S .`
 - Recommended automated check:
   - `python tools/secrets_guard.py scan --staged`
+- OpenClaw autonomy guard config is hardened:
+  - `python scripts/verify_openclaw_config.py`
 
 ## Incident Response (If A Secret Leaks)
 

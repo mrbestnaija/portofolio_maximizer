@@ -43,7 +43,9 @@ def _calc_psi(base: pd.Series, other: pd.Series, bins: int = 10) -> float:
     if base.empty or other.empty:
         return 0.0
     quantiles = np.linspace(0, 1, bins + 1)
-    cuts = base.quantile(quantiles).drop_duplicates().values
+    cuts = np.asarray(base.quantile(quantiles).drop_duplicates().to_numpy(dtype=float), dtype=float).copy()
+    if cuts.size < 2:
+        return 0.0
     cuts[0], cuts[-1] = -np.inf, np.inf
     base_counts, _ = np.histogram(base, bins=cuts)
     other_counts, _ = np.histogram(other, bins=cuts)

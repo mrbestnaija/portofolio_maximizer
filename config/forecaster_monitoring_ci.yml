@@ -4,6 +4,10 @@ forecaster_monitoring:
     baseline_model: BEST_SINGLE
     max_rmse_ratio_vs_baseline: 1.1
     max_violation_rate: 0.25
+    # Recent-window stability gate: block if fresh audits regress even when
+    # wider history still looks acceptable.
+    recent_window_audits: 5
+    recent_window_max_violation_rate: 0.25
 
     # Lower counts so CI fails quickly on regressions.
     min_effective_audits: 3
@@ -26,6 +30,10 @@ forecaster_monitoring:
       max_ensemble_under_best_rate: 1.00
       max_avg_ensemble_ratio_vs_best: 1.20
       max_ensemble_worse_than_rw_rate: 0.30
+      # Gate on the effective default path (what production actually routes)
+      # while still reporting raw ensemble metrics for diagnostics.
+      use_effective_default_path_metric: true
+      max_effective_worse_than_rw_rate: 0.30
       require_zero_errors: true
 
   quant_validation:

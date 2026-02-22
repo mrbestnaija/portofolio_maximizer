@@ -20,6 +20,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
+RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
+WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
+FALSEY_VALUES = {"0", "false", "no", "off"}
+
+
+def _env_enabled(raw: str | None, *, default: bool) -> bool:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return bool(default)
+    return text not in FALSEY_VALUES
 
 
 def _load_cfg() -> dict:
@@ -139,11 +149,35 @@ def main() -> int:
 
     # Context management
     ctx_tokens = defaults.get("contextTokens", 200000)
-    bootstrap_max = defaults.get("bootstrapMaxChars", 20000)
+    bootstrap_max = defaults.get("bootstrapMaxChars", RECOMMENDED_BOOTSTRAP_MAX_CHARS)
     ok.append(f"contextTokens = {ctx_tokens}")
     ok.append(f"bootstrapMaxChars = {bootstrap_max}")
+    try:
+        bootstrap_limit_int = int(bootstrap_max)
+    except Exception:
+        bootstrap_limit_int = RECOMMENDED_BOOTSTRAP_MAX_CHARS
     if ctx_tokens > 65536:
         warnings.append(f"contextTokens ({ctx_tokens}) very high for local models")
+    if bootstrap_limit_int < RECOMMENDED_BOOTSTRAP_MAX_CHARS:
+        warnings.append(
+            "bootstrapMaxChars is below 20000; large workspace bootstrap files may be truncated "
+            "(can cause malformed tool calls/stuck sessions)."
+        )
+    for fname in WORKSPACE_BOOTSTRAP_FILES:
+        fpath = PROJECT_ROOT / fname
+        if not fpath.exists():
+            continue
+        try:
+            size = len(fpath.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        if size > bootstrap_limit_int:
+            warnings.append(
+                f"{fname} is {size} chars > bootstrapMaxChars ({bootstrap_limit_int}); "
+                "OpenClaw will truncate bootstrap context."
+            )
+        else:
+            ok.append(f"{fname} size = {size} chars (within bootstrapMaxChars)")
 
     # Compaction
     compaction = defaults.get("compaction", {}).get("mode", "default")
@@ -219,6 +253,44 @@ def main() -> int:
             issues.append(f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, not qwen3:8b (tool-calling required)")
         else:
             ok.append(f".env model order: {env_model_order}")
+
+    env_autonomy_guard = env.get("OPENCLAW_AUTONOMY_GUARD_ENABLED", "")
+    if env_autonomy_guard and not _env_enabled(env_autonomy_guard, default=True):
+        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_GUARD_ENABLED is disabled")
+    elif env_autonomy_guard:
+        ok.append(f".env OPENCLAW_AUTONOMY_GUARD_ENABLED = {env_autonomy_guard}")
+    else:
+        ok.append(".env OPENCLAW_AUTONOMY_GUARD_ENABLED not set (runtime default: enabled)")
+
+    env_autonomy_approval = env.get("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", "")
+    if env_autonomy_approval and not _env_enabled(env_autonomy_approval, default=True):
+        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled")
+    elif env_autonomy_approval:
+        ok.append(f".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN = {env_autonomy_approval}")
+    else:
+        ok.append(".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN not set (runtime default: enabled)")
+
+    env_autonomy_prefix = env.get("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", "")
+    if env_autonomy_prefix and not _env_enabled(env_autonomy_prefix, default=True):
+        warnings.append("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled")
+    elif env_autonomy_prefix:
+        ok.append(f".env OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED = {env_autonomy_prefix}")
+
+    env_injection_block = env.get("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", "")
+    if env_injection_block and _env_enabled(env_injection_block, default=False):
+        ok.append(f".env OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS = {env_injection_block}")
+    else:
+        warnings.append(
+            "OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS is not enabled "
+            "(recommended for fully autonomous web-heavy workflows)"
+        )
+
+    env_approval_token = env.get("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")
+    if env_approval_token:
+        if len(env_approval_token.strip()) < 8:
+            warnings.append("OPENCLAW_AUTONOMY_APPROVAL_TOKEN is short; use a non-trivial token")
+        else:
+            ok.append(".env OPENCLAW_AUTONOMY_APPROVAL_TOKEN = [set]")
 
     # ===== 9. LLM CONFIG ALIGNMENT =====
     llm = llm_cfg.get("llm", {})
@@ -320,13 +392,18 @@ def main() -> int:
     else:
         ok.append("agentToAgent: disabled (isolated workloads)")
 
-    # Loop detection
-    loop_det = tools_cfg.get("loopDetection", {})
-    if loop_det.get("enabled", False):
-        ok.append(f"loopDetection: enabled (warn={loop_det.get('warningThreshold')}, critical={loop_det.get('criticalThreshold')})")
+    # Loop detection (optional and version-dependent in OpenClaw builds)
+    loop_det = tools_cfg.get("loopDetection")
+    if isinstance(loop_det, dict):
+        if loop_det.get("enabled", False):
+            ok.append(
+                "loopDetection: enabled "
+                f"(warn={loop_det.get('warningThreshold')}, critical={loop_det.get('criticalThreshold')})"
+            )
+        else:
+            warnings.append("loopDetection is configured but disabled")
     else:
-        if agent_list:
-            warnings.append("loopDetection not enabled (recommended for multi-agent)")
+        ok.append("loopDetection: not configured (optional / may be unsupported by current OpenClaw version)")
 
     # ===== REPORT =====
     print("=" * 65)
