@@ -301,6 +301,48 @@ def _tail_lines(text: str, *, limit: int = 40) -> str:
     return "\n".join(lines[-limit:])
 
 
+def _load_profitability_requirements(path: Path) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return raw.get("profitability_proof_requirements") or {}
+    except Exception:
+        return {}
+
+
+def _build_evidence_progress(
+    *,
+    metrics: Dict[str, Any],
+    requirements: Dict[str, Any],
+) -> Dict[str, Any]:
+    stat_req = (requirements.get("statistical_significance") or {}) if isinstance(requirements, dict) else {}
+    min_closed = int(stat_req.get("min_closed_trades", 0) or 0)
+    min_days = int(stat_req.get("min_trading_days", 0) or 0)
+
+    closed_trades = int(metrics.get("closed_trades", 0) or 0)
+    if closed_trades <= 0:
+        winning = int(metrics.get("winning_trades", 0) or 0)
+        losing = int(metrics.get("losing_trades", 0) or 0)
+        closed_trades = winning + losing
+    trading_days = int(metrics.get("trading_days", 0) or 0)
+
+    remaining_closed = max(0, min_closed - closed_trades)
+    remaining_days = max(0, min_days - trading_days)
+
+    return {
+        "ready": (remaining_closed == 0 and remaining_days == 0),
+        "closed_trades": closed_trades,
+        "min_closed_trades": min_closed,
+        "remaining_closed_trades": remaining_closed,
+        "trading_days": trading_days,
+        "min_trading_days": min_days,
+        "remaining_trading_days": remaining_days,
+    }
+
+
 def _parse_json_payload(text: str) -> Optional[Dict[str, Any]]:
     text = (text or "").strip()
     if not text:
@@ -359,6 +401,11 @@ def main() -> int:
         "--db",
         default="data/portfolio_maximizer.db",
         help="Path to SQLite database (default: data/portfolio_maximizer.db).",
+    )
+    parser.add_argument(
+        "--proof-requirements",
+        default="config/profitability_proof_requirements.yml",
+        help="Profitability proof requirements config (default: config/profitability_proof_requirements.yml).",
     )
     parser.add_argument(
         "--audit-dir",
@@ -441,6 +488,7 @@ def main() -> int:
         print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
     python_bin = str(Path(args.python_bin))
     db_path = _resolve_path(repo_root, args.db)
+    proof_requirements_path = _resolve_path(repo_root, args.proof_requirements)
     audit_dir = _resolve_path(repo_root, args.audit_dir)
     monitor_config = _resolve_path(repo_root, args.monitor_config)
     output_path = _resolve_path(repo_root, args.output_json)
@@ -509,6 +557,8 @@ def main() -> int:
     metrics = proof_payload.get("metrics") if isinstance(proof_payload.get("metrics"), dict) else {}
     winning = int(metrics.get("winning_trades", 0) or 0)
     losing = int(metrics.get("losing_trades", 0) or 0)
+    proof_requirements = _load_profitability_requirements(proof_requirements_path)
+    evidence_progress = _build_evidence_progress(metrics=metrics, requirements=proof_requirements)
 
     gate_pass = lift_pass and proof_pass
     gate_status = "PASS" if gate_pass else "FAIL"
@@ -523,6 +573,7 @@ def main() -> int:
         "repo_state": _collect_git_state(repo_root),
         "inputs": {
             "db": str(db_path),
+            "proof_requirements": str(proof_requirements_path),
             "audit_dir": str(audit_dir),
             "monitor_config": str(monitor_config),
             "max_files": int(args.max_files),
@@ -557,6 +608,7 @@ def main() -> int:
             "win_rate": metrics.get("win_rate"),
             "closed_trades": winning + losing,
             "trading_days": metrics.get("trading_days"),
+            "evidence_progress": evidence_progress,
             "violations": proof_payload.get("violations", []),
             "warnings": proof_payload.get("warnings", []),
             "recommendations": proof_payload.get("recommendations", []),
@@ -583,6 +635,12 @@ def main() -> int:
     print(
         f"Proof status   : {proof_status} "
         f"(valid={proof_is_valid}, profitable={proof_is_profitable})"
+    )
+    print(
+        "Proof runway   : "
+        f"closed={evidence_progress.get('closed_trades')}/{evidence_progress.get('min_closed_trades')} "
+        f"days={evidence_progress.get('trading_days')}/{evidence_progress.get('min_trading_days')} "
+        f"remaining_days={evidence_progress.get('remaining_trading_days')}"
     )
     print(f"Gate status    : {gate_status}")
     if reconcile_result.get("requested"):

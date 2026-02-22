@@ -44,7 +44,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -286,6 +286,28 @@ def _as_bool(value: Any, fallback: bool) -> bool:
     return bool(fallback)
 
 
+def _csv_env_tokens(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return tuple(default)
+    tokens: list[str] = []
+    for part in re.split(r"[,\n;|]", raw):
+        token = str(part or "").strip().lower()
+        if token:
+            tokens.append(token)
+    if not tokens:
+        return tuple(default)
+    # Keep order deterministic while removing duplicates.
+    return tuple(dict.fromkeys(tokens))
+
+
+def _text_contains_any(text: str, tokens: tuple[str, ...]) -> bool:
+    low = str(text or "").lower()
+    if not low:
+        return False
+    return any(tok in low for tok in tokens if tok)
+
+
 MAX_ROUNDS_DEFAULT = max(
     1,
     _int_env("PMX_QWEN_MAX_ROUNDS", _as_int(_profile_env_default("PMX_QWEN_MAX_ROUNDS", 3), 3)),
@@ -441,11 +463,208 @@ TRADING_CRITICAL_KEYWORDS = (
 TORCH_DEFAULT_VERSION = (os.getenv("PMX_TORCH_DEFAULT_VERSION") or "2.9.1").strip() or "2.9.1"
 TORCH_DEFAULT_CUDA_VARIANT = (os.getenv("PMX_TORCH_DEFAULT_CUDA_VARIANT") or "cu128").strip().lower() or "cu128"
 
+REPO_STATUS_SUBJECT_TOKENS = _csv_env_tokens(
+    "PMX_REPO_STATUS_SUBJECT_TOKENS",
+    (
+        "github",
+        "repository",
+        "repo",
+        "origin",
+        "remote",
+        "branch",
+        "commit",
+        "ahead",
+        "behind",
+        "pull request",
+    ),
+)
+REPO_STATUS_ACTION_TOKENS = _csv_env_tokens(
+    "PMX_REPO_STATUS_ACTION_TOKENS",
+    (
+        "check",
+        "status",
+        "verify",
+        "health",
+        "state",
+        "sync",
+        "latest",
+    ),
+)
+STATUS_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_STATUS_FAST_PATH_BLOCKED_TOKENS",
+    (
+        "install ",
+        "pip ",
+        "torch",
+        "reconcile",
+        "gate",
+        "audit",
+        "pnl",
+        "profit",
+        "trade",
+        "buy",
+        "sell",
+        "portfolio",
+    ),
+)
+STATUS_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_STATUS_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "health",
+        "status",
+        "system up",
+        "gateway",
+        "model availability",
+        "models available",
+    ),
+)
+
+SOURCE_INDEX_FILE = PROJECT_ROOT / "logs" / "llm_activity" / "source_index.json"
+SOURCE_READ_ALLOWED_PREFIXES = _csv_env_tokens(
+    "PMX_SOURCE_READ_ALLOWED_PREFIXES",
+    (
+        "ai_llm/",
+        "config/",
+        "etl/",
+        "execution/",
+        "forcester_ts/",
+        "integrity/",
+        "models/",
+        "risk/",
+        "scripts/",
+        "tests/",
+        "Documentation/",
+    ),
+)
+SOURCE_READ_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_SOURCE_READ_BLOCKED_TOKENS",
+    (
+        ".env",
+        "credentials.json",
+        "auth-profiles.json",
+        ".pem",
+        ".key",
+    ),
+)
+SOURCE_QUERY_STOPWORDS = _csv_env_tokens(
+    "PMX_SOURCE_QUERY_STOPWORDS",
+    (
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "code",
+        "source",
+        "file",
+        "files",
+        "project",
+        "repo",
+        "repository",
+        "please",
+        "show",
+        "check",
+    ),
+)
+SOURCE_READ_DEFAULT_MAX_FILES = max(1, _int_env("PMX_SOURCE_READ_DEFAULT_MAX_FILES", 4))
+SOURCE_READ_DEFAULT_MAX_CHARS = max(1200, _int_env("PMX_SOURCE_READ_DEFAULT_MAX_CHARS", 12000))
+SOURCE_READ_MAX_FILES_CAP = max(2, _int_env("PMX_SOURCE_READ_MAX_FILES_CAP", 12))
+SOURCE_READ_MAX_CHARS_CAP = max(4000, _int_env("PMX_SOURCE_READ_MAX_CHARS_CAP", 30000))
+SOURCE_READ_MAX_SNIPPETS_PER_FILE = max(1, _int_env("PMX_SOURCE_READ_MAX_SNIPPETS_PER_FILE", 6))
+SOURCE_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_SOURCE_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "source code",
+        "inspect source",
+        "read source",
+        "self attribution",
+        "self-attribution",
+        "cite",
+        "citation",
+        "code evidence",
+        "self-improvement",
+    ),
+)
+WEB_SEARCH_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_WEB_SEARCH_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "web search",
+        "online search",
+        "search the web",
+        "search online",
+        "search internet",
+        "search on the internet",
+        "internet search",
+        "web lookup",
+        "online lookup",
+        "internet lookup",
+        "look up online",
+        "lookup online",
+        "look up on the web",
+        "lookup on the web",
+        "find online",
+        "find on the web",
+        "browse the web",
+        "browse internet",
+        "research online",
+        "check online",
+        "google ",
+        "duckduckgo",
+        "wikipedia",
+        "tavily",
+    ),
+)
+WEB_SEARCH_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_WEB_SEARCH_FAST_PATH_BLOCKED_TOKENS",
+    (
+        "source code",
+        "inspect source",
+        "read source",
+        "repository status",
+        "repo status",
+        "github repo status",
+        "system health",
+        "gateway status",
+    ),
+)
+QUANT_VALIDATION_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_QUANT_VALIDATION_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "quant validation",
+        "quant health",
+        "validation health",
+        "fail rate",
+        "headroom",
+        "95% gate",
+        "90% gate",
+        "check quant",
+        "quant gate",
+    ),
+)
+QUANT_VALIDATION_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_QUANT_VALIDATION_FAST_PATH_BLOCKED_TOKENS",
+    (
+        "install ",
+        "pip ",
+        "source code",
+        "repo status",
+        "github",
+        "web search",
+        "search online",
+    ),
+)
+
 _TOOL_CACHEABLE = {
     "fast_reasoning",
     "deep_reasoning",
     "read_gate_status",
     "query_trade_metrics",
+    "check_quant_validation_headroom",
+    "search_web_tavily",
+    "inspect_source_code",
+    "check_github_repo_status",
     "check_system_health",
     "run_sub_agent_batch",
 }
@@ -474,6 +693,10 @@ _TOOL_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "deep_reasoning": ("task",),
     "read_gate_status": ("gate",),
     "query_trade_metrics": ("metric",),
+    "check_quant_validation_headroom": (),
+    "search_web_tavily": ("query",),
+    "inspect_source_code": (),
+    "check_github_repo_status": (),
     "send_notification": ("channel", "message"),
     "run_sub_agent_batch": ("tasks",),
     "check_system_health": (),
@@ -481,6 +704,28 @@ _TOOL_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "install_torch_runtime": (),
     "install_python_package": ("package",),
 }
+
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "web_search": "search_web_tavily",
+    "search_web": "search_web_tavily",
+    "brave_web_search": "search_web_tavily",
+    "source_read": "inspect_source_code",
+    "read_source_code": "inspect_source_code",
+    "code_search": "inspect_source_code",
+    "repo_status": "check_github_repo_status",
+    "github_repo_status": "check_github_repo_status",
+    "check_repo_status": "check_github_repo_status",
+    "check_quant_health": "check_quant_validation_headroom",
+    "quant_validation_health": "check_quant_validation_headroom",
+    "quant_health": "check_quant_validation_headroom",
+}
+
+
+def _canonical_tool_name(tool_name: str) -> str:
+    raw = str(tool_name or "").strip()
+    if not raw:
+        return ""
+    return _TOOL_NAME_ALIASES.get(raw.lower(), raw)
 
 
 def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -682,6 +927,7 @@ def _tool_error_message(tool_result: str) -> str:
 
 
 def _sanitize_tool_arguments(tool_name: str, raw_arguments: Any) -> tuple[dict[str, Any], Optional[str]]:
+    canonical_tool_name = _canonical_tool_name(tool_name)
     args: dict[str, Any]
     if isinstance(raw_arguments, dict):
         args = dict(raw_arguments)
@@ -701,15 +947,16 @@ def _sanitize_tool_arguments(tool_name: str, raw_arguments: Any) -> tuple[dict[s
     else:
         args = {}
 
-    if tool_name in {"read", "read_file"}:
+    if canonical_tool_name in {"read", "read_file"}:
         path = str(args.get("path") or "").strip()
         if not path:
             return args, "Missing required field: path"
         return args, "Unsupported tool name in this orchestrator. Use read_gate_status instead."
 
-    required = _TOOL_REQUIRED_FIELDS.get(tool_name)
+    required = _TOOL_REQUIRED_FIELDS.get(canonical_tool_name)
     if required is None:
-        return args, f"Unknown tool: {tool_name}"
+        unknown = canonical_tool_name or str(tool_name or "").strip() or "unknown"
+        return args, f"Unknown tool: {unknown}"
     missing = [field for field in required if not str(args.get(field) or "").strip()]
     if missing:
         return args, f"Missing required field(s): {', '.join(missing)}"
@@ -912,6 +1159,144 @@ REASONING_TOOLS = [
                     },
                 },
                 "required": ["metric"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_quant_validation_headroom",
+            "description": (
+                "Summarize recent quant-validation fail rate and headroom to gate thresholds "
+                "from logs/signals/quant_validation.jsonl. Use this instead of inline python -c."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window": {
+                        "type": "integer",
+                        "description": "Number of most recent entries to analyze (default 120).",
+                    },
+                    "red_gate_pct": {
+                        "type": "number",
+                        "description": "RED threshold in percent (default 95).",
+                    },
+                    "warn_gate_pct": {
+                        "type": "number",
+                        "description": "YELLOW threshold in percent (default 90).",
+                    },
+                    "log_path": {
+                        "type": "string",
+                        "description": "Optional quant_validation.jsonl path override.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web_tavily",
+            "description": (
+                "Search the web robustly using Tavily first with free-provider fallback "
+                "(DuckDuckGo, Wikipedia) for current external information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results to return (1-10, default 5).",
+                    },
+                    "search_depth": {
+                        "type": "string",
+                        "enum": ["basic", "advanced", "fast", "ultra-fast"],
+                        "description": "Search depth.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "enum": ["general", "news", "finance"],
+                        "description": "Optional topic (for example: general, news).",
+                    },
+                    "include_domains": {
+                        "type": "string",
+                        "description": "Optional comma-separated domain allowlist.",
+                    },
+                    "exclude_domains": {
+                        "type": "string",
+                        "description": "Optional comma-separated domain blocklist.",
+                    },
+                    "base_url": {
+                        "type": "string",
+                        "description": "Optional Tavily base URL override.",
+                    },
+                    "providers": {
+                        "type": "string",
+                        "description": (
+                            "Optional provider order as CSV. "
+                            "Allowed: tavily,duckduckgo,wikipedia."
+                        ),
+                    },
+                    "allow_fallback": {
+                        "type": "boolean",
+                        "description": "When false, force Tavily-only lookup.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_source_code",
+            "description": (
+                "Read PMX source files with safe allowlist constraints and return attributable "
+                "snippets with file:line citations for evidence-backed reasoning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language intent to search relevant source files.",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "description": "Optional explicit relative file paths to inspect first.",
+                        "items": {"type": "string"},
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "Maximum files to inspect (bounded).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum aggregate characters returned (bounded).",
+                    },
+                    "refresh_index": {
+                        "type": "boolean",
+                        "description": "When true, rebuild source index before reading.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_github_repo_status",
+            "description": (
+                "Check local repository state versus GitHub remote for the current workspace. "
+                "Use for requests about branch/head/dirty state/upstream ahead-behind and repo sync."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -1126,7 +1511,7 @@ def execute_tool_call(
     budget_seconds: Optional[float] = None,
 ) -> str:
     """Execute a tool call requested by the orchestrator model."""
-    safe_tool_name = str(tool_name or "").strip()
+    safe_tool_name = _canonical_tool_name(tool_name)
     args, arg_error = _sanitize_tool_arguments(safe_tool_name, arguments)
     if arg_error:
         _record_tool_failure(safe_tool_name, args, arg_error)
@@ -1185,6 +1570,30 @@ def execute_tool_call(
             result = _query_trade_metrics(args.get("metric", "summary"))
             if cacheable:
                 _cache_set(cache_key, result, ttl_seconds=15.0)
+            return result
+
+        if safe_tool_name == "check_quant_validation_headroom":
+            result = _check_quant_validation_headroom_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=15.0)
+            return result
+
+        if safe_tool_name == "search_web_tavily":
+            result = _search_web_tavily_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=20.0)
+            return result
+
+        if safe_tool_name == "inspect_source_code":
+            result = _inspect_source_code_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=20.0)
+            return result
+
+        if safe_tool_name == "check_github_repo_status":
+            result = _check_github_repo_status_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=20.0)
             return result
 
         if safe_tool_name == "run_production_audit_gate":
@@ -1529,6 +1938,513 @@ def _query_trade_metrics(metric: str) -> str:
                 indent=2,
             )
         return json.dumps({"error": str(e)})
+
+
+def _check_quant_validation_headroom_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    script = PROJECT_ROOT / "scripts" / "quant_validation_headroom.py"
+    if not script.exists():
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_quant_validation_headroom",
+                "error": f"missing_script: {script}",
+            },
+            ensure_ascii=True,
+        )
+
+    try:
+        window = int(args.get("window", 120))
+    except Exception:
+        window = 120
+    window = max(0, min(10000, window))
+
+    red_gate_pct = _as_float(args.get("red_gate_pct"), 95.0)
+    red_gate_pct = max(1.0, min(100.0, red_gate_pct))
+    warn_gate_pct = _as_float(args.get("warn_gate_pct"), 90.0)
+    warn_gate_pct = max(0.0, min(red_gate_pct, warn_gate_pct))
+
+    cmd = [
+        sys.executable,
+        str(script),
+        "--window",
+        str(window),
+        "--red-gate-pct",
+        f"{red_gate_pct:.3f}",
+        "--warn-gate-pct",
+        f"{warn_gate_pct:.3f}",
+        "--json",
+    ]
+
+    log_path = str(args.get("log_path") or "").strip()
+    if log_path:
+        cmd.extend(["--log-path", log_path])
+
+    timeout_seconds = _bounded_timeout(
+        _as_float(args.get("timeout_seconds"), 45.0),
+        budget_seconds,
+    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_quant_validation_headroom",
+                "error": f"quant_validation_headroom timed out after {timeout_seconds:.1f}s",
+                "command": cmd,
+            },
+            ensure_ascii=True,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_quant_validation_headroom",
+                "error": f"quant_validation_headroom execution error: {exc}",
+                "command": cmd,
+            },
+            ensure_ascii=True,
+        )
+
+    stdout_text = str(proc.stdout or "").strip()
+    parsed: Optional[dict[str, Any]] = None
+    if stdout_text:
+        try:
+            obj = json.loads(stdout_text)
+            if isinstance(obj, dict):
+                parsed = obj
+        except Exception:
+            start = stdout_text.find("{")
+            end = stdout_text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    obj = json.loads(stdout_text[start : end + 1])
+                    if isinstance(obj, dict):
+                        parsed = obj
+                except Exception:
+                    parsed = None
+
+    classification = str((parsed or {}).get("status") or "").upper()
+    if classification == "RED":
+        status = "FAIL"
+    elif classification == "YELLOW":
+        status = "WARN"
+    elif classification == "GREEN":
+        status = "PASS"
+    else:
+        status = "PASS" if int(proc.returncode) == 0 else "FAIL"
+
+    payload: dict[str, Any] = {
+        "status": status,
+        "action": "check_quant_validation_headroom",
+        "exit_code": int(proc.returncode),
+        "classification": classification or None,
+        "summary": parsed,
+        "command": cmd,
+        "stdout_tail": "\n".join((proc.stdout or "").splitlines()[-20:]),
+        "stderr_tail": "\n".join((proc.stderr or "").splitlines()[-20:]),
+    }
+    if parsed is None and stdout_text:
+        payload["raw_output"] = stdout_text[:4000]
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _search_web_tavily_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    query = str(arguments.get("query") or "").strip()
+    if not query:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "search_web_tavily",
+                "error": "missing_query",
+            }
+        )
+
+    try:
+        max_results = int(arguments.get("max_results", 5))
+    except Exception:
+        max_results = 5
+    max_results = max(1, min(10, max_results))
+
+    search_depth = str(arguments.get("search_depth") or "basic").strip().lower() or "basic"
+    if search_depth not in {"basic", "advanced", "fast", "ultra-fast"}:
+        search_depth = "basic"
+
+    topic = str(arguments.get("topic") or "general").strip() or "general"
+    topic = topic.lower()
+    if topic not in {"general", "news", "finance"}:
+        topic = "general"
+    include_domains = str(arguments.get("include_domains") or "").strip() or None
+    exclude_domains = str(arguments.get("exclude_domains") or "").strip() or None
+    tavily_base_url = str(arguments.get("base_url") or "").strip() or None
+    providers_csv = str(arguments.get("providers") or "").strip() or None
+    allow_fallback = _as_bool(arguments.get("allow_fallback"), True)
+    if not allow_fallback and not providers_csv:
+        providers_csv = "tavily"
+
+    try:
+        from utils.web_search_client import search_web_multi
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "search_web_tavily",
+                "query": query,
+                "error": f"web_search_client_unavailable: {exc}",
+            }
+        )
+
+    timeout_seconds = _bounded_timeout(20.0, budget_seconds)
+    result = search_web_multi(
+        query=query,
+        max_results=max_results,
+        search_depth=search_depth,
+        topic=topic,
+        include_answer=True,
+        include_raw_content=False,
+        include_images=False,
+        include_domains_csv=include_domains,
+        exclude_domains_csv=exclude_domains,
+        tavily_base_url=tavily_base_url,
+        timeout_seconds=timeout_seconds,
+        providers_csv=providers_csv,
+    )
+
+    payload = {
+        "status": "PASS" if bool(result.ok) else "FAIL",
+        "action": "search_web_tavily",
+        "query": result.query or query,
+        "provider": result.provider,
+        "attempts": result.attempts,
+        "answer": result.answer,
+        "results": result.results,
+        "error": result.error,
+        "status_code": result.status_code,
+        "latency_seconds": result.latency_seconds,
+    }
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _normalize_rel_path(path_text: str) -> str:
+    text = str(path_text or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.strip("/")
+
+
+def _split_source_path_args(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_normalize_rel_path(v) for v in value if str(v or "").strip()]
+    if isinstance(value, str):
+        parts = re.split(r"[,;\n]", value)
+        return [_normalize_rel_path(v) for v in parts if str(v or "").strip()]
+    return []
+
+
+def _is_allowed_source_rel_path(rel_path: str) -> bool:
+    rel = _normalize_rel_path(rel_path)
+    if not rel:
+        return False
+    low = rel.lower()
+    if any(token and token in low for token in SOURCE_READ_BLOCKED_TOKENS):
+        return False
+    return any(rel.startswith(prefix.rstrip("/")) for prefix in SOURCE_READ_ALLOWED_PREFIXES)
+
+
+def _safe_read_source_index(refresh: bool = False, timeout_seconds: float = 45.0) -> dict[str, Any]:
+    if refresh or not SOURCE_INDEX_FILE.exists():
+        setup_script = PROJECT_ROOT / "scripts" / "openclaw_self_improve.py"
+        if setup_script.exists():
+            try:
+                subprocess.run(
+                    [sys.executable, str(setup_script), "index"],
+                    cwd=str(PROJECT_ROOT),
+                    capture_output=True,
+                    text=True,
+                    timeout=max(10.0, timeout_seconds),
+                    check=False,
+                )
+            except Exception:
+                pass
+    if not SOURCE_INDEX_FILE.exists():
+        return {"files": []}
+    try:
+        payload = json.loads(SOURCE_INDEX_FILE.read_text(encoding="utf-8", errors="replace"))
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {"files": []}
+
+
+def _source_query_tokens(query: str) -> list[str]:
+    low = str(query or "").lower()
+    tokens = [tok for tok in re.findall(r"[a-z][a-z0-9_]{2,}", low) if tok not in SOURCE_QUERY_STOPWORDS]
+    # Deduplicate while preserving order.
+    return list(dict.fromkeys(tokens))[:24]
+
+
+def _source_candidate_paths(index_payload: dict[str, Any], query: str, requested_paths: list[str], max_files: int) -> list[str]:
+    files = index_payload.get("files") if isinstance(index_payload.get("files"), list) else []
+    index_paths: list[str] = []
+    for row in files:
+        if not isinstance(row, dict):
+            continue
+        path = _normalize_rel_path(str(row.get("path") or ""))
+        if path and _is_allowed_source_rel_path(path):
+            index_paths.append(path)
+
+    seen: set[str] = set()
+    selected: list[str] = []
+    for raw in requested_paths:
+        p = _normalize_rel_path(raw)
+        if not p or p in seen or p not in index_paths:
+            continue
+        selected.append(p)
+        seen.add(p)
+        if len(selected) >= max_files:
+            return selected
+
+    query_tokens = _source_query_tokens(query)
+    scored: list[tuple[int, str]] = []
+    for p in index_paths:
+        if p in seen:
+            continue
+        low = p.lower()
+        score = 0
+        for tok in query_tokens:
+            if tok in low:
+                score += 3
+        basename = Path(p).name.lower()
+        for tok in query_tokens:
+            if tok in basename:
+                score += 2
+        if score > 0:
+            scored.append((score, p))
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    for _, p in scored:
+        if p in seen:
+            continue
+        selected.append(p)
+        seen.add(p)
+        if len(selected) >= max_files:
+            break
+    return selected
+
+
+def _snippet_rows_for_content(content: str, query_tokens: list[str], max_snippets: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    lines = content.splitlines()
+    if not lines:
+        return rows
+
+    def _append_line(line_no: int, text: str) -> None:
+        trimmed = str(text or "").strip()
+        if not trimmed:
+            return
+        rows.append(
+            {
+                "line": int(line_no),
+                "text": trimmed[:220],
+            }
+        )
+
+    if query_tokens:
+        for idx, line in enumerate(lines, start=1):
+            low = line.lower()
+            if any(tok in low for tok in query_tokens):
+                _append_line(idx, line)
+                if len(rows) >= max_snippets:
+                    break
+
+    if rows:
+        return rows
+
+    for idx, line in enumerate(lines, start=1):
+        text = str(line or "").lstrip()
+        if text.startswith(("def ", "class ", "async def ", "import ", "from ")):
+            _append_line(idx, line)
+            if len(rows) >= max_snippets:
+                break
+
+    if rows:
+        return rows
+
+    _append_line(1, lines[0])
+    return rows
+
+
+def _inspect_source_code_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    query = str(args.get("query") or "").strip()
+    requested_paths = _split_source_path_args(args.get("paths"))
+    refresh_index = _as_bool(args.get("refresh_index"), False)
+
+    if not query and not requested_paths:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "inspect_source_code",
+                "error": "Provide query and/or paths.",
+            },
+            ensure_ascii=True,
+        )
+
+    max_files = _as_int(args.get("max_files"), SOURCE_READ_DEFAULT_MAX_FILES)
+    max_files = max(1, min(SOURCE_READ_MAX_FILES_CAP, max_files))
+    max_chars = _as_int(args.get("max_chars"), SOURCE_READ_DEFAULT_MAX_CHARS)
+    max_chars = max(1200, min(SOURCE_READ_MAX_CHARS_CAP, max_chars))
+    timeout_seconds = _bounded_timeout(30.0, budget_seconds)
+
+    index_payload = _safe_read_source_index(refresh=refresh_index, timeout_seconds=timeout_seconds)
+    selected_paths = _source_candidate_paths(
+        index_payload=index_payload,
+        query=query,
+        requested_paths=requested_paths,
+        max_files=max_files,
+    )
+
+    total_chars = 0
+    matches: list[dict[str, Any]] = []
+    citations: list[str] = []
+    query_tokens = _source_query_tokens(query)
+
+    for rel in selected_paths:
+        full_path = (PROJECT_ROOT / rel).resolve()
+        if not full_path.exists() or not full_path.is_file():
+            continue
+        if total_chars >= max_chars:
+            break
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if not content:
+            continue
+
+        remaining = max_chars - total_chars
+        excerpt = content[:remaining]
+        total_chars += len(excerpt)
+
+        snippets = _snippet_rows_for_content(
+            excerpt,
+            query_tokens=query_tokens,
+            max_snippets=SOURCE_READ_MAX_SNIPPETS_PER_FILE,
+        )
+        for row in snippets:
+            line_no = int(row.get("line") or 1)
+            citations.append(f"{rel}:{line_no}")
+
+        matches.append(
+            {
+                "path": rel,
+                "chars_read": len(excerpt),
+                "snippets": snippets,
+            }
+        )
+
+    status = "PASS" if matches else "FAIL"
+    payload: dict[str, Any] = {
+        "status": status,
+        "action": "inspect_source_code",
+        "query": query,
+        "requested_paths": requested_paths,
+        "selected_paths": [m.get("path") for m in matches],
+        "matches": matches,
+        "citations": list(dict.fromkeys(citations))[:64],
+        "limits": {
+            "max_files": max_files,
+            "max_chars": max_chars,
+            "chars_read": total_chars,
+        },
+    }
+    if not matches:
+        payload["error"] = "No eligible source files matched query/paths."
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _check_github_repo_status_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    _ = arguments if isinstance(arguments, dict) else {}
+    script = PROJECT_ROOT / "scripts" / "check_github_repo_status.py"
+    if not script.exists():
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_github_repo_status",
+                "error": f"missing_script: {script}",
+            },
+            ensure_ascii=True,
+        )
+
+    timeout_seconds = _bounded_timeout(25.0, budget_seconds)
+    cmd = [sys.executable, str(script), "--pretty"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_github_repo_status",
+                "error": f"check_github_repo_status timed out after {timeout_seconds:.1f}s",
+                "command": cmd,
+            },
+            ensure_ascii=True,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "check_github_repo_status",
+                "error": f"check_github_repo_status execution error: {exc}",
+                "command": cmd,
+            },
+            ensure_ascii=True,
+        )
+
+    stdout_text = str(proc.stdout or "").strip()
+    parsed_report: Optional[dict[str, Any]] = None
+    if stdout_text:
+        try:
+            report_obj = json.loads(stdout_text)
+            if isinstance(report_obj, dict):
+                parsed_report = report_obj
+        except Exception:
+            parsed_report = None
+
+    status = "PASS" if int(proc.returncode) == 0 else "FAIL"
+    if parsed_report:
+        report_status = str(parsed_report.get("status", "")).upper()
+        if report_status in {"PASS", "WARN", "FAIL"}:
+            status = report_status if int(proc.returncode) == 0 else "FAIL"
+
+    payload: dict[str, Any] = {
+        "status": status,
+        "action": "check_github_repo_status",
+        "exit_code": int(proc.returncode),
+        "command": cmd,
+        "report": parsed_report,
+        "stdout_tail": "\n".join((proc.stdout or "").splitlines()[-20:]),
+        "stderr_tail": "\n".join((proc.stderr or "").splitlines()[-20:]),
+    }
+    if parsed_report is None and stdout_text:
+        payload["raw_output"] = stdout_text[:4000]
+    return json.dumps(payload, ensure_ascii=True)
 
 
 def _run_production_audit_gate_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
@@ -2515,6 +3431,200 @@ def _extract_runtime_fast_path_request(message: str) -> Optional[tuple[str, dict
     return ("install_python_package", args)
 
 
+def _extract_source_fast_path_paths(message: str) -> list[str]:
+    text = str(message or "")
+    candidates = re.findall(r"[A-Za-z0-9_./\\-]+\.(?:py|yml|yaml|json|md|toml)", text)
+    normalized: list[str] = []
+    for row in candidates:
+        rel = _normalize_rel_path(row)
+        if rel and _is_allowed_source_rel_path(rel):
+            normalized.append(rel)
+    return list(dict.fromkeys(normalized))[:6]
+
+
+def _extract_source_inspection_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if not _text_contains_any(low, SOURCE_FAST_PATH_TRIGGER_TOKENS):
+        return None
+    return (
+        "inspect_source_code",
+        {
+            "query": text,
+            "paths": _extract_source_fast_path_paths(text),
+            "max_files": min(4, SOURCE_READ_MAX_FILES_CAP),
+            "max_chars": min(12000, SOURCE_READ_MAX_CHARS_CAP),
+        },
+    )
+
+
+def _is_repo_status_prompt(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    if not _text_contains_any(text, REPO_STATUS_SUBJECT_TOKENS):
+        return False
+    return _text_contains_any(text, REPO_STATUS_ACTION_TOKENS)
+
+
+def _extract_repo_status_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    if not _is_repo_status_prompt(message):
+        return None
+    return ("check_github_repo_status", {})
+
+
+def _extract_quant_window(message: str) -> Optional[int]:
+    text = str(message or "")
+    patterns = (
+        r"\blast\s+(\d{1,5})\b",
+        r"\brecent\s+(\d{1,5})\b",
+        r"\bwindow\s*[:=]?\s*(\d{1,5})\b",
+        r"\bentries?\s*[:=]?\s*(\d{1,5})\b",
+    )
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _extract_quant_validation_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if _text_contains_any(low, QUANT_VALIDATION_FAST_PATH_BLOCKED_TOKENS):
+        return None
+    if not _text_contains_any(low, QUANT_VALIDATION_FAST_PATH_TRIGGER_TOKENS):
+        return None
+
+    args: dict[str, Any] = {}
+    window = _extract_quant_window(text)
+    if window is not None:
+        args["window"] = max(1, min(10000, window))
+
+    if "95%" in low or "95 % " in f" {low} ":
+        args["red_gate_pct"] = 95.0
+    if "90%" in low or "90 % " in f" {low} ":
+        args["warn_gate_pct"] = 90.0
+
+    return ("check_quant_validation_headroom", args)
+
+
+def _infer_web_search_topic(message: str) -> str:
+    low = str(message or "").lower()
+    if _text_contains_any(
+        low,
+        (
+            "stock",
+            "ticker",
+            "market",
+            "price",
+            "crypto",
+            "forex",
+            "bond",
+            "etf",
+            "economy",
+            "earnings",
+        ),
+    ):
+        return "finance"
+    if _text_contains_any(
+        low,
+        (
+            "news",
+            "latest",
+            "today",
+            "yesterday",
+            "breaking",
+            "headline",
+            "update",
+        ),
+    ):
+        return "news"
+    return "general"
+
+
+def _extract_web_search_query(message: str) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    patterns = (
+        r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|kindly\s+)?(?:look\s*up|lookup|find|search|research|check|browse)\s+(?:it\s+)?(?:online|on\s+the\s+web|the\s+web|internet)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|kindly\s+)?(?:online|web|internet)\s+(?:search|lookup|look\s*up|research)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:web\s+search)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:search\s+the\s+web)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:search\s+online)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:search\s+internet)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:internet\s+search)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:web\s+lookup|online\s+lookup|internet\s+lookup)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:look\s*up|lookup)\s+(?:online|on\s+the\s+web)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:browse\s+the\s+web|browse\s+internet|research\s+online|check\s+online)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:find\s+online)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:find\s+on\s+the\s+web)(?:\s+for)?\s*[:\-]?\s*",
+        r"^\s*(?:please\s+)?(?:google|duckduckgo|wikipedia|tavily)(?:\s+for)?\s*[:\-]?\s*",
+    )
+    query = text
+    for pattern in patterns:
+        stripped = re.sub(pattern, "", query, count=1, flags=re.IGNORECASE).strip()
+        if stripped != query:
+            query = stripped
+            break
+    return query.strip(" \t\r\n?:,-")
+
+
+def _extract_web_search_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if _text_contains_any(low, WEB_SEARCH_FAST_PATH_BLOCKED_TOKENS):
+        return None
+    if not _text_contains_any(low, WEB_SEARCH_FAST_PATH_TRIGGER_TOKENS):
+        return None
+
+    query = _extract_web_search_query(text)
+    if not query:
+        return None
+
+    args: dict[str, Any] = {
+        "query": query,
+        "allow_fallback": True,
+    }
+    topic = _infer_web_search_topic(query)
+    if topic != "general":
+        args["topic"] = topic
+
+    max_results = None
+    max_match = re.search(
+        r"\b(?:top|max(?:imum)?\s+results?)\s*[:=]?\s*(\d{1,2})\b",
+        low,
+        flags=re.IGNORECASE,
+    )
+    if max_match:
+        try:
+            max_results = int(max_match.group(1))
+        except Exception:
+            max_results = None
+    if max_results is not None:
+        args["max_results"] = max(1, min(10, max_results))
+
+    provider_order: list[str] = []
+    for provider in ("tavily", "duckduckgo", "wikipedia"):
+        if re.search(rf"\b{provider}\b", low):
+            provider_order.append(provider)
+    if provider_order:
+        args["providers"] = ",".join(dict.fromkeys(provider_order))
+
+    return ("search_web_tavily", args)
+
+
 def _summarize_runtime_tool_result(tool_name: str, raw_result: str) -> str:
     text = str(raw_result or "").strip()
     if not text:
@@ -2546,37 +3656,263 @@ def _summarize_runtime_tool_result(tool_name: str, raw_result: str) -> str:
     return _truncate_progress_text("\n".join(lines), 900)
 
 
+def _summarize_repo_status_tool_result(raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "repo status: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    report = parsed.get("report") if isinstance(parsed.get("report"), dict) else {}
+    if not report and isinstance(parsed.get("checks"), dict):
+        report = parsed
+
+    status = str((report or {}).get("status") or parsed.get("status") or "UNKNOWN").upper()
+    checks = report.get("checks") if isinstance(report, dict) and isinstance(report.get("checks"), dict) else {}
+    local = checks.get("local") if isinstance(checks.get("local"), dict) else {}
+    tracking = checks.get("tracking") if isinstance(checks.get("tracking"), dict) else {}
+    issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+    slug = str(checks.get("github_slug") or "").strip()
+    branch = str(local.get("branch") or "unknown")
+    head_short = str(local.get("head_short") or local.get("head") or "unknown")
+    upstream = str(tracking.get("upstream") or "none")
+    ahead = tracking.get("ahead")
+    behind = tracking.get("behind")
+    dirty = bool(local.get("dirty"))
+
+    lines = [
+        f"repo status: {status}" + (f" | {slug}" if slug else ""),
+        f"branch={branch} head={head_short} worktree={'dirty' if dirty else 'clean'}",
+        f"tracking={upstream} ahead={ahead if ahead is not None else 'n/a'} behind={behind if behind is not None else 'n/a'}",
+    ]
+    if issues:
+        lines.append("issues: " + "; ".join(str(x) for x in issues[:3]))
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
+def _summarize_web_search_tool_result(raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "web search: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status") or "UNKNOWN").upper()
+    provider = str(parsed.get("provider") or "none")
+    attempts = parsed.get("attempts") if isinstance(parsed.get("attempts"), list) else []
+    answer = str(parsed.get("answer") or "").strip()
+    results = parsed.get("results") if isinstance(parsed.get("results"), list) else []
+    error = str(parsed.get("error") or "").strip()
+
+    lines = [f"web search: {status} | provider={provider} | attempts={len(attempts)}"]
+    if status != "PASS":
+        lines.append(f"error: {error or 'unknown_error'}")
+        return _truncate_progress_text("\n".join(lines), 900)
+
+    if answer:
+        lines.append("answer: " + _truncate_progress_text(answer, 260))
+    for idx, row in enumerate(results[:3], start=1):
+        if not isinstance(row, dict):
+            continue
+        title = _truncate_progress_text(str(row.get("title") or "result"), 130)
+        url = _truncate_progress_text(str(row.get("url") or "").strip(), 160)
+        lines.append(f"{idx}. {title}{f' - {url}' if url else ''}")
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
+def _summarize_quant_validation_tool_result(raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "quant validation: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status") or "UNKNOWN").upper()
+    classification = str(parsed.get("classification") or "UNKNOWN").upper()
+    summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+    fail_count = summary.get("fail_count", "n/a")
+    total = summary.get("total", "n/a")
+    fail_rate = summary.get("fail_rate_pct", "n/a")
+    headroom = summary.get("headroom_to_red_gate_pct", "n/a")
+    red_gate = summary.get("red_gate_pct", "n/a")
+
+    lines = [
+        f"quant validation: {status} | class={classification}",
+        f"fail={fail_count}/{total} ({fail_rate}%), headroom_to_{red_gate}%={headroom}%",
+    ]
+    per_ticker = summary.get("per_ticker") if isinstance(summary.get("per_ticker"), list) else []
+    if per_ticker:
+        top = []
+        for row in per_ticker[:3]:
+            if not isinstance(row, dict):
+                continue
+            top.append(
+                f"{row.get('ticker', '?')}:{row.get('fail_count', '?')}/{row.get('total', '?')}({row.get('fail_rate_pct', '?')}%)"
+            )
+        if top:
+            lines.append("tickers: " + ", ".join(top))
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
+@dataclass(frozen=True)
+class BridgeFastPathSpec:
+    key: str
+    extractor: Callable[[str], Optional[tuple[str, dict[str, Any]]]]
+    summarizer: Callable[[str, str], str]
+    progress_label: str
+    budget_seconds: float
+
+
+def _summarize_runtime_fast_path(tool_name: str, raw_result: str) -> str:
+    return _summarize_runtime_tool_result(tool_name, raw_result)
+
+
+def _summarize_source_fast_path(_tool_name: str, raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "source evidence: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status", "UNKNOWN")).upper()
+    selected = parsed.get("selected_paths") if isinstance(parsed.get("selected_paths"), list) else []
+    citations = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
+    lines = [
+        f"source evidence: {status}",
+        f"files={len(selected)} citations={len(citations)}",
+    ]
+    if selected:
+        lines.append("paths: " + ", ".join(str(x) for x in selected[:3]))
+    if citations:
+        lines.append("cite: " + ", ".join(str(x) for x in citations[:5]))
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
+def _summarize_repo_fast_path(_tool_name: str, raw_result: str) -> str:
+    return _summarize_repo_status_tool_result(raw_result)
+
+
+def _summarize_web_search_fast_path(_tool_name: str, raw_result: str) -> str:
+    return _summarize_web_search_tool_result(raw_result)
+
+
+def _summarize_quant_validation_fast_path(_tool_name: str, raw_result: str) -> str:
+    return _summarize_quant_validation_tool_result(raw_result)
+
+
+_BRIDGE_FAST_PATH_SPECS: tuple[BridgeFastPathSpec, ...] = (
+    BridgeFastPathSpec(
+        key="runtime",
+        extractor=_extract_runtime_fast_path_request,
+        summarizer=_summarize_runtime_fast_path,
+        progress_label="runtime_fast_path",
+        budget_seconds=1200.0,
+    ),
+    BridgeFastPathSpec(
+        key="repo",
+        extractor=_extract_repo_status_fast_path_request,
+        summarizer=_summarize_repo_fast_path,
+        progress_label="repo_fast_path",
+        budget_seconds=45.0,
+    ),
+    BridgeFastPathSpec(
+        key="source",
+        extractor=_extract_source_inspection_fast_path_request,
+        summarizer=_summarize_source_fast_path,
+        progress_label="source_fast_path",
+        budget_seconds=50.0,
+    ),
+    BridgeFastPathSpec(
+        key="quant",
+        extractor=_extract_quant_validation_fast_path_request,
+        summarizer=_summarize_quant_validation_fast_path,
+        progress_label="quant_fast_path",
+        budget_seconds=45.0,
+    ),
+    BridgeFastPathSpec(
+        key="web",
+        extractor=_extract_web_search_fast_path_request,
+        summarizer=_summarize_web_search_fast_path,
+        progress_label="web_search_fast_path",
+        budget_seconds=45.0,
+    ),
+)
+
+
+def _has_registered_fast_path_match(message: str) -> bool:
+    text = (message or "").strip()
+    if not text:
+        return False
+    for spec in _BRIDGE_FAST_PATH_SPECS:
+        try:
+            if spec.extractor(text):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _run_bridge_fast_path(
+    *,
+    spec: BridgeFastPathSpec,
+    message: str,
+    channel: Optional[str],
+    reply_to: Optional[str],
+    activity: Any,
+) -> Optional[str]:
+    fast_path = spec.extractor(message)
+    if not fast_path:
+        return None
+    tool_name, tool_args = fast_path
+    arg_keys = sorted(tool_args.keys()) if isinstance(tool_args, dict) else []
+    activity.log_openclaw_event(
+        channel=channel or "unknown",
+        event_type=f"bridge_{spec.key}_fast_path_start",
+        payload={"tool": tool_name, "arg_keys": arg_keys},
+    )
+    if channel and reply_to and PROGRESS_UPDATES_DEFAULT:
+        _deliver_response(
+            channel=channel,
+            to=reply_to,
+            message=f"[progress 0.1s] {spec.progress_label} | executing {tool_name}",
+        )
+    tool_raw = execute_tool_call(tool_name, tool_args, allow_cache=False, budget_seconds=spec.budget_seconds)
+    response = spec.summarizer(tool_name, tool_raw)
+    if reply_to and channel:
+        _deliver_response(channel=channel, to=reply_to, message=response)
+    activity.log_openclaw_event(
+        channel=channel or "unknown",
+        event_type=f"bridge_{spec.key}_fast_path_complete",
+        payload={"tool": tool_name, "response_preview": response[:120]},
+    )
+    return response
+
+
 def _is_status_fast_path_prompt(message: str) -> bool:
     text = (message or "").strip().lower()
     if not text:
         return False
-    blocked_tokens = (
-        "install ",
-        "pip ",
-        "torch",
-        "reconcile",
-        "gate",
-        "audit",
-        "pnl",
-        "profit",
-        "trade",
-        "buy",
-        "sell",
-        "portfolio",
-    )
-    if any(tok in text for tok in blocked_tokens):
+    if _has_registered_fast_path_match(text):
         return False
-    return any(
-        tok in text
-        for tok in (
-            "health",
-            "status",
-            "system up",
-            "gateway",
-            "model availability",
-            "models available",
-        )
-    )
+    if _text_contains_any(text, STATUS_FAST_PATH_BLOCKED_TOKENS):
+        return False
+    return _text_contains_any(text, STATUS_FAST_PATH_TRIGGER_TOKENS)
 
 
 def _summarize_health_tool_result(raw_result: str) -> str:
@@ -2711,11 +4047,15 @@ def _base_system_prompt() -> str:
     return (
         "You are Best-Anime, a quantitative portfolio optimization assistant for Bestman. "
         "You have access to reasoning tools (deepseek-r1 models) for chain-of-thought analysis, "
-        "data tools for reading gate status and trade metrics, notification tools for sending "
+        "data tools for reading gate status/trade metrics and inspecting source code with citations, "
+        "quant validation health/headroom tools for fail-rate monitoring, "
+        "robust web search (Tavily with free-provider fallback) for external lookups, "
+        "notification tools for sending "
         "messages via OpenClaw, runtime dependency tools (including torch and generic package install/verification), "
         "system health checks, and sub-agent batch execution. "
         "Use tools aggressively for evidence-backed answers and execute sub-agent batches for complex tasks. "
         "Prefer tool-backed conclusions over unsupported assumptions. "
+        "When claims depend on repository code, call inspect_source_code and cite path:line evidence. "
         "For trading-critical prompts, rely on gate/metrics evidence before recommending actions. "
         "Be concise, data-driven, and profit-focused."
     )
@@ -3200,7 +4540,8 @@ def orchestrate(
                 break
 
             fn = tc.get("function", {})
-            tool_name = str(fn.get("name") or "").strip()
+            raw_tool_name = str(fn.get("name") or "").strip()
+            tool_name = _canonical_tool_name(raw_tool_name)
             args_raw = fn.get("arguments", {})
             args, arg_error = _sanitize_tool_arguments(tool_name, args_raw)
             if arg_error:
@@ -3214,7 +4555,7 @@ def orchestrate(
                 )
                 tool_message = {
                     "role": "tool",
-                    "name": tool_name or "unknown",
+                    "name": raw_tool_name or tool_name or "unknown",
                     "content": tool_result[:4000],
                 }
                 if tc.get("id"):
@@ -3233,7 +4574,7 @@ def orchestrate(
                 tool_result = _tool_error_json(tool_name, repeat_error, arguments=args)
                 tool_message = {
                     "role": "tool",
-                    "name": tool_name,
+                    "name": raw_tool_name or tool_name,
                     "content": tool_result[:4000],
                 }
                 if tc.get("id"):
@@ -3250,6 +4591,13 @@ def orchestrate(
                 )
                 continue
 
+            if raw_tool_name and raw_tool_name != tool_name:
+                logger.info(
+                    "[round %d] Tool alias: %s -> %s",
+                    round_num + 1,
+                    raw_tool_name,
+                    tool_name,
+                )
             logger.info("[round %d] Tool call: %s(%s)", round_num + 1, tool_name, json.dumps(args)[:80])
             progress.emit(
                 f"round_{round_num + 1}_tool_start",
@@ -3293,7 +4641,7 @@ def orchestrate(
 
             tool_message = {
                 "role": "tool",
-                "name": tool_name,
+                "name": raw_tool_name or tool_name,
                 "content": tool_result[:4000],
             }
             if tc.get("id"):
@@ -3439,30 +4787,16 @@ def openclaw_bridge(
             message="[progress 0.0s] request_received | analyzing request and selecting tools",
         )
 
-    fast_path = _extract_runtime_fast_path_request(message)
-    if fast_path:
-        tool_name, tool_args = fast_path
-        activity.log_openclaw_event(
-            channel=channel or "unknown",
-            event_type="bridge_fast_path_start",
-            payload={"tool": tool_name, "arg_keys": sorted(tool_args.keys())},
+    for fast_path_spec in _BRIDGE_FAST_PATH_SPECS:
+        fast_path_response = _run_bridge_fast_path(
+            spec=fast_path_spec,
+            message=message,
+            channel=channel,
+            reply_to=reply_to,
+            activity=activity,
         )
-        if channel and reply_to and PROGRESS_UPDATES_DEFAULT:
-            _deliver_response(
-                channel=channel,
-                to=reply_to,
-                message=f"[progress 0.1s] runtime_fast_path | executing {tool_name}",
-            )
-        tool_raw = execute_tool_call(tool_name, tool_args, allow_cache=False, budget_seconds=1200.0)
-        response = _summarize_runtime_tool_result(tool_name, tool_raw)
-        if reply_to and channel:
-            _deliver_response(channel=channel, to=reply_to, message=response)
-        activity.log_openclaw_event(
-            channel=channel or "unknown",
-            event_type="bridge_fast_path_complete",
-            payload={"tool": tool_name, "response_preview": response[:120]},
-        )
-        return response
+        if fast_path_response is not None:
+            return fast_path_response
 
     if _is_status_fast_path_prompt(message):
         activity.log_openclaw_event(

@@ -225,16 +225,11 @@ class TestConfigModelMapping:
                 assert model in self.VALID_MODEL_KEYS, \
                     f"candidate_weights[{i}] has unknown model '{model}'"
 
-    def test_yaml_candidates_sarimax_optional(self, candidate_weights_from_config):
-        """Candidate weights may include SARIMAX (filtered at runtime if disabled).
-
-        Phase 7.10: SARIMAX candidates retained in YAML so they activate when
-        sarimax is explicitly re-enabled.  Ensemble coordinator filters absent
-        models during weight selection.
-        """
+    def test_yaml_candidates_exclude_disabled_sarimax(self, candidate_weights_from_config):
+        """When sarimax is disabled, YAML candidates must remain fast-only."""
         sarimax_count = sum(1 for c in candidate_weights_from_config if "sarimax" in c)
-        assert sarimax_count <= len(candidate_weights_from_config), \
-            "Structural check: sarimax candidate count should not exceed total"
+        assert sarimax_count == 0, \
+            "candidate_weights should not include disabled sarimax entries"
 
 
 # ---------------------------------------------------------------------------
@@ -491,12 +486,9 @@ class TestConfigDriftDetection:
     """Detect unexpected changes to critical config sections."""
 
     def test_ensemble_candidate_count_stable(self, candidate_weights_from_config):
-        """Alert if candidate count changes unexpectedly (currently 13).
-
-        Phase 7.9 added 5 new candidates: 3 GARCH-blend, 2 MSSA-RL-dominant, 3 pure fallbacks.
-        """
-        assert len(candidate_weights_from_config) == 13, \
-            f"Expected 13 candidate weight sets, got {len(candidate_weights_from_config)}. " \
+        """Alert if candidate count changes unexpectedly (currently 10 fast-only sets)."""
+        assert len(candidate_weights_from_config) == 10, \
+            f"Expected 10 candidate weight sets, got {len(candidate_weights_from_config)}. " \
             "Update this test if intentional."
 
     def test_sarimax_default_remains_disabled(self):
@@ -508,13 +500,12 @@ class TestConfigDriftDetection:
     def test_ensemble_config_default_count_matches_yaml_fast_only(self, candidate_weights_from_config):
         """EnsembleConfig defaults should match YAML fast-only candidates.
 
-        Phase 7.10: YAML includes SARIMAX candidates (total 13) that are excluded
-        from defaults (total 10).  This test compares defaults to the YAML subset
-        that excludes disabled models.
+        YAML is now kept fast-only when sarimax is disabled, so defaults and
+        YAML candidate counts should match exactly.
         """
         ec = EnsembleConfig()
         default_count = len(ec.candidate_weights)
-        yaml_fast_count = sum(1 for c in candidate_weights_from_config if "sarimax" not in c)
+        yaml_fast_count = len(candidate_weights_from_config)
         assert default_count == yaml_fast_count, \
             f"EnsembleConfig defaults ({default_count}) != YAML fast-only ({yaml_fast_count}). " \
             "Keep them in sync."

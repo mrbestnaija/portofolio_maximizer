@@ -126,6 +126,43 @@ def test_profitability_eval_passes_minimal_db(tmp_path: Path) -> None:
     assert not result["reasons"]
 
 
+def test_forecaster_eval_uses_effective_default_metric_when_configured(tmp_path: Path) -> None:
+    suite_path = tmp_path / "suite.json"
+    suite_path.write_text(
+        mod.json.dumps(
+            {
+                "summary": {
+                    "prod_like_conf_on": {
+                        "errors": 0,
+                        "ensemble_under_best_rate": 0.20,
+                        "avg_ensemble_ratio_vs_best": 1.10,
+                        "ensemble_worse_than_rw_rate": 0.65,
+                        "effective_worse_than_rw_rate": 0.10,
+                    }
+                },
+                "thresholds": {
+                    "max_ensemble_under_best_rate": 1.0,
+                    "max_avg_ensemble_ratio_vs_best": 1.2,
+                    "max_ensemble_worse_than_rw_rate": 0.3,
+                    "max_effective_worse_than_rw_rate": 0.2,
+                    "use_effective_default_path_metric": True,
+                    "require_zero_errors": True,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = mod._forecaster_eval(
+        suite_path=suite_path,
+        monitor_config=tmp_path / "unused.yml",
+        factor=1.0,
+        max_age_hours=999,
+    )
+    assert result["status"] == "PASS"
+
+
 def test_autopilot_starts_training_when_benchmarks_fail(tmp_path: Path, monkeypatch) -> None:
     # Avoid writing into repo logs during tests.
     monkeypatch.setattr(mod, "TRAINING_PROPOSALS_DIR", tmp_path / "proposals")
@@ -154,4 +191,3 @@ def test_autopilot_starts_training_when_benchmarks_fail(tmp_path: Path, monkeypa
     assert rc == 0
     state = mod._read_json(state_file)
     assert state.get("pid") == 4242
-

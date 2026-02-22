@@ -344,6 +344,15 @@ def _forecaster_eval(
             "max_ensemble_under_best_rate": float(suite_cfg.get("max_ensemble_under_best_rate", 1.0)),
             "max_avg_ensemble_ratio_vs_best": float(suite_cfg.get("max_avg_ensemble_ratio_vs_best", 1.2)),
             "max_ensemble_worse_than_rw_rate": float(suite_cfg.get("max_ensemble_worse_than_rw_rate", 0.3)),
+            "max_effective_worse_than_rw_rate": float(
+                suite_cfg.get(
+                    "max_effective_worse_than_rw_rate",
+                    suite_cfg.get("max_ensemble_worse_than_rw_rate", 0.3),
+                )
+            ),
+            "use_effective_default_path_metric": bool(
+                suite_cfg.get("use_effective_default_path_metric", False)
+            ),
             "require_zero_errors": bool(suite_cfg.get("require_zero_errors", True)),
         }
 
@@ -351,6 +360,11 @@ def _forecaster_eval(
     max_under_best = _apply_factor_max(float(thresholds.get("max_ensemble_under_best_rate", 1.0)), factor)
     max_ratio = _apply_factor_max(float(thresholds.get("max_avg_ensemble_ratio_vs_best", 1.2)), factor)
     max_worse_rw = _apply_factor_max(float(thresholds.get("max_ensemble_worse_than_rw_rate", 0.3)), factor)
+    max_effective_worse_rw = _apply_factor_max(
+        float(thresholds.get("max_effective_worse_than_rw_rate", max_worse_rw)),
+        factor,
+    )
+    use_effective_metric = bool(thresholds.get("use_effective_default_path_metric", False))
     require_zero_errors = bool(thresholds.get("require_zero_errors", True))
 
     for variant, row in summary.items():
@@ -360,7 +374,14 @@ def _forecaster_eval(
         under_best = float(row.get("ensemble_under_best_rate", 0.0) or 0.0)
         ratio = row.get("avg_ensemble_ratio_vs_best")
         ratio = float(ratio) if isinstance(ratio, (int, float)) else None
-        worse_rw = float(row.get("ensemble_worse_than_rw_rate", 0.0) or 0.0)
+        if use_effective_metric and "effective_worse_than_rw_rate" in row:
+            worse_rw = float(row.get("effective_worse_than_rw_rate", 0.0) or 0.0)
+            worse_rw_threshold = max_effective_worse_rw
+            worse_rw_label = "effective_worse_rw"
+        else:
+            worse_rw = float(row.get("ensemble_worse_than_rw_rate", 0.0) or 0.0)
+            worse_rw_threshold = max_worse_rw
+            worse_rw_label = "worse_rw"
 
         if require_zero_errors and errors > 0:
             breaches.append(f"{variant}:errors={errors}")
@@ -368,8 +389,8 @@ def _forecaster_eval(
             breaches.append(f"{variant}:under_best={under_best:.4f}>{max_under_best:.4f}")
         if ratio is not None and ratio > max_ratio:
             breaches.append(f"{variant}:ratio_vs_best={ratio:.4f}>{max_ratio:.4f}")
-        if worse_rw > max_worse_rw:
-            breaches.append(f"{variant}:worse_rw={worse_rw:.4f}>{max_worse_rw:.4f}")
+        if worse_rw > worse_rw_threshold:
+            breaches.append(f"{variant}:{worse_rw_label}={worse_rw:.4f}>{worse_rw_threshold:.4f}")
 
     status = "PASS" if not breaches else "FAIL"
     return {
@@ -381,6 +402,8 @@ def _forecaster_eval(
             "max_ensemble_under_best_rate": max_under_best,
             "max_avg_ensemble_ratio_vs_best": max_ratio,
             "max_ensemble_worse_than_rw_rate": max_worse_rw,
+            "max_effective_worse_than_rw_rate": max_effective_worse_rw,
+            "use_effective_default_path_metric": use_effective_metric,
             "require_zero_errors": require_zero_errors,
         },
         "suite_path": str(suite_path),

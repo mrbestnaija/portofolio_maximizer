@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +44,9 @@ class GlobalHealthSummary:
     pass_count: int
     fail_count: int
     negative_expected_profit_count: int
+    skipped_action_count: int = 0
+    skipped_mode_count: int = 0
+    skipped_scope_count: int = 0
 
     @property
     def fail_fraction(self) -> float:
@@ -83,30 +87,109 @@ def _load_monitoring_cfg(path: Optional[Path]) -> Dict[str, Any]:
     return raw.get("forecaster_monitoring") or {}
 
 
+def _parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        # Date-only fallback (YYYY-MM-DD).
+        try:
+            dt = datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _extract_run_id(rec: Dict[str, Any]) -> Optional[str]:
+    run_id = rec.get("run_id")
+    if run_id is not None:
+        return str(run_id)
+    pipeline_id = rec.get("pipeline_id")
+    if pipeline_id is not None:
+        return str(pipeline_id)
+    qv = rec.get("quant_validation") or {}
+    run_id = qv.get("run_id")
+    if run_id is not None:
+        return str(run_id)
+    return None
+
+
 def _summarize_global(
     entries: List[Dict[str, Any]],
     exclude_modes: Optional[List[str]] = None,
+    include_actions: Optional[List[str]] = None,
+    run_ids: Optional[List[str]] = None,
+    since_ts: Optional[datetime] = None,
 ) -> GlobalHealthSummary:
     total = 0
     pass_count = 0
     fail_count = 0
     neg_exp_profit = 0
+    skipped_action = 0
+    skipped_mode = 0
+    skipped_scope = 0
     exclude_set = set(m.lower() for m in (exclude_modes or []))
+    include_actions_set = {
+        action.strip().upper()
+        for action in (include_actions or [])
+        if action and str(action).strip()
+    }
+    if "ALL" in include_actions_set:
+        include_actions_set = set()
+    run_id_set = {
+        str(v).strip()
+        for v in (run_ids or [])
+        if v is not None and str(v).strip()
+    }
 
     for rec in entries:
+        if since_ts is not None:
+            ts = _parse_iso_timestamp(rec.get("timestamp"))
+            if ts is None or ts < since_ts:
+                skipped_scope += 1
+                continue
+        if run_id_set:
+            rec_run_id = _extract_run_id(rec)
+            if rec_run_id is None or rec_run_id not in run_id_set:
+                skipped_scope += 1
+                continue
+
+        if include_actions_set:
+            action = str(rec.get("action") or "").strip().upper()
+            if action not in include_actions_set:
+                skipped_action += 1
+                continue
+
         # Skip entries whose execution_mode is in the exclusion list.
         # This allows proof-mode entries (max_holding=5, artificial constraints)
         # to be excluded from the RED gate calculation.
         if exclude_set:
-            exec_mode = str(rec.get("execution_mode") or "").lower()
-            proof_flag = bool(rec.get("proof_mode"))
+            exec_mode = str(
+                rec.get("execution_mode")
+                or (rec.get("quant_validation") or {}).get("execution_mode")
+                or ""
+            ).lower()
+            proof_raw = rec.get("proof_mode")
+            if proof_raw is None:
+                proof_raw = (rec.get("quant_validation") or {}).get("proof_mode")
+            if isinstance(proof_raw, str):
+                proof_flag = proof_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                proof_flag = bool(proof_raw)
             if exec_mode in exclude_set or (proof_flag and "proof" in exclude_set):
+                skipped_mode += 1
                 continue
 
         total += 1
-        status = rec.get("status") or (rec.get("quant_validation") or {}).get(
-            "status"
-        )
+        status = str(
+            rec.get("status") or (rec.get("quant_validation") or {}).get("status") or ""
+        ).upper()
         if status == "PASS":
             pass_count += 1
         elif status == "FAIL":
@@ -125,6 +208,9 @@ def _summarize_global(
         pass_count=pass_count,
         fail_count=fail_count,
         negative_expected_profit_count=neg_exp_profit,
+        skipped_action_count=skipped_action,
+        skipped_mode_count=skipped_mode,
+        skipped_scope_count=skipped_scope,
     )
 
 
@@ -208,6 +294,35 @@ def main() -> None:
             "Example: --exclude-mode proof diagnostic"
         ),
     )
+    parser.add_argument(
+        "--include-action",
+        nargs="*",
+        default=["BUY", "SELL"],
+        metavar="ACTION",
+        help=(
+            "Only include these actions when computing health metrics. "
+            "Defaults to actionable trades only (BUY/SELL). "
+            "Use --include-action ALL to disable action filtering."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        nargs="*",
+        default=[],
+        metavar="RUN_ID",
+        help=(
+            "Only include entries matching these run IDs. "
+            "Matches root run_id and pipeline_id fields."
+        ),
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "Only include entries with timestamp >= this ISO value "
+            "(e.g. 2026-02-19T14:40:46+00:00 or 2026-02-19)."
+        ),
+    )
     args = parser.parse_args()
 
     log_path = Path(args.log_path)
@@ -243,9 +358,34 @@ def main() -> None:
         )
     )
 
-    summary = _summarize_global(entries, exclude_modes=args.exclude_mode)
+    since_ts = None
+    if args.since:
+        since_ts = _parse_iso_timestamp(args.since)
+        if since_ts is None:
+            raise SystemExit(
+                f"Invalid --since value '{args.since}'. "
+                "Use ISO format, e.g. 2026-02-19T14:40:46+00:00."
+            )
+
+    summary = _summarize_global(
+        entries,
+        exclude_modes=args.exclude_mode,
+        include_actions=args.include_action,
+        run_ids=args.run_id,
+        since_ts=since_ts,
+    )
 
     print("=== Quant Validation Global Health ===")
+    print(
+        "  Filters                      : "
+        f"actions={args.include_action or ['ALL']} "
+        f"exclude_mode={args.exclude_mode or []} "
+        f"run_id={args.run_id or []} "
+        f"since={args.since or 'none'}"
+    )
+    print(f"  Skipped (action filter)      : {summary.skipped_action_count}")
+    print(f"  Skipped (mode filter)        : {summary.skipped_mode_count}")
+    print(f"  Skipped (scope filter)       : {summary.skipped_scope_count}")
     print(f"  Total entries                : {summary.total}")
     print(f"  PASS                         : {summary.pass_count}")
     print(f"  FAIL                         : {summary.fail_count}")
@@ -261,6 +401,13 @@ def main() -> None:
         f"{summary.negative_expected_profit_fraction:.3f} "
         f"(max allowed={max_neg_exp_frac:.3f})"
     )
+
+    if summary.total == 0:
+        print(
+            "Health check VIOLATION: no entries remain after filters "
+            "(action/mode/scope)."
+        )
+        raise SystemExit(1)
 
     violations: List[str] = []
     if summary.fail_fraction > max_fail_frac:

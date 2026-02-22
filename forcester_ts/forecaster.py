@@ -1062,7 +1062,10 @@ class TimeSeriesForecaster:
             reason = str(preselection_gate.get("reason", "recent RMSE ratio gate"))
             metadata["ensemble_status"] = "DISABLE_DEFAULT"
             metadata["ensemble_decision_reason"] = f"preselection gate: {reason}"
-            if primary_model:
+            target_default_model = preselection_gate.get("target_default_model")
+            if isinstance(target_default_model, str) and target_default_model.strip():
+                metadata["default_model"] = target_default_model.strip().upper()
+            elif primary_model:
                 metadata["default_model"] = primary_model
             self._record_model_event(
                 "ensemble",

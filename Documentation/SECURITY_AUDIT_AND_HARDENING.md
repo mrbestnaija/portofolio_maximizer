@@ -274,6 +274,30 @@ os.chmod(db_path, 0o600)  # Read/write for owner only
 
 ---
 
+#### 11. **Autonomous Agent Prompt-Injection / Sensitive-Action Abuse** (CRITICAL)
+- **Risk**: Agent follows untrusted instructions from web/email content, then exfiltrates secrets or executes irreversible actions.
+- **Impact**: Credential theft, unauthorized financial/account operations, remote compromise.
+- **Location**: OpenClaw autonomous runs (`openclaw agent` via `utils/openclaw_cli.py`, cron `agentTurn` flows, prompt templates).
+- **Priority**: **P0 - BLOCKER for autonomous execution**
+
+**Threat model alignment**
+- This maps to browser/assistant prompt-injection guidance in public safety advisories (for example Claude-in-browser safe-use guidance around untrusted-page instructions and sensitive actions): https://support.claude.com/en/articles/12902428-using-claude-in-chrome-safely
+
+**Implemented Controls (2026-02-19)**
+- Runtime guard in `utils/openclaw_cli.py` blocks high-risk autonomous prompts unless explicit approval token is present.
+- Agent turns are prefixed with `[PMX_AUTONOMY_POLICY]` to reinforce "untrusted content" handling and secret non-disclosure.
+- Optional strict mode can hard-block prompt-injection patterns (`OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`).
+- Config audit checks in `scripts/verify_openclaw_config.py` now flag disabled autonomy guard settings.
+- Prompt templates in `config/openclaw_prompt_templates.yml` now explicitly include prompt-injection/secret/high-risk-action guardrails.
+
+**Required Fix / Operating Policy**
+- Keep `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`.
+- Keep `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`.
+- Use an explicit approval token (`OPENCLAW_AUTONOMY_APPROVAL_TOKEN`, default `PMX_APPROVE_HIGH_RISK`) only after human review.
+- Prefer enabling strict prompt-injection blocking for fully autonomous web-heavy runs.
+
+---
+
 ## 🛡️ COMPREHENSIVE HARDENING CHECKLIST
 
 ### **Phase 1: Critical Security Fixes (Immediate - 2-4 weeks)**
@@ -302,6 +326,10 @@ os.chmod(db_path, 0o600)  # Read/write for owner only
 - [ ] Add security headers (HSTS, CSP, X-Frame-Options)
 - [ ] Disable debug mode in production
 - [ ] Remove default credentials
+- [ ] Keep `OPENCLAW_AUTONOMY_GUARD_ENABLED=1` in all automation runtimes
+- [ ] Keep `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1` and define a non-trivial approval token
+- [ ] Enable `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` for unattended web-heavy autonomous jobs
+- [ ] Run `python scripts/verify_openclaw_config.py` as a preflight before enabling autonomous cron runs
 
 ---
 
@@ -469,6 +497,20 @@ To be considered SaaS-ready, the system must have:
    ```bash
    # Use docker secrets or external secret manager
    # See SECURITY_QUICK_FIXES.md for details
+   ```
+
+5. **Enable autonomous-run guardrails (OpenClaw)**
+   ```bash
+   # Recommended defaults
+   OPENCLAW_AUTONOMY_GUARD_ENABLED=1
+   OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1
+   OPENCLAW_AUTONOMY_APPROVAL_TOKEN=PMX_APPROVE_HIGH_RISK
+   OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1
+   ```
+   ```bash
+   # Verify hardening state
+   python scripts/verify_openclaw_config.py
+   pytest tests/utils/test_openclaw_cli.py -k "autonomy_guard or AutonomyGuard" -v
    ```
 
 ### **Short-term Actions (This Month)**

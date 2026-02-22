@@ -128,6 +128,10 @@ def main(argv: List[str]) -> int:
     oc_ok, oc_line = _report_group("openclaw_targets", ["OPENCLAW_TARGETS", "OPENCLAW_TO"])
     lines.append(oc_line)
 
+    # Tavily web grounding (optional)
+    _tavily_ok, tavily_line = _report_group("tavily_api_key", ["TAVILY_API_KEY"])
+    lines.append(tavily_line)
+
     # Interactions API (optional)
     interactions_key = (load_secret("INTERACTIONS_API_KEY") or "").strip()
     if not interactions_key:

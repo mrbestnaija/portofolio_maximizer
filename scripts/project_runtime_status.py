@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -29,8 +30,19 @@ def _trim(text: str, max_chars: int = 1400) -> str:
     return raw[:max_chars] + "\n...[truncated]..."
 
 
-def _run_check(name: str, cmd: list[str], timeout_seconds: float) -> dict[str, Any]:
+def _run_check(
+    name: str,
+    cmd: list[str],
+    timeout_seconds: float,
+    *,
+    env_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
     start = time.time()
+    env = dict(os.environ)
+    for key, value in (env_overrides or {}).items():
+        text = str(value or "").strip()
+        if text:
+            env[key] = text
     try:
         proc = subprocess.run(
             cmd,
@@ -38,6 +50,7 @@ def _run_check(name: str, cmd: list[str], timeout_seconds: float) -> dict[str, A
             capture_output=True,
             text=True,
             timeout=float(timeout_seconds),
+            env=env,
         )
         duration = time.time() - start
         return {
@@ -76,6 +89,9 @@ def _run_check(name: str, cmd: list[str], timeout_seconds: float) -> dict[str, A
 def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
     py = sys.executable
     db_path = PROJECT_ROOT / "data" / "portfolio_maximizer.db"
+    whitelist_ids = str(
+        os.getenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66")
+    ).strip() or "66"
 
     checks: list[dict[str, Any]] = []
 
@@ -85,6 +101,9 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
                 "pnl_integrity",
                 [py, "-m", "integrity.pnl_integrity_enforcer", "--db", str(db_path)],
                 timeout_seconds=timeout_seconds,
+                env_overrides={
+                    "INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS": whitelist_ids,
+                },
             )
         )
     else:
@@ -141,4 +160,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

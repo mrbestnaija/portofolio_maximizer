@@ -56,8 +56,19 @@ jobs:
           python scripts/openclaw_models.py status
           python scripts/pmx_interactions_api.py --check
 
+      - name: OpenClaw connectivity regression gate
+        run: |
+          if command -v openclaw >/dev/null 2>&1; then
+            python scripts/openclaw_regression_gate.py --json
+          else
+            python scripts/openclaw_regression_gate.py --allow-missing-openclaw --json
+          fi
+
       - name: Integrity CI gate (blocking)
         run: python scripts/ci_integrity_gate.py --strict
+
+      - name: Forecasting config integrity gate (blocking)
+        run: python scripts/validate_forecasting_configs.py --json
 
       - name: Adversarial integrity suite (blocking when DB exists)
         run: |

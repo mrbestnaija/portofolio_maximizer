@@ -604,25 +604,39 @@ class PnLIntegrityEnforcer:
         )]
 
     def _check_duplicate_close_for_same_entry(self) -> List[IntegrityViolation]:
-        """HIGH: Each opening leg should be closed at most once."""
+        """HIGH: Detect over-closed entries (duplicate close quantity).
+
+        Legitimate partial exits may produce multiple closing legs for a single
+        opening leg. The integrity violation is when *multiple* linked close
+        legs over-consume the opening leg quantity.
+        """
         rows = self.conn.execute(
-            "SELECT entry_trade_id, COUNT(*) as cnt "
-            "FROM trade_executions "
-            "WHERE is_close = 1 AND entry_trade_id IS NOT NULL "
-            "GROUP BY entry_trade_id "
-            "HAVING COUNT(*) > 1"
+            "SELECT "
+            "  o.id AS open_id, "
+            "  COALESCE(o.shares, 0.0) AS open_qty, "
+            "  COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) AS closed_qty "
+            "FROM trade_executions o "
+            "JOIN trade_executions c "
+            "  ON c.entry_trade_id = o.id "
+            " AND c.is_close = 1 "
+            "WHERE o.action = 'BUY' "
+            "  AND o.is_close = 0 "
+            "GROUP BY o.id "
+            "HAVING COUNT(c.id) > 1 "
+            "   AND COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) "
+            "       > COALESCE(o.shares, 0.0) + 0.02"
         ).fetchall()
 
         if not rows:
             return []
 
-        affected = [r["entry_trade_id"] for r in rows]
+        affected = [r["open_id"] for r in rows]
         return [IntegrityViolation(
             check_name="DUPLICATE_CLOSE_FOR_ENTRY",
             severity="HIGH",
             description=(
-                f"{len(rows)} opening legs have been closed more than once. "
-                "This causes PnL duplication."
+                f"{len(rows)} opening legs are over-closed (linked close_size "
+                "sum exceeds opening shares). This causes PnL duplication."
             ),
             affected_ids=affected,
             count=len(rows),
@@ -702,12 +716,15 @@ class PnLIntegrityEnforcer:
         """Link closing legs to their opening legs via entry_trade_id.
 
         Matching heuristic: same ticker, SELL.entry_price matches BUY.price,
-        BUY happened before SELL, and BUY is not already linked.
+        BUY happened before SELL, and BUY has sufficient remaining quantity
+        after accounting for existing linked closes.
         """
         closes = self.conn.execute(
-            "SELECT id, ticker, entry_price, trade_date FROM trade_executions "
+            "SELECT id, ticker, entry_price, trade_date, "
+            "       COALESCE(close_size, shares, 0.0) AS close_qty "
+            "FROM trade_executions "
             "WHERE is_close = 1 AND entry_trade_id IS NULL "
-            "ORDER BY id"
+            "ORDER BY trade_date, id"
         ).fetchall()
 
         if not closes:
@@ -715,16 +732,38 @@ class PnLIntegrityEnforcer:
             return 0
 
         linked = 0
-        used_buy_ids = set()
 
-        # Pre-fetch used entry_trade_ids to avoid double-linking
-        existing_links = self.conn.execute(
-            "SELECT entry_trade_id FROM trade_executions "
-            "WHERE entry_trade_id IS NOT NULL"
+        # Remaining quantity by BUY leg after accounting for linked closes.
+        buy_rows = self.conn.execute(
+            "SELECT id, ticker, trade_date, COALESCE(shares, 0.0) AS buy_qty, "
+            "       COALESCE(price, 0.0) AS buy_price "
+            "FROM trade_executions "
+            "WHERE action = 'BUY' AND is_close = 0 "
+            "ORDER BY trade_date DESC, id DESC"
         ).fetchall()
-        used_buy_ids = {r["entry_trade_id"] for r in existing_links}
+        buy_by_id: Dict[int, sqlite3.Row] = {int(r["id"]): r for r in buy_rows}
+        close_usage = self.conn.execute(
+            "SELECT entry_trade_id, "
+            "       COALESCE(SUM(COALESCE(close_size, shares, 0.0)), 0.0) AS used_qty "
+            "FROM trade_executions "
+            "WHERE is_close = 1 AND entry_trade_id IS NOT NULL "
+            "GROUP BY entry_trade_id"
+        ).fetchall()
+        used_qty_by_buy: Dict[int, float] = {
+            int(r["entry_trade_id"]): float(r["used_qty"] or 0.0)
+            for r in close_usage
+            if r["entry_trade_id"] is not None
+        }
+        remaining_qty_by_buy: Dict[int, float] = {}
+        for buy_id, buy_row in buy_by_id.items():
+            remaining = float(buy_row["buy_qty"] or 0.0) - used_qty_by_buy.get(buy_id, 0.0)
+            remaining_qty_by_buy[buy_id] = max(0.0, remaining)
 
         for close in closes:
+            close_qty = float(close["close_qty"] or 0.0)
+            if close_qty <= 0:
+                continue
+
             # Find matching opening BUY
             candidates = self.conn.execute(
                 "SELECT id, price, trade_date FROM trade_executions "
@@ -735,7 +774,9 @@ class PnLIntegrityEnforcer:
             ).fetchall()
 
             for cand in candidates:
-                if cand["id"] in used_buy_ids:
+                cand_id = int(cand["id"])
+                remaining_qty = remaining_qty_by_buy.get(cand_id, 0.0)
+                if remaining_qty + 1e-9 < close_qty:
                     continue
                 # Match on entry_price tolerance
                 if (
@@ -748,11 +789,11 @@ class PnLIntegrityEnforcer:
                             "WHERE id = ?",
                             (cand["id"], close["id"]),
                         )
-                    used_buy_ids.add(cand["id"])
+                    remaining_qty_by_buy[cand_id] = max(0.0, remaining_qty - close_qty)
                     linked += 1
                     logger.debug(
-                        "Linked close id=%d to open id=%d (ticker=%s)",
-                        close["id"], cand["id"], close["ticker"],
+                        "Linked close id=%d to open id=%d (ticker=%s, close_qty=%.4f, remaining=%.4f)",
+                        close["id"], cand["id"], close["ticker"], close_qty, remaining_qty_by_buy[cand_id],
                     )
                     break
 

@@ -1,4 +1,4 @@
-# Docker Build and Test Script for Portfolio Maximizer v4.5 (PowerShell)
+﻿# Docker Build and Test Script for Portfolio Maximizer v4.5 (PowerShell)
 # This script builds the Docker images and runs comprehensive tests
 
 param(
@@ -20,17 +20,17 @@ function Write-Header {
 
 function Write-Success {
     param($Message)
-    Write-Host "✓ $Message" -ForegroundColor Green
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
 function Write-Error {
     param($Message)
-    Write-Host "✗ $Message" -ForegroundColor Red
+    Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
 function Write-Warning {
     param($Message)
-    Write-Host "⚠ $Message" -ForegroundColor Yellow
+    Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
 # Function to check prerequisites

@@ -284,6 +284,16 @@ def main() -> None:
     min_lift_rmse_ratio = float(rmse_cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
     min_lift_fraction = float(rmse_cfg.get("min_lift_fraction", 0.0) or 0.0)
     promotion_margin = float(rmse_cfg.get("promotion_margin", 0.0) or 0.0)
+    recent_window_audits = max(int(rmse_cfg.get("recent_window_audits", 0) or 0), 0)
+    recent_window_max_violation_rate = float(
+        rmse_cfg.get("recent_window_max_violation_rate", max_violation_rate)
+    )
+    raw_recent_p90 = rmse_cfg.get("recent_window_max_p90_rmse_ratio")
+    recent_window_max_p90_rmse_ratio = (
+        float(raw_recent_p90)
+        if isinstance(raw_recent_p90, (int, float))
+        else None
+    )
 
     def _dedupe_key(path: Path) -> Optional[Tuple[Any, ...]]:
         audit = _load_audit(path)
@@ -361,6 +371,16 @@ def main() -> None:
         )
     if promotion_margin > 0:
         print(f"Promotion margin: requires >= {promotion_margin:.2%} lift to keep ensemble as default")
+    if recent_window_audits > 0:
+        print(
+            f"Recent window  : {recent_window_audits} effective audit(s) "
+            f"(max violation rate {recent_window_max_violation_rate:.2%})"
+        )
+        if recent_window_max_p90_rmse_ratio is not None:
+            print(
+                "Recent p90 gate: "
+                f"p90(rmse_ratio) <= {recent_window_max_p90_rmse_ratio:.3f}"
+            )
 
     violation_count = sum(1 for r in results if r.violation)
     effective_n = sum(
@@ -399,6 +419,28 @@ def main() -> None:
         if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
     ]
     pct = _percentiles(ratios, [0.1, 0.5, 0.9]) if ratios else {}
+    recent_results: List[AuditCheckResult] = (
+        results[:recent_window_audits] if recent_window_audits > 0 else []
+    )
+    recent_effective_n = sum(
+        1
+        for r in recent_results
+        if (
+            r.ensemble_rmse is not None
+            and r.baseline_rmse is not None
+            and r.baseline_rmse > 0
+        )
+    )
+    recent_violation_count = sum(1 for r in recent_results if r.violation)
+    recent_violation_rate = (
+        (recent_violation_count / recent_effective_n) if recent_effective_n else 0.0
+    )
+    recent_ratios = [
+        r.rmse_ratio
+        for r in recent_results
+        if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
+    ]
+    recent_pct = _percentiles(recent_ratios, [0.5, 0.9]) if recent_ratios else {}
 
     print(f"\nEffective audits with RMSE: {effective_n}")
     print(f"Violations (ensemble worse than baseline beyond tolerance): {violation_count}")
@@ -408,6 +450,43 @@ def main() -> None:
             "RMSE ratio percentiles: "
             f"p10={pct.get(0.1):.3f}, median={pct.get(0.5):.3f}, p90={pct.get(0.9):.3f}"
         )
+    if recent_window_audits > 0:
+        print(
+            "Recent window stats: "
+            f"effective={recent_effective_n}/{recent_window_audits}, "
+            f"violations={recent_violation_count}, "
+            f"violation_rate={recent_violation_rate:.2%}"
+        )
+        if recent_pct:
+            print(
+                "Recent RMSE ratio percentiles: "
+                f"median={recent_pct.get(0.5):.3f}, p90={recent_pct.get(0.9):.3f}"
+            )
+
+    if recent_window_audits > 0:
+        if recent_effective_n < recent_window_audits:
+            print(
+                "Recent-window gate inconclusive: "
+                f"effective_audits={recent_effective_n} < required_audits={recent_window_audits}"
+            )
+        else:
+            if recent_violation_rate > recent_window_max_violation_rate:
+                raise SystemExit(
+                    f"Recent-window violation rate {recent_violation_rate:.2%} exceeds "
+                    f"max-violation-rate {recent_window_max_violation_rate:.2%} "
+                    f"(window={recent_window_audits})"
+                )
+            if (
+                recent_window_max_p90_rmse_ratio is not None
+                and recent_pct
+                and recent_pct.get(0.9) is not None
+                and float(recent_pct.get(0.9)) > float(recent_window_max_p90_rmse_ratio)
+            ):
+                raise SystemExit(
+                    f"Recent-window p90 RMSE ratio {float(recent_pct.get(0.9)):.3f} exceeds "
+                    f"{float(recent_window_max_p90_rmse_ratio):.3f} "
+                    f"(window={recent_window_audits})"
+                )
 
     warmup_required = max(min_effective_audits, holding_period, 0)
     if warmup_required > 0 and effective_n < warmup_required:
@@ -579,6 +658,13 @@ def main() -> None:
         "ratio_distribution": ratio_stats,
         "decision": decision,
         "decision_reason": decision_reason,
+        "recent_window_audits": recent_window_audits,
+        "recent_effective_audits": recent_effective_n,
+        "recent_violation_count": recent_violation_count,
+        "recent_violation_rate": recent_violation_rate,
+        "recent_window_max_violation_rate": recent_window_max_violation_rate,
+        "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
+        "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
         "dataset_windows": dataset_entries,
     }
     cache_path = cache_dir / "latest_summary.json"
