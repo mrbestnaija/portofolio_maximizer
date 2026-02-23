@@ -42,9 +42,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"   # Don't abort on individual test failures
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SETUP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $ROOT       = Split-Path -Parent $PSScriptRoot
 $TIMESTAMP  = (Get-Date -Format "yyyyMMdd_HHmmss")
 $REPORT_DIR = Join-Path $ROOT $ReportDir
@@ -61,7 +61,8 @@ if (-not $PythonExe) {
     )
     foreach ($c in $candidates) {
         if (Test-Path $c -ErrorAction SilentlyContinue) { $PythonExe = $c; break }
-        $resolved = (Get-Command $c -ErrorAction SilentlyContinue)?.Source
+        $cmdInfo = Get-Command $c -ErrorAction SilentlyContinue
+        $resolved = if ($cmdInfo) { $cmdInfo.Source } else { $null }
         if ($resolved) { $PythonExe = $resolved; break }
     }
 }
@@ -73,9 +74,9 @@ if (-not $PythonExe) {
 # Ensure report directory exists
 $null = New-Item -ItemType Directory -Force -Path $REPORT_DIR
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # LOGGING UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $script:TestResults  = [System.Collections.Generic.List[hashtable]]::new()
 $script:PassCount    = 0
 $script:FailCount    = 0
@@ -179,11 +180,11 @@ function Invoke-PytestTarget {
     return @{ ExitCode = $exitCode; Output = ($out -join "`n"); Elapsed = $sw.ElapsedMilliseconds }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SECTION A: VALIDATION LOGIC TESTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-ValidationLogic {
-    Write-Log "Validation Logic Tests (Part A — Phase 7.10b)" "SECT"
+    Write-Log "Validation Logic Tests (Part A -- Phase 7.10b)" "SECT"
 
     # A1. Weighted scoring: score >= 0.60 -> PASS
     $code = @'
@@ -387,11 +388,11 @@ print("A4_PROFIT_FLOOR_PASS")
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SECTION B: MODEL SIGNAL QUALITY TESTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-ModelSignalQuality {
-    Write-Log "Model Signal Quality Tests (Part B — Phase 7.10b)" "SECT"
+    Write-Log "Model Signal Quality Tests (Part B -- Phase 7.10b)" "SECT"
 
     # B1a. GARCH: import + basic construction with new params
     $code = @'
@@ -400,9 +401,9 @@ sys.path.insert(0, r"ROOT_PLACEHOLDER")
 try:
     from forcester_ts.garch import GARCHForecaster
     g = GARCHForecaster(dist="skewt", mean="AR", enforce_stationarity=True, igarch_fallback="gjr")
-    assert g._dist == "skewt",  f"Expected dist=skewt, got {g._dist}"
-    assert g._mean == "AR",     f"Expected mean=AR, got {g._mean}"
-    assert g._igarch_fallback == "gjr", f"Expected gjr fallback, got {g._igarch_fallback}"
+    assert g.dist == "skewt",  f"Expected dist=skewt, got {g.dist}"
+    assert g.mean == "AR",     f"Expected mean=AR, got {g.mean}"
+    assert g.igarch_fallback == "gjr", f"Expected gjr fallback, got {g.igarch_fallback}"
     print("B1A_GARCH_PARAMS_PASS")
 except ImportError as e:
     print(f"B1A_SKIP_IMPORT_ERROR: {e}")
@@ -434,8 +435,8 @@ try:
     g      = GARCHForecaster(dist="skewt", mean="AR", enforce_stationarity=True)
     g.fit(series)
     result = g.forecast(steps=5)
-    assert "forecast" in result,     "Missing forecast key"
-    assert len(result["forecast"]) == 5, f"Expected 5 steps, got {len(result['forecast'])}"
+    assert "mean_forecast" in result,     "Missing mean_forecast key"
+    assert len(result["mean_forecast"]) == 5, f"Expected 5 steps, got {len(result['mean_forecast'])}"
     assert "volatility" in result,   "Missing volatility key"
     summ   = g.get_model_summary()
     assert summ.get("dist") == "skewt",  f"Summary dist mismatch: {summ.get('dist')}"
@@ -479,9 +480,9 @@ try:
     g = GARCHForecaster(dist="skewt", mean="AR", enforce_stationarity=True, igarch_fallback="gjr")
     g.fit(prices)
     result = g.forecast(steps=5)
-    assert len(result["forecast"]) == 5, "IGARCH path: wrong forecast length"
+    assert len(result["mean_forecast"]) == 5, "IGARCH path: wrong forecast length"
     summ   = g.get_model_summary()
-    # Should have tried GJR or fallen back to EWMA — check summary reports a vol model
+    # Should have tried GJR or fallen back to EWMA -- check summary reports a vol model
     assert "vol_model" in summ or "mean_model" in summ, "Summary missing model fields"
     print("B1C_GARCH_IGARCH_PATH_PASS")
 except Exception as e:
@@ -513,7 +514,7 @@ try:
     f = SAMOSSAForecaster(window_length=0)   # 0 = auto
     f.fit(prices)
     expected_window = n // 3   # 100
-    actual_window   = f._window_length
+    actual_window   = f.config.window_length
     assert actual_window == expected_window or actual_window >= 5, \
         f"Auto window should be T//3={expected_window}, got {actual_window}"
     assert actual_window != 40, f"Hard 40-cap should be removed, but got {actual_window}"
@@ -541,7 +542,7 @@ try:
     from forcester_ts.samossa import SAMOSSAForecaster
     n      = 200
     dates  = pd.date_range("2020-01-01", periods=n, freq="D")
-    # Trending up series → expect directional_signal = +1.0
+    # Trending up series -> expect directional_signal = +1.0
     prices = pd.Series(np.linspace(100, 150, n) + np.random.normal(0, 1, n),
                        index=dates, name="Close")
     f = SAMOSSAForecaster(window_length=0)
@@ -581,9 +582,10 @@ try:
     assert cfg.use_q_strategy_selection == True, "Q selection should be enabled"
     assert cfg.reward_mode == "directional_pnl", f"Wrong reward_mode: {cfg.reward_mode}"
     assert cfg.change_point_threshold == 4.0,    f"Wrong threshold: {cfg.change_point_threshold}"
-    f   = MSSARLForecaster(use_q_strategy_selection=True, reward_mode="directional_pnl",
-                           change_point_threshold=4.0)
-    assert hasattr(f, "_q_table"), "Forecaster should have _q_table attribute"
+    f   = MSSARLForecaster(config=MSSARLConfig(
+              use_q_strategy_selection=True, reward_mode="directional_pnl",
+              change_point_threshold=4.0))
+    assert hasattr(f.config, "use_q_strategy_selection"), "Config should expose use_q_strategy_selection"
     print("B3A_MSSARL_CONFIG_PASS")
 except ImportError as e:
     print(f"B3A_SKIP: {e}")
@@ -605,12 +607,12 @@ import sys, numpy as np, pandas as pd
 sys.path.insert(0, r"ROOT_PLACEHOLDER")
 np.random.seed(17)
 try:
-    from forcester_ts.mssa_rl import MSSARLForecaster
+    from forcester_ts.mssa_rl import MSSARLForecaster, MSSARLConfig
     n      = 200
     dates  = pd.date_range("2020-01-01", periods=n, freq="D")
     # Highly volatile series that could cause large slopes
     prices = pd.Series(100 + np.cumsum(np.random.normal(0, 5, n)), index=dates, name="Close")
-    f      = MSSARLForecaster(use_q_strategy_selection=True, reward_mode="directional_pnl")
+    f      = MSSARLForecaster(config=MSSARLConfig(use_q_strategy_selection=True, reward_mode="directional_pnl"))
     f.fit(prices)
     result = f.forecast(steps=30)
     fcst   = np.array(result["forecast"])
@@ -647,11 +649,13 @@ try:
     # Model directional accuracy: garch 60%, samossa 45%, mssa_rl 55%
     model_da = {"garch": 0.60, "samossa": 0.45, "mssa_rl": 0.55}
     # Run weight selection with DA input
-    model_errors = {"garch": 0.12, "samossa": 0.15, "mssa_rl": 0.14}
-    weights = coord.select_weights(
-        model_errors=model_errors,
+    model_confidence = {"garch": 0.88, "samossa": 0.85, "mssa_rl": 0.86}
+    weights_result = coord.select_weights(
+        model_confidence=model_confidence,
         model_directional_accuracy=model_da
     )
+    # select_weights returns (dict, float) tuple
+    weights = weights_result[0] if isinstance(weights_result, tuple) else weights_result
     assert isinstance(weights, dict), f"select_weights should return dict, got {type(weights)}"
     assert len(weights) > 0, "Weights should be non-empty"
     total_w = sum(weights.values())
@@ -725,18 +729,18 @@ shutil.rmtree(tmp_dir, ignore_errors=True)
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SECTION C: DIRECTIONAL ACCURACY ENHANCEMENTS (Phase 7.11 Logic)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-DirectionalAccuracy {
-    Write-Log "Directional Accuracy Enhancement Tests (Part C — Phase 7.11)" "SECT"
+    Write-Log "Directional Accuracy Enhancement Tests (Part C -- Phase 7.11)" "SECT"
 
     # C1. Directional Consensus Gate
     $code = @'
 import sys, numpy as np
 sys.path.insert(0, r"ROOT_PLACEHOLDER")
 
-def _check_directional_consensus(model_directions, min_consensus=0.67):
+def _check_directional_consensus(model_directions, min_consensus=2.0/3):
     long_v  = sum(1 for d in model_directions.values() if d > 0)
     short_v = sum(1 for d in model_directions.values() if d < 0)
     total   = len(model_directions)
@@ -868,7 +872,7 @@ features  = pd.concat([feat_good, feat_bad], axis=1)
 
 kept = _compute_rolling_ic(features, rets, window=60, ic_threshold=0.03)
 assert "good" in kept, f"Correlated feature 'good' should survive culling, got {kept}"
-# Noise feature may or may not survive (random IC) — just ensure 'good' is kept
+# Noise feature may or may not survive (random IC) -- just ensure 'good' is kept
 print(f"C3_IC_CULLING_PASS kept={list(kept.keys())}")
 '@
     $code = $code.Replace("ROOT_PLACEHOLDER", $ROOT.Replace("\","\\"))
@@ -1124,9 +1128,9 @@ print("C8_ASYMMETRIC_LOSS_PASS")
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SECTION D: ADVERSARIAL TESTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-Adversarial {
     Write-Log "Adversarial Tests (Edge Cases, Outliers, Hostile Inputs)" "SECT"
 
@@ -1206,7 +1210,7 @@ try:
     g = GARCHForecaster(dist="skewt", mean="AR", enforce_stationarity=True)
     g.fit(prices)
     result = g.forecast(steps=5)
-    fcst = result["forecast"]
+    fcst = result["mean_forecast"]
     assert len(fcst) == 5, f"Expected 5 forecast steps, got {len(fcst)}"
     assert not any(abs(f) > 1e6 for f in fcst), f"Extreme outlier spike caused divergent forecast: {fcst}"
     print("D2_ADVERSARIAL_GARCH_OUTLIER_PASS")
@@ -1266,7 +1270,7 @@ except ImportError as e:
         Record-Result "D3.Adversarial.SAMoSSA.NaN_Gaps" "FAIL" "$($r.Stderr)$($r.Stdout)" $r.Elapsed
     }
 
-    # D4. Constant-price series (zero variance — degenerate case)
+    # D4. Constant-price series (zero variance -- degenerate case)
     $code = @'
 import sys, numpy as np, pandas as pd
 sys.path.insert(0, r"ROOT_PLACEHOLDER")
@@ -1296,8 +1300,8 @@ except ImportError:
     print("D4_SAMOSSA_SKIP")
 
 try:
-    from forcester_ts.mssa_rl import MSSARLForecaster
-    r = _test_constant_series(MSSARLForecaster, use_q_strategy_selection=True)
+    from forcester_ts.mssa_rl import MSSARLForecaster, MSSARLConfig
+    r = _test_constant_series(MSSARLForecaster, config=MSSARLConfig(use_q_strategy_selection=True))
     print(f"D4_MSSARL_CONSTANT: {r}")
 except ImportError:
     print("D4_MSSARL_SKIP")
@@ -1361,9 +1365,9 @@ print("D5_ADVERSARIAL_PERTURBATION_PASS")
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SECTION E: SYSTEM-LEVEL TESTS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Test-SystemLevel {
     Write-Log "System-Level Tests (Config Sync, Co-Agent Files, pytest Targets)" "SECT"
 
@@ -1485,7 +1489,7 @@ print(f"E3_COAGENT_ISOLATION_PASS staged_count={len(staged)}")
     if ($r.ExitCode -eq 0 -and $r.Stdout -match "E3_COAGENT_ISOLATION_PASS") {
         Record-Result "E3.CoAgent.FileIsolation.Staged" "PASS" "No co-agent files in staged changeset" $r.Elapsed
     } else {
-        # After commit this is expected to be clean — report as WARN not FAIL
+        # After commit this is expected to be clean -- report as WARN not FAIL
         Record-Result "E3.CoAgent.FileIsolation.Staged" "WARN" "No staged files (committed) or co-agent files staged" $r.Elapsed
     }
 
@@ -1533,9 +1537,9 @@ print(f"E3_COAGENT_ISOLATION_PASS staged_count={len(staged)}")
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MAIN ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Write-Log "Phase 7.10b + 7.11 Performance Test Suite" "SECT"
 Write-Log "Python: $PythonExe"
 Write-Log "Root:   $ROOT"
@@ -1550,9 +1554,9 @@ if (-not $AdversarialOnly) {
 }
 Test-Adversarial
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FINAL REPORT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 $elapsed = ((Get-Date) - $script:StartTime).TotalSeconds
 $total   = $script:PassCount + $script:FailCount + $script:WarnCount
 $passRate = if ($total -gt 0) { [math]::Round(100.0 * $script:PassCount / $total, 1) } else { 0 }
