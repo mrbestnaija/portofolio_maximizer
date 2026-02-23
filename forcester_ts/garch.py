@@ -365,6 +365,11 @@ class GARCHForecaster:
                 "log_likelihood": None,
                 "backend": backend,
                 "igarch_fallback": True,
+                # Mirror the arch-path keys so callers have a consistent contract
+                "vol_model": "ewma",
+                "mean_model": getattr(self, "mean", "AR"),
+                "dist": self.dist,
+                "differenced": bool(getattr(self, "_differenced", False)),
             }
         return {
             "params": self.fitted_model.params.to_dict(),

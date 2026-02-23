@@ -38,5 +38,6 @@ def test_integrity_enforcer_canonical_metrics():
         metrics = enforcer.get_canonical_metrics()
     assert hasattr(metrics, "total_realized_pnl"), "Metrics should have total_realized_pnl"
     assert hasattr(metrics, "win_rate"), "Metrics should have win_rate"
-    if metrics.total_trades > 0:
+    assert hasattr(metrics, "total_round_trips"), "Metrics should have total_round_trips"
+    if metrics.total_round_trips > 0:
         assert 0.0 <= metrics.win_rate <= 1.0, f"win_rate out of range: {metrics.win_rate}"
