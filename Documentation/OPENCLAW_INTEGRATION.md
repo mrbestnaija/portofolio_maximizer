@@ -417,7 +417,38 @@ What it does:
 - Parses recent WhatsApp channel logs for delivery/session signals (`closed session`, deferred recovery budget, retry wait inflation) and surfaces targeted manual actions.
 
 Run once (apply mode):
-- `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure --attempt-primary-reenable --recheck-delay-seconds 8 --primary-restart-attempts 2`
+- `python scripts/openclaw_maintenance.py --apply --disable-broken-channels --restart-gateway-on-rpc-failure --attempt-primary-reenable --recheck-delay-seconds 8 --primary-restart-attempts 1`
+
+### Gateway Restart Throttling (Prevent Terminal Interruptions)
+
+The maintenance watchdog can restart the OpenClaw gateway very aggressively
+when channels are flapping. Use these env vars (set in `.env`) to throttle
+restart frequency:
+
+| Env Var | Default | Recommended | Effect |
+|---------|---------|-------------|--------|
+| `OPENCLAW_GATEWAY_RESTART_COOLDOWN_SECONDS` | 120 | **600** | Min gap between maintenance-triggered gateway restarts |
+| `OPENCLAW_PRIMARY_REENABLE_COOLDOWN_SECONDS` | 300 | **600** | Min gap between disable/enable toggle remediation |
+| `OPENCLAW_PRIMARY_RESTART_ATTEMPTS` | 2 | **1** | Restart attempts per incident before giving up |
+| `OPENCLAW_FAST_SUPERVISOR_INTERVAL_SECONDS` | 5 | **60** | Fast supervisor probe frequency in watch mode |
+| `OPENCLAW_FAST_SUPERVISOR_FAILURE_THRESHOLD` | 2 | **3** | Consecutive failed probes required before restart |
+| `OPENCLAW_FAST_SUPERVISOR_RESTART_COOLDOWN_SECONDS` | 20 | **300** | Min gap between fast-supervisor-triggered restarts |
+
+These are set as active defaults in `.env.template`. To apply:
+```bash
+# One-time apply after updating .env:
+python scripts/openclaw_models.py apply --strategy local-first
+# Then restart gateway once to pick up new cooldown state:
+openclaw gateway restart
+```
+
+**Local LLM as main agent** — enforce qwen3:8b as the only primary model:
+```bash
+# Ensure OPENCLAW_LOCAL_ONLY=1 and OPENCLAW_MODEL_STRATEGY=local-first are in .env, then:
+python scripts/openclaw_models.py apply --strategy local-first
+# Verify primary is ollama/qwen3:8b with no cloud fallbacks:
+python scripts/openclaw_models.py status
+```
 
 Cron path:
 - `bash/production_cron.sh openclaw_maintenance`
@@ -786,4 +817,179 @@ Assign cron jobs to specific agents to isolate workloads:
 ```bash
 python scripts/verify_openclaw_config.py   # Validates multi-agent config
 python scripts/openclaw_models.py status    # Model availability
+```
+
+---
+
+## Skills for Portfolio Maximizer & Remote WhatsApp Development
+
+OpenClaw 2026.2.19-2 ships a skill system (`openclaw skills`) that exposes
+reusable workflows to agents. PMX uses two workspace skills (loaded from the
+repo) and several bundled skills. The `clawhub` CLI can install additional
+skills from the public registry.
+
+### Currently Ready Skills (`openclaw skills`)
+
+| Skill | Type | Status | Purpose |
+|-------|------|--------|---------|
+| `portfolio-maximizer` | workspace | ready | PMX-specific commands: gate checks, PnL audits, quant health |
+| `pmx-inbox` | workspace | ready | Gmail/Proton inbox workflows for trade alerts |
+| `coding-agent` | bundled | ready | Delegate coding tasks to Claude Code / Codex in background |
+| `skill-creator` | bundled | ready | Create or update AgentSkills with scripts and references |
+| `healthcheck` | bundled | ready | System health checks (model availability, gateway status) |
+| `discord` | bundled | ready | Discord channel interactions |
+| `weather` | bundled | ready | Weather lookup (useful for correlation context) |
+
+Workspace skills are loaded automatically when your OpenClaw workspace points
+at the repo root. Bundled skills are pre-installed with OpenClaw.
+
+### Installing Additional PMX-Relevant Skills via ClawHub
+
+Some useful skills are not pre-installed. Install them with `npx clawhub`:
+
+```bash
+# Search for available skills
+npx clawhub search github
+npx clawhub search tmux
+npx clawhub search session-logs
+npx clawhub search gh-issues
+
+# Install individually
+npx clawhub install github        # GitHub PR/issue management from agent
+npx clawhub install tmux          # Terminal session management (remote dev)
+npx clawhub install session-logs  # OpenClaw session log inspection
+npx clawhub install gh-issues     # Create/triage GitHub issues via WhatsApp
+
+# Sync all installed skills to latest versions
+npx clawhub sync
+
+# Check installed skill versions
+npx clawhub update --check
+```
+
+After installing, reload skills in a running gateway:
+```bash
+openclaw skills reload
+# or restart gateway
+openclaw gateway restart
+```
+
+### Remote Development via WhatsApp + coding-agent
+
+The `coding-agent` skill lets you send coding tasks from WhatsApp and have
+them executed by Claude Code or Codex running as a background process on your
+dev machine. This is the primary remote development path for PMX.
+
+**Workflow:**
+
+```
+WhatsApp message
+  -> OpenClaw Gateway (ops agent)
+    -> coding-agent skill activated
+      -> spawns Claude Code / Codex subprocess in project root
+        -> edits files, runs tests, produces output
+      -> result delivered back to WhatsApp
+```
+
+**Example WhatsApp prompts:**
+
+```
+"Use coding-agent to fix the 2 failing tests in tests/scripts/"
+"coding-agent: add --exclude-mode flag to check_quant_validation_health.py"
+"coding-agent: run pytest tests/ --tb=short -q and report failures"
+"coding-agent: check git status and summarize staged changes"
+```
+
+**Important routing note**: `coding-agent` runs under the `ops` agent
+(WhatsApp binding). It has full tool access and workspace access to the repo
+root. Tasks involving model training should be prefixed with "use training
+agent" to route to the `training` agent instead (via explicit agentId).
+
+**Safety guardrails for remote coding tasks:**
+
+- Prompts are prefixed with `[PMX_AUTONOMY_POLICY]` (autonomy guard, see above).
+- High-risk actions (force push, drop table, delete branch) require
+  `PMX_APPROVE_HIGH_RISK` token in the message.
+- Git push requires explicit confirmation -- the agent will ask before pushing.
+- Keep `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` for unattended sessions.
+
+**Checking background coding task status:**
+
+```bash
+# From local terminal -- check what coding-agent spawned
+openclaw sessions list
+openclaw sessions tail <session-id>
+```
+
+Or from WhatsApp:
+```
+"What is the status of the last coding-agent task?"
+"Show me the last 20 lines of the active coding session"
+```
+
+### skill-creator: Creating New PMX Skills
+
+Use `skill-creator` to create or update workspace skills from WhatsApp:
+
+```
+"Use skill-creator to add a new skill for running the adversarial test suite"
+"skill-creator: update portfolio-maximizer skill to include quant_validation_headroom command"
+```
+
+Skills are written to `skills/<name>/SKILL.md` in the repo. Run
+`openclaw skills reload` after creation.
+
+### Per-Agent Skill Routing
+
+Skills are available to all agents by default, but PMX restricts by role:
+
+| Skill | Best Agent | Reason |
+|-------|-----------|--------|
+| `portfolio-maximizer` | ops, trading | Gate checks, PnL reporting, quant health |
+| `pmx-inbox` | ops | Inbox workflows need messaging + exec |
+| `coding-agent` | ops | Full tool access required for code execution |
+| `skill-creator` | ops | Write access to `skills/` directory |
+| `github` (if installed) | ops | PR/issue management needs write access |
+| `tmux` (if installed) | ops, training | Terminal session control for long jobs |
+| `session-logs` (if installed) | ops | Read-only session inspection |
+| `gh-issues` (if installed) | ops | Issue filing needs GitHub write |
+| `healthcheck` | ops | System-wide health checks |
+| `discord` | notifier | Discord delivery only |
+
+To restrict a skill to specific agents, add `allowedAgents` to the skill's
+`SKILL.md` front-matter (if OpenClaw version supports it):
+```yaml
+---
+name: coding-agent
+allowedAgents: [ops]
+---
+```
+
+### Checking Skill Status & Troubleshooting
+
+```bash
+# List all skills and their status
+openclaw skills
+
+# Check which skills are ready vs missing
+openclaw skills --filter ready
+openclaw skills --filter missing
+
+# Reload after workspace skill changes
+openclaw skills reload
+
+# View a specific skill definition
+openclaw skills show portfolio-maximizer
+
+# If a skill fails to activate (bundled skill shows "missing"):
+npx clawhub sync                   # sync all installed skills
+openclaw doctor --fix              # fix config schema issues
+openclaw gateway restart           # reload skill registry
+```
+
+**From WhatsApp:**
+```
+"List available skills"
+"Show me the portfolio-maximizer skill commands"
+"Reload skills"
 ```

@@ -733,17 +733,29 @@ python scripts/pmx_interactions_api.py
 
 ---
 
-## Adversarial Audit Findings (2026-02-16)
+## Adversarial Audit Findings (2026-02-16) + Phase 7.10b/7.11 Remediation
 
 **Status**: 10 findings documented in `Documentation/ADVERSARIAL_AUDIT_20260216.md`
 
-Key findings for agent awareness:
-- 94.2% quant FAIL rate (0.8% from RED gate) -- P0
-- Ensemble worse than best single model 92% of the time -- P0
-- Directional accuracy below coin-flip for all models (41% WR) -- P0
-- Confidence calibration broken: 0.9+ confidence yields 41% win rate -- P1
-- signal_id NULL for all trades (no model attribution) -- P2
+Original findings (2026-02-16):
+- 94.2% quant FAIL rate (0.8% from RED gate) -- P0 -- **FIXED Phase 7.10b**
+- Ensemble worse than best single model 92% of the time -- P0 -- **Addressed Phase 7.10b/7.11**
+- Directional accuracy below coin-flip for all models (41% WR) -- P0 -- **Addressed Phase 7.11**
+- Confidence calibration broken: 0.9+ confidence yields 41% win rate -- P1 -- **B5 Platt scaling PENDING**
+- signal_id NULL for all trades (no model attribution) -- P2 -- **PENDING**
 - System survives on magnitude asymmetry (avg win $91.59 vs avg loss $34.54 = 2.65x)
+
+**Phase 7.10b/7.11 Validation (2026-02-21)**:
+- Quant FAIL rate: **94.2% -> 27.7%** on BUY/SELL signals (GREEN, was 0.8% from RED gate)
+- Headroom to RED gate: **23.3%** (was 0.8%)
+- AAPL (primary test ticker, 50 post-7.10b entries): 32.0% FAIL
+- Rolling window (120-entry) shows 71.7% because 9/10 tickers have pre-7.10b legacy entries
+- Non-AAPL tickers need fresh pipeline runs to clear legacy 100% FAIL entries
+
+**Remaining open issues**:
+- signal_id NULL for all trades (no model attribution) -- P1 next
+- B5 Platt scaling (confidence calibration) -- P1, needs 30+ (conf,win) pairs to accumulate
+- Directional accuracy improvement not yet re-measured -- run adversarial suite to confirm
 
 ---
 
