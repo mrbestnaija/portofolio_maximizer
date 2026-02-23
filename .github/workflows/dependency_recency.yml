@@ -37,7 +37,7 @@ jobs:
 
       - name: Upload security preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: security-preflight-scheduled
           path: reports/security/*.json
