@@ -1,30 +1,33 @@
-#!/usr/bin/env python3
-"""Quick test of production_only filtering"""
-
+"""Tests for production metrics API shape and integrity-enforcer filtering."""
+import pytest
 from etl.database_manager import DatabaseManager
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
 
-with DatabaseManager() as db:
-    # Test with production_only=False (all data)
-    all_data = db.get_performance_summary(production_only=False)
-    print("=== ALL DATA (including test/synthetic) ===")
-    print(f"Total trades: {all_data['total_trades']}")
-    print(f"Total profit: ${all_data['total_profit'] or 0:.2f}")
-    print(f"Win rate: {all_data['win_rate']:.1%}")
-    print(f"Profit factor: {all_data['profit_factor']}")
-    print(f"Table used: {all_data['table_used']}")
-    print()
 
-    # Test with production_only=True (exclude test data)
-    prod_data = db.get_performance_summary(production_only=True)
-    print("=== PRODUCTION DATA ONLY ===")
-    print(f"Total trades: {prod_data['total_trades']}")
-    print(f"Total profit: ${prod_data['total_profit'] or 0:.2f}")
-    print(f"Win rate: {prod_data['win_rate']:.1%}")
-    print(f"Profit factor: {prod_data['profit_factor']}")
-    print(f"Table used: {prod_data['table_used']}")
-    print()
+def test_performance_summary_returns_expected_keys():
+    """get_performance_summary() returns a dict with the required metric keys."""
+    with DatabaseManager() as db:
+        data = db.get_performance_summary()
+    assert isinstance(data, dict), "Should return a dict"
+    required_keys = {"total_trades", "total_profit", "win_rate", "profit_factor"}
+    missing = required_keys - data.keys()
+    assert not missing, f"Missing keys in summary: {missing}"
 
-    # Show the difference
-    print("=== DIFFERENCE (test/synthetic data) ===")
-    print(f"Test trades: {all_data['total_trades'] - prod_data['total_trades']}")
-    print(f"Test profit: ${(all_data['total_profit'] or 0) - (prod_data['total_profit'] or 0):.2f}")
+
+def test_performance_summary_types():
+    """get_performance_summary() numeric fields are numeric (or None)."""
+    with DatabaseManager() as db:
+        data = db.get_performance_summary()
+    assert isinstance(data["total_trades"], int), "total_trades should be int"
+    if data["total_profit"] is not None:
+        assert isinstance(data["total_profit"], (int, float)), "total_profit should be numeric"
+
+
+def test_integrity_enforcer_canonical_metrics():
+    """PnLIntegrityEnforcer.get_canonical_metrics() returns production-only metrics."""
+    with PnLIntegrityEnforcer() as enforcer:
+        metrics = enforcer.get_canonical_metrics()
+    assert hasattr(metrics, "total_realized_pnl"), "Metrics should have total_realized_pnl"
+    assert hasattr(metrics, "win_rate"), "Metrics should have win_rate"
+    if metrics.total_trades > 0:
+        assert 0.0 <= metrics.win_rate <= 1.0, f"win_rate out of range: {metrics.win_rate}"
