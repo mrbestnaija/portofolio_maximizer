@@ -927,8 +927,11 @@ Results: Key metrics or validation results
 - [ ] Platform-specific code tested on Windows
 - [ ] Documentation updated in relevant phase docs
 - [ ] CLAUDE.md updated with new patterns (if applicable)
-- [ ] No unicode characters in console output
+- [ ] No unicode characters in console output (`arch_tree.md`, scripts, logs must be ASCII)
 - [ ] Git status clean or changes documented
+- [ ] No `test_*.py` files in `scripts/` (must be in `tests/scripts/`)
+- [ ] No `.bat`/`.sh` launchers in root (must be in `bash/`)
+- [ ] No transient artifacts in root (`compile_out.txt`, `nul`, `query`, `*.tmp`)
 
 ---
 
@@ -943,6 +946,8 @@ Results: Key metrics or validation results
 - `config/pipeline_config.yml` - Main configuration
 - `config/llm_config.yml` - LLM model selection
 - `.env.template` - Environment variable template
+- `Documentation/BOOTSTRAP.md` - Agent onboarding bootstrap guide
+- `Documentation/HEARTBEAT.md` - System status / active sessions snapshot
 
 ### Key Directories
 - `etl/` - Data extraction, transformation, loading
@@ -951,16 +956,26 @@ Results: Key metrics or validation results
 - `execution/` - Order management and paper trading
 - `integrity/` - PnL integrity enforcement (Phase 7.9)
 - `ai_llm/` - LLM integration (Ollama client, market analyzer)
-- `tests/` - Test suite (810+ tests)
-- `scripts/` - Utility scripts, migrations, APIs
+- `tests/` - Test suite (810+ tests); test files MUST live here, never in scripts/
+- `tests/scripts/` - Tests for scripts/ utilities (paired 1:1 with scripts/*.py)
+- `scripts/` - Utility scripts, migrations, APIs (NO test_*.py files here)
+- `bash/` - Shell/batch launchers and orchestration scripts (.sh, .bat, .ps1 wrappers)
 - `tools/` - Development tools (secrets guard, git askpass)
 - `config/` - YAML configuration files
-- `Documentation/` - Phase-specific documentation (174 files)
-- `logs/` - Pipeline and application logs
+- `Documentation/` - Phase-specific documentation (175+ files)
+- `logs/` - Pipeline and application logs (transient build artifacts go here, not root)
+
+### File Placement Rules (enforced 2026-02-21)
+- **Test files** (`test_*.py`): ALWAYS in `tests/<module>/`, NEVER in `scripts/`
+- **Shell launchers** (`.bat`, `.sh`, orchestration `.ps1`): `bash/` directory
+- **Utility scripts** (`.ps1` with logic): `scripts/`
+- **Build artifacts** (`compile_out.txt`, `*.db` test databases): `logs/` or `data/`
+- **Agent identity/status docs**: `Documentation/` (BOOTSTRAP.md, HEARTBEAT.md)
+- **Transient files** (`nul`, `query`, `*.tmp`): delete, never commit
 
 ---
 
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-18 (Phase 7.9 Complete: PnL integrity enforcement, adversarial audit, OpenClaw stuck session guard, 6 test fixes, integrity views in schema, OpenClaw cron automation, Interactions API, 3-model LLM strategy, secrets leak guard)
+**Last Updated**: 2026-02-21 (Repo reorganization: 7 test files moved scripts/->tests/scripts/, build scripts moved to bash/, BOOTSTRAP.md+HEARTBEAT.md moved to Documentation/, arch_tree.md ASCII-cleaned, file placement rules added)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git

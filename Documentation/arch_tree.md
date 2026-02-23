@@ -2,10 +2,10 @@
 
 > **RUNTIME GUARDRAIL (WSL `simpleTrader_env` ONLY)**
 > Supported runtime: WSL + Linux venv `simpleTrader_env/bin/python` (`source simpleTrader_env/bin/activate`).
-> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) — results are invalid.
+> **Do not** use Windows interpreters/venvs (incl. `py`, `python.exe`, `.venv`, `simpleTrader_env\\Scripts\\python.exe`) -- results are invalid.
 > Before reporting runs, include the runtime fingerprint (command + output): `which python`, `python -V`, `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"` (see `Documentation/RUNTIME_GUARDRAILS.md`).
 
-**Purpose**: Provide a navigable map of the repository (modules, workflows, and evidence artifacts) and point to the canonical “source of truth” documents.
+**Purpose**: Provide a navigable map of the repository (modules, workflows, and evidence artifacts) and point to the canonical "source of truth" documents.
 
 If you are looking for:
 
@@ -30,47 +30,47 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 **Recent changes (2025-12-19)**: Synthetic stack upgraded with profiles + copula/tail shocks + richer features/calibration + txn-cost microstructure (TxnCostBps/ImpactBps) and persisted features/calibration artifacts; `SYNTHETIC_DATASET_ID=latest` now points to `syn_6c850a7d0b99` (manifest + features + calibration). Forecasting/ETL statistical hardening landed (SARIMAX shift-safe backtransform, ensemble variance screening + row-wise convex blending, MSSA-RL standardized CUSUM, synthetic/live isolation, leak-free post-split normalization). GPU preference wiring remains in place (`PIPELINE_DEVICE` auto-detects CUDA with CPU fallback). Added cache/log sanitizer (`scripts/sanitize_cache_and_logs.py`) and cron hook `sanitize_caches` to keep artifacts within 14-day retention by default.
 **Recent changes (2026-01-29)**: Auto-trader now resumes portfolio state by default (`--resume`) and persists positions/cash; `scripts/dashboard_db_bridge.py` filters trade events to latest `run_id` and falls back to `trade_executions` if `portfolio_positions` is empty; ops helpers added (`bash/run_daily_trader.sh`, `run_daily_trader.bat`, `bash/reset_portfolio.sh`, `scripts/migrate_add_portfolio_state.py`).
 **Recent Achievements**:
-- 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque–Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
+- 2025-12-19 Delta (forecasting + ETL hardening): SARIMAX log-shift inversion + Jarque-Bera compatibility, ensemble one-sided variance screening + minimum weight pruning + row-wise blending under partial forecasts, MSSA-RL standardized CUSUM mean-shift detection, and ETL isolation/slicing/leak-free scaling. Regression coverage: `tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/etl/test_time_series_forecaster.py`, `tests/integration/test_time_series_signal_integration.py`, and core ETL/synthetic suites.
 - 2026-01-03 Delta (comprehensive brutal verification): `bash/comprehensive_brutal_test.sh` completes end-to-end under `simpleTrader_env`, exercising profit-critical, ETL unit, Time Series forecasting, signal routing, integration, LLM, security, and pipeline execution (CV, frontier multi-ticker training, and pipeline-with-forecast stages). Evidence lives under `logs/brutal/results_20260103_220403/` (`test.log`, per-suite logs in `logs/`, and `stage_summary.csv`); DB snapshot: `logs/brutal/results_20260103_220403/artifacts/test_database.db.bak`. Suite counts from `test.log`: ETL (98), Time Series (37), signal routing (26), integration (30), LLM (67), security (13), plus profit-critical and pipeline execution (4 runs).
-- 2026-01-18 Delta (dashboard + monitoring correctness): `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels from real run artifacts (no embedded demo data). Canonical producer is `scripts/dashboard_db_bridge.py` (DB→JSON) started by bash orchestrators and snapshot-persisted to `data/dashboard_audit.db` by default; `scripts/audit_dashboard_payload_sources.py` audits payload provenance. `scripts/check_forecast_audits.py` dedupes audits by dataset window with “newest wins”.
+- 2026-01-18 Delta (dashboard + monitoring correctness): `visualizations/live_dashboard.html` now polls `visualizations/dashboard_data.json` every 5s and renders trade/price/PnL panels from real run artifacts (no embedded demo data). Canonical producer is `scripts/dashboard_db_bridge.py` (DB->JSON) started by bash orchestrators and snapshot-persisted to `data/dashboard_audit.db` by default; `scripts/audit_dashboard_payload_sources.py` audits payload provenance. `scripts/check_forecast_audits.py` dedupes audits by dataset window with "newest wins".
 - 2025-11-30 Sentiment overlay plan captured (`Documentation/SENTIMENT_SIGNAL_INTEGRATION_PLAN.md`); `config/sentiment.yml` remains disabled with strict gating and `tests/sentiment/test_sentiment_config_scaffold.py` guarding activation until profitability beats the benchmark.
 - 2025-12-04 Delta (TS/LLM guardrails + MVS reporting): TimeSeriesSignalGenerator now treats quant validation as a hard gate for TS trades (FAILED profiles demote BUY/SELL to HOLD outside diagnostic modes, using `config/quant_success_config.yml`), `scripts/run_auto_trader.py` only enables LLM fallback once `data/llm_signal_tracking.json` reports at least one validated signal (LLM remains research-only otherwise), and `bash/run_end_to_end.sh`/`bash/run_pipeline_live.sh` clear DIAGNOSTIC_*/LLM_FORCE_FALLBACK envs and print MVS-style profitability summaries via `DatabaseManager.get_performance_summary()` after each run.
 - 2025-12-04 Delta (Quant monitoring + brutal integration): `scripts/check_quant_validation_health.py` now reads `config/forecaster_monitoring.yml` to classify global quant health as GREEN/YELLOW/RED (strict RED gate at `max_fail_fraction=0.90`, softer YELLOW warning band), `scripts/summarize_quant_validation.py` uses the same config for per-ticker GREEN/YELLOW/RED tiers, and `bash/comprehensive_brutal_test.sh` embeds the global classification in `final_report.md` as **Quant validation health (global)** so every brutal run is self-describing.
 - 2025-12-03 Delta (diagnostic mode + invariants): DIAGNOSTIC_MODE/TS/EXECUTION toggles relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off) and make PaperTradingEngine permissive (>=1 share) while bypassing LLM latency guards in diagnostics; volume_ma_ratio now guards zero/NaN volume. Numeric/scaling invariants and dashboard/quant health tests pass in `simpleTrader_env` (`tests/forcester_ts/test_ensemble_and_scaling_invariants.py`, `tests/forcester_ts/test_metrics_low_level.py`, dashboard payload + quant health scripts). Reduced-universe diagnostic run (MTN, SOL, GC=F, EURUSD=X; cycles=1; horizon=10; cap=$25k) executed 4 trades with PnL -0.06%, updated `visualizations/dashboard_data.json`; positions: long MTN 10, short SOL 569, short GC=F 1, short EURUSD=X 792; quant_validation fail_fraction 0.932 (<0.98) and negative_expected_profit_fraction 0.488 (<0.60).
 - 2025-12-07: GPU-parallel, energy-aware runner checklist added (`Documentation/GPU_PARALLEL_RUNNER_CHECKLIST.md`) plus a shard-per-GPU orchestration stub (`bash/run_gpu_parallel.sh`) and a trade-count-aware rebuild helper (`bash/auto_rebuild_and_sweep.sh`) to rebuild evidence only when needed.
 - 2025-12-07 Delta (DB recovery + power-aware rebuild): Restored the latest good eval snapshot to `data/portfolio_maximizer.db` after corruption (preserved corrupt copy), re-tightened per-ticker TS thresholds (CL=F 0.55/0.005, AAPL 0.65/0.010) with high-notional names removed from diagnostics, disabled LLM fallback/redundancy for faster sampling, and added `bash/auto_rebuild_and_sweep.sh` to rebuild trade history only when realised trades are below target, then refresh slippage and TS sweeps.
-- Remote Sync (2025-11-06): Pipeline entry point refactoring, data persistence auditing, LLM graceful failure, comprehensive documentation updates ⭐ NEW
+- Remote Sync (2025-11-06): Pipeline entry point refactoring, data persistence auditing, LLM graceful failure, comprehensive documentation updates [*] NEW
 - Phase 4.6: Platform-agnostic architecture
 - Phase 4.7: Configuration-driven CV
 - Phase 4.8: Checkpointing and event logging with 7-day retention
-- Phase 5.2: LLM Integration Complete (Ollama) ⭐ COMPLETE
-- Phase 5.3: Profit Calculation Fix Applied (Oct 14, 2025) ⭐ CRITICAL
-- Phase 5.4: Ollama Health Check Fixed (Oct 22, 2025) ⭐ COMPLETE
-- Phase 5.5: Error Monitoring & Performance Optimization (Oct 22, 2025) ⭐ NEW
-- Week 5.6: Statistical validation suite + paper trading integration (Nov 02, 2025) ⭐ NEW
-- Week 5.6: Visual analytics dashboard with market/commodity context overlays (Nov 02, 2025) ⭐ NEW
-- Week 5.6: Signal validator backtests publish statistical/bootstrapped metrics to monitoring (Nov 02, 2025) ⭐ NEW
-- Week 5.6: LLM latency guard telemetry now visible in system monitor dashboards (Nov 02, 2025) ⭐ NEW
-- Week 5.6: SQLite “disk I/O” auto-retry added for OHLCV ingestion (Nov 02, 2025) ⭐ NEW
-- Week 5.6: `--config config.yml` alias resolves to `config/pipeline_config.yml` (Nov 02, 2025) ⭐ NEW
-- Week 5.6: All pipeline/utility logs streamed to `logs/` directory (Nov 02, 2025) ⭐ NEW
-- Week 5.7: Time-series models extracted into `forcester_ts/` (SARIMAX, GARCH, SAMOSSA, MSSA-RL) with shared orchestration (Nov 06, 2025) ⭐ NEW
-- Week 5.7: Dashboard pipeline emits forecast/signal PNGs via `etl/dashboard_loader.py` + `TimeSeriesVisualizer.plot_forecast_dashboard` (Nov 06, 2025) ⭐ NEW
-- Week 5.7: Token-throughput failover auto-selects faster Ollama models when tokens/sec degrade (`ai_llm/ollama_client.py`, Nov 12, 2025) ⭐ NEW
-- Week 5.8: Time Series Signal Generation Refactoring IMPLEMENTED (Nov 06, 2025) ⭐ NEW - **ROBUST TESTING REQUIRED**
+- Phase 5.2: LLM Integration Complete (Ollama) [*] COMPLETE
+- Phase 5.3: Profit Calculation Fix Applied (Oct 14, 2025) [*] CRITICAL
+- Phase 5.4: Ollama Health Check Fixed (Oct 22, 2025) [*] COMPLETE
+- Phase 5.5: Error Monitoring & Performance Optimization (Oct 22, 2025) [*] NEW
+- Week 5.6: Statistical validation suite + paper trading integration (Nov 02, 2025) [*] NEW
+- Week 5.6: Visual analytics dashboard with market/commodity context overlays (Nov 02, 2025) [*] NEW
+- Week 5.6: Signal validator backtests publish statistical/bootstrapped metrics to monitoring (Nov 02, 2025) [*] NEW
+- Week 5.6: LLM latency guard telemetry now visible in system monitor dashboards (Nov 02, 2025) [*] NEW
+- Week 5.6: SQLite "disk I/O" auto-retry added for OHLCV ingestion (Nov 02, 2025) [*] NEW
+- Week 5.6: `--config config.yml` alias resolves to `config/pipeline_config.yml` (Nov 02, 2025) [*] NEW
+- Week 5.6: All pipeline/utility logs streamed to `logs/` directory (Nov 02, 2025) [*] NEW
+- Week 5.7: Time-series models extracted into `forcester_ts/` (SARIMAX, GARCH, SAMOSSA, MSSA-RL) with shared orchestration (Nov 06, 2025) [*] NEW
+- Week 5.7: Dashboard pipeline emits forecast/signal PNGs via `etl/dashboard_loader.py` + `TimeSeriesVisualizer.plot_forecast_dashboard` (Nov 06, 2025) [*] NEW
+- Week 5.7: Token-throughput failover auto-selects faster Ollama models when tokens/sec degrade (`ai_llm/ollama_client.py`, Nov 12, 2025) [*] NEW
+- Week 5.8: Time Series Signal Generation Refactoring IMPLEMENTED (Nov 06, 2025) [*] NEW - **ROBUST TESTING REQUIRED**
   - Time Series ensemble is DEFAULT signal generator (models/time_series_signal_generator.py) - TESTING COMPLETE (2025-12-28)
   - Signal Router routes TS primary + LLM fallback (models/signal_router.py) - TESTING COMPLETE (2025-12-28)
   - Unified signal interface for backward compatibility (models/signal_adapter.py) - TESTING COMPLETE (2025-12-28)
   - Unified trading_signals database table - TESTING COMPLETE (2025-12-28)
   - Regression metrics (RMSE / sMAPE / tracking error) persisted to SQLite feed the router + dashboards (forecester_ts/forecaster.py, DatabaseManager.save_forecast regression_metrics column) - **LIVE**
   - Complete pipeline integration with 50 tests written (38 unit + 12 integration) - VALIDATED (2025-12-28 brutal run)
-- Week 5.9: Monitoring + Nightly Backfill Instrumentation (Nov 09, 2025) ⭐ NEW
+- Week 5.9: Monitoring + Nightly Backfill Instrumentation (Nov 09, 2025) [*] NEW
   - `scripts/monitor_llm_system.py` logs latency benchmarks (`logs/latency_benchmark.json`), emits `llm_signal_backtests` summaries, and saves JSON run reports for dashboards.
   - `schedule_backfill.bat` replays validator jobs nightly; register via Windows Task Scheduler (02:00 daily) to keep Time Series + LLM metrics fresh.
   - `models/time_series_signal_generator.py` hardened (volatility scalar conversion + HOLD provenance timestamps) and regression-tested via `pytest tests/models/test_time_series_signal_generator.py -q` plus the targeted integration smoke.
   - `simpleTrader_env/` (authorised virtual environment) is the sole supported interpreter across Windows/WSL; all other ad-hoc venvs were removed to keep configuration consistent.
-- Week 5.9: Autonomous Profit Engine roll-out (Nov 12, 2025) ⭐ NEW
-  - `scripts/run_auto_trader.py` chains extraction → validation → forecasting → Time Series signal generation → signal routing → execution (PaperTradingEngine) with optional LLM fallback, keeping cash/positions/trade history synchronized each cycle.
+- Week 5.9: Autonomous Profit Engine roll-out (Nov 12, 2025) [*] NEW
+  - `scripts/run_auto_trader.py` chains extraction -> validation -> forecasting -> Time Series signal generation -> signal routing -> execution (PaperTradingEngine) with optional LLM fallback, keeping cash/positions/trade history synchronized each cycle.
   - `README.md` + `Documentation/UNIFIED_ROADMAP.md` now present the platform as an **Autonomous Profit Engine**, highlight the hands-free loop in Key Features, and add a Quick Start recipe plus project-structure pointer so operators can launch the trader immediately.
   - See `Documentation/NAV_RISK_BUDGET_ARCH.md` and `Documentation/NAV_BAR_BELL_TODO.md` for the NAV-centric barbell wiring (TS-first, LLM capped fallback) that wraps this loop.
   - `scripts/run_etl_pipeline.py` stage planner updated: `data_storage` is part of the core stage list, Time Series forecasting/signal routing run before any LLM stage, and LLM work is appended only as fallback after the router.
@@ -82,23 +82,23 @@ This file is best read as a *map* (what exists and where it lives), not as the c
 - `etl/synthetic_extractor.py` reads profile overrides (`SYNTHETIC_PROFILE`), supports t-copula shocks, emits txn-cost columns, and records events/regimes in attrs for downstream consumers.
 
 ### GPU defaults and PIPELINE_DEVICE (2025-12-08)
-- `scripts/run_etl_pipeline.py`, backtest stubs (`scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`), and GAN runner (`bash/run_gan_stub.sh` → `scripts/train_gan_stub.py`) auto-detect CUDA (torch/cupy) and set `PIPELINE_DEVICE=cuda` when available, falling back to CPU.
+- `scripts/run_etl_pipeline.py`, backtest stubs (`scripts/backtest_llm_signals.py`, `scripts/run_backtest_for_candidate.py`), and GAN runner (`bash/run_gan_stub.sh` -> `scripts/train_gan_stub.py`) auto-detect CUDA (torch/cupy) and set `PIPELINE_DEVICE=cuda` when available, falling back to CPU.
 - New `--prefer-gpu/--no-prefer-gpu` flags thread through the runners; env `PIPELINE_DEVICE` is logged and respected across stages so TS/ETL/backtests stay aligned with operator intent.
 - GAN stub checkpoints under `models/synthetic/gan_stub` consume the same synthetic parquet to keep GPU/CPU parity during quick experiments.
 
 ### Broader refresh (timelines, phase statuses, run IDs)
 - Timeline: Phase 1/2 synthetic event/regime + market-hours/microstructure hooks are live; tail/corr profiles and feature/calibration persistence added; Phase 2 calibration sweeps + ML generator remain open; GPU preference wiring is landed across pipeline/backtests/GAN stub.
 - Phase status: Synthetic stack is green with Spread/Slippage/TxnCost/Impact outputs; GPU auto-detect defaults to CUDA when present with silent CPU fallback; GAN stub remains optional/torch-gated.
-- Run IDs: `data/synthetic/latest.json` → `syn_6c850a7d0b99` (profiles + copula + features/calibration); prior baselines `syn_682c415bb89c`, `syn_fc8a37128efc`, and `syn_714ae868f78b` remain for comparison. Latest smoke ran via `scripts/brutal_synthetic_smoke.py` (with PYTHONPATH set) / `scripts/run_etl_pipeline.py --execution-mode synthetic`.
-- Week 5.10: Higher-Order Hyperopt & Regime-Aware Backtesting (Nov 24, 2025) ⭐ NEW
-  - `bash/run_post_eval.sh` now acts as a higher-order hyper-parameter driver around ETL → auto-trader → strategy optimization, treating evaluation windows, `min_expected_profit`, and `time_series.min_expected_return` as tunable knobs.
+- Run IDs: `data/synthetic/latest.json` -> `syn_6c850a7d0b99` (profiles + copula + features/calibration); prior baselines `syn_682c415bb89c`, `syn_fc8a37128efc`, and `syn_714ae868f78b` remain for comparison. Latest smoke ran via `scripts/brutal_synthetic_smoke.py` (with PYTHONPATH set) / `scripts/run_etl_pipeline.py --execution-mode synthetic`.
+- Week 5.10: Higher-Order Hyperopt & Regime-Aware Backtesting (Nov 24, 2025) [*] NEW
+  - `bash/run_post_eval.sh` now acts as a higher-order hyper-parameter driver around ETL -> auto-trader -> strategy optimization, treating evaluation windows, `min_expected_profit`, and `time_series.min_expected_return` as tunable knobs.
   - Stochastic, non-convex search uses a bandit-style explore/exploit policy (30% explore / 70% exploit by default, dynamically adjusted per trial) and logs trials to `logs/hyperopt/hyperopt_<RUN_ID>.log`.
   - Hyperopt candidate ranges are tightened using historic quant-validation metrics for profitable tickers (e.g., AAPL, COOP, GC=F, EURUSD=X), and the best configuration per run is re-executed as `<RUN_ID>_best` with metrics surfaced in `visualizations/dashboard_data.json`.
   - `bash/run_end_to_end.sh` and `bash/run_auto_trader.sh` honour `HYPEROPT_ROUNDS>0` by delegating to `bash/run_post_eval.sh`, making higher-order hyperopt the default orchestration mode when enabled.
   - 2025-12-07 TS model search scaffold:
     - `ts_model_candidates` table in `etl/database_manager.py` stores per-(ticker, regime, candidate_name) CV metrics, stability, and scalar scores.
     - `scripts/run_ts_model_search.py` runs rolling-window CV for compact SARIMAX/SAMOSSA grids and records candidates into `ts_model_candidates`.
-    - `etl/statistical_tests.py` provides Diebold–Mariano-style comparison and rank stability helpers so candidate selection is statistically grounded.
+    - `etl/statistical_tests.py` provides Diebold-Mariano-style comparison and rank stability helpers so candidate selection is statistically grounded.
     - `scripts/build_automation_dashboard.py` consolidates TS sweeps, transaction costs, sleeve promotion plans, config proposals, and best strategy/TS model candidates into `visualizations/dashboard_automation.json` for institutional-grade review.
 - Historical note: the 2025-11-12 brutal run timed out in the Time Series block and flagged a missing validator test; this is resolved and superseded by the 2025-12-28 run (see `logs/brutal/results_20251228_224751/test.log`). *(The script defaults to Time Series-first execution; set `BRUTAL_ENABLE_LLM=1` only when you need the legacy LLM fallback stage.)*
 
@@ -239,22 +239,22 @@ scripts/analyze_dataset.py
   - `config/signal_routing_config.yml` stores the TS-first, LLM-fallback feature flags consumed by both `scripts/run_auto_trader.py` and `scripts/run_etl_pipeline.py`.
   - `logs/signals/quant_validation.jsonl` logs every scored signal (ticker, metrics, pass/fail) so brutal/dry-run invocations can surface quantitative guardrail breaches immediately after stage timings.
 
-- Week 5.10: Demo-first broker frosting (Nov 12, 2025) ⭐ NEW
+- Week 5.10: Demo-first broker frosting (Nov 12, 2025) [*] NEW
   - `execution/ctrader_client.py` and `execution/order_manager.py` replace the massive.com/polygon.io stub with a demo-ready cTrader Open API client that handles OAuth tokens, order placement, and lifecycle persistence while the order manager enforces the 2% per signal risk cap, daily trade limit, and risk-manager circuit breakers before submitting trades.
   - `config/ctrader_config.yml` documents the demo/live endpoints, risk thresholds, and gating rules.
   - New unit tests (`tests/execution/test_ctrader_client.py`, `tests/execution/test_order_manager.py`) cover configuration loading, order placement, and lifecycle gating, keeping the new broker stack regression-tested.
 - Portfolio mathematics engine upgraded to institutional-grade metrics and optimisation (`etl/portfolio_math.py`)
 - Signal validator aligned with 5-layer quantitative guardrails (statistical significance, Kelly sizing)
-- Comprehensive error monitoring system with automated alerting ⭐ NEW
-- Advanced LLM performance optimization and signal quality validation ⭐ NEW
+- Comprehensive error monitoring system with automated alerting [*] NEW
+- Advanced LLM performance optimization and signal quality validation [*] NEW
 - 200+ tests (100% passing) + enhanced risk/optimisation coverage + LLM integration tests + error monitoring tests
 
 
 ### 2025-11-15 Brutal Run Regression (historical; resolved by 2025-12-28)
 Status: resolved; kept for audit context. Current evidence is in `logs/brutal/results_20251228_224751/test.log`.
-- `logs/pipeline_run.log:16932-17729` and a direct `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` call reported `database disk image is malformed`, �rowid � out of order,� and �row � missing from index� for dozens of pages. Every OHLCV/forecast write in `etl/database_manager.py:689` and `:1213` is now rejected, so the project is running against a corrupted primary datastore.
-- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, �` capture the same `ValueError: The truth value of a DatetimeIndex is ambiguous` after inserting ~90 SARIMAX/SAMOSSA/MSSA rows per ticker. The culprit is the `change_points = mssa_result.get('change_points') or []` branch inside `scripts/run_etl_pipeline.py:1755-1764`. Because the exception fires after the DB writes, the code logs �Saved forecast �� and then overwrites the ticker entry with an `error`, so downstream stages see �No valid forecast available.�
-- Immediately after the failed stage, the visualization hook raises `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (`logs/pipeline_run.log:2626, 2981, �`), so the dashboard export promised in this document is also broken.
+- `logs/pipeline_run.log:16932-17729` and a direct `sqlite3 data/portfolio_maximizer.db "PRAGMA integrity_check;"` call reported `database disk image is malformed`, ?rowid ? out of order,? and ?row ? missing from index? for dozens of pages. Every OHLCV/forecast write in `etl/database_manager.py:689` and `:1213` is now rejected, so the project is running against a corrupted primary datastore.
+- `logs/pipeline_run.log:2272-2279, 2624, 2979, 3263, 3547, ?` capture the same `ValueError: The truth value of a DatetimeIndex is ambiguous` after inserting ~90 SARIMAX/SAMOSSA/MSSA rows per ticker. The culprit is the `change_points = mssa_result.get('change_points') or []` branch inside `scripts/run_etl_pipeline.py:1755-1764`. Because the exception fires after the DB writes, the code logs ?Saved forecast ?? and then overwrites the ticker entry with an `error`, so downstream stages see ?No valid forecast available.?
+- Immediately after the failed stage, the visualization hook raises `FigureBase.autofmt_xdate() got an unexpected keyword argument 'axis'` (`logs/pipeline_run.log:2626, 2981, ?`), so the dashboard export promised in this document is also broken.
 - The earlier DatetimeIndex ambiguity and SARIMAX warning storm have been resolved; the 2025-12-28 brutal run shows the Time Series stage completes cleanly, and any residual warnings are routed to `logs/warnings/warning_events.log` for review.
 - `scripts/backfill_signal_validation.py` now uses timezone-aware timestamps and sqlite adapters; the prior Python 3.12 deprecation warnings are cleared.
 - **2025-11-19 remediation note**: Database corruption, MSSA change-point ambiguity, the Matplotlib `axis=` crash, and SARIMAX warning storms have concrete fixes in `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `etl/visualizer.py`, and `forcester_ts/forecaster.py`/`forcester_ts/sarimax.py`. Synthetic/brutal pipelines write into `data/test_database.db` via `PORTFOLIO_DB_PATH`, keeping `data/portfolio_maximizer.db` reserved for production. The gating items are closed as of the 2025-12-28 brutal run; see `logs/brutal/results_20251228_224751/test.log`.
@@ -299,12 +299,12 @@ Status: resolved; kept for audit context. Current evidence is in `logs/brutal/re
 ## IMMEDIATE PRIORITIES (WEEK 1-2)
 
 ### PHASE 5.1: COMPLETE MULTI-SOURCE DATA EXTRACTION
-**Status**: ✅ FOUNDATION COMPLETE - Phase 4.6 implemented platform-agnostic architecture
+**Status**: [OK] FOUNDATION COMPLETE - Phase 4.6 implemented platform-agnostic architecture
 
 #### **TASK 5.1.1: Implement Alpha Vantage Extractor**
 ```python
 # etl/alpha_vantage_extractor.py - STUB READY FOR IMPLEMENTATION
-# Current: ✅ 140-line stub (BaseExtractor pattern established)
+# Current: [OK] 140-line stub (BaseExtractor pattern established)
 # Priority: MEDIUM - Foundation ready, API implementation needed
 
 class AlphaVantageExtractor(BaseExtractor):
@@ -319,7 +319,7 @@ class AlphaVantageExtractor(BaseExtractor):
 #### **TASK 5.1.2: Implement Finnhub Extractor**
 ```python
 # etl/finnhub_extractor.py - STUB READY FOR IMPLEMENTATION
-# Current: ✅ 145-line stub (BaseExtractor pattern established)
+# Current: [OK] 145-line stub (BaseExtractor pattern established)
 # Priority: MEDIUM - Foundation ready, API implementation needed
 
 class FinnhubExtractor(BaseExtractor):
@@ -333,15 +333,15 @@ class FinnhubExtractor(BaseExtractor):
 
 #### **TASK 5.1.3: DataSourceManager - Production Ready**
 ```python
-# etl/data_source_manager.py - ✅ COMPLETE (340 lines)
+# etl/data_source_manager.py - [OK] COMPLETE (340 lines)
 # Status: Strategy + Factory + Chain of Responsibility patterns implemented
 # Phase 4.6: Multi-source orchestration with failover (18 tests passing)
 
 def extract_ohlcv(self, tickers: List[str], start_date: str, end_date: str,
                  prefer_source: Optional[str] = None) -> pd.DataFrame:
     """Production-ready multi-source extraction with failover"""
-    # ✅ Current: Dynamic extractor selection (yfinance active)
-    # ✅ Failover: P(success) = 1 - ∏(1 - p_i) = 99.99% (3 sources)
+    # [OK] Current: Dynamic extractor selection (yfinance active)
+    # [OK] Failover: P(success) = 1 - PI(1 - p_i) = 99.99% (3 sources)
     # Ready: Add Alpha Vantage/Finnhub when implementations complete
 ```
 
@@ -394,7 +394,7 @@ class TickerValidator:
 
 #### **TASK 5.3.1: Create Optimizer-Ready Pipeline**
 ```python
-# ✅ ENHANCED: scripts/run_etl_pipeline.py (modular CVSettings + LLMComponents orchestrator)
+# [OK] ENHANCED: scripts/run_etl_pipeline.py (modular CVSettings + LLMComponents orchestrator)
 # Add ticker discovery integration to existing pipeline
 
 def run_optimizer_pipeline(ticker_source="manual", portfolio_size=50):
@@ -402,7 +402,7 @@ def run_optimizer_pipeline(ticker_source="manual", portfolio_size=50):
     # Option 1: Manual ticker list (existing behavior)
     # Option 2: Discover from Alpha Vantage universe
     # Option 3: Pre-validated portfolio candidates
-    # Reuse existing: extraction → validation → preprocessing → storage
+    # Reuse existing: extraction -> validation -> preprocessing -> storage
 ```
 
 #### **TASK 5.3.2: Portfolio Selection Module**
@@ -488,7 +488,7 @@ portfolio_maximizer_v45/
 |   |-- monitor_llm_system.py        # ? 418 lines - LLM system monitoring + latency/backtest reporting (Phase 5.6) ? NEW
 |   |-- test_llm_implementations.py  # ? 150 lines - LLM implementation testing (Phase 5.5) ? NEW
 |   |-- deploy_monitoring.sh         # ? 213 lines - Monitoring deployment script (Phase 5.5) ? NEW
-|   |-- dashboard_db_bridge.py       # DB→JSON live dashboard bridge (writes visualizations/dashboard_data.json; optional audit snapshots)
+|   |-- dashboard_db_bridge.py       # DB->JSON live dashboard bridge (writes visualizations/dashboard_data.json; optional audit snapshots)
 |   |-- audit_dashboard_payload_sources.py # Audits dashboard payload + audit DB for non-fictitious content and source consistency
 |   |-- dev_dashboard_smoke.py       # Local wiring sanity check for dashboard bridge + http.server
 |   `-- refresh_ticker_universe.py   # ? NEW - Weekly ticker updates
@@ -565,13 +565,13 @@ portfolio_maximizer_v45/
 ## INTEGRATION WITH EXISTING ARCHITECTURE
 
 ### Leverage Current Strengths (Phase 4.6 + 4.7):
-- ✅ **Cache System**: 100% hit rate, 20x speedup - Reuse for ticker data
-- ✅ **Validation**: Existing data_validator.py - Extend for ticker validation
-- ✅ **Configuration**: 8 YAML files - Add ticker discovery settings
-- ✅ **Cross-Validation**: k-fold CV (5.5x coverage) - Use for portfolio backtesting
-- ✅ **Multi-source**: DataSourceManager (Phase 4.6) - Extend for ticker discovery
-- ✅ **Platform-Agnostic**: BaseExtractor pattern - Consistent interface across sources
-- ✅ **Config-Driven**: Zero hard-coded defaults - Full YAML + CLI control
+- [OK] **Cache System**: 100% hit rate, 20x speedup - Reuse for ticker data
+- [OK] **Validation**: Existing data_validator.py - Extend for ticker validation
+- [OK] **Configuration**: 8 YAML files - Add ticker discovery settings
+- [OK] **Cross-Validation**: k-fold CV (5.5x coverage) - Use for portfolio backtesting
+- [OK] **Multi-source**: DataSourceManager (Phase 4.6) - Extend for ticker discovery
+- [OK] **Platform-Agnostic**: BaseExtractor pattern - Consistent interface across sources
+- [OK] **Config-Driven**: Zero hard-coded defaults - Full YAML + CLI control
 
 ### Heuristics, Full Models, and ML Calibration (Conceptual Stack)
 
@@ -588,25 +588,25 @@ portfolio_maximizer_v45/
 
 ### Build on Production Foundation:
 ```
-Phase 4.6: Multi-Source Architecture (COMPLETE ✅)
-├── BaseExtractor (280 lines) - Abstract Factory pattern
-├── DataSourceManager (340 lines) - Multi-source orchestration
-├── YFinanceExtractor (498 lines) - BaseExtractor implementation
-├── Alpha Vantage extractor - Production ready (API keys required)
-└── Finnhub extractor - Production ready (API keys required)
+Phase 4.6: Multi-Source Architecture (COMPLETE [OK])
+|---- BaseExtractor (280 lines) - Abstract Factory pattern
+|---- DataSourceManager (340 lines) - Multi-source orchestration
+|---- YFinanceExtractor (498 lines) - BaseExtractor implementation
+|---- Alpha Vantage extractor - Production ready (API keys required)
+'---- Finnhub extractor - Production ready (API keys required)
 
-Phase 4.7: Configuration-Driven CV (COMPLETE ✅)
-├── Pipeline config enhanced - Zero hard-coded defaults
-├── CLI override system - 3-tier priority (CLI > Config > Defaults)
-├── Bash validation scripts - 5 pipeline tests + 88 unit tests
-└── Documentation - CV_CONFIGURATION_GUIDE.md (3.3 KB)
+Phase 4.7: Configuration-Driven CV (COMPLETE [OK])
+|---- Pipeline config enhanced - Zero hard-coded defaults
+|---- CLI override system - 3-tier priority (CLI > Config > Defaults)
+|---- Bash validation scripts - 5 pipeline tests + 88 unit tests
+'---- Documentation - CV_CONFIGURATION_GUIDE.md (3.3 KB)
 
 Phase 5 (NEXT): Complete Multi-Source + Ticker Discovery
-    ↓
+    v
 Implement Alpha Vantage/Finnhub API integration
-    ↓
+    v
 Integrate Ticker Discovery (NEW MODULE)
-    ↓
+    v
 Enhanced Portfolio Pipeline (OPTIMIZER READY)
 ```
 
@@ -628,10 +628,10 @@ Enhanced Portfolio Pipeline (OPTIMIZER READY)
 ## SUCCESS CRITERIA
 
 ### Critical Requirements:
-- [x] **ZERO** breaking changes to existing portfolio optimization ✅ Phase 4.6/4.7
-- [x] **100%** cache performance maintained (20x speedup) ✅ Phase 4.6
-- [x] **All 88 tests** continue passing (100% coverage) ✅ Phase 4.6/4.7
-- [x] **Existing pipelines** unaffected (backward compatibility) ✅ Phase 4.7
+- [x] **ZERO** breaking changes to existing portfolio optimization [OK] Phase 4.6/4.7
+- [x] **100%** cache performance maintained (20x speedup) [OK] Phase 4.6
+- [x] **All 88 tests** continue passing (100% coverage) [OK] Phase 4.6/4.7
+- [x] **Existing pipelines** unaffected (backward compatibility) [OK] Phase 4.7
 
 ### New Capabilities:
 - [ ] Alpha Vantage data extraction operational
@@ -666,20 +666,20 @@ FINNHUB_API_KEY='your_finnhub_key_here'
 ## RISK MITIGATION
 
 ### Low Risk Implementation (Phase 4.6 Complete):
-- ✅ **Stubs Exist**: alpha_vantage_extractor.py and finnhub_extractor.py (Phase 4.6)
-- ✅ **Config Ready**: YAML files pre-configured for new sources (Phase 4.6)
-- ✅ **Patterns Established**: BaseExtractor, DataSourceManager operational (Phase 4.6)
-- ✅ **Tests Comprehensive**: 100+ tests provide safety net (Phase 4.6/4.7)
-- ✅ **Architecture Complete**: Abstract Factory + Strategy patterns implemented (Phase 4.6)
+- [OK] **Stubs Exist**: alpha_vantage_extractor.py and finnhub_extractor.py (Phase 4.6)
+- [OK] **Config Ready**: YAML files pre-configured for new sources (Phase 4.6)
+- [OK] **Patterns Established**: BaseExtractor, DataSourceManager operational (Phase 4.6)
+- [OK] **Tests Comprehensive**: 100+ tests provide safety net (Phase 4.6/4.7)
+- [OK] **Architecture Complete**: Abstract Factory + Strategy patterns implemented (Phase 4.6)
 
 ### Rollback Safety (Production Safeguards):
-- ✅ Existing `yfinance_extractor.py` remains primary source (tested, working)
-- ✅ New sources are fallback only (failover pattern implemented)
-- ✅ All changes in separate, optional modules (no breaking changes)
-- ✅ Can disable multi-source and revert to yfinance-only easily (config toggle)
-- ✅ Configuration-driven (zero code changes needed for source selection)
+- [OK] Existing `yfinance_extractor.py` remains primary source (tested, working)
+- [OK] New sources are fallback only (failover pattern implemented)
+- [OK] All changes in separate, optional modules (no breaking changes)
+- [OK] Can disable multi-source and revert to yfinance-only easily (config toggle)
+- [OK] Configuration-driven (zero code changes needed for source selection)
 
-**STATUS**: ✅ PHASES 4.6 & 4.7 COMPLETE
+**STATUS**: [OK] PHASES 4.6 & 4.7 COMPLETE
 - **Multi-source architecture**: Platform-agnostic foundation ready (Phase 4.6)
 - **Configuration-driven CV**: Zero hard-coded defaults (Phase 4.7)
 - **Test coverage**: 100+ tests, 100% passing (Phase 4.6/4.7)
