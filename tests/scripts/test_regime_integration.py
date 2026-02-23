@@ -76,7 +76,7 @@ def test_regime_detection_enabled():
     print("=" * 80)
 
     # Load actual config
-    config_path = Path(__file__).parent.parent / "config" / "forecasting_config.yml"
+    config_path = Path(__file__).parent.parent.parent / "config" / "forecasting_config.yml"
     with open(config_path) as f:
         yaml_config = yaml.safe_load(f)
 
