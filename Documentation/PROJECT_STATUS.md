@@ -10,6 +10,33 @@
 
 **Sequenced optimization roadmap (2026-01)**: `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` (bar-aware trading loop, horizon-consistent TS signals, execution cost alignment, run-local reporting).
 
+## Phase 7.11: Directional Accuracy Enhancement Roadmap — PLANNED
+
+**Status**: Plan written, not yet implemented.
+**Plan doc**: `Documentation/QUANT_FAIL_RATE_RECOVERY_PLAN_2026-02-19.md` (Part C)
+**Baseline**: 41-46% directional accuracy (post 7.10b). Target: ≥52% over 50+ live trades.
+
+### Part C Roadmap Summary
+| # | Change | Tier | Files | Expected DA lift |
+|---|--------|------|-------|-----------------|
+| C1 | Directional Consensus Gate (≥2/3 models agree) | 1 | `time_series_signal_generator.py` | +3-5 pp |
+| C2 | Hurst Exponent Directional Policy (trend=follow, revert=fade) | 1 | `time_series_signal_generator.py` | +3-5 pp |
+| C3 | Rolling IC Feature Culling (Spearman IC < 0.03 → drop) | 1 | `time_series_signal_generator.py` | +2-4 pp |
+| C4 | EMA Momentum Pre-Filter (anti-whipsaw gate) | 1 | `time_series_signal_generator.py` | +3-5 pp |
+| C5 | Direction Classifier (sklearn LR on lagged features) | 2 | new `models/direction_classifier.py` | +4-7 pp |
+| C6 | Isotonic Regression Calibration (upgrade from Platt) | 2 | `time_series_signal_generator.py` | +2-3 pp |
+| C7 | Volume Confirmation Gate (suppress low-volume signals) | 2 | `time_series_signal_generator.py` | +3-5 pp |
+| C8 | Asymmetric Directional Loss (RMSE + λ·direction_error) | 2 | `samossa.py`, `mssa_rl.py` | +2-4 pp |
+| C9 | Walk-Forward Hit Rate Tracking (auto-penalize lagging models) | 3 | `ensemble.py`, `database_manager.py` | +2-5 pp |
+| C10 | Wavelet Denoising before SSA (PyWavelets db4) | 3 | `preprocessor.py` | +2-4 pp |
+| C11 | Fourier Spectral Cycle Phase Detection | 3 | `samossa.py` | +1-3 pp |
+
+**Implementation order**: C1 → C2 → C4 → C5 → C3 → C6 → C7 → C8 → C9 → C10 → C11
+
+**All Part C config flags default to `enabled: false`** until validated on ≥50 live trades.
+
+---
+
 ## Phase 7.10b: Quant FAIL Rate Recovery (2026-02-19) — COMPLETE
 
 **Status**: Implemented and tested (802 tests passing, 0 failures).
