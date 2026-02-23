@@ -134,6 +134,7 @@ class TimeSeriesSignal:
     lower_ci: Optional[float] = None
     upper_ci: Optional[float] = None
     signal_id: Optional[int] = None  # Phase 7.10: unique ID for model attribution
+    confidence_calibrated: Optional[float] = None  # Pure Platt-scaled probability (before raw blend)
 
 
 class TimeSeriesSignalGenerator:
@@ -169,6 +170,9 @@ class TimeSeriesSignalGenerator:
         """
         # Phase 7.10: monotonic signal ID counter for model attribution
         self._signal_counter = 0
+        # B5 Platt scaling: stores the pure logistic-regression probability from the
+        # most recent _calibrate_confidence() call (before blending with raw confidence).
+        self._platt_calibrated: Optional[float] = None
 
         # Diagnostic toggle (env DIAGNOSTIC_MODE=1 or TS_DIAGNOSTIC_MODE=1) to force more signals.
         diag_mode = str(os.getenv("TS_DIAGNOSTIC_MODE") or os.getenv("DIAGNOSTIC_MODE") or "0") == "1"
@@ -604,6 +608,8 @@ class TimeSeriesSignalGenerator:
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
                 signal_id=self._signal_counter,
+                # B5: pure Platt-scaled probability from the most recent calibration call
+                confidence_calibrated=getattr(self, '_platt_calibrated', None),
             )
 
             quant_profile = self._build_quant_success_profile(
@@ -2066,34 +2072,53 @@ class TimeSeriesSignalGenerator:
         ticker: str,
         db_path: Optional[str] = None,
     ) -> float:
-        """Calibrate raw confidence using realized win/loss outcomes from trade_executions."""
+        """Calibrate raw confidence using realized win/loss outcomes.
+
+        Priority: (1) quant_validation.jsonl outcome pairs, (2) trade_executions DB.
+        Also stores the pure Platt probability in self._platt_calibrated before
+        blending so it can be written to the confidence_calibrated DB column.
+        """
+        self._platt_calibrated = None
         if raw_confidence is None:
             return 0.50
 
         raw_conf = float(raw_confidence)
-        db_file = Path(
-            db_path
-            or os.getenv("PORTFOLIO_DB_PATH")
-            or "data/portfolio_maximizer.db"
-        )
-        pairs_conf, pairs_win = self._load_realized_outcome_pairs(
-            db_file=db_file,
-            ticker=ticker,
-            limit=1200,
-        )
 
-        if len(pairs_conf) < 30 and ticker:
-            # Fallback to global history when ticker-local sample is too small.
+        # 1. JSONL-based (conf, outcome) pairs — populated by update_platt_outcomes.py.
+        pairs_conf, pairs_win = self._load_jsonl_outcome_pairs(limit=2000)
+        source = "jsonl"
+
+        if len(pairs_conf) < 30:
+            # 2. Ticker-local DB fallback.
+            db_file = Path(
+                db_path
+                or os.getenv("PORTFOLIO_DB_PATH")
+                or "data/portfolio_maximizer.db"
+            )
             pairs_conf, pairs_win = self._load_realized_outcome_pairs(
                 db_file=db_file,
-                ticker="",
-                limit=2000,
+                ticker=ticker,
+                limit=1200,
             )
+            source = "db_local"
+
+            if len(pairs_conf) < 30 and ticker:
+                # 3. Global DB fallback.
+                pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                    db_file=db_file,
+                    ticker="",
+                    limit=2000,
+                )
+                source = "db_global"
 
         n = len(pairs_conf)
         wins = int(sum(pairs_win))
         losses = int(n - wins)
         if n < 30 or wins < 5 or losses < 5:
+            logger.debug(
+                "Outcome calibration skipped (n=%d wins=%d losses=%d source=%s); using raw.",
+                n, wins, losses, source,
+            )
             return float(max(0.05, min(0.95, raw_conf)))
 
         try:
@@ -2104,6 +2129,8 @@ class TimeSeriesSignalGenerator:
             clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
             clf.fit(x, y)
             calibrated = float(clf.predict_proba([[raw_conf]])[0][1])
+            # Store pure Platt probability for the confidence_calibrated DB column.
+            self._platt_calibrated = float(max(0.05, min(0.95, calibrated)))
             qv_cfg = getattr(self, "quant_validation_config", None) or {}
             calibration_cfg = qv_cfg.get("calibration") if isinstance(qv_cfg, dict) else {}
             calibration_cfg = calibration_cfg if isinstance(calibration_cfg, dict) else {}
@@ -2122,14 +2149,70 @@ class TimeSeriesSignalGenerator:
             logger.debug(
                 (
                     "Outcome calibration: raw=%.3f model=%.3f blended=%.3f "
-                    "(n=%d wins=%d losses=%d ticker=%s raw_weight=%.2f)"
+                    "(n=%d wins=%d losses=%d ticker=%s raw_weight=%.2f source=%s)"
                 ),
-                raw_conf, calibrated, blended, n, wins, losses, ticker, raw_weight,
+                raw_conf, calibrated, blended, n, wins, losses, ticker, raw_weight, source,
             )
             return float(max(0.05, min(0.95, blended)))
         except Exception as exc:
             logger.debug("Outcome calibration fit failed (%s); using raw confidence.", exc)
             return float(max(0.05, min(0.95, raw_conf)))
+
+    def _load_jsonl_outcome_pairs(
+        self,
+        *,
+        limit: int = 2000,
+    ) -> Tuple[List[float], List[float]]:
+        """Load (confidence, win) pairs from quant_validation.jsonl outcome entries.
+
+        Only entries that have both 'confidence' and 'outcome' fields are used.
+        'outcome' is written by update_platt_outcomes.py after a trade closes.
+        """
+        pairs_conf: List[float] = []
+        pairs_win: List[float] = []
+        config = self.quant_validation_config or {}
+        logging_cfg = config.get("logging") or {}
+        if not logging_cfg.get("enabled"):
+            return pairs_conf, pairs_win
+
+        log_dir = Path(logging_cfg.get("log_dir", "logs/signals"))
+        log_file = log_dir / logging_cfg.get("filename", "quant_validation.jsonl")
+        if not log_file.exists():
+            return pairs_conf, pairs_win
+
+        try:
+            lines = log_file.read_text(encoding="utf-8").splitlines()
+        except Exception as exc:
+            logger.debug("_load_jsonl_outcome_pairs: cannot read %s (%s)", log_file, exc)
+            return pairs_conf, pairs_win
+
+        # Iterate newest-first so limit applies to most recent data
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            conf_raw = entry.get("confidence")
+            outcome = entry.get("outcome")
+            if conf_raw is None or outcome is None:
+                continue
+            if not isinstance(outcome, dict):
+                continue
+            win_raw = outcome.get("win")
+            if win_raw is None:
+                continue
+            try:
+                pairs_conf.append(float(conf_raw))
+                pairs_win.append(1.0 if win_raw else 0.0)
+            except (TypeError, ValueError):
+                continue
+            if len(pairs_conf) >= limit:
+                break
+
+        return pairs_conf, pairs_win
 
     def _load_realized_outcome_pairs(
         self,
@@ -2285,6 +2368,7 @@ class TimeSeriesSignalGenerator:
 
         entry = {
             'timestamp': utc_now().isoformat(),
+            'signal_id': signal.signal_id,
             'pipeline_id': str(pipeline_id) if pipeline_id is not None else None,
             'run_id': str(run_id) if run_id is not None else None,
             'ticker': ticker,

@@ -52,6 +52,11 @@ fi
 # ---------------------------------------------------------------------------
 log_section "STEP 2/3: Pipeline refresh for non-AAPL tickers"
 
+# Reconcile JSONL outcomes before pipeline runs so calibration uses
+# any newly available trade outcomes from previous sessions.
+log "--- update_platt_outcomes.py (Platt scaling outcome reconciliation)"
+"$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+
 TICKERS="AMZN GOOG GS JPM META MSFT NVDA TSLA V"
 TICKER_PASS=0
 TICKER_FAIL=0

@@ -766,6 +766,82 @@ class TestTimeSeriesSignalGenerator:
         assert payload.get('pipeline_id')
         assert payload.get('execution_mode')
 
+    def test_quant_validation_logging_includes_signal_id(self,
+                                                          sample_forecast_bundle,
+                                                          sample_market_data,
+                                                          quant_logging_config,
+                                                          ts_routing_config):
+        """JSONL entries must include signal_id for Platt scaling outcome linkage (B5)."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=quant_logging_config
+        )
+
+        generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data
+        )
+
+        log_file = Path(quant_logging_config['logging']['log_dir']) / quant_logging_config['logging']['filename']
+        lines = [line for line in log_file.read_text().splitlines() if line.strip()]
+        assert lines, "Log must have at least one entry"
+        payload = json.loads(lines[-1])
+        assert 'signal_id' in payload, "JSONL entry must contain signal_id field"
+        # signal_id should be a positive integer (starts at 1)
+        assert payload['signal_id'] is not None
+        assert int(payload['signal_id']) >= 1
+
+    def test_load_jsonl_outcome_pairs_empty_when_no_outcome(self, quant_logging_config, ts_routing_config):
+        """_load_jsonl_outcome_pairs returns empty lists when no entries have outcome field."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=quant_logging_config
+        )
+        log_dir = Path(quant_logging_config['logging']['log_dir'])
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / quant_logging_config['logging']['filename']
+        # Write entries without outcome
+        import json as _json
+        log_file.write_text(
+            _json.dumps({"signal_id": 1, "confidence": 0.9}) + "\n" +
+            _json.dumps({"signal_id": 2, "confidence": 0.85}) + "\n",
+            encoding="utf-8",
+        )
+        confs, wins = generator._load_jsonl_outcome_pairs(limit=100)
+        assert confs == []
+        assert wins == []
+
+    def test_load_jsonl_outcome_pairs_reads_outcome_entries(self, quant_logging_config, ts_routing_config):
+        """_load_jsonl_outcome_pairs correctly reads (confidence, win) pairs from JSONL."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=quant_logging_config
+        )
+        log_dir = Path(quant_logging_config['logging']['log_dir'])
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / quant_logging_config['logging']['filename']
+        import json as _json
+        log_file.write_text(
+            _json.dumps({"signal_id": 1, "confidence": 0.90, "outcome": {"win": True, "pnl": 10.0}}) + "\n" +
+            _json.dumps({"signal_id": 2, "confidence": 0.85, "outcome": {"win": False, "pnl": -5.0}}) + "\n" +
+            _json.dumps({"signal_id": 3, "confidence": 0.80}) + "\n",  # no outcome
+            encoding="utf-8",
+        )
+        confs, wins = generator._load_jsonl_outcome_pairs(limit=100)
+        assert len(confs) == 2
+        assert confs[0] == pytest.approx(0.85)  # newest first
+        assert wins[0] == 0.0
+        assert confs[1] == pytest.approx(0.90)
+        assert wins[1] == 1.0
+
     def test_per_ticker_min_expected_profit_override(self,
                                                      sample_forecast_bundle,
                                                      sample_market_data,

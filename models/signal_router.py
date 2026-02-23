@@ -340,6 +340,7 @@ class SignalRouter:
             'lower_ci': signal.lower_ci,
             'upper_ci': signal.upper_ci,
             'signal_id': getattr(signal, 'signal_id', None),
+            'confidence_calibrated': getattr(signal, 'confidence_calibrated', None),
         }
 
     def _get_routing_mode(self) -> str:

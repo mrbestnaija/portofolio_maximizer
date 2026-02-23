@@ -93,6 +93,7 @@ class Trade:
     barbell_multiplier: Optional[float] = None
     base_confidence: Optional[float] = None
     effective_confidence: Optional[float] = None
+    confidence_calibrated: Optional[float] = None  # B5: pure Platt-scaled probability
     # PnL integrity enforcement fields (Phase 7.9+)
     is_diagnostic: int = 0
     is_synthetic: int = 0
@@ -598,6 +599,7 @@ class PaperTradingEngine:
             barbell_multiplier=signal.get("barbell_multiplier"),
             base_confidence=signal.get("base_confidence"),
             effective_confidence=signal.get("confidence"),
+            confidence_calibrated=signal.get("confidence_calibrated"),
             is_diagnostic=1 if diag_mode else 0,
             is_synthetic=1 if data_source and "synthetic" in str(data_source).lower() else 0,
         )
@@ -1346,6 +1348,7 @@ class PaperTradingEngine:
                 exit_reason=trade.exit_reason,
                 is_diagnostic=trade.is_diagnostic,
                 is_synthetic=trade.is_synthetic,
+                confidence_calibrated=trade.confidence_calibrated,
             )
 
             # Store entry_trade_id when opening position (for future close linkage)
