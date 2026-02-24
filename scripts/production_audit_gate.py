@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Phase 7.13-C1: central path constants
+try:
+    from etl.paths import DB_PATH as _DEFAULT_DB_PATH, FORECAST_AUDITS_DIR as _DEFAULT_AUDIT_DIR
+except ImportError:
+    _root = Path(__file__).resolve().parent.parent
+    _DEFAULT_DB_PATH = _root / "data" / "portfolio_maximizer.db"
+    _DEFAULT_AUDIT_DIR = _root / "logs" / "forecast_audits"
+
+
 def _resolve_path(root: Path, raw_path: str) -> Path:
     path = Path(raw_path)
     if path.is_absolute():
@@ -399,8 +408,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--db",
-        default="data/portfolio_maximizer.db",
-        help="Path to SQLite database (default: data/portfolio_maximizer.db).",
+        default=str(_DEFAULT_DB_PATH),
+        help="Path to SQLite database (default: etl.paths.DB_PATH or data/portfolio_maximizer.db).",
     )
     parser.add_argument(
         "--proof-requirements",
@@ -409,8 +418,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--audit-dir",
-        default="logs/forecast_audits",
-        help="Forecast audit directory (default: logs/forecast_audits).",
+        default=str(_DEFAULT_AUDIT_DIR),
+        help="Forecast audit directory (default: etl.paths.FORECAST_AUDITS_DIR).",
     )
     parser.add_argument(
         "--monitor-config",

@@ -34,7 +34,13 @@ except ImportError:  # pragma: no cover - yaml is an explicit project dependency
     yaml = None  # type: ignore[assignment]
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
-DEFAULT_LOG_PATH = ROOT_PATH / "logs" / "signals" / "quant_validation.jsonl"
+
+# Phase 7.13-C1: prefer central path constants; fall back to local computation
+try:
+    from etl.paths import QUANT_VALIDATION_JSONL as DEFAULT_LOG_PATH
+except ImportError:
+    DEFAULT_LOG_PATH = ROOT_PATH / "logs" / "signals" / "quant_validation.jsonl"
+
 DEFAULT_MONITORING_CONFIG = ROOT_PATH / "config" / "forecaster_monitoring.yml"
 
 

@@ -1,0 +1,112 @@
+{
+  "phase": "7.13",
+  "title": "Architectural Sanitization - ID Unification & Pipeline Wiring",
+  "timestamp_utc": "2026-02-24T00:00:00Z",
+  "id_unification_summary": {
+    "ts_signal_id": "now globally unique TEXT ts_{ticker}_{run_suffix}_{counter:04d}",
+    "pipeline_id": "etl_{YYYYMMDDTHHMMSSZ}_{pid} (existing)",
+    "run_id": "pmx_ts_{YYYYMMDDTHHMMSSZ}_{pid} (existing, unchanged)",
+    "session_id": "not implemented (deferred to Phase 7.14)",
+    "llm_signal_id": "llm_signals.id auto-increment (separate namespace, unchanged)"
+  },
+  "issues": {
+    "C1": {
+      "severity": "CRITICAL",
+      "description": "Signal ID namespace collision: ts signal_id resets per instance",
+      "status": "FIXED",
+      "phase": "A2",
+      "fix_summary": "_make_ts_signal_id() produces globally unique ts_{ticker}_{run_suffix}_{counter:04d} strings. TimeSeriesSignal.signal_id changed from Optional[int] to Optional[str]. DB gets new ts_signal_id TEXT column. signal_router._signal_to_dict exposes ts_signal_id. paper_trading_engine.Trade.ts_signal_id added. update_platt_outcomes.py queries ts_signal_id TEXT column."
+    },
+    "C2": {
+      "severity": "CRITICAL",
+      "description": "run_etl_pipeline.py never calls PaperTradingEngine; pipeline generates JSONL but zero DB trade rows",
+      "status": "FIXED",
+      "phase": "A3",
+      "fix_summary": "overnight_refresh.sh Step 2.5 added: runs run_auto_trader.py --cycles 1 --execution-mode synthetic --proof-mode after pipeline loop. update_platt_outcomes.py called after auto_trader cycle. annotated dead-end in run_etl_pipeline.py with explicit NOTE comment."
+    },
+    "C3": {
+      "severity": "CRITICAL",
+      "description": "--execution-mode CLI arg missing from run_auto_trader.py (env-var only)",
+      "status": "FIXED",
+      "phase": "A1",
+      "fix_summary": "Added @click.option('--execution-mode', type=click.Choice(['live','synthetic','auto'])) to run_auto_trader.py main(). CLI arg priority-overrides EXECUTION_MODE env var. CLAUDE.md updated with correct synthetic sprint command.",
+      "commit": "8a2aba2"
+    },
+    "H1": {
+      "severity": "HIGH",
+      "description": "confidence_calibrated missing from JSONL write; breaks Platt feedback loop",
+      "status": "FIXED",
+      "phase": "B1",
+      "fix_summary": "Added 'confidence_calibrated': signal.confidence_calibrated to _log_quant_validation entry dict in time_series_signal_generator.py."
+    },
+    "H2": {
+      "severity": "HIGH",
+      "description": "Divergent signal generator init paths in run_etl_pipeline.py vs run_auto_trader.py",
+      "status": "DEFERRED",
+      "phase": "B2",
+      "fix_summary": "Deferred to Phase 7.14. Requires creating models/signal_generator_factory.py and refactoring both pipeline scripts. Risk of regression is higher than benefit given current test coverage."
+    },
+    "H3": {
+      "severity": "HIGH",
+      "description": "Orphan detection not enforced in holdout mode (threshold 60 days too permissive)",
+      "status": "FIXED",
+      "phase": "B3",
+      "fix_summary": "run_20_audit_sprint.sh holdout INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS changed 60->14 days. Orphan whitelist IDs 5,6,11,13,61,62,67 added to INTEGRITY_ORPHAN_WHITELIST_IDS."
+    },
+    "M1": {
+      "severity": "MEDIUM",
+      "description": "JSONL path and DB path hardcoded in multiple scripts (inconsistent CWD-relative strings)",
+      "status": "FIXED",
+      "phase": "C1",
+      "fix_summary": "Created etl/paths.py with ROOT-relative constants (DB_PATH, QUANT_VALIDATION_JSONL, FORECAST_AUDITS_DIR, FORECAST_AUDITS_CACHE). Updated update_platt_outcomes.py, check_quant_validation_health.py, ci_integrity_gate.py, production_audit_gate.py to import from etl.paths."
+    },
+    "M2": {
+      "severity": "MEDIUM",
+      "description": "forecast_audits_cache not refreshed by overnight_refresh.sh; production gate at 7 AM has stale data",
+      "status": "FIXED",
+      "phase": "C2",
+      "fix_summary": "overnight_refresh.sh Step 3 now calls production_audit_gate.py (exit ignored with || true) to refresh forecast_audits_cache/latest_summary.json after each overnight run."
+    },
+    "M3": {
+      "severity": "MEDIUM",
+      "description": "Gate hierarchy undefined; no master orchestrator",
+      "status": "FIXED",
+      "phase": "C3",
+      "fix_summary": "Created scripts/run_all_gates.py: runs ci_integrity_gate -> check_quant_validation_health -> production_audit_gate in order. Flags: --skip-forecast-gate, --skip-profitability-gate, --strict, --json, --db. Non-zero exit if any blocking gate fails."
+    },
+    "M4": {
+      "severity": "MEDIUM",
+      "description": "Signal router dead-end in ETL pipeline undocumented; future developers confused",
+      "status": "FIXED",
+      "phase": "C4",
+      "fix_summary": "Added explicit NOTE comment block in run_etl_pipeline.py after signal routing stage: 'Signal routing above is for quant_validation.jsonl logging ONLY. Signals are NOT executed here.'"
+    },
+    "M5": {
+      "severity": "MEDIUM",
+      "description": "Legacy trades have NULL model attribution (ts_signal_id); 84 existing rows unattributed",
+      "status": "FIXED",
+      "phase": "C5",
+      "fix_summary": "migrate_add_ts_signal_id.py backfills legacy rows with synthetic IDs: legacy_{trade_date}_{id}. Applied: 84 rows backfilled. Script is idempotent."
+    },
+    "L1": {
+      "severity": "LOW",
+      "description": "DB path resolution inconsistent across scripts (different env var names, relative strings)",
+      "status": "FIXED",
+      "phase": "C6",
+      "fix_summary": "Handled by C1 (etl/paths.py). DB_PATH respects PORTFOLIO_DB_PATH env var override. Scripts that previously hardcoded 'data/portfolio_maximizer.db' now use _DEFAULT_DB_PATH from etl.paths."
+    }
+  },
+  "migration": {
+    "migrate_add_ts_signal_id": {
+      "script": "scripts/migrate_add_ts_signal_id.py",
+      "status": "APPLIED",
+      "rows_backfilled": 84,
+      "applied_date": "2026-02-24"
+    }
+  },
+  "test_results": {
+    "full_suite": "914 passed, 6 skipped, 7 xfailed",
+    "pre_existing_failures": ["tests/etl/test_database_manager_schema.py::test_recent_signals_backtest_helpers (peewee timezone bug, pre-existing)"],
+    "new_failures": 0
+  }
+}

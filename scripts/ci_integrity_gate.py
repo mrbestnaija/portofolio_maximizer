@@ -23,11 +23,18 @@ sys.path.insert(0, ROOT)
 
 from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
 
+# Phase 7.13-C1: central path constants
+try:
+    from etl.paths import DB_PATH as _DEFAULT_DB_PATH
+except ImportError:
+    from pathlib import Path
+    _DEFAULT_DB_PATH = Path(os.path.join(ROOT, "data", "portfolio_maximizer.db"))
+
 
 def main():
     import argparse
 
-    DEFAULT_DB = os.path.join(ROOT, "data", "portfolio_maximizer.db")
+    DEFAULT_DB = str(_DEFAULT_DB_PATH)
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=DEFAULT_DB, help="Path to SQLite database")
