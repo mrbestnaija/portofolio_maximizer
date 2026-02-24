@@ -66,7 +66,8 @@ class Trade:
     is_paper_trade: bool = True
     trade_id: Optional[str] = None
     slippage: float = 0.0
-    signal_id: Optional[int] = None
+    signal_id: Optional[int] = None  # FK to llm_signals.id (LLM-originated trades)
+    ts_signal_id: Optional[str] = None  # Phase 7.13-A2: globally unique TS signal ID
     realized_pnl: float = 0.0
     realized_pnl_pct: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -585,6 +586,7 @@ class PaperTradingEngine:
             is_paper_trade=True,
             slippage=(abs(entry_price - float(current_price)) / float(current_price)) if current_price else 0.0,
             signal_id=signal.get('signal_id'),
+            ts_signal_id=signal.get('ts_signal_id'),  # Phase 7.13-A2
             stop_loss=signal.get("stop_loss"),
             target_price=signal.get("target_price"),
             forecast_horizon=forecast_horizon,
@@ -1349,6 +1351,7 @@ class PaperTradingEngine:
                 is_diagnostic=trade.is_diagnostic,
                 is_synthetic=trade.is_synthetic,
                 confidence_calibrated=trade.confidence_calibrated,
+                ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
             )
 
             # Store entry_trade_id when opening position (for future close linkage)

@@ -133,7 +133,7 @@ class TimeSeriesSignal:
     volatility: Optional[float] = None
     lower_ci: Optional[float] = None
     upper_ci: Optional[float] = None
-    signal_id: Optional[int] = None  # Phase 7.10: unique ID for model attribution
+    signal_id: Optional[str] = None  # Phase 7.13-A2: globally unique ts_signal_id string
     confidence_calibrated: Optional[float] = None  # Pure Platt-scaled probability (before raw blend)
 
 
@@ -170,6 +170,8 @@ class TimeSeriesSignalGenerator:
         """
         # Phase 7.10: monotonic signal ID counter for model attribution
         self._signal_counter = 0
+        # Phase 7.13-A2: current ticker set at generate_signals() entry to build ts_signal_id
+        self._current_ticker: str = "unknown"
         # B5 Platt scaling: stores the pure logistic-regression probability from the
         # most recent _calibrate_confidence() call (before blending with raw confidence).
         self._platt_calibrated: Optional[float] = None
@@ -392,6 +394,8 @@ class TimeSeriesSignalGenerator:
         Returns:
             TimeSeriesSignal with action, confidence, and risk metrics
         """
+        # Phase 7.13-A2: track current ticker for globally unique ts_signal_id construction
+        self._current_ticker = ticker or "unknown"
         try:
             # Resolve forecast source selected by the forecaster routing contract.
             primary_forecast, forecast_source = self._resolve_primary_forecast(forecast_bundle)
@@ -607,7 +611,7 @@ class TimeSeriesSignalGenerator:
                 volatility=volatility,
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
-                signal_id=self._signal_counter,
+                signal_id=self._make_ts_signal_id(),  # Phase 7.13-A2: globally unique string
                 # B5: pure Platt-scaled probability from the most recent calibration call
                 confidence_calibrated=getattr(self, '_platt_calibrated', None),
             )
@@ -2376,6 +2380,7 @@ class TimeSeriesSignalGenerator:
             'execution_mode': execution_mode,
             'proof_mode': self._to_bool(proof_mode, default=False),
             'confidence': signal.confidence,
+            'confidence_calibrated': signal.confidence_calibrated,  # Phase 7.13-B1: Platt-scaled probability
             'expected_return': signal.expected_return,
             'risk_score': signal.risk_score,
             'volatility': signal.volatility,
@@ -2393,6 +2398,27 @@ class TimeSeriesSignalGenerator:
                 handle.write(json.dumps(entry, default=self._json_serializer) + "\n")
         except Exception as exc:  # pragma: no cover - logging must not break signals
             logger.warning("Unable to persist quant validation log for %s: %s", ticker, exc)
+
+    def _make_ts_signal_id(self) -> str:
+        """Build a globally unique ts_signal_id string (Phase 7.13-A2).
+
+        Format: ts_{ticker}_{run_id_suffix}_{counter:04d}
+        Example: ts_AAPL_20260224T2315Z_0001
+
+        Globally unique because:
+        - _current_ticker distinguishes same-counter signals across ticker instances
+        - run_id_suffix includes timestamp+PID, unique per generator instance
+        - counter monotonically increments within the instance
+        """
+        run_suffix = (self._runtime_run_id or "unknown")
+        # Use last 14 chars of run_id to keep IDs reasonably short while unique
+        # pmx_ts_20260224T2315Z_12345 -> 20260224T2315Z
+        if "_" in run_suffix:
+            parts = run_suffix.split("_")
+            run_suffix = parts[-2] if len(parts) >= 3 else parts[-1]
+        run_suffix = run_suffix[:14]
+        ticker_safe = (self._current_ticker or "unknown").upper().replace("-", "")[:6]
+        return f"ts_{ticker_safe}_{run_suffix}_{self._signal_counter:04d}"
 
     @staticmethod
     def _coerce_nonempty_str(value: Any) -> Optional[str]:

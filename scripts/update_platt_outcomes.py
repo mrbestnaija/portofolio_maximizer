@@ -25,6 +25,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Phase 7.13-C1: central path constants (fallback gracefully if etl not in sys.path)
+try:
+    from etl.paths import DB_PATH as _DEFAULT_DB_PATH, QUANT_VALIDATION_JSONL as _DEFAULT_JSONL_PATH
+except ImportError:
+    _DEFAULT_DB_PATH = Path("data/portfolio_maximizer.db")
+    _DEFAULT_JSONL_PATH = Path("logs/signals/quant_validation.jsonl")
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,11 +45,12 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 def _fetch_outcomes_for_signals(
     conn: sqlite3.Connection,
-    signal_ids: List[int],
-) -> Dict[int, Dict[str, Any]]:
-    """Return {signal_id: outcome_dict} for closed trades matching any of the given ids.
+    signal_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Return {ts_signal_id: outcome_dict} for closed trades matching any of the given ids.
 
-    When multiple closing trades share the same signal_id (e.g. partial fills),
+    Phase 7.13-A2: queries ts_signal_id TEXT column (globally unique per TS signal).
+    When multiple closing trades share the same ts_signal_id (partial fills),
     the one with the largest abs(realized_pnl) is used.
     """
     if not signal_ids:
@@ -50,9 +58,9 @@ def _fetch_outcomes_for_signals(
 
     placeholders = ",".join("?" * len(signal_ids))
     query = f"""
-        SELECT signal_id, realized_pnl, realized_pnl_pct
+        SELECT ts_signal_id, realized_pnl, realized_pnl_pct
         FROM trade_executions
-        WHERE signal_id IN ({placeholders})
+        WHERE ts_signal_id IN ({placeholders})
           AND is_close = 1
           AND realized_pnl IS NOT NULL
         ORDER BY ABS(realized_pnl) DESC
@@ -65,16 +73,16 @@ def _fetch_outcomes_for_signals(
         logger.error("DB query failed: %s", exc)
         return {}
 
-    result: Dict[int, Dict[str, Any]] = {}
+    result: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         sid, pnl, pnl_pct = row
         if sid is None:
             continue
-        # First row per signal_id wins (ordered by abs(pnl) DESC)
-        if int(sid) not in result:
+        # First row per ts_signal_id wins (ordered by abs(pnl) DESC)
+        if str(sid) not in result:
             try:
                 pnl_f = float(pnl)
-                result[int(sid)] = {
+                result[str(sid)] = {
                     "win": pnl_f > 0,
                     "pnl": round(pnl_f, 4),
                     "pnl_pct": round(float(pnl_pct), 6) if pnl_pct is not None else None,
@@ -153,8 +161,8 @@ def reconcile(
     entries = _load_jsonl(log_path)
     total = len(entries)
 
-    # Collect signal_ids that still need outcome
-    pending: List[int] = []
+    # Collect ts_signal_ids that still need outcome (Phase 7.13-A2: string IDs)
+    pending: List[str] = []
     already_done = 0
     for entry in entries:
         if "outcome" in entry:
@@ -162,10 +170,9 @@ def reconcile(
             continue
         sid = entry.get("signal_id")
         if sid is not None:
-            try:
-                pending.append(int(sid))
-            except (TypeError, ValueError):
-                pass
+            sid_str = str(sid).strip()
+            if sid_str:
+                pending.append(sid_str)
 
     if not pending:
         print(f"[INFO] 0 entries need outcome (total={total}, already_done={already_done}).")
@@ -186,12 +193,9 @@ def reconcile(
         sid = entry.get("signal_id")
         if sid is None:
             continue
-        try:
-            sid_int = int(sid)
-        except (TypeError, ValueError):
-            continue
-        if sid_int in outcomes:
-            entry["outcome"] = outcomes[sid_int]
+        sid_str = str(sid).strip()
+        if sid_str in outcomes:
+            entry["outcome"] = outcomes[sid_str]
             updated += 1
 
     print(
@@ -250,15 +254,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    db_path = Path(
-        args.db
-        or os.getenv("PORTFOLIO_DB_PATH")
-        or "data/portfolio_maximizer.db"
-    )
-    log_path = Path(
-        args.log
-        or "logs/signals/quant_validation.jsonl"
-    )
+    db_path = Path(args.db) if args.db else _DEFAULT_DB_PATH
+    log_path = Path(args.log) if args.log else _DEFAULT_JSONL_PATH
 
     reconcile(db_path=db_path, log_path=log_path, dry_run=args.dry_run)
 

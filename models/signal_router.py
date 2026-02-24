@@ -340,6 +340,7 @@ class SignalRouter:
             'lower_ci': signal.lower_ci,
             'upper_ci': signal.upper_ci,
             'signal_id': getattr(signal, 'signal_id', None),
+            'ts_signal_id': getattr(signal, 'signal_id', None),  # Phase 7.13-A2: signal_id IS the ts_signal_id for TS signals
             'confidence_calibrated': getattr(signal, 'confidence_calibrated', None),
         }
 

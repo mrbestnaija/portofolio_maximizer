@@ -791,9 +791,11 @@ class TestTimeSeriesSignalGenerator:
         assert lines, "Log must have at least one entry"
         payload = json.loads(lines[-1])
         assert 'signal_id' in payload, "JSONL entry must contain signal_id field"
-        # signal_id should be a positive integer (starts at 1)
+        # Phase 7.13-A2: signal_id is now a globally unique string ts_{ticker}_{run_suffix}_{counter}
         assert payload['signal_id'] is not None
-        assert int(payload['signal_id']) >= 1
+        sid = str(payload['signal_id'])
+        assert sid.startswith("ts_"), f"Expected ts_* prefix, got: {sid!r}"
+        assert len(sid) > 6, f"ts_signal_id too short: {sid!r}"
 
     def test_load_jsonl_outcome_pairs_empty_when_no_outcome(self, quant_logging_config, ts_routing_config):
         """_load_jsonl_outcome_pairs returns empty lists when no entries have outcome field."""
