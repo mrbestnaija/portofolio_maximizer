@@ -78,8 +78,12 @@ pytest tests/execution/test_order_manager.py -v
 # Run ETL pipeline (main data processing)
 python scripts/run_etl_pipeline.py --tickers AAPL,MSFT --start 2020-01-01 --end 2024-01-01 --execution-mode auto --enable-llm
 
-# Run autonomous trading loop
+# Run autonomous trading loop (live mode, real data)
 python scripts/run_auto_trader.py --tickers AAPL,MSFT,NVDA --lookback-days 365 --cycles 5
+
+# Run in synthetic mode (market-hours-independent, Platt scaling data accumulation)
+# Phase 7.13-A1: --execution-mode is now a direct CLI arg (was env-var-only before)
+python scripts/run_auto_trader.py --tickers AAPL,MSFT,NVDA --cycles 3 --execution-mode synthetic --proof-mode --no-resume
 
 # Run pipeline with bash wrapper (recommended)
 bash/run_pipeline.sh --mode live --tickers AAPL --enable-llm
