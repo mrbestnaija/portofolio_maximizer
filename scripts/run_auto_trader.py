@@ -1711,6 +1711,15 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
     help="Optional YYYY-MM-DD override for the market window end date. "
          "Use this to accumulate holdout audits on historical end dates.",
 )
+@click.option(
+    "--execution-mode",
+    default=None,
+    show_default=False,
+    type=click.Choice(["live", "synthetic", "auto"], case_sensitive=False),
+    help="Override EXECUTION_MODE env var. 'live' uses real market data, "
+         "'synthetic' uses generated data (market-hours-independent), "
+         "'auto' follows DataSourceManager defaults. Default: live.",
+)
 def main(
     tickers: str,
     include_frontier_tickers: bool,
@@ -1729,6 +1738,7 @@ def main(
     resume: bool = True,
     proof_mode: bool = False,
     as_of_date: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> None:
     """Entry point for the automated profit engine."""
     run_started_at = datetime.now(UTC)
@@ -1795,6 +1805,9 @@ def main(
         logger.info("As-of date override active: %s", resolved_as_of_date.isoformat())
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+    # CLI --execution-mode takes priority over EXECUTION_MODE env var (Phase 7.13-A1)
+    if execution_mode is not None:
+        os.environ["EXECUTION_MODE"] = execution_mode.strip().lower()
     execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
     if execution_mode not in {"live", "synthetic", "auto"}:
         execution_mode = "live"
