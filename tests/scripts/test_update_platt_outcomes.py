@@ -31,23 +31,31 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def _make_db(path: Path, trades: List[Dict[str, Any]]) -> None:
-    """Create minimal trade_executions table and populate with given rows."""
+    """Create minimal trade_executions table and populate with given rows.
+
+    Phase 7.13-A2: table includes ts_signal_id TEXT column.
+    Tests pass integer signal_id values; _make_db stores str(signal_id) in ts_signal_id
+    so the reconcile() query (which now targets ts_signal_id) matches correctly.
+    """
     conn = sqlite3.connect(str(path))
     cur = conn.cursor()
     cur.execute(
         """CREATE TABLE trade_executions (
             id INTEGER PRIMARY KEY,
             signal_id INTEGER,
+            ts_signal_id TEXT,
             realized_pnl REAL,
             realized_pnl_pct REAL,
             is_close INTEGER
         )"""
     )
     for t in trades:
+        raw_sid = t.get("signal_id")
+        ts_sid = str(raw_sid) if raw_sid is not None else None
         cur.execute(
-            "INSERT INTO trade_executions (signal_id, realized_pnl, realized_pnl_pct, is_close) "
-            "VALUES (?, ?, ?, ?)",
-            (t.get("signal_id"), t.get("realized_pnl"), t.get("realized_pnl_pct"), t.get("is_close", 1)),
+            "INSERT INTO trade_executions (signal_id, ts_signal_id, realized_pnl, realized_pnl_pct, is_close) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (raw_sid, ts_sid, t.get("realized_pnl"), t.get("realized_pnl_pct"), t.get("is_close", 1)),
         )
     conn.commit()
     conn.close()

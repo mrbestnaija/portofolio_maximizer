@@ -864,6 +864,8 @@ class DatabaseManager:
                 is_synthetic INTEGER DEFAULT 0,
                 confidence_calibrated REAL,
                 entry_trade_id INTEGER,
+                -- TS model attribution (Phase 7.13-A2): globally unique signal ID from TimeSeriesSignalGenerator
+                ts_signal_id TEXT,
                 bar_open REAL,
                 bar_high REAL,
                 bar_low REAL,
@@ -961,6 +963,15 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_low REAL")
         if "bar_close" not in trade_cols:
             self.cursor.execute("ALTER TABLE trade_executions ADD COLUMN bar_close REAL")
+        if "ts_signal_id" not in trade_cols:
+            # Phase 7.13-A2: globally unique TS signal ID string
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN ts_signal_id TEXT"
+            )
+            self.cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trade_executions_ts_signal_id "
+                "ON trade_executions(ts_signal_id)"
+            )
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -2114,6 +2125,7 @@ class DatabaseManager:
         bar_high: Optional[float] = None,
         bar_low: Optional[float] = None,
         bar_close: Optional[float] = None,
+        ts_signal_id: Optional[str] = None,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -2168,6 +2180,7 @@ class DatabaseManager:
                     "bar_high",
                     "bar_low",
                     "bar_close",
+                    "ts_signal_id",
                 ]
                 values = [
                     ticker,
@@ -2214,6 +2227,7 @@ class DatabaseManager:
                     float(bar_high) if bar_high is not None else None,
                     float(bar_low) if bar_low is not None else None,
                     float(bar_close) if bar_close is not None else None,
+                    ts_signal_id,
                 ]
                 placeholders = ", ".join(["?"] * len(columns))
                 sql = f"INSERT INTO trade_executions ({', '.join(columns)}) VALUES ({placeholders})"
