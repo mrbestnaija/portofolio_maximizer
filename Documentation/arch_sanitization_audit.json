@@ -104,9 +104,26 @@
       "applied_date": "2026-02-24"
     }
   },
+  "adversarial_audit": {
+    "performed": "2026-02-24",
+    "scope": "second-pass implementation verification of all 12 Phase 7.13 claims",
+    "outcome": "11/12 claims confirmed; 1 critical post-implementation bug found and fixed",
+    "bugs_found": {
+      "BUG2": {
+        "severity": "CRITICAL",
+        "description": "signal_router._signal_to_dict() set BOTH signal_id and ts_signal_id to the same value (getattr(signal,'signal_id',None)). For TS signals signal.signal_id is now a str ('ts_AAPL_...'); leaking it into the signal_id key causes a STRING to flow into signal_id INTEGER FK llm_signals column via paper_trading_engine.",
+        "file": "models/signal_router.py",
+        "lines": "342-343",
+        "status": "FIXED",
+        "fix_summary": "Type-separated the two keys: signal_id only receives int values (LLM FK), ts_signal_id only receives str values (TS attribution). isinstance() guards prevent cross-namespace leakage.",
+        "tests_passing": "56 (signal_router + ts_signal_generator + update_platt_outcomes + paper_trading_engine)"
+      }
+    }
+  },
   "test_results": {
     "full_suite": "914 passed, 6 skipped, 7 xfailed",
     "pre_existing_failures": ["tests/etl/test_database_manager_schema.py::test_recent_signals_backtest_helpers (peewee timezone bug, pre-existing)"],
-    "new_failures": 0
+    "new_failures": 0,
+    "post_adversarial_audit": "56 targeted tests pass after BUG2 fix"
   }
 }
