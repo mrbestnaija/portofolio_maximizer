@@ -285,7 +285,7 @@ class PipelineLogger:
                         logger.warning(f"Failed to delete log file {log_file}: {e}")
 
         if deleted_count > 0:
-            logger.info(f"✓ Cleaned {deleted_count} old log file(s)")
+            logger.info(f"[OK] Cleaned {deleted_count} old log file(s)")
 
         return deleted_count
 
