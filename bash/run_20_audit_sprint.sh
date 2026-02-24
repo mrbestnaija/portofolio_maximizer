@@ -113,10 +113,11 @@ fi
 
 # Integrity gate: orphaned-position max-age sensitivity.
 # - Live runs: keep strict default (3 days) so stale opens trip the HIGH gate quickly.
-# - Holdout/local runs: widen the window to avoid false positives from historical "as-of" dates.
+# - Holdout/local runs: tightened to 14 days (was 60) — Phase 7.13-B3.
+#   IDs older than 14 days with no close leg are genuine orphans, not as-of-date artifacts.
 if [[ -z "${INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS:-}" ]]; then
     if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
-        export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS="60"
+        export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS="14"
     else
         export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS="3"
     fi
@@ -126,6 +127,10 @@ fi
 
 # Whitelist known resume-originated unlinked closes (IDs 66, 75 from portfolio state).
 export INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS="${INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS:-66,75}"
+
+# Whitelist known stale orphan IDs (pre-Phase-7.13-A2 legacy opens with no close leg).
+# Phase 7.13-B3: IDs 5,6,11,13,61,62,67 pre-date cross-session persistence; permanently whitelisted.
+export INTEGRITY_ORPHAN_WHITELIST_IDS="${INTEGRITY_ORPHAN_WHITELIST_IDS:-5,6,11,13,61,62,67}"
 
 if [[ -z "${ALLOW_FORECAST_GATE_FAILURE}" ]]; then
     if [[ "${ALLOW_GATE_CONTEXT}" == "1" ]]; then
