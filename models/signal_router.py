@@ -339,8 +339,12 @@ class SignalRouter:
             'volatility': signal.volatility,
             'lower_ci': signal.lower_ci,
             'upper_ci': signal.upper_ci,
-            'signal_id': getattr(signal, 'signal_id', None),
-            'ts_signal_id': getattr(signal, 'signal_id', None),  # Phase 7.13-A2: signal_id IS the ts_signal_id for TS signals
+            # Phase 7.13-A2 + adversarial-fix: keep ID namespaces type-separated.
+            # TS signals carry signal_id as a str ("ts_AAPL_..."); that must NOT flow
+            # into the signal_id INTEGER FK → llm_signals column.  LLM signal_ids
+            # are ints and route to signal_id only, never ts_signal_id.
+            'signal_id': getattr(signal, 'signal_id', None) if isinstance(getattr(signal, 'signal_id', None), int) else None,
+            'ts_signal_id': getattr(signal, 'signal_id', None) if isinstance(getattr(signal, 'signal_id', None), str) else None,
             'confidence_calibrated': getattr(signal, 'confidence_calibrated', None),
         }
 
