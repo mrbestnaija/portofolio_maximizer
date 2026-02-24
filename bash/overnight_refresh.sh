@@ -81,6 +81,33 @@ done
 log "Ticker results: ${TICKER_PASS} passed / ${TICKER_FAIL} failed"
 
 # ---------------------------------------------------------------------------
+# STEP 2.5: Execute signals via auto_trader (synthetic cycle) -- Phase 7.13-A3
+# Pipeline above only generates JSONL; no DB trade rows are created.
+# This step executes the generated signals so trade_executions accumulates rows
+# that update_platt_outcomes.py can reconcile against quant_validation.jsonl.
+# ---------------------------------------------------------------------------
+log_section "STEP 2.5/3: Synthetic auto_trader cycle (Platt scaling data accumulation)"
+
+ALL_TICKERS="AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V"
+log "--- run_auto_trader.py --tickers $ALL_TICKERS --cycles 1 --execution-mode synthetic --proof-mode --no-resume"
+if "$PYTHON" scripts/run_auto_trader.py \
+        --tickers "$ALL_TICKERS" \
+        --cycles 1 \
+        --execution-mode synthetic \
+        --proof-mode \
+        --no-resume \
+        --sleep-seconds 0 \
+        >> "$LOG" 2>&1; then
+    log "[PASS] Synthetic auto_trader cycle completed"
+else
+    log "[WARN] Synthetic auto_trader cycle returned non-zero (Platt pairs may not accumulate)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+log "--- update_platt_outcomes.py (reconcile new trade outcomes)"
+"$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+
+# ---------------------------------------------------------------------------
 # STEP 3: Health check + headroom measurement
 # ---------------------------------------------------------------------------
 log_section "STEP 3/3: Final health check"
@@ -90,6 +117,10 @@ log "--- check_quant_validation_health.py"
 
 log "--- quant_validation_headroom.py --json"
 "$PYTHON" scripts/quant_validation_headroom.py --json >> "$LOG" 2>&1 || true
+
+# Phase 7.13-C2: Refresh forecast audit cache so production_audit_gate has current data at 7 AM cron.
+log "--- production_audit_gate.py (refresh forecast_audits_cache/latest_summary.json)"
+"$PYTHON" scripts/production_audit_gate.py >> "$LOG" 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # SUMMARY

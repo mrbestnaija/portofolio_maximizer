@@ -2466,6 +2466,16 @@ def execute_pipeline(
                     )
                     pipeline_log.log_checkpoint(pipeline_id, stage_name, checkpoint_id)
 
+                    # NOTE (Phase 7.13-C4): Signal routing above is for quant_validation.jsonl
+                    # logging ONLY. Signals are NOT executed here. PaperTradingEngine is never
+                    # called from run_etl_pipeline.py. To accumulate DB trade rows for Platt
+                    # scaling, use run_auto_trader.py (or overnight_refresh.sh Step 2.5 which
+                    # runs a synthetic auto_trader cycle after this pipeline completes).
+                    logger.debug(
+                        "Signal routing complete. No trade execution in ETL pipeline "
+                        "(use run_auto_trader.py or overnight_refresh.sh for execution)."
+                    )
+
                 except ImportError as e:
                     logger.warning(f"Signal router modules not available: {e}")
                 except Exception as e:
