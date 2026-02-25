@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -245,32 +246,59 @@ def main() -> int:
     log("--- update_platt_outcomes.py (reconcile new trade outcomes)")
     py("scripts/update_platt_outcomes.py", allow_fail=True)
 
+    # Phase 7.15: Auto-trigger bootstrap when JSONL pair count is below threshold.
+    # Root cause of 0 pairs: --cycles 1 never closes positions within one cycle,
+    # so no is_close=1 rows are written -> update_platt_outcomes finds nothing to match.
+    # Solution: auto-enable bootstrap when pairs_with_outcome < PLATT_MIN_PAIRS.
+    PLATT_MIN_PAIRS = 30
+    if not args.platt_bootstrap:
+        _jsonl = REPO_ROOT / "logs" / "signals" / "quant_validation.jsonl"
+        _pairs = 0
+        if _jsonl.exists():
+            try:
+                _pairs = sum(
+                    1 for _line in _jsonl.read_text(encoding="utf-8").splitlines()
+                    if _line.strip() and "outcome" in json.loads(_line)
+                )
+            except Exception:
+                pass
+        log(f"--- Platt pairs check: {_pairs} pairs_with_outcome (threshold: {PLATT_MIN_PAIRS})")
+        if _pairs < PLATT_MIN_PAIRS:
+            log(f"[AUTO] Platt pairs below {PLATT_MIN_PAIRS} -- enabling bootstrap automatically")
+            args.platt_bootstrap = True
+
     # -------------------------------------------------------------------
-    # STEP 2.6: Historical Platt bootstrap (opt-in)
+    # STEP 2.6: Historical Platt bootstrap (opt-in, or auto when pairs < threshold)
     # -------------------------------------------------------------------
     if args.platt_bootstrap:
         log_section("STEP 2.6/3: Platt bootstrap -- seeding pairs from 2021-2024")
         # Platt calibration requires CLOSED trades with ts_* signal IDs.
-        # Root cause of 0 pairs: --cycles 1 --no-resume opens positions but max_holding
-        # (default 5-30 bars) never elapses within a single cycle, so no is_close=1 rows
-        # are written with ts_* IDs.  Fix: --proof-mode forces max_holding=5 bars; with
-        # --cycles 8 positions opened in cycle 1 close by cycle 5 -> realized_pnl populated
-        # -> update_platt_outcomes.py can match JSONL signal_id to DB ts_signal_id.
-        # NOTE: proof-mode exits are slightly tight (5-bar) but acceptable for bootstrap;
-        # production Step 2.5 above runs WITHOUT proof-mode for live-comparable calibration.
-        for as_of in BOOTSTRAP_DATES:
+        #
+        # Adversarial finding (2026-02-25): historical bootstrap with
+        #   --cycles 8 + fixed --as-of-date + default --bar-aware
+        # yields cycle-1 executions then cycles 2..8 as SKIPPED_SAME_BAR,
+        # so no bar progression occurs and no time exits are written.
+        #
+        # Fix: run a single cycle per historical as-of date and carry portfolio
+        # state forward across dates (resume after first date). This advances
+        # bar timestamps across runs and allows proof-mode max_holding exits
+        # to produce closed ts_* trades that update_platt_outcomes can match.
+        for idx, as_of in enumerate(BOOTSTRAP_DATES):
             log(f"--- bootstrap as-of {as_of}")
-            py(
+            cmd = [
                 "scripts/run_auto_trader.py",
                 "--tickers", all_tickers_csv,
-                "--cycles", "8",        # 8 cycles so proof-mode 5-bar max_holding fires
+                "--cycles", "1",
                 "--execution-mode", "synthetic",
                 "--as-of-date", as_of,
-                "--no-resume",
                 "--sleep-seconds", "0",
-                "--proof-mode",         # max_holding=5 bars -> closed trades within 8 cycles
-                allow_fail=True,
-            )
+                "--proof-mode",
+            ]
+            if idx == 0:
+                cmd.append("--no-resume")
+            else:
+                cmd.append("--resume")
+            py(*cmd, allow_fail=True)
             py("scripts/update_platt_outcomes.py", allow_fail=True)
         log("[DONE] Platt bootstrap complete")
 
@@ -343,7 +371,7 @@ def main() -> int:
         f"Completed        : {datetime.datetime.now()}",
         f"Errors           : {errors}",
         f"Tickers          : {ticker_pass} passed / {ticker_fail} failed",
-        f"Platt bootstrap  : {'ON (8 cycles + proof-mode)' if args.platt_bootstrap else 'OFF (run with --platt-bootstrap to seed pairs)'}",
+        f"Platt bootstrap  : {'ON (8 AS_OF windows, resume + proof-mode)' if args.platt_bootstrap else 'OFF (run with --platt-bootstrap to seed pairs)'}",
         f"Audit bootstrap  : {'ON (20 AS_OF windows)' if args.audit_gate_bootstrap else 'OFF (run with --audit-gate-bootstrap to reach holding_period_audits=20)'}",
         "",
         "Diagnostics:",
@@ -359,7 +387,7 @@ def main() -> int:
         "  2. Headroom    : python scripts/quant_validation_headroom.py --json",
         "  3. Health      : python scripts/check_quant_validation_health.py",
         "  4. Platt check : python scripts/update_platt_outcomes.py",
-        "  5. If 0 Platt pairs: run with --platt-bootstrap to seed 8 historical windows (8 cycles+proof-mode)",
+        "  5. If 0 Platt pairs: run with --platt-bootstrap to seed 8 historical windows (1 cycle/date + resume + proof-mode)",
         "  6. If lift INCONCLUSIVE: run with --audit-gate-bootstrap to seed 20 unique audit windows",
     ]
 
