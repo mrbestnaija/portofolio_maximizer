@@ -76,7 +76,7 @@ forecasting:
     # See Documentation/PRIORITY_ANALYSIS_20260212.md.
     track_directional_accuracy: true  # Phase 7.10b: inject auto_directional candidate using per-model CV hit rates
     prefer_diversified_candidate: true
-    diversity_tolerance: 0.15  # Phase 7.9: lowered from 0.35 to let pure candidates win more often (reduces blend dilution that causes RMSE violations)
+    diversity_tolerance: 0.05  # Phase 7.15: lowered from 0.15 -> 0.05. Pure mssa_rl wins if >5% better than blend (was 15% bar; mssa_rl beats blend by ~12% but was losing to 15% threshold). Audit data shows mssa_rl is best model (RMSE 3.08) but ensemble weights samossa 42.7% (worst at 4.05), causing 1.14x RMSE regression.
     candidate_weights:
       # SARIMAX is disabled by default; keep ensemble candidates aligned with active models.
       - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
@@ -114,9 +114,9 @@ forecasting:
         - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
         - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
       MODERATE_MIXED:
-        # Balanced: GARCH anchor with SAMOSSA/MSSA diversity
+        # Phase 7.15: MSSA-RL led. Audit data shows mssa_rl RMSE=3.08 beats garch=3.55 and samossa=4.05
+        - {mssa_rl: 0.55, garch: 0.30, samossa: 0.15}
         - {garch: 0.45, samossa: 0.35, mssa_rl: 0.20}
-        - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
       MODERATE_TRENDING:
         # Trend-aware but GARCH-anchored
         - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}

@@ -19,16 +19,49 @@ fi
 TS="$(date +%Y%m%d_%H%M%S)"
 LOG="${REPO_ROOT}/logs/run_audit/overnight_refresh_${TS}.log"
 SUMMARY="${REPO_ROOT}/logs/run_audit/overnight_refresh_${TS}_summary.txt"
+TICKERS="AMZN GOOG GS JPM META MSFT NVDA TSLA V"
 mkdir -p "${REPO_ROOT}/logs/run_audit"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 log_section() { echo "" | tee -a "$LOG"; echo "========================================" | tee -a "$LOG"; log "$*"; echo "========================================" | tee -a "$LOG"; }
 
+run_best_effort() {
+    local label="$1"
+    shift
+    log "--- ${label}"
+    if "$@" >> "$LOG" 2>&1; then
+        log "[PASS] ${label}"
+    else
+        log "[WARN] ${label} returned non-zero"
+    fi
+}
+
+run_synthetic_auto_trader() {
+    local as_of_date="${1:-}"
+    local -a cmd=(
+        "$PYTHON" scripts/run_auto_trader.py
+        --tickers "$ALL_TICKERS"
+        --cycles 1
+        --execution-mode synthetic
+        --no-resume
+        --sleep-seconds 0
+    )
+    if [[ -n "$as_of_date" ]]; then
+        cmd+=(--as-of-date "$as_of_date")
+    fi
+    "${cmd[@]}" >> "$LOG" 2>&1
+}
+
+reconcile_platt_outcomes() {
+    local context="$1"
+    run_best_effort "update_platt_outcomes.py (${context})" "$PYTHON" scripts/update_platt_outcomes.py
+}
+
 log_section "Overnight refresh started"
 log "Python: $PYTHON"
 log "Repo: $REPO_ROOT"
 log "Log: $LOG"
-log "Tickers: AMZN GOOG GS JPM META MSFT NVDA TSLA V"
+log "Tickers: $TICKERS"
 log "Estimated runtime: 60-120 minutes"
 
 cd "$REPO_ROOT"
@@ -54,10 +87,7 @@ log_section "STEP 2/3: Pipeline refresh for non-AAPL tickers"
 
 # Reconcile JSONL outcomes before pipeline runs so calibration uses
 # any newly available trade outcomes from previous sessions.
-log "--- update_platt_outcomes.py (Platt scaling outcome reconciliation)"
-"$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
-
-TICKERS="AMZN GOOG GS JPM META MSFT NVDA TSLA V"
+reconcile_platt_outcomes "pre-run reconciliation"
 TICKER_PASS=0
 TICKER_FAIL=0
 
@@ -92,21 +122,14 @@ ALL_TICKERS="AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V"
 log "--- run_auto_trader.py --tickers $ALL_TICKERS --cycles 1 --execution-mode synthetic --no-resume"
 # NOTE: --proof-mode removed (Phase 7.14-A4). Proof-mode forces max_holding=5 bars -> unnatural
 # tight exits -> Platt calibration data reflects test behavior, not production behavior.
-if "$PYTHON" scripts/run_auto_trader.py \
-        --tickers "$ALL_TICKERS" \
-        --cycles 1 \
-        --execution-mode synthetic \
-        --no-resume \
-        --sleep-seconds 0 \
-        >> "$LOG" 2>&1; then
+if run_synthetic_auto_trader; then
     log "[PASS] Synthetic auto_trader cycle completed"
 else
     log "[WARN] Synthetic auto_trader cycle returned non-zero (Platt pairs may not accumulate)"
     ERRORS=$((ERRORS + 1))
 fi
 
-log "--- update_platt_outcomes.py (reconcile new trade outcomes)"
-"$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+reconcile_platt_outcomes "post-auto-trader reconciliation"
 
 # ---------------------------------------------------------------------------
 # STEP 2.6: Historical Platt bootstrap -- seed (confidence, outcome) pairs
@@ -118,14 +141,12 @@ if [[ "${PLATT_BOOTSTRAP:-0}" == "1" ]]; then
     log_section "STEP 2.6/3: Platt bootstrap -- seeding pairs from 2021-2024 historical data"
     for AS_OF in 2021-01-01 2021-07-01 2022-01-01 2022-07-01 2023-01-01 2023-07-01 2024-01-01 2024-07-01; do
         log "--- bootstrap as-of $AS_OF"
-        "$PYTHON" scripts/run_auto_trader.py \
-            --tickers "$ALL_TICKERS" \
-            --cycles 1 \
-            --execution-mode synthetic \
-            --as-of-date "$AS_OF" \
-            --no-resume \
-            --sleep-seconds 0 >> "$LOG" 2>&1 || true
-        "$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+        if run_synthetic_auto_trader "$AS_OF"; then
+            log "[PASS] bootstrap as-of $AS_OF"
+        else
+            log "[WARN] bootstrap as-of $AS_OF returned non-zero"
+        fi
+        reconcile_platt_outcomes "bootstrap as-of $AS_OF"
     done
     log "[DONE] Platt bootstrap complete"
 fi
@@ -135,15 +156,13 @@ fi
 # ---------------------------------------------------------------------------
 log_section "STEP 3/3: Final health check"
 
-log "--- check_quant_validation_health.py"
-"$PYTHON" scripts/check_quant_validation_health.py >> "$LOG" 2>&1 || true
-
-log "--- quant_validation_headroom.py --json"
-"$PYTHON" scripts/quant_validation_headroom.py --json >> "$LOG" 2>&1 || true
-
+run_best_effort "check_quant_validation_health.py" "$PYTHON" scripts/check_quant_validation_health.py
+run_best_effort "quant_validation_headroom.py --json" "$PYTHON" scripts/quant_validation_headroom.py --json
 # Phase 7.13-C2: Refresh forecast audit cache so production_audit_gate has current data at 7 AM cron.
-log "--- production_audit_gate.py (refresh forecast_audits_cache/latest_summary.json)"
-"$PYTHON" scripts/production_audit_gate.py >> "$LOG" 2>&1 || true
+# Phase 7.15: --allow-inconclusive-lift: holding_period_audits=20 requires 20 unique AS_OF date
+# windows; overnight refresh (fixed 2024-01-01->2026-01-01 range) is structurally capped at ~11
+# unique audit windows after dedup. Inconclusive during holding period = non-failing per config.
+run_best_effort "production_audit_gate.py (refresh forecast_audits_cache/latest_summary.json)" "$PYTHON" scripts/production_audit_gate.py --allow-inconclusive-lift
 
 # ---------------------------------------------------------------------------
 # SUMMARY
