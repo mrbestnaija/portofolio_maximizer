@@ -89,12 +89,13 @@ log "Ticker results: ${TICKER_PASS} passed / ${TICKER_FAIL} failed"
 log_section "STEP 2.5/3: Synthetic auto_trader cycle (Platt scaling data accumulation)"
 
 ALL_TICKERS="AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V"
-log "--- run_auto_trader.py --tickers $ALL_TICKERS --cycles 1 --execution-mode synthetic --proof-mode --no-resume"
+log "--- run_auto_trader.py --tickers $ALL_TICKERS --cycles 1 --execution-mode synthetic --no-resume"
+# NOTE: --proof-mode removed (Phase 7.14-A4). Proof-mode forces max_holding=5 bars -> unnatural
+# tight exits -> Platt calibration data reflects test behavior, not production behavior.
 if "$PYTHON" scripts/run_auto_trader.py \
         --tickers "$ALL_TICKERS" \
         --cycles 1 \
         --execution-mode synthetic \
-        --proof-mode \
         --no-resume \
         --sleep-seconds 0 \
         >> "$LOG" 2>&1; then
@@ -106,6 +107,28 @@ fi
 
 log "--- update_platt_outcomes.py (reconcile new trade outcomes)"
 "$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# STEP 2.6: Historical Platt bootstrap -- seed (confidence, outcome) pairs
+# from backtested dates so calibration has material to work with immediately.
+# Set PLATT_BOOTSTRAP=1 to activate (off by default to keep overnight fast).
+# Uses --as-of-date to rewind market data to each historical date.
+# ---------------------------------------------------------------------------
+if [[ "${PLATT_BOOTSTRAP:-0}" == "1" ]]; then
+    log_section "STEP 2.6/3: Platt bootstrap -- seeding pairs from 2021-2024 historical data"
+    for AS_OF in 2021-01-01 2021-07-01 2022-01-01 2022-07-01 2023-01-01 2023-07-01 2024-01-01 2024-07-01; do
+        log "--- bootstrap as-of $AS_OF"
+        "$PYTHON" scripts/run_auto_trader.py \
+            --tickers "$ALL_TICKERS" \
+            --cycles 1 \
+            --execution-mode synthetic \
+            --as-of-date "$AS_OF" \
+            --no-resume \
+            --sleep-seconds 0 >> "$LOG" 2>&1 || true
+        "$PYTHON" scripts/update_platt_outcomes.py >> "$LOG" 2>&1 || true
+    done
+    log "[DONE] Platt bootstrap complete"
+fi
 
 # ---------------------------------------------------------------------------
 # STEP 3: Health check + headroom measurement

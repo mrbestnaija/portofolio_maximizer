@@ -50,6 +50,29 @@ except ModuleNotFoundError:  # pragma: no cover - CLI fallback
 
 logger = logging.getLogger(__name__)
 
+
+def _convert_timestamp_tz_safe(val: bytes) -> Optional[datetime]:
+    """TIMESTAMP converter that handles timezone offsets stored by Python's datetime adapter.
+
+    Python's built-in TIMESTAMP converter expects 'YYYY-MM-DD HH:MM:SS[.ffffff]' but
+    timezone-aware datetimes are stored as 'YYYY-MM-DD HH:MM:SS+HH:MM', causing
+    'invalid literal for int() with base 10: b\"00+00\"' on retrieval.
+    """
+    try:
+        s = val.decode("utf-8", errors="replace").replace("T", " ")
+        # Strip optional timezone offset (+HH:MM or -HH:MM) starting after the date portion
+        for sep in ("+", "-"):
+            idx = s.find(sep, 10)  # pos 10+ skips date dashes at pos 4 and 7
+            if idx != -1:
+                s = s[:idx]
+                break
+        return datetime.fromisoformat(s.strip())
+    except Exception:
+        return None
+
+
+sqlite3.register_converter("TIMESTAMP", _convert_timestamp_tz_safe)
+
 # Updated in Phase 5.x to support extreme risk classification
 ALLOWED_RISK_LEVELS = {'low', 'medium', 'high', 'extreme'}
 
@@ -1154,6 +1177,15 @@ class DatabaseManager:
             if 'regression_metrics' not in columns:
                 logger.info("Adding regression_metrics column to time_series_forecasts")
                 self.cursor.execute("ALTER TABLE time_series_forecasts ADD COLUMN regression_metrics TEXT")
+                self.conn.commit()
+            # Phase 7.14-D: persist regime detection to DB
+            if 'detected_regime' not in columns:
+                logger.info("Adding detected_regime column to time_series_forecasts")
+                self.cursor.execute("ALTER TABLE time_series_forecasts ADD COLUMN detected_regime TEXT")
+                self.conn.commit()
+            if 'regime_confidence' not in columns:
+                logger.info("Adding regime_confidence column to time_series_forecasts")
+                self.cursor.execute("ALTER TABLE time_series_forecasts ADD COLUMN regime_confidence REAL")
                 self.conn.commit()
 
         # Performance metrics (quantifiable success criteria)
@@ -2513,6 +2545,10 @@ class DatabaseManager:
         regression_metrics = forecast_data.get('regression_metrics')
         diagnostics_str = json.dumps(diagnostics_data)
         regression_metrics_str = json.dumps(regression_metrics or {})
+        # Phase 7.14-D: regime detection persistence
+        detected_regime = forecast_data.get('detected_regime') or None
+        regime_confidence_val = forecast_data.get('regime_confidence')
+        regime_confidence_float = float(regime_confidence_val) if regime_confidence_val is not None else None
 
         def _execute_insert() -> int:
             self.cursor.execute(
@@ -2520,8 +2556,9 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO time_series_forecasts
                 (ticker, forecast_date, model_type, forecast_horizon,
                  forecast_value, lower_ci, upper_ci, volatility,
-                 model_order, aic, bic, diagnostics, regression_metrics)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model_order, aic, bic, diagnostics, regression_metrics,
+                 detected_regime, regime_confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ticker,
@@ -2547,6 +2584,8 @@ class DatabaseManager:
                     else None,
                     diagnostics_str,
                     regression_metrics_str,
+                    detected_regime,
+                    regime_confidence_float,
                 ),
             )
             self.conn.commit()

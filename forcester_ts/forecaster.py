@@ -834,6 +834,31 @@ class TimeSeriesForecaster:
             out["lower_ci"] = pd.Series(lower, index=forecast.index[: len(lower)], name="garch_lower_ci")
             out["upper_ci"] = pd.Series(upper, index=forecast.index[: len(upper)], name="garch_upper_ci")
 
+            # Phase 7.14-C: Inflate CI by 1.5x when GARCH optimizer did not converge.
+            # Wide CI -> SNR drops below threshold -> signal_generator.py:478 blocks signal.
+            # Self-attenuating chain: bad fit -> wider CI -> lower SNR -> no trade.
+            if not payload.get("convergence_ok", True):
+                logger.warning(
+                    "GARCH convergence_ok=False: inflating CI half-width by 1.5x "
+                    "to trigger SNR gate and block low-quality signal."
+                )
+                lower_arr = out["lower_ci"].to_numpy(dtype=float)
+                upper_arr = out["upper_ci"].to_numpy(dtype=float)
+                price_arr = forecast.to_numpy(dtype=float)
+                inflated_lower = price_arr - (price_arr - lower_arr) * 1.5
+                inflated_upper = price_arr + (upper_arr - price_arr) * 1.5
+                out["lower_ci"] = pd.Series(
+                    np.maximum(0.0, inflated_lower),
+                    index=forecast.index[: len(inflated_lower)],
+                    name="garch_lower_ci",
+                )
+                out["upper_ci"] = pd.Series(
+                    inflated_upper,
+                    index=forecast.index[: len(inflated_upper)],
+                    name="garch_upper_ci",
+                )
+            out["convergence_ok"] = bool(payload.get("convergence_ok", True))
+
         return out
 
     def get_component_summaries(self) -> Dict[str, Any]:

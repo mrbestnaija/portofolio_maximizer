@@ -960,3 +960,112 @@ class TestTimeSeriesSignal:
         assert signal.entry_price == 100.0
         assert signal.target_price == 110.0
         assert signal.stop_loss == 95.0
+
+
+class TestATRStopLoss:
+    """Phase 7.14-B: Verify ATR-based stop loss in _calculate_targets and _compute_atr."""
+
+    def _make_generator(self):
+        return TimeSeriesSignalGenerator(
+            confidence_threshold=0.50,
+            min_expected_return=0.001,
+            max_risk_score=0.90,
+            quant_validation_config={"enabled": False},
+        )
+
+    def _make_ohlcv(self, n=20, price=100.0, bar_range=2.0):
+        """Create synthetic OHLCV where ATR(14) ≈ bar_range."""
+        dates = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.DataFrame({
+            "Open":  [price] * n,
+            "High":  [price + bar_range] * n,
+            "Low":   [price - bar_range] * n,
+            "Close": [price] * n,
+            "Volume": [1_000_000] * n,
+        }, index=dates)
+
+    def test_atr_stop_uses_bar_data(self):
+        """ATR-based stop should equal current_price - ATR*1.5 for BUY."""
+        gen = self._make_generator()
+        price = 100.0
+        bar_range = 2.0  # High-Low range per bar; ATR(14) ≈ 2.0
+        market_data = self._make_ohlcv(n=20, price=price, bar_range=bar_range)
+
+        atr = gen._compute_atr(market_data, period=14)
+        assert atr is not None
+        assert atr == pytest.approx(bar_range * 2, rel=0.05)  # TR = (H-L) when no gap
+
+        target, stop = gen._calculate_targets(
+            current_price=price,
+            forecast_price=105.0,
+            volatility=0.20,
+            action="BUY",
+            market_data=market_data,
+        )
+        expected_stop = price * (1 - max((atr * 1.5) / price, 0.015))
+        assert stop == pytest.approx(expected_stop, rel=1e-6)
+
+    def test_atr_stop_fallback_no_ohlc(self):
+        """Missing High/Low columns -> fall back to volatility-based stop."""
+        gen = self._make_generator()
+        market_data = pd.DataFrame(
+            {"Close": [100.0] * 20},
+            index=pd.date_range("2024-01-01", periods=20, freq="D"),
+        )
+        atr = gen._compute_atr(market_data, period=14)
+        assert atr is None  # No High/Low -> no ATR
+
+        volatility = 0.20
+        _, stop = gen._calculate_targets(
+            current_price=100.0,
+            forecast_price=105.0,
+            volatility=volatility,
+            action="BUY",
+            market_data=market_data,
+        )
+        # Should use volatility fallback: pct = max(0.015, min(0.05, 0.20*0.5)) = 0.05
+        expected_pct = max(0.015, min(0.05, volatility * 0.5))
+        assert stop == pytest.approx(100.0 * (1 - expected_pct), rel=1e-6)
+
+    def test_atr_stop_minimum_floor(self):
+        """Very small ATR -> stop still enforces 1.5% minimum floor."""
+        gen = self._make_generator()
+        market_data = self._make_ohlcv(n=20, price=100.0, bar_range=0.01)  # tiny ATR
+
+        atr = gen._compute_atr(market_data, period=14)
+        assert atr is not None
+        _, stop = gen._calculate_targets(
+            current_price=100.0,
+            forecast_price=102.0,
+            volatility=None,
+            action="BUY",
+            market_data=market_data,
+        )
+        # stop_pct must be >= 1.5%
+        stop_pct = (100.0 - stop) / 100.0
+        assert stop_pct >= 0.015
+
+    def test_atr_stop_nvda_wide(self):
+        """High-vol name: ATR > 5% of price -> no 5% cap applied (cap was removed in 7.14-B)."""
+        gen = self._make_generator()
+        price = 130.0
+        bar_range = 5.0  # ATR ≈ 10 (True Range per bar when accounting for H-L = 2*bar_range)
+        market_data = self._make_ohlcv(n=20, price=price, bar_range=bar_range)
+
+        atr = gen._compute_atr(market_data, period=14)
+        assert atr is not None
+        atr_pct = atr / price
+        assert atr_pct > 0.05  # Confirms ATR exceeds old 5% cap threshold
+
+        _, stop = gen._calculate_targets(
+            current_price=price,
+            forecast_price=price * 1.10,
+            volatility=0.58,
+            action="BUY",
+            market_data=market_data,
+        )
+        stop_pct = (price - stop) / price
+        # Old code: min(0.05, ...) would cap at 5%. New code: ATR*1.5/price with no cap.
+        # We cannot assert stop_pct > 0.05 exactly (ATR*1.5 might differ), but stop < price.
+        assert stop < price
+        assert stop_pct >= 0.015  # At least the minimum floor

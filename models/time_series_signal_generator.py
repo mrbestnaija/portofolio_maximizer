@@ -525,12 +525,13 @@ class TimeSeriesSignalGenerator:
                 max_risk_score=max_risk_score,
             )
 
-            # Calculate target and stop loss
+            # Calculate target and stop loss (market_data enables ATR-based stops)
             target_price, stop_loss = self._calculate_targets(
                 current_price,
                 forecast_value,
                 volatility,
-                action
+                action,
+                market_data=market_data,
             )
 
             # Build reasoning
@@ -1325,13 +1326,49 @@ class TimeSeriesSignalGenerator:
             return 'SELL'
         return 'HOLD'
 
+    def _compute_atr(self, market_data: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
+        """Compute Average True Range (ATR) from OHLC bar data.
+
+        ATR measures market-observable noise using actual High-Low ranges, unlike
+        model-implied volatility. Returns None when OHLC columns are unavailable
+        or there is insufficient history.
+
+        Args:
+            market_data: DataFrame with High, Low, Close columns (date-indexed)
+            period: Lookback period in bars (default 14)
+
+        Returns:
+            ATR value in price units, or None if unavailable
+        """
+        if market_data is None or len(market_data) < period + 1:
+            return None
+        required = {'High', 'Low', 'Close'}
+        if not required.issubset(market_data.columns):
+            return None
+        high = market_data['High']
+        low = market_data['Low']
+        close = market_data['Close']
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1
+        ).max(axis=1)
+        atr = float(tr.iloc[-period:].mean())
+        return atr if atr > 0 else None
+
     def _calculate_targets(self,
                           current_price: float,
                           forecast_price: float,
                           volatility: Optional[float],
-                          action: str) -> tuple[Optional[float], Optional[float]]:
+                          action: str,
+                          market_data: Optional[pd.DataFrame] = None) -> tuple[Optional[float], Optional[float]]:
         """
         Calculate target price and stop loss.
+
+        Stop loss uses ATR(14) when OHLC data is available (Phase 7.14-B). ATR-based
+        stops adapt to market-observable noise rather than model-implied volatility, and
+        carry no upper percentage cap -- intentional for high-volatility names (NVDA).
+        Falls back to volatility-scaled stop when bar data is unavailable.
 
         Returns:
             (target_price, stop_loss)
@@ -1339,12 +1376,18 @@ class TimeSeriesSignalGenerator:
         if action == 'HOLD':
             return None, None
 
-        # Target: forecast price (or 2:1 reward/risk ratio)
+        # Target: forecast price
         target_price = forecast_price
 
-        # Stop loss: based on volatility or 2% default
-        if volatility is not None:
-            stop_loss_pct = max(0.015, min(0.05, volatility * 0.5))  # 1.5% to 5%
+        # Stop loss: ATR-based (preferred) or volatility-based fallback
+        atr = self._compute_atr(market_data)
+        if atr is not None and current_price > 0:
+            # ATR * 1.5 positions stop below 1.5 average noise ranges.
+            # No upper cap -- high-vol names need wider stops to avoid noise fires.
+            stop_loss_pct = max((atr * 1.5) / current_price, 0.015)
+        elif volatility is not None:
+            # Fallback: model-implied vol, 1.5%-5% clamp
+            stop_loss_pct = max(0.015, min(0.05, volatility * 0.5))
         else:
             stop_loss_pct = 0.02  # 2% default
 

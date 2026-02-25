@@ -8,15 +8,10 @@ forecaster_monitoring:
     min_pass_rate: 0.05
 
     # Global ceilings used by check_quant_validation_health.py
-    # to gate CI/brutal runs. With these values, a global
-    # FAIL fraction above 90% or more than half of entries
-    # having negative expected_profit will trip the hard gate
+    # to gate CI/brutal runs. A global FAIL fraction above 85% or more than
+    # half of entries having negative expected_profit will trip the hard gate
     # and mark the run RED.
-    # Phase 7.9: raised from 0.90 to 0.95.  Proof-mode tight thresholds
-    # (confidence>=0.65, min_return>=0.50%) cause most quant entries to FAIL.
-    # This is expected behavior -- proof-mode prioritizes round-trip forcing
-    # over signal quality metrics.
-    max_fail_fraction: 0.95
+    max_fail_fraction: 0.85
     max_negative_expected_profit_fraction: 0.5
 
     # Softer global warning band used to classify runs as
@@ -78,7 +73,8 @@ forecaster_monitoring:
 
     # Minimum fraction of effective audits that must show lift; otherwise we
     # recommend disbanding the ensemble as default source of truth.
-    min_lift_fraction: 0.10
+    # 25% requires meaningful evidence of ensemble benefit over best-single.
+    min_lift_fraction: 0.25
 
     # Preselection hard gate (forecast-time): block ensemble from being the
     # default forecast source when recent ensemble/best-single RMSE ratio is

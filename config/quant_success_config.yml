@@ -35,7 +35,7 @@ quant_validation:
     min_expected_profit_pct: 0.002    # Phase 7.10b: Relative floor (0.2% of capital_base=$50); PASS if either met
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
-    min_directional_accuracy: 0.40    # Phase 7.10: Lowered from 0.50; all models are below coin-flip (avg 45%)
+    min_directional_accuracy: 0.45    # Requires material directional edge above coin-flip floor
     require_significance: false
     min_information_ratio: 0.0
 
@@ -58,7 +58,7 @@ quant_validation:
     win_rate: 0.04                   # Raw hit-rate (intentionally lowest weight)
 
   calibration:
-    db_path: null                    # Defaults to PORTFOLIO_DB_PATH or data/portfolio_maximizer.db
+    db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query
 
   # Optional per-ticker overrides for success criteria; used by
   # models/time_series_signal_generator.TimeSeriesSignalGenerator when
