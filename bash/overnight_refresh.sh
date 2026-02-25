@@ -54,20 +54,25 @@ run_synthetic_auto_trader() {
 }
 
 run_platt_bootstrap_cycle() {
-    # Platt bootstrap: 8 cycles + proof-mode so positions open (cycle 1) and
-    # close (cycles 5+) within the same run, producing is_close=1 rows with
-    # ts_* signal IDs that update_platt_outcomes.py can match to JSONL entries.
-    # Root cause of 0 Platt pairs: --cycles 1 never reaches max_holding ->
-    # no closed trades in the ts_* namespace.
+    # Platt bootstrap requires CLOSED ts_* trades for update_platt_outcomes.py.
+    #
+    # Adversarial finding (2026-02-25): fixed --as-of-date with --cycles 8 and
+    # default --bar-aware produces cycle-1 executions then SKIPPED_SAME_BAR for
+    # cycles 2..8, so bars do not progress and time exits never trigger.
+    #
+    # Fix: run 1 cycle per historical date and carry state across dates
+    # (resume after first window). This advances bar timestamps across runs and
+    # allows proof-mode holding exits to realize ts_* closes.
     local as_of_date="${1:-}"
+    local resume_flag="${2:---resume}"
     local -a cmd=(
         "$PYTHON" scripts/run_auto_trader.py
         --tickers "$ALL_TICKERS"
-        --cycles 8
+        --cycles 1
         --execution-mode synthetic
-        --no-resume
         --sleep-seconds 0
         --proof-mode
+        "$resume_flag"
     )
     if [[ -n "$as_of_date" ]]; then
         cmd+=(--as-of-date "$as_of_date")
@@ -162,9 +167,16 @@ reconcile_platt_outcomes "post-auto-trader reconciliation"
 # ---------------------------------------------------------------------------
 if [[ "${PLATT_BOOTSTRAP:-0}" == "1" ]]; then
     log_section "STEP 2.6/3: Platt bootstrap -- seeding pairs from 2021-2024 historical data"
+    BOOTSTRAP_FIRST=1
     for AS_OF in 2021-01-01 2021-07-01 2022-01-01 2022-07-01 2023-01-01 2023-07-01 2024-01-01 2024-07-01; do
         log "--- bootstrap as-of $AS_OF"
-        if run_platt_bootstrap_cycle "$AS_OF"; then
+        if [[ "$BOOTSTRAP_FIRST" -eq 1 ]]; then
+            resume_flag="--no-resume"
+            BOOTSTRAP_FIRST=0
+        else
+            resume_flag="--resume"
+        fi
+        if run_platt_bootstrap_cycle "$AS_OF" "$resume_flag"; then
             log "[PASS] bootstrap as-of $AS_OF"
         else
             log "[WARN] bootstrap as-of $AS_OF returned non-zero"
