@@ -38,6 +38,7 @@ run_best_effort() {
 
 run_synthetic_auto_trader() {
     local as_of_date="${1:-}"
+    # Production step 2.5: 1 cycle, no proof-mode -> live-comparable behavior.
     local -a cmd=(
         "$PYTHON" scripts/run_auto_trader.py
         --tickers "$ALL_TICKERS"
@@ -45,6 +46,28 @@ run_synthetic_auto_trader() {
         --execution-mode synthetic
         --no-resume
         --sleep-seconds 0
+    )
+    if [[ -n "$as_of_date" ]]; then
+        cmd+=(--as-of-date "$as_of_date")
+    fi
+    "${cmd[@]}" >> "$LOG" 2>&1
+}
+
+run_platt_bootstrap_cycle() {
+    # Platt bootstrap: 8 cycles + proof-mode so positions open (cycle 1) and
+    # close (cycles 5+) within the same run, producing is_close=1 rows with
+    # ts_* signal IDs that update_platt_outcomes.py can match to JSONL entries.
+    # Root cause of 0 Platt pairs: --cycles 1 never reaches max_holding ->
+    # no closed trades in the ts_* namespace.
+    local as_of_date="${1:-}"
+    local -a cmd=(
+        "$PYTHON" scripts/run_auto_trader.py
+        --tickers "$ALL_TICKERS"
+        --cycles 8
+        --execution-mode synthetic
+        --no-resume
+        --sleep-seconds 0
+        --proof-mode
     )
     if [[ -n "$as_of_date" ]]; then
         cmd+=(--as-of-date "$as_of_date")
@@ -141,7 +164,7 @@ if [[ "${PLATT_BOOTSTRAP:-0}" == "1" ]]; then
     log_section "STEP 2.6/3: Platt bootstrap -- seeding pairs from 2021-2024 historical data"
     for AS_OF in 2021-01-01 2021-07-01 2022-01-01 2022-07-01 2023-01-01 2023-07-01 2024-01-01 2024-07-01; do
         log "--- bootstrap as-of $AS_OF"
-        if run_synthetic_auto_trader "$AS_OF"; then
+        if run_platt_bootstrap_cycle "$AS_OF"; then
             log "[PASS] bootstrap as-of $AS_OF"
         else
             log "[WARN] bootstrap as-of $AS_OF returned non-zero"
@@ -149,6 +172,44 @@ if [[ "${PLATT_BOOTSTRAP:-0}" == "1" ]]; then
         reconcile_platt_outcomes "bootstrap as-of $AS_OF"
     done
     log "[DONE] Platt bootstrap complete"
+fi
+
+# ---------------------------------------------------------------------------
+# STEP 2.7: Audit gate bootstrap -- seed 20 unique forecast audit windows
+# ---------------------------------------------------------------------------
+# Problem: check_forecast_audits.py deduplicates by (dataset.start, dataset.end,
+# dataset.length, forecast_horizon). The fixed overnight date range always yields
+# ~11 unique windows (< holding_period_audits=20). This step generates 20 unique
+# dataset windows so the lift gate exits INCONCLUSIVE and makes a definitive verdict.
+# Set AUDIT_GATE_BOOTSTRAP=1 to activate (off by default; run once after config changes).
+# ---------------------------------------------------------------------------
+if [[ "${AUDIT_GATE_BOOTSTRAP:-0}" == "1" ]]; then
+    log_section "STEP 2.7/3: Audit gate bootstrap (20 AS_OF windows for lift gate)"
+    AUDIT_WIN_PASS=0
+    AUDIT_WIN_FAIL=0
+    for AS_OF in \
+        2022-01-03 2022-04-04 2022-07-05 2022-10-03 \
+        2023-01-03 2023-04-03 2023-07-03 2023-10-02 \
+        2024-01-02 2024-04-01 2024-07-01 2024-10-01 \
+        2025-01-02 2025-04-01 2025-07-01 2025-10-01 \
+        2026-01-02 2026-01-15 2026-02-02 2026-02-16; do
+        log "--- audit window as-of $AS_OF"
+        if "$PYTHON" scripts/run_auto_trader.py \
+                --tickers "$ALL_TICKERS" \
+                --cycles 1 \
+                --execution-mode synthetic \
+                --as-of-date "$AS_OF" \
+                --no-resume \
+                --sleep-seconds 0 >> "$LOG" 2>&1; then
+            log "[PASS] audit window as-of $AS_OF"
+            AUDIT_WIN_PASS=$((AUDIT_WIN_PASS + 1))
+        else
+            log "[WARN] audit window as-of $AS_OF returned non-zero"
+            AUDIT_WIN_FAIL=$((AUDIT_WIN_FAIL + 1))
+        fi
+    done
+    log "Audit window results: ${AUDIT_WIN_PASS} passed / ${AUDIT_WIN_FAIL} failed"
+    log "[DONE] Audit gate bootstrap complete"
 fi
 
 # ---------------------------------------------------------------------------
