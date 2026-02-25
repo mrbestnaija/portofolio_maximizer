@@ -4,11 +4,13 @@
 **Last full-suite**: 2026-01-07
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-01-29
+**Document updated**: 2026-02-25
 
 **Metric definitions (canonical)**: `Documentation/METRICS_AND_EVALUATION.md` (implementations in `etl/database_manager.py`, `etl/portfolio_math.py`, `etl/statistical_tests.py`).
 
 **Sequenced optimization roadmap (2026-01)**: `Documentation/PROJECT_WIDE_OPTIMIZATION_ROADMAP.md` (bar-aware trading loop, horizon-consistent TS signals, execution cost alignment, run-local reporting).
+
+**Signal quality + enrichment plan (2026-02-25)**: `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md` (data-source gaps, feature degradation paths, audit-window diversification, and mandatory unit/regression test gate).
 
 ## Phase 7.11: Directional Accuracy Enhancement Roadmap — PLANNED
 
@@ -75,7 +77,7 @@ Do not conflate these.
 
 - Code compiles cleanly (`python -m compileall` on core packages)
 - Full pytest suite passes: **529 tests** (last full-suite run 2026-01-07; still green)
-- Brutal harness completes end-to-end with quant-validation health GREEN (see `logs/brutal/results_20260103_220403/reports/final_report.md`)
+- Historical brutal harness validation completed with quant-validation health GREEN (artifacts pruned from git during 2026-02-25 hygiene cleanup; regenerate locally when needed)
 - LLM monitoring script no longer errors on missing `llm_db_manager` (see `scripts/monitor_llm_system.py`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
 - Auto-trader loop is bar-aware (`scripts/run_auto_trader.py` skips repeated cycles on the same bar; optional persisted bar-state)
@@ -121,21 +123,23 @@ Do not conflate these.
   tests/etl/test_data_source_manager_chunking.py
 ```
 
-### Brutal Run Snapshot (2026-01-03)
+### Production Gate Snapshot (2026-02-25)
 
-Artifact bundle:
-- `logs/brutal/results_20260103_220403/reports/final_report.md`
-- `logs/brutal/results_20260103_220403/test.log`
-- `logs/brutal/results_20260103_220403/logs/pipeline_execution.log`
+Runtime evidence commands:
+- `python scripts/project_runtime_status.py --pretty`
+- `python scripts/quant_validation_headroom.py --json`
 
-Headline outcomes:
-- 42/42 stages PASSED (pass rate 100%)
-- Quant validation health (global): GREEN
-- Pipeline execution ran in SYNTHETIC mode (by design for brutal validation)
+Observed status:
+- Runtime status: `DEGRADED` (`production_gate` failed; `pnl_integrity` and `error_monitor` passed)
+- Lift gate: `INCONCLUSIVE` with 11 unique effective audits; holding-period requirement is 20
+- Profitability proof gate: `FAIL` because `scripts/validate_profitability_proof.py` raised `ModuleNotFoundError: integrity.sqlite_guardrails` when run as a script
+- Quant validation health: `GREEN` (`0/86` failures; 95.0 percentage-point headroom to RED gate)
 
-Notable warnings (do not fail the suite, but matter for production readiness):
-- `logs/brutal/results_20260103_220403/logs/monitoring_run.log`: monitoring summary reported `overall_status=DEGRADED` (latency above 5s benchmark, and signal-backtest inputs missing)
-- `logs/brutal/results_20260103_220403/logs/profitability_validation.log`: profitability status WARNING (expected-return below threshold; no realised PnL in the test DB)
+### Historical Artifact Note (2026-02-25 Hygiene Cleanup)
+
+- Legacy run artifacts under `logs/brutal/` and `logs/run_audit/*.jsonl` were removed from git tracking to reduce churn.
+- Keep summary findings in documentation; regenerate bulky runtime artifacts locally as needed.
+- If brutal evidence must be refreshed, run `bash/comprehensive_brutal_test.sh` and archive outputs outside git.
 
 ### Operational Notes (2026-01-04)
 
@@ -184,13 +188,14 @@ Report artifact: `reports/mvs_paper_window_20251226_183023.md`
 
 ## Current Status (Reality-Based)
 
-- 🟢 **Engineering / Integration**: Unblocked (core pipeline pieces compile and tests above pass)
-- 🟡 **Profitability / Quant Health**: Full-history MVS is PASS, but recent windows can still FAIL due to low trade count and weak edge; paper/live still needs sustained evidence (and quant-validation health GREEN/YELLOW)
-- ⚪ **LLM (Ollama) Live Inference**: Optional; integration tests skip unless Ollama is running and `RUN_OLLAMA_TESTS=1`
+- Engineering/Integration: largely unblocked, but runtime is currently `DEGRADED` due to `production_gate` failure.
+- Profitability/Quant Health: quant-validation health is GREEN; proof runway is not ready (`0/30` closed trades and `0/21` trading days).
+- LLM (Ollama) live inference: optional; integration tests skip unless Ollama is running and `RUN_OLLAMA_TESTS=1`.
 
 ## Pending Tasks (Highest Value Next)
 
-1. Drive **recent-window MVS PASS** on actual paper/live runs (≥30 realised trades, positive PnL, WR/PF thresholds) using `bash/run_end_to_end.sh` / `scripts/run_auto_trader.py`.
-2. Calibrate `signal_routing.time_series.cost_model.default_roundtrip_cost_bps` using the persisted mid-slippage telemetry (`scripts/estimate_transaction_costs.py` → `scripts/generate_config_proposals.py` → `scripts/generate_signal_routing_overrides.py`).
-3. Use `backtesting/candidate_simulator.py` walk-forward harness to validate thresholds/cost-model choices without lookahead before promoting configs.
-4. Archive fresh brutal/end-to-end artifacts under `logs/`/`reports/` and refresh quant-health classification based on the recent window (not full history).
+1. Fix `scripts/validate_profitability_proof.py` import-path collision (`integrity.sqlite_guardrails`) so profitability proof gate can execute.
+2. Increase unique audit windows using AS-OF diversification until lift holding-period evidence reaches requirement (`>=20` effective audits).
+3. Implement Workstream B telemetry from `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md` (cross-sectional fallback counters + seasonal availability rate).
+4. Restore OpenClaw WhatsApp listener readiness for reliable gate notifications.
+5. Continue recent-window MVS accumulation (`>=30` realized trades, positive PnL, WR/PF thresholds) on paper/live-like runs.

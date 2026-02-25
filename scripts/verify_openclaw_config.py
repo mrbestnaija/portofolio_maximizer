@@ -23,6 +23,13 @@ OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
 RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
 WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
 FALSEY_VALUES = {"0", "false", "no", "off"}
+VALID_OLLAMA_APIS = {
+    "ollama",
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+}
 
 
 def _env_enabled(raw: str | None, *, default: bool) -> bool:
@@ -82,11 +89,16 @@ def main() -> int:
             ok.append(f"ollama.baseUrl = {ollama['baseUrl']}")
 
         api = ollama.get("api", "")
-        valid_apis = {"openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"}
-        if api not in valid_apis:
-            issues.append(f"[ERROR] ollama.api={api!r} not in {valid_apis}")
+        if api not in VALID_OLLAMA_APIS:
+            issues.append(f"[ERROR] ollama.api={api!r} not in {VALID_OLLAMA_APIS}")
         else:
             ok.append(f"ollama.api = {api}")
+            base_url = str(ollama.get("baseUrl", "")).strip().lower()
+            if api == "ollama" and base_url.endswith("/v1"):
+                warnings.append(
+                    "ollama.api='ollama' with baseUrl ending in '/v1' looks like an OpenAI-compatible endpoint; "
+                    "prefer baseUrl without '/v1' for native Ollama API mode."
+                )
 
         models = ollama.get("models", [])
         if not models:

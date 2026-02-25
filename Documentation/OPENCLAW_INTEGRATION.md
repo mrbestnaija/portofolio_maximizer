@@ -254,6 +254,24 @@ If `openclaw channels status` shows WhatsApp `stopped/disconnected` with an "Ope
 
 - `openclaw channels login --channel whatsapp --verbose`
 
+### One-Command Fresh Relink (Recommended)
+
+When WhatsApp repeatedly fails to link (for example with `status=405 Method Not Allowed`), use the PMX helper to rotate auth storage and force a fresh pairing token:
+
+- `python scripts/openclaw_whatsapp_relink.py --fresh-auth`
+
+This helper will:
+- log out the selected WhatsApp account
+- set a timestamped `authDir` (preserving old auth data)
+- probe critical URLs (`http://127.0.0.1:18789/channels`, `https://openclaw.ai/`) before login
+- auto-apply an idempotent OpenClaw WhatsApp runtime hotfix (with `.pmxbak` backups) for known Baileys WA-version `405` handshake failures
+- restart the gateway
+- run interactive `openclaw channels login --channel whatsapp --account default --verbose`
+- verify post-login status with `--probe`
+
+If you want to force the runtime hotfix even when no prior marker was detected:
+- `python scripts/openclaw_whatsapp_relink.py --fresh-auth --force-wa-version-hotfix`
+
 ## Tool-Call Failure Hardening (PowerShell + Edit Schema)
 
 When gateway logs show patterns like:

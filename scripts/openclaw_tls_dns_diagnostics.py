@@ -191,6 +191,10 @@ def _recommendations(
     if not bool(dns_result.get("ok")):
         out.append(f"DNS failed for {host}. Verify resolver, firewall, and outbound network policy.")
         out.append("Run `nslookup web.whatsapp.com` and compare with this host's DNS settings.")
+        if str(host).strip().lower() == "raw.githubusercontent.com":
+            out.append(
+                "raw.githubusercontent.com is unreachable; Baileys version discovery can fail and trigger WhatsApp 405 handshakes."
+            )
     if bool(tls_result.get("verify_error")):
         out.append(
             "TLS certificate verification failed. Check corporate TLS interception and configure trust chain (for Node: NODE_EXTRA_CA_CERTS)."
@@ -198,6 +202,10 @@ def _recommendations(
     tls_error = str(tls_result.get("error") or "").lower()
     if "timed out" in tls_error:
         out.append("TLS handshake timed out. Validate outbound 443 access and proxy behavior.")
+        if str(host).strip().lower() == "raw.githubusercontent.com":
+            out.append(
+                "If this host remains blocked, use `python scripts/openclaw_whatsapp_relink.py --fresh-auth --force-wa-version-hotfix`."
+            )
     if proxy_env:
         out.append("Proxy environment variables are set. Ensure they allow websocket/TLS traffic to WhatsApp hosts.")
     if not out:
@@ -301,7 +309,7 @@ def main(argv: list[str]) -> int:
 
     hosts = [str(x).strip() for x in (args.hosts or []) if str(x).strip()]
     if not hosts:
-        hosts = ["web.whatsapp.com", "mmg.whatsapp.net"]
+        hosts = ["web.whatsapp.com", "mmg.whatsapp.net", "raw.githubusercontent.com"]
 
     family = _dns_family(args.family)
     proxy_environment = _proxy_env()

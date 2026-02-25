@@ -147,6 +147,8 @@ tests/visualizations/
 tmp/
 temp/
 .tmp/
+compile_out.txt
+HEARTBEAT.md
 
 # Build files
 build/
@@ -187,12 +189,18 @@ settings.local.json
 
 # Logs and logging
 logs/*.log
+logs/cron/*.out
 logs/events/
 logs/events/*
 logging/
 logs/archive/*
 logs/automation/*
 logs/signals/*
+logs/run_audit/*.jsonl
+logs/run_audit/*_summary.txt
+logs/run_audit/MORNING_CHECK_*.md
+logs/security_audit.jsonl
+logs/phase7.7/*.log
 logs/*.pid
 logs/**/*.pid
 logs/brutal/
