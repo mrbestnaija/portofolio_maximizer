@@ -39,7 +39,8 @@ When multiple developer-agents or humans are working in the same workspace:
    - Leave unrelated in-progress files untouched unless explicitly requested.
 4. **Verify cross-agent compatibility before commit**:
    - Run compile/smoke checks for touched entry points.
-   - Run the fast regression lane (`pytest -m "not gpu and not slow"`) when feasible.
+   - For every new implementation, run at least one targeted unit test for touched modules and run the fast regression lane (`pytest -m "not gpu and not slow"`).
+   - Treat test execution as required delivery evidence (not optional); if a lane cannot run, report why and list exact blockers.
 5. **Report integration evidence**:
    - Summarize what was verified, what was intentionally left untouched, and any residual risks.
    - Never claim "done" without command-level verification evidence.
@@ -159,3 +160,4 @@ Start conservative and lift limits only after you are satisfied with behavior:
 - `Documentation/API_KEYS_SECURITY.md`
 - `Documentation/OPENCLAW_INTEGRATION.md`
 - `Documentation/AGENT_INSTRUCTION.md`
+- `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md`

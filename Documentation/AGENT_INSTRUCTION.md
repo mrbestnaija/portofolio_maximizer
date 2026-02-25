@@ -38,7 +38,7 @@ When multiple developer-agents or humans are active in the same repository:
 - Inspect existing diffs before editing shared files (`git diff -- <file>`), and complement rather than overwrite.
 - If ownership/intent is unclear for a shared file, stop and request direction before editing.
 - Keep commits scoped to the task requested; do not bundle unrelated concurrent changes.
-- Before finalizing, run compatibility checks (compile/smoke + fast regression lane where feasible).
+- Before finalizing, run compatibility checks (compile/smoke + targeted unit tests + fast regression lane).
 - Final delivery must explicitly list:
   - files changed for the task,
   - files intentionally left untouched due to parallel ownership,
@@ -55,7 +55,7 @@ When multiple developer-agents or humans are active in the same repository:
 7. **Cost model alignment**: Update routing logic and the `models/time_series_signal_generator.py` cost model for realistic roundtrip costs (slippage, fees) and adjust slippage handling in `execution/paper_trading_engine.py`. Test trades with/without the updated model to see net profit impacts.
 8. **Execution simulation**: Add realistic LOB/depth-profile fallbacks for illiquid assets and refine slippage/execution cost calculations; keep paper-trading simulation consistent with the updated cost model and simulate illiquid names to measure slippage differences.
 9. **Reporting fixes**: Ensure `win_rate` and `profit_factor` reflect only trades from the live run (no historical bleed). Track and store real-time forecast regression metrics to monitor forecaster health.
-10. **Continuous testing & validation**: Add/refresh unit tests for confidence, horizon alignment, diagnostics scoring, and cost model; run iterative backtests per phase and maintain live monitoring for trades, confidence, execution costs, and portfolio performance.
+10. **Continuous testing & validation**: Add/refresh unit tests for confidence, horizon alignment, diagnostics scoring, and cost model; run iterative backtests per phase and maintain live monitoring for trades, confidence, execution costs, and portfolio performance. For every new implementation, run at least one targeted unit test and the fast regression lane before marking work complete.
 11. **Final optimization**: After fixes validate in backtests, enable the barbell strategy (if applicable) in simulated/live-like mode and monitor for discrepancies during simulated capital runs.
 12. **Documentation & reporting**: Document changes to horizons, execution modeling, diagnostics scoring, and cost handling; generate performance reports per phase vs baselines and update configs (`config/barbell.yml`, `execution/execution_config.yml`, etc.) to match new behaviour.
 13. **Final iteration & ongoing monitoring**: Conduct a full review for stability/performance and continue iterative updates based on live monitoring, backtesting, and user feedback.
@@ -63,6 +63,7 @@ When multiple developer-agents or humans are active in the same repository:
 ## Optimization & Hardening Backlog
 - Use `Documentation/OPTIMIZATION_OPTIONS.md` as the canonical backlog for performance, scalability, caching, architecture, reliability, observability, security, and resource optimizations (vectorization gaps, cache invalidation, config consolidation, circuit breakers, structured logging, secrets rotation).
 - Pull items only with profitability/stability justification and in alignment with the Core Directive and phase gates; prefer configuration-driven, incremental changes with targeted backtests over large refactors.
+- Use `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md` as the canonical plan for feature/data enhancement and enrichment work (data-source coverage, cross-sectional feature health, calibration readiness, audit-window diversification).
 
 ## Approved Time-Series Stack (Tier-1 default)
 - Canonical reference: `Documentation/QUANT_TIME_SERIES_STACK.md` (pin in every AI companion's context). Consider Tier-1 the only sanctioned dependency set until profitability + GPU budget gates unlock higher tiers.
@@ -192,6 +193,7 @@ REQUIRED FOR EVERY CODE SUGGESTION:
 - [ ] **Performance metrics tracked?** Execution time, memory usage, accuracy
 - [ ] **Documentation minimal but complete?** What it does, why it exists, how to test
 - [ ] **Entry points compile?** Run targeted `python -m compileall` / smoke CLI to catch indentation or syntax regressions
+- [ ] **Unit + regression gates executed?** Run targeted unit tests for touched modules and run `pytest -m "not gpu and not slow"`; record command results in delivery notes
 - [ ] **Orchestrators decomposed?** Break pipelines >200 lines into helpers; keep CLI functions as thin coordinators
 
 ### Extractor Safety Requirements
@@ -345,7 +347,7 @@ This checklist is designed to prevent the architectural over-engineering and ana
 #### Phase 1-3: Core Testing Only
 **Maximum 200 lines of test code** - Don't spend more time testing than developing
 
-**Standing instruction**: Always build a unit test for every critical implementation path before shipping changes.
+**Standing instruction**: Always build a unit test for every critical implementation path before shipping changes, and always execute the fast regression lane before final delivery.
 
 ```python
 # test_core_functions.py - Essential tests only
