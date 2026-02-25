@@ -11,6 +11,7 @@ Phase 7.10b improvements:
 from __future__ import annotations
 
 import logging
+import warnings as _warnings
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -76,6 +77,7 @@ class GARCHForecaster:
         self._scale_factor = 1.0  # Track scaling factor for rescaling forecasts
         self._fallback_state: Optional[Dict[str, Any]] = None
         self._differenced: bool = False  # Track if series was differenced for stationarity
+        self._convergence_ok: bool = True  # Phase 7.14-C: False when optimizer did not converge
 
     def fit(self, returns: pd.Series) -> "GARCHForecaster":
         if not getattr(self, "auto_select", True):
@@ -169,7 +171,30 @@ class GARCHForecaster:
                             dist=dist_try,
                             rescale=False,  # We handle scaling manually
                         )
-                        fitted = model.fit(disp="off")
+                        # Phase 7.14-C: Detect convergence failure via warning capture.
+                        # scipy optimizer emits RuntimeWarning containing "convergence" or
+                        # "code 9" when SLSQP hits the iteration limit.
+                        _convergence_failed = False
+                        with _warnings.catch_warnings(record=True) as _caught:
+                            _warnings.simplefilter("always")
+                            fitted = model.fit(disp="off")
+                            _convergence_failed = any(
+                                issubclass(w.category, (RuntimeWarning, UserWarning))
+                                and (
+                                    "convergence" in str(w.message).lower()
+                                    or "code 9" in str(w.message).lower()
+                                )
+                                for w in _caught
+                            )
+                        if not _convergence_failed and hasattr(fitted, "convergence_flag"):
+                            _convergence_failed = fitted.convergence_flag != 0
+                        if _convergence_failed:
+                            logger.warning(
+                                "GARCH(%s,%s, %s) optimizer did not converge; "
+                                "will trigger GJR fallback.",
+                                p_candidate, q_candidate, dist_try,
+                            )
+                            self._convergence_ok = False
                         aic = float(getattr(fitted, "aic", np.inf))
                         if np.isfinite(aic) and aic < best_aic:
                             best_aic = aic
@@ -191,10 +216,13 @@ class GARCHForecaster:
             return self._fit_ewma(returns_clean)
         # Phase 7.10b: IGARCH / unit-root guard -- if alpha+beta >= 0.97 the
         # variance process is near-non-stationary and forecasts diverge.
+        # Phase 7.14-C: Also trigger GJR fallback when the optimizer did not converge,
+        # because unconverged fits produce unreliable parameter estimates and CIs.
         # Try GJR-GARCH (asymmetric volatility; better for equity fat tails) first;
         # only fall back to EWMA if GJR also degenerates.
         persistence = self._garch_persistence()
-        if persistence is not None and persistence >= 0.97:
+        convergence_failed = not getattr(self, "_convergence_ok", True)
+        if (persistence is not None and persistence >= 0.97) or convergence_failed:
             igarch_fallback = str(getattr(self, "igarch_fallback", "gjr")).lower()
             if igarch_fallback == "gjr" and ARCH_AVAILABLE:
                 logger.warning(
@@ -322,6 +350,7 @@ class GARCHForecaster:
                 "dist": self.dist,
                 "aic": None,
                 "bic": None,
+                "convergence_ok": True,  # EWMA/GJR fallback is always "converged"
             }
             return self.forecast_results
 
@@ -349,6 +378,9 @@ class GARCHForecaster:
             "dist": self.dist,
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
+            # Phase 7.14-C: Propagate convergence status so _enrich_garch_forecast
+            # can inflate CI width when the optimizer did not converge.
+            "convergence_ok": bool(getattr(self, "_convergence_ok", True)),
         }
         return self.forecast_results
 

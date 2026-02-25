@@ -89,7 +89,11 @@ INTRADAY_CYCLES="${INTRADAY_CYCLES:-3}"
 GPU_POLL_SECONDS="${GPU_POLL_SECONDS:-15}"
 WAIT_BETWEEN_RUNS_SECONDS="${WAIT_BETWEEN_RUNS_SECONDS:-0}"
 AUTO_WAIT_FOR_NEW_BARS="${AUTO_WAIT_FOR_NEW_BARS:-1}"
-PROOF_MODE="${PROOF_MODE:-1}"
+# Phase 7.14-A5: Default changed from 1 to 0. Proof-mode is opt-in for rapid
+# round-trip generation during development only. Production sprints run without
+# proof-mode so Platt calibration data reflects live-comparable exit behavior.
+# To enable: export PROOF_MODE=1 before calling this script.
+PROOF_MODE="${PROOF_MODE:-0}"
 # Optional holdout-audit backfill: run the same pipeline as if "today" were a
 # previous date to create unique dataset windows for forecast_audit gating.
 AS_OF_START_DATE="${AS_OF_START_DATE:-}"

@@ -268,3 +268,39 @@ def test_time_exit_uses_bar_count_not_calendar_days():
     assert engine.portfolio.positions.get("AAPL", 0) == 0
 
     db.close()
+
+
+def test_confidence_calibrated_saved_to_db():
+    """Phase 7.14-E: confidence_calibrated flows from signal dict to trade_executions DB."""
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.95))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    # Use the same market data format as the working test_execute_signal_executes_and_persists_trade
+    signal = {
+        "ticker": "MSFT",
+        "action": "BUY",
+        "confidence": 0.78,
+        "confidence_calibrated": 0.62,  # Platt-scaled value
+    }
+
+    result = engine.execute_signal(signal, make_market_data(120.0))
+    assert result.status == "EXECUTED"
+
+    # Query DB to confirm confidence_calibrated was saved
+    cursor = db.conn.cursor()
+    cursor.execute(
+        "SELECT confidence_calibrated FROM trade_executions WHERE ticker = 'MSFT' ORDER BY id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    assert row[0] is not None
+    assert abs(row[0] - 0.62) < 1e-6
+
+    db.close()

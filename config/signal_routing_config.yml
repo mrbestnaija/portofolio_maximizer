@@ -17,14 +17,15 @@ signal_routing:
 
   # Time Series signal generation thresholds (production defaults)
   time_series:
-    confidence_threshold: 0.45  # Slightly lowered for test runs to admit more signals
+    confidence_threshold: 0.55  # Production threshold; requires meaningful model conviction
     min_expected_return: 0.0030 # 30 bps = 2x roundtrip cost buffer (actual ~15 bps roundtrip)
-    max_risk_score: 0.85        # Raised to allow higher volatility names during evaluation
+    max_risk_score: 0.70        # Conservative production risk ceiling
     use_volatility_filter: true # Filter signals based on volatility
     # Cost/uncertainty gating for Time Series signals.
     # - default_roundtrip_cost_bps is a *prior* used only when bid/ask or synthetic microstructure
     #   columns (TxnCostBps/ImpactBps) are unavailable. Values are basis points of notional.
-    # - min_signal_to_noise is an optional CI-based SNR gate (0 disables).
+    # - min_signal_to_noise: CI-based SNR gate. Requires expected_return > threshold * CI_half_width.
+    #   When GARCH does not converge, CI widens -> SNR drops -> signal blocked automatically.
     cost_model:
       # Phase 7.9: Updated to realistic 2026 execution costs (per risk_mode.yml)
       default_roundtrip_cost_bps:
@@ -34,22 +35,22 @@ signal_routing:
         CRYPTO: 8.0      # Updated from 12.0 - CEX improvements
         INDEX: 1.5       # Updated from 2.0 - ETF liquidity
         UNKNOWN: 3.0     # Updated from 5.0 - less conservative default
-      min_signal_to_noise: 0.0
-    # Production per-ticker overrides (aligned to proposals after review).
+      min_signal_to_noise: 1.5  # Require E[return] > 1.5x CI half-width; 0 disables
+    # Production per-ticker overrides.
     per_ticker:
       "CL=F":
         confidence_threshold: 0.55
         min_expected_return: 0.005
       "MSFT":
-        confidence_threshold: 0.45
-        min_expected_return: 0.0005
-        max_risk_score: 0.85
+        confidence_threshold: 0.55
+        min_expected_return: 0.0020  # 20 bps floor; 5 bps was below roundtrip cost
+        max_risk_score: 0.70
       "MTN":
-        confidence_threshold: 0.45
-        min_expected_return: 0.0005
+        confidence_threshold: 0.55
+        min_expected_return: 0.0020
       "AAPL":
-        confidence_threshold: 0.50
-        min_expected_return: 0.0005
+        confidence_threshold: 0.55
+        min_expected_return: 0.0020  # 20 bps floor; 5 bps was below roundtrip cost
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.

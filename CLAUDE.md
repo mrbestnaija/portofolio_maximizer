@@ -6,8 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.9 Complete (PnL integrity enforcement, adversarial audit, OpenClaw automation, Interactions API)
-**Last Updated**: 2026-02-18
+**Current Phase**: Phase 7.14 In Progress (Gate Recalibration, Config Sanitization, ATR Stops, GARCH Hardening, Platt Wire)
+**Completed Phases**: 7.13 (Arch Sanitization), 7.12 (Platt Feedback Wire), 7.11 (OpenClaw Hardening), 7.9 (PnL Integrity + Proof Mode)
+**Last Updated**: 2026-02-24
 
 ---
 
@@ -757,9 +758,82 @@ Original findings (2026-02-16):
 - Non-AAPL tickers need fresh pipeline runs to clear legacy 100% FAIL entries
 
 **Remaining open issues**:
-- signal_id NULL for all trades (no model attribution) -- P1 next
-- B5 Platt scaling (confidence calibration) -- P1, needs 30+ (conf,win) pairs to accumulate
-- Directional accuracy improvement not yet re-measured -- run adversarial suite to confirm
+- signal_id NULL for all trades (no model attribution) -- **FIXED Phase 7.13** (ts_signal_id unification)
+- B5 Platt scaling (confidence calibration) -- **In Phase 7.14-E** (wiring confidence_calibrated)
+- Directional accuracy improvement not yet re-measured -- run adversarial suite after 7.14 complete
+
+---
+
+## Phase 7.13 Reference (Architectural Sanitization - COMPLETE 2026-02-24)
+
+**Status**: COMPLETE (914 passed, 6 skipped, 7 xfailed; 1 pre-existing peewee timezone bug)
+**Documentation**: `Documentation/PHASE_7.13_ARCH_SANITIZATION.md`, `Documentation/arch_sanitization_audit.json`
+
+12 architectural issues fixed:
+- **C1/CRITICAL**: ts_signal_id now globally unique `ts_{ticker}_{run_suffix}_{counter:04d}` TEXT strings
+- **C2/CRITICAL**: overnight_refresh.sh Step 2.5 added: synthetic auto_trader cycle to populate trade_executions
+- **C3/CRITICAL**: `--execution-mode` CLI arg added to `run_auto_trader.py` (was env-var-only)
+- **H1/HIGH**: `confidence_calibrated` added to JSONL quant_validation entries
+- **H3/HIGH**: Orphan detection threshold 60->14 days, whitelist IDs added
+- **M1-M4/MEDIUM**: `etl/paths.py` centralized paths; gate orchestrator `run_all_gates.py`; pipeline dead-end annotated
+- **C5-C6**: 84 legacy trades backfilled with synthetic `legacy_*` ts_signal_ids; DB path centralized
+
+**Adversarial audit finding (BUG2 fixed)**: `signal_router._signal_to_dict()` was leaking TS string
+`signal_id` into INTEGER FK `signal_id` column. Fixed with isinstance() type guards at `signal_router.py:346-347`.
+
+---
+
+## Phase 7.14 Reference (Gate Recalibration - IN PROGRESS 2026-02-24)
+
+**Documentation**: `Documentation/PHASE_7.14_GATE_RECALIBRATION.md`
+
+**Core problem**: Three layers of test-mode drift poisoning performance reporting:
+1. Config values left in test-mode (confidence 0.45, risk 0.85, SNR disabled, min_return 5bps)
+2. Proof-mode in production pipelines (overnight_refresh --proof-mode taints Platt data)
+3. Gates passing trivially (max_fail_fraction 0.95, min_lift_fraction 0.10, calibration db_path null)
+
+**Phase A (Config Sanitization)** -- COMPLETE:
+- `signal_routing_config.yml`: confidence 0.45->0.55, AAPL/MSFT/MTN min_return 5bps->20bps, risk 0.85->0.70, SNR 0->1.5
+- `forecaster_monitoring.yml`: max_fail_fraction 0.95->0.85, min_lift_fraction 0.10->0.25
+- `quant_success_config.yml`: min_DA 0.40->0.45, calibration.db_path set to actual DB path
+- `bash/overnight_refresh.sh`: Removed --proof-mode; added PLATT_BOOTSTRAP=1 loop (8 historical dates 2021-2024)
+- `bash/run_20_audit_sprint.sh`: PROOF_MODE default 1->0
+
+**Phase B (ATR Stop Loss)** -- PENDING: Replace vol*0.5 cap[1.5%,5%] with ATR*1.5 (no cap)
+**Phase C (GARCH Convergence)** -- PENDING: ConvergenceWarning->GJR->CI inflation->SNR gate blocks
+**Phase D (Regime DB Persistence)** -- PENDING: detected_regime saved to time_series_forecasts table
+**Phase E (Platt Wire)** -- PENDING: confidence_calibrated saved by PaperTradingEngine -> Platt can activate
+**Phase F (Factory)** -- DEFERRED TO 7.15
+
+### Key Thresholds and Rationale (Phase 7.14)
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `confidence_threshold` | 0.55 | Prior comment: "lowered for test runs". 0.55 = production conviction floor |
+| `min_expected_return` AAPL/MSFT/MTN | 0.0020 (20bps) | 5bps was below ~15bps roundtrip cost -- zero edge |
+| `max_risk_score` | 0.70 | Prior comment: "raised during evaluation". Reverted to conservative |
+| `min_signal_to_noise` | 1.5 | E[return] > 1.5x CI half-width. Gate was implemented at signal_generator.py:478 but disabled |
+| `max_fail_fraction` | 0.85 | 71.7% rolling FAIL was YELLOW at 0.95; correctly RED at 0.85 |
+| `min_lift_fraction` | 0.25 | Ensemble beats best-single on 8% of windows; 10% floor was trivially passing |
+| `min_directional_accuracy` | 0.45 | 41% WR = 1pp above 0.40 floor -- no upward pressure |
+| ATR stop multiplier | 1.5x ATR | Places stop below 1.5 avg-true-ranges; NVDA 7.7% ATR no longer clipped by 5% cap |
+| GARCH CI inflation | 1.5x half-width | On convergence failure; wide CI -> low SNR -> signal blocked |
+
+### PLATT_BOOTSTRAP Usage
+
+```bash
+# Seed Platt pairs from 2021-2024 historical backtests (8 dates, ~30-60 min)
+PLATT_BOOTSTRAP=1 bash bash/overnight_refresh.sh
+
+# Verify Platt pairs accumulated
+python scripts/update_platt_outcomes.py
+python -c "
+import json, pathlib
+entries = [json.loads(l) for l in pathlib.Path('logs/signals/quant_validation.jsonl').read_text(encoding='utf-8').splitlines() if l.strip()]
+with_outcome = [e for e in entries if 'outcome' in e]
+print(f'Platt pairs: {len(with_outcome)} (need 30+ for calibration to activate)')
+"
+```
 
 ---
 

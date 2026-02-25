@@ -264,6 +264,70 @@ def test_get_forecasts_and_update_regression_metrics(tmp_path: Path) -> None:
         manager.close()
 
 
+def test_detected_regime_saved_and_retrieved(tmp_path: Path):
+    """Phase 7.14-D: detected_regime and regime_confidence round-trip through DB."""
+    from pathlib import Path as _Path
+    db_path = tmp_path / "regime_test.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        row_id = manager.save_forecast(
+            "AAPL",
+            "2026-01-15",
+            {
+                "model_type": "ENSEMBLE",
+                "forecast_horizon": 5,
+                "forecast_value": 195.50,
+                "model_order": {},
+                "detected_regime": "HIGH_VOL_TRENDING",
+                "regime_confidence": 0.72,
+            },
+        )
+        assert row_id != -1
+
+        cursor = manager.conn.cursor()
+        cursor.execute(
+            "SELECT detected_regime, regime_confidence FROM time_series_forecasts WHERE id = ?",
+            (row_id,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] == "HIGH_VOL_TRENDING"
+        assert abs(row[1] - 0.72) < 1e-6
+    finally:
+        manager.close()
+
+
+def test_detected_regime_null_ok(tmp_path: Path):
+    """Phase 7.14-D: NULL detected_regime does not cause an error."""
+    db_path = tmp_path / "regime_null_test.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        row_id = manager.save_forecast(
+            "MSFT",
+            "2026-01-16",
+            {
+                "model_type": "GARCH",
+                "forecast_horizon": 3,
+                "forecast_value": 420.00,
+                "model_order": {},
+                # No detected_regime or regime_confidence -> should default to NULL
+            },
+        )
+        assert row_id != -1
+
+        cursor = manager.conn.cursor()
+        cursor.execute(
+            "SELECT detected_regime, regime_confidence FROM time_series_forecasts WHERE id = ?",
+            (row_id,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] is None
+        assert row[1] is None
+    finally:
+        manager.close()
+
+
 def test_performance_summary_filters_by_run_id(tmp_path: Path):
     db_path = tmp_path / "perf_summary.db"
     manager = DatabaseManager(str(db_path))
