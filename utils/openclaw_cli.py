@@ -174,7 +174,7 @@ def _evaluate_autonomy_message(message: str) -> tuple[bool, list[str], str]:
             reasons.extend([f"high_risk:{hit}" for hit in risky_hits])
 
     injection_hits = _find_pattern_hits(message, _PROMPT_INJECTION_PATTERNS)
-    if injection_hits and _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=False):
+    if injection_hits and _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=True):
         if not token_present:
             reasons.extend([f"prompt_injection:{hit}" for hit in injection_hits])
 

@@ -14,6 +14,7 @@ Per refactoring plan:
 import json
 import logging
 import os
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -170,6 +171,9 @@ class TimeSeriesSignalGenerator:
         """
         # Phase 7.10: monotonic signal ID counter for model attribution
         self._signal_counter = 0
+        # Phase 7.15: per-instance 4-char hex prevents ts_signal_id collisions across
+        # instances that start within the same second (parallel processing, test runs).
+        self._instance_uid: str = secrets.token_hex(2)  # e.g. "a3f2"
         # Phase 7.13-A2: current ticker set at generate_signals() entry to build ts_signal_id
         self._current_ticker: str = "unknown"
         # B5 Platt scaling: stores the pure logistic-regression probability from the
@@ -2445,23 +2449,31 @@ class TimeSeriesSignalGenerator:
     def _make_ts_signal_id(self) -> str:
         """Build a globally unique ts_signal_id string (Phase 7.13-A2).
 
-        Format: ts_{ticker}_{run_id_suffix}_{counter:04d}
-        Example: ts_AAPL_20260224T2315Z_0001
+        Format: ts_{ticker}_{datetime_seconds}_{instance_uid}_{counter:04d}
+        Example: ts_AAPL_20260224T231500Z_a3f2_0001
 
         Globally unique because:
-        - _current_ticker distinguishes same-counter signals across ticker instances
-        - run_id_suffix includes timestamp+PID, unique per generator instance
+        - _current_ticker distinguishes signals across ticker instances
+        - datetime_seconds (YYYYMMDDTHHMMSSz) is unique per second
+        - _instance_uid (4-char random hex per instance, Phase 7.15) prevents
+          collisions between instances that start within the same second
         - counter monotonically increments within the instance
         """
-        run_suffix = (self._runtime_run_id or "unknown")
-        # Use last 14 chars of run_id to keep IDs reasonably short while unique
-        # pmx_ts_20260224T2315Z_12345 -> 20260224T2315Z
-        if "_" in run_suffix:
-            parts = run_suffix.split("_")
-            run_suffix = parts[-2] if len(parts) >= 3 else parts[-1]
-        run_suffix = run_suffix[:14]
+        # Extract the compact datetime-seconds component from the run_id.
+        # run_id format: pmx_ts_20260224T231500Z_<pid> -> extract 20260224T231500Z
+        run_id = (self._runtime_run_id or "unknown")
+        if "_" in run_id:
+            parts = run_id.split("_")
+            # parts: ["pmx", "ts", "20260224T231500Z", "<pid>"]
+            # Take the third segment (index 2) which is the timestamp
+            dt_part = parts[2] if len(parts) >= 3 else parts[-1]
+        else:
+            dt_part = run_id
+        # Keep up to 16 chars (YYYYMMDDTHHMMSSz) -- no truncation that loses seconds
+        dt_part = dt_part[:16]
         ticker_safe = (self._current_ticker or "unknown").upper().replace("-", "")[:6]
-        return f"ts_{ticker_safe}_{run_suffix}_{self._signal_counter:04d}"
+        uid = getattr(self, "_instance_uid", "0000")
+        return f"ts_{ticker_safe}_{dt_part}_{uid}_{self._signal_counter:04d}"
 
     @staticmethod
     def _coerce_nonempty_str(value: Any) -> Optional[str]:

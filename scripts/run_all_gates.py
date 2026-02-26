@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-run_all_gates.py — Master gate orchestrator (Phase 7.13-C3).
+run_all_gates.py - Master gate orchestrator.
 
-Runs all production gates in strict priority order and returns a JSON summary:
+Runs production gates in strict priority order and returns a JSON summary:
 
-  1. ci_integrity_gate.py    (PnL structural invariants — CRITICAL/HIGH)
-  2. check_quant_validation_health.py (FAIL-rate / GREEN-YELLOW-RED)
+  1. ci_integrity_gate.py (PnL structural invariants)
+  2. check_quant_validation_health.py (quant validation fail-rate health)
   3. production_audit_gate.py (forecast lift + profitability proof)
+  4. institutional_unattended_gate.py (unattended-run hardening contracts)
 
 Exit codes:
     0  all blocking gates passed
@@ -17,8 +18,9 @@ Usage:
     python scripts/run_all_gates.py
     python scripts/run_all_gates.py --skip-forecast-gate
     python scripts/run_all_gates.py --skip-profitability-gate
-    python scripts/run_all_gates.py --strict    # MEDIUM violations also fail
-    python scripts/run_all_gates.py --json      # emit JSON summary to stdout
+    python scripts/run_all_gates.py --skip-institutional-gate
+    python scripts/run_all_gates.py --strict
+    python scripts/run_all_gates.py --json
 """
 
 from __future__ import annotations
@@ -29,11 +31,12 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _run(cmd: list, label: str) -> dict:
+def _run(cmd: list[str], label: str) -> dict[str, Any]:
     """Run a subprocess and return a result dict."""
     try:
         proc = subprocess.run(
@@ -41,13 +44,14 @@ def _run(cmd: list, label: str) -> dict:
             capture_output=True,
             text=True,
             cwd=str(ROOT),
+            check=False,
         )
         return {
             "label": label,
-            "exit_code": proc.returncode,
-            "passed": proc.returncode == 0,
-            "stdout": proc.stdout[-4000:] if proc.stdout else "",
-            "stderr": proc.stderr[-2000:] if proc.stderr else "",
+            "exit_code": int(proc.returncode),
+            "passed": int(proc.returncode) == 0,
+            "stdout": (proc.stdout or "")[-4000:],
+            "stderr": (proc.stderr or "")[-2000:],
         }
     except Exception as exc:
         return {
@@ -57,6 +61,20 @@ def _run(cmd: list, label: str) -> dict:
             "stdout": "",
             "stderr": str(exc),
         }
+
+
+def _print_gate_result(result: dict[str, Any], *, emit_json: bool) -> None:
+    if emit_json:
+        return
+    label = str(result.get("label"))
+    exit_code = int(result.get("exit_code", -1))
+    if bool(result.get("passed")):
+        print(f"[PASS] {label}")
+        return
+    print(f"[FAIL] {label} (exit {exit_code})")
+    stdout = str(result.get("stdout") or "").strip()
+    if stdout:
+        print(stdout)
 
 
 def main() -> None:
@@ -70,6 +88,11 @@ def main() -> None:
         "--skip-profitability-gate",
         action="store_true",
         help="Skip production_audit_gate.py gate.",
+    )
+    parser.add_argument(
+        "--skip-institutional-gate",
+        action="store_true",
+        help="Skip institutional_unattended_gate.py gate.",
     )
     parser.add_argument(
         "--strict",
@@ -90,10 +113,10 @@ def main() -> None:
     args = parser.parse_args()
 
     python = sys.executable
-    results = []
+    results: list[dict[str, Any]] = []
     overall_pass = True
 
-    # ── Gate 1: PnL integrity (always runs) ──────────────────────────────
+    # Gate 1: PnL integrity
     cmd1 = [python, "scripts/ci_integrity_gate.py"]
     if args.strict:
         cmd1.append("--strict")
@@ -101,60 +124,52 @@ def main() -> None:
         cmd1 += ["--db", args.db]
     r1 = _run(cmd1, "ci_integrity_gate")
     results.append(r1)
-    if not r1["passed"]:
-        overall_pass = False
-        if not args.emit_json:
-            print(f"[FAIL] {r1['label']} (exit {r1['exit_code']})")
-            if r1["stdout"]:
-                print(r1["stdout"])
-    else:
-        if not args.emit_json:
-            print(f"[PASS] {r1['label']}")
+    overall_pass = overall_pass and bool(r1.get("passed"))
+    _print_gate_result(r1, emit_json=args.emit_json)
 
-    # ── Gate 2: Quant validation health ──────────────────────────────────
+    # Gate 2: quant validation health
     if not args.skip_forecast_gate:
         r2 = _run([python, "scripts/check_quant_validation_health.py"], "check_quant_validation_health")
         results.append(r2)
-        if not r2["passed"]:
-            overall_pass = False
-            if not args.emit_json:
-                print(f"[FAIL] {r2['label']} (exit {r2['exit_code']})")
-                if r2["stdout"]:
-                    print(r2["stdout"])
-        else:
-            if not args.emit_json:
-                print(f"[PASS] {r2['label']}")
+        overall_pass = overall_pass and bool(r2.get("passed"))
+        _print_gate_result(r2, emit_json=args.emit_json)
     else:
-        results.append({"label": "check_quant_validation_health", "skipped": True, "passed": True})
+        skipped = {"label": "check_quant_validation_health", "skipped": True, "passed": True}
+        results.append(skipped)
         if not args.emit_json:
             print("[SKIP] check_quant_validation_health (--skip-forecast-gate)")
 
-    # ── Gate 3: Production audit gate (forecast lift + profitability) ─────
+    # Gate 3: production audit gate
     if not args.skip_profitability_gate:
         cmd3 = [python, "scripts/production_audit_gate.py"]
         if args.db:
             cmd3 += ["--db", args.db]
         r3 = _run(cmd3, "production_audit_gate")
         results.append(r3)
-        if not r3["passed"]:
-            overall_pass = False
-            if not args.emit_json:
-                print(f"[FAIL] {r3['label']} (exit {r3['exit_code']})")
-                if r3["stdout"]:
-                    print(r3["stdout"])
-        else:
-            if not args.emit_json:
-                print(f"[PASS] {r3['label']}")
+        overall_pass = overall_pass and bool(r3.get("passed"))
+        _print_gate_result(r3, emit_json=args.emit_json)
     else:
-        results.append({"label": "production_audit_gate", "skipped": True, "passed": True})
+        skipped = {"label": "production_audit_gate", "skipped": True, "passed": True}
+        results.append(skipped)
         if not args.emit_json:
             print("[SKIP] production_audit_gate (--skip-profitability-gate)")
 
-    # ── Summary ──────────────────────────────────────────────────────────
+    # Gate 4: unattended-run hardening contracts
+    if not args.skip_institutional_gate:
+        r4 = _run([python, "scripts/institutional_unattended_gate.py"], "institutional_unattended_gate")
+        results.append(r4)
+        overall_pass = overall_pass and bool(r4.get("passed"))
+        _print_gate_result(r4, emit_json=args.emit_json)
+    else:
+        skipped = {"label": "institutional_unattended_gate", "skipped": True, "passed": True}
+        results.append(skipped)
+        if not args.emit_json:
+            print("[SKIP] institutional_unattended_gate (--skip-institutional-gate)")
+
     summary = {
-        "phase": "7.13",
+        "phase": "institutional_unattended_hardening",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "overall_passed": overall_pass,
+        "overall_passed": bool(overall_pass),
         "gates": results,
     }
 
@@ -162,7 +177,7 @@ def main() -> None:
         print(json.dumps(summary, indent=2))
     else:
         status = "[PASS]" if overall_pass else "[FAIL]"
-        passed_count = sum(1 for r in results if r.get("passed"))
+        passed_count = sum(1 for r in results if bool(r.get("passed")))
         print(f"\n{status} run_all_gates: {passed_count}/{len(results)} gates passed")
 
     sys.exit(0 if overall_pass else 1)
@@ -170,3 +185,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

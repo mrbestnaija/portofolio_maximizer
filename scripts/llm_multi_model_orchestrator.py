@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1424,11 +1425,11 @@ REASONING_TOOLS = [
                     },
                     "index_url": {
                         "type": "string",
-                        "description": "Optional custom pip index-url (https://...).",
+                        "description": "Optional custom pip index-url (https://..., allowed host only).",
                     },
                     "extra_index_url": {
                         "type": "string",
-                        "description": "Optional extra pip index-url (https://...).",
+                        "description": "Optional extra pip index-url (https://..., allowed host only).",
                     },
                     "timeout_seconds": {
                         "type": "number",
@@ -2696,8 +2697,10 @@ def _normalize_package_spec(package_raw: Any, version_raw: Any) -> tuple[str, Op
         return "", "Invalid package spec: cannot start with '-'"
     if any(ch.isspace() for ch in package):
         return "", "Invalid package spec: whitespace is not allowed"
+    if "@" in package:
+        return "", "Direct URL/VCS package specs are disabled for runtime installs"
 
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.[]<>=!~,+@")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.[]<>=!~,+")
     for ch in package:
         if ch not in allowed:
             return "", f"Invalid package spec character: {ch}"
@@ -2753,8 +2756,29 @@ def _normalize_index_url(url_raw: Any, field_name: str) -> tuple[str, Optional[s
         return "", None
     if any(ch.isspace() for ch in raw):
         return "", f"{field_name} must not contain whitespace"
-    if not (raw.startswith("https://") or raw.startswith("http://")):
-        return "", f"{field_name} must start with https:// or http://"
+    if not raw.startswith("https://"):
+        return "", f"{field_name} must start with https://"
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return "", f"{field_name} must be a valid https URL"
+    if parsed.username or parsed.password:
+        return "", f"{field_name} must not include credentials"
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return "", f"{field_name} host is missing"
+
+    default_allowed_hosts = {
+        "pypi.org",
+        "files.pythonhosted.org",
+        "download.pytorch.org",
+        "test.pypi.org",
+    }
+    extra_hosts_raw = str(os.getenv("PMX_RUNTIME_PIP_ALLOWED_INDEX_HOSTS") or "").strip()
+    extra_hosts = {h.strip().lower() for h in extra_hosts_raw.split(",") if h.strip()}
+    allowed_hosts = default_allowed_hosts | extra_hosts
+    if host not in allowed_hosts:
+        allowed_str = ", ".join(sorted(allowed_hosts))
+        return "", f"{field_name} host '{host}' is not allowed (allowed: {allowed_str})"
     return raw, None
 
 
@@ -2811,6 +2835,18 @@ def _probe_python_module(module_name: str, timeout_seconds: float = 25.0) -> dic
 
 def _install_python_package_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
     args = arguments if isinstance(arguments, dict) else {}
+    if not _truthy_env("PMX_ALLOW_RUNTIME_PIP_INSTALL", default=False):
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "install_python_package",
+                "error": (
+                    "Runtime pip installation is disabled by policy. "
+                    "Set PMX_ALLOW_RUNTIME_PIP_INSTALL=1 to enable explicitly."
+                ),
+            },
+            indent=2,
+        )
 
     pkg_spec, pkg_err = _normalize_package_spec(
         args.get("package", ""),
@@ -3022,6 +3058,18 @@ def _install_torch_runtime_tool(arguments: dict[str, Any], *, budget_seconds: Op
                 "python_executable": sys.executable,
                 "in_virtualenv": in_venv,
                 "probe": initial_probe,
+            },
+            indent=2,
+        )
+    if not _truthy_env("PMX_ALLOW_RUNTIME_PIP_INSTALL", default=False):
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "install_torch_runtime",
+                "error": (
+                    "Runtime pip installation is disabled by policy. "
+                    "Set PMX_ALLOW_RUNTIME_PIP_INSTALL=1 to enable explicitly."
+                ),
             },
             indent=2,
         )

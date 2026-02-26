@@ -24,6 +24,10 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct script fallback
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
+    # If a third-party `integrity` package was imported first, evict it so
+    # the local repo package resolves correctly after ROOT insertion.
+    sys.modules.pop("integrity", None)
+    sys.modules.pop("integrity.sqlite_guardrails", None)
     from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 

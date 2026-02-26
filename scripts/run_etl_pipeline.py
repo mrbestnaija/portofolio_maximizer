@@ -2049,6 +2049,9 @@ def execute_pipeline(
 
                             # Save forecasts to database
                             forecast_date = datetime.now().strftime('%Y-%m-%d')
+                            # Phase 7.14-D: regime fields for all save calls below
+                            _regime_for_db = forecast_result.get('detected_regime')
+                            _regime_conf_for_db = forecast_result.get('regime_confidence')
 
                             # Save SARIMAX forecast if available
                             if forecast_result.get('sarimax_forecast'):
@@ -2067,6 +2070,8 @@ def execute_pipeline(
                                             'bic': sarimax_result.get('bic'),
                                             'diagnostics': sarimax_result.get('diagnostics'),
                                             'regression_metrics': metrics_map.get('sarimax'),
+                                            'detected_regime': _regime_for_db,
+                                            'regime_confidence': _regime_conf_for_db,
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -2089,6 +2094,8 @@ def execute_pipeline(
                                             'aic': garch_result.get('aic'),
                                             'bic': garch_result.get('bic'),
                                             'regression_metrics': metrics_map.get('garch'),
+                                            'detected_regime': _regime_for_db,
+                                            'regime_confidence': _regime_conf_for_db,
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -2118,6 +2125,8 @@ def execute_pipeline(
                                                 'explained_variance_ratio': samossa_result.get('explained_variance_ratio'),
                                             },
                                             'regression_metrics': metrics_map.get('samossa'),
+                                            'detected_regime': _regime_for_db,
+                                            'regime_confidence': _regime_conf_for_db,
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -2148,6 +2157,8 @@ def execute_pipeline(
                                             'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
                                             'diagnostics': diagnostics,
                                             'regression_metrics': metrics_map.get('mssa_rl'),
+                                            'detected_regime': _regime_for_db,
+                                            'regime_confidence': _regime_conf_for_db,
                                         }
                                         db_manager.save_forecast(
                                             ticker=ticker,
@@ -2204,6 +2215,8 @@ def execute_pipeline(
                                         'upper_ci': float(upper_ci.iloc[step]) if isinstance(upper_ci, pd.Series) and step < len(upper_ci) else None,
                                         'diagnostics': diagnostics,
                                         'regression_metrics': metrics_map.get('ensemble'),
+                                        'detected_regime': _regime_for_db,
+                                        'regime_confidence': _regime_conf_for_db,
                                     }
                                     db_manager.save_forecast(
                                         ticker=ticker,
@@ -2254,29 +2267,17 @@ def execute_pipeline(
                 logger.info("Generating trading signals from Time Series forecasts...")
 
                 try:
-                    from models.time_series_signal_generator import TimeSeriesSignalGenerator
                     from models.signal_adapter import SignalAdapter
+                    from models.signal_generator_factory import build_signal_generator
 
-                    # Load signal routing config (pipeline override or shared YAML)
-                    signal_routing_cfg = pipeline_cfg.get('signal_routing', {}) or {}
-                    ts_signal_cfg = signal_routing_cfg.get('time_series', {}) or {}
-                    if not ts_signal_cfg:
-                        cfg_path = Path("config") / "signal_routing_config.yml"
-                        if cfg_path.exists():
-                            try:
-                                with cfg_path.open("r", encoding="utf-8") as handle:
-                                    raw = yaml.safe_load(handle) or {}
-                                shared_cfg = raw.get("signal_routing") or {}
-                                ts_signal_cfg = shared_cfg.get("time_series", {}) or {}
-                            except Exception as exc:  # pragma: no cover - defensive
-                                logger.warning("Failed to load signal routing config: %s", exc)
-
-                    # Initialize signal generator
-                    ts_signal_generator = TimeSeriesSignalGenerator(
-                        confidence_threshold=float(ts_signal_cfg.get('confidence_threshold', 0.55)),
-                        min_expected_return=float(ts_signal_cfg.get('min_expected_return', 0.003)),
-                        max_risk_score=float(ts_signal_cfg.get('max_risk_score', 0.7)),
-                        use_volatility_filter=bool(ts_signal_cfg.get('use_volatility_filter', True)),
+                    # Phase 7.15: factory ensures all 9 constructor params are populated.
+                    # Restore pipeline-specific override surface: if pipeline_config.yml has
+                    # a signal_routing.time_series section, those values override the YAML
+                    # base (same resolution order as run_auto_trader.py ts_cfg logic).
+                    _pl_routing = pipeline_cfg.get("signal_routing", {}) or {}
+                    _pl_ts_overrides = _pl_routing.get("time_series", {}) or {}
+                    ts_signal_generator = build_signal_generator(
+                        ts_cfg_overrides=_pl_ts_overrides if _pl_ts_overrides else None,
                     )
 
                     # Get forecasts from previous stage

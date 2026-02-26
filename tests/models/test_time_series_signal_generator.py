@@ -37,12 +37,17 @@ def ts_routing_config():
 
 @pytest.fixture
 def signal_generator(ts_routing_config):
-    """Create signal generator instance for testing using config-driven thresholds."""
+    """Create signal generator instance for testing using config-driven thresholds.
+
+    quant_validation_config disables JSONL logging so tests cannot contaminate
+    the production logs/signals/quant_validation.jsonl file.
+    """
     return TimeSeriesSignalGenerator(
         confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
         min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
         max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
         use_volatility_filter=bool(ts_routing_config.get("use_volatility_filter", True)),
+        quant_validation_config={"logging": {"enabled": False}},
     )
 
 

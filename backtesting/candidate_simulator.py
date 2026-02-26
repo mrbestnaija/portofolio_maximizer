@@ -21,7 +21,7 @@ import pandas as pd
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from etl.database_manager import DatabaseManager
 from execution.paper_trading_engine import PaperTradingEngine
-from models.time_series_signal_generator import TimeSeriesSignalGenerator
+from models.signal_generator_factory import build_signal_generator
 
 logger = logging.getLogger(__name__)
 
@@ -140,13 +140,11 @@ def simulate_candidate(
     history_bars = int(candidate_params.get("history_bars", 120) or 120)
     min_bars = int(candidate_params.get("min_bars", 60) or 60)
 
-    ts_generator = TimeSeriesSignalGenerator(
-        confidence_threshold=float(guardrails.get("confidence_threshold", 0.55) or 0.55),
-        min_expected_return=float(guardrails.get("min_expected_return", 0.003) or 0.003),
-        max_risk_score=float(guardrails.get("max_risk_score", 0.7) or 0.7),
-        use_volatility_filter=bool(guardrails.get("use_volatility_filter", True)),
-        per_ticker_thresholds=guardrails.get("per_ticker") if isinstance(guardrails.get("per_ticker"), dict) else None,
-        cost_model=guardrails.get("cost_model") if isinstance(guardrails.get("cost_model"), dict) else None,
+    # Phase 7.15: factory provides all 9 params (previously quant_validation_config
+    # and forecasting_config_path were missing). guardrails dict keys match the
+    # signal_routing.time_series YAML section, so they merge cleanly as overrides.
+    ts_generator = build_signal_generator(
+        ts_cfg_overrides=guardrails if guardrails else None,
     )
 
     frames_by_ticker: Dict[str, pd.DataFrame] = {

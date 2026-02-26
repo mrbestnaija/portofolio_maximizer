@@ -70,6 +70,9 @@ jobs:
       - name: Forecasting config integrity gate (blocking)
         run: python scripts/validate_forecasting_configs.py --json
 
+      - name: Institutional unattended hardening gate (blocking)
+        run: python scripts/institutional_unattended_gate.py --json
+
       - name: Adversarial integrity suite (blocking when DB exists)
         run: |
           if [ -f data/portfolio_maximizer.db ]; then

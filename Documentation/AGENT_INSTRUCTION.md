@@ -44,6 +44,68 @@ When multiple developer-agents or humans are active in the same repository:
   - files intentionally left untouched due to parallel ownership,
   - verification commands and outcomes.
 
+## Institutional Hardening Baseline (Mandatory)
+
+For any unattended/autonomous readiness claim, run and report:
+
+1. `python scripts/institutional_unattended_gate.py --json`
+2. `python scripts/run_all_gates.py --json`
+3. `python -m pytest tests/scripts/test_institutional_unattended_contract.py tests/scripts/test_institutional_unattended_gate.py tests/scripts/test_llm_runtime_install_policy.py tests/scripts/test_platt_calibration_contract.py tests/scripts/test_run_all_gates.py -q`
+4. `python -m pytest -m "not gpu and not slow" --tb=short -q`
+
+Do not use skip flags in final evidence (`--skip-forecast-gate`, `--skip-profitability-gate`, `--skip-institutional-gate`).
+
+Institutional contracts to preserve:
+- Runtime pip install remains default-deny (`PMX_ALLOW_RUNTIME_PIP_INSTALL=1` required).
+- Prompt-injection blocking remains default-on in autonomous paths.
+- Forecast/audit max-files defaults stay repo-synced via `scripts/audit_gate_defaults.py`.
+- `platt_contract_audit.py` runs standalone without manual `PYTHONPATH`.
+- No shadow runtime duplicates (`Dockerfile (1)`, `execution/lob_simulator (1).py`).
+
+## Workspace Bootstrap Budget Control (Pre-Cut + Iterative Add)
+
+Use this protocol before adding or expanding `SOUL.md`, `AGENTS.md`, `TOOLS.md`, `IDENTITY.md`, or `USER.md`.
+
+### Hard Budget
+- Combined workspace bootstrap payload must remain <= 25,000 chars.
+- No single workspace file may exceed 20,000 chars.
+- Enforcement test: `tests/utils/test_openclaw_cli.py::TestWorkspaceBootstrapContract`.
+
+### Pre-Cut Rule (Before You Add)
+1. Measure current size first.
+2. Estimate planned addition.
+3. Pre-cut low-signal text before adding new content.
+4. Target pre-cut amount = 1.2x planned addition (safety margin).
+
+Priority for cuts:
+- Repetitive examples, narrative prose, and duplicated checklists.
+- Historical detail already covered in `Documentation/` files.
+- Long command blocks that can be replaced by one canonical command + link.
+
+Do not cut:
+- Safety constraints, escalation thresholds, command contracts, and canonical file paths.
+- Operator-critical runbooks and failure-mode instructions.
+
+### Iterative Add Pattern
+- Add in small chunks (about 200-400 chars each), then re-check budget.
+- After each chunk, re-run the workspace-budget test.
+- Stop immediately if projected total exceeds budget; cut first, then continue.
+
+### Required Commands (PowerShell Safe)
+```powershell
+$files='SOUL.md','AGENTS.md','TOOLS.md','IDENTITY.md','USER.md'
+$total=0
+foreach($f in $files){ if(Test-Path $f){ $len=(Get-Content $f -Raw).Length; $total+=$len; Write-Output ($f+':'+$len) } }
+Write-Output ('TOTAL:'+ $total)
+
+python -m pytest tests/utils/test_openclaw_cli.py -k "individual_workspace_files_within_limit or total_workspace_files_within_budget" -q
+```
+
+### Signal Fidelity Standard
+- Keep concise, high-variance summaries in workspace files.
+- Move deep detail to topic docs under `Documentation/` and link back.
+- Every retained line should be either operationally actionable or risk-relevant.
+
 ## Auto-Portfolio Trader Remediation To-Do (Critical)
 
 1. **Initial setup & scoping**: Review the auto-portfolio trader stack (`config/yfinance_config.yml`, `models/time_series_signal_generator.py`, `execution/paper_trading_engine.py`, related configs). Define the fix scope (align execution with forecast horizon, realistic cost model, live metrics) and stage iterative updates/backtests to avoid system disruption.

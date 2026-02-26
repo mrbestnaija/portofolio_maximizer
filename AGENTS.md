@@ -47,38 +47,13 @@ When multiple developer-agents or humans are working in the same workspace:
 
 ### Windows PowerShell Command Rule
 
-- `exec` may run in Windows PowerShell 5 where `&&` is invalid.
-- In PowerShell: no nested `powershell -Command`, use `$true`/`$false`, avoid unbounded loops.
-- For Python diagnostics, do not embed multiline code in `python -c "..."` with literal `\n`; use checked-in scripts (`python scripts/...`) with flags.
-- For `edit` calls, always include `path` + `oldText` + `newText` (or `new_string`); on schema failure, retry once then switch strategy.
-- For multi-step checks, run separate `exec` calls or use one wrapper command:
-  - `python scripts/project_runtime_status.py --pretty`
-
-### Common PMX Tasks → Tool Mappings
-
-| User Request | Tools to Use |
-|---|---|
-| "Check PnL" / "portfolio status" | `exec` → `python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db` |
-| "Run tests" | `exec` → `python -m pytest tests/ --tb=short -q` |
-| "Check gate" / "audit status" | `exec` → `python scripts/production_audit_gate.py` |
-| "Quant validation health" / "fail rate headroom" | `exec` → `python scripts/quant_validation_headroom.py --json` (or `python scripts/check_quant_validation_health.py`) |
-| "Read file X" | `read` → read the file, summarize key points |
-| "What's the market doing?" | `exec` → `python scripts/tavily_search.py --query "<market question>" --json` |
-| "Check project repo on GitHub" | `exec` → `python scripts/check_github_repo_status.py --pretty` |
-| "Send message to..." | `message` → send via the specified channel |
-| "Check system health" | `exec` → `python scripts/llm_multi_model_orchestrator.py status` |
-| "Check errors" / "any issues?" | `exec` → `python scripts/error_monitor.py --check` |
-
-Preferred single-command runtime snapshot:
-- `exec` -> `python scripts/project_runtime_status.py --pretty`
+- `exec` runs in Windows PowerShell 5 — no `&&`, no nested `powershell -Command`, use checked-in scripts (`python scripts/...`) not inline `-c` multiline strings.
+- Single-command runtime snapshot: `exec` -> `python scripts/project_runtime_status.py --pretty`
 
 ### What NOT to Do
 
 - Do NOT say "I'll help you with that!" then produce no tool calls.
 - Do NOT say "The gateway is running properly" without actually checking it.
-- Do NOT produce empty thinking blocks that just restate the question.
-- Do NOT use emojis excessively. One per message max.
-- Do NOT offer to do things you weren't asked to do.
 - Do NOT use native `web_search` that requests `BRAVE_API_KEY`; use `python scripts/tavily_search.py --query ... --json`.
 
 ## Non-Negotiables (Secrets)
@@ -121,43 +96,90 @@ Cron jobs use `agentTurn` mode with agent-specific routing:
 | [P0] Quant Validation Health | Daily 7:30 AM | trading | FAIL rate >= 90% (approaching 95% RED gate) |
 | [P1] Signal Linkage Monitor | Daily 8 AM | trading | New orphan opens or unlinked closes detected |
 | [P1] Ticker Health Monitor | Daily 8:30 AM | trading | 3+ consecutive losses or PnL below -$300 |
+| [P1] Platt Contract Audit | Weekly Mon 9:30 AM | training | Any FAIL finding (wrong classifier, broken fallback chain, bootstrap produced 0 closes, no active calibration tier) |
 | [P2] GARCH Unit-Root Guard | Weekly Mon 9 AM | training | Unit-root rate >= 35% (above 28% baseline) |
 | [P2] Overnight Hold Monitor | Weekly Fri 9 AM | training | Overnight drag > 25% of intraday profits |
 | System Health Check | Every 6h | ops | Any model offline or error monitor issues |
 | Weekly Session Cleanup | Sunday 3 AM | ops | Never (silent maintenance) |
 
+Platt cron command: `exec` -> `python scripts/platt_contract_audit.py --json`
+
 **If the cron fires and everything is healthy: respond NO_REPLY. Do not say "all checks passed".**
+
+---
+
+## Implementation Contract Rules
+
+**Rules enforced by `tests/scripts/test_platt_calibration_contract.py` and `scripts/platt_contract_audit.py`.**
+
+These exist because two categories of silent failure were observed:
+
+### Rule P-1: Never claim a calibration method without test coverage
+
+If you change the classifier used in `_calibrate_confidence()`:
+1. Update `PHASE_7.14_GATE_RECALIBRATION.md` to name the new method exactly
+2. Update `test_platt_calibration_contract.py::TestClassifierIdentity` to match
+3. Update `platt_contract_audit.py::EXPECTED_CLASSIFIER` constant
+4. DO NOT leave docs claiming the old method -- mismatches are caught as CI failures
+
+**Current contract**: `_calibrate_confidence()` uses `sklearn.linear_model.LogisticRegression`
+(classic Platt scaling). NOT isotonic. NOT CalibratedClassifierCV. Any change must update all three targets above.
+
+### Rule P-2: Bootstrap steps must verify output, not just exit code
+
+If a bootstrap step exits 0 but produced zero useful output (e.g., 0 closed trades,
+0 matched pairs), the pipeline MUST fail loudly. Silent success on zero output is a
+first-class bug -- it conceals broken bootstrap design (wrong cycle count, missing
+`--resume`, same-bar-repeat, etc.).
+
+**Mechanism**: `run_overnight_refresh.py` counts `ts_* is_close=1` trades before and
+after bootstrap. Delta == 0 increments `errors` and logs `[FAIL]`. The
+`test_platt_calibration_contract.py::TestBootstrapOutcomeGuard` tests assert this guard
+exists in code.
+
+### Rule P-3: HOLD signals must not inflate reconciliation starvation metrics
+
+`quant_validation.jsonl` logs ALL signal evaluations including HOLD actions. HOLD
+signals structurally cannot produce `is_close=1` trades and therefore can never reconcile.
+Counting them as "pending" makes starvation metrics look worse than they are.
+
+**Mechanism**: `update_platt_outcomes.py` filters HOLD entries before building the
+`pending` list. The `hold_skipped=N` field in the summary line makes the count explicit.
+
+### Rule P-4: DB-based calibration is primary; JSONL is supplementary
+
+`_calibrate_confidence()` has three tiers: JSONL -> DB-local -> DB-global. The JSONL
+tier is frequently starved (logs HOLDs, unexecuted signals, legacy IDs). The DB tier
+queries actual executed+closed trades directly and is more reliable.
+
+**Do not treat JSONL starvation as a calibration failure.** Check `platt_contract_audit.py`
+output for `calibration_active_tier` to see which tier is actually active.
+
+## Institutional Hardening Baseline (Mandatory)
+
+Before claiming unattended-run readiness, run and report all of:
+
+1. `python scripts/institutional_unattended_gate.py --json`
+2. `python scripts/run_all_gates.py --json`
+3. `python -m pytest tests/scripts/test_institutional_unattended_contract.py tests/scripts/test_institutional_unattended_gate.py tests/scripts/test_llm_runtime_install_policy.py tests/scripts/test_platt_calibration_contract.py tests/scripts/test_run_all_gates.py -q`
+4. `python -m pytest -m "not gpu and not slow" --tb=short -q`
+
+Do not use skip flags (`--skip-forecast-gate`, `--skip-profitability-gate`, `--skip-institutional-gate`) as final evidence for readiness.
+
+Current institutional contracts that must remain true:
+- Runtime pip install is default-deny (`PMX_ALLOW_RUNTIME_PIP_INSTALL=1` required to enable installs).
+- Prompt-injection blocking is default-on in autonomous paths.
+- Forecast gate max-files default is shared via `scripts/audit_gate_defaults.py`.
+- `platt_contract_audit.py` must run standalone (no manual `PYTHONPATH` setup).
+- No tracked shadow duplicates (`Dockerfile (1)`, `execution/lob_simulator (1).py`).
 
 ## OpenClaw + Gmail Defaults
 
-- OpenClaw + SMTP email alert delivery is enabled by default in `config/error_monitoring_config.yml`, but is a **no-op until configured**.
-- OpenClaw notifications:
-  - Configure `OPENCLAW_TARGETS` (recommended) or `OPENCLAW_TO` (and optionally `OPENCLAW_COMMAND`).
-  - `scripts/production_audit_gate.py` auto-notifies if `OPENCLAW_TARGETS`/`OPENCLAW_TO` is set (disable with `PMX_NOTIFY_OPENCLAW=0`).
-- Gmail/email alerts (SMTP):
-  - Configure `PMX_EMAIL_USERNAME`, `PMX_EMAIL_PASSWORD` (app password recommended), and `PMX_EMAIL_TO`.
-
-## Inbox Workflows (Gmail + Proton)
-
-- Config: `config/inbox_workflows.yml`
-- Scan script: `python scripts/inbox_workflow.py scan`
-- Safe defaults:
-  - Read-only scans (no mark-seen) by default.
-  - Email sending is disabled by default. Enable explicitly with `PMX_INBOX_ALLOW_SEND=1` (or set `limits.allow_send: true` in the YAML).
-- Proton Mail requires Proton Mail Bridge (local IMAP/SMTP endpoints).
-
-## Safety Levels (Increase Over Time)
-
-Start conservative and lift limits only after you are satisfied with behavior:
-
-1. **Read-only**: inspect logs/configs, run tests, run audits.
-2. **Safe automation**: run `scripts/production_audit_gate.py`, `scripts/error_monitor.py`, dashboards, and notifications.
-3. **Code changes**: implement refactors/features with tests and compile checks.
-4. **Trading operations**: only with explicit confirmation; never run live execution by default.
+- OpenClaw notifications: set `OPENCLAW_TARGETS` or `OPENCLAW_TO`. Auto-notifies from `production_audit_gate.py` (disable with `PMX_NOTIFY_OPENCLAW=0`).
+- Gmail/SMTP alerts: set `PMX_EMAIL_USERNAME`, `PMX_EMAIL_PASSWORD`, `PMX_EMAIL_TO`.
+- Inbox scan: `python scripts/inbox_workflow.py scan` (read-only by default; enable send with `PMX_INBOX_ALLOW_SEND=1`).
 
 ## References
 
-- `Documentation/API_KEYS_SECURITY.md`
 - `Documentation/OPENCLAW_INTEGRATION.md`
 - `Documentation/AGENT_INSTRUCTION.md`
-- `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md`
