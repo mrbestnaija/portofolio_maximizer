@@ -374,31 +374,77 @@ def derive_model_confidence(
     if sarimax_score is not None:
         confidence["sarimax"] = sarimax_score
 
-    # GARCH confidence scoring - Phase 7.3 addition for ensemble integration
-    # Use AIC/BIC (like SARIMAX) as primary confidence indicator
+    def _garch_domain_normalize(
+        raw_aic_bic_score: Optional[float],
+        igarch_fallback: bool,
+    ) -> float:
+        """
+        Map GARCH's volatility-domain AIC/BIC score to the price-domain
+        confidence band used by SAMOSSA and MSSA-RL.
+
+        GARCH models variance dynamics; its AIC/BIC measures volatility model
+        fit quality -- not directly comparable to SAMOSSA's EVR (always ~1.0 by
+        SSA construction) or MSSA-RL's baseline_variance metric.  Mixing raw
+        AIC/BIC magnitudes with EVR distorts weight selection because the scales
+        are incommensurable (different signal domains).
+
+        Strategy: compress GARCH's contribution to a neutral [0.42, 0.58] band
+        that keeps it in the 3-model confidence pool without claiming top-model
+        status via volatility-fit quality alone.  With 3 models present, the
+        quantile normalizer maps to [0.40, 0.625, 0.65], enabling GARCH-heavy
+        blend candidates to clear the diversity_tolerance threshold.
+
+        Phase 7.15-E: replaces the `if garch_score is None and garch_summary`
+        dead-code block where `{}` (falsy) prevented GARCH from ever getting a
+        fallback score, causing permanent 2-model collapse.
+        """
+        if igarch_fallback:
+            # IGARCH/EWMA degrades to exponential smoothing -- lower information
+            # content than converged GARCH; keep below the neutral midpoint.
+            return 0.28
+        if raw_aic_bic_score is None:
+            # GARCH fit converged but produced no information criteria; assign a
+            # neutral participation score just above the MSSA-RL floor (0.40).
+            return 0.45
+        # Compress AIC/BIC-derived raw score [0, 1] to [0.42, 0.58].
+        # Prevents a high AIC/BIC ratio from claiming SAMOSSA's top rank
+        # (earned via price-level EVR -- a separate measurement domain).
+        return float(np.clip(0.42 + 0.16 * float(np.clip(raw_aic_bic_score, 0.0, 1.0)), 0.28, 0.58))
+
+    # GARCH confidence scoring
+    # Phase 7.3+: Use AIC/BIC as primary indicator, then blend with regression metrics.
+    # Phase 7.15-E: Apply domain normalization.  GARCH models variance dynamics (not
+    # price levels); raw AIC/BIC is incommensurable with SAMOSSA's EVR.  The helper
+    # _garch_domain_normalize() maps GARCH's volatility-domain score to the same
+    # effective confidence band as the other models, ensuring GARCH always
+    # participates in the 3-model pool and blend candidates can clear diversity gate.
     aic = garch_summary.get("aic")
     bic = garch_summary.get("bic")
-    garch_score = None
+    _raw_garch_aic_bic: Optional[float] = None
     if aic is not None and bic is not None:
-        garch_score = np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6))
+        _raw_garch_aic_bic = float(np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6)))
 
-    # If regression_metrics available, blend with AIC/BIC score
+    garch_normalized = _garch_domain_normalize(
+        _raw_garch_aic_bic, bool(garch_summary.get("igarch_fallback"))
+    )
+    logger.info(
+        "GARCH domain normalization: raw_aic_bic_score=%.4f normalized=%.4f igarch=%s",
+        _raw_garch_aic_bic if _raw_garch_aic_bic is not None else float("nan"),
+        garch_normalized,
+        garch_summary.get("igarch_fallback", False),
+    )
+
+    # Blend domain-normalized score with regression metrics when available.
     garch_metrics = garch_summary.get("regression_metrics", {}) or {}
     garch_score = _combine_scores(
-        garch_score,  # AIC/BIC score (if available)
+        garch_normalized,
         _score_from_metrics(garch_metrics),
         _variance_test_score(garch_metrics, baseline_metrics)
         if baseline_metrics
         else None,
     )
-    if garch_score is None and garch_summary:
-        # Phase 7.10: Lower fallback for IGARCH/EWMA cases.  Previous 0.35 was
-        # too generous when GARCH degenerates -- the EWMA fallback lacks
-        # information-criteria and is mechanically simpler.
-        if garch_summary.get("igarch_fallback"):
-            garch_score = 0.20
-        else:
-            garch_score = 0.35
+    # garch_normalized is always non-None, so _combine_scores always returns
+    # non-None.  GARCH is always included in the confidence pool.
     if garch_score is not None:
         confidence["garch"] = garch_score
 
