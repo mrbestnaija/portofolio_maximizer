@@ -535,3 +535,66 @@ Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
     - Error: `WslRegisterDistribution failed with error: 0x80070002` (`The system cannot find the file specified.`)
 
 **Constraint:** This session is not elevated (`net stop ...` returns `Access is denied`), so enabling/repairing Windows optional features / Hyper-V admin group changes cannot be completed here.
+
+### Multi-Agent Handoff Addendum (2026-02-26)
+
+**Purpose:** Complement parallel developer-agent work with verifiable lift-gate and integrity findings, plus scoped implementation evidence.
+
+**Runtime note (guardrail compliance):**
+- `wsl.exe -e bash -lc "pwd"` -> **exit 1**
+  - `Windows Subsystem for Linux has no installed distributions.`
+- Commands below were run with Windows Python (`python` / `simpleTrader_env\\Scripts\\python.exe`) and should be treated as runtime-untrusted until rerun under WSL `simpleTrader_env`.
+
+**Implemented + committed (scoped):**
+- Commit `5f47548`:
+  - `integrity/pnl_integrity_enforcer.py`
+  - `tests/integrity/test_pnl_integrity_enforcer.py`
+  - `scripts/check_forecast_audits.py`
+  - `tests/scripts/test_check_forecast_audits.py`
+- Functional changes:
+  - Direction-aware close-leg PnL arithmetic (BUY close/short-cover handled correctly).
+  - `BEST_SINGLE` baseline wiring in lift gate now includes `garch` (aligned with forecaster best-single logic).
+
+**Data repairs performed:**
+- `python scripts/repair_unlinked_closes.py --db data/portfolio_maximizer.db --apply`
+  - **exit 1** (expected warning exit; repairs applied)
+  - Linked 5 closes: `155->152`, `164->161`, `170->167`, `176->173`, `182->179`.
+  - Remaining unlinked closes: `156, 165, 171, 177, 183` (TSLA).
+
+**Verification commands + outcomes:**
+- `python -m pytest tests/integrity/test_pnl_integrity_enforcer.py -q`
+  - **exit 0** (`6 passed`)
+- `python -m pytest tests/scripts/test_check_forecast_audits.py -q`
+  - **exit 0** (`7 passed`)
+- `python -m integrity.pnl_integrity_enforcer --db data/portfolio_maximizer.db`
+  - **exit 0**
+  - Current integrity violation: `CLOSE_WITHOUT_ENTRY_LINK: 5` (down from 10)
+- `python scripts/production_audit_gate.py` (with `PMX_NOTIFY_OPENCLAW=0`)
+  - **exit 1**
+  - `Lift=FAIL`, `Proof=PASS`, `Gate=FAIL`
+  - Artifact: `logs/audit_gate/production_gate_latest_20260226_180620.json`
+- `python -m pytest -m "not gpu and not slow"`
+  - **exit 0**
+  - `993 passed, 3 skipped, 28 deselected, 7 xfailed`
+
+**Lift-fraction deep profile (effective windows):**
+- `python scripts/check_forecast_audits.py --max-files 1000`
+  - **exit 1** (no-lift gate fail)
+  - `effective_audits=103`, `violation_rate=0.00%`, `lift_fraction=0.97%` vs required `25%`
+- Window-level collapse profile from audit files:
+  - `ratio==1.000` windows: `74/103` (`71.84%`)
+  - single-weight windows: `74/103`
+  - `ratio==1.000 AND single-weight`: `74/74` (exact overlap)
+- Counterfactual eligibility under wider holdout band:
+  - `band=0.05`: `eligible_1=74`
+  - `band=0.10`: `eligible_1=69`
+  - `band=0.15`: `eligible_1=68`
+  - `band=0.20`: `eligible_1=22`
+  - Interpretation: small widening (0.10-0.15) has limited effect; material de-collapse starts near ~0.20.
+
+**Cross-agent wiring risk flagged:**
+- ETL audit path uses `config/pipeline_config.yml` forecasting block (`scripts/run_etl_pipeline.py`), while live auto-trader uses `config/forecasting_config.yml` (`scripts/run_auto_trader.py`).
+- Current ensemble settings differ across these configs (`confidence_scaling`, `diversity_tolerance`), so audit-derived lift behavior may not mirror live behavior one-to-one.
+
+**Files intentionally untouched due parallel ownership:**
+- Existing modified/untracked files outside scoped commit (multiple `scripts/`, `models/`, `tests/`, docs) were left unchanged.
