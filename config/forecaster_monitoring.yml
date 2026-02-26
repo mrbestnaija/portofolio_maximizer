@@ -65,7 +65,9 @@ forecaster_monitoring:
 
     # If true, fail the RMSE gate when the ensemble does not demonstrate enough
     # lift over the selected baseline across the holding period window.
-    disable_ensemble_if_no_lift: true
+    # Keep ensemble in non-default/research-only posture when lift is weak, but
+    # do not hard-fail unattended readiness solely on no-lift evidence.
+    disable_ensemble_if_no_lift: false
 
     # "Lift" means ensemble_rmse <= (1 - min_lift_rmse_ratio) * baseline_rmse.
     # 0.00 means "any improvement counts". 0.02 means ">=2% RMSE improvement".

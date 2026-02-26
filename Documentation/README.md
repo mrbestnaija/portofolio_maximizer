@@ -1,4 +1,4 @@
-# Portfolio Maximizer – Autonomous Profit Engine
+﻿# Portfolio Maximizer â€“ Autonomous Profit Engine
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -6,31 +6,33 @@
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
+> Canonical documentation navigator: [DOCS_INDEX.md](DOCS_INDEX.md)
+
 **Version**: 3.0
-**Status**: Production Ready ✅
+**Status**: Production Ready âœ…
 **Last Updated**: 2025-12-04
 
 ---
 
-## 🎯 Overview
+## ðŸŽ¯ Overview
 
 Portfolio Maximizer is a self-directed trading stack that marries institutional-grade ETL with autonomous execution. It continuously extracts, validates, preprocesses, forecasts, and trades financial time series so profit-focused decisions are generated without human babysitting.
 
 ### Key Features
 
-- **🚀 Intelligent Caching**: 20x speedup with cache-first strategy (24h validity)
-- **📊 Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
-- **📈 Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
-- **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
-- **✅ Comprehensive Testing**: 141+ tests with high coverage across ETL, LLM, and integration modules
-- **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
-- **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
-- **🔐 Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
-- **🤖 Autonomous Profit Engine**: `scripts/run_auto_trader.py` keeps the signal router + trading engine firing so positions are sized and executed automatically
+- **ðŸš€ Intelligent Caching**: 20x speedup with cache-first strategy (24h validity)
+- **ðŸ“Š Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
+- **ðŸ“ˆ Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
+- **ðŸ”„ Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
+- **âœ… Comprehensive Testing**: 141+ tests with high coverage across ETL, LLM, and integration modules
+- **âš¡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
+- **ðŸ§  Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, LLM stages, and ticker discovery with auditable logging
+- **ðŸ” Resilient Data & LLM Access**: Hardened Yahoo Finance extraction and pooled Ollama sessions reduce transient failures
+- **ðŸ¤– Autonomous Profit Engine**: `scripts/run_auto_trader.py` keeps the signal router + trading engine firing so positions are sized and executed automatically
 
 ---
 
-### ♻️ Latest Enhancements (Oct 2025)
+### â™»ï¸ Latest Enhancements (Oct 2025)
 
 - Refactored `scripts/run_etl_pipeline.py` around `CVSettings` and `LLMComponents` helpers so cross-validation, LLM bootstrapping, and discovery fallbacks reuse a single orchestration path with consistent telemetry.
 - Centralised logging configuration by removing `logging.basicConfig` calls from extractor modules; entry points now own verbosity without side effects.
@@ -47,7 +49,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-## 📋 Table of Contents
+## ðŸ“‹ Table of Contents
 
 - [Architecture](#architecture)
 - [Installation](#installation)
@@ -62,35 +64,35 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-## 🏗️ Architecture
+## ðŸ—ï¸ Architecture
 
 ### System Architecture (7 Layers)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│              Portfolio Maximizer                          │
-│              Production-Ready System                     │
-└─────────────────────────────────────────────────────────┘
-                        │
-        ┌───────────────┼───────────────┐
-        │               │               │
-        ▼               ▼               ▼
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚              Portfolio Maximizer                          â”‚
+â”‚              Production-Ready System                     â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                        â”‚
+        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+        â”‚               â”‚               â”‚
+        â–¼               â–¼               â–¼
   Layer 1:        Layer 2:         Layer 3:
   Extraction      Storage          Validation
   (yfinance &     (Parquet         (Quality
    multi-source)  Format)          Checks)
-        │               │               │
-        └───────────────┼───────────────┘
-                        │
-        ┌───────────────┼───────────────┐
-        ▼               ▼               ▼
+        â”‚               â”‚               â”‚
+        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                        â”‚
+        â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+        â–¼               â–¼               â–¼
   Layer 4:        Layer 5:         Layer 6:
   Preprocessing   Organization     Analysis &
   (Transform)     (Train/Val/Test) Visualization
-        │               │               │
-        └───────────────┼───────────────┘
-                        │
-                        ▼
+        â”‚               â”‚               â”‚
+        â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                        â”‚
+                        â–¼
                    Layer 7:
                    Output
                    (Reports, Plots)
@@ -110,7 +112,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-## 🚀 Installation
+## ðŸš€ Installation
 
 ### Prerequisites
 
@@ -193,7 +195,7 @@ LLM/Ollama integration is disabled by default to avoid unnecessary startup delay
 
 ---
 
-## ⚡ Quick Start
+## âš¡ Quick Start
 
 ### Run the ETL Pipeline
 
@@ -216,17 +218,17 @@ python scripts/run_etl_pipeline.py --execution-mode live
 python scripts/run_etl_pipeline.py --execution-mode synthetic --include-frontier-tickers
 
 # Expected output:
-# ✓ Extraction complete (cache hit: <0.1s)
-# ✓ Validation complete (0.1s)
-# ✓ Preprocessing complete (0.2s)
-# ✓ Storage complete (0.1s)
-# Total time: varies with mode (synthetic ≈ 1s, live depends on APIs)
+# âœ“ Extraction complete (cache hit: <0.1s)
+# âœ“ Validation complete (0.1s)
+# âœ“ Preprocessing complete (0.2s)
+# âœ“ Storage complete (0.1s)
+# Total time: varies with mode (synthetic â‰ˆ 1s, live depends on APIs)
 
 # Shortcut runner (auto mode with logs):
 ./bash/run_pipeline_live.sh
 ```
 
-`--include-frontier-tickers` automatically adds the Nigeria → Bulgaria frontier symbols
+`--include-frontier-tickers` automatically adds the Nigeria â†’ Bulgaria frontier symbols
 curated in `etl/frontier_markets.py` (see `Documentation/arch_tree.md`) so every multi-ticker
 training or validation run exercises less-liquid market scenarios. Synthetic mode is
 recommended until provider-specific ticker mappings are finalized.
@@ -254,23 +256,23 @@ Add `--enable-llm` (plus `PM_ENABLE_OLLAMA=1`) to activate the legacy Ollama-bac
 2. Validates, imputes, and feeds the data into the SARIMAX/SAMOSSA/GARCH/MSSA-RL ensemble.
 3. Routes the highest-confidence trade and executes it through `PaperTradingEngine`, tracking cash, PnL, and open positions in real time.
 
-### Higher‑Order Hyper‑Parameter Optimization (Default Orchestration Mode)
+### Higherâ€‘Order Hyperâ€‘Parameter Optimization (Default Orchestration Mode)
 
-For post‑implementation evaluation and regime‑aware tuning, the project includes a higher‑order
-hyper‑parameter driver that wraps ETL → auto‑trader → strategy optimization in a stochastic loop.
+For postâ€‘implementation evaluation and regimeâ€‘aware tuning, the project includes a higherâ€‘order
+hyperâ€‘parameter driver that wraps ETL â†’ autoâ€‘trader â†’ strategy optimization in a stochastic loop.
 This driver treats configuration knobs such as:
 
 - Time window (`START` / `END` evaluation dates),
 - Quant success `min_expected_profit`,
 - Time Series `time_series.min_expected_return`
 
-as higher‑order hyper‑parameters and searches over them non‑convexly using a bandit‑style
+as higherâ€‘order hyperâ€‘parameters and searches over them nonâ€‘convexly using a banditâ€‘style
 explore/exploit policy (30% explore / 70% exploit by default, dynamically adjusted).
 
 The canonical entrypoint is:
 
 ```bash
-# Run a 5‑round higher‑order hyper‑parameter search
+# Run a 5â€‘round higherâ€‘order hyperâ€‘parameter search
 HYPEROPT_ROUNDS=5 bash/bash/run_post_eval.sh
 ```
 
@@ -284,9 +286,9 @@ Each round:
 - Maintains a 30/70 explore/exploit policy that slowly shifts toward exploitation
   as better configurations are discovered.
 
-The best configuration is re‑run as `<RUN_ID>_best` and surfaced in
+The best configuration is reâ€‘run as `<RUN_ID>_best` and surfaced in
 `visualizations/dashboard_data.json` so dashboards and downstream tools can treat it
-as the current regime‑specific optimum (without hardcoding it in code).
+as the current regimeâ€‘specific optimum (without hardcoding it in code).
 
 ### Analyze Dataset
 
@@ -321,7 +323,7 @@ python scripts/visualize_dataset.py \
 
 ---
 
-## 📖 Usage
+## ðŸ“– Usage
 
 ### 1. Data Extraction
 
@@ -355,7 +357,7 @@ validation_results = validator.validate_dataframe(df)
 # Check for:
 # - Price positivity
 # - Volume non-negativity
-# - Outliers (3σ threshold)
+# - Outliers (3Ïƒ threshold)
 # - Missing data percentage
 ```
 
@@ -391,7 +393,7 @@ results = analyzer.analyze(
 # Results include:
 # - ADF test (stationarity)
 # - ACF/PACF (autocorrelation)
-# - Statistical summary (μ, σ², skewness, kurtosis)
+# - Statistical summary (Î¼, ÏƒÂ², skewness, kurtosis)
 ```
 
 ### 5. Visualization
@@ -414,73 +416,73 @@ viz.plot_comprehensive_dashboard(
 
 ---
 
-## 📁 Project Structure
+## ðŸ“ Project Structure
 
 ```
 portfolio_maximizer/
-│
-├── config/                          # Configuration files (YAML)
-│   ├── analysis_config.yml          # Time series analysis parameters
-│   ├── preprocessing_config.yml     # Preprocessing settings
-│   └── yfinance_config.yml         # Yahoo Finance settings
-│
-├── data/                            # Data storage (organized by ETL stage)
-│   ├── raw/                         # Original extracted data + cache
-│   ├── processed/                   # Cleaned and transformed data
-│   ├── training/                    # Training set (70%)
-│   ├── validation/                  # Validation set (15%)
-│   └── testing/                     # Test set (15%)
-│
-├── Documentation/                   # Comprehensive documentation
-│   ├── arch_tree.md                # Architecture documentation
-│   ├── CACHING_IMPLEMENTATION.md   # Caching mechanism guide
-│   ├── GIT_WORKFLOW.md             # Git workflow (local-first)
-│   └── implementation_checkpoint.md # Implementation status
-│
-├── .local_automation/              # Local automation helpers (kept private)
-│   ├── developer_notes.md          # Automation & tooling playbook
-│   └── settings.local.json         # Local agent settings
-│
-├── etl/                             # ETL pipeline modules
-│   ├── yfinance_extractor.py       # Yahoo Finance extraction
-│   ├── data_validator.py           # Data quality validation
-│   ├── preprocessor.py             # Data preprocessing
-│   ├── data_storage.py             # Data persistence
-│   ├── portfolio_math.py           # Financial calculations
-│   ├── time_series_analyzer.py     # Time series analysis
-│   └── visualizer.py               # Visualization engine
-│
-├── scripts/                         # Executable scripts
-│   ├── run_etl_pipeline.py         # Main ETL orchestration
-│   ├── run_auto_trader.py          # Autonomous profit loop
-│   ├── analyze_dataset.py          # Analysis CLI
-│   ├── visualize_dataset.py        # Visualization CLI
-│   └── validate_environment.py     # Environment validation
-│
-├── tests/                           # Test suite (141+ tests)
-│   ├── etl/                        # ETL module tests
-│   │   ├── test_yfinance_cache.py
-│   │   ├── test_preprocessor.py
-│   │   ├── test_data_storage.py
-│   │   ├── test_portfolio_math.py
-│   │   └── test_time_series_analyzer.py
-│   └── integration/                # Integration tests
-│
-├── visualizations/                  # Generated visualizations
-│   └── training/                    # Training data plots
-│
-├── workflows/                       # Pipeline orchestration (YAML)
-│   ├── etl_pipeline.yml            # Main ETL workflow
-│
-├── .gitignore                       # Git ignore rules
-├── pytest.ini                       # Pytest configuration
-├── requirements.txt                 # Python dependencies
-└── README.md                        # This file
+â”‚
+â”œâ”€â”€ config/                          # Configuration files (YAML)
+â”‚   â”œâ”€â”€ analysis_config.yml          # Time series analysis parameters
+â”‚   â”œâ”€â”€ preprocessing_config.yml     # Preprocessing settings
+â”‚   â””â”€â”€ yfinance_config.yml         # Yahoo Finance settings
+â”‚
+â”œâ”€â”€ data/                            # Data storage (organized by ETL stage)
+â”‚   â”œâ”€â”€ raw/                         # Original extracted data + cache
+â”‚   â”œâ”€â”€ processed/                   # Cleaned and transformed data
+â”‚   â”œâ”€â”€ training/                    # Training set (70%)
+â”‚   â”œâ”€â”€ validation/                  # Validation set (15%)
+â”‚   â””â”€â”€ testing/                     # Test set (15%)
+â”‚
+â”œâ”€â”€ Documentation/                   # Comprehensive documentation
+â”‚   â”œâ”€â”€ arch_tree.md                # Architecture documentation
+â”‚   â”œâ”€â”€ CACHING_IMPLEMENTATION.md   # Caching mechanism guide
+â”‚   â”œâ”€â”€ GIT_WORKFLOW.md             # Git workflow (local-first)
+â”‚   â””â”€â”€ implementation_checkpoint.md # Implementation status
+â”‚
+â”œâ”€â”€ .local_automation/              # Local automation helpers (kept private)
+â”‚   â”œâ”€â”€ developer_notes.md          # Automation & tooling playbook
+â”‚   â””â”€â”€ settings.local.json         # Local agent settings
+â”‚
+â”œâ”€â”€ etl/                             # ETL pipeline modules
+â”‚   â”œâ”€â”€ yfinance_extractor.py       # Yahoo Finance extraction
+â”‚   â”œâ”€â”€ data_validator.py           # Data quality validation
+â”‚   â”œâ”€â”€ preprocessor.py             # Data preprocessing
+â”‚   â”œâ”€â”€ data_storage.py             # Data persistence
+â”‚   â”œâ”€â”€ portfolio_math.py           # Financial calculations
+â”‚   â”œâ”€â”€ time_series_analyzer.py     # Time series analysis
+â”‚   â””â”€â”€ visualizer.py               # Visualization engine
+â”‚
+â”œâ”€â”€ scripts/                         # Executable scripts
+â”‚   â”œâ”€â”€ run_etl_pipeline.py         # Main ETL orchestration
+â”‚   â”œâ”€â”€ run_auto_trader.py          # Autonomous profit loop
+â”‚   â”œâ”€â”€ analyze_dataset.py          # Analysis CLI
+â”‚   â”œâ”€â”€ visualize_dataset.py        # Visualization CLI
+â”‚   â””â”€â”€ validate_environment.py     # Environment validation
+â”‚
+â”œâ”€â”€ tests/                           # Test suite (141+ tests)
+â”‚   â”œâ”€â”€ etl/                        # ETL module tests
+â”‚   â”‚   â”œâ”€â”€ test_yfinance_cache.py
+â”‚   â”‚   â”œâ”€â”€ test_preprocessor.py
+â”‚   â”‚   â”œâ”€â”€ test_data_storage.py
+â”‚   â”‚   â”œâ”€â”€ test_portfolio_math.py
+â”‚   â”‚   â””â”€â”€ test_time_series_analyzer.py
+â”‚   â””â”€â”€ integration/                # Integration tests
+â”‚
+â”œâ”€â”€ visualizations/                  # Generated visualizations
+â”‚   â””â”€â”€ training/                    # Training data plots
+â”‚
+â”œâ”€â”€ workflows/                       # Pipeline orchestration (YAML)
+â”‚   â”œâ”€â”€ etl_pipeline.yml            # Main ETL workflow
+â”‚
+â”œâ”€â”€ .gitignore                       # Git ignore rules
+â”œâ”€â”€ pytest.ini                       # Pytest configuration
+â”œâ”€â”€ requirements.txt                 # Python dependencies
+â””â”€â”€ README.md                        # This file
 ```
 
 ---
 
-## ⚡ Performance
+## âš¡ Performance
 
 ### Benchmarks (AAPL Dataset: 1,006 rows)
 
@@ -507,7 +509,7 @@ portfolio_maximizer/
 
 ---
 
-## 🧪 Testing
+## ðŸ§ª Testing
 
 ### Run Test Suite
 
@@ -538,7 +540,7 @@ pytest tests/ -v --tb=short
 
 ---
 
-## 📚 Documentation
+## ðŸ“š Documentation
 
 Comprehensive documentation is available in the `Documentation/` directory:
 
@@ -554,7 +556,7 @@ Comprehensive documentation is available in the `Documentation/` directory:
 
 ---
 
-## 🛣️ Roadmap
+## ðŸ›£ï¸ Roadmap
 
 ### Phase 5: Portfolio Optimization (Next)
 - Mean-variance optimization (Markowitz)
@@ -582,7 +584,7 @@ Comprehensive documentation is available in the `Documentation/` directory:
 
 ---
 
-## 🤝 Contributing
+## ðŸ¤ Contributing
 
 Contributions are welcome! Please follow these guidelines:
 
@@ -636,13 +638,13 @@ bash/git_syn_to_local.sh master
 
 ---
 
-## 📄 License
+## ðŸ“„ License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 👤 Author
+## ðŸ‘¤ Author
 
 **Bestman Ezekwu Enock**
 
@@ -651,7 +653,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 🙏 Acknowledgments
+## ðŸ™ Acknowledgments
 
 - **MIT OpenCourseWare**: Micro Masters in Statistics and Data Science (MMSDS)
 - **Wife**: Linda Bestman
@@ -659,7 +661,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 📊 Project Statistics
+## ðŸ“Š Project Statistics
 
 - **Total Lines of Code**: 3,567 (production)
 - **Test Lines**: 1,068
@@ -670,7 +672,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 🔧 Troubleshooting
+## ðŸ”§ Troubleshooting
 
 ### Common Issues
 
@@ -705,7 +707,7 @@ python --version  # Should be 3.10+
 
 ---
 
-## 📞 Support
+## ðŸ“ž Support
 
 For questions or issues:
 
@@ -716,8 +718,10 @@ For questions or issues:
 
 ---
 
-**Built with ❤️ using Python, NumPy and Pandas**
+**Built with â¤ï¸ using Python, NumPy and Pandas**
 
-**Status**: Production Ready ✅
+**Status**: Production Ready âœ…
 **Version**: 3.0
 **Last Updated**: 2025-12-04
+
+

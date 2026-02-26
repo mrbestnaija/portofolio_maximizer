@@ -34,6 +34,9 @@ def test_forecaster_holdout_reweight_never_worse_than_best_single() -> None:
     metrics = forecaster.evaluate(actual)
     assert "sarimax" in metrics
     assert "ensemble" in metrics
+    metadata = forecaster._latest_results.get("ensemble_metadata", {})
+    assert metadata.get("confidence") == {"samossa": 1.0}
+    assert metadata.get("holdout_reweight_applied") is True
 
     best_rmse = min(
         metrics["sarimax"]["rmse"],
