@@ -62,3 +62,23 @@ def test_ci_workflow_runs_institutional_gate() -> None:
     source = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "Institutional unattended hardening gate" in source
     assert "python scripts/institutional_unattended_gate.py --json" in source
+
+
+def test_forecaster_evaluate_has_no_posthoc_holdout_reweighting() -> None:
+    source = Path("forcester_ts/forecaster.py").read_text(encoding="utf-8")
+    assert "_maybe_reweight_ensemble_from_holdout" not in source
+    assert "Recompute ensemble metrics on the reweighted forecast bundle." not in source
+
+
+def test_forecast_audit_script_does_not_fallback_missing_ensemble_metrics() -> None:
+    source = Path("scripts/check_forecast_audits.py").read_text(encoding="utf-8")
+    assert "ensemble or sarimax or garch or samossa" not in source
+    assert "max_missing_ensemble_rate" in source
+    assert "manifest_integrity_mode" in source
+
+
+def test_ci_forecaster_monitoring_hardening_contracts() -> None:
+    source = Path("config/forecaster_monitoring_ci.yml").read_text(encoding="utf-8")
+    assert "max_ensemble_under_best_rate: 0.35" in source
+    assert "manifest_integrity_mode: fail" in source
+    assert "max_missing_ensemble_rate: 0.00" in source

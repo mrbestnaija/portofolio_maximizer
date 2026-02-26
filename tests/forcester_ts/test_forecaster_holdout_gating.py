@@ -7,9 +7,9 @@ import pandas as pd
 from forcester_ts.forecaster import TimeSeriesForecaster
 
 
-def test_forecaster_holdout_reweight_never_worse_than_best_single() -> None:
-    # Construct a forecaster and inject synthetic forecast payloads so we can
-    # validate the "best model is weightier" invariant without fitting models.
+def test_forecaster_evaluate_does_not_reweight_from_holdout() -> None:
+    # evaluate() must score precomputed forecasts only. Reweighting inside
+    # evaluate() would leak realized labels into gate evidence.
     forecaster = TimeSeriesForecaster(forecast_horizon=3)
     forecaster._rmse_monitor_cfg = {}
     forecaster._audit_dir = None  # Avoid writing audit files during tests.
@@ -36,14 +36,15 @@ def test_forecaster_holdout_reweight_never_worse_than_best_single() -> None:
     assert "ensemble" in metrics
     metadata = forecaster._latest_results.get("ensemble_metadata", {})
     assert metadata.get("confidence") == {"samossa": 1.0}
-    assert metadata.get("holdout_reweight_applied") is True
+    assert metadata.get("holdout_reweight_applied") is False
+    assert metadata.get("weights") == {"samossa": 1.0}
 
     best_rmse = min(
         metrics["sarimax"]["rmse"],
         metrics["samossa"]["rmse"],
         metrics["mssa_rl"]["rmse"],
     )
-    assert metrics["ensemble"]["rmse"] <= best_rmse
+    assert metrics["ensemble"]["rmse"] > best_rmse
 
 
 def test_forecaster_waits_for_min_effective_audits(monkeypatch, tmp_path: Path) -> None:

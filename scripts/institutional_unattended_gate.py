@@ -95,6 +95,76 @@ def _phase_p1_operational() -> List[Finding]:
     else:
         out.append(Finding("P1", "gate_max_files_repo_sync", "FAIL", "Forecast/audit gate max-files defaults are not repo-synced."))
 
+    forecaster_src = _read("forcester_ts/forecaster.py")
+    if "_maybe_reweight_ensemble_from_holdout" in forecaster_src:
+        out.append(
+            Finding(
+                "P1",
+                "holdout_leakage_block",
+                "FAIL",
+                "Forecaster evaluate() still performs post-hoc holdout reweighting.",
+            )
+        )
+    else:
+        out.append(
+            Finding(
+                "P1",
+                "holdout_leakage_block",
+                "PASS",
+                "Forecaster evaluate() is read-only (no post-hoc holdout reweighting).",
+            )
+        )
+
+    if (
+        "max_missing_ensemble_rate" in check_src
+        and "manifest_integrity_mode" in check_src
+        and "ensemble or sarimax or garch or samossa" not in check_src
+    ):
+        out.append(
+            Finding(
+                "P1",
+                "audit_evidence_hardening",
+                "PASS",
+                "Forecast audit gate enforces manifest + missing-ensemble contracts.",
+            )
+        )
+    else:
+        out.append(
+            Finding(
+                "P1",
+                "audit_evidence_hardening",
+                "FAIL",
+                "Forecast audit gate still allows fallback/missing provenance contracts.",
+            )
+        )
+
+    ci_cfg = _read("config/forecaster_monitoring_ci.yml")
+    if all(
+        token in ci_cfg
+        for token in (
+            "max_ensemble_under_best_rate: 0.35",
+            "manifest_integrity_mode: fail",
+            "max_missing_ensemble_rate: 0.00",
+        )
+    ):
+        out.append(
+            Finding(
+                "P1",
+                "ci_overfit_poison_thresholds",
+                "PASS",
+                "CI thresholds enforce overfit and provenance hardening contracts.",
+            )
+        )
+    else:
+        out.append(
+            Finding(
+                "P1",
+                "ci_overfit_poison_thresholds",
+                "FAIL",
+                "CI thresholds are too permissive for overfit/provenance risks.",
+            )
+        )
+
     refresh_src = _read("scripts/run_overnight_refresh.py")
     required = [
         r'rc = py\("scripts/check_quant_validation_health.py".*?errors \+= 1',

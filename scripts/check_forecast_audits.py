@@ -18,6 +18,7 @@ or CI workflows.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,9 @@ DEFAULT_BASELINE_MODEL = "BEST_SINGLE"
 DEFAULT_DECISION_KEEP = "KEEP"
 DEFAULT_DECISION_RESEARCH = "RESEARCH_ONLY"
 DEFAULT_DECISION_DISABLE = "DISABLE_DEFAULT"
+DEFAULT_MANIFEST_FILENAME = "forecast_audit_manifest.jsonl"
+DEFAULT_MANIFEST_MODE = "off"
+MANIFEST_MODES = {"off", "warn", "fail"}
 
 
 @dataclass
@@ -45,6 +49,7 @@ class AuditCheckResult:
     rmse_ratio: Optional[float]
     violation: bool
     baseline_model: Optional[str] = None
+    ensemble_missing: bool = False
 
 
 def _load_audit(path: Path) -> Optional[Dict[str, Any]]:
@@ -53,6 +58,66 @@ def _load_audit(path: Path) -> Optional[Dict[str, Any]]:
             return json.load(handle)
     except Exception:
         return None
+
+
+def _sha256_file(path: Path) -> Optional[str]:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return None
+
+
+def _load_manifest_index(manifest_path: Path) -> Tuple[Dict[str, str], Dict[str, Any]]:
+    index: Dict[str, str] = {}
+    stats = {
+        "manifest_path": str(manifest_path),
+        "manifest_exists": manifest_path.exists(),
+        "invalid_records": 0,
+    }
+    if not manifest_path.exists():
+        return index, stats
+
+    for raw_line in manifest_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            stats["invalid_records"] += 1
+            continue
+        file_name = str(payload.get("file") or "").strip()
+        digest = str(payload.get("sha256") or "").strip().lower()
+        if not file_name or len(digest) != 64:
+            stats["invalid_records"] += 1
+            continue
+        index[file_name] = digest
+    return index, stats
+
+
+def _verify_manifest_entry(path: Path, manifest_index: Dict[str, str]) -> str:
+    """
+    Return manifest verification status for an audit artifact.
+
+    Status values:
+    - ok
+    - missing
+    - hash_failed
+    - mismatch
+    """
+    expected = manifest_index.get(path.name)
+    if not expected:
+        return "missing"
+    actual = _sha256_file(path)
+    if not actual:
+        return "hash_failed"
+    if actual.lower() != expected.lower():
+        return "mismatch"
+    return "ok"
 
 
 def _extract_metrics(
@@ -84,7 +149,7 @@ def _extract_metrics(
     if ensemble is None and sarimax is None and garch is None and samossa is None:
         return None, None, None
 
-    ensemble_metrics = ensemble or sarimax or garch or samossa
+    ensemble_metrics = ensemble if isinstance(ensemble, dict) else None
 
     baseline_model = (baseline_model or DEFAULT_BASELINE_MODEL).strip().upper()
 
@@ -113,7 +178,7 @@ def _extract_metrics(
             return garch, "GARCH"
         if isinstance(samossa, dict):
             return samossa, "SAMOSSA"
-        return ensemble_metrics if isinstance(ensemble_metrics, dict) else None, "ENSEMBLE"
+        return None, None
 
     if baseline_model == "SAMOSSA":
         if isinstance(samossa, dict):
@@ -136,11 +201,7 @@ def _extract_metrics(
     else:
         baseline_metrics, resolved_baseline = _best_single()
 
-    return (
-        ensemble_metrics if isinstance(ensemble_metrics, dict) else None,
-        baseline_metrics if isinstance(baseline_metrics, dict) else None,
-        resolved_baseline,
-    )
+    return ensemble_metrics, baseline_metrics if isinstance(baseline_metrics, dict) else None, resolved_baseline
 
 
 def _rmse_from(metrics: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -165,6 +226,11 @@ def check_audit_file(
     )
     ensemble_rmse = _rmse_from(ensemble_metrics)
     baseline_rmse = _rmse_from(baseline_metrics)
+    ensemble_missing = (
+        ensemble_metrics is None
+        and baseline_rmse is not None
+        and baseline_rmse > 0
+    )
 
     if ensemble_rmse is None or baseline_rmse is None or baseline_rmse <= 0:
         return AuditCheckResult(
@@ -174,6 +240,7 @@ def check_audit_file(
             rmse_ratio=None,
             violation=False,
             baseline_model=resolved_baseline,
+            ensemble_missing=ensemble_missing,
         )
 
     rmse_ratio = ensemble_rmse / baseline_rmse
@@ -186,6 +253,7 @@ def check_audit_file(
         rmse_ratio=rmse_ratio,
         violation=violation,
         baseline_model=resolved_baseline,
+        ensemble_missing=ensemble_missing,
     )
 
 
@@ -259,6 +327,33 @@ def main() -> None:
         action="store_true",
         help="If set, require effective audits to meet holding_period_audits from the monitoring config.",
     )
+    parser.add_argument(
+        "--manifest-integrity-mode",
+        default=None,
+        choices=sorted(MANIFEST_MODES),
+        help=(
+            "Audit provenance enforcement mode: off|warn|fail. "
+            "If omitted, uses forecaster_monitoring.regression_metrics.manifest_integrity_mode."
+        ),
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help=(
+            "Path to forecast audit manifest JSONL. "
+            "If omitted, uses <audit-dir>/forecast_audit_manifest.jsonl "
+            "or regression_metrics.manifest_filename."
+        ),
+    )
+    parser.add_argument(
+        "--max-missing-ensemble-rate",
+        type=float,
+        default=None,
+        help=(
+            "Maximum fraction of unique audits allowed to miss ensemble metrics "
+            "before exiting non-zero. If omitted, uses config value or 1.0."
+        ),
+    )
     args = parser.parse_args()
 
     audit_dir = Path(args.audit_dir)
@@ -313,6 +408,24 @@ def main() -> None:
         if isinstance(raw_recent_p90, (int, float))
         else None
     )
+    manifest_mode = (
+        str(args.manifest_integrity_mode).strip().lower()
+        if args.manifest_integrity_mode
+        else str(rmse_cfg.get("manifest_integrity_mode", DEFAULT_MANIFEST_MODE)).strip().lower()
+    )
+    if manifest_mode not in MANIFEST_MODES:
+        manifest_mode = DEFAULT_MANIFEST_MODE
+    manifest_filename = str(rmse_cfg.get("manifest_filename", DEFAULT_MANIFEST_FILENAME))
+    manifest_path = (
+        Path(args.manifest_path)
+        if args.manifest_path
+        else (audit_dir / manifest_filename)
+    )
+    max_missing_ensemble_rate = (
+        float(args.max_missing_ensemble_rate)
+        if args.max_missing_ensemble_rate is not None
+        else float(rmse_cfg.get("max_missing_ensemble_rate", 1.0))
+    )
 
     def _dedupe_key(path: Path) -> Optional[Tuple[Any, ...]]:
         audit = _load_audit(path)
@@ -333,27 +446,34 @@ def main() -> None:
 
     unique_map: dict[Tuple[Any, ...], Path] = {}
 
-    def _has_effective_metrics(path: Path) -> bool:
-        audit = _load_audit(path)
-        if not audit:
-            return False
-        ensemble_metrics, baseline_metrics, _ = _extract_metrics(
-            audit, baseline_model=baseline_model
-        )
-        ensemble_rmse = _rmse_from(ensemble_metrics)
-        baseline_rmse = _rmse_from(baseline_metrics)
-        return (
-            ensemble_rmse is not None
-            and baseline_rmse is not None
-            and baseline_rmse > 0
-        )
+    manifest_index: Dict[str, str] = {}
+    manifest_stats: Dict[str, Any] = {
+        "mode": manifest_mode,
+        "manifest_path": str(manifest_path),
+        "manifest_exists": None,
+        "invalid_records": 0,
+        "verified": 0,
+        "missing": 0,
+        "hash_failed": 0,
+        "mismatch": 0,
+        "excluded_unverified": 0,
+    }
+    if manifest_mode != "off":
+        manifest_index, loaded_stats = _load_manifest_index(manifest_path)
+        manifest_stats.update(loaded_stats)
 
     for f in files:
+        if manifest_mode != "off":
+            status = _verify_manifest_entry(f, manifest_index)
+            if status == "ok":
+                manifest_stats["verified"] += 1
+            else:
+                manifest_stats[status] += 1
+                if manifest_mode == "fail":
+                    manifest_stats["excluded_unverified"] += 1
+                    continue
         key = _dedupe_key(f)
         if key is None:
-            continue
-        # Skip entries without usable metrics; they do not inform RMSE gating.
-        if not _has_effective_metrics(f):
             continue
         # Files are sorted newest-first, so keep the first (newest) entry we see
         # for each dataset window and ignore older duplicates.
@@ -400,6 +520,39 @@ def main() -> None:
                 "Recent p90 gate: "
                 f"p90(rmse_ratio) <= {recent_window_max_p90_rmse_ratio:.3f}"
             )
+    if manifest_mode != "off":
+        print(
+            "Manifest check : "
+            f"mode={manifest_mode} path={manifest_stats.get('manifest_path')} "
+            f"exists={manifest_stats.get('manifest_exists')}"
+        )
+        print(
+            "Manifest stats : "
+            f"verified={manifest_stats.get('verified', 0)} "
+            f"missing={manifest_stats.get('missing', 0)} "
+            f"mismatch={manifest_stats.get('mismatch', 0)} "
+            f"hash_failed={manifest_stats.get('hash_failed', 0)} "
+            f"invalid_records={manifest_stats.get('invalid_records', 0)}"
+        )
+        if manifest_mode == "fail":
+            unverified = (
+                int(manifest_stats.get("missing", 0))
+                + int(manifest_stats.get("mismatch", 0))
+                + int(manifest_stats.get("hash_failed", 0))
+                + int(manifest_stats.get("invalid_records", 0))
+            )
+            if not bool(manifest_stats.get("manifest_exists", False)):
+                raise SystemExit(
+                    f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}"
+                )
+            if unverified > 0:
+                raise SystemExit(
+                    "Manifest integrity failed: "
+                    f"missing={manifest_stats.get('missing', 0)} "
+                    f"mismatch={manifest_stats.get('mismatch', 0)} "
+                    f"hash_failed={manifest_stats.get('hash_failed', 0)} "
+                    f"invalid_records={manifest_stats.get('invalid_records', 0)}"
+                )
 
     violation_count = sum(1 for r in results if r.violation)
     effective_n = sum(
@@ -412,6 +565,8 @@ def main() -> None:
         )
     )
     violation_rate = (violation_count / effective_n) if effective_n else 0.0
+    ensemble_missing_count = sum(1 for r in results if r.ensemble_missing)
+    ensemble_missing_rate = (ensemble_missing_count / len(results)) if results else 0.0
 
     def _percentiles(values: list[float], percents: list[float]) -> Dict[float, float]:
         if not values:
@@ -464,6 +619,18 @@ def main() -> None:
     print(f"\nEffective audits with RMSE: {effective_n}")
     print(f"Violations (ensemble worse than baseline beyond tolerance): {violation_count}")
     print(f"Violation rate: {violation_rate:.2%} (max allowed {max_violation_rate:.2%})")
+    print(
+        "Missing ensemble metrics      : "
+        f"{ensemble_missing_count}/{len(results)} ({ensemble_missing_rate:.2%}) "
+        f"(max allowed {max_missing_ensemble_rate:.2%})"
+    )
+    if len(results) > 0 and max_missing_ensemble_rate >= 0:
+        if ensemble_missing_rate > max_missing_ensemble_rate:
+            raise SystemExit(
+                "Missing ensemble metric rate "
+                f"{ensemble_missing_rate:.2%} exceeds max "
+                f"{max_missing_ensemble_rate:.2%}"
+            )
     if pct:
         print(
             "RMSE ratio percentiles: "
@@ -664,14 +831,20 @@ def main() -> None:
             entry["rmse_ratio"] = matching.rmse_ratio
             entry["ensemble_rmse"] = matching.ensemble_rmse
             entry["baseline_rmse"] = matching.baseline_rmse
+            entry["ensemble_missing"] = bool(matching.ensemble_missing)
         dataset_entries.append(entry)
 
     summary = {
         "audit_dir": str(audit_dir),
         "effective_audits": effective_n,
+        "total_unique_audits": len(results),
         "violation_count": violation_count,
         "violation_rate": violation_rate,
         "max_violation_rate": max_violation_rate,
+        "ensemble_missing_count": ensemble_missing_count,
+        "ensemble_missing_rate": ensemble_missing_rate,
+        "max_missing_ensemble_rate": max_missing_ensemble_rate,
+        "manifest_integrity": manifest_stats,
         "holding_period_required": warmup_required,
         "lift_fraction": lift_fraction,
         "min_lift_fraction": min_lift_fraction,
