@@ -266,4 +266,8 @@ class TestEnsembleCoordinator:
         }
         confidence = derive_model_confidence(summaries)
         assert confidence["samossa"] > confidence["sarimax"]
-        assert confidence["mssa_rl"] > confidence["samossa"]
+        # Phase 7.15-E: GARCH always enters the pool (fallback 0.45 when no summary).
+        # With 4 models the top two both hit the 0.65 accuracy cap; raw ordering
+        # (mssa_rl 0.854 > samossa 0.775) is preserved but not distinguishable post-cap.
+        assert confidence["mssa_rl"] >= confidence["samossa"]
+        assert "garch" in confidence  # GARCH participates even without explicit summary
