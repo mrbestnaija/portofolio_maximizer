@@ -118,6 +118,33 @@ def _insert_unlinked_short_cover_close_row(db_path: Path) -> None:
     conn.close()
 
 
+def _insert_unlinked_close_without_realized_pnl(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id
+        ) VALUES (
+            99, 'MSFT', '2026-02-15', 'SELL', 1.0, 300.0, 300.0,
+            0.0, 300.0, 0.0,
+            'synthetic', 'synthetic', '20260215_090000',
+            NULL, NULL, 2,
+            305.0, 300.0, 1.0, 1.0, 0.0,
+            1, '2026-02-15T00:00:00+00:00', 'EXIT_RULE', 'US_EQUITY', 'spot',
+            1.0, 0.8, NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 def _insert_orphan_short_entry(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     conn.execute(
@@ -143,6 +170,20 @@ def _insert_orphan_short_entry(db_path: Path) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def test_find_unlinked_closes_includes_rows_without_realized_pnl(tmp_path: Path) -> None:
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+    _insert_unlinked_close_without_realized_pnl(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = repair.find_unlinked_closes(conn)
+    conn.close()
+
+    close_ids = {int(r["id"]) for r in rows}
+    assert 99 in close_ids
 
 
 def test_repair_linkage_reconstruct_from_state_dry_run(tmp_path: Path) -> None:

@@ -391,6 +391,64 @@ def test_check_forecast_audits_fails_on_missing_ensemble_rate(
     assert excinfo.value.code != 0
 
 
+def test_check_forecast_audits_missing_ensemble_rate_not_deferred_by_effective_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2024-06-01",
+        end="2024-06-30",
+        length=160,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 2.5},
+            "samossa": {"rmse": 2.0},
+            # ensemble intentionally missing
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    max_missing_ensemble_rate: 0.0",
+                "    min_effective_for_missing_rate_check: 20",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
+
+
 def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)

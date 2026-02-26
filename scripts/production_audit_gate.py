@@ -76,7 +76,9 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
     where = [
         "is_close = 1",
         "entry_trade_id IS NULL",
-        "realized_pnl IS NOT NULL",
+        # Note: intentionally no realized_pnl IS NOT NULL filter -- matches the scope
+        # used by PnLIntegrityEnforcer.CLOSE_WITHOUT_ENTRY_LINK (pnl_integrity_enforcer.py:552)
+        # so that reconcile PASS ↔ zero integrity violations, not just zero PnL-carrying ones.
     ]
     params: list[Any] = []
     filtered_ids = [int(x) for x in (close_ids or []) if int(x) > 0]
@@ -127,8 +129,10 @@ def _run_reconcile_step(
         "status": "PASS" if int(proc.returncode) == 0 else "FAIL",
         "output_tail": _tail_lines(output),
     }
-    if not apply:
-        return result
+    if int(proc.returncode) != 0:
+        result["status_reason"] = "reconcile_command_failed"
+    else:
+        result["status_reason"] = "reconcile_command_ok"
 
     remaining_count, remaining_ids, verification_error = _count_unlinked_closes(
         db_path,
@@ -144,9 +148,17 @@ def _run_reconcile_step(
     elif remaining_count is not None and int(remaining_count) > 0:
         # Strict semantics: do not report PASS when targeted closes remain unlinked.
         result["status"] = "FAIL"
-        result["status_reason"] = "remaining_unlinked_after_apply"
+        result["status_reason"] = (
+            "remaining_unlinked_after_apply" if apply else "remaining_unlinked_detected"
+        )
+    elif int(proc.returncode) == 0:
+        result["status"] = "PASS"
+        result["status_reason"] = (
+            "verified_zero_unlinked_after_apply" if apply else "verified_zero_unlinked"
+        )
     else:
-        result["status_reason"] = "verified_zero_unlinked_after_apply"
+        result["status"] = "FAIL"
+        result["status_reason"] = "reconcile_command_failed"
 
     return result
 
@@ -837,12 +849,11 @@ def main() -> int:
             f"(apply={bool(reconcile_result.get('apply'))}, "
             f"close_ids={reconcile_result.get('close_ids')})"
         )
-        if reconcile_result.get("apply"):
-            print(
-                "Reconcile verify: "
-                f"remaining_unlinked={reconcile_result.get('remaining_unlinked_closes')} "
-                f"reason={reconcile_result.get('status_reason')}"
-            )
+        print(
+            "Reconcile verify: "
+            f"remaining_unlinked={reconcile_result.get('remaining_unlinked_closes')} "
+            f"reason={reconcile_result.get('status_reason')}"
+        )
     print(f"Artifact       : {output_path}")
     print(f"Artifact (run) : {stamped_output}")
     try:

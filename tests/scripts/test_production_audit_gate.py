@@ -145,7 +145,7 @@ def test_run_reconcile_step_apply_passes_when_verified_zero_unlinked(
     assert res["remaining_unlinked_close_ids"] == []
 
 
-def test_run_reconcile_step_dry_run_keeps_exit_code_status_without_strict_verification(
+def test_run_reconcile_step_dry_run_fails_when_unlinked_detected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
@@ -171,8 +171,9 @@ def test_run_reconcile_step_dry_run_keeps_exit_code_status_without_strict_verifi
         close_ids=[66],
         apply=False,
     )
-    assert res["status"] == "PASS"
-    assert "remaining_unlinked_closes" not in res
+    assert res["status"] == "FAIL"
+    assert res["status_reason"] == "remaining_unlinked_detected"
+    assert res["remaining_unlinked_closes"] == 1
 
 
 def test_main_fails_gate_when_reconcile_status_is_fail(
