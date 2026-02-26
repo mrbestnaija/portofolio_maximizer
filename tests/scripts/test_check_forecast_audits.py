@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import time
@@ -31,6 +32,28 @@ def _write_audit(
         },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _write_manifest(audit_dir: Path, audit_paths: list[Path]) -> Path:
+    manifest = audit_dir / "forecast_audit_manifest.jsonl"
+    lines = []
+    for path in audit_paths:
+        lines.append(
+            json.dumps(
+                {
+                    "file": path.name,
+                    "sha256": _sha256(path),
+                }
+            )
+        )
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest
 
 
 def test_check_forecast_audits_dedupes_by_dataset_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +178,217 @@ def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:
     assert res is not None
     assert res.baseline_model == "GARCH"
     assert res.rmse_ratio == pytest.approx(1.0)
+
+
+def test_check_audit_file_missing_ensemble_metrics_no_fallback(tmp_path: Path) -> None:
+    audit = tmp_path / "audit_missing_ensemble.json"
+    _write_audit(
+        audit,
+        start="2024-03-01",
+        end="2024-03-31",
+        length=180,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 3.0},
+            "samossa": {"rmse": 2.0},
+        },
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    res = mod.check_audit_file(audit, tolerance=0.1, baseline_model="BEST_SINGLE")
+    assert res is not None
+    assert res.ensemble_rmse is None
+    assert res.baseline_rmse == pytest.approx(2.0)
+    assert res.rmse_ratio is None
+    assert res.ensemble_missing is True
+
+
+def test_check_forecast_audits_manifest_fail_mode_blocks_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    audit_path = audit_dir / "forecast_audit_0.json"
+    _write_audit(
+        audit_path,
+        start="2024-04-01",
+        end="2024-04-30",
+        length=200,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 3.0},
+            "ensemble": {"rmse": 3.0},
+        },
+    )
+    _write_manifest(audit_dir, [audit_path])
+    # Tamper after manifest generation.
+    _write_audit(
+        audit_path,
+        start="2024-04-01",
+        end="2024-04-30",
+        length=200,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 3.0},
+            "ensemble": {"rmse": 9.0},
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+                "    manifest_integrity_mode: fail",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
+
+
+def test_check_forecast_audits_manifest_fail_mode_accepts_valid_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    audit_path = audit_dir / "forecast_audit_0.json"
+    _write_audit(
+        audit_path,
+        start="2024-04-01",
+        end="2024-04-30",
+        length=200,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 3.0},
+            "ensemble": {"rmse": 3.0},
+        },
+    )
+    _write_manifest(audit_dir, [audit_path])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+                "    manifest_integrity_mode: fail",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+
+def test_check_forecast_audits_fails_on_missing_ensemble_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2024-05-01",
+        end="2024-05-31",
+        length=180,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 3.0},
+            "samossa": {"rmse": 2.0},
+            # ensemble intentionally missing
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    max_missing_ensemble_rate: 0.0",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
 
 
 def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

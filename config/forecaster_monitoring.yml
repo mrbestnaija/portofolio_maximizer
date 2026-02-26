@@ -77,6 +77,11 @@ forecaster_monitoring:
     # recommend disbanding the ensemble as default source of truth.
     # 25% requires meaningful evidence of ensemble benefit over best-single.
     min_lift_fraction: 0.25
+    # Alert/fail if ensemble metrics are missing too often from audit payloads.
+    max_missing_ensemble_rate: 0.05
+    # Audit provenance hardening (set to fail after legacy audit backfill).
+    manifest_integrity_mode: warn
+    manifest_filename: forecast_audit_manifest.jsonl
 
     # Preselection hard gate (forecast-time): block ensemble from being the
     # default forecast source when recent ensemble/best-single RMSE ratio is

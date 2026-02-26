@@ -448,6 +448,12 @@ def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
     metrics["min_lift_fraction"] = _capture_ratio(
         r"Ensemble lift fraction:\s*[0-9]+(?:\.[0-9]+)?%\s*\(required\s*>=\s*([0-9]+(?:\.[0-9]+)?)%\)"
     )
+    metrics["ensemble_missing_rate"] = _capture_ratio(
+        r"Missing ensemble metrics\s*:\s*\d+/\d+\s*\(([0-9]+(?:\.[0-9]+)?)%\)"
+    )
+    metrics["max_missing_ensemble_rate"] = _capture_ratio(
+        r"Missing ensemble metrics\s*:\s*\d+/\d+\s*\([0-9]+(?:\.[0-9]+)?%\)\s*\(max allowed\s*([0-9]+(?:\.[0-9]+)?)%\)"
+    )
 
     decision_match = re.search(r"Decision:\s*([A-Z_]+)\s*\((.+?)\)", text)
     metrics["decision"] = decision_match.group(1) if decision_match else None

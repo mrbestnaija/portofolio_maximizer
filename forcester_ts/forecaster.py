@@ -6,6 +6,7 @@ and the new MSSA-RL variant in parallel.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import logging
 import os
 import warnings
@@ -900,6 +901,53 @@ class TimeSeriesForecaster:
     def save_audit_report(self, output_path: Path) -> None:
         """Persist the instrumentation report to disk for interpretable-AI auditing."""
         self._instrumentation.dump_json(output_path)
+        self._append_audit_manifest_entry(output_path)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> Optional[str]:
+        try:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except Exception:
+            return None
+
+    def _append_audit_manifest_entry(self, audit_path: Path) -> None:
+        """
+        Record immutable digest metadata for forecast audits.
+
+        This does not replace filesystem controls, but it allows the gate to
+        detect silent audit tampering or partial writes before using evidence.
+        """
+        digest = self._sha256_file(audit_path)
+        if not digest:
+            logger.warning("Unable to hash forecast audit artifact: %s", audit_path)
+            return
+        try:
+            size_bytes = int(audit_path.stat().st_size)
+        except Exception:
+            size_bytes = None
+
+        manifest_path = audit_path.parent / "forecast_audit_manifest.jsonl"
+        entry = {
+            "file": audit_path.name,
+            "sha256": digest,
+            "bytes": size_bytes,
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source": "TimeSeriesForecaster.save_audit_report",
+        }
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with manifest_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            logger.warning(
+                "Failed to append forecast audit manifest entry for %s: %s",
+                audit_path,
+                exc,
+            )
 
     def _build_config_from_kwargs(
         self,
@@ -1362,122 +1410,11 @@ class TimeSeriesForecaster:
 
         rmse_cfg = self._rmse_monitor_cfg or {}
         history_stats = self._audit_history_stats(metrics_map)
-
-        def _maybe_reweight_ensemble_from_holdout() -> None:
-            metadata = self._latest_results.get("ensemble_metadata")
-            if not isinstance(metadata, dict):
-                return
-            if not any(model in metrics_map for model in ("sarimax", "samossa", "mssa_rl")):
-                return
-            required = max(
-                int(rmse_cfg.get("holding_period_audits", 0) or 0),
-                int(rmse_cfg.get("min_effective_audits", 0) or 0),
-                0,
-            )
-            if required > 0 and history_stats.get("effective_n", 0) < required:
-                self._record_model_event(
-                    "ensemble",
-                    "holdout_wait",
-                    effective_audits=history_stats.get("effective_n", 0),
-                    required_audits=required,
-                )
-                return
-
-            rmse_by_model: Dict[str, float] = {}
-            for model in ("sarimax", "garch", "samossa", "mssa_rl"):
-                rmse_val = (metrics_map.get(model) or {}).get("rmse")
-                if isinstance(rmse_val, (int, float)) and float(rmse_val) >= 0:
-                    rmse_by_model[model] = float(rmse_val)
-            if not rmse_by_model:
-                return
-
-            best_model, best_rmse = min(rmse_by_model.items(), key=lambda item: item[1])
-            # Only blend models that are "close enough" to the best performer on
-            # the evaluated window. Otherwise, pick the best model outright so
-            # the ensemble cannot be worse than the best available forecaster.
-            #
-            # This implements the policy "model with least forecasting error is
-            # weightier" in a way that's robust for production gates.
-            relative_band = 0.05
-            eligible = {
-                model: rmse
-                for model, rmse in rmse_by_model.items()
-                if rmse <= best_rmse * (1.0 + relative_band)
-            }
-            if not eligible:
-                eligible = {best_model: best_rmse}
-
-            eps = 1e-12
-            raw_weights = {model: 1.0 / (rmse + eps) for model, rmse in eligible.items()}
-            total = sum(raw_weights.values())
-            if total <= 0:
-                return
-            weights = {model: val / total for model, val in raw_weights.items()}
-
-            # Rebuild the ensemble forecast using these RMSE-derived weights so
-            # the lowest error models are weightier on the evaluated window.
-            model_series: Dict[str, pd.Series] = {}
-            lower_bounds: Dict[str, Optional[pd.Series]] = {}
-            upper_bounds: Dict[str, Optional[pd.Series]] = {}
-            for model in weights.keys():
-                payload = self._latest_results.get(f"{model}_forecast")
-                if not isinstance(payload, dict):
-                    continue
-                forecast_series = self._extract_series(payload)
-                if forecast_series is None:
-                    continue
-                model_series[model] = forecast_series
-                lower_bounds[model] = payload.get("lower_ci") if isinstance(payload.get("lower_ci"), pd.Series) else None
-                upper_bounds[model] = payload.get("upper_ci") if isinstance(payload.get("upper_ci"), pd.Series) else None
-
-            if not model_series:
-                return
-
-            coordinator = EnsembleCoordinator(self._ensemble_config)
-            coordinator.selected_weights = dict(weights)
-            blended = coordinator.blend_forecasts(model_series, lower_bounds, upper_bounds)
-            if not blended:
-                return
-
-            previous_weights = (
-                dict(metadata.get("weights", {}))
-                if isinstance(metadata.get("weights"), dict)
-                else {}
-            )
-            model_confidence = (
-                dict(metadata.get("confidence", {}))
-                if isinstance(metadata.get("confidence"), dict)
-                else {}
-            )
-            self._latest_results["ensemble_forecast"] = blended
-            metadata["weights"] = dict(weights)
-            metadata["holdout_reweight_applied"] = True
-            metadata["holdout_reweight_previous_weights"] = previous_weights
-            metadata["holdout_reweight_weights"] = dict(weights)
-            self._instrumentation.record_artifact("ensemble_weights", dict(weights))
-            self._instrumentation.record_artifact(
-                "ensemble_selection_reweighted",
-                {
-                    "weights": dict(weights),
-                    "model_confidence": model_confidence,
-                    "selection_score": metadata.get("selection_score"),
-                    "previous_weights": previous_weights,
-                },
-            )
-            self._record_model_event(
-                "ensemble",
-                "reweighted_from_holdout",
-                weights=metadata.get("weights"),
-            )
-
-            # Recompute ensemble metrics on the reweighted forecast bundle.
-            ensemble_series = blended.get("forecast")
-            if isinstance(ensemble_series, pd.Series):
-                new_metrics = compute_regression_metrics(actual, ensemble_series)
-                if new_metrics:
-                    metrics_map["ensemble"] = new_metrics
-
-        _maybe_reweight_ensemble_from_holdout()
+        # Keep evaluate() read-only: changing ensemble weights using realized
+        # labels in this method is post-hoc leakage and contaminates gate data.
+        metadata = self._latest_results.get("ensemble_metadata")
+        if isinstance(metadata, dict):
+            metadata.setdefault("holdout_reweight_applied", False)
         self._enforce_ensemble_safety(metrics_map, history_stats, rmse_cfg)
 
         self._latest_metrics = metrics_map

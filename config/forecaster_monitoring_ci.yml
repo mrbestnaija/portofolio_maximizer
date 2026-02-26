@@ -18,6 +18,11 @@ forecaster_monitoring:
     disable_ensemble_if_no_lift: true
     min_lift_rmse_ratio: 0.00
     min_lift_fraction: 0.10
+    # Hard fail when ensemble metrics disappear from audit payloads.
+    max_missing_ensemble_rate: 0.00
+    # Require digest manifest coverage for all scanned audit artifacts.
+    manifest_integrity_mode: fail
+    manifest_filename: forecast_audit_manifest.jsonl
 
     # Preselection hard gate in CI profile.
     strict_preselection_gate_enabled: true
@@ -27,7 +32,7 @@ forecaster_monitoring:
 
     # Adversarial-suite thresholds (blocking in CI).
     adversarial_suite:
-      max_ensemble_under_best_rate: 1.00
+      max_ensemble_under_best_rate: 0.35
       max_avg_ensemble_ratio_vs_best: 1.20
       max_ensemble_worse_than_rw_rate: 0.30
       # Gate on the effective default path (what production actually routes)
