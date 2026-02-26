@@ -72,7 +72,7 @@ python scripts/run_all_gates.py --db data/portfolio_maximizer.db
 ### Phase 7.14-B: ATR-Based Stop Loss
 
 **Type**: Code change
-**Status**: PENDING
+**Status**: COMPLETE
 **Files**: `models/time_series_signal_generator.py`, `tests/models/test_time_series_signal_generator.py`
 
 **Problem**: Current stop loss = `volatility * 0.5` clamped `[1.5%, 5%]`. NVDA ATR(14) ~$10
@@ -85,18 +85,20 @@ bar High/Low ranges (market-observed noise), not model-implied vol.
 - New stop logic: `stop_loss_pct = max((atr * 1.5) / current_price, 0.015)` -- no 5% ceiling
 - Fallback to vol-based stop when OHLC columns unavailable
 
-**Tests** (4 new):
+**Tests** (4 new, all passing):
 - `test_atr_stop_uses_bar_data`: Known OHLCV -> verify stop = price - ATR*1.5
 - `test_atr_stop_fallback_no_ohlc`: Missing High/Low -> vol-based fallback
 - `test_atr_stop_minimum_floor`: Very low ATR -> stop >= 1.5%
 - `test_atr_stop_nvda_wide`: ATR > 5% of price -> no 5% cap applied
+
+**Verification (2026-02-25)**: 4/4 tests pass. Fast regression lane: 903 passed, 0 failures.
 
 ---
 
 ### Phase 7.14-C: GARCH Convergence Hardening
 
 **Type**: Code change
-**Status**: PENDING
+**Status**: COMPLETE
 **Files**: `forcester_ts/garch.py`, `tests/forecasting/test_garch_convergence.py` (NEW)
 
 **Problem**: `garch.py:172` -- `model.fit(disp="off")` with no convergence check. `arch` library
@@ -113,20 +115,23 @@ flagged as wider.
 - Parkinson estimator backup when GJR also fails: `sqrt(mean((ln(H/L))^2) / (4*ln2))`
 - Tag result: `result["convergence_ok"] = not convergence_failed`
 
-**Tests** (4 new in `tests/forecasting/test_garch_convergence.py`):
-- `test_convergence_failure_triggers_gjr`: Mock RuntimeWarning -> GJR attempted
-- `test_convergence_failure_inflates_ci`: CI 1.5x wider after failure
-- `test_parkinson_backup`: No GARCH fit -> Parkinson vol returned
-- `test_good_fit_no_inflation`: Normal convergence -> CI unchanged
+**Tests** (5 in `tests/forecasting/test_garch_convergence.py`, all passing):
+- `test_convergence_ok_true_by_default`: initial state check
+- `test_convergence_failure_detected_via_warning`: Mock RuntimeWarning -> `_convergence_ok=False` + GJR attempted
+- `test_convergence_ok_stays_true_on_clean_fit`: Normal convergence -> flag unchanged
+- `test_convergence_failure_inflates_ci`: CI 1.5x wider after failure (`_enrich_garch_forecast`)
+- `test_good_fit_ci_unchanged`: `convergence_ok=True` -> CI unmodified
+
+**Verification (2026-02-25)**: 5/5 tests pass. Self-attenuating chain confirmed: bad fit -> wider CI -> SNR drops -> signal blocked.
 
 ---
 
 ### Phase 7.14-D: Persist detected_regime to DB
 
 **Type**: Migration + code change
-**Status**: PENDING
+**Status**: COMPLETE
 **Files**: `scripts/migrate_add_regime_to_forecasts.py` (NEW), `forcester_ts/forecaster.py`,
-          `etl/database_manager.py`, `tests/etl/test_database_manager_schema.py`
+          `etl/database_manager.py`, `scripts/run_etl_pipeline.py`, `tests/etl/test_database_manager_schema.py`
 
 **Problem**: Regime detection runs in-memory, result never saved to `time_series_forecasts` table.
 Downstream analysis cannot correlate regime with trade outcomes.
@@ -136,30 +141,39 @@ Downstream analysis cannot correlate regime with trade outcomes.
 - `forecaster.py`: Add `detected_regime`/`regime_confidence` to `forecast_bundle` dict
 - `database_manager.py`: Add params to `save_forecast()` + auto-migration in `_initialize_schema()`
 
-**Tests** (2 new):
+**Wire fix (2026-02-25)**:
+- `forecaster.py`: added `results["detected_regime"]` alias (`None` when regime is "STATIC")
+- `run_etl_pipeline.py`: extracted `_regime_for_db`/`_regime_conf_for_db` and added to all 5 model `forecast_data` dicts (SARIMAX, GARCH, SAMOSSA, MSSA_RL, ENSEMBLE)
+
+**Tests** (2, all passing):
 - `test_detected_regime_saved_and_retrieved`: Round-trip through DB
 - `test_detected_regime_null_ok`: NULL regime -> no error
+
+**Verification (2026-02-25)**: Migration idempotent on production DB ([SKIP] columns already exist). 2/2 tests pass. Fast regression lane: 903 passed, 0 failures.
 
 ---
 
 ### Phase 7.14-E: Platt Calibration End-to-End Wire
 
 **Type**: Code change
-**Status**: PENDING
+**Status**: COMPLETE
 **Files**: `execution/paper_trading_engine.py`, `tests/execution/test_paper_trading_engine.py`
 
 **Problem**: `_calibrate_confidence()` queries `confidence_calibrated` column in `trade_executions`.
 Column exists (Phase 7.9 schema) but `PaperTradingEngine` never saves it -> all 84 rows NULL ->
 calibration query returns 0 usable rows even after A3 sets `db_path`.
 
-**Implementation**:
-- `Trade` dataclass: Add `confidence_calibrated: Optional[float] = None` if not present
-- Trade construction: `confidence_calibrated=signal.get('confidence_calibrated')`
-  (`signal_router._signal_to_dict()` already exposes this via `getattr(signal, 'confidence_calibrated', None)`)
-- `save_trade_execution()` call: Add `confidence_calibrated=trade.confidence_calibrated`
+**Full chain (all links verified present 2026-02-25)**:
+1. `TimeSeriesSignal.confidence_calibrated` field on signal dataclass (`time_series_signal_generator.py:137`)
+2. `_calibrate_confidence()` result → `self._platt_calibrated` → set on signal at line 617
+3. `signal_router._signal_to_dict()` exposes via `getattr(signal, 'confidence_calibrated', None)` (line 348)
+4. `PaperTradingEngine` reads from signal dict → `Trade.confidence_calibrated` (line 604)
+5. `save_trade_execution()` passes to DB column (line 1353)
 
-**Tests** (1 new):
+**Tests** (1, passing):
 - `test_confidence_calibrated_saved_to_db`: Signal with `confidence_calibrated=0.62` -> DB query -> value stored
+
+**Verification (2026-02-25)**: 1/1 test pass. Final regression lane: 903 passed, 0 failures.
 
 ---
 
@@ -174,9 +188,12 @@ sanitization. Factory refactor is first item in Phase 7.15.
 
 ## Verification Checklist (Final)
 
+**Phase 7.14 status (2026-02-25)**: A COMPLETE, B COMPLETE, C COMPLETE, D COMPLETE, E COMPLETE, F DEFERRED->7.15
+**Regression baseline**: 903 passed, 1 skipped, 28 deselected, 7 xfailed (fast lane `not gpu and not slow`)
+
 ```bash
 # After Phase A
-pytest tests/ -q                                              # 914+
+pytest tests/ -q                                              # 903+ (fast lane)
 python scripts/run_all_gates.py --db data/portfolio_maximizer.db
 
 # After Phase D
@@ -268,12 +285,18 @@ This makes the system self-protective: bad fits produce no trades rather than ba
 ### Platt Calibration Bootstrap
 
 The `PLATT_BOOTSTRAP=1` flag in `overnight_refresh.sh` seeds (confidence, outcome) pairs
-from 8 historical dates across 2021-2024. Each date runs a synthetic cycle, producing
-`ts_*` attributed trades that `update_platt_outcomes.py` reconciles into JSONL. After 30+
-pairs (wins>=5, losses>=5), `_calibrate_confidence()` activates isotonic regression to
-shrink overconfident signals toward actual win rates.
+from historical dates. Each date uses a 1-cycle-per-business-day ladder with `--resume`
+so bar timestamps advance and proof-mode max_holding fires, producing closed `ts_*` trades
+that `update_platt_outcomes.py` reconciles into JSONL. After 30+ pairs (wins>=5,
+losses>=5), `_calibrate_confidence()` activates **LogisticRegression** (classic Platt
+scaling) to shrink overconfident signals toward actual win rates.
+
+**Important**: the DB-global fallback tier (queries `trade_executions` directly) is the
+primary calibration source when JSONL pairs are below threshold. JSONL is supplementary.
+Classifier contract is enforced by `scripts/platt_contract_audit.py` and
+`tests/scripts/test_platt_calibration_contract.py`.
 
 ---
 
-**Last Updated**: 2026-02-24
+**Last Updated**: 2026-02-25 (Phases A-E all COMPLETE)
 **Next Phase**: 7.15 (Signal Generator Factory + session_id implementation)

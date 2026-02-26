@@ -759,6 +759,8 @@ class TimeSeriesForecaster:
             results["regime_confidence"] = None
             results["regime_features"] = None
             results["regime_recommendations"] = None
+        # Phase 7.14-D: alias for DB persistence (database_manager reads 'detected_regime')
+        results["detected_regime"] = results["regime"] if results["regime"] != "STATIC" else None
 
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)

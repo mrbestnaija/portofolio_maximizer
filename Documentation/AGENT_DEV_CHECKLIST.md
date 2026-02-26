@@ -31,6 +31,20 @@
 >   - what was intentionally left untouched,
 >   - what was verified and with which commands.
 
+> **Institutional Hardening Baseline (Mandatory)**
+> - For unattended/autonomous readiness claims, run and report:
+>   - `python scripts/institutional_unattended_gate.py --json`
+>   - `python scripts/run_all_gates.py --json`
+>   - `python -m pytest tests/scripts/test_institutional_unattended_contract.py tests/scripts/test_institutional_unattended_gate.py tests/scripts/test_llm_runtime_install_policy.py tests/scripts/test_platt_calibration_contract.py tests/scripts/test_run_all_gates.py -q`
+>   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
+> - Do not use skip flags in final evidence (`--skip-forecast-gate`, `--skip-profitability-gate`, `--skip-institutional-gate`).
+> - Preserve these contracts:
+>   - Runtime pip install stays default-deny (`PMX_ALLOW_RUNTIME_PIP_INSTALL=1` required).
+>   - Prompt-injection blocking stays default-on for autonomous paths.
+>   - Forecast/audit max-files defaults remain repo-synced (`scripts/audit_gate_defaults.py`).
+>   - `platt_contract_audit.py` remains standalone-runnable (no manual `PYTHONPATH`).
+>   - No shadow runtime duplicates (`Dockerfile (1)`, `execution/lob_simulator (1).py`).
+
 ## Delta (2026-01-18)
 
 - Live dashboard must not fabricate results: `visualizations/live_dashboard.html` only renders from `visualizations/dashboard_data.json` (polled every 5s) and shows empty states when missing.

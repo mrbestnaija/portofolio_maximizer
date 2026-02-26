@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import sqlite3
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -53,30 +53,38 @@ def extract_forecast_data_from_db(
     """
     conn = guarded_sqlite_connect('data/portfolio_maximizer.db')
 
-    # Build query (note: column is model_type not model_name in schema)
-    query = f"""
-        SELECT
-            model_type as model_name,
-            forecast_date,
-            forecast_value,
-            lower_ci,
-            upper_ci,
-            volatility,
-            created_at
-        FROM time_series_forecasts
-        WHERE ticker = '{ticker}'
-    """
+    # Build parameterized query (note: column is model_type not model_name in schema)
+    query_parts = [
+        "SELECT",
+        "    model_type as model_name,",
+        "    forecast_date,",
+        "    forecast_value,",
+        "    lower_ci,",
+        "    upper_ci,",
+        "    volatility,",
+        "    created_at",
+        "FROM time_series_forecasts",
+        "WHERE ticker = ?",
+    ]
+    query_params: list[Any] = [ticker]
 
     if pipeline_id:
-        query += f" AND created_at LIKE '{pipeline_id.split('_')[-2]}%'"
+        pid_parts = str(pipeline_id).split("_")
+        stamp = pid_parts[-2] if len(pid_parts) >= 2 else ""
+        if stamp:
+            query_parts.append("  AND created_at LIKE ?")
+            query_params.append(f"{stamp}%")
 
     if days:
-        query += f" AND date(forecast_date) >= date('now', '-{days} days')"
+        lookback_days = max(1, int(days))
+        query_parts.append("  AND date(forecast_date) >= date('now', ?)")
+        query_params.append(f"-{lookback_days} days")
 
-    query += " ORDER BY forecast_date, model_name"
+    query_parts.append("ORDER BY forecast_date, model_name")
+    query = "\n".join(query_parts)
 
     logger.info(f"Querying forecasts for {ticker}...")
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query(query, conn, params=query_params)
 
     if df.empty:
         conn.close()
@@ -112,16 +120,20 @@ def extract_forecast_data_from_db(
 
     # Fetch actual prices from OHLCV data
     # Try to get actuals from the database
-    actual_query = f"""
+    actual_query = """
         SELECT date, close
         FROM ohlcv_data
-        WHERE ticker = '{ticker}'
-        AND date >= (SELECT MIN(forecast_date) FROM time_series_forecasts WHERE ticker = '{ticker}')
+        WHERE ticker = ?
+          AND date >= (
+              SELECT MIN(forecast_date)
+              FROM time_series_forecasts
+              WHERE ticker = ?
+          )
         ORDER BY date
     """
 
     try:
-        actuals_df = pd.read_sql_query(actual_query, conn)
+        actuals_df = pd.read_sql_query(actual_query, conn, params=[ticker, ticker])
         if not actuals_df.empty:
             actual_values = actuals_df['close'].values
             logger.info(f"Fetched {len(actual_values)} actual price values")

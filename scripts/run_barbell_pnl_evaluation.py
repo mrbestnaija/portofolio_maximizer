@@ -34,7 +34,7 @@ if str(ROOT_PATH) not in sys.path:
 from etl.database_manager import DatabaseManager
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
-from models.time_series_signal_generator import TimeSeriesSignalGenerator
+from models.signal_generator_factory import build_signal_generator
 from risk.barbell_policy import BarbellConfig
 from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence as _write_promotion_evidence
 from risk.barbell_sizing import apply_barbell_confidence, barbell_confidence_multipliers
@@ -244,13 +244,18 @@ def _simulate_walk_forward(
         database_manager=sim_db,
     )
 
-    quant_validation_config = {"enabled": False} if disable_quant_validation else None
-    ts_generator = TimeSeriesSignalGenerator(
-        confidence_threshold=float(signal_confidence_threshold),
-        min_expected_return=float(signal_min_expected_return),
-        max_risk_score=float(signal_max_risk_score),
-        use_volatility_filter=not bool(disable_volatility_filter),
-        quant_validation_config=quant_validation_config,
+    # Phase 7.15: factory provides all 9 params (previously per_ticker_thresholds,
+    # cost_model, and forecasting_config_path were missing from this caller).
+    # Explicit CLI params override the YAML base; quant_validation_config disables
+    # JSONL writes when disable_quant_validation=True.
+    ts_generator = build_signal_generator(
+        ts_cfg_overrides={
+            "confidence_threshold": float(signal_confidence_threshold),
+            "min_expected_return": float(signal_min_expected_return),
+            "max_risk_score": float(signal_max_risk_score),
+            "use_volatility_filter": not bool(disable_volatility_filter),
+        },
+        quant_validation_config={"enabled": False} if disable_quant_validation else None,
     )
     multipliers = _barbell_multipliers(barbell_cfg)
     profile = str(forecaster_profile or "full").strip().lower()

@@ -11,6 +11,7 @@ Test Coverage:
 import pytest
 import pandas as pd
 import numpy as np
+import pickle
 from pathlib import Path
 from datetime import datetime, timedelta
 import shutil
@@ -185,6 +186,30 @@ class TestCheckpointManager:
         """Test loading nonexistent checkpoint raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             checkpoint_manager.load_checkpoint('nonexistent_checkpoint_id')
+
+    def test_load_checkpoint_rejects_invalid_checkpoint_id(self, checkpoint_manager):
+        """Path traversal-like checkpoint IDs must be rejected before any filesystem access."""
+        with pytest.raises(ValueError):
+            checkpoint_manager.load_checkpoint("../escape_attempt")
+
+    def test_load_checkpoint_rejects_unsafe_pickled_state(self, checkpoint_manager, sample_data, temp_checkpoint_dir):
+        """Checkpoint state unpickling must reject non-primitive classes."""
+        checkpoint_id = checkpoint_manager.save_checkpoint(
+            pipeline_id='test_pipeline',
+            stage='unsafe_state',
+            data=sample_data
+        )
+
+        class _Evil:
+            def __reduce__(self):  # pragma: no cover - only executed by pickle machinery
+                return (eval, ("1+1",))
+
+        state_file = Path(temp_checkpoint_dir) / f"{checkpoint_id}_state.pkl"
+        with open(state_file, "wb") as fh:
+            pickle.dump(_Evil(), fh)
+
+        with pytest.raises((pickle.UnpicklingError, ValueError)):
+            checkpoint_manager.load_checkpoint(checkpoint_id)
 
     # ==================== Data Hash Tests ====================
 

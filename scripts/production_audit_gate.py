@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+except Exception:  # pragma: no cover - script execution path fallback
+    from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+
 
 # Phase 7.13-C1: central path constants
 try:
@@ -492,8 +497,8 @@ def main() -> int:
     parser.add_argument(
         "--max-files",
         type=int,
-        default=500,
-        help="Max forecast audit files to scan (default: 500).",
+        default=FORECAST_AUDIT_MAX_FILES_DEFAULT,
+        help=f"Max forecast audit files to scan (default: {FORECAST_AUDIT_MAX_FILES_DEFAULT}).",
     )
     parser.add_argument(
         "--require-holding-period",

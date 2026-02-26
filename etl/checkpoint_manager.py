@@ -14,6 +14,8 @@ import json
 import hashlib
 import os
 import pickle
+import builtins
+import re
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -23,6 +25,35 @@ import pandas as pd
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_SAFE_PICKLE_BUILTINS = {
+    "dict",
+    "list",
+    "tuple",
+    "set",
+    "frozenset",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "bytes",
+    "bytearray",
+    "NoneType",
+}
+
+
+class _CheckpointSafeUnpickler(pickle.Unpickler):
+    """Restricted unpickler for checkpoint metadata state."""
+
+    def find_class(self, module: str, name: str) -> Any:  # noqa: D401 - inherited contract
+        if module == "builtins" and name in _SAFE_PICKLE_BUILTINS:
+            return getattr(builtins, name)
+        raise pickle.UnpicklingError(f"Disallowed class in checkpoint state: {module}.{name}")
+
+
+def _safe_pickle_load(handle: Any) -> Any:
+    return _CheckpointSafeUnpickler(handle).load()
 
 
 class CheckpointManager:
@@ -87,6 +118,22 @@ class CheckpointManager:
         hash_input = pd.util.hash_pandas_object(data_sorted, index=True).values
         return hashlib.sha256(hash_input.tobytes()).hexdigest()[:16]
 
+    @staticmethod
+    def _validate_checkpoint_id(checkpoint_id: str) -> str:
+        raw = str(checkpoint_id or "").strip()
+        if not _CHECKPOINT_ID_PATTERN.fullmatch(raw):
+            raise ValueError(f"Invalid checkpoint id: {checkpoint_id!r}")
+        return raw
+
+    def _checkpoint_paths(self, checkpoint_id: str) -> tuple[Path, Path]:
+        safe_id = self._validate_checkpoint_id(checkpoint_id)
+        base_dir = self.checkpoint_dir.resolve()
+        checkpoint_path = (base_dir / f"{safe_id}.parquet").resolve()
+        state_path = (base_dir / f"{safe_id}_state.pkl").resolve()
+        if checkpoint_path.parent != base_dir or state_path.parent != base_dir:
+            raise ValueError(f"Checkpoint path escapes checkpoint_dir: {checkpoint_id!r}")
+        return checkpoint_path, state_path
+
     def save_checkpoint(self,
                        pipeline_id: str,
                        stage: str,
@@ -109,8 +156,7 @@ class CheckpointManager:
         checkpoint_id = f"{pipeline_id}_{stage}_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
         # Create checkpoint paths
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
-        state_path = self.checkpoint_dir / f"{checkpoint_id}_state.pkl"
+        checkpoint_path, state_path = self._checkpoint_paths(checkpoint_id)
 
         # Save data (atomic write)
         temp_data = checkpoint_path.with_suffix('.tmp')
@@ -172,8 +218,7 @@ class CheckpointManager:
         Raises:
             FileNotFoundError: If checkpoint doesn't exist
         """
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
-        state_path = self.checkpoint_dir / f"{checkpoint_id}_state.pkl"
+        checkpoint_path, state_path = self._checkpoint_paths(checkpoint_id)
 
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_id}")
@@ -183,7 +228,9 @@ class CheckpointManager:
 
         # Load state
         with open(state_path, 'rb') as f:
-            state = pickle.load(f)
+            state = _safe_pickle_load(f)
+        if not isinstance(state, dict):
+            raise ValueError(f"Checkpoint state must be a dict for {checkpoint_id}")
 
         # Verify data integrity
         loaded_hash = self._compute_data_hash(data)
@@ -281,8 +328,11 @@ class CheckpointManager:
                 if cp_time < cutoff:
                     # Delete checkpoint files
                     checkpoint_id = cp['checkpoint_id']
-                    data_file = self.checkpoint_dir / f"{checkpoint_id}.parquet"
-                    state_file = self.checkpoint_dir / f"{checkpoint_id}_state.pkl"
+                    try:
+                        data_file, state_file = self._checkpoint_paths(checkpoint_id)
+                    except ValueError:
+                        logger.warning("Skipping invalid checkpoint id in metadata: %s", checkpoint_id)
+                        continue
 
                     if data_file.exists():
                         data_file.unlink()
@@ -316,8 +366,10 @@ class CheckpointManager:
         Returns:
             True if deleted, False if not found
         """
-        checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.parquet"
-        state_path = self.checkpoint_dir / f"{checkpoint_id}_state.pkl"
+        try:
+            checkpoint_path, state_path = self._checkpoint_paths(checkpoint_id)
+        except ValueError:
+            return False
 
         if not checkpoint_path.exists():
             return False

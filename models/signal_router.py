@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import time
 
 from models.time_series_signal_generator import TimeSeriesSignal, TimeSeriesSignalGenerator
+from models.signal_generator_factory import build_signal_generator
 from ai_llm.signal_generator import LLMSignalGenerator
 
 logger = logging.getLogger(__name__)
@@ -75,13 +76,11 @@ class SignalRouter:
         ts_cfg = self.config.get("time_series") or {}
 
         # Initialize generators
-        self.ts_generator = time_series_generator or TimeSeriesSignalGenerator(
-            confidence_threshold=float(ts_cfg.get("confidence_threshold", 0.55)),
-            min_expected_return=float(ts_cfg.get("min_expected_return", 0.003)),
-            max_risk_score=float(ts_cfg.get("max_risk_score", 0.7)),
-            use_volatility_filter=bool(ts_cfg.get("use_volatility_filter", True)),
-            per_ticker_thresholds=ts_cfg.get("per_ticker") if isinstance(ts_cfg.get("per_ticker"), dict) else None,
-            cost_model=ts_cfg.get("cost_model") if isinstance(ts_cfg.get("cost_model"), dict) else None,
+        # Phase 7.15: factory ensures all 9 constructor params (incl. quant_validation_config
+        # and forecasting_config_path) are populated. ts_cfg carries any proof-mode overrides
+        # applied by run_auto_trader.py before SignalRouter is constructed.
+        self.ts_generator = time_series_generator or build_signal_generator(
+            ts_cfg_overrides=ts_cfg if ts_cfg else None,
         )
         self.llm_generator = llm_generator  # Optional, only if LLM fallback enabled
 
