@@ -354,6 +354,16 @@ def main() -> None:
             "before exiting non-zero. If omitted, uses config value or 1.0."
         ),
     )
+    parser.add_argument(
+        "--min-forecast-horizon",
+        type=int,
+        default=None,
+        help=(
+            "Minimum dataset.forecast_horizon required for an audit artifact "
+            "to participate in gate statistics. If omitted, uses "
+            "regression_metrics.min_forecast_horizon when present."
+        ),
+    )
     args = parser.parse_args()
 
     audit_dir = Path(args.audit_dir)
@@ -427,10 +437,19 @@ def main() -> None:
         else float(rmse_cfg.get("max_missing_ensemble_rate", 1.0))
     )
 
-    def _dedupe_key(path: Path) -> Optional[Tuple[Any, ...]]:
-        audit = _load_audit(path)
-        if not audit:
-            return None
+    min_forecast_horizon = (
+        int(args.min_forecast_horizon)
+        if args.min_forecast_horizon is not None
+        else (
+            int(rmse_cfg.get("min_forecast_horizon"))
+            if rmse_cfg.get("min_forecast_horizon") is not None
+            else None
+        )
+    )
+    if min_forecast_horizon is not None and min_forecast_horizon < 0:
+        min_forecast_horizon = 0
+
+    def _dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
         dataset = audit.get("dataset") or {}
         ds_key = (
             dataset.get("start"),
@@ -444,7 +463,18 @@ def main() -> None:
         # the violation rate and aligns with "latest evidence wins" monitoring.
         return ds_key
 
+    def _forecast_horizon_from_audit(audit: Dict[str, Any]) -> Optional[int]:
+        dataset = audit.get("dataset") or {}
+        raw = dataset.get("forecast_horizon")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
     unique_map: dict[Tuple[Any, ...], Path] = {}
+    horizon_filtered_count = 0
 
     manifest_index: Dict[str, str] = {}
     manifest_stats: Dict[str, Any] = {
@@ -463,6 +493,16 @@ def main() -> None:
         manifest_stats.update(loaded_stats)
 
     for f in files:
+        audit = _load_audit(f)
+        if not audit:
+            continue
+
+        if min_forecast_horizon is not None:
+            horizon = _forecast_horizon_from_audit(audit)
+            if horizon is None or horizon < min_forecast_horizon:
+                horizon_filtered_count += 1
+                continue
+
         if manifest_mode != "off":
             status = _verify_manifest_entry(f, manifest_index)
             if status == "ok":
@@ -472,9 +512,7 @@ def main() -> None:
                 if manifest_mode == "fail":
                     manifest_stats["excluded_unverified"] += 1
                     continue
-        key = _dedupe_key(f)
-        if key is None:
-            continue
+        key = _dedupe_key_from_audit(audit)
         # Files are sorted newest-first, so keep the first (newest) entry we see
         # for each dataset window and ignore older duplicates.
         if key in unique_map:
@@ -515,11 +553,17 @@ def main() -> None:
             f"Recent window  : {recent_window_audits} effective audit(s) "
             f"(max violation rate {recent_window_max_violation_rate:.2%})"
         )
-        if recent_window_max_p90_rmse_ratio is not None:
-            print(
-                "Recent p90 gate: "
-                f"p90(rmse_ratio) <= {recent_window_max_p90_rmse_ratio:.3f}"
-            )
+    if min_forecast_horizon is not None:
+        print(
+            "Horizon filter : "
+            f"forecast_horizon >= {min_forecast_horizon} "
+            f"(excluded={horizon_filtered_count})"
+        )
+    if recent_window_max_p90_rmse_ratio is not None:
+        print(
+            "Recent p90 gate: "
+            f"p90(rmse_ratio) <= {recent_window_max_p90_rmse_ratio:.3f}"
+        )
     if manifest_mode != "off":
         print(
             "Manifest check : "
@@ -844,6 +888,8 @@ def main() -> None:
         "ensemble_missing_count": ensemble_missing_count,
         "ensemble_missing_rate": ensemble_missing_rate,
         "max_missing_ensemble_rate": max_missing_ensemble_rate,
+        "min_forecast_horizon": min_forecast_horizon,
+        "horizon_filtered_count": horizon_filtered_count,
         "manifest_integrity": manifest_stats,
         "holding_period_required": warmup_required,
         "lift_fraction": lift_fraction,
