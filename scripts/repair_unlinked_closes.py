@@ -77,7 +77,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = None) -> list[sqlite3.Row]:
-    """Find closing legs with PnL but no entry_trade_id."""
+    """Find closing legs with no entry_trade_id."""
     base_sql = """
         SELECT
             id, ticker, trade_date, action, shares, price, realized_pnl, bar_timestamp, run_id,
@@ -87,7 +87,6 @@ def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = 
         FROM trade_executions
         WHERE is_close = 1
           AND entry_trade_id IS NULL
-          AND realized_pnl IS NOT NULL
     """
     params: tuple[Any, ...] = ()
     if close_ids:

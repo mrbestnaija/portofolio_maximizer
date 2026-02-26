@@ -436,7 +436,6 @@ def main() -> None:
         if args.max_missing_ensemble_rate is not None
         else float(rmse_cfg.get("max_missing_ensemble_rate", 1.0))
     )
-
     min_forecast_horizon = (
         int(args.min_forecast_horizon)
         if args.min_forecast_horizon is not None
@@ -668,7 +667,10 @@ def main() -> None:
         f"{ensemble_missing_count}/{len(results)} ({ensemble_missing_rate:.2%}) "
         f"(max allowed {max_missing_ensemble_rate:.2%})"
     )
-    if len(results) > 0 and max_missing_ensemble_rate >= 0:
+    if (
+        len(results) > 0
+        and max_missing_ensemble_rate >= 0
+    ):
         if ensemble_missing_rate > max_missing_ensemble_rate:
             raise SystemExit(
                 "Missing ensemble metric rate "

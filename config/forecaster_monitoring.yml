@@ -67,6 +67,15 @@ forecaster_monitoring:
     # lift over the selected baseline across the holding period window.
     # Keep ensemble in non-default/research-only posture when lift is weak, but
     # do not hard-fail unattended readiness solely on no-lift evidence.
+    #
+    # Governance: keep false (fail-open) while DISABLE_DEFAULT posture holds.
+    # Ensemble is already in DISABLE_DEFAULT / research-only mode -- the
+    # operational signal is correct without hard-failing overnight runs.
+    # Flip to true ONLY when ALL of the following are true:
+    #   1. lift_fraction >= min_lift_fraction (0.25) across 20+ fresh audit windows
+    #   2. Those audit windows were generated post-Phase-7.15-F ensemble fix
+    #   3. Recent-window violation rate is consistently below max_violation_rate
+    # Current status: 1.67% lift fraction vs 25% required (as of 2026-02-26).
     disable_ensemble_if_no_lift: false
 
     # "Lift" means ensemble_rmse <= (1 - min_lift_rmse_ratio) * baseline_rmse.
