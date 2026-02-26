@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -60,6 +61,47 @@ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None) -> Tuple[Optional[int], List[int], Optional[str]]:
+    """
+    Verify unlinked-close backlog directly from DB.
+
+    Returns:
+    - remaining_count (None on verification error)
+    - sampled_close_ids (up to 20)
+    - verification_error (None on success)
+    """
+    if not db_path.exists():
+        return None, [], f"db_not_found:{db_path}"
+
+    where = [
+        "is_close = 1",
+        "entry_trade_id IS NULL",
+        "realized_pnl IS NOT NULL",
+    ]
+    params: list[Any] = []
+    filtered_ids = [int(x) for x in (close_ids or []) if int(x) > 0]
+    if filtered_ids:
+        placeholders = ",".join("?" for _ in filtered_ids)
+        where.append(f"id IN ({placeholders})")
+        params.extend(filtered_ids)
+
+    sql_where = " AND ".join(where)
+    count_sql = f"SELECT COUNT(*) AS n FROM trade_executions WHERE {sql_where}"
+    sample_sql = f"SELECT id FROM trade_executions WHERE {sql_where} ORDER BY id LIMIT 20"
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(count_sql, tuple(params)).fetchone()
+        count_val = int(row["n"]) if row and row["n"] is not None else 0
+        sample_rows = conn.execute(sample_sql, tuple(params)).fetchall()
+        sample_ids = [int(r["id"]) for r in sample_rows if r and r["id"] is not None]
+        conn.close()
+        return count_val, sample_ids, None
+    except Exception as exc:
+        return None, [], str(exc)
+
+
 def _run_reconcile_step(
     *,
     python_bin: str,
@@ -77,7 +119,7 @@ def _run_reconcile_step(
         cmd.append("--apply")
     proc = _run_command(cmd, cwd=repo_root)
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
-    return {
+    result: Dict[str, Any] = {
         "requested": True,
         "apply": bool(apply),
         "close_ids": [int(x) for x in close_ids if int(x) > 0],
@@ -85,6 +127,28 @@ def _run_reconcile_step(
         "status": "PASS" if int(proc.returncode) == 0 else "FAIL",
         "output_tail": _tail_lines(output),
     }
+    if not apply:
+        return result
+
+    remaining_count, remaining_ids, verification_error = _count_unlinked_closes(
+        db_path,
+        close_ids=[int(x) for x in close_ids if int(x) > 0],
+    )
+    result["remaining_unlinked_closes"] = remaining_count
+    result["remaining_unlinked_close_ids"] = remaining_ids
+    result["verification_error"] = verification_error
+
+    if verification_error:
+        result["status"] = "FAIL"
+        result["status_reason"] = "reconcile_verification_failed"
+    elif remaining_count is not None and int(remaining_count) > 0:
+        # Strict semantics: do not report PASS when targeted closes remain unlinked.
+        result["status"] = "FAIL"
+        result["status_reason"] = "remaining_unlinked_after_apply"
+    else:
+        result["status_reason"] = "verified_zero_unlinked_after_apply"
+
+    return result
 
 
 def _run_command_quiet(cmd: list[str], cwd: Path) -> Tuple[int, str, str]:
@@ -678,7 +742,11 @@ def main() -> int:
     proof_requirements = _load_profitability_requirements(proof_requirements_path)
     evidence_progress = _build_evidence_progress(metrics=metrics, requirements=proof_requirements)
 
-    gate_pass = lift_pass and proof_pass
+    reconcile_pass = True
+    if reconcile_result.get("requested"):
+        reconcile_pass = str(reconcile_result.get("status") or "FAIL").upper() == "PASS"
+
+    gate_pass = lift_pass and proof_pass and reconcile_pass
     gate_status = "PASS" if gate_pass else "FAIL"
 
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -735,6 +803,7 @@ def main() -> int:
         "production_profitability_gate": {
             "status": gate_status,
             "pass": gate_pass,
+            "reconcile_pass": reconcile_pass,
         },
     }
 
@@ -768,6 +837,12 @@ def main() -> int:
             f"(apply={bool(reconcile_result.get('apply'))}, "
             f"close_ids={reconcile_result.get('close_ids')})"
         )
+        if reconcile_result.get("apply"):
+            print(
+                "Reconcile verify: "
+                f"remaining_unlinked={reconcile_result.get('remaining_unlinked_closes')} "
+                f"reason={reconcile_result.get('status_reason')}"
+            )
     print(f"Artifact       : {output_path}")
     print(f"Artifact (run) : {stamped_output}")
     try:

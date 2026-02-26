@@ -82,3 +82,10 @@ def test_ci_forecaster_monitoring_hardening_contracts() -> None:
     assert "max_ensemble_under_best_rate: 0.35" in source
     assert "manifest_integrity_mode: fail" in source
     assert "max_missing_ensemble_rate: 0.00" in source
+
+
+def test_production_gate_reconcile_is_strictly_verified_after_apply() -> None:
+    source = Path("scripts/production_audit_gate.py").read_text(encoding="utf-8")
+    assert "_count_unlinked_closes" in source
+    assert "remaining_unlinked_after_apply" in source
+    assert "verified_zero_unlinked_after_apply" in source
