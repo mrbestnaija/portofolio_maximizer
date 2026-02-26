@@ -720,7 +720,7 @@ class PnLIntegrityEnforcer:
         after accounting for existing linked closes.
         """
         closes = self.conn.execute(
-            "SELECT id, ticker, entry_price, trade_date, "
+            "SELECT id, ticker, action, entry_price, trade_date, "
             "       COALESCE(close_size, shares, 0.0) AS close_qty "
             "FROM trade_executions "
             "WHERE is_close = 1 AND entry_trade_id IS NULL "
@@ -733,12 +733,14 @@ class PnLIntegrityEnforcer:
 
         linked = 0
 
-        # Remaining quantity by BUY leg after accounting for linked closes.
+        # Remaining quantity by opening leg after accounting for linked closes.
+        # Fetch ALL opening legs (is_close=0) regardless of action so that
+        # short positions (SELL to open, BUY to close) are handled correctly.
         buy_rows = self.conn.execute(
-            "SELECT id, ticker, trade_date, COALESCE(shares, 0.0) AS buy_qty, "
+            "SELECT id, ticker, action, trade_date, COALESCE(shares, 0.0) AS buy_qty, "
             "       COALESCE(price, 0.0) AS buy_price "
             "FROM trade_executions "
-            "WHERE action = 'BUY' AND is_close = 0 "
+            "WHERE is_close = 0 "
             "ORDER BY trade_date DESC, id DESC"
         ).fetchall()
         buy_by_id: Dict[int, sqlite3.Row] = {int(r["id"]): r for r in buy_rows}
@@ -764,13 +766,17 @@ class PnLIntegrityEnforcer:
             if close_qty <= 0:
                 continue
 
-            # Find matching opening BUY
+            # Direction-aware open leg search:
+            #   close.action='SELL' closes a LONG  -> look for open.action='BUY'
+            #   close.action='BUY'  closes a SHORT -> look for open.action='SELL'
+            close_action = str(close["action"] or "SELL").upper()
+            open_action = "BUY" if close_action == "SELL" else "SELL"
             candidates = self.conn.execute(
                 "SELECT id, price, trade_date FROM trade_executions "
-                "WHERE ticker = ? AND action = 'BUY' AND is_close = 0 "
+                "WHERE ticker = ? AND action = ? AND is_close = 0 "
                 "  AND trade_date <= ? "
                 "ORDER BY trade_date DESC, id DESC",
-                (close["ticker"], close["trade_date"]),
+                (close["ticker"], open_action, close["trade_date"]),
             ).fetchall()
 
             for cand in candidates:

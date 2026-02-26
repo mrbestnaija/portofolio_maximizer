@@ -46,7 +46,8 @@ def _make_db(path: Path, trades: List[Dict[str, Any]]) -> None:
             ts_signal_id TEXT,
             realized_pnl REAL,
             realized_pnl_pct REAL,
-            is_close INTEGER
+            is_close INTEGER,
+            entry_trade_id INTEGER
         )"""
     )
     for t in trades:
