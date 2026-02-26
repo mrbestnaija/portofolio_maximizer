@@ -47,48 +47,82 @@ def _fetch_outcomes_for_signals(
     conn: sqlite3.Connection,
     signal_ids: List[str],
 ) -> Dict[str, Dict[str, Any]]:
-    """Return {ts_signal_id: outcome_dict} for closed trades matching any of the given ids.
+    """Return {open_ts_signal_id: outcome_dict} for closed trades matching any of the given ids.
 
-    Phase 7.13-A2: queries ts_signal_id TEXT column (globally unique per TS signal).
-    When multiple closing trades share the same ts_signal_id (partial fills),
-    the one with the largest abs(realized_pnl) is used.
+    Two-pass approach (Phase 7.15 fix):
+
+    Pass 1 — direct match: close leg's ts_signal_id IN (signal_ids).
+    Works for same-run round-trips where the exit signal reuses the entry signal ID.
+
+    Pass 2 — open-leg join: join close leg to its open leg via entry_trade_id, then
+    match on open leg's ts_signal_id. This handles the common case where ladder-resume
+    exits generate a NEW ts_signal_id on the close leg that differs from the open signal
+    (the one recorded in JSONL). The JSONL entry always uses the OPEN signal's ID, so
+    matching must trace close -> open via entry_trade_id to find it.
+
+    Result is keyed by the OPEN signal's ts_signal_id so callers can look up outcomes
+    using the same signal_id stored in the JSONL entry.
     """
     if not signal_ids:
         return {}
 
     placeholders = ",".join("?" * len(signal_ids))
-    query = f"""
-        SELECT ts_signal_id, realized_pnl, realized_pnl_pct
-        FROM trade_executions
-        WHERE ts_signal_id IN ({placeholders})
-          AND is_close = 1
-          AND realized_pnl IS NOT NULL
-        ORDER BY ABS(realized_pnl) DESC
-    """
-    try:
-        cur = conn.cursor()
-        cur.execute(query, signal_ids)
-        rows = cur.fetchall()
-    except Exception as exc:
-        logger.error("DB query failed: %s", exc)
-        return {}
-
     result: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        sid, pnl, pnl_pct = row
-        if sid is None:
-            continue
-        # First row per ts_signal_id wins (ordered by abs(pnl) DESC)
-        if str(sid) not in result:
-            try:
-                pnl_f = float(pnl)
-                result[str(sid)] = {
-                    "win": pnl_f > 0,
-                    "pnl": round(pnl_f, 4),
-                    "pnl_pct": round(float(pnl_pct), 6) if pnl_pct is not None else None,
-                }
-            except (TypeError, ValueError):
-                pass
+    cur = conn.cursor()
+
+    def _add_rows(rows: list, key_col_index: int = 0) -> None:
+        for row in rows:
+            sid, pnl, pnl_pct = row[key_col_index], row[1], row[2]
+            if sid is None:
+                continue
+            if str(sid) not in result:
+                try:
+                    pnl_f = float(pnl)
+                    result[str(sid)] = {
+                        "win": pnl_f > 0,
+                        "pnl": round(pnl_f, 4),
+                        "pnl_pct": round(float(pnl_pct), 6) if pnl_pct is not None else None,
+                    }
+                except (TypeError, ValueError):
+                    pass
+
+    # Pass 1: direct match on close leg's ts_signal_id (same-run round trips).
+    try:
+        cur.execute(
+            f"""
+            SELECT ts_signal_id, realized_pnl, realized_pnl_pct
+            FROM trade_executions
+            WHERE ts_signal_id IN ({placeholders})
+              AND is_close = 1
+              AND realized_pnl IS NOT NULL
+            ORDER BY ABS(realized_pnl) DESC
+            """,
+            signal_ids,
+        )
+        _add_rows(cur.fetchall())
+    except Exception as exc:
+        logger.error("DB query (pass 1) failed: %s", exc)
+
+    # Pass 2: join close leg to open leg via entry_trade_id; match on open
+    # leg's ts_signal_id. This covers ladder-resume exits where the close leg
+    # carries a different ts_signal_id than the opening signal recorded in JSONL.
+    try:
+        cur.execute(
+            f"""
+            SELECT o.ts_signal_id, c.realized_pnl, c.realized_pnl_pct
+            FROM trade_executions c
+            JOIN trade_executions o ON c.entry_trade_id = o.id
+            WHERE o.ts_signal_id IN ({placeholders})
+              AND c.is_close = 1
+              AND c.realized_pnl IS NOT NULL
+            ORDER BY ABS(c.realized_pnl) DESC
+            """,
+            signal_ids,
+        )
+        _add_rows(cur.fetchall())
+    except Exception as exc:
+        logger.error("DB query (pass 2) failed: %s", exc)
+
     return result
 
 
@@ -161,18 +195,30 @@ def reconcile(
     entries = _load_jsonl(log_path)
     total = len(entries)
 
-    # Collect ts_signal_ids that still need outcome (Phase 7.13-A2: string IDs)
+    # Collect ts_signal_ids that still need outcome (Phase 7.13-A2: string IDs).
+    # Only BUY/SELL actions are collected: HOLD signals structurally cannot produce
+    # is_close=1 trades and must not inflate the still_pending starvation metric.
     pending: List[str] = []
     already_done = 0
+    hold_skipped = 0
+    other_no_sid = 0
     for entry in entries:
         if "outcome" in entry:
             already_done += 1
+            continue
+        action = str(entry.get("action", "")).upper()
+        if action == "HOLD":
+            hold_skipped += 1
             continue
         sid = entry.get("signal_id")
         if sid is not None:
             sid_str = str(sid).strip()
             if sid_str:
                 pending.append(sid_str)
+            else:
+                other_no_sid += 1
+        else:
+            other_no_sid += 1
 
     if not pending:
         print(f"[INFO] 0 entries need outcome (total={total}, already_done={already_done}).")
@@ -201,7 +247,8 @@ def reconcile(
     print(
         f"[update_platt_outcomes] total={total} pending={len(pending)} "
         f"matched={updated} already_done={already_done} "
-        f"still_pending={len(pending) - updated}"
+        f"still_pending={len(pending) - updated} "
+        f"hold_skipped={hold_skipped} no_sid={other_no_sid}"
     )
 
     if updated > 0 and not dry_run:
