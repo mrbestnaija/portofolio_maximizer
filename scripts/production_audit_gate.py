@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -387,6 +388,68 @@ def _summary_matches_audit_dir(summary: Dict[str, Any], audit_dir: Path) -> bool
     return summary_dir == audit_dir.resolve()
 
 
+def _summary_matches_invocation(
+    summary: Dict[str, Any],
+    *,
+    audit_dir: Path,
+    max_files: int,
+) -> bool:
+    if not _summary_matches_audit_dir(summary, audit_dir):
+        return False
+    raw_max_files = summary.get("max_files")
+    if raw_max_files is None:
+        return True
+    try:
+        return int(raw_max_files) == int(max_files)
+    except Exception:
+        return False
+
+
+def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
+    text = output or ""
+
+    def _capture_int(pattern: str) -> Optional[int]:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
+
+    def _capture_ratio(pattern: str) -> Optional[float]:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            return None
+        try:
+            return float(match.group(1)) / 100.0
+        except Exception:
+            return None
+
+    metrics: Dict[str, Any] = {}
+    metrics["effective_audits"] = _capture_int(r"Effective audits with RMSE:\s*(\d+)")
+    metrics["violation_count"] = _capture_int(
+        r"Violations \(ensemble worse than baseline beyond tolerance\):\s*(\d+)"
+    )
+    metrics["violation_rate"] = _capture_ratio(
+        r"Violation rate:\s*([0-9]+(?:\.[0-9]+)?)%\s*\(max allowed"
+    )
+    metrics["max_violation_rate"] = _capture_ratio(
+        r"Violation rate:\s*[0-9]+(?:\.[0-9]+)?%\s*\(max allowed\s*([0-9]+(?:\.[0-9]+)?)%\)"
+    )
+    metrics["lift_fraction"] = _capture_ratio(
+        r"Ensemble lift fraction:\s*([0-9]+(?:\.[0-9]+)?)%\s*\(required"
+    )
+    metrics["min_lift_fraction"] = _capture_ratio(
+        r"Ensemble lift fraction:\s*[0-9]+(?:\.[0-9]+)?%\s*\(required\s*>=\s*([0-9]+(?:\.[0-9]+)?)%\)"
+    )
+
+    decision_match = re.search(r"Decision:\s*([A-Z_]+)\s*\((.+?)\)", text)
+    metrics["decision"] = decision_match.group(1) if decision_match else None
+    metrics["decision_reason"] = decision_match.group(2) if decision_match else None
+    return metrics
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
@@ -533,20 +596,55 @@ def main() -> int:
     lift_proc = _run_command(lift_cmd, cwd=repo_root)
     lift_output = f"{lift_proc.stdout or ''}\n{lift_proc.stderr or ''}".strip()
     lift_inconclusive = "RMSE gate inconclusive" in lift_output
+    lift_output_metrics = _extract_lift_output_metrics(lift_output)
 
     lift_summary = _safe_load_json(summary_cache_path) or {}
-    if lift_summary and not _summary_matches_audit_dir(lift_summary, audit_dir):
+    if lift_summary and not _summary_matches_invocation(
+        lift_summary,
+        audit_dir=audit_dir,
+        max_files=int(args.max_files),
+    ):
         lift_summary = {}
 
     lift_status = "PASS"
     if lift_proc.returncode != 0:
         lift_status = "FAIL"
+        # Do not attach stale cached decision metadata when the active lift run failed.
+        lift_summary = {}
     elif lift_inconclusive:
         lift_status = "INCONCLUSIVE"
 
     lift_pass = lift_proc.returncode == 0 and (
         args.allow_inconclusive_lift or not lift_inconclusive
     )
+
+    lift_decision = lift_output_metrics.get("decision") or lift_summary.get("decision")
+    lift_decision_reason = lift_output_metrics.get("decision_reason") or lift_summary.get(
+        "decision_reason"
+    )
+    if lift_inconclusive:
+        lift_decision = None
+        lift_decision_reason = "insufficient effective audits for RMSE gate"
+
+    lift_effective_audits = lift_output_metrics.get("effective_audits")
+    if lift_effective_audits is None:
+        lift_effective_audits = lift_summary.get("effective_audits")
+
+    lift_violation_rate = lift_output_metrics.get("violation_rate")
+    if lift_violation_rate is None:
+        lift_violation_rate = lift_summary.get("violation_rate")
+
+    lift_max_violation_rate = lift_output_metrics.get("max_violation_rate")
+    if lift_max_violation_rate is None:
+        lift_max_violation_rate = lift_summary.get("max_violation_rate")
+
+    lift_fraction = lift_output_metrics.get("lift_fraction")
+    if lift_fraction is None:
+        lift_fraction = lift_summary.get("lift_fraction")
+
+    min_lift_fraction = lift_output_metrics.get("min_lift_fraction")
+    if min_lift_fraction is None:
+        min_lift_fraction = lift_summary.get("min_lift_fraction")
 
     proof_cmd = [
         python_bin,
@@ -597,13 +695,13 @@ def main() -> int:
             "pass": lift_pass,
             "exit_code": int(lift_proc.returncode),
             "inconclusive": lift_inconclusive,
-            "decision": lift_summary.get("decision"),
-            "decision_reason": lift_summary.get("decision_reason"),
-            "effective_audits": lift_summary.get("effective_audits"),
-            "violation_rate": lift_summary.get("violation_rate"),
-            "max_violation_rate": lift_summary.get("max_violation_rate"),
-            "lift_fraction": lift_summary.get("lift_fraction"),
-            "min_lift_fraction": lift_summary.get("min_lift_fraction"),
+            "decision": lift_decision,
+            "decision_reason": lift_decision_reason,
+            "effective_audits": lift_effective_audits,
+            "violation_rate": lift_violation_rate,
+            "max_violation_rate": lift_max_violation_rate,
+            "lift_fraction": lift_fraction,
+            "min_lift_fraction": min_lift_fraction,
             "output_tail": _tail_lines(lift_output),
         },
         "profitability_proof": {
