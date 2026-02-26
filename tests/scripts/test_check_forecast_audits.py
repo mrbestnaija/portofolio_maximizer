@@ -718,3 +718,153 @@ def test_check_forecast_audits_recent_window_gate_catches_fresh_regression(
     with pytest.raises(SystemExit) as excinfo:
         mod.main()
     assert excinfo.value.code != 0
+
+
+def test_check_forecast_audits_min_forecast_horizon_filters_short_horizon_regressions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    # Short-horizon artifacts (typical of tests/research) are regressions.
+    _write_audit(
+        audit_dir / "forecast_audit_short_0.json",
+        start="2024-11-01",
+        end="2024-12-01",
+        length=180,
+        horizon=5,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 10.0},
+            "ensemble": {"rmse": 15.0},
+        },
+    )
+    _write_audit(
+        audit_dir / "forecast_audit_short_1.json",
+        start="2024-11-02",
+        end="2024-12-02",
+        length=180,
+        horizon=10,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 10.0},
+            "ensemble": {"rmse": 14.0},
+        },
+    )
+
+    # Production-like horizon remains healthy.
+    _write_audit(
+        audit_dir / "forecast_audit_prod_0.json",
+        start="2024-11-03",
+        end="2024-12-03",
+        length=220,
+        horizon=30,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 10.0},
+            "ensemble": {"rmse": 10.0},
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    min_forecast_horizon: 20",
+                "    holding_period_audits: 1",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "Horizon filter : forecast_horizon >= 20" in out
+
+
+def test_check_forecast_audits_min_forecast_horizon_cli_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    # Same structure as the filter test: two short-horizon regressions + one clean long horizon.
+    for i, horizon, ens_rmse in (
+        (0, 5, 15.0),
+        (1, 10, 14.0),
+        (2, 30, 10.0),
+    ):
+        _write_audit(
+            audit_dir / f"forecast_audit_{i}.json",
+            start=f"2024-11-{i+1:02d}",
+            end=f"2024-12-{i+1:02d}",
+            length=220,
+            horizon=horizon,
+            weights={"samossa": 1.0},
+            eval_metrics={
+                "samossa": {"rmse": 10.0},
+                "ensemble": {"rmse": ens_rmse},
+            },
+        )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    min_forecast_horizon: 20",
+                "    holding_period_audits: 1",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    # Override the config filter and include all horizons; should fail on violation rate.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+            "--min-forecast-horizon",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
