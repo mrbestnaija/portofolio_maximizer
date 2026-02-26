@@ -115,3 +115,55 @@ def test_backfill_entry_links_supports_partial_close_inventory(tmp_path):
         ).fetchone()[0]
         assert linked_id == 10
 
+
+def test_pnl_arithmetic_allows_long_sell_close(tmp_path):
+    db_path = tmp_path / "pnl_long_close.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (1, "AAPL", "2026-01-01", "BUY", 2.0, 100.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (2, "AAPL", "2026-01-02", "SELL", 2.0, 110.0, 2.0, 20.0, 0.10, 100.0, 110.0, 1.0, "TIME_EXIT", "live", 1, 1, 0, 0, 0.0),
+        ],
+    )
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_pnl_arithmetic()
+
+    assert violations == []
+
+
+def test_pnl_arithmetic_allows_short_buy_close(tmp_path):
+    db_path = tmp_path / "pnl_short_cover.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (10, "TSLA", "2026-01-01", "SELL", 2.0, 100.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (11, "TSLA", "2026-01-02", "BUY", 2.0, 90.0, 2.0, 20.0, 0.10, 100.0, 90.0, 1.0, "TIME_EXIT", "live", 1, 10, 0, 0, 0.0),
+        ],
+    )
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_pnl_arithmetic()
+
+    assert violations == []
+
+
+def test_pnl_arithmetic_flags_wrong_sign_for_short_buy_close(tmp_path):
+    db_path = tmp_path / "pnl_short_cover_bad.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (20, "TSLA", "2026-01-01", "SELL", 2.0, 100.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (21, "TSLA", "2026-01-02", "BUY", 2.0, 90.0, 2.0, -20.0, -0.10, 100.0, 90.0, 1.0, "TIME_EXIT", "live", 1, 20, 0, 0, 0.0),
+        ],
+    )
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_pnl_arithmetic()
+
+    assert len(violations) == 1
+    assert violations[0].check_name == "PNL_ARITHMETIC_MISMATCH"
+    assert violations[0].affected_ids == [21]

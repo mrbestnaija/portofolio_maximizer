@@ -569,21 +569,34 @@ class PnLIntegrityEnforcer:
         )]
 
     def _check_pnl_arithmetic(self) -> List[IntegrityViolation]:
-        """MEDIUM: Verify realized_pnl matches (exit_price - entry_price) * shares."""
+        """MEDIUM: Verify realized_pnl matches direction-aware close arithmetic."""
         rows = self.conn.execute(
-            "SELECT id, ticker, entry_price, exit_price, close_size, "
-            "       realized_pnl, commission "
+            "SELECT c.id, c.ticker, c.action, c.entry_price, c.exit_price, "
+            "       c.close_size, c.realized_pnl, c.commission, o.action AS open_action "
             "FROM trade_executions "
-            "WHERE is_close = 1 "
-            "  AND entry_price IS NOT NULL "
-            "  AND exit_price IS NOT NULL "
-            "  AND close_size IS NOT NULL "
-            "  AND realized_pnl IS NOT NULL"
+            "AS c "
+            "LEFT JOIN trade_executions AS o ON c.entry_trade_id = o.id "
+            "WHERE c.is_close = 1 "
+            "  AND c.entry_price IS NOT NULL "
+            "  AND c.exit_price IS NOT NULL "
+            "  AND c.close_size IS NOT NULL "
+            "  AND c.realized_pnl IS NOT NULL"
         ).fetchall()
 
         mismatched = []
         for r in rows:
-            expected = (r["exit_price"] - r["entry_price"]) * r["close_size"]
+            close_action = str(r["action"] or "").upper()
+            open_action = str(r["open_action"] or "").upper()
+            direction = 1.0
+            if close_action == "BUY":
+                # BUY close usually means covering a short.
+                direction = -1.0
+            elif close_action not in {"SELL", "BUY"}:
+                # Fallback for malformed/legacy close action values.
+                if open_action == "SELL":
+                    direction = -1.0
+
+            expected = direction * (r["exit_price"] - r["entry_price"]) * r["close_size"]
             commission = r["commission"] or 0.0
             expected -= commission
             if abs(r["realized_pnl"] - expected) > 0.02:  # 2 cent tolerance
@@ -597,7 +610,7 @@ class PnLIntegrityEnforcer:
             severity="MEDIUM",
             description=(
                 f"{len(mismatched)} closing trades have realized_pnl that doesn't "
-                "match (exit_price - entry_price) * close_size - commission."
+                "match directional close arithmetic using action, size, and commission."
             ),
             affected_ids=mismatched,
             count=len(mismatched),
