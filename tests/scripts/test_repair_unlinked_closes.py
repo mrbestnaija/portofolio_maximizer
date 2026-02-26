@@ -91,6 +91,60 @@ def _insert_unlinked_close_row(db_path: Path) -> None:
     conn.close()
 
 
+def _insert_unlinked_short_cover_close_row(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic
+        ) VALUES (
+            88, 'AAPL', '2026-02-01', 'BUY', 2.0, 95.0, 190.0,
+            0.0, 95.0, 0.0,
+            'synthetic', 'synthetic', '20260214_130000',
+            10.0, 0.05, 3,
+            100.0, 95.0, 2.0, -2.0, 0.0,
+            1, '2026-02-01T00:00:00+00:00', 'TAKE_PROFIT', 'US_EQUITY', 'spot',
+            1.0, 0.75, NULL, 1
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _insert_orphan_short_entry(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic
+        ) VALUES (
+            77, 'AAPL', '2026-01-29', 'SELL', 2.0, 100.0, 200.0,
+            0.0, 100.0, 0.0,
+            'synthetic', 'synthetic', '20260214_129500',
+            NULL, NULL, NULL,
+            NULL, NULL, NULL, 0.0, -2.0,
+            0, '2026-01-29T00:00:00+00:00', NULL, 'US_EQUITY', 'spot',
+            1.0, 0.75, NULL, 1
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_repair_linkage_reconstruct_from_state_dry_run(tmp_path: Path) -> None:
     db_path = tmp_path / "portfolio.db"
     report_path = tmp_path / "forensic.json"
@@ -161,3 +215,62 @@ def test_repair_linkage_reconstruct_from_state_apply(tmp_path: Path) -> None:
     assert str(entry_row["run_id"]).endswith("_recon_entry_66")
     assert str(entry_row["execution_mode"]).endswith("_entry_reconstructed")
 
+
+def test_repair_linkage_short_cover_reconstructs_sell_entry(tmp_path: Path) -> None:
+    db_path = tmp_path / "portfolio.db"
+    report_path = tmp_path / "forensic_short.json"
+    _create_trade_executions_table(db_path)
+    _insert_unlinked_short_cover_close_row(db_path)
+
+    rc = repair.repair_linkage(
+        db_path=db_path,
+        dry_run=False,
+        close_ids=[88],
+        reconstruct_from_state=True,
+        forensic_report_file=report_path,
+        logs_root=tmp_path / "logs",
+    )
+    assert rc == 0
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    close_row = conn.execute("SELECT entry_trade_id FROM trade_executions WHERE id = 88").fetchone()
+    assert close_row is not None
+    entry_id = int(close_row["entry_trade_id"])
+    assert entry_id > 0
+
+    entry = conn.execute(
+        "SELECT action, is_close, shares, price, position_after FROM trade_executions WHERE id = ?",
+        (entry_id,),
+    ).fetchone()
+    conn.close()
+
+    assert entry is not None
+    assert str(entry["action"]) == "SELL"
+    assert int(entry["is_close"]) == 0
+    assert abs(float(entry["shares"]) - 2.0) < 1e-9
+    assert abs(float(entry["price"]) - 100.0) < 1e-9
+    assert abs(float(entry["position_after"]) - (-2.0)) < 1e-9
+
+
+def test_repair_linkage_short_cover_matches_existing_orphan_sell(tmp_path: Path) -> None:
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+    _insert_orphan_short_entry(db_path)
+    _insert_unlinked_short_cover_close_row(db_path)
+
+    rc = repair.repair_linkage(
+        db_path=db_path,
+        dry_run=False,
+        close_ids=[88],
+        reconstruct_from_state=False,
+        forensic_report_file=None,
+        logs_root=tmp_path / "logs",
+    )
+    assert rc == 0
+
+    conn = sqlite3.connect(db_path)
+    close_row = conn.execute("SELECT entry_trade_id FROM trade_executions WHERE id = 88").fetchone()
+    conn.close()
+    assert close_row is not None
+    assert int(close_row[0]) == 77

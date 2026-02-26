@@ -62,6 +62,15 @@ def _parse_iso_ts(value: Any) -> datetime | None:
         return None
 
 
+def _close_to_entry_action(close_action: Any) -> str | None:
+    side = str(close_action or "").strip().upper()
+    if side == "SELL":
+        return "BUY"
+    if side == "BUY":
+        return "SELL"
+    return None
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -71,7 +80,7 @@ def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = 
     """Find closing legs with PnL but no entry_trade_id."""
     base_sql = """
         SELECT
-            id, ticker, trade_date, shares, price, realized_pnl, bar_timestamp, run_id,
+            id, ticker, trade_date, action, shares, price, realized_pnl, bar_timestamp, run_id,
             entry_price, close_size, position_before, position_after, holding_period_days,
             data_source, execution_mode, asset_class, instrument_type, multiplier,
             commission, mid_price, mid_slippage_bps, effective_confidence
@@ -89,14 +98,14 @@ def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = 
     return conn.execute(base_sql, params).fetchall()
 
 
-def find_orphaned_entries(conn: sqlite3.Connection, ticker: str) -> list[sqlite3.Row]:
-    """Find orphaned BUY entries for a ticker (no SELL linkage)."""
+def find_orphaned_entries(conn: sqlite3.Connection, ticker: str, entry_action: str) -> list[sqlite3.Row]:
+    """Find orphaned entries for a ticker/action pair (no close linkage)."""
     return conn.execute(
         """
         SELECT id, ticker, trade_date, shares, price, bar_timestamp, run_id, position_after
         FROM trade_executions
         WHERE ticker = ?
-          AND action = 'BUY'
+          AND action = ?
           AND is_close = 0
           AND id NOT IN (
               SELECT DISTINCT entry_trade_id
@@ -105,32 +114,32 @@ def find_orphaned_entries(conn: sqlite3.Connection, ticker: str) -> list[sqlite3
           )
         ORDER BY trade_date, id
         """,
-        (ticker,),
+        (ticker, entry_action),
     ).fetchall()
 
 
-def match_fifo(unlinked_sell: sqlite3.Row, orphaned_buys: list[sqlite3.Row]) -> int | None:
-    """Match SELL to BUY by proximity + share match within run context."""
-    sell_date = str(unlinked_sell["trade_date"] or "")
-    sell_shares = _safe_float(unlinked_sell["shares"])
-    sell_run = str(unlinked_sell["run_id"] or "")
+def match_fifo(unlinked_close: sqlite3.Row, orphaned_entries: list[sqlite3.Row]) -> int | None:
+    """Match close leg to opposite-side open by proximity + share match within run context."""
+    close_date = str(unlinked_close["trade_date"] or "")
+    close_shares = _safe_float(unlinked_close["shares"])
+    close_run = str(unlinked_close["run_id"] or "")
 
     candidates: list[tuple[int, int]] = []
-    for buy in orphaned_buys:
-        buy_date = str(buy["trade_date"] or "")
-        if buy_date > sell_date:
+    for entry in orphaned_entries:
+        entry_date = str(entry["trade_date"] or "")
+        if entry_date > close_date:
             continue
 
-        buy_run = str(buy["run_id"] or "")
+        entry_run = str(entry["run_id"] or "")
         try:
-            run_distance = abs(int(sell_run.split("_")[1]) - int(buy_run.split("_")[1]))
+            run_distance = abs(int(close_run.split("_")[1]) - int(entry_run.split("_")[1]))
         except (ValueError, IndexError):
             run_distance = 10_000
 
-        buy_shares = _safe_float(buy["shares"])
-        share_match = abs(sell_shares - buy_shares) < 1e-9
+        entry_shares = _safe_float(entry["shares"])
+        share_match = abs(close_shares - entry_shares) < 1e-9
         score = -run_distance + (100 if share_match else 0)
-        candidates.append((score, int(buy["id"])))
+        candidates.append((score, _safe_int(entry["id"])))
 
     if not candidates:
         return None
@@ -182,6 +191,8 @@ def _collect_forensic_evidence(close_row: sqlite3.Row, logs_root: Path) -> dict[
 def _derive_reconstructed_entry(close_row: sqlite3.Row) -> dict[str, Any] | None:
     close_id = _safe_int(close_row["id"])
     ticker = str(close_row["ticker"] or "").strip()
+    close_action = str(close_row["action"] or "").strip().upper()
+    entry_action = _close_to_entry_action(close_action)
     close_qty = _safe_float(close_row["close_size"], _safe_float(close_row["shares"]))
     entry_price = _safe_float(close_row["entry_price"])
     position_before = _safe_float(close_row["position_before"])
@@ -189,10 +200,22 @@ def _derive_reconstructed_entry(close_row: sqlite3.Row) -> dict[str, Any] | None
 
     if close_id <= 0 or not ticker:
         return None
+    if entry_action not in {"BUY", "SELL"}:
+        return None
     if close_qty <= 0.0 or entry_price <= 0.0:
         return None
-    if position_before + 1e-9 < close_qty:
-        return None
+    if entry_action == "BUY":
+        # Closing SELL should unwind a long position.
+        if position_before + 1e-9 < close_qty:
+            return None
+        entry_position_after = close_qty
+    else:
+        # Closing BUY should unwind a short position.
+        if abs(position_before) + 1e-9 < close_qty:
+            return None
+        if position_before >= 0:
+            return None
+        entry_position_after = -close_qty
 
     close_trade_date = _parse_trade_date(close_row["trade_date"])
     if close_trade_date is None:
@@ -212,8 +235,10 @@ def _derive_reconstructed_entry(close_row: sqlite3.Row) -> dict[str, Any] | None
     return {
         "close_id": close_id,
         "ticker": ticker,
+        "entry_action": entry_action,
         "shares": close_qty,
         "entry_price": entry_price,
+        "entry_position_after": entry_position_after,
         "entry_trade_date": entry_trade_date,
         "entry_bar_timestamp": entry_bar_ts,
         "run_id": recon_run_id,
@@ -235,12 +260,12 @@ def _find_existing_reconstructed_entry(conn: sqlite3.Connection, candidate: dict
         SELECT id
         FROM trade_executions
         WHERE run_id = ?
-          AND action = 'BUY'
+          AND action = ?
           AND is_close = 0
           AND ticker = ?
         LIMIT 1
         """,
-        (candidate["run_id"], candidate["ticker"]),
+        (candidate["run_id"], candidate["entry_action"], candidate["ticker"]),
     ).fetchone()
     if not row:
         return None
@@ -260,11 +285,12 @@ def _insert_reconstructed_entry(conn: sqlite3.Connection, candidate: dict[str, A
             bar_timestamp, exit_reason,
             asset_class, instrument_type, multiplier,
             effective_confidence, is_diagnostic, is_synthetic
-        ) VALUES (?, ?, 'BUY', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, 0)
         """,
         (
             candidate["ticker"],
             candidate["entry_trade_date"],
+            candidate["entry_action"],
             candidate["shares"],
             candidate["entry_price"],
             candidate["shares"] * candidate["entry_price"],
@@ -275,7 +301,7 @@ def _insert_reconstructed_entry(conn: sqlite3.Connection, candidate: dict[str, A
             candidate["execution_mode"],
             candidate["run_id"],
             0.0,
-            candidate["shares"],
+            candidate["entry_position_after"],
             candidate["entry_bar_timestamp"],
             "RECONSTRUCTED_MISSING_ENTRY",
             candidate["asset_class"],
@@ -326,54 +352,67 @@ def repair_linkage(
     reconstruct_repairs: list[dict[str, Any]] = []
     forensic_entries: list[dict[str, Any]] = []
 
-    for sell in unlinked:
-        sell_id = _safe_int(sell["id"])
-        ticker = str(sell["ticker"] or "")
-        sell_date = str(sell["trade_date"] or "")
-        shares = _safe_float(sell["shares"])
-        price = _safe_float(sell["price"])
-        pnl = _safe_float(sell["realized_pnl"])
-        run_id = str(sell["run_id"] or "")
-        print(f"Unlinked SELL ID {sell_id}: {ticker} {sell_date} - {shares} shares @ {price:.2f}")
+    for close_leg in unlinked:
+        close_id = _safe_int(close_leg["id"])
+        close_action = str(close_leg["action"] or "").strip().upper()
+        entry_action = _close_to_entry_action(close_action)
+        ticker = str(close_leg["ticker"] or "")
+        close_date = str(close_leg["trade_date"] or "")
+        shares = _safe_float(close_leg["shares"])
+        price = _safe_float(close_leg["price"])
+        pnl = _safe_float(close_leg["realized_pnl"])
+        run_id = str(close_leg["run_id"] or "")
+        print(
+            f"Unlinked CLOSE ID {close_id}: action={close_action or 'UNKNOWN'} "
+            f"{ticker} {close_date} - {shares} shares @ {price:.2f}"
+        )
         print(f"  PnL: ${pnl:.2f}, Run: {run_id}")
 
-        orphans = find_orphaned_entries(conn, ticker)
-        matched_buy_id = match_fifo(sell, orphans) if orphans else None
-        if matched_buy_id:
-            buy = next(b for b in orphans if _safe_int(b["id"]) == matched_buy_id)
+        if entry_action not in {"BUY", "SELL"}:
+            print("  [WARNING] Unsupported close action; cannot determine opposite-side entry action")
+            print()
+            continue
+
+        orphans = find_orphaned_entries(conn, ticker, entry_action=entry_action)
+        matched_entry_id = match_fifo(close_leg, orphans) if orphans else None
+        if matched_entry_id:
+            entry = next(b for b in orphans if _safe_int(b["id"]) == matched_entry_id)
             print(
-                f"  [MATCH] BUY ID {matched_buy_id}: {buy['trade_date']} - "
-                f"{_safe_float(buy['shares']):.4f} shares @ {_safe_float(buy['price']):.2f}"
+                f"  [MATCH] {entry_action} ID {matched_entry_id}: {entry['trade_date']} - "
+                f"{_safe_float(entry['shares']):.4f} shares @ {_safe_float(entry['price']):.2f}"
             )
-            print(f"          Run: {buy['run_id']}")
+            print(f"          Run: {entry['run_id']}")
             direct_repairs.append(
                 {
-                    "sell_id": sell_id,
-                    "buy_id": matched_buy_id,
+                    "close_id": close_id,
+                    "entry_id": matched_entry_id,
+                    "entry_action": entry_action,
                     "ticker": ticker,
-                    "reason": "matched_existing_orphan_buy",
+                    "reason": "matched_existing_orphan_entry",
                 }
             )
             print()
             continue
 
         if not reconstruct_from_state:
-            print(f"  [WARNING] No orphaned BUYs found for {ticker}")
+            print(f"  [WARNING] No orphaned {entry_action} entries found for {ticker}")
             print()
             continue
 
-        candidate = _derive_reconstructed_entry(sell)
-        evidence = _collect_forensic_evidence(sell, logs_root=logs_root)
+        candidate = _derive_reconstructed_entry(close_leg)
+        evidence = _collect_forensic_evidence(close_leg, logs_root=logs_root)
         forensic_entry: dict[str, Any] = {
-            "close_id": sell_id,
+            "close_id": close_id,
+            "close_action": close_action,
+            "entry_action": entry_action,
             "ticker": ticker,
-            "trade_date": sell_date,
+            "trade_date": close_date,
             "run_id": run_id,
-            "entry_price": _safe_float(sell["entry_price"]),
-            "close_size": _safe_float(sell["close_size"], shares),
-            "position_before": _safe_float(sell["position_before"]),
-            "position_after": _safe_float(sell["position_after"]),
-            "holding_period_days": _safe_int(sell["holding_period_days"], 0),
+            "entry_price": _safe_float(close_leg["entry_price"]),
+            "close_size": _safe_float(close_leg["close_size"], shares),
+            "position_before": _safe_float(close_leg["position_before"]),
+            "position_after": _safe_float(close_leg["position_after"]),
+            "holding_period_days": _safe_int(close_leg["holding_period_days"], 0),
             "evidence": evidence,
         }
 
@@ -388,8 +427,9 @@ def repair_linkage(
         if existing_recon_id:
             direct_repairs.append(
                 {
-                    "sell_id": sell_id,
-                    "buy_id": existing_recon_id,
+                    "close_id": close_id,
+                    "entry_id": existing_recon_id,
+                    "entry_action": entry_action,
                     "ticker": ticker,
                     "reason": "matched_existing_reconstructed_entry",
                 }
@@ -397,16 +437,16 @@ def repair_linkage(
             forensic_entry["status"] = "reused_existing_reconstructed_entry"
             forensic_entry["reconstructed_entry_id"] = existing_recon_id
             forensic_entries.append(forensic_entry)
-            print(f"  [RECON] Reusing reconstructed BUY ID {existing_recon_id}")
+            print(f"  [RECON] Reusing reconstructed {candidate['entry_action']} ID {existing_recon_id}")
             print()
             continue
 
-        reconstruct_repairs.append({"sell_id": sell_id, "ticker": ticker, "candidate": candidate})
+        reconstruct_repairs.append({"close_id": close_id, "ticker": ticker, "candidate": candidate})
         forensic_entry["status"] = "planned_reconstruction"
         forensic_entry["candidate"] = candidate
         forensic_entries.append(forensic_entry)
         print(
-            "  [RECON] Planned reconstructed BUY "
+            f"  [RECON] Planned reconstructed {candidate['entry_action']} "
             f"(date={candidate['entry_trade_date']}, shares={candidate['shares']:.4f}, price={candidate['entry_price']:.2f})"
         )
         print()
@@ -435,15 +475,15 @@ def repair_linkage(
     if dry_run:
         print("[DRY RUN] Would apply the following repairs:")
         for op in direct_repairs:
-            print(f"  UPDATE trade_executions SET entry_trade_id = {op['buy_id']} WHERE id = {op['sell_id']}")
+            print(f"  UPDATE trade_executions SET entry_trade_id = {op['entry_id']} WHERE id = {op['close_id']}")
         for op in reconstruct_repairs:
             candidate = op["candidate"]
             print(
-                "  INSERT reconstructed BUY "
+                f"  INSERT reconstructed {candidate['entry_action']} "
                 f"(ticker={candidate['ticker']}, date={candidate['entry_trade_date']}, "
                 f"shares={candidate['shares']:.4f}, price={candidate['entry_price']:.2f}, run_id={candidate['run_id']})"
             )
-            print(f"  UPDATE trade_executions SET entry_trade_id = <new_id> WHERE id = {op['sell_id']}")
+            print(f"  UPDATE trade_executions SET entry_trade_id = <new_id> WHERE id = {op['close_id']}")
         print()
         print("Re-run with --apply to execute")
         if forensic_entries and forensic_report_file:
@@ -466,29 +506,29 @@ def repair_linkage(
             for op in direct_repairs:
                 conn.execute(
                     "UPDATE trade_executions SET entry_trade_id = ? WHERE id = ?",
-                    (op["buy_id"], op["sell_id"]),
+                    (op["entry_id"], op["close_id"]),
                 )
                 print(
-                    f"  [OK] Linked SELL {op['sell_id']} -> BUY {op['buy_id']} "
+                    f"  [OK] Linked CLOSE {op['close_id']} -> {op['entry_action']} {op['entry_id']} "
                     f"({op['ticker']}, reason={op['reason']})"
                 )
 
             for op in reconstruct_repairs:
                 candidate = op["candidate"]
-                sell_id = _safe_int(op["sell_id"])
-                buy_id = _insert_reconstructed_entry(conn, candidate)
+                close_id = _safe_int(op["close_id"])
+                entry_id = _insert_reconstructed_entry(conn, candidate)
                 conn.execute(
                     "UPDATE trade_executions SET entry_trade_id = ? WHERE id = ? AND entry_trade_id IS NULL",
-                    (buy_id, sell_id),
+                    (entry_id, close_id),
                 )
                 print(
-                    f"  [OK] Reconstructed BUY {buy_id} and linked SELL {sell_id} "
+                    f"  [OK] Reconstructed {candidate['entry_action']} {entry_id} and linked CLOSE {close_id} "
                     f"({candidate['ticker']})"
                 )
                 for entry in forensic_entries:
-                    if _safe_int(entry.get("close_id")) == sell_id and entry.get("status") == "planned_reconstruction":
+                    if _safe_int(entry.get("close_id")) == close_id and entry.get("status") == "planned_reconstruction":
                         entry["status"] = "applied_reconstruction"
-                        entry["reconstructed_entry_id"] = buy_id
+                        entry["reconstructed_entry_id"] = entry_id
                         break
 
             conn.commit()
