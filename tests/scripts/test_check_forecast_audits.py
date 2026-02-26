@@ -132,6 +132,31 @@ def test_check_audit_file_uses_requested_baseline(tmp_path: Path) -> None:
     assert res.rmse_ratio == pytest.approx(1.5)
 
 
+def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:
+    audit = tmp_path / "audit_garch_best.json"
+    _write_audit(
+        audit,
+        start="2024-02-01",
+        end="2024-02-29",
+        length=200,
+        horizon=30,
+        weights={"garch": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 5.0},
+            "samossa": {"rmse": 4.0},
+            "garch": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    res = mod.check_audit_file(audit, tolerance=0.1, baseline_model="BEST_SINGLE")
+    assert res is not None
+    assert res.baseline_model == "GARCH"
+    assert res.rmse_ratio == pytest.approx(1.0)
+
+
 def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)

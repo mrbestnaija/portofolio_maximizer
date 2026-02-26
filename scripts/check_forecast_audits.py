@@ -23,6 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+except Exception:  # pragma: no cover - script execution path fallback
+    from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+
 
 DEFAULT_AUDIT_DIR = Path("logs/forecast_audits")
 DEFAULT_MONITORING_CONFIG = Path("config/forecaster_monitoring.yml")
@@ -61,7 +66,9 @@ def _extract_metrics(
 
     Baseline selection:
     - BEST_SINGLE: choose the available single-model entry with the smallest RMSE.
+      Candidate set includes SARIMAX, GARCH, SAMOSSA, and MSSA_RL.
     - SAMOSSA: use samossa when present; else fall back to BEST_SINGLE.
+    - GARCH: use garch when present; else fall back to BEST_SINGLE.
     - SARIMAX: use sarimax when present; else fall back to BEST_SINGLE.
     """
     artifacts = audit.get("artifacts") or {}
@@ -71,18 +78,19 @@ def _extract_metrics(
 
     ensemble = eval_metrics.get("ensemble")
     sarimax = eval_metrics.get("sarimax")
+    garch = eval_metrics.get("garch")
     samossa = eval_metrics.get("samossa")
 
-    if ensemble is None and sarimax is None and samossa is None:
+    if ensemble is None and sarimax is None and garch is None and samossa is None:
         return None, None, None
 
-    ensemble_metrics = ensemble or sarimax or samossa
+    ensemble_metrics = ensemble or sarimax or garch or samossa
 
     baseline_model = (baseline_model or DEFAULT_BASELINE_MODEL).strip().upper()
 
     def _best_single() -> Tuple[Optional[Dict[str, float]], Optional[str]]:
         candidates: List[Tuple[str, Dict[str, Any]]] = []
-        for name in ("sarimax", "samossa", "mssa_rl"):
+        for name in ("sarimax", "garch", "samossa", "mssa_rl"):
             payload = eval_metrics.get(name)
             if isinstance(payload, dict):
                 candidates.append((name, payload))
@@ -101,6 +109,8 @@ def _extract_metrics(
             return best_payload, best_name
         if isinstance(sarimax, dict):
             return sarimax, "SARIMAX"
+        if isinstance(garch, dict):
+            return garch, "GARCH"
         if isinstance(samossa, dict):
             return samossa, "SAMOSSA"
         return ensemble_metrics if isinstance(ensemble_metrics, dict) else None, "ENSEMBLE"
@@ -109,6 +119,12 @@ def _extract_metrics(
         if isinstance(samossa, dict):
             baseline_metrics = samossa
             resolved_baseline = "SAMOSSA"
+        else:
+            baseline_metrics, resolved_baseline = _best_single()
+    elif baseline_model == "GARCH":
+        if isinstance(garch, dict):
+            baseline_metrics = garch
+            resolved_baseline = "GARCH"
         else:
             baseline_metrics, resolved_baseline = _best_single()
     elif baseline_model == "SARIMAX":
@@ -199,8 +215,11 @@ def main() -> None:
     parser.add_argument(
         "--max-files",
         type=int,
-        default=50,
-        help="Maximum number of most recent audit files to inspect (default: 50)",
+        default=FORECAST_AUDIT_MAX_FILES_DEFAULT,
+        help=(
+            "Maximum number of most recent audit files to inspect "
+            f"(default: {FORECAST_AUDIT_MAX_FILES_DEFAULT})"
+        ),
     )
     parser.add_argument(
         "--tolerance",
@@ -225,7 +244,7 @@ def main() -> None:
     parser.add_argument(
         "--baseline-model",
         default=None,
-        help="Baseline model for the RMSE gate: BEST_SINGLE, SAMOSSA, or SARIMAX. "
+        help="Baseline model for the RMSE gate: BEST_SINGLE, SAMOSSA, GARCH, or SARIMAX. "
         "If omitted, uses forecaster_monitoring.regression_metrics.baseline_model "
         f"or {DEFAULT_BASELINE_MODEL}.",
     )
