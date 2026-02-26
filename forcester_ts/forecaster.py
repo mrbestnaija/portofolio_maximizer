@@ -706,10 +706,26 @@ class TimeSeriesForecaster:
         if ensemble:
             results["ensemble_forecast"] = ensemble["forecast_bundle"]
             results["ensemble_metadata"] = ensemble["metadata"]
-            self._instrumentation.record_artifact(
-                "ensemble_weights", ensemble["metadata"].get("weights", {})
-            )
             ensemble_meta = ensemble["metadata"]
+            self._instrumentation.record_artifact(
+                "ensemble_weights", ensemble_meta.get("weights", {})
+            )
+            self._instrumentation.record_artifact(
+                "ensemble_selection",
+                {
+                    "weights": dict(ensemble_meta.get("weights") or {}),
+                    "model_confidence": (
+                        dict(ensemble_meta.get("confidence", {}))
+                        if isinstance(ensemble_meta.get("confidence"), dict)
+                        else {}
+                    ),
+                    "selection_score": ensemble_meta.get("selection_score"),
+                    "primary_model": ensemble_meta.get("primary_model"),
+                    "allow_as_default": ensemble_meta.get("allow_as_default"),
+                    "ensemble_status": ensemble_meta.get("ensemble_status"),
+                    "ensemble_decision_reason": ensemble_meta.get("ensemble_decision_reason"),
+                },
+            )
             allow_as_default = bool(ensemble_meta.get("allow_as_default", True))
             if allow_as_default:
                 results["mean_forecast"] = ensemble["forecast_bundle"]
@@ -1423,10 +1439,31 @@ class TimeSeriesForecaster:
             if not blended:
                 return
 
+            previous_weights = (
+                dict(metadata.get("weights", {}))
+                if isinstance(metadata.get("weights"), dict)
+                else {}
+            )
+            model_confidence = (
+                dict(metadata.get("confidence", {}))
+                if isinstance(metadata.get("confidence"), dict)
+                else {}
+            )
             self._latest_results["ensemble_forecast"] = blended
             metadata["weights"] = dict(weights)
-            metadata["confidence"] = dict(weights)
+            metadata["holdout_reweight_applied"] = True
+            metadata["holdout_reweight_previous_weights"] = previous_weights
+            metadata["holdout_reweight_weights"] = dict(weights)
             self._instrumentation.record_artifact("ensemble_weights", dict(weights))
+            self._instrumentation.record_artifact(
+                "ensemble_selection_reweighted",
+                {
+                    "weights": dict(weights),
+                    "model_confidence": model_confidence,
+                    "selection_score": metadata.get("selection_score"),
+                    "previous_weights": previous_weights,
+                },
+            )
             self._record_model_event(
                 "ensemble",
                 "reweighted_from_holdout",

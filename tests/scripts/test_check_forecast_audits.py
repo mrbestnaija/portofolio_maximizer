@@ -215,6 +215,68 @@ def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: p
     assert excinfo.value.code != 0
 
 
+def test_check_forecast_audits_no_lift_soft_mode_sets_disable_default_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(3):
+        _write_audit(
+            audit_dir / f"forecast_audit_{i}.json",
+            start=f"2024-01-{i+1:02d}",
+            end=f"2024-02-{i+1:02d}",
+            length=200,
+            horizon=30,
+            weights={"samossa": 1.0},
+            eval_metrics={
+                "sarimax": {"rmse": 5.0},
+                "samossa": {"rmse": 4.0},
+                "ensemble": {"rmse": 4.0},
+            },
+        )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 3",
+                "    disable_ensemble_if_no_lift: false",
+                "    min_lift_rmse_ratio: 0.01",
+                "    min_lift_fraction: 0.10",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+                "    promotion_margin: 0.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "Decision: DISABLE_DEFAULT" in out
+
+
 def test_check_forecast_audits_fail_during_holding_period(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)

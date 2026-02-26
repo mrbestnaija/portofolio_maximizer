@@ -573,7 +573,7 @@ def main() -> None:
         )
         lift_fraction = lift_count / effective_n
 
-    if disable_if_no_lift and holding_period > 0 and effective_n >= holding_period:
+    if holding_period > 0 and effective_n >= holding_period:
         print(
             f"\nEnsemble lift fraction: {lift_fraction:.2%} "
             f"(required >= {min_lift_fraction:.2%})"
@@ -581,11 +581,17 @@ def main() -> None:
         if lift_fraction < min_lift_fraction:
             decision = DEFAULT_DECISION_DISABLE
             decision_reason = "insufficient lift vs baseline"
-            raise SystemExit(
-                "Ensemble shows insufficient lift over baseline during holding period; "
-                "disable ensemble as default source of truth (reward-to-effort)."
+            if disable_if_no_lift:
+                raise SystemExit(
+                    "Ensemble shows insufficient lift over baseline during holding period; "
+                    "disable ensemble as default source of truth (reward-to-effort)."
+                )
+            print(
+                "No-lift hard fail disabled by config; keeping ensemble in "
+                "non-default/research-only posture."
             )
-        decision_reason = "lift demonstrated during holding period"
+        else:
+            decision_reason = "lift demonstrated during holding period"
 
     if violation_rate > max_violation_rate:
         decision = DEFAULT_DECISION_RESEARCH
@@ -597,7 +603,7 @@ def main() -> None:
             f"max-violation-rate {max_violation_rate:.2%}"
         )
 
-    if promotion_margin > 0 and effective_n > 0:
+    if promotion_margin > 0 and effective_n > 0 and decision == DEFAULT_DECISION_KEEP:
         margin_threshold = 1.0 - promotion_margin
         margin_lift = sum(
             1
