@@ -437,6 +437,35 @@ class SARIMAXForecaster:
             candidate_orders.insert(0, (0, d, 0))
         candidate_orders = list(dict.fromkeys(candidate_orders))
 
+        # Phase 7.16: OrderLearner warm-start for SARIMAX grid search.
+        _learner = getattr(self, "_order_learner", None)
+        _ol_ticker = getattr(self, "_fit_ticker", "")
+        _ol_regime = getattr(self, "_fit_regime", None)
+        if _learner is not None and _ol_ticker:
+            try:
+                _suggestion = _learner.suggest(_ol_ticker, "SARIMAX", _ol_regime)
+                if _suggestion is not None:
+                    _wo = tuple(int(x) for x in _suggestion.get("order", [1, 1, 1]))
+                    _ws = tuple(int(x) for x in _suggestion.get("seasonal", [0, 0, 0, 0]))
+                    if _learner.should_skip_grid(_ol_ticker, "SARIMAX", _ol_regime):
+                        logger.debug(
+                            "SARIMAX skip-grid %s/%s: order=%s seasonal=%s",
+                            _ol_ticker, _ol_regime, _wo, _ws,
+                        )
+                        return _wo, _ws
+                    # Prioritize warm order at front of candidate list
+                    if _wo not in candidate_orders:
+                        candidate_orders.insert(0, _wo)
+                    elif candidate_orders[0] != _wo:
+                        candidate_orders.remove(_wo)
+                        candidate_orders.insert(0, _wo)
+                    logger.debug(
+                        "SARIMAX warm-start %s/%s: priority order=%s",
+                        _ol_ticker, _ol_regime, _wo,
+                    )
+            except Exception as _we:
+                logger.debug("SARIMAX OrderLearner.suggest failed: %s", _we)
+
         seasonal_period = self.seasonal_periods or self._season_period_hint
         if not seasonal_period:
             seasonal_period = self._detect_seasonality(data)
@@ -633,6 +662,9 @@ class SARIMAXForecaster:
         self,
         series: pd.Series,
         exogenous: Optional[pd.DataFrame] = None,
+        order_learner=None,
+        ticker: str = "",
+        regime: str | None = None,
     ) -> "SARIMAXForecaster":
         if series.isna().all():
             raise ValueError("Series contains only NaNs")
@@ -656,6 +688,11 @@ class SARIMAXForecaster:
         freq_hint = getattr(self, "_frequency_hint", freq_hint)
 
         aligned_exog = self._align_exogenous(prepared, exogenous)
+
+        # Phase 7.16: Store order_learner context for _select_best_order warm-start.
+        self._order_learner = order_learner
+        self._fit_ticker = ticker
+        self._fit_regime = regime
 
         if not self.auto_select:
             if self.manual_order is None:
@@ -805,6 +842,27 @@ class SARIMAXForecaster:
 
         self.model = selected_model
         self.fitted_model = selected_result
+
+        # Phase 7.16: Record best SARIMAX order in OrderLearner for future warm-start.
+        _learner = getattr(self, "_order_learner", None)
+        _ol_ticker = getattr(self, "_fit_ticker", "")
+        _ol_regime = getattr(self, "_fit_regime", None)
+        if _learner is not None and selected_result is not None and _ol_ticker:
+            try:
+                _aic_r = float(getattr(selected_result, "aic", float("nan")))
+                _bic_r = float(getattr(selected_result, "bic", float("nan")))
+                _nobs = int(getattr(selected_result, "nobs", 0))
+                _learner.record_fit(
+                    ticker=_ol_ticker, model_type="SARIMAX", regime=_ol_regime,
+                    order_params={
+                        "order": list(self.best_order or [1, 1, 1]),
+                        "seasonal": list(self.best_seasonal_order or [0, 0, 0, 0]),
+                    },
+                    aic=_aic_r, bic=_bic_r, n_obs=_nobs,
+                )
+            except Exception as _oe:
+                logger.debug("SARIMAX OrderLearner.record_fit failed: %s", _oe)
+
         self._fit_metadata = {
             "fit_strategy": selected_label,
             "primary_converged": bool(primary_converged),
@@ -921,3 +979,35 @@ class SARIMAXForecaster:
             "log_shift": self._log_shift,
             "convergence": dict(getattr(self, "_fit_metadata", {})),
         }
+
+    def load_fitted(self, snapshot: Any) -> "SARIMAXForecaster":
+        """
+        Restore fitted state from a ModelSnapshotStore snapshot (skip-refit path).
+
+        `snapshot` must be a dict with:
+        {"fitted_model": SARIMAXResultsWrapper, "best_order": tuple,
+         "best_seasonal_order": tuple, "scale_factor": float}
+        or a raw SARIMAXResultsWrapper.
+        """
+        if snapshot is None:
+            return self
+        try:
+            if isinstance(snapshot, dict):
+                self.fitted_model = snapshot.get("fitted_model")
+                self.model = snapshot.get("model")
+                self.best_order = snapshot.get("best_order", self.best_order)
+                self.best_seasonal_order = snapshot.get(
+                    "best_seasonal_order", self.best_seasonal_order
+                )
+                self._scale_factor = float(snapshot.get("scale_factor", 1.0))
+                self._fit_metadata = snapshot.get("fit_metadata", {})
+                logger.debug("SARIMAXForecaster.load_fitted: loaded from snapshot dict")
+            elif hasattr(snapshot, "get_forecast"):
+                # Raw SARIMAXResultsWrapper
+                self.fitted_model = snapshot
+                logger.debug("SARIMAXForecaster.load_fitted: loaded SARIMAXResultsWrapper")
+            else:
+                logger.debug("SARIMAXForecaster.load_fitted: unrecognized snapshot format")
+        except Exception as exc:
+            logger.warning("SARIMAXForecaster.load_fitted failed: %s", exc)
+        return self

@@ -98,12 +98,10 @@ def _utc_now_iso() -> str:
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.as_posix()}?mode=ro"
-    conn = guarded_sqlite_connect(
-        uri,
-        uri=True,
-        timeout=2.0,
-        enable_guardrails=False,
-    )
+    # [SETUP-PHASE BYPASS] The guardrail authorizer is a whitelist: any PRAGMA not in
+    # ALLOWED_READ_PRAGMAS is denied, including busy_timeout.  Set it before guardrails
+    # lock the connection, then apply guardrails immediately after.
+    conn = guarded_sqlite_connect(uri, uri=True, timeout=2.0, enable_guardrails=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=2000")
     apply_sqlite_guardrails(conn, allow_schema_changes=False)
@@ -112,14 +110,13 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
 
 def _connect_rw(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = guarded_sqlite_connect(
-        str(db_path),
-        timeout=5.0,
-        enable_guardrails=False,
-    )
+    # [SETUP-PHASE BYPASS] journal_mode=WAL is in BLOCKED_PRAGMAS and must be set before
+    # guardrails lock the connection.  apply_sqlite_guardrails() MUST be the next call after
+    # the PRAGMA block -- do not insert code between them.
+    conn = guarded_sqlite_connect(str(db_path), timeout=5.0, enable_guardrails=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")   # blocked once guardrails apply
+    conn.execute("PRAGMA busy_timeout=5000")  # not blocked; set here for co-location clarity
     apply_sqlite_guardrails(conn, allow_schema_changes=False)
     return conn
 

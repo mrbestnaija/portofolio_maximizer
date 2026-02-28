@@ -141,7 +141,8 @@ def main() -> None:
 
     # Gate 3: production audit gate
     if not args.skip_profitability_gate:
-        cmd3 = [python, "scripts/production_audit_gate.py"]
+        cmd3 = [python, "scripts/production_audit_gate.py",
+                "--reconcile"]  # dry-run: surface unlinked closes without applying; overnight job applies
         if args.db:
             cmd3 += ["--db", args.db]
         r3 = _run(cmd3, "production_audit_gate")

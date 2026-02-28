@@ -39,6 +39,7 @@ class OpenClawResult:
 
 
 logger = logging.getLogger("pmx.openclaw_cli")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 _DEFAULT_AUTONOMY_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
@@ -261,6 +262,268 @@ class _MessageDeduplicator:
 _deduplicator = _MessageDeduplicator(
     window_seconds=float(os.getenv("OPENCLAW_DEDUP_WINDOW_SECONDS", "30")),
 )
+
+
+class _PersistentNotificationGuard:
+    """Cross-process duplicate + burst guard to prevent notification storms."""
+
+    def __init__(self, *, state_path: Optional[Path] = None, max_entries: int = 4000):
+        self._default_state_path = Path(
+            state_path or (PROJECT_ROOT / "logs" / "openclaw_notify" / "guard_state.json")
+        )
+        self._default_max_entries = max(100, int(max_entries))
+        self._lock = threading.Lock()
+
+    def _enabled(self) -> bool:
+        return _env_enabled("OPENCLAW_PERSISTENT_GUARD_ENABLED", default=True)
+
+    def _state_path(self) -> Path:
+        raw = str(os.getenv("OPENCLAW_PERSISTENT_GUARD_STATE_PATH", "")).strip()
+        if raw:
+            try:
+                return Path(raw).expanduser().resolve()
+            except Exception:
+                pass
+        return self._default_state_path
+
+    def _dedup_window_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS", "300"))
+        except Exception:
+            value = 300.0
+        return max(0.0, float(value))
+
+    def _target_cooldown_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_TARGET_COOLDOWN_SECONDS", "15"))
+        except Exception:
+            value = 15.0
+        return max(0.0, float(value))
+
+    def _max_entries(self) -> int:
+        try:
+            value = int(
+                os.getenv(
+                    "OPENCLAW_PERSISTENT_GUARD_MAX_ENTRIES",
+                    str(self._default_max_entries),
+                )
+            )
+        except Exception:
+            value = self._default_max_entries
+        return max(100, int(value))
+
+    def _lock_timeout_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_PERSISTENT_GUARD_LOCK_TIMEOUT_SECONDS", "1.5"))
+        except Exception:
+            value = 1.5
+        return max(0.1, float(value))
+
+    def _lock_stale_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_PERSISTENT_GUARD_LOCK_STALE_SECONDS", "30"))
+        except Exception:
+            value = 30.0
+        return max(5.0, float(value))
+
+    def _fingerprint(self, *, to: str, message: str, channel: Optional[str], media: Optional[str]) -> str:
+        raw = (
+            f"{str(channel or '').strip().lower()}:{to}:{str(media or '').strip()}:{(message or '')[:400]}"
+        ).encode("utf-8", errors="replace")
+        return hashlib.sha256(raw).hexdigest()
+
+    def _target_key(self, *, to: str, channel: Optional[str]) -> str:
+        return f"{str(channel or '').strip().lower()}:{str(to or '').strip()}"
+
+    def _acquire_lock(self, lock_path: Path) -> Optional[int]:
+        deadline = time.monotonic() + self._lock_timeout_seconds()
+        stale_seconds = self._lock_stale_seconds()
+        while True:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, str(os.getpid()).encode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+                return fd
+            except FileExistsError:
+                try:
+                    age = max(0.0, time.time() - float(lock_path.stat().st_mtime))
+                    if age > stale_seconds:
+                        lock_path.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.05)
+            except Exception:
+                return None
+
+    def _release_lock(self, lock_path: Path, fd: Optional[int]) -> None:
+        try:
+            if fd is not None:
+                os.close(int(fd))
+        except Exception:
+            pass
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _load_state(self, path: Path) -> dict[str, dict[str, float]]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else payload
+        if not isinstance(entries, dict):
+            entries = {}
+
+        dedup_raw = entries.get("dedup") if isinstance(entries.get("dedup"), dict) else {}
+        target_raw = (
+            entries.get("target_last_sent")
+            if isinstance(entries.get("target_last_sent"), dict)
+            else {}
+        )
+
+        def _coerce_map(raw_map: dict[str, Any]) -> dict[str, float]:
+            out: dict[str, float] = {}
+            for key, value in raw_map.items():
+                if not isinstance(key, str):
+                    continue
+                try:
+                    out[key] = float(value)
+                except Exception:
+                    continue
+            return out
+
+        return {
+            "dedup": _coerce_map(dedup_raw),
+            "target_last_sent": _coerce_map(target_raw),
+        }
+
+    def _save_state(self, path: Path, state: dict[str, dict[str, float]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at_utc": time.time(),
+            "entries": {
+                "dedup": state.get("dedup", {}),
+                "target_last_sent": state.get("target_last_sent", {}),
+            },
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(str(tmp_path), str(path))
+
+    def _prune_map(self, data: dict[str, float], *, now: float, age_limit_seconds: float) -> dict[str, float]:
+        if age_limit_seconds <= 0:
+            return {}
+        return {
+            key: ts
+            for key, ts in data.items()
+            if isinstance(ts, (int, float)) and (now - float(ts)) <= age_limit_seconds
+        }
+
+    def _cap_entries(self, data: dict[str, float], *, max_entries: int) -> dict[str, float]:
+        if len(data) <= max_entries:
+            return data
+        ranked = sorted(data.items(), key=lambda row: float(row[1]), reverse=True)
+        return {key: float(ts) for key, ts in ranked[:max_entries]}
+
+    def should_suppress(
+        self,
+        *,
+        to: str,
+        message: str,
+        channel: Optional[str] = None,
+        media: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        if not self._enabled():
+            return False, ""
+
+        dedup_window = self._dedup_window_seconds()
+        target_cooldown = self._target_cooldown_seconds()
+        if dedup_window <= 0 and target_cooldown <= 0:
+            return False, ""
+
+        state_path = self._state_path()
+        lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+        now = time.time()
+        max_entries = self._max_entries()
+
+        with self._lock:
+            lock_fd = self._acquire_lock(lock_path)
+            if lock_fd is None:
+                # Fail-open when state lock is unavailable to avoid blocking alerts.
+                return False, ""
+
+            try:
+                state = self._load_state(state_path)
+                dedup = self._prune_map(state.get("dedup", {}), now=now, age_limit_seconds=dedup_window)
+                target_last_sent = self._prune_map(
+                    state.get("target_last_sent", {}),
+                    now=now,
+                    age_limit_seconds=max(target_cooldown * 20.0, 3600.0),
+                )
+
+                target_key = self._target_key(to=to, channel=channel)
+                if target_cooldown > 0:
+                    last_target = target_last_sent.get(target_key)
+                    if isinstance(last_target, (int, float)):
+                        elapsed = max(0.0, now - float(last_target))
+                        if elapsed < target_cooldown:
+                            remaining = max(1, int(round(target_cooldown - elapsed)))
+                            self._save_state(
+                                state_path,
+                                {
+                                    "dedup": self._cap_entries(dedup, max_entries=max_entries),
+                                    "target_last_sent": self._cap_entries(
+                                        target_last_sent, max_entries=max_entries
+                                    ),
+                                },
+                            )
+                            return True, (
+                                "[guard] Suppressed message burst "
+                                f"(target cooldown active: {remaining}s remaining)."
+                            )
+
+                fingerprint = self._fingerprint(
+                    to=to, message=message, channel=channel, media=media
+                )
+                if dedup_window > 0 and fingerprint in dedup:
+                    self._save_state(
+                        state_path,
+                        {
+                            "dedup": self._cap_entries(dedup, max_entries=max_entries),
+                            "target_last_sent": self._cap_entries(
+                                target_last_sent, max_entries=max_entries
+                            ),
+                        },
+                    )
+                    return True, "[guard] Duplicate message suppressed (persistent dedup window)."
+
+                if dedup_window > 0:
+                    dedup[fingerprint] = now
+                if target_cooldown > 0:
+                    target_last_sent[target_key] = now
+
+                self._save_state(
+                    state_path,
+                    {
+                        "dedup": self._cap_entries(dedup, max_entries=max_entries),
+                        "target_last_sent": self._cap_entries(target_last_sent, max_entries=max_entries),
+                    },
+                )
+                return False, ""
+            finally:
+                self._release_lock(lock_path, lock_fd)
+
+
+_persistent_notification_guard = _PersistentNotificationGuard()
 
 # Recovery state is process-local and used to prevent gateway restart thrashing.
 _listener_recovery_state: dict[str, float] = {"last_restart_monotonic": 0.0}
@@ -550,6 +813,8 @@ def infer_linked_whatsapp_target(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=float(timeout_seconds),
             env=env,
         )
@@ -627,6 +892,8 @@ def _openclaw_status_json(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=float(timeout_seconds),
             env=env,
         )
@@ -706,6 +973,8 @@ def _clear_stuck_gateway_sessions(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10.0,
             env=env,
         )
@@ -727,6 +996,8 @@ def _clear_stuck_gateway_sessions(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10.0,
             env=env,
         )
@@ -751,6 +1022,8 @@ def _clear_stuck_gateway_sessions(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10.0,
             env=env,
         )
@@ -838,6 +1111,8 @@ def _run_openclaw_control(
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=float(timeout_seconds),
             env=env,
         )
@@ -1010,9 +1285,10 @@ def send_message(
     cmd = build_message_send_command(command=command, to=to, message=message, media=media, channel=channel, silent=silent)
     if extra_args:
         cmd.extend([str(arg) for arg in extra_args])
+    is_dry_run = any(a == "--dry-run" for a in (extra_args or []))
 
     # --- Deduplication guard ---
-    if not skip_dedup and not any(a == "--dry-run" for a in (extra_args or [])):
+    if not skip_dedup and not is_dry_run:
         if _deduplicator.is_duplicate(to, message or ""):
             return OpenClawResult(
                 ok=True,
@@ -1021,9 +1297,23 @@ def send_message(
                 stdout="[dedup] Duplicate message suppressed (same target+content within window)",
                 stderr="",
             )
+        suppressed, suppress_reason = _persistent_notification_guard.should_suppress(
+            to=to,
+            message=message or "",
+            channel=channel,
+            media=media,
+        )
+        if suppressed:
+            return OpenClawResult(
+                ok=True,
+                returncode=0,
+                command=cmd,
+                stdout=suppress_reason or "[guard] Message suppressed by persistent notification guard.",
+                stderr="",
+            )
 
     # --- Rate limiting guard ---
-    if not skip_rate_limit and not any(a == "--dry-run" for a in (extra_args or [])):
+    if not skip_rate_limit and not is_dry_run:
         if not _rate_limiter.acquire(timeout=3.0):
             return OpenClawResult(
                 ok=False,
@@ -1125,6 +1415,8 @@ def send_message(
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=float(timeout_seconds),
                 env=env,
             )
@@ -1141,6 +1433,8 @@ def send_message(
                     cwd=str(cwd) if cwd else None,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=float(timeout_seconds),
                     env=env,
                 )
@@ -1403,6 +1697,8 @@ def run_agent_turn(
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=float(timeout_seconds),
                 env=env,
             )

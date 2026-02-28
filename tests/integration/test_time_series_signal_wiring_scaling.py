@@ -75,7 +75,9 @@ def fast_all_model_config() -> dict:
 
 @pytest.fixture(scope="session")
 def forecast_bundle_all_models(sample_price_series_daily: pd.Series, fast_all_model_config: dict) -> dict:
-    # Avoid audit-log side effects during tests.
+    # Pop the env var so the forecaster resolves the real audit dir (logs/forecast_audits).
+    # This allows the preselection gate to engage with actual audit data, which is
+    # required for the confidence values to be consistent between base and scaled runs.
     prior = os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
     try:
         returns = sample_price_series_daily.pct_change().dropna()

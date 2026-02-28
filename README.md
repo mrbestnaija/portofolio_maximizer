@@ -2,16 +2,40 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.9 Complete](https://img.shields.io/badge/Phase%207.9-Complete-green.svg)](Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md)
-[![Tests: 731](https://img.shields.io/badge/tests-731%20(718%20passing)-success.svg)](tests/)
+[![Phase 7.16 Hardened](https://img.shields.io/badge/Phase%207.16-Hardened-green.svg)](MEMORY.md)
+[![Fast Lane: 1200 passing](https://img.shields.io/badge/fast%20lane-1200%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
 **Version**: 4.3
-**Status**: Phase 7.9 Complete - PnL integrity enforcement, adversarial audit, OpenClaw automation
-**Last Updated**: 2026-02-17
+**Status**: Phase 7.16 hardening, Monte Carlo forecast summaries, and truthful capability audits
+**Last Updated**: 2026-02-28
+
+## Current Repo Truth (2026-02-28)
+
+- The Phase 7.16 auto-learning stack is present and hardened: `OrderLearner`,
+  `ModelSnapshotStore`, walk-forward learning, VaR backtesting, and Shapley
+  attribution are implemented in `forcester_ts/`.
+- `TimeSeriesForecaster.forecast(mc_enabled=...)` now supports an opt-in additive
+  Monte Carlo summary via `forcester_ts/monte_carlo_simulator.py`. It consumes
+  existing forecast outputs and does not change training, model selection, or
+  default routing.
+- Weather context and net-edge cost gating are wired through the real signal path:
+  `utils/weather_context.py`, `ai_llm/signal_validator.py`,
+  `models/time_series_signal_generator.py`, `models/signal_router.py`, and
+  `execution/paper_trading_engine.py`.
+- `config/xtb_config.yml` enables broker-side stocks, but there is no checked-in
+  XTB runtime execution adapter yet. The repo's truthful audit state for
+  `emerging_market_equity_execution` is `partial`, not `implemented`.
+- Latest verification snapshot:
+  - `python scripts/verify_emerging_market_claims.py --json`
+  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
+  - Result: `1200 passed, 3 skipped, 28 deselected, 7 xfailed`
+
+Historical sections below preserve earlier phase notes for chronology; use this
+section as the current repo baseline.
 
 ---
 

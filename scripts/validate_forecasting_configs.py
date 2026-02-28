@@ -158,6 +158,13 @@ def _sync_checks(
         errors.append(
             "sync: ensemble.candidate_weights mismatch between forecasting and pipeline configs"
         )
+
+    f_monte_carlo = (forecasting_cfg.get("monte_carlo") or {})
+    p_monte_carlo = (pipeline_cfg.get("monte_carlo") or {})
+    if f_monte_carlo != p_monte_carlo:
+        errors.append(
+            "sync: monte_carlo mismatch between forecasting and pipeline configs"
+        )
     return errors
 
 

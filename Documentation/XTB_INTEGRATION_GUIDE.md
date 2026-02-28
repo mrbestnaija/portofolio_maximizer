@@ -2,15 +2,17 @@
 **Demo Account Trading Integration**
 
 **Date**: October 19, 2025  
-**Status**: Ready for Implementation  
+**Status**: Design guide only; runtime adapter not yet implemented  
 **Broker**: XTB (X-Trade Brokers)  
 **Account Type**: Demo Account
+
+> Current repo reality (2026-02-28): this file is an implementation guide, not a statement of completed broker connectivity. The example execution/xtb_client.py referenced below is an implementation target and does not currently exist in the checked-in runtime. Do not treat config/xtb_config.yml stock enablement as proof of live XTB execution readiness.
 
 ---
 
 ## 📊 EXECUTIVE SUMMARY
 
-### XTB Integration Benefits
+### Target Benefits After Implementation
 - ✅ **Demo Account**: Risk-free testing with real market conditions
 - ✅ **Multiple Asset Classes**: Forex, Indices, Commodities, Stocks
 - ✅ **High Leverage**: Up to 30:1 for Forex, 20:1 for Indices
@@ -18,7 +20,7 @@
 - ✅ **WebSocket API**: Real-time data and order execution
 - ✅ **Regulated Broker**: EU-regulated with investor protection
 
-### Supported Instruments
+### Supported Instruments (Design Target)
 - **Forex**: EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD, NZDUSD
 - **Indices**: US500, US30, US100, UK100, GER30, FRA40
 - **Commodities**: GOLD, SILVER, OIL, GAS
@@ -508,7 +510,7 @@ password = os.getenv('XTB_PASSWORD')
 
 ---
 
-**STATUS**: ✅ **READY FOR IMPLEMENTATION**  
+**Status**: Design guide only; runtime adapter not yet implemented  
 **Next Action**: Create XTB demo account and begin Week 3-4 development  
 **Timeline**: 2 weeks to full XTB integration  
 **Risk Level**: Low (demo account only)
@@ -517,6 +519,6 @@ password = os.getenv('XTB_PASSWORD')
 
 **Prepared by**: AI Development Assistant  
 **Date**: October 19, 2025  
-**Status**: XTB integration plan complete  
+**Status**: Design guide only; runtime adapter not yet implemented  
 **Priority**: Week 3-4 implementation ready
 

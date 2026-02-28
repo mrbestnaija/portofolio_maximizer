@@ -5,6 +5,7 @@ SAMOSSA (Singular Spectrum Analysis + ARIMAX hybrid) forecaster.
 from __future__ import annotations
 
 import logging
+import warnings as _warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -43,7 +44,11 @@ class SAMOSSAConfig:
     normalize: bool = True
     ar_order: int = 5
     matrix_type: Literal["page", "hankel"] = "page"
-    arima_order: Tuple[int, int, int] = (1, 0, 1)  # Phase 7.10b: ARMA(1,1) on residuals
+    # Phase 7.16: AR(1) replaces ARMA(1,1). Near-cancellation of AR/MA roots on
+    # near-white-noise SSA residuals caused ConvergenceWarning on every fit.
+    # Set to None to activate AIC-guided AR lag auto-search (AR1..max_ar_lag).
+    arima_order: Optional[Tuple[int, int, int]] = (1, 0, 0)
+    max_ar_lag: int = 4          # Phase 7.16: Max AR lag tried when arima_order=None
     trend_slope_bars: int = 10  # Phase 7.10b: bars over which directional slope signal is computed
 
 
@@ -69,7 +74,7 @@ class SAMOSSAForecaster:
         normalize: bool = True,
         ar_order: int = 5,
         matrix_type: Literal["page", "hankel"] = "page",
-        arima_order: Tuple[int, int, int] = (1, 0, 1),
+        arima_order: Tuple[int, int, int] = (1, 0, 0),  # Phase 7.16: AR(1) — see SAMOSSAConfig
         trend_slope_bars: int = 10,
     ) -> None:
         self.config = SAMOSSAConfig(
@@ -222,19 +227,73 @@ class SAMOSSAForecaster:
         residuals_plain = residuals.copy()
         residuals_plain.index = pd.RangeIndex(start=0, stop=len(residuals_plain), step=1)
 
+        # Phase 7.16: AR lag auto-search when arima_order=None (AIC-guided).
+        # When arima_order is None the config activates AIC-guided search from
+        # AR(1) up to AR(max_ar_lag), using AutoReg for each lag candidate.
+        if getattr(self.config, "arima_order", (1, 0, 0)) is None and AutoReg is not None:
+            max_lag = max(1, int(getattr(self.config, "max_ar_lag", 4)))
+            best_lag, best_aic, best_ar_fit = 1, float("inf"), None
+            for lag in range(1, max_lag + 1):
+                with _warnings.catch_warnings(record=True) as _w:
+                    _warnings.simplefilter("always")
+                    try:
+                        _candidate = AutoReg(residuals_plain, lags=lag, old_names=False).fit()
+                    except Exception:
+                        continue
+                if any("convergence" in str(w.message).lower() for w in _w):
+                    continue
+                try:
+                    _cand_aic = float(_candidate.aic)
+                except Exception:
+                    _cand_aic = float("inf")
+                if _cand_aic < best_aic:
+                    best_aic, best_lag, best_ar_fit = _cand_aic, lag, _candidate
+            self._learned_ar_lag = best_lag
+            self._learned_ar_aic = best_aic
+            if best_ar_fit is not None:
+                self._residual_model = best_ar_fit
+                logger.debug(
+                    "SAMOSSA: AR lag auto-search selected AR(%d) (AIC=%.2f) on %d obs.",
+                    best_lag, best_aic, len(residuals_plain),
+                )
+            else:
+                self._residual_model = None
+            return
+
         # Phase 7.10b: Use ARIMA(p,d,q) from config instead of AutoReg.
         # This actually uses the arima_order parameter (previously ignored despite config).
+        # Phase 7.16: Capture convergence warnings so a non-converged ARIMA is NOT stored
+        # as the residual model (previously only exceptions triggered the AutoReg fallback;
+        # statsmodels emits ConvergenceWarning without raising, so the bad model was kept).
         if ARIMA_AVAILABLE and _ARIMA is not None:
-            arima_order = getattr(self.config, "arima_order", (1, 0, 1))
+            arima_order = getattr(self.config, "arima_order", (1, 0, 1)) or (1, 0, 0)
             try:
-                arima_fit = _ARIMA(residuals_plain, order=arima_order).fit()
-                self._residual_model = arima_fit
-                logger.debug(
-                    "SAMOSSA: ARIMA%s residual model fitted on %d observations.",
-                    arima_order,
-                    len(residuals_plain),
+                with _warnings.catch_warnings(record=True) as _caught:
+                    _warnings.simplefilter("always")
+                    arima_fit = _ARIMA(residuals_plain, order=arima_order).fit()
+                _convergence_warning = any(
+                    issubclass(w.category, Warning)
+                    and any(
+                        kw in str(w.message).lower()
+                        for kw in ("convergence", "nonstationary", "non-stationary",
+                                   "non-invertible", "non_invertible")
+                    )
+                    for w in _caught
                 )
-                return
+                if _convergence_warning:
+                    logger.debug(
+                        "ARIMA%s residual fit issued convergence/stationarity warning; "
+                        "falling back to AutoReg.",
+                        arima_order,
+                    )
+                else:
+                    self._residual_model = arima_fit
+                    logger.debug(
+                        "SAMOSSA: ARIMA%s residual model fitted on %d observations.",
+                        arima_order,
+                        len(residuals_plain),
+                    )
+                    return
             except Exception as arima_exc:
                 logger.debug(
                     "ARIMA%s residual fit failed (%s); falling back to AutoReg.",
@@ -261,7 +320,13 @@ class SAMOSSAForecaster:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def fit(self, series: pd.Series) -> "SAMOSSAForecaster":
+    def fit(
+        self,
+        series: pd.Series,
+        order_learner=None,
+        ticker: str = "",
+        regime: str | None = None,
+    ) -> "SAMOSSAForecaster":
         series_len = len(series)
         if series_len < self.config.min_series_length:
             adaptive_min = max(20, self.config.n_components * 5)
@@ -365,6 +430,24 @@ class SAMOSSAForecaster:
         self._reconstructed = recon_series
         self._residuals = residuals
         self._fit_residual_model(residuals)
+
+        # Phase 7.16: Record learned AR lag in OrderLearner for future warm-start.
+        if order_learner is not None and ticker:
+            try:
+                ar_lag = getattr(self, "_learned_ar_lag", None)
+                ar_aic = getattr(self, "_learned_ar_aic", float("nan"))
+                if ar_lag is None:
+                    _ao = self.config.arima_order or (1, 0, 0)
+                    ar_lag = int(_ao[0]) if _ao else 1
+                    ar_aic = float("nan")
+                order_learner.record_fit(
+                    ticker=ticker, model_type="SAMOSSA_ARIMA", regime=regime,
+                    order_params={"ar_lag": ar_lag},
+                    aic=ar_aic, bic=float("nan"), n_obs=len(residuals),
+                )
+            except Exception as _oe:
+                logger.debug("SAMOSSA OrderLearner.record_fit failed: %s", _oe)
+
         trend_window = min(max(30, self.config.window_length * 2), min(90, len(observed_tail)))
         self._trend_slope, self._trend_intercept, self._trend_strength = self._estimate_trend(
             observed_tail, trend_window
@@ -448,3 +531,36 @@ class SAMOSSAForecaster:
             "normalized_mean": self._normalized_stats.get("mean"),
             "normalized_std": self._normalized_stats.get("std"),
         }
+
+    def load_fitted(self, snapshot: Any) -> "SAMOSSAForecaster":
+        """
+        Restore fitted state from a ModelSnapshotStore snapshot (skip-refit path).
+
+        `snapshot` must be a dict with keys:
+        {"reconstructed": pd.Series, "residual_model": fitted AutoReg/ARIMA,
+         "config": SAMOSSAConfig dict, "scale_mean": float, "scale_std": float, ...}
+        """
+        if snapshot is None:
+            return self
+        try:
+            if not isinstance(snapshot, dict):
+                logger.debug("SAMOSSAForecaster.load_fitted: expected dict snapshot")
+                return self
+            self._reconstructed = snapshot.get("reconstructed")
+            self._residuals = snapshot.get("residuals")
+            self._residual_model = snapshot.get("residual_model")
+            self._scale_mean = float(snapshot.get("scale_mean", 0.0))
+            self._scale_std = float(snapshot.get("scale_std", 1.0))
+            self._explained_variance_ratio = float(snapshot.get("evr", 0.0))
+            self._trend_slope = float(snapshot.get("trend_slope", 0.0))
+            self._trend_intercept = float(snapshot.get("trend_intercept", 0.0))
+            self._trend_strength = float(snapshot.get("trend_strength", 0.0))
+            self._last_index = snapshot.get("last_index")
+            self._target_freq = snapshot.get("target_freq", "D")
+            self._last_observed = snapshot.get("last_observed")
+            self._normalized_stats = snapshot.get("normalized_stats", {"mean": 0.0, "std": 1.0})
+            self._fitted = True
+            logger.debug("SAMOSSAForecaster.load_fitted: restored from snapshot")
+        except Exception as exc:
+            logger.warning("SAMOSSAForecaster.load_fitted failed: %s", exc)
+        return self

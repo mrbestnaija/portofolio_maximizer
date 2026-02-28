@@ -173,6 +173,21 @@ Current institutional contracts that must remain true:
 - `platt_contract_audit.py` must run standalone (no manual `PYTHONPATH` setup).
 - No tracked shadow duplicates (`Dockerfile (1)`, `execution/lob_simulator (1).py`).
 
+## Ensemble Lift Governance
+
+`disable_ensemble_if_no_lift` in `config/forecaster_monitoring.yml` is currently **false** (fail-open).
+
+**Rationale**: Ensemble is already in `DISABLE_DEFAULT` / research-only posture. Flipping to fail-closed would hard-fail overnight unattended runs before new post-Phase-7.15-F audit windows accumulate enough lift evidence.
+
+**Flip condition** (all three must be true before setting to `true`):
+1. `lift_fraction >= min_lift_fraction` (currently 0.25) across 20+ fresh audit windows
+2. Those windows were generated post-Phase-7.15-F (ensemble domain-normalization fix, commit `234b079`)
+3. Recent-window violation rate is consistently below `max_violation_rate` (0.35)
+
+Current status (2026-02-26): 1.67% lift fraction vs 25% required. Do not flip until post-7.15-F windows are accumulated.
+
+---
+
 ## OpenClaw + Gmail Defaults
 
 - OpenClaw notifications: set `OPENCLAW_TARGETS` or `OPENCLAW_TO`. Auto-notifies from `production_audit_gate.py` (disable with `PMX_NOTIFY_OPENCLAW=0`).

@@ -19,6 +19,13 @@ from etl.time_series_forecaster import (
 pytestmark = pytest.mark.slow
 
 
+@pytest.fixture(autouse=True)
+def _disable_forecast_audit_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep test-generated artifacts out of logs/forecast_audits so gate evidence
+    # only reflects production/research runs, not unit test folds.
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
+
+
 def _build_price_series(start: str = "2020-01-01", periods: int = 240) -> pd.Series:
     dates = pd.date_range(datetime.fromisoformat(start), periods=periods, freq="D")
     trend = 0.05 * np.arange(periods)

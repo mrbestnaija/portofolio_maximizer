@@ -69,6 +69,11 @@ class TimeSeriesForecasterConfig:
     regime_detection_enabled: bool = False
     regime_detection_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    # Phase 7.16: Auto-learning order cache + snapshot store
+    order_learning_config: Dict[str, Any] = field(default_factory=dict)
+    order_learning_db_path: str = ""  # path to portfolio_maximizer.db
+    monte_carlo_config: Dict[str, Any] = field(default_factory=dict)
+
 
 class TimeSeriesForecaster:
     """
@@ -86,6 +91,7 @@ class TimeSeriesForecaster:
         samossa_config: Optional[Dict[str, Any]] = None,
         mssa_rl_config: Optional[Dict[str, Any]] = None,
         ensemble_config: Optional[Dict[str, Any]] = None,
+        monte_carlo_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         if config is None:
             config = self._build_config_from_kwargs(
@@ -95,6 +101,7 @@ class TimeSeriesForecaster:
                 samossa_config=samossa_config,
                 mssa_rl_config=mssa_rl_config,
                 ensemble_config=ensemble_config,
+                monte_carlo_config=monte_carlo_config,
             )
         elif forecast_horizon is not None:
             config.forecast_horizon = forecast_horizon
@@ -147,15 +154,36 @@ class TimeSeriesForecaster:
                 self.config.regime_detection_kwargs.get("regime_candidate_weights")
             )
 
+        # Phase 7.16: Construct OrderLearner + ModelSnapshotStore if enabled.
+        self._order_learner: Optional[Any] = None
+        self._snapshot_store: Optional[Any] = None
+        ol_cfg = self.config.order_learning_config or {}
+        if ol_cfg.get("enabled", False):
+            _db_path = self.config.order_learning_db_path or "data/portfolio_maximizer.db"
+            try:
+                from forcester_ts.order_learner import OrderLearner
+                from forcester_ts.model_snapshot_store import ModelSnapshotStore
+                self._order_learner = OrderLearner(db_path=_db_path, config=ol_cfg)
+                self._snapshot_store = ModelSnapshotStore()
+                logger.info(
+                    "[TS_MODEL] OrderLearner + ModelSnapshotStore initialised (db=%s)", _db_path
+                )
+            except Exception as _ole:
+                logger.warning(
+                    "[TS_MODEL] OrderLearner/SnapshotStore init failed: %s", _ole
+                )
+
         self._model_summaries: Dict[str, Dict[str, Any]] = {}
         self._latest_results: Dict[str, Any] = {}
         self._latest_metrics: Dict[str, Dict[str, float]] = {}
         self._model_errors: Dict[str, str] = {}
         self._model_events: list[Dict[str, Any]] = []
+        self._regime_result: Optional[Dict[str, Any]] = None
         self._series_diagnostics: Dict[str, Any] = {}
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
         self._sarimax_exog_columns: list[str] = []
+        self._macro_context: Optional[pd.DataFrame] = None  # Signal Quality A
         self._last_price: Optional[float] = None
         self._last_timestamp: Optional[pd.Timestamp] = None
         self._series_freq_hint: Optional[str] = None
@@ -175,17 +203,39 @@ class TimeSeriesForecaster:
         cfg_path = os.environ.get("TS_FORECAST_MONITOR_CONFIG", "config/forecaster_monitoring.yml")
         self._rmse_monitor_cfg: Dict[str, Any] = self._load_rmse_monitoring_config(Path(cfg_path))
 
+    # Signal Quality A: macro columns sourced from macro_context
+    _MACRO_EXOG_COLUMNS = ("vix_level", "yield_spread_10y_2y", "sector_momentum_5d")
+    _DEFAULT_MC_PATHS = 1000
+    _GENERIC_TICKER_NAMES = {
+        "close",
+        "adj close",
+        "adj_close",
+        "open",
+        "high",
+        "low",
+        "price",
+        "returns",
+        "return",
+    }
+
     def _build_sarimax_exogenous(
         self,
         *,
-        price_series: pd.Series,
-        returns_series: Optional[pd.Series],
-    ) -> pd.DataFrame:
+        price_series: "pd.Series",
+        returns_series: "Optional[pd.Series]",
+        macro_context: "Optional[pd.DataFrame]" = None,
+    ) -> "pd.DataFrame":
         """
-        Build a minimal SARIMAX-X feature set from the observed window.
+        Build a SARIMAX-X feature set from the observed window.
 
-        Feature names are treated as part of the instrumentation contract:
-        ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"].
+        Core features (always present):
+          ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"]
+
+        Macro features (Signal Quality A — merged when macro_context is provided):
+          ["vix_level", "yield_spread_10y_2y", "sector_momentum_5d"]
+
+        Macro columns absent from macro_context are silently omitted.
+        All values forward-filled then back-filled to handle business-day gaps.
         """
         returns = returns_series if returns_series is not None else price_series.pct_change()
         returns = returns.reindex(price_series.index)
@@ -201,16 +251,28 @@ class TimeSeriesForecaster:
         std_20 = price_series.rolling(20).std()
         zscore_20 = (price_series - mean_20) / std_20.replace(0.0, pd.NA)
 
-        exog = pd.DataFrame(
-            {
-                "ret_1": ret_1,
-                "vol_10": vol_10,
-                "mom_5": mom_5,
-                "ema_gap_10": ema_gap_10,
-                "zscore_20": zscore_20,
-            },
-            index=price_series.index,
-        )
+        exog_dict: Dict[str, "pd.Series"] = {
+            "ret_1": ret_1,
+            "vol_10": vol_10,
+            "mom_5": mom_5,
+            "ema_gap_10": ema_gap_10,
+            "zscore_20": zscore_20,
+        }
+
+        # Signal Quality A: merge optional macro context columns
+        if macro_context is not None and not macro_context.empty:
+            for col in self._MACRO_EXOG_COLUMNS:
+                if col in macro_context.columns:
+                    aligned = (
+                        macro_context[col]
+                        .reindex(price_series.index)
+                        .ffill()
+                        .bfill()
+                        .fillna(0.0)
+                    )
+                    exog_dict[col] = aligned.astype(float)
+
+        exog = pd.DataFrame(exog_dict, index=price_series.index)
         exog = exog.astype(float).replace([pd.NA, float("inf"), float("-inf")], 0.0).fillna(0.0)
         return exog
 
@@ -413,12 +475,243 @@ class TimeSeriesForecaster:
             normalized = {model: value / normal_sum for model, value in normalized.items()}
         return normalized
 
+    @staticmethod
+    def _hash_snapshot_inputs(
+        series: pd.Series,
+        *,
+        exogenous: Optional[pd.DataFrame] = None,
+    ) -> str:
+        hasher = hashlib.sha256()
+        values = np.asarray(series.astype(float, copy=False), dtype=np.float64)
+        hasher.update(values.tobytes())
+
+        try:
+            if isinstance(series.index, pd.DatetimeIndex):
+                hasher.update(series.index.view("int64").tobytes())
+            else:
+                for item in series.index:
+                    hasher.update(str(item).encode("utf-8", errors="replace"))
+                    hasher.update(b"\x1f")
+        except Exception:
+            hasher.update(str(list(series.index)).encode("utf-8", errors="replace"))
+
+        if exogenous is not None and not exogenous.empty:
+            hasher.update(b"|exogenous|")
+            hasher.update(",".join(str(col) for col in exogenous.columns).encode("utf-8", errors="replace"))
+            exog_values = np.asarray(exogenous.astype(float).to_numpy(copy=True), dtype=np.float64)
+            hasher.update(exog_values.tobytes())
+
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _snapshot_loaded(component: str, forecaster: Any) -> bool:
+        if component == "samossa":
+            return bool(getattr(forecaster, "_fitted", False))
+        return getattr(forecaster, "fitted_model", None) is not None
+
+    def _maybe_restore_snapshot(
+        self,
+        *,
+        component: str,
+        model_type: str,
+        forecaster: Any,
+        series: pd.Series,
+        exogenous: Optional[pd.DataFrame],
+        ticker: str,
+        regime: Optional[str],
+    ) -> bool:
+        if self._snapshot_store is None or not ticker:
+            return False
+        try:
+            data_hash = self._hash_snapshot_inputs(series, exogenous=exogenous)
+            snapshot = self._snapshot_store.load(
+                ticker=ticker,
+                model_type=model_type,
+                regime=regime,
+                current_n_obs=int(len(series)),
+                current_data_hash=data_hash,
+                max_obs_delta=0,
+                strict_hash=True,
+            )
+            if snapshot is None:
+                return False
+            forecaster.load_fitted(snapshot)
+            if not self._snapshot_loaded(component, forecaster):
+                return False
+            self._record_model_event(
+                component,
+                "snapshot_restore",
+                ticker=ticker,
+                regime=regime,
+                n_obs=int(len(series)),
+            )
+            return True
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[TS_MODEL] %s snapshot restore skipped: %s", component.upper(), exc)
+            return False
+
+    def _maybe_save_snapshot(
+        self,
+        *,
+        component: str,
+        model_type: str,
+        fitted_obj: Any,
+        series: pd.Series,
+        exogenous: Optional[pd.DataFrame],
+        ticker: str,
+        regime: Optional[str],
+        aic: Optional[float],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._snapshot_store is None or not ticker:
+            return
+        try:
+            data_hash = self._hash_snapshot_inputs(series, exogenous=exogenous)
+            self._snapshot_store.save(
+                ticker=ticker,
+                model_type=model_type,
+                regime=regime,
+                fitted_obj=fitted_obj,
+                n_obs=int(len(series)),
+                data_hash=data_hash,
+                aic=float(aic) if aic is not None else float("nan"),
+                metadata=metadata or {},
+            )
+            self._record_model_event(
+                component,
+                "snapshot_save",
+                ticker=ticker,
+                regime=regime,
+                n_obs=int(len(series)),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[TS_MODEL] %s snapshot save skipped: %s", component.upper(), exc)
+
+    def _build_monte_carlo_summary(
+        self,
+        results: Dict[str, Any],
+        *,
+        alpha: float,
+        mc_paths: int,
+        mc_seed: Optional[int],
+    ) -> Dict[str, Any]:
+        base_payload = results.get("mean_forecast")
+        base_forecast = self._extract_series(base_payload)
+        if base_forecast is None:
+            return {"status": "SKIP", "reason": "base_forecast_missing"}
+        try:
+            last_price_val = float(self._last_price) if self._last_price is not None else float("nan")
+        except Exception:
+            last_price_val = float("nan")
+        if not np.isfinite(last_price_val) or last_price_val <= 0.0:
+            return {"status": "SKIP", "reason": "last_price_missing"}
+
+        lower_ci = self._extract_series(base_payload, "lower_ci")
+        upper_ci = self._extract_series(base_payload, "upper_ci")
+
+        volatility = None
+        volatility_payload = results.get("volatility_forecast")
+        if isinstance(volatility_payload, dict):
+            volatility = volatility_payload.get("volatility")
+        if volatility is None:
+            garch_payload = results.get("garch_forecast")
+            if isinstance(garch_payload, dict):
+                volatility = garch_payload.get("volatility")
+
+        from forcester_ts.monte_carlo_simulator import MonteCarloSimulator
+
+        simulator = MonteCarloSimulator()
+        return simulator.simulate_price_distribution(
+            base_forecast=base_forecast,
+            last_price=last_price_val,
+            n_paths=mc_paths,
+            seed=mc_seed,
+            volatility=volatility,
+            lower_ci=lower_ci,
+            upper_ci=upper_ci,
+            alpha=alpha,
+        )
+
+    @staticmethod
+    def _coerce_bool(value: Any, *, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off", ""}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _coerce_optional_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _resolve_monte_carlo_options(
+        self,
+        *,
+        mc_enabled: Optional[bool],
+        mc_paths: Optional[int],
+        mc_seed: Optional[int],
+    ) -> tuple[bool, int, Optional[int]]:
+        cfg = self.config.monte_carlo_config if isinstance(self.config.monte_carlo_config, dict) else {}
+        enabled = self._coerce_bool(
+            mc_enabled if mc_enabled is not None else cfg.get("enabled"),
+            default=False,
+        )
+        paths = self._coerce_optional_int(mc_paths if mc_paths is not None else cfg.get("paths"))
+        if paths is None:
+            paths = self._DEFAULT_MC_PATHS
+        seed = self._coerce_optional_int(mc_seed if mc_seed is not None else cfg.get("seed"))
+        return enabled, int(paths), seed
+
+    @staticmethod
+    def _resolve_ticker(
+        ticker: str,
+        price_series: pd.Series,
+        returns_series: Optional[pd.Series] = None,
+    ) -> str:
+        candidate = str(ticker or "").strip()
+        if candidate:
+            return candidate
+        for series in (price_series, returns_series):
+            if series is None:
+                continue
+            raw_name = getattr(series, "name", "")
+            if isinstance(raw_name, tuple):
+                raw_name = raw_name[0] if raw_name else ""
+            candidate = str(raw_name or "").strip()
+            normalized = candidate.replace("_", " ").strip().lower()
+            if (
+                candidate
+                and candidate.upper() not in {"NONE", "NAN"}
+                and normalized not in TimeSeriesForecaster._GENERIC_TICKER_NAMES
+            ):
+                return candidate
+        return ""
+
     def fit(
         self,
         price_series: pd.Series,
         returns_series: Optional[pd.Series] = None,
+        ticker: str = "",
+        macro_context: Optional[pd.DataFrame] = None,
     ) -> "TimeSeriesForecaster":
         price_series = self._ensure_series(price_series)
+        ticker = self._resolve_ticker(ticker, price_series, returns_series)
+        self._macro_context = macro_context  # Signal Quality A: store for exog building
         cleaned_price = price_series.dropna()
         if not cleaned_price.empty:
             self._last_price = float(cleaned_price.iloc[-1])
@@ -477,6 +770,13 @@ class TimeSeriesForecaster:
                 self._regime_result = None
                 self._handle_model_failure("regime", "detect", exc)
 
+        # Phase 7.16: Extract regime string for OrderLearner regime conditioning.
+        _ol_regime: Optional[str] = None
+        if self._regime_result is not None:
+            _ol_regime = self._regime_result.get("regime") or None
+            if _ol_regime == "STATIC":
+                _ol_regime = None
+
         if self.config.sarimax_enabled:
             self._record_model_event(
                 "sarimax",
@@ -493,6 +793,7 @@ class TimeSeriesForecaster:
                     exog = self._build_sarimax_exogenous(
                         price_series=price_series,
                         returns_series=returns_series,
+                        macro_context=self._macro_context,  # Signal Quality A
                     )
                     self._sarimax_exog_columns = list(exog.columns)
                     self._sarimax_exog_last_row = exog.iloc[-1] if not exog.empty else None
@@ -500,7 +801,44 @@ class TimeSeriesForecaster:
                         "sarimax_exogenous",
                         {"columns": self._sarimax_exog_columns, "row_count": int(len(exog))},
                     )
-                    self._sarimax.fit(price_series, exogenous=exog)
+                    restored_from_snapshot = self._maybe_restore_snapshot(
+                        component="sarimax",
+                        model_type="SARIMAX",
+                        forecaster=self._sarimax,
+                        series=price_series,
+                        exogenous=exog,
+                        ticker=ticker,
+                        regime=_ol_regime,
+                    )
+                    meta["restored_from_snapshot"] = restored_from_snapshot
+                    if not restored_from_snapshot:
+                        self._sarimax.fit(
+                            price_series, exogenous=exog,
+                            order_learner=self._order_learner,
+                            ticker=ticker,
+                            regime=_ol_regime,
+                        )
+                        self._maybe_save_snapshot(
+                            component="sarimax",
+                            model_type="SARIMAX",
+                            fitted_obj={
+                                "fitted_model": self._sarimax.fitted_model,
+                                "model": self._sarimax.model,
+                                "best_order": self._sarimax.best_order,
+                                "best_seasonal_order": self._sarimax.best_seasonal_order,
+                                "scale_factor": getattr(self._sarimax, "_scale_factor", 1.0),
+                                "fit_metadata": dict(getattr(self._sarimax, "_fit_metadata", {})),
+                            },
+                            series=price_series,
+                            exogenous=exog,
+                            ticker=ticker,
+                            regime=_ol_regime,
+                            aic=getattr(getattr(self._sarimax, "fitted_model", None), "aic", None),
+                            metadata={
+                                "best_order": list(self._sarimax.best_order or []),
+                                "best_seasonal_order": list(self._sarimax.best_seasonal_order or []),
+                            },
+                        )
                     meta["order"] = getattr(self._sarimax, "best_order", None)
                     meta["seasonal"] = getattr(self._sarimax, "best_seasonal_order", None)
                 self._record_model_event(
@@ -508,6 +846,7 @@ class TimeSeriesForecaster:
                     "fit_complete",
                     order=getattr(self._sarimax, "best_order", None),
                     seasonal=getattr(self._sarimax, "best_seasonal_order", None),
+                    restored=bool(meta.get("restored_from_snapshot")),
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 self._sarimax = None
@@ -528,7 +867,48 @@ class TimeSeriesForecaster:
                     self._samossa = self._construct_with_filtered_kwargs(
                         SAMOSSAForecaster, self.config.samossa_kwargs
                     )
-                    self._samossa.fit(price_series)
+                    restored_from_snapshot = self._maybe_restore_snapshot(
+                        component="samossa",
+                        model_type="SAMOSSA",
+                        forecaster=self._samossa,
+                        series=price_series,
+                        exogenous=None,
+                        ticker=ticker,
+                        regime=_ol_regime,
+                    )
+                    meta["restored_from_snapshot"] = restored_from_snapshot
+                    if not restored_from_snapshot:
+                        self._samossa.fit(
+                            price_series,
+                            order_learner=self._order_learner,
+                            ticker=ticker,
+                            regime=_ol_regime,
+                        )
+                        self._maybe_save_snapshot(
+                            component="samossa",
+                            model_type="SAMOSSA",
+                            fitted_obj={
+                                "reconstructed": getattr(self._samossa, "_reconstructed", None),
+                                "residuals": getattr(self._samossa, "_residuals", None),
+                                "residual_model": getattr(self._samossa, "_residual_model", None),
+                                "scale_mean": getattr(self._samossa, "_scale_mean", 0.0),
+                                "scale_std": getattr(self._samossa, "_scale_std", 1.0),
+                                "evr": getattr(self._samossa, "_explained_variance_ratio", 0.0),
+                                "trend_slope": getattr(self._samossa, "_trend_slope", 0.0),
+                                "trend_intercept": getattr(self._samossa, "_trend_intercept", 0.0),
+                                "trend_strength": getattr(self._samossa, "_trend_strength", 0.0),
+                                "last_index": getattr(self._samossa, "_last_index", None),
+                                "target_freq": getattr(self._samossa, "_target_freq", None),
+                                "last_observed": getattr(self._samossa, "_last_observed", None),
+                                "normalized_stats": dict(getattr(self._samossa, "_normalized_stats", {})),
+                            },
+                            series=price_series,
+                            exogenous=None,
+                            ticker=ticker,
+                            regime=_ol_regime,
+                            aic=getattr(self._samossa, "_learned_ar_aic", None),
+                            metadata={"window_length": getattr(self._samossa.config, "window_length", None)},
+                        )
                     summary = self._samossa.get_model_summary()
                     meta["explained_variance"] = summary.get("explained_variance_ratio")
                     meta["components"] = summary.get("n_components")
@@ -539,6 +919,7 @@ class TimeSeriesForecaster:
                     explained_variance=summary.get("explained_variance_ratio"),
                     components=summary.get("n_components"),
                     window=summary.get("window_length_used"),
+                    restored=bool(meta.get("restored_from_snapshot")),
                 )
             except Exception as exc:
                 self._samossa = None
@@ -592,7 +973,48 @@ class TimeSeriesForecaster:
                         self._garch = self._construct_with_filtered_kwargs(
                             GARCHForecaster, self.config.garch_kwargs
                         )
-                        self._garch.fit(returns_series)
+                        restored_from_snapshot = self._maybe_restore_snapshot(
+                            component="garch",
+                            model_type="GARCH",
+                            forecaster=self._garch,
+                            series=returns_series,
+                            exogenous=None,
+                            ticker=ticker,
+                            regime=_ol_regime,
+                        )
+                        meta["restored_from_snapshot"] = restored_from_snapshot
+                        if not restored_from_snapshot:
+                            self._garch.fit(
+                                returns_series,
+                                order_learner=self._order_learner,
+                                ticker=ticker,
+                                regime=_ol_regime,
+                            )
+                            self._maybe_save_snapshot(
+                                component="garch",
+                                model_type="GARCH",
+                                fitted_obj={
+                                    "fitted_model": getattr(self._garch, "fitted_model", None),
+                                    "backend": getattr(self._garch, "backend", "arch"),
+                                    "scale_factor": getattr(self._garch, "_scale_factor", 1.0),
+                                    "fallback_state": getattr(self._garch, "_fallback_state", None),
+                                    "p": getattr(self._garch, "p", None),
+                                    "q": getattr(self._garch, "q", None),
+                                    "vol": getattr(self._garch, "vol", None),
+                                    "dist": getattr(self._garch, "dist", None),
+                                    "mean": getattr(self._garch, "mean", None),
+                                },
+                                series=returns_series,
+                                exogenous=None,
+                                ticker=ticker,
+                                regime=_ol_regime,
+                                aic=getattr(getattr(self._garch, "fitted_model", None), "aic", None),
+                                metadata={
+                                    "p": getattr(self._garch, "p", None),
+                                    "q": getattr(self._garch, "q", None),
+                                    "backend": getattr(self._garch, "backend", "arch"),
+                                },
+                            )
                         summary = self._garch.get_model_summary()
                         meta["order"] = {"p": self._garch.p, "q": self._garch.q}
                         meta["aic"] = summary.get("aic")
@@ -603,6 +1025,7 @@ class TimeSeriesForecaster:
                         order={"p": self._garch.p, "q": self._garch.q},
                         aic=summary.get("aic"),
                         bic=summary.get("bic"),
+                        restored=bool(meta.get("restored_from_snapshot")),
                     )
                 except Exception as exc:
                     self._garch = None
@@ -615,8 +1038,21 @@ class TimeSeriesForecaster:
             self._instrumentation.record_artifact("component_summaries", self._model_summaries)
         return self
 
-    def forecast(self, *, steps: Optional[int] = None, alpha: float = 0.05) -> Dict[str, Any]:
+    def forecast(
+        self,
+        *,
+        steps: Optional[int] = None,
+        alpha: float = 0.05,
+        mc_enabled: Optional[bool] = None,
+        mc_paths: Optional[int] = None,
+        mc_seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
         horizon = int(steps) if steps is not None else self.config.forecast_horizon
+        mc_enabled_resolved, mc_paths_resolved, mc_seed_resolved = self._resolve_monte_carlo_options(
+            mc_enabled=mc_enabled,
+            mc_paths=mc_paths,
+            mc_seed=mc_seed,
+        )
         results: Dict[str, Any] = {"horizon": horizon}
         self._instrumentation.set_dataset_metadata(forecast_horizon=horizon)
 
@@ -764,6 +1200,28 @@ class TimeSeriesForecaster:
                 results["mean_forecast"] = results.get("sarimax_forecast")
                 if results["mean_forecast"] is not None:
                     results["default_model"] = "SARIMAX"
+
+        if mc_enabled_resolved:
+            self._record_model_event("monte_carlo", "forecast_start", horizon=horizon)
+            with self._instrumentation.track("monte_carlo", "forecast", horizon=horizon) as meta:
+                mc_result = self._build_monte_carlo_summary(
+                    results,
+                    alpha=alpha,
+                    mc_paths=mc_paths_resolved,
+                    mc_seed=mc_seed_resolved,
+                )
+                results["monte_carlo"] = mc_result
+                meta["status"] = mc_result.get("status")
+                meta["paths_used"] = mc_result.get("paths_used")
+                meta["reason"] = mc_result.get("reason")
+                meta["volatility_source"] = mc_result.get("volatility_source")
+            self._record_model_event(
+                "monte_carlo",
+                "forecast_complete",
+                status=results["monte_carlo"].get("status"),
+                reason=results["monte_carlo"].get("reason"),
+                paths_used=results["monte_carlo"].get("paths_used"),
+            )
 
         # Phase 7.5: Add regime metadata to results
         if self._regime_result:
@@ -958,6 +1416,7 @@ class TimeSeriesForecaster:
         samossa_config: Optional[Dict[str, Any]],
         mssa_rl_config: Optional[Dict[str, Any]],
         ensemble_config: Optional[Dict[str, Any]],
+        monte_carlo_config: Optional[Dict[str, Any]],
     ) -> TimeSeriesForecasterConfig:
         config = TimeSeriesForecasterConfig()
         if forecast_horizon is not None:
@@ -992,6 +1451,9 @@ class TimeSeriesForecaster:
             config.ensemble_kwargs = {
                 k: v for k, v in ensemble_config.items() if k != "enabled"
             }
+
+        if monte_carlo_config is not None:
+            config.monte_carlo_config = dict(monte_carlo_config)
 
         return config
 

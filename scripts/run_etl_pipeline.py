@@ -1875,6 +1875,8 @@ def execute_pipeline(
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
                     regime_detection_cfg = forecasting_cfg.get('regime_detection', {})  # Phase 7.5
+                    order_learning_cfg = forecasting_cfg.get('order_learning', {})      # Phase 7.16
+                    monte_carlo_cfg = forecasting_cfg.get('monte_carlo', {})            # Phase 7.16
 
                     # Phase 7.3 DEBUG: Check what's in ensemble_cfg
                     logger.info(
@@ -1920,6 +1922,9 @@ def execute_pipeline(
                             regime_detection_kwargs={
                                 k: v for k, v in regime_detection_cfg.items() if k != 'enabled'
                             },
+                            # Phase 7.16: Auto-learning pipeline
+                            order_learning_config=order_learning_cfg,
+                            monte_carlo_config=monte_carlo_cfg,
                         )
 
                     for ticker in ticker_list:
@@ -1984,7 +1989,7 @@ def execute_pipeline(
                             )
 
                             train_returns = train_series.pct_change().dropna()
-                            forecaster.fit(train_series, returns_series=train_returns)
+                            forecaster.fit(train_series, returns_series=train_returns, ticker=ticker)
 
                             forecast_result = forecaster.forecast(
                                 steps=forecast_horizon,
