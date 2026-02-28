@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 from etl.portfolio_math import calculate_kelly_fraction_correct
 from etl.statistical_tests import StatisticalTestSuite
+from utils.weather_context import hydrate_signal_weather_context
 
 # Phase 7.9: Risk mode configuration for advisory/gated filters
 try:
@@ -47,6 +48,32 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 ALLOWED_RISK_LEVELS = ("low", "medium", "high", "extreme")
+WEATHER_SENSITIVE_COMMODITIES = {
+    "CORN",
+    "COCOA",
+    "COFFEE",
+    "COTTON",
+    "RICE",
+    "SOYBEAN",
+    "SOYBEANS",
+    "SUGAR",
+    "WHEAT",
+    "ZC",
+    "ZS",
+    "ZW",
+    "KC",
+    "CC",
+}
+_WEATHER_SEVERITY_SCORES = {
+    "none": 0.0,
+    "low": 0.25,
+    "minor": 0.25,
+    "moderate": 0.5,
+    "medium": 0.5,
+    "high": 0.75,
+    "severe": 0.9,
+    "extreme": 1.0,
+}
 
 
 def _normalise_risk_level(level: Any) -> Tuple[str, Optional[str]]:
@@ -177,6 +204,95 @@ class SignalValidator:
         self._stat_suite = StatisticalTestSuite()
         
         logger.info(f"Signal Validator initialized with min_confidence={min_confidence}")
+
+    @staticmethod
+    def _coerce_mapping(raw: Any) -> Dict[str, Any]:
+        """Best-effort conversion of dict-or-JSON payloads into a mapping."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    @classmethod
+    def _is_weather_sensitive_signal(cls, signal: Dict[str, Any]) -> bool:
+        """Identify agricultural commodity signals where weather shocks matter most."""
+        ticker = str(signal.get("ticker") or "").strip().upper()
+        asset_class = str(signal.get("asset_class") or "").strip().lower()
+        sector = str(signal.get("sector") or "").strip().lower()
+        tags_raw = signal.get("tags")
+        tags: list[str] = []
+        if isinstance(tags_raw, (list, tuple, set)):
+            tags = [str(tag).strip().lower() for tag in tags_raw if str(tag).strip()]
+
+        if ticker in WEATHER_SENSITIVE_COMMODITIES:
+            return True
+        if asset_class in {"commodity", "commodities", "agriculture", "agri"}:
+            return True
+        if sector in {"agriculture", "agri", "softs", "grains"}:
+            return True
+        return any(tag in {"commodity", "agriculture", "agri", "softs", "grains"} for tag in tags)
+
+    @classmethod
+    def _apply_weather_risk_overlay(cls, signal: Dict[str, Any]) -> tuple[float, List[str]]:
+        """Conservatively reduce confidence when severe near-term weather risk is provided."""
+        if not cls._is_weather_sensitive_signal(signal):
+            return 1.0, []
+
+        provenance = cls._coerce_mapping(signal.get("provenance"))
+        weather_context = cls._coerce_mapping(signal.get("weather_context"))
+        if not weather_context:
+            weather_context = cls._coerce_mapping(provenance.get("weather_context"))
+        if not weather_context:
+            return 1.0, []
+
+        severity_label = str(weather_context.get("severity") or "").strip().lower()
+        severity_score = _WEATHER_SEVERITY_SCORES.get(severity_label)
+        impact_score = _clamp_confidence(weather_context.get("impact_score"), default=0.0)
+        if severity_score is None:
+            severity_score = impact_score
+
+        supply_disruption = _clamp_confidence(weather_context.get("supply_disruption_pct"), default=0.0)
+        event_confidence = _clamp_confidence(weather_context.get("confidence"), default=1.0)
+        impact_direction = str(
+            weather_context.get("impact_direction")
+            or weather_context.get("direction")
+            or "adverse"
+        ).strip().lower()
+        if impact_direction in {"favorable", "positive", "supportive", "benign"}:
+            return 1.0, []
+
+        try:
+            days_to_event = int(weather_context.get("days_to_event"))
+        except (TypeError, ValueError):
+            days_to_event = 7
+
+        if days_to_event <= 3:
+            urgency = 1.0
+        elif days_to_event <= 7:
+            urgency = 0.85
+        elif days_to_event <= 14:
+            urgency = 0.65
+        else:
+            urgency = 0.45
+
+        raw_risk = max(float(severity_score), float(impact_score), float(supply_disruption))
+        effective_risk = max(0.0, min(raw_risk * urgency * max(event_confidence, 0.5), 1.0))
+        if effective_risk < 0.20:
+            return 1.0, []
+
+        penalty = max(0.70, 1.0 - (0.10 + effective_risk * 0.20))
+        event_label = str(weather_context.get("event_type") or "weather shock").strip() or "weather shock"
+        warning = (
+            f"Weather risk overlay: {event_label} raises near-term uncertainty for "
+            f"weather-sensitive commodity (score {effective_risk:.2f})"
+        )
+        return penalty, [warning]
 
     @staticmethod
     def _is_exit_trade(signal: Dict[str, Any], portfolio_state: Optional[Dict[str, Any]]) -> bool:
@@ -346,6 +462,11 @@ class SignalValidator:
 
         confidence = _clamp_confidence(signal.get('confidence', 0.5))
         signal['confidence'] = confidence
+        hydrate_signal_weather_context(
+            signal,
+            market_data,
+            ticker=signal.get("ticker"),
+        )
 
         exit_trade = self._is_exit_trade(signal, portfolio_state)
         
@@ -400,6 +521,11 @@ class SignalValidator:
             adjusted_confidence *= max(0.0, 1 - 0.15 * failed_layers)
         if warnings:
             adjusted_confidence *= max(0.0, 1 - 0.05 * len(warnings))
+
+        weather_multiplier, weather_warnings = self._apply_weather_risk_overlay(signal)
+        if weather_warnings:
+            adjusted_confidence *= weather_multiplier
+            warnings.extend(weather_warnings)
         # Optional edge-aware adjustment for Time Series provenance.
         edge_ratio = None
         provenance_raw = signal.get("provenance")
@@ -1148,5 +1274,3 @@ assert SignalValidator.backtest_signal_quality.__doc__ is not None
 logger.info("Signal Validator module loaded successfully")
 
 # Line count: ~380 lines (slightly over budget but essential functionality)
-
-

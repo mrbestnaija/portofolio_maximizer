@@ -780,6 +780,7 @@ def _generate_time_series_forecast(
     price_frame: pd.DataFrame,
     horizon: int,
     *,
+    ticker: str = "",
     interval: Optional[str] = None,
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """Fit the ensemble forecaster and return the forecast bundle + latest price."""
@@ -811,6 +812,9 @@ def _generate_time_series_forecast(
         regime_cfg = fcfg.get("regime_detection", {})
         regime_detection_enabled = regime_cfg.get("enabled", False)
         regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != "enabled"}
+        # Phase 7.16: thread order-learning config so OrderLearner.record_fit() fires
+        order_learning_cfg = fcfg.get("order_learning", {})
+        monte_carlo_cfg = fcfg.get("monte_carlo", {})
 
         sarimax_cfg = fcfg.get("sarimax", {})
         sarimax_enabled = sarimax_cfg.get("enabled", False)
@@ -841,9 +845,11 @@ def _generate_time_series_forecast(
                 ensemble_kwargs=ensemble_kwargs,
                 regime_detection_enabled=regime_detection_enabled,
                 regime_detection_kwargs=regime_detection_kwargs,
+                order_learning_config=order_learning_cfg,  # Phase 7.16
+                monte_carlo_config=monte_carlo_cfg,
             )
         )
-        forecaster.fit(price_series=close_series, returns_series=returns_series)
+        forecaster.fit(price_series=close_series, returns_series=returns_series, ticker=ticker)
         forecast_bundle = forecaster.forecast()
     except Exception as exc:
         logger.error("Forecasting failed: %s", exc)
@@ -875,6 +881,7 @@ def _generate_forecasts_bulk(
             out[symbol] = _generate_time_series_forecast(
                 frames_by_ticker[symbol],
                 horizon,
+                ticker=symbol,
                 interval=interval,
             )
         return out
@@ -887,6 +894,7 @@ def _generate_forecasts_bulk(
                 _generate_time_series_forecast,
                 frames_by_ticker[symbol],
                 horizon,
+                ticker=symbol,
                 interval=interval,
             ): symbol
             for symbol in tickers
@@ -985,7 +993,11 @@ def _prepare_candidate_with_forecast(
     horizon: int,
 ) -> Dict[str, Any]:
     candidate = _prepare_ticker_candidate(ticker=ticker, frame=frame, preprocessor=preprocessor)
-    forecast_bundle, current_price = _generate_time_series_forecast(candidate["frame"], horizon)
+    forecast_bundle, current_price = _generate_time_series_forecast(
+        candidate["frame"],
+        horizon,
+        ticker=ticker,
+    )
     candidate["forecast_bundle"] = forecast_bundle
     candidate["current_price"] = current_price
     return candidate
@@ -2281,6 +2293,7 @@ def main(
                 forecast_bundle, current_price = _generate_time_series_forecast(
                     ticker_frame,
                     forecast_horizon,
+                    ticker=ticker,
                     interval=interval,
                 )
 

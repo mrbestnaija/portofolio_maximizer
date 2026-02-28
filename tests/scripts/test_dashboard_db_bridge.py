@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import sqlite3
 
 from scripts import dashboard_db_bridge as mod
@@ -135,3 +136,35 @@ def test_positions_fallback_uses_average_cost(tmp_path) -> None:
     pos = payload["positions"]["AAPL"]
     assert pos["shares"] == 5
     assert pos["entry_price"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# P0 guardrail smoke tests: verify both connect helpers harden connections
+# ---------------------------------------------------------------------------
+
+def test_connect_ro_blocks_dangerous_pragma(tmp_path) -> None:
+    """_connect_ro must apply guardrails so blocked PRAGMAs raise OperationalError."""
+    db_path = tmp_path / "ro_test.db"
+    # Seed a minimal DB so the file exists and can be opened read-only.
+    seed = sqlite3.connect(str(db_path))
+    seed.execute("CREATE TABLE t(x INTEGER)")
+    seed.commit()
+    seed.close()
+
+    conn = mod._connect_ro(db_path)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):  # authorizer denial raises DatabaseError
+            conn.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        conn.close()
+
+
+def test_connect_rw_blocks_dangerous_pragma_after_setup(tmp_path) -> None:
+    """_connect_rw must apply guardrails after WAL setup so journal_mode cannot be changed again."""
+    db_path = tmp_path / "rw_test.db"
+    conn = mod._connect_rw(db_path)
+    try:
+        with pytest.raises(sqlite3.DatabaseError):  # authorizer denial raises DatabaseError
+            conn.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        conn.close()

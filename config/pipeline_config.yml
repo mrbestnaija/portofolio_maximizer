@@ -310,6 +310,11 @@ pipeline:
       use_garch_volatility: true
       combine_confidence_intervals: true
 
+    monte_carlo:
+      enabled: false
+      paths: 1000
+      seed: null
+
     ensemble:
       enabled: true
       confidence_scaling: false

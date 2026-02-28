@@ -411,6 +411,71 @@ class TestSignalValidator:
         assert result.layer_results  # sanity
         assert signal['risk_level'] in ALLOWED_RISK_LEVELS
 
+    def test_weather_risk_overlay_penalises_weather_sensitive_commodities(self, validator, sample_market_data):
+        """Structured weather context should reduce confidence for agri commodities."""
+        base_signal = {
+            'ticker': 'SOYBEAN',
+            'asset_class': 'commodity',
+            'action': 'BUY',
+            'confidence': 0.8,
+            'risk_level': 'medium',
+        }
+        baseline = validator.validate_llm_signal(dict(base_signal), sample_market_data)
+
+        weather_signal = dict(base_signal)
+        weather_signal['provenance'] = {
+            'weather_context': {
+                'event_type': 'drought',
+                'severity': 'severe',
+                'days_to_event': 2,
+                'supply_disruption_pct': 0.35,
+                'confidence': 0.9,
+            }
+        }
+        result = validator.validate_llm_signal(weather_signal, sample_market_data)
+
+        assert result.confidence_score < baseline.confidence_score
+        assert any('Weather risk overlay' in warning for warning in result.warnings)
+
+    def test_weather_risk_overlay_ignores_non_commodity_tickers(self, validator, sample_market_data):
+        """Weather context should not affect unrelated single-name equities."""
+        signal = {
+            'ticker': 'AAPL',
+            'action': 'BUY',
+            'confidence': 0.8,
+            'risk_level': 'medium',
+            'weather_context': {
+                'event_type': 'storm',
+                'severity': 'extreme',
+                'days_to_event': 1,
+                'supply_disruption_pct': 0.8,
+            },
+        }
+        result = validator.validate_llm_signal(signal, sample_market_data)
+        assert not any('Weather risk overlay' in warning for warning in result.warnings)
+
+    def test_weather_risk_overlay_auto_hydrates_from_market_data(self, validator, sample_market_data):
+        """Validator should pull weather context from market data when signal omits it."""
+        sample_market_data.attrs["weather_context"] = {
+            "event_type": "drought",
+            "severity": "severe",
+            "days_to_event": 2,
+            "impact_direction": "adverse",
+        }
+        signal = {
+            'ticker': 'CORN',
+            'asset_class': 'commodity',
+            'action': 'BUY',
+            'confidence': 0.8,
+            'risk_level': 'medium',
+        }
+
+        result = validator.validate_llm_signal(signal, sample_market_data)
+
+        assert signal["weather_context"]["event_type"] == "drought"
+        assert signal["provenance"]["weather_context"]["severity"] == "severe"
+        assert any('Weather risk overlay' in warning for warning in result.warnings)
+
 
 # Integration test
 class TestSignalValidatorIntegration:

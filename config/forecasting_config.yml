@@ -25,8 +25,13 @@ forecasting:
   # GARCH configuration
   garch:
     enabled: true
-    p: 1  # ARCH order
-    q: 1  # GARCH order
+    p: 1  # ARCH order (starting point for auto-search)
+    q: 1  # GARCH order (starting point for auto-search)
+    # Phase 7.16: Cap auto-search to (1,1)-(2,2).  Constructor default was 3 each,
+    # allowing (1,3), (2,3) etc. which have persistence >=0.97 and trigger
+    # near-IGARCH GJR fallback on nearly every fit.  (2,2) stays in stable territory.
+    max_p: 2
+    max_q: 2
     vol: "GARCH"               # Options: 'GARCH', 'EGARCH', 'EGARCH'
     dist: "skewt"              # Phase 7.10b: skewt handles fat tails + negative skew (was 'normal')
     mean: "AR"                 # Phase 7.10b: AR(1) conditional mean for directional signal (was 'Zero')
@@ -39,7 +44,12 @@ forecasting:
     window_length: null      # Phase 7.10b: Auto = min(T//3, 40); paper recommends <= T/3 (was fixed 60)
     n_components: 8          # Phase 7.3: Increased from 6 for complex patterns (or -1 for auto)
     use_residual_arima: true # Fit ARIMA on residual component (now actually used via statsmodels)
-    arima_order: [1, 0, 1]   # ARIMA(p,d,q) order for residual modelling
+    # Phase 7.16: Changed from [1,0,1] ARMA(1,1) to [1,0,0] pure AR(1).
+    # ARMA(1,1) on SSA residuals (which are near-white-noise) causes near-
+    # cancellation of AR/MA roots -> flat MLE likelihood surface -> ConvergenceWarning.
+    # Pure AR(1) has a globally unique MLE solution; phi->0 for white noise without
+    # convergence failure.  The MA term added no forecasting value over AR-only.
+    arima_order: [1, 0, 0]   # AR(1) on residuals; MA term removed (convergence fix)
     seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
     min_series_length: 120   # Minimum observations required before fit
     max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
@@ -159,3 +169,43 @@ forecasting:
         # Fallback for unclear regimes → Balanced ensemble
         preferred_models: ['garch', 'samossa', 'mssa_rl']
         description: "No clear regime, use balanced ensemble"
+
+  # Phase 7.16: Auto-learning of model orders and statistical properties
+  order_learning:
+    enabled: true
+    min_fits_to_suggest: 3      # Minimum recorded fits before making a warm-start suggestion
+    max_order_age_days: 90      # Discard cache entries not used within this many days
+    skip_grid_threshold: 5      # Skip grid search entirely after this many confident fits
+    regime_aware: true          # Separate cache entry per detected regime
+    # SAMOSSA residual AR lag auto-search (null = AIC-guided 1..max_ar_lag)
+    samossa_max_ar_lag: 4       # AR lags to try when arima_order is set to null (auto)
+
+  # Phase 7.16: Walk-forward rolling/expanding retraining harness
+  walk_forward:
+    enabled: true
+    window_type: "expanding"    # "expanding" (grow window) or "rolling" (fixed window)
+    min_train_length: 120       # Minimum training bars before first fold
+    fold_step: 5                # Advance window by this many bars per fold
+    forecast_horizon: 10        # Bars to forecast per fold
+    confidence_level: 0.99      # VaR confidence level used in each fold
+
+  # Phase 7.16: Additive Monte Carlo forecast summaries (opt-in, fail-closed)
+  monte_carlo:
+    enabled: false
+    paths: 1000
+    seed: null
+
+  # Phase 7.16: Value-at-Risk backtesting for GARCH/SARIMAX confidence intervals
+  var_backtest:
+    enabled: true
+    confidence_levels: [0.95, 0.99]
+    pinball_taus: [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
+    max_violation_excess: 0.02  # Alert if actual violation rate > target + this margin
+
+  # Phase 7.16: Shapley-based PBSV ensemble attribution
+  shapley_attribution:
+    enabled: true
+    loss_fn: "mae"              # "mae" | "mse" | "pinball"
+    pinball_tau: 0.5            # Used when loss_fn="pinball"
+    regime_aggregation: true    # Group Shapley results by detected regime
+    dominant_driver_threshold: 0.05  # Flag model if |shapley| > threshold * ensemble_loss

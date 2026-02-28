@@ -68,7 +68,8 @@ def _evaluate_against_random_walk(price_series: pd.Series, *, horizon: int) -> d
 
     cfg = _build_forecaster_config(horizon)
 
-    prior_audit = os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
+    prior_audit = os.environ.get("TS_FORECAST_AUDIT_DIR")
+    os.environ["TS_FORECAST_AUDIT_DIR"] = ""
     try:
         forecaster = TimeSeriesForecaster(config=cfg)
         returns = train.pct_change().dropna()
@@ -76,7 +77,9 @@ def _evaluate_against_random_walk(price_series: pd.Series, *, horizon: int) -> d
         forecaster.forecast(steps=horizon)
         model_metrics = forecaster.evaluate(holdout)
     finally:
-        if prior_audit is not None:
+        if prior_audit is None:
+            os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
+        else:
             os.environ["TS_FORECAST_AUDIT_DIR"] = prior_audit
 
     return {

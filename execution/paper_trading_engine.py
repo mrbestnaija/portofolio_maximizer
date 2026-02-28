@@ -455,6 +455,12 @@ class PaperTradingEngine:
         if (edge_cost_gate or proof_mode) and not diag_mode and forced_exit_shares is None:
             expected_ret = signal.get("expected_return_net")
             if expected_ret is None:
+                provenance = signal.get("provenance")
+                if isinstance(provenance, dict):
+                    decision_context = provenance.get("decision_context")
+                    if isinstance(decision_context, dict):
+                        expected_ret = decision_context.get("expected_return_net")
+            if expected_ret is None:
                 expected_ret = signal.get("expected_return")
             try:
                 expected_ret_f = float(expected_ret) if expected_ret is not None else None

@@ -119,6 +119,39 @@ class TestSignalRouter:
         assert bundle.primary_signal['is_primary'] is True
         assert bundle.fallback_signal is None
 
+    def test_signal_to_dict_promotes_cost_and_weather_context(self):
+        """Critical root fields must be promoted so execution gates cannot bypass nested context."""
+        router = SignalRouter()
+        ts_signal = TimeSeriesSignal(
+            ticker="CORN",
+            action="BUY",
+            confidence=0.8,
+            entry_price=100.0,
+            signal_timestamp=datetime.now(),
+            model_type="ENSEMBLE",
+            expected_return=0.02,
+            risk_score=0.4,
+            provenance={
+                "decision_context": {
+                    "expected_return_net": 0.001,
+                    "gross_trade_return": 0.02,
+                    "net_trade_return": 0.001,
+                    "roundtrip_cost_fraction": 0.002,
+                    "roundtrip_cost_bps": 20.0,
+                },
+                "weather_context": {
+                    "event_type": "drought",
+                    "severity": "high",
+                },
+            },
+        )
+
+        payload = router._signal_to_dict(ts_signal)
+
+        assert payload["expected_return_net"] == pytest.approx(0.001)
+        assert payload["roundtrip_cost_bps"] == pytest.approx(20.0)
+        assert payload["weather_context"]["event_type"] == "drought"
+
     def test_route_llm_fallback(self, mock_llm_generator, sample_forecast_bundle):
         """Test LLM fallback when Time Series unavailable"""
         router = SignalRouter(

@@ -36,9 +36,129 @@ def test_send_message_missing_binary_is_handled() -> None:
         message="hello",
         command="definitely-not-a-real-openclaw-binary-123",
         timeout_seconds=0.5,
+        skip_dedup=True,
     )
     assert result.ok is False
     assert result.returncode == 127
+
+
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_persistent_guard_suppresses_duplicate_across_calls(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+    state_path = tmp_path / "persistent_guard_state.json"
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_PERSISTENT_GUARD_ENABLED": "1",
+            "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+            "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "300",
+            "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+        },
+        clear=False,
+    ):
+        first = send_message(
+            to="+15551234567",
+            message="same payload",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+        second = send_message(
+            to="+15551234567",
+            message="same payload",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert "persistent dedup window" in second.stdout
+    assert mock_run.call_count == 1
+
+
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_persistent_guard_target_cooldown_suppresses_burst(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+    state_path = tmp_path / "persistent_guard_state.json"
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_PERSISTENT_GUARD_ENABLED": "1",
+            "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+            "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
+            "OPENCLAW_TARGET_COOLDOWN_SECONDS": "60",
+        },
+        clear=False,
+    ):
+        first = send_message(
+            to="+15551234567",
+            message="message one",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+        second = send_message(
+            to="+15551234567",
+            message="message two",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert "target cooldown active" in second.stdout
+    assert mock_run.call_count == 1
+
+
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_persistent_guard_can_be_disabled(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    mock_run.return_value = MagicMock(returncode=0, stdout='{"ok":true}', stderr="")
+    state_path = tmp_path / "persistent_guard_state.json"
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_PERSISTENT_GUARD_ENABLED": "0",
+            "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+            "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "300",
+            "OPENCLAW_TARGET_COOLDOWN_SECONDS": "60",
+        },
+        clear=False,
+    ):
+        first = send_message(
+            to="+15551234567",
+            message="same payload",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+        second = send_message(
+            to="+15551234567",
+            message="same payload",
+            command="openclaw",
+            timeout_seconds=5.0,
+            skip_rate_limit=True,
+        )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert mock_run.call_count == 2
 
 
 def test_parse_openclaw_targets_e164_implies_whatsapp() -> None:

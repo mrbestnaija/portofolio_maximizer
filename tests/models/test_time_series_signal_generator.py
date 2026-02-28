@@ -526,6 +526,34 @@ class TestTimeSeriesSignalGenerator:
         # Net should be closer to zero than gross for SELL signals.
         assert ctx["expected_return_net"] > ctx["expected_return"]
 
+    def test_weather_context_is_attached_from_market_data_attrs(self, signal_generator, sample_forecast_bundle):
+        """Weather context should be recorded in TS provenance when present on market data."""
+        market_data = pd.DataFrame(
+            {
+                "Close": [100.0, 101.0, 102.0],
+                "Volume": [1_000_000, 1_100_000, 1_200_000],
+            },
+            index=pd.date_range("2024-01-01", periods=3, freq="D"),
+        )
+        market_data.attrs["weather_context_by_ticker"] = {
+            "AAPL": {
+                "event_type": "heatwave",
+                "severity": "high",
+                "days_to_event": 3,
+                "impact_direction": "adverse",
+            }
+        }
+
+        signal = signal_generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=market_data,
+        )
+
+        assert signal.provenance["weather_context"]["event_type"] == "heatwave"
+        assert signal.provenance["weather_context"]["severity"] == "high"
+
     def test_hold_signal_on_error(self, signal_generator):
         """Test HOLD signal returned on error"""
         # Invalid forecast bundle

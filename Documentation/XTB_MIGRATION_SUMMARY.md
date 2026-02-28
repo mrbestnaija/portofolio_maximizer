@@ -2,22 +2,24 @@
 **Interactive Brokers → XTB API Integration**
 
 **Date**: October 19, 2025  
-**Status**: ✅ **MIGRATION COMPLETE**  
+**Status**: Planning/config completed; runtime adapter pending  
 **Broker**: XTB (X-Trade Brokers)  
 **Account Type**: Demo Account
+
+> Current repo reality (2026-02-28): this document records planning and configuration work. config/xtb_config.yml exists and broker-side stocks are enabled, but there is no checked-in XTB execution adapter in the runtime code. Treat broker-side emerging-market equity execution as partial until a real adapter exists under the trading runtime.
 
 ---
 
 ## 📊 EXECUTIVE SUMMARY
 
-### Migration Completed
+### What Is Actually Completed
 - ✅ **Updated Implementation Plans**: Both `SEQUENCED_IMPLEMENTATION_PLAN.md` and `NEXT_TO_DO_SEQUENCED.md`
 - ✅ **Created XTB Configuration**: `config/xtb_config.yml` with comprehensive settings
 - ✅ **Developed Integration Guide**: `Documentation/XTB_INTEGRATION_GUIDE.md`
 - ✅ **Fixed Portfolio Math Warnings**: Resolved runtime warnings for zero volatility scenarios
 - ✅ **Updated TODO List**: Reflected XTB integration tasks
 
-### Key Benefits of XTB Migration
+### Potential Benefits Once Runtime Integration Exists
 - **Demo Account**: Risk-free testing with real market conditions
 - **Multiple Asset Classes**: Forex, Indices, Commodities support
 - **High Leverage**: Up to 30:1 for Forex, 20:1 for Indices
@@ -278,7 +280,7 @@ XTB_APP_VERSION=1.0
 
 ---
 
-**STATUS**: ✅ **XTB MIGRATION COMPLETE**  
+**Status**: Planning/config completed; runtime adapter pending  
 **Next Action**: Create XTB demo account and begin Week 3-4 development  
 **Timeline**: 2 weeks to full XTB integration  
 **Risk Level**: Low (demo account only)
@@ -287,6 +289,6 @@ XTB_APP_VERSION=1.0
 
 **Prepared by**: AI Development Assistant  
 **Date**: October 19, 2025  
-**Status**: XTB migration complete, ready for implementation  
+**Status**: Planning/config completed; runtime adapter pending  
 **Priority**: Week 3-4 XTB integration development
 

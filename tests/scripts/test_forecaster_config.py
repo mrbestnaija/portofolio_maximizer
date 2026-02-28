@@ -3,6 +3,7 @@
 Test forecaster config loading directly.
 """
 import sys
+import os
 import logging
 import yaml
 import pandas as pd
@@ -11,6 +12,8 @@ from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Disable forecast-audit writes during this import-time smoke script.
+os.environ["TS_FORECAST_AUDIT_DIR"] = ""
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(name)s - %(message)s')

@@ -79,7 +79,13 @@ class GARCHForecaster:
         self._differenced: bool = False  # Track if series was differenced for stationarity
         self._convergence_ok: bool = True  # Phase 7.14-C: False when optimizer did not converge
 
-    def fit(self, returns: pd.Series) -> "GARCHForecaster":
+    def fit(
+        self,
+        returns: pd.Series,
+        order_learner=None,
+        ticker: str = "",
+        regime: str | None = None,
+    ) -> "GARCHForecaster":
         if not getattr(self, "auto_select", True):
             raise ValueError("Manual GARCH orders are unsupported; set auto_select=True and use max_p/max_q caps.")
 
@@ -155,11 +161,39 @@ class GARCHForecaster:
             dist_candidates += ["t", "normal"]
         elif self.dist == "t":
             dist_candidates += ["normal"]
+        best_dist = dist_candidates[0]
 
         max_p = max(1, int(getattr(self, "max_p", self.p)))
         max_q = max(1, int(getattr(self, "max_q", self.q)))
-        for p_candidate in range(1, max_p + 1):
-            for q_candidate in range(1, max_q + 1):
+
+        # Phase 7.16: OrderLearner warm-start — prioritize cached (p,q,dist,mean).
+        _p_range = list(range(1, max_p + 1))
+        _q_range = list(range(1, max_q + 1))
+        if order_learner is not None and ticker:
+            try:
+                _suggestion = order_learner.suggest(ticker, "GARCH", regime)
+                if _suggestion is not None:
+                    _wp = int(_suggestion.get("p", self.p))
+                    _wq = int(_suggestion.get("q", self.q))
+                    _wd = str(_suggestion.get("dist", dist_candidates[0]))
+                    _wm = str(_suggestion.get("mean", mean_model))
+                    if order_learner.should_skip_grid(ticker, "GARCH", regime):
+                        _p_range = [_wp]
+                        _q_range = [_wq]
+                    else:
+                        _p_range = sorted({_wp} | set(range(1, max_p + 1)))
+                        _q_range = sorted({_wq} | set(range(1, max_q + 1)))
+                    dist_candidates = [_wd] + [d for d in dist_candidates if d != _wd]
+                    mean_model = _wm
+                    logger.debug(
+                        "GARCH warm-start %s/%s: p=%d q=%d dist=%s mean=%s",
+                        ticker, regime, _wp, _wq, _wd, _wm,
+                    )
+            except Exception as _we:
+                logger.debug("GARCH OrderLearner.suggest failed: %s", _we)
+
+        for p_candidate in _p_range:
+            for q_candidate in _q_range:
                 for dist_try in dist_candidates:
                     try:
                         model = arch_model(
@@ -201,6 +235,7 @@ class GARCHForecaster:
                             best_model = model
                             best_fit = fitted
                             best_order = (p_candidate, q_candidate)
+                            best_dist = dist_try
                         break  # Use first dist that fits
                     except Exception:  # pragma: no cover - best-effort search
                         continue
@@ -208,6 +243,24 @@ class GARCHForecaster:
         self.p, self.q = best_order
         self.model = best_model
         self.fitted_model = best_fit
+
+        # Phase 7.16: Record best fit in OrderLearner for future warm-start.
+        if order_learner is not None and best_fit is not None and ticker:
+            try:
+                _aic_r = float(getattr(best_fit, "aic", float("nan")))
+                _bic_r = float(getattr(best_fit, "bic", float("nan")))
+                order_learner.record_fit(
+                    ticker=ticker, model_type="GARCH", regime=regime,
+                    order_params={
+                        "p": self.p, "q": self.q,
+                        "dist": best_dist, "mean": mean_model,
+                    },
+                    aic=_aic_r, bic=_bic_r,
+                    n_obs=len(returns_scaled),
+                )
+            except Exception as _oe:
+                logger.debug("GARCH OrderLearner.record_fit failed: %s", _oe)
+
         if self.fitted_model is None:
             logger.warning(
                 "GARCH auto_select failed to fit any model; falling back to EWMA volatility."
@@ -241,7 +294,24 @@ class GARCHForecaster:
                         dist=dist_candidates[0],
                         rescale=False,
                     )
-                    gjr_fit = gjr_model.fit(disp="off")
+                    # GJR is already a fallback path; optimizer warnings here are
+                    # expected and handled — suppress to avoid log noise.
+                    with _warnings.catch_warnings(record=True) as _gjr_caught:
+                        _warnings.simplefilter("always")
+                        gjr_fit = gjr_model.fit(disp="off")
+                    _gjr_conv_failed = any(
+                        issubclass(w.category, (RuntimeWarning, UserWarning))
+                        and (
+                            "convergence" in str(w.message).lower()
+                            or "code 9" in str(w.message).lower()
+                        )
+                        for w in _gjr_caught
+                    )
+                    if _gjr_conv_failed:
+                        logger.debug(
+                            "GJR-GARCH optimizer did not fully converge; "
+                            "checking persistence to decide fallback."
+                        )
                     gjr_persistence = sum(
                         float(v) for k, v in gjr_fit.params.items()
                         if k.startswith(("alpha[", "beta[")) and np.isfinite(float(v))
@@ -414,3 +484,41 @@ class GARCHForecaster:
             "dist": self.dist,
             "differenced": bool(getattr(self, "_differenced", False)),
         }
+
+    def load_fitted(self, snapshot: Any) -> "GARCHForecaster":
+        """
+        Restore fitted state from a ModelSnapshotStore snapshot (skip-refit path).
+
+        `snapshot` may be:
+        - An ARCHModelResult (arch backend) — stored directly as fitted_model
+        - A dict with {"fitted_model": ..., "backend": ..., "scale_factor": ...}
+        """
+        if snapshot is None:
+            return self
+        try:
+            if hasattr(snapshot, "aic") and hasattr(snapshot, "forecast"):
+                # Raw ARCHModelResult
+                self.fitted_model = snapshot
+                self.backend = "arch"
+                logger.debug("GARCHForecaster.load_fitted: loaded ARCHModelResult")
+            elif isinstance(snapshot, dict) and "fitted_model" in snapshot:
+                self.fitted_model = snapshot["fitted_model"]
+                self.backend = snapshot.get("backend", self.backend)
+                self._scale_factor = float(snapshot.get("scale_factor", 1.0))
+                self._fallback_state = snapshot.get("fallback_state")
+                if snapshot.get("p") is not None:
+                    self.p = int(snapshot["p"])
+                if snapshot.get("q") is not None:
+                    self.q = int(snapshot["q"])
+                if snapshot.get("vol") is not None:
+                    self.vol = str(snapshot["vol"])
+                if snapshot.get("dist") is not None:
+                    self.dist = str(snapshot["dist"])
+                if snapshot.get("mean") is not None:
+                    self.mean = str(snapshot["mean"])
+                logger.debug("GARCHForecaster.load_fitted: loaded from snapshot dict")
+            else:
+                logger.debug("GARCHForecaster.load_fitted: unrecognized snapshot format")
+        except Exception as exc:
+            logger.warning("GARCHForecaster.load_fitted failed: %s", exc)
+        return self

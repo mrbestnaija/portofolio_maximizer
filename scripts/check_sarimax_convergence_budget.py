@@ -59,6 +59,20 @@ def _load_total_runs(suite_report: Path | None) -> int:
 
 
 def _parse_event_counts(log_path: Path) -> Dict[str, int]:
+    """
+    Count total convergence-budget events across ALL log entries.
+
+    Each `log_warning(f"event=X occurrence=N", ...)` call emits ONE log line.
+    Counting lines gives the true total number of events recorded in this log
+    file (across all process runs that wrote to it).
+
+    Previous implementation used max(counts[event], occurrence) which returned
+    the highest checkpoint value seen — i.e., the worst single-run count, NOT
+    the total.  With class-level counters that reset per process, that approach
+    undercounted cross-process totals and allowed the fallback_converged count
+    to inflate the denominator, producing artifically low primary_nonconverged
+    rates (threshold dodge).
+    """
     counts: Dict[str, int] = {
         "primary_nonconverged": 0,
         "fallback_converged": 0,
@@ -74,9 +88,8 @@ def _parse_event_counts(log_path: Path) -> Dict[str, int]:
         if not match:
             continue
         event = str(match.group("event"))
-        occurrence = int(match.group("count"))
         if event in counts:
-            counts[event] = max(counts[event], occurrence)
+            counts[event] += 1  # count lines, not max occurrence value
     return counts
 
 
@@ -111,8 +124,17 @@ def main() -> None:
     counts = _parse_event_counts(warning_log)
     total_runs = _load_total_runs(suite_report)
     if total_runs <= 0:
-        # Fallback so local runs without report still get deterministic output.
-        total_runs = max(1, counts["primary_nonconverged"], counts["fallback_converged"], counts["fallback_nonconverged"])
+        # Without a suite report we cannot know the true total number of SARIMAX
+        # fit calls (successful primaries are never logged).  Use the sum of ALL
+        # convergence-path events as the denominator: that equals the total number
+        # of fits that took either the primary-nonconverged or fallback paths.
+        # This is conservative (excludes successful primaries) so rates will be
+        # *higher* than the real rate, not lower -- the direction is safe for a
+        # gate that blocks on high failure rates.
+        # Previous code used max(event_counts), which inflated the denominator
+        # when fallback_converged was large, producing artificially low rates
+        # (threshold dodge).
+        total_runs = max(1, sum(counts.values()))
 
     rates = {
         "primary_nonconverged_rate": _fmt_rate(counts["primary_nonconverged"], total_runs),

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
 from etl.timestamp_utils import utc_now
+from utils.weather_context import extract_weather_context
 
 from etl.time_series_forecaster import (
     TimeSeriesForecaster,
@@ -554,6 +555,12 @@ class TimeSeriesSignalGenerator:
                 forecast_bundle,
                 selected_source=forecast_source,
             )
+            weather_context = extract_weather_context(
+                market_data,
+                ticker=ticker,
+            )
+            if weather_context:
+                provenance["weather_context"] = weather_context
 
             provenance["execution_friction"] = friction
             provenance["thresholds"] = {
@@ -1805,6 +1812,11 @@ class TimeSeriesSignalGenerator:
             regime_detection_enabled = regime_cfg.get('enabled', False)
             regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != 'enabled'}
 
+            # Phase 7.16: Thread order-learning config so OrderLearner.record_fit() fires
+            order_learning_cfg = (
+                self._forecasting_config.get('order_learning', {}) if self._forecasting_config else {}
+            )
+
             if fast_intraday_cv:
                 sarimax_enabled = baseline_key == "sarimax"
                 samossa_enabled = baseline_key == "samossa"
@@ -1827,6 +1839,7 @@ class TimeSeriesSignalGenerator:
                     ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
                     regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
                     regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
+                    order_learning_config=order_learning_cfg,  # Phase 7.16
                 )
             else:
                 forecaster_config = TimeSeriesForecasterConfig(
@@ -1834,6 +1847,7 @@ class TimeSeriesSignalGenerator:
                     ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
                     regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
                     regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
+                    order_learning_config=order_learning_cfg,  # Phase 7.16
                 )
 
             validator = RollingWindowValidator(

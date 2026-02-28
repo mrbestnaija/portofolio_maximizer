@@ -105,6 +105,39 @@ def test_execute_signal_executes_and_persists_trade():
     db.close()
 
 
+def test_edge_cost_gate_uses_nested_expected_return_net(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    monkeypatch.setenv("PMX_EDGE_COST_GATE", "1")
+
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.8,
+        "expected_return": 0.02,
+        "provenance": {
+            "decision_context": {
+                "expected_return_net": 0.0,
+            }
+        },
+    }
+
+    result = engine.execute_signal(signal, make_market_data())
+
+    assert result.status == "REJECTED"
+    assert "Edge/cost gate" in (result.reason or "")
+    assert len(engine.trades) == 0
+
+    db.close()
+
+
 def test_regime_state_risk_multiplier_scales_position_size(tmp_path, monkeypatch):
     """Risk multiplier from regime_state.yml should affect max position value."""
     # Create an in-memory DB and engine

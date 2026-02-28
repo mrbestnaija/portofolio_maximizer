@@ -19,16 +19,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
-try:
-    from integrity.sqlite_guardrails import guarded_sqlite_connect
-except ModuleNotFoundError:  # pragma: no cover - direct script fallback
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
-    # If a third-party `integrity` package was imported first, evict it so
-    # the local repo package resolves correctly after ROOT insertion.
-    sys.modules.pop("integrity", None)
-    sys.modules.pop("integrity.sqlite_guardrails", None)
-    from integrity.sqlite_guardrails import guarded_sqlite_connect
+# Ensure the repo root is on sys.path BEFORE the first import attempt so the
+# local integrity/ package always resolves ahead of any third-party distribution
+# with the same name.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from integrity.sqlite_guardrails import guarded_sqlite_connect
 
 
 def load_requirements(config_path: str = "config/profitability_proof_requirements.yml") -> Dict[str, Any]:

@@ -306,6 +306,17 @@ class SignalRouter:
     def _signal_to_dict(self, signal: TimeSeriesSignal) -> Dict[str, Any]:
         """Convert TimeSeriesSignal to dict for compatibility"""
         risk_level = "medium"
+        signal_provenance = signal.provenance if isinstance(signal.provenance, dict) else {}
+        decision_context = (
+            signal_provenance.get("decision_context")
+            if isinstance(signal_provenance.get("decision_context"), dict)
+            else {}
+        )
+        weather_context = (
+            signal_provenance.get("weather_context")
+            if isinstance(signal_provenance.get("weather_context"), dict)
+            else None
+        )
         try:
             rs = float(signal.risk_score)
             if rs <= 0.40:
@@ -330,10 +341,16 @@ class SignalRouter:
             'model_type': signal.model_type,
             'forecast_horizon': signal.forecast_horizon,
             'expected_return': signal.expected_return,
+            'expected_return_net': decision_context.get('expected_return_net'),
+            'gross_trade_return': decision_context.get('gross_trade_return'),
+            'net_trade_return': decision_context.get('net_trade_return'),
+            'roundtrip_cost_fraction': decision_context.get('roundtrip_cost_fraction'),
+            'roundtrip_cost_bps': decision_context.get('roundtrip_cost_bps'),
             'risk_score': signal.risk_score,
             'risk_level': risk_level,
             'reasoning': signal.reasoning,
-            'provenance': signal.provenance,
+            'provenance': signal_provenance,
+            'weather_context': weather_context,
             'signal_type': signal.signal_type,
             'volatility': signal.volatility,
             'lower_ci': signal.lower_ci,

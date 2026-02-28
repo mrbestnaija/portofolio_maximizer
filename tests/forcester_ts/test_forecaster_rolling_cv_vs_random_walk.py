@@ -96,7 +96,8 @@ def _rolling_cv_benchmark(series: pd.Series, cv: _CVConfig) -> dict:
     model_rows: dict[str, list[dict]] = {}
 
     cfg = _fast_forecaster_config(cv.horizon)
-    prior_audit = os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
+    prior_audit = os.environ.get("TS_FORECAST_AUDIT_DIR")
+    os.environ["TS_FORECAST_AUDIT_DIR"] = ""
     try:
         for train, test in folds:
             baseline_forecast = _rw_baseline(train, test.index)
@@ -111,7 +112,9 @@ def _rolling_cv_benchmark(series: pd.Series, cv: _CVConfig) -> dict:
             for model_name, metric_map in metrics.items():
                 model_rows.setdefault(model_name, []).append(metric_map)
     finally:
-        if prior_audit is not None:
+        if prior_audit is None:
+            os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
+        else:
             os.environ["TS_FORECAST_AUDIT_DIR"] = prior_audit
 
     baseline = _aggregate_metrics(baseline_rows)

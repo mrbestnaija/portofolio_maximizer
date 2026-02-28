@@ -56,7 +56,7 @@ xtb:
       spread_typical: 0.1
     
     stocks:
-      enabled: false  # Enable if needed
+      enabled: true
       leverage: 1
       spread_typical: 0.01
 

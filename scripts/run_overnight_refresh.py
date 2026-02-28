@@ -546,7 +546,10 @@ def main() -> int:
     # Phase 7.15-D: auto-trigger in step 2.7 ensures unique_windows >= AUDIT_MIN_UNIQUE_WINDOWS
     # (20) so the gate can make a definitive PASS/FAIL verdict.  Inconclusive = holdout runway
     # not yet complete or lift gate below threshold, not a structural window-count failure.
-    rc = py("scripts/production_audit_gate.py", "--allow-inconclusive-lift", allow_fail=True)
+    # --reconcile --reconcile-apply: auto-link unlinked closes during nightly maintenance window.
+    # Scans all unlinked closes (no --close-ids = scan all) and applies direction-aware repair.
+    rc = py("scripts/production_audit_gate.py", "--allow-inconclusive-lift",
+            "--reconcile", "--reconcile-apply", allow_fail=True)
     if rc != 0:
         errors += 1
 
