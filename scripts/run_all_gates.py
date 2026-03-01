@@ -33,6 +33,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# BYP-01 fix: cap how many optional gates can be skipped before we force overall_passed=False.
+# With 3 optional gates, allowing only 1 skip means at least 2/3 must actually run.
+MAX_SKIPPED_OPTIONAL_GATES = 1
+
+# Artifact written after every run so downstream tools (e.g. institutional gate) can
+# verify gates ran recently without re-running them (BYP-03 fix).
+GATE_STATUS_ARTIFACT = Path(__file__).resolve().parents[1] / "logs" / "gate_status_latest.json"
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -169,12 +177,33 @@ def main() -> None:
         if not args.emit_json:
             print("[SKIP] institutional_unattended_gate (--skip-institutional-gate)")
 
+    # BYP-01 fix: enforce minimum active gate count.
+    # Skipped optional gates are counted; if too many were skipped, force FAIL.
+    skipped_optional = sum(1 for r in results if r.get("skipped", False))
+    if skipped_optional > MAX_SKIPPED_OPTIONAL_GATES:
+        overall_pass = False
+        skip_fail_msg = (
+            f"[FAIL] Too many optional gates skipped ({skipped_optional}/3). "
+            f"Requires at most {MAX_SKIPPED_OPTIONAL_GATES} skip(s) for overall_passed=True."
+        )
+        if not args.emit_json:
+            print(skip_fail_msg)
+
     summary = {
         "phase": "institutional_unattended_hardening",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "overall_passed": bool(overall_pass),
+        "skipped_optional_gates": skipped_optional,
+        "max_skipped_optional_gates": MAX_SKIPPED_OPTIONAL_GATES,
         "gates": results,
     }
+
+    # BYP-03 fix: write a status artifact so downstream tools can verify gates ran recently.
+    try:
+        GATE_STATUS_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+        GATE_STATUS_ARTIFACT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    except Exception:
+        pass  # Non-fatal: artifact is best-effort
 
     if args.emit_json:
         print(json.dumps(summary, indent=2))

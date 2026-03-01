@@ -21,6 +21,8 @@ def _mk_profitability_db(path: Path) -> None:
                 "  action TEXT,",
                 "  execution_mode TEXT,",
                 "  is_close INTEGER,",
+                "  is_diagnostic INTEGER DEFAULT 0,",
+                "  is_synthetic INTEGER DEFAULT 0,",
                 "  entry_trade_id INTEGER",
                 ")",
             ]

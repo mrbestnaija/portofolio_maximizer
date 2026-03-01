@@ -627,7 +627,12 @@ def main() -> int:
     if _log_fh:
         _log_fh.close()
 
-    return errors
+    # BYP-04 fix: normalize exit semantics to strict 0/1 (not error count).
+    # Previously `return errors` caused sys.exit(N) where N = number of failures.
+    # Callers interpreting exit code >0 as failure still work, but code=1 (one error)
+    # was indistinguishable from code=1 (true success in some scripts).
+    # Now: 0=success, 1=any failure.
+    return 0 if errors == 0 else 1
 
 
 if __name__ == "__main__":

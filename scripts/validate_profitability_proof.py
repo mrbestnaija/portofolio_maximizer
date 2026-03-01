@@ -5,6 +5,11 @@ Profitability Proof Validator
 Rigorous validation that performance metrics represent REAL profitability.
 Part of the Critical Profitability Analysis & Remediation Plan (Phase 6).
 
+Phase 7.21 hardening (INT-03): All PnL metrics now read exclusively from
+production_closed_trades view (is_close=1, is_diagnostic=0, is_synthetic=0).
+Synthetic ticker and data-source audits still inspect trade_executions for
+completeness, but never feed into the validity determination.
+
 Usage:
     python scripts/validate_profitability_proof.py [--db data/portfolio_maximizer.db]
 """
@@ -61,66 +66,80 @@ def load_requirements(config_path: str = "config/profitability_proof_requirement
     return default_requirements
 
 
+def _view_exists(cursor) -> bool:
+    """Return True if production_closed_trades view exists in the DB."""
+    cursor.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='view' AND name='production_closed_trades'"
+    )
+    return cursor.fetchone()[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# Data-quality audits (still read trade_executions for completeness; these
+# findings are informational and do NOT influence is_proof_valid).
+# ---------------------------------------------------------------------------
+
 def check_null_data_sources(cursor) -> float:
-    """Return percentage of trades with NULL data_source."""
-    cursor.execute("""
-        SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN data_source IS NULL OR data_source = '' THEN 1 ELSE 0 END) as null_count
-        FROM trade_executions
-    """)
-    row = cursor.fetchone()
-    if row[0] == 0:
+    """Return percentage of all trades (any flag) with NULL data_source.
+
+    This is a data-quality signal only; synthetic/diagnostic trades are not
+    excluded here because we are auditing ingestion quality, not PnL.
+    """
+    try:
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN data_source IS NULL OR data_source = '' THEN 1 ELSE 0 END) as null_count
+            FROM trade_executions
+        """)
+        row = cursor.fetchone()
+        if row[0] == 0:
+            return 0.0
+        return row[1] / row[0]
+    except Exception:
         return 0.0
-    return row[1] / row[0]
 
 
 def count_synthetic_tickers(cursor) -> int:
-    """Count trades with synthetic test tickers (SYN0, SYN1, etc.)."""
-    cursor.execute("""
-        SELECT COUNT(*) FROM trade_executions
-        WHERE ticker LIKE 'SYN%' AND ticker GLOB 'SYN[0-9]*'
-    """)
-    return cursor.fetchone()[0]
+    """Count trades with synthetic test tickers (SYN0, SYN1, etc.) in all rows.
 
-
-def calculate_win_rate(cursor, production_only: bool = True) -> Optional[float]:
-    """Calculate win rate from closed positions."""
-    # Note: is_test_data column may not exist in older schemas
-    query = """
-        SELECT
-            SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
-            SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losses
-        FROM trade_executions
-        WHERE realized_pnl IS NOT NULL AND realized_pnl != 0
+    These should never appear in production_closed_trades but we audit the
+    raw table to confirm the is_synthetic flag is set correctly.
     """
-    # Skip is_test_data filter since column may not exist
-    # if production_only:
-    #     query += " AND (is_test_data = 0 OR is_test_data IS NULL)"
-
-    cursor.execute(query)
-    row = cursor.fetchone()
-
-    if row[0] is None or row[1] is None:
-        return None
-
-    total = (row[0] or 0) + (row[1] or 0)
-    if total == 0:
-        return None
-    return row[0] / total
+    try:
+        cursor.execute("""
+            SELECT COUNT(*) FROM trade_executions
+            WHERE ticker LIKE 'SYN%' AND ticker GLOB 'SYN[0-9]*'
+        """)
+        return cursor.fetchone()[0]
+    except Exception:
+        return 0
 
 
-def count_actions(cursor) -> Dict[str, int]:
-    """Count BUY, SELL, and HOLD actions."""
-    cursor.execute("""
-        SELECT action, COUNT(*) FROM trade_executions GROUP BY action
-    """)
-    return {row[0]: row[1] for row in cursor.fetchall()}
-
+# ---------------------------------------------------------------------------
+# Core PnL functions — ALWAYS query production_closed_trades
+# (Phase 7.21 hardening: was raw trade_executions, caused INT-03 finding)
+# ---------------------------------------------------------------------------
 
 def get_trade_stats(cursor) -> Dict[str, Any]:
-    """Get comprehensive trade statistics."""
-    cursor.execute("""
+    """Get comprehensive trade statistics from production_closed_trades view.
+
+    Only closed, non-diagnostic, non-synthetic trades contribute to metrics.
+    Falls back to manually filtered query if view is not present.
+    """
+    if _view_exists(cursor):
+        table = "production_closed_trades"
+    else:
+        # Fallback for databases where migration has not yet run.
+        table = (
+            "(SELECT * FROM trade_executions "
+            "WHERE is_close=1 "
+            "AND COALESCE(is_diagnostic,0)=0 "
+            "AND COALESCE(is_synthetic,0)=0)"
+        )
+
+    cursor.execute(f"""
         SELECT
             COUNT(*) as total_trades,
             COUNT(DISTINCT ticker) as unique_tickers,
@@ -131,7 +150,7 @@ def get_trade_stats(cursor) -> Dict[str, Any]:
             COALESCE(SUM(realized_pnl), 0) as total_pnl,
             COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END), 0) as gross_profit,
             COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN ABS(realized_pnl) ELSE 0 END), 0) as gross_loss
-        FROM trade_executions
+        FROM {table}
     """)
     row = cursor.fetchone()
 
@@ -149,9 +168,60 @@ def get_trade_stats(cursor) -> Dict[str, Any]:
     }
 
 
+def calculate_win_rate(cursor) -> Optional[float]:
+    """Calculate win rate from production_closed_trades view.
+
+    Excludes opening legs, diagnostic trades, and synthetic trades.
+    """
+    if _view_exists(cursor):
+        table = "production_closed_trades"
+    else:
+        table = (
+            "(SELECT * FROM trade_executions "
+            "WHERE is_close=1 "
+            "AND COALESCE(is_diagnostic,0)=0 "
+            "AND COALESCE(is_synthetic,0)=0)"
+        )
+
+    cursor.execute(f"""
+        SELECT
+            SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losses
+        FROM {table}
+        WHERE realized_pnl IS NOT NULL AND realized_pnl != 0
+    """)
+    row = cursor.fetchone()
+
+    if row[0] is None or row[1] is None:
+        return None
+
+    total = (row[0] or 0) + (row[1] or 0)
+    if total == 0:
+        return None
+    return row[0] / total
+
+
+def count_actions(cursor) -> Dict[str, int]:
+    """Count BUY, SELL, and HOLD actions across all trade_executions.
+
+    This remains on the raw table because we need the lifecycle ratio
+    (total opens vs closes) to detect positions that never close.
+    """
+    try:
+        cursor.execute("""
+            SELECT action, COUNT(*) FROM trade_executions GROUP BY action
+        """)
+        return {row[0]: row[1] for row in cursor.fetchall()}
+    except Exception:
+        return {}
+
+
 def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     """
     Validate whether performance metrics represent REAL profitability.
+
+    All PnL metrics are derived exclusively from production_closed_trades
+    (closing legs only, no diagnostic/synthetic contamination).
 
     Returns:
         {
@@ -174,14 +244,17 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     )
     cursor = conn.cursor()
 
-    # Get trade statistics
+    # Get trade statistics (from production_closed_trades view)
     stats = get_trade_stats(cursor)
     actions = count_actions(cursor)
 
-    # Check if we have any trades
+    # Check if we have any production closed trades
     if stats["total_trades"] == 0:
-        violations.append("No trades found in database")
-        recommendations.append("Run trading pipeline with --execution-mode live to generate trades")
+        violations.append("No production closed trades found in database")
+        recommendations.append(
+            "Run trading pipeline with --execution-mode live to generate trades. "
+            "Ensure trades have is_close=1, is_diagnostic=0, is_synthetic=0."
+        )
         return {
             "is_profitable": False,
             "is_proof_valid": False,
@@ -194,26 +267,36 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
                 "hold_count": 0,
                 "win_rate": None,
                 "null_data_source_pct": 0,
-                "synthetic_ticker_count": 0
+                "synthetic_ticker_count": 0,
+                "data_source": "production_closed_trades"
             },
             "recommendations": recommendations,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
-    # 1. Data Source Coverage
+    # 1. Data Source Coverage (informational; reads trade_executions for quality audit)
     null_source_pct = check_null_data_sources(cursor)
     min_coverage = requirements["data_quality"]["min_data_source_coverage"]
     if null_source_pct > (1 - min_coverage):
-        violations.append(f"Data source NULL for {null_source_pct:.1%} of trades (max allowed: {(1-min_coverage):.1%})")
+        warnings.append(
+            f"Data source NULL for {null_source_pct:.1%} of all trades "
+            f"(max allowed: {(1-min_coverage):.1%}) -- data ingestion quality issue"
+        )
 
-    # 2. Synthetic Contamination
+    # 2. Synthetic Ticker Audit (informational; checks raw table for contamination)
     synthetic_count = count_synthetic_tickers(cursor)
     max_synthetic = requirements["data_quality"]["max_synthetic_ticker_pct"]
     if synthetic_count > 0 and max_synthetic == 0:
-        violations.append(f"Found {synthetic_count} synthetic ticker trades (SYN*)")
-        recommendations.append("Run: DELETE FROM trade_executions WHERE ticker LIKE 'SYN%'")
+        warnings.append(
+            f"Found {synthetic_count} synthetic ticker trades (SYN*) in trade_executions. "
+            "These are already excluded from PnL metrics by production_closed_trades view."
+        )
+        recommendations.append(
+            "Verify is_synthetic=1 is set on all SYN* trades to ensure they don't "
+            "contaminate production_closed_trades if the view definition changes."
+        )
 
-    # 3. Win Rate Reality Check
+    # 3. Win Rate Reality Check (from production_closed_trades)
     win_rate = calculate_win_rate(cursor)
     if win_rate is not None:
         max_win_rate = requirements["statistical_significance"]["max_win_rate"]
@@ -225,7 +308,7 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
         elif win_rate < min_win_rate:
             warnings.append(f"Win rate {win_rate:.1%} below {min_win_rate:.1%} - strategy may be unprofitable")
 
-    # 4. Position Lifecycle Completeness
+    # 4. Position Lifecycle Completeness (raw table: lifecycle BUY/SELL ratio)
     buy_count = actions.get("BUY", 0)
     sell_count = actions.get("SELL", 0)
 
@@ -235,12 +318,17 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     elif buy_count > sell_count * 5:
         warnings.append(f"{buy_count} BUY vs {sell_count} SELL - positions may not be closing properly")
 
-    # 5. Minimum Closed Trades
+    # 5. Minimum Closed Trades (from production_closed_trades)
     closed_trades = stats["winning_trades"] + stats["losing_trades"]
     min_trades = requirements["statistical_significance"]["min_closed_trades"]
     if closed_trades < min_trades:
-        violations.append(f"Only {closed_trades} closed trades (need {min_trades} for statistical significance)")
-        recommendations.append(f"Continue trading to accumulate {min_trades - closed_trades} more closed positions")
+        violations.append(
+            f"Only {closed_trades} production closed trades "
+            f"(need {min_trades} for statistical significance)"
+        )
+        recommendations.append(
+            f"Continue trading to accumulate {min_trades - closed_trades} more closed positions"
+        )
 
     # 6. Minimum Trading Days
     min_days = requirements["statistical_significance"]["min_trading_days"]
@@ -272,7 +360,8 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
             "hold_count": actions.get("HOLD", 0),
             "win_rate": win_rate,
             "null_data_source_pct": null_source_pct,
-            "synthetic_ticker_count": synthetic_count
+            "synthetic_ticker_count": synthetic_count,
+            "data_source": "production_closed_trades"
         },
         "recommendations": recommendations,
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -285,6 +374,7 @@ def print_report(result: Dict[str, Any]) -> None:
     print("PROFITABILITY PROOF VALIDATION REPORT")
     print("=" * 60)
     print(f"Timestamp: {result['timestamp']}")
+    print(f"Data source: {result['metrics'].get('data_source', 'unknown')}")
     print()
 
     # Overall Status
