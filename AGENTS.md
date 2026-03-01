@@ -108,6 +108,33 @@ Platt cron command: `exec` -> `python scripts/platt_contract_audit.py --json`
 
 ---
 
+## Measurement Layers
+
+Run one command to see the full model health story:
+
+```bash
+python scripts/check_model_improvement.py          # all 4 layers
+python scripts/check_model_improvement.py --layer 1  # forecast quality only
+python scripts/check_model_improvement.py --json     # machine-readable output
+python scripts/check_model_improvement.py --save-baseline logs/baseline_before.json
+python scripts/check_model_improvement.py --baseline logs/baseline_before.json
+```
+
+| Layer | Script(s) | Key Metric | Alert Threshold | Frequency |
+|-------|-----------|------------|-----------------|-----------|
+| 1 Forecast Quality | `scripts/ensemble_health_audit.py` | lift_fraction_global, samossa_da_zero_pct | WARN lift < 5% or DA-zero > 40% | Nightly (Step 2.9 of overnight_refresh) |
+| 2 Gate Status | `scripts/run_all_gates.py --json` | overall_passed | FAIL if False -- no reinterpretation | Manual or cron; surface-only |
+| 3 Trade Quality | `integrity/pnl_integrity_enforcer.py` + `scripts/exit_quality_audit.py` | win_rate, profit_factor, interpretation | WARN win_rate < 45% or pf < 1.3 | After >= 20 production closed trades |
+| 4 Calibration | `scripts/platt_contract_audit.py` | calibration_active_tier, brier, ECE | FAIL tier = inactive; brier >= 0.25 | After >= 30 Platt outcome pairs |
+
+**SKIP != PASS.** A SKIP layer means "no measurement data" (empty audit dir, DB not found, etc.).
+It provides no health signal. Do not treat SKIP as green.
+
+Layers 1-2 run automatically in `scripts/run_overnight_refresh.py` (Steps 2.8-2.9).
+Layers 3-4 should be run manually or via cron once sufficient trade/calibration data accumulates.
+
+---
+
 ## Implementation Contract Rules
 
 **Rules enforced by `tests/scripts/test_platt_calibration_contract.py` and `scripts/platt_contract_audit.py`.**
