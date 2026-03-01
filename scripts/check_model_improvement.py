@@ -84,6 +84,7 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
         "n_skipped_malformed",
         "n_skipped_missing_metrics",
         "n_total_files",
+        "coverage_ratio",  # Phase 7.19: n_used / n_total; WARN when < 0.20
     },
     2: {"overall_passed", "n_gates_passed", "n_gates_failed"},
     3: {"win_rate", "profit_factor", "total_pnl", "n_trades", "interpretation"},
@@ -204,11 +205,17 @@ def run_layer1_forecast_quality(
             windows.append(w)
 
     n_used = len(windows)
+    # coverage_ratio = usable windows / total files (after dedup); WARN when < 20%.
+    # Low coverage_ratio means most audit files are in old pre-Phase-7.15-F format
+    # and should not be silently treated as "no data" — they are structurally missing
+    # the evaluation_metrics.ensemble key needed for lift calculations.
+    coverage_ratio = n_used / n_total if n_total > 0 else 0.0
     quality: dict = {
         "n_total_files": n_total,
         "n_skipped_malformed": n_malformed,
         "n_skipped_missing_metrics": n_missing,
         "n_used_windows": n_used,
+        "coverage_ratio": coverage_ratio,
     }
 
     if n_used == 0:
@@ -293,6 +300,12 @@ def run_layer1_forecast_quality(
         if n_used < warn_coverage_threshold:
             status = "WARN"
             reasons.append(f"n_used={n_used} < coverage_threshold={warn_coverage_threshold}")
+        if coverage_ratio < 0.20:
+            status = "WARN"
+            reasons.append(
+                f"coverage_ratio={coverage_ratio:.1%} < 20% "
+                f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
+            )
 
     reason_str = " | " + "; ".join(reasons) if reasons else ""
     summary = (
@@ -528,6 +541,17 @@ def run_layer4_calibration(db_path: Path, jsonl_path: Path) -> LayerResult:
       FAIL  -- overall_status == 'FAIL' OR calibration_active_tier == 'inactive'
       WARN  -- overall_status == 'WARN'
       PASS  -- overall_status == 'PASS'
+
+    Structural debt (as of Phase 7.19 — expected, not a failure signal):
+      - DB tier (TIER_3_DB) is the PRIMARY tier; it reads from is_close=1
+        production trades. This is the most reliable source of truth.
+      - JSONL tier (TIER_1_JSONL) is structurally starved: ~50% of entries are
+        HOLD signals which can never generate matched outcome pairs. Expect this
+        tier to remain underutilised until HOLD filter is applied at write-time.
+      - ECE > 0.15 with < 50 pairs is expected (noise-dominated, not model failure).
+        WARN is the normal calibration state during early-accumulation.
+      - WARN on calibration_quality with n < 50 pairs is not actionable; accumulate
+        more trades before treating calibration ECE/Brier as diagnostic signals.
     """
     db_path = Path(db_path)
     jsonl_path = Path(jsonl_path)

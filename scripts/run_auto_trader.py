@@ -1336,7 +1336,11 @@ def _execute_signal(
 
     # Proof-mode overrides: tighter exits for guaranteed round trips.
     if proof_mode:
-        default_horizon = 6 if is_intraday else 5
+        # Phase 7.19: was 5; widened to 8 to let winners develop before time-exit fires.
+        # Audit (2026-03-01): 5-day cap was clipping winners (avg time-exit gain $2.71)
+        # while stops hit at full size (avg stop-loss -$46.69). 8 days preserves the
+        # protective stop while giving trades ~3 extra bars to reach target_price.
+        default_horizon = 6 if is_intraday else 8
         proof_horizon = default_horizon
         # ATR-based stops/targets and adaptive holding period.
         if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14:

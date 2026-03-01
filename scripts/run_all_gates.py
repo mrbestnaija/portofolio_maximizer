@@ -142,7 +142,9 @@ def main() -> None:
     # Gate 3: production audit gate
     if not args.skip_profitability_gate:
         cmd3 = [python, "scripts/production_audit_gate.py",
-                "--reconcile"]  # dry-run: surface unlinked closes without applying; overnight job applies
+                "--reconcile",              # dry-run: surface unlinked closes without applying; overnight job applies
+                "--allow-inconclusive-lift",  # Phase 7.19: INCONCLUSIVE during warmup = ok (ensemble is DISABLE_DEFAULT)
+                ]
         if args.db:
             cmd3 += ["--db", args.db]
         r3 = _run(cmd3, "production_audit_gate")
