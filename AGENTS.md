@@ -184,6 +184,20 @@ queries actual executed+closed trades directly and is more reliable.
 **Do not treat JSONL starvation as a calibration failure.** Check `platt_contract_audit.py`
 output for `calibration_active_tier` to see which tier is actually active.
 
+## Security & Adversarial Diagnostics (Phase 7.20+)
+
+```bash
+python scripts/adversarial_diagnostic_runner.py  # all 21 checks (--json --severity --fix-report)
+```
+
+Exit codes: 0=clean, 1=CRITICAL/HIGH confirmed, 2=error.
+
+**Hardened (7.21-7.23)**: INT-03 uses `production_closed_trades` view; BYP-01 max 1 optional gate skip; BYP-03 `logs/gate_status_latest.json` verified by institutional P4 (<26h); LEAK-01 `_calibrate_confidence()` 70/30 split, fallback to raw if holdout acc<0.50.
+
+**Open (MEDIUM)**: THR-01 (coverage WARN), WIRE-01 (lift hardcoded), POI-01 (AIC unbounded), INT-04 (orphan BUY-only), INT-05 (MEDIUM in CI).
+
+---
+
 ## Institutional Hardening Baseline (Mandatory)
 
 Before claiming unattended-run readiness, run and report all of:

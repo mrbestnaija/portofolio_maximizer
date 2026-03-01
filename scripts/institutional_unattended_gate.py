@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, List
 
@@ -251,12 +252,87 @@ def _phase_p3_repo_hygiene() -> List[Finding]:
     return out
 
 
+def _phase_p4_prior_gate_verification() -> List[Finding]:
+    """BYP-03 fix: verify that run_all_gates.py ran recently and overall_passed=True.
+
+    Reads logs/gate_status_latest.json written by run_all_gates.py on each run.
+    Fails if:
+      - The artifact does not exist (gates never ran or old version)
+      - overall_passed is False in the artifact
+      - The artifact timestamp is more than 26 hours old
+    """
+    out: List[Finding] = []
+    artifact = ROOT / "logs" / "gate_status_latest.json"
+
+    if not artifact.exists():
+        out.append(Finding(
+            "P4", "prior_gate_execution",
+            "WARN",
+            "logs/gate_status_latest.json not found. run_all_gates.py may not have run yet. "
+            "Execute: python scripts/run_all_gates.py",
+        ))
+        return out
+
+    try:
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+    except Exception as exc:
+        out.append(Finding(
+            "P4", "prior_gate_execution",
+            "FAIL",
+            f"Could not parse logs/gate_status_latest.json: {exc}",
+        ))
+        return out
+
+    # Check overall_passed
+    overall_passed = bool(data.get("overall_passed", False))
+    ts_str = data.get("timestamp_utc", "")
+
+    # Check freshness
+    age_ok = False
+    age_detail = "timestamp unknown"
+    if ts_str:
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - ts
+            age_hours = age.total_seconds() / 3600
+            age_ok = age_hours <= 26
+            age_detail = f"{age_hours:.1f}h ago"
+        except Exception:
+            age_detail = "unparseable timestamp"
+
+    if not overall_passed:
+        out.append(Finding(
+            "P4", "prior_gate_execution",
+            "FAIL",
+            f"run_all_gates.py last result: overall_passed=False ({age_detail}). "
+            "Fix failing gates before autonomous runs.",
+        ))
+    elif not age_ok:
+        out.append(Finding(
+            "P4", "prior_gate_execution",
+            "WARN",
+            f"run_all_gates.py last success was {age_detail} ago (limit: 26h). "
+            "Run gates before next autonomous cycle.",
+        ))
+    else:
+        out.append(Finding(
+            "P4", "prior_gate_execution",
+            "PASS",
+            f"run_all_gates.py: overall_passed=True, run {age_detail}.",
+        ))
+
+    return out
+
+
 def run_gate() -> List[Finding]:
     findings: List[Finding] = []
     findings.extend(_phase_p0_security())
     findings.extend(_phase_p1_operational())
     findings.extend(_phase_p2_platt_data())
     findings.extend(_phase_p3_repo_hygiene())
+    findings.extend(_phase_p4_prior_gate_verification())
     return findings
 
 

@@ -2261,9 +2261,39 @@ class TimeSeriesSignalGenerator:
             import numpy as _np  # pylint: disable=import-outside-toplevel
             x = _np.array(pairs_conf, dtype=float).reshape(-1, 1)
             y = _np.array(pairs_win, dtype=float)
+
+            # LEAK-01 fix: time-based 70/30 train/holdout split.
+            # Pairs are chronologically ordered (DB: by rowid; JSONL: by file order).
+            # Training uses only the first 70%; holdout validates calibration quality.
+            split_idx = max(int(len(x) * 0.70), 20)  # need at least 20 training pairs
+            if split_idx >= len(x):
+                # Insufficient data for a meaningful split -- skip calibration
+                logger.debug(
+                    "Platt calibration skipped -- need >%d pairs for 70/30 split (have %d)",
+                    split_idx, len(x),
+                )
+                return float(max(0.05, min(0.95, raw_conf)))
+
+            x_train, x_holdout = x[:split_idx], x[split_idx:]
+            y_train, y_holdout = y[:split_idx], y[split_idx:]
+
             from sklearn.linear_model import LogisticRegression  # pylint: disable=import-outside-toplevel
             clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
-            clf.fit(x, y)
+            clf.fit(x_train, y_train)
+
+            # Evaluate on holdout to detect overfitting / poisoned training data.
+            if len(x_holdout) >= 5:
+                holdout_preds = clf.predict(x_holdout)
+                holdout_acc = float((holdout_preds == y_holdout).mean())
+                self._calibration_holdout_accuracy = holdout_acc
+                if holdout_acc < 0.50:
+                    logger.warning(
+                        "Platt holdout accuracy %.2f below 0.50 (n_holdout=%d) -- "
+                        "falling back to raw confidence to avoid miscalibration.",
+                        holdout_acc, len(x_holdout),
+                    )
+                    return float(max(0.05, min(0.95, raw_conf)))
+
             calibrated = float(clf.predict_proba([[raw_conf]])[0][1])
             # Store pure Platt probability for the confidence_calibrated DB column.
             self._platt_calibrated = float(max(0.05, min(0.95, calibrated)))

@@ -208,22 +208,14 @@ class TestDuplicateCloseNullBypass:
 class TestProofRawTable:
     """INT-03 — CRITICAL: validate_profitability_proof.py reads raw table."""
 
-    def test_confirmed_when_source_has_no_view_reference(self, tmp_path):
-        fake_src = tmp_path / "validate_profitability_proof.py"
-        fake_src.write_text(
-            "SELECT COUNT(*) FROM trade_executions WHERE realized_pnl IS NOT NULL",
-            encoding="utf-8",
-        )
-        # Use ROOT-relative lookup — monkeypatch via file path hack isn't needed;
-        # chk_proof_raw_table reads ROOT/"scripts"/"validate_profitability_proof.py"
-        # So we test the LIVE source file which is the production code.
+    def test_now_cleared_in_production_codebase(self, tmp_path):
+        # Phase 7.21 fixed INT-03: validate_profitability_proof.py now uses
+        # production_closed_trades view for all PnL metrics.
         result = chk_proof_raw_table(ROOT / "data" / "portfolio_maximizer.db")
         assert result.id == "INT-03"
-        # The live source should NOT contain production_closed_trades
-        # (confirmed vulnerability in Phase 7.20 audit)
-        assert result.passed is False, (
-            "INT-03 should be confirmed: validate_profitability_proof.py "
-            "must NOT use production_closed_trades (audit finding)"
+        assert result.passed is True, (
+            "INT-03 must be CLEARED after Phase 7.21: "
+            "validate_profitability_proof.py now uses production_closed_trades view"
         )
 
     def test_clears_when_source_uses_canonical_view(self, monkeypatch):
@@ -646,8 +638,11 @@ class TestRunAllChecks:
                 assert f.passed, "All confirmed findings must precede cleared findings"
 
     def test_critical_confirmed_findings_exist_in_production_codebase(self, tmp_path):
-        """The 6 CRITICAL findings identified in Phase 7.20 must still be confirmed
-        against the live production codebase (anti-regression lock)."""
+        """CRITICAL findings baseline after Phase 7.21-7.23 fixes.
+
+        INT-03, BYP-02, BYP-03, BYP-04, LEAK-01 are now CLEARED.
+        BYP-01 remains confirmed (skip flags still exist; enforcement bounds them).
+        """
         db_real = ROOT / "data" / "portfolio_maximizer.db"
         audit_dir = ROOT / "logs" / "forecast_audits"
         findings = run_all_checks(db_real, audit_dir, None, None)
@@ -655,15 +650,18 @@ class TestRunAllChecks:
             f for f in findings if f.severity == "CRITICAL" and not f.passed
         ]
         critical_ids = {f.id for f in critical_confirmed}
-        # These must remain confirmed until individually fixed and cleared
-        expected_critical = {"INT-03", "BYP-01", "BYP-02", "BYP-03", "BYP-04", "LEAK-01"}
-        still_confirmed = expected_critical & critical_ids
-        # If all 6 are fixed, this test should be updated to reflect the new baseline.
-        # For now, at least INT-03 must remain (validate_profitability_proof.py not yet fixed)
-        assert "INT-03" in critical_ids, (
-            "INT-03 (validate_profitability_proof raw table) is a known confirmed vulnerability. "
-            "If it no longer appears, INT-03 was fixed -- update this test accordingly."
+        # BYP-01 remains: skip flags still present (now bounded to max 1, but
+        # the detection check flags the presence of skip flags + gate passing).
+        assert "BYP-01" in critical_ids, (
+            "BYP-01 (gate skip bypass) must remain CONFIRMED. "
+            "The enforcement limit exists but skip flags themselves are still present."
         )
+        # INT-03, BYP-02, BYP-03, BYP-04, LEAK-01 must now be CLEARED
+        for cleared_id in ("INT-03", "BYP-02", "BYP-03", "BYP-04", "LEAK-01"):
+            assert cleared_id not in critical_ids, (
+                f"{cleared_id} was fixed in Phase 7.21-7.23 and must be CLEARED. "
+                f"If it reappears, a regression was introduced."
+            )
 
 
 class TestJsonOutputSchema:

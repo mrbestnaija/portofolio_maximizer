@@ -384,7 +384,19 @@ def run_layer2_gate_status(root: Optional[Path] = None) -> LayerResult:
             error=str(exc),
         )
 
-    overall_passed = bool(data.get("overall_passed", False))
+    # BYP-02 fix: cross-check subprocess exit code with JSON field.
+    # If the process exited non-zero, treat the gate as FAIL regardless of JSON content.
+    # A JSON field of overall_passed=true but exit_code=1 indicates a discrepancy;
+    # we conservatively trust the exit code (more difficult to spoof than JSON output).
+    json_overall_passed = bool(data.get("overall_passed", False))
+    if result.returncode != 0 and json_overall_passed:
+        # Discrepancy: exit code says failure, JSON says pass. Trust exit code.
+        overall_passed = False
+    elif result.returncode != 0:
+        overall_passed = False
+    else:
+        overall_passed = json_overall_passed
+
     gates = data.get("gates", [])
     n_passed = sum(1 for g in gates if g.get("passed", False))
     n_failed = sum(1 for g in gates if not g.get("passed", True))
