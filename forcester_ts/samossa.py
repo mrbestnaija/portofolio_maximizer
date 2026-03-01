@@ -559,6 +559,13 @@ class SAMOSSAForecaster:
             self._target_freq = snapshot.get("target_freq", "D")
             self._last_observed = snapshot.get("last_observed")
             self._normalized_stats = snapshot.get("normalized_stats", {"mean": 0.0, "std": 1.0})
+            if snapshot.get("config_window_length") is not None:
+                self.config.window_length = int(snapshot.get("config_window_length"))
+            if snapshot.get("config_n_components") is not None:
+                self.config.n_components = int(snapshot.get("config_n_components"))
+            self._learned_ar_lag = snapshot.get("learned_ar_lag")
+            self._learned_ar_aic = snapshot.get("learned_ar_aic")
+            self._learned_ar_bic = snapshot.get("learned_ar_bic")
             self._fitted = True
             logger.debug("SAMOSSAForecaster.load_fitted: restored from snapshot")
         except Exception as exc:

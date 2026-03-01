@@ -33,6 +33,17 @@ _NO_REGIME = "__none__"
 _MIN_FITS_FLOOR = 3
 _SKIP_GRID_THRESHOLD_FLOOR = 5
 _MAX_ORDER_AGE_DAYS_FLOOR = 1
+_GENERIC_TICKER_NAMES = {
+    "close",
+    "adj close",
+    "adj_close",
+    "open",
+    "high",
+    "low",
+    "price",
+    "returns",
+    "return",
+}
 
 
 def _regime_key(regime: str | None) -> str:
@@ -70,6 +81,19 @@ def _coerce_floor(value: Any, floor: int) -> int:
     except Exception:
         parsed = floor
     return max(floor, parsed)
+
+
+def _clean_ticker_key(ticker: str | None) -> str:
+    """Reject empty or generic series labels so they cannot become cache identities."""
+    candidate = str(ticker or "").strip()
+    if not candidate:
+        return ""
+    normalized = candidate.replace("_", " ").strip().lower()
+    if candidate.upper() in {"NONE", "NAN"}:
+        return ""
+    if normalized in _GENERIC_TICKER_NAMES:
+        return ""
+    return candidate
 
 
 class OrderLearner:
@@ -144,7 +168,8 @@ class OrderLearner:
         n_obs: int,
     ) -> None:
         """Upsert one fit record; updates n_fits, aic_sum, bic_sum, best_aic."""
-        if not ticker or not model_type:
+        ticker_key = _clean_ticker_key(ticker)
+        if not ticker_key or not model_type:
             return
         try:
             aic_val = float(aic)
@@ -183,16 +208,16 @@ class OrderLearner:
                     best_aic  = MIN(COALESCE(best_aic, excluded.best_aic), excluded.best_aic),
                     last_used = excluded.last_used
                 """,
-                (ticker, model_type, regime_key, op_json,
+                (ticker_key, model_type, regime_key, op_json,
                  aic_val, bic_val,
                  aic_val,          # best_aic initial value
-                 today, today),
+                  today, today),
             )
             conn.commit()
             conn.close()
             logger.debug(
                 "OrderLearner recorded %s/%s/%s order=%s aic=%.3f",
-                ticker, model_type, regime_key, op_json, aic_val,
+                ticker_key, model_type, regime_key, op_json, aic_val,
             )
         except Exception as exc:
             logger.warning("OrderLearner.record_fit failed: %s", exc)
@@ -211,6 +236,9 @@ class OrderLearner:
         Falls back to regime=None if no regime-specific qualifying entry.
         Returns None if no qualifying entry found.
         """
+        ticker_key = _clean_ticker_key(ticker)
+        if not ticker_key or not model_type:
+            return None
         cutoff = self._cutoff_date()
 
         try:
@@ -229,14 +257,14 @@ class OrderLearner:
                     ORDER BY best_aic ASC, (aic_sum / n_fits) ASC
                     LIMIT 1
                     """,
-                    (ticker, model_type, rk, self._min_fits, cutoff),
+                    (ticker_key, model_type, rk, self._min_fits, cutoff),
                 ).fetchone()
                 if row is not None:
                     conn.close()
                     result = json.loads(row[0])
                     logger.debug(
                         "OrderLearner.suggest %s/%s/%s -> %s",
-                        ticker, model_type, rk, result,
+                        ticker_key, model_type, rk, result,
                     )
                     return result
             conn.close()
@@ -254,6 +282,9 @@ class OrderLearner:
         True if the best cached order for this key has n_fits >= skip_grid_threshold.
         When True the caller should use the cached order directly, bypassing grid search.
         """
+        ticker_key = _clean_ticker_key(ticker)
+        if not ticker_key or not model_type:
+            return False
         cutoff = self._cutoff_date()
         required_fits = max(self._min_fits, self._skip_grid_threshold)
 
@@ -273,7 +304,7 @@ class OrderLearner:
                     ORDER BY best_aic ASC, (aic_sum / n_fits) ASC
                     LIMIT 1
                     """,
-                    (ticker, model_type, rk, required_fits, cutoff),
+                    (ticker_key, model_type, rk, required_fits, cutoff),
                 ).fetchone()
                 if row is not None:
                     conn.close()
@@ -282,6 +313,48 @@ class OrderLearner:
         except Exception as exc:
             logger.warning("OrderLearner.should_skip_grid failed: %s", exc)
         return False
+
+    def record_usage(
+        self,
+        ticker: str,
+        model_type: str,
+        regime: str | None,
+        order_params: dict[str, Any],
+    ) -> bool:
+        """
+        Refresh last_used for an existing learned row without incrementing n_fits.
+
+        This is for exact snapshot restores: the cached order was reused, but no new
+        optimization was run, so counting it as another fit would weaken the
+        qualification threshold.
+        """
+        ticker_key = _clean_ticker_key(ticker)
+        if not ticker_key or not model_type or not order_params:
+            return False
+
+        regime_key = _regime_key(regime)
+        op_json = _canonical_json(order_params)
+        today = date.today().isoformat()
+        try:
+            conn = self._connect_rw()
+            conn.execute(
+                """
+                UPDATE model_order_stats
+                SET last_used = ?
+                WHERE ticker = ?
+                  AND model_type = ?
+                  AND regime = ?
+                  AND order_params = ?
+                """,
+                (today, ticker_key, model_type, regime_key, op_json),
+            )
+            updated = int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+            conn.commit()
+            conn.close()
+            return updated > 0
+        except Exception as exc:
+            logger.warning("OrderLearner.record_usage failed: %s", exc)
+            return False
 
     def prune_stale(self) -> int:
         """
@@ -309,13 +382,16 @@ class OrderLearner:
         """Return {total_entries, qualified_entries} for health monitoring."""
         try:
             conn = self._connect_ro()
-            total = conn.execute("SELECT COUNT(*) FROM model_order_stats").fetchone()[0]
-            qualified = conn.execute(
-                "SELECT COUNT(*) FROM model_order_stats WHERE n_fits >= ? AND best_aic IS NOT NULL",
-                (self._min_fits,),
-            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT ticker, n_fits, best_aic FROM model_order_stats"
+            ).fetchall()
             conn.close()
-            return {"total_entries": total, "qualified_entries": qualified}
+            eligible_rows = [row for row in rows if _clean_ticker_key(row[0])]
+            qualified = sum(
+                1 for _, n_fits, best_aic in eligible_rows
+                if int(n_fits or 0) >= self._min_fits and best_aic is not None
+            )
+            return {"total_entries": len(eligible_rows), "qualified_entries": qualified}
         except Exception as exc:
             logger.warning("OrderLearner.coverage_stats failed: %s", exc)
             return {"total_entries": 0, "qualified_entries": 0}

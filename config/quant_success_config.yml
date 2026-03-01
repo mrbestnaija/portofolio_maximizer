@@ -59,6 +59,9 @@ quant_validation:
 
   calibration:
     db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query
+    raw_weight: 0.80              # Weight given to raw (uncalibrated) confidence in the blended output
+    max_downside_adjustment: 0.15 # Maximum allowed downward adjustment from Platt correction
+    max_upside_adjustment: 0.10   # Maximum allowed upward adjustment from Platt correction (symmetric cap)
 
   # Optional per-ticker overrides for success criteria; used by
   # models/time_series_signal_generator.TimeSeriesSignalGenerator when

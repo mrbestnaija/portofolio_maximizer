@@ -272,13 +272,19 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
         try:
             conn = sqlite3.connect(str(db_path), timeout=3.0)
             cur = conn.cursor()
+            # Must exactly mirror _load_realized_outcome_pairs query so the reported
+            # pair count matches what LogisticRegression actually trains on.
+            # Only closing legs (is_close=1) are eligible — opening legs have no
+            # settled PnL outcome and were never part of calibration training data.
             cur.execute(
                 "SELECT COUNT(*) FROM trade_executions "
                 "WHERE realized_pnl IS NOT NULL "
                 "  AND action IN ('BUY', 'SELL') "
                 "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) "
                 "      IS NOT NULL "
-                "  AND (is_close = 1 OR is_close IS NULL)"
+                "  AND is_close = 1 "
+                "  AND COALESCE(is_diagnostic, 0) = 0 "
+                "  AND COALESCE(is_synthetic, 0) = 0"
             )
             db_pairs = cur.fetchone()[0]
             conn.close()
@@ -314,6 +320,98 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
 
 
 # ---------------------------------------------------------------------------
+# Check 6: Calibration quality (ECE + Brier score)
+# ---------------------------------------------------------------------------
+
+def check_calibration_quality(jsonl_path: Path, n_bins: int = 10) -> Finding:
+    """Compute Expected Calibration Error (ECE) and Brier score from JSONL outcome pairs.
+
+    ECE measures reliability: whether stated confidence matches empirical win rates.
+    Brier score measures overall probabilistic accuracy (0.25 = no-skill baseline).
+
+    Both require JSONL tier to have >= PLATT_MIN_PAIRS actionable outcome pairs.
+    Uses confidence_calibrated (pure Platt) when available, else blended confidence.
+    """
+    if not jsonl_path.exists():
+        return Finding("calibration_quality", "SKIP", f"JSONL not found: {jsonl_path}")
+
+    try:
+        lines = [ln for ln in jsonl_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception as exc:
+        return Finding("calibration_quality", "FAIL", f"Cannot read JSONL: {exc}")
+
+    pairs_conf: List[float] = []
+    pairs_win: List[float] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        action = str(entry.get("action", "")).upper()
+        if action not in {"BUY", "SELL"}:
+            continue
+        outcome = entry.get("outcome")
+        if not isinstance(outcome, dict):
+            continue
+        win_raw = outcome.get("win")
+        if win_raw is None:
+            continue
+        # Prefer pure Platt probability; fall back to blended confidence.
+        conf_val = entry.get("confidence_calibrated") or entry.get("confidence")
+        if conf_val is None:
+            continue
+        try:
+            pairs_conf.append(float(conf_val))
+            pairs_win.append(1.0 if win_raw else 0.0)
+        except (TypeError, ValueError):
+            continue
+
+    n = len(pairs_conf)
+    if n < PLATT_MIN_PAIRS:
+        return Finding(
+            "calibration_quality",
+            "SKIP",
+            f"Insufficient outcome pairs for quality check (n={n}, need {PLATT_MIN_PAIRS}).",
+        )
+
+    try:
+        # Brier score: mean((p - y)^2). Lower is better; 0.25 = no-skill (p=0.5 always).
+        brier = sum((c - w) ** 2 for c, w in zip(pairs_conf, pairs_win)) / n
+
+        # ECE: bin confidences into n_bins buckets, compare mean_conf vs win_rate per bin.
+        bins: List[List] = [[] for _ in range(n_bins)]
+        for c, w in zip(pairs_conf, pairs_win):
+            idx = min(int(c * n_bins), n_bins - 1)
+            bins[idx].append((c, w))
+
+        ece = 0.0
+        for bucket in bins:
+            if not bucket:
+                continue
+            bucket_n = len(bucket)
+            mean_conf = sum(c for c, _ in bucket) / bucket_n
+            win_rate = sum(w for _, w in bucket) / bucket_n
+            ece += (bucket_n / n) * abs(mean_conf - win_rate)
+
+        detail = (
+            f"n={n}, ECE={ece:.4f} (threshold 0.15), Brier={brier:.4f} (no-skill=0.25)."
+        )
+        # Brier threshold = 0.25 (no-skill baseline: always predicting 0.5 gives exactly 0.25).
+        # Accepting Brier > 0.25 would mean the calibrator is WORSE than random — a threshold
+        # dodge.  Previously set to 0.30 which silently allowed below-random calibrators.
+        if ece > 0.15 or brier > 0.25:
+            return Finding(
+                "calibration_quality",
+                "WARN",
+                f"Poor calibration: {detail} "
+                f"Consider more training data or lower raw_weight to allow stronger correction.",
+            )
+        return Finding("calibration_quality", "PASS", detail)
+    except Exception as exc:
+        return Finding("calibration_quality", "FAIL", f"Quality computation failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -324,6 +422,7 @@ def run_audit(*, db_path: Path, jsonl_path: Path) -> List[Finding]:
         check_hold_inflation(jsonl_path),
         check_ts_closes_in_db(db_path),
         check_calibration_active_tier(db_path, jsonl_path),
+        check_calibration_quality(jsonl_path),
     ]
 
 

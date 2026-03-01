@@ -251,6 +251,31 @@ class TestSkipGrid:
             learner.record_fit("AAPL", "GARCH", None, params, aic=278.0, bic=298.0, n_obs=100)
         assert learner.should_skip_grid("AAPL", "GARCH", None) is True
 
+    def test_record_usage_updates_last_used_without_incrementing_n_fits(self, learner):
+        params = {"p": 1, "q": 1}
+        learner.record_fit("AAPL", "GARCH", None, params, aic=280.0, bic=300.0, n_obs=100)
+
+        conn = sqlite3.connect(learner._db_path)
+        conn.execute(
+            "UPDATE model_order_stats SET last_used = '2000-01-01' WHERE ticker = 'AAPL'"
+        )
+        conn.commit()
+        before = conn.execute(
+            "SELECT n_fits, last_used FROM model_order_stats WHERE ticker = 'AAPL'"
+        ).fetchone()
+        conn.close()
+        assert before == (1, "2000-01-01")
+
+        assert learner.record_usage("AAPL", "GARCH", None, params) is True
+
+        conn = sqlite3.connect(learner._db_path)
+        after = conn.execute(
+            "SELECT n_fits, last_used FROM model_order_stats WHERE ticker = 'AAPL'"
+        ).fetchone()
+        conn.close()
+        assert after[0] == 1
+        assert after[1] != "2000-01-01"
+
 
 # ---------------------------------------------------------------------------
 # prune_stale
@@ -300,6 +325,22 @@ class TestCoverageStats:
         assert stats["total_entries"] == 1
         assert stats["qualified_entries"] == 1
 
+    def test_coverage_stats_excludes_generic_series_labels(self, learner):
+        conn = sqlite3.connect(learner._db_path)
+        conn.execute(
+            """
+            INSERT INTO model_order_stats
+                (ticker, model_type, regime, order_params, n_fits, aic_sum, bic_sum, best_aic, last_used, first_seen)
+            VALUES ('Close', 'GARCH', '__none__', '{}', 9, 900.0, 990.0, 90.0, DATE('now'), DATE('now'))
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        stats = learner.coverage_stats()
+        assert stats["total_entries"] == 0
+        assert stats["qualified_entries"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Edge cases
@@ -319,6 +360,15 @@ class TestEdgeCases:
     def test_empty_ticker_ignored(self, learner):
         """Empty ticker should not insert a row."""
         learner.record_fit("", "GARCH", None, {"p": 1},
+                           aic=100.0, bic=110.0, n_obs=50)
+        conn = sqlite3.connect(learner._db_path)
+        count = conn.execute("SELECT COUNT(*) FROM model_order_stats").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+    def test_generic_series_name_ignored(self, learner):
+        """Generic labels like Close should never become cache identities."""
+        learner.record_fit("Close", "GARCH", None, {"p": 1},
                            aic=100.0, bic=110.0, n_obs=50)
         conn = sqlite3.connect(learner._db_path)
         count = conn.execute("SELECT COUNT(*) FROM model_order_stats").fetchone()[0]

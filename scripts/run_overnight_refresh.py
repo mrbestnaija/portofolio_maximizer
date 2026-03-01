@@ -526,6 +526,33 @@ def main() -> int:
         log("STEP 2.7 SKIPPED -- re-run with --audit-gate-bootstrap (or AUDIT_GATE_BOOTSTRAP=1) to seed 20 unique audit windows")
 
     # -------------------------------------------------------------------
+    # STEP 2.8: Deduplicate audit windows (dry-run -- report only)
+    # -------------------------------------------------------------------
+    log_section("STEP 2.8/3: Deduplicate forecast audit windows (dry-run)")
+    rc = py(
+        "scripts/dedupe_audit_windows.py",
+        allow_fail=True,  # non-blocking: exit 1 = duplicates found (warning only)
+    )
+    if rc == 1:
+        log("[WARN] Duplicate audit windows detected -- run dedupe_audit_windows.py --apply to remove")
+    elif rc == 0:
+        log("[OK] No duplicate audit windows")
+
+    # -------------------------------------------------------------------
+    # STEP 2.9: Ensemble health audit + adaptive weight update
+    # -------------------------------------------------------------------
+    log_section("STEP 2.9/3: Ensemble health audit + adaptive weights")
+    rc = py(
+        "scripts/ensemble_health_audit.py",
+        "--write-config",
+        "--write-report",
+        "--recent-n", "20",
+        allow_fail=True,  # non-blocking: diagnostic, not gatekeeping
+    )
+    if rc != 0:
+        log("[WARN] Ensemble health audit returned non-zero -- check logs/ensemble_health/")
+
+    # -------------------------------------------------------------------
     # STEP 3: Health check + headroom
     # -------------------------------------------------------------------
     log_section("STEP 3/3: Final health check")

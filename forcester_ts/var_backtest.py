@@ -233,32 +233,141 @@ class VaRBacktester:
 
         return results
 
+    @staticmethod
+    def _has_forecast_input(value: "np.ndarray | pd.Series | None") -> bool:
+        if value is None:
+            return False
+        try:
+            arr = np.asarray(value, dtype=float)
+        except Exception:
+            return False
+        if arr.size == 0:
+            return False
+        return bool(np.isfinite(arr).any())
+
+    @staticmethod
+    def _resolve_quantile_forecast(
+        quantile_forecasts: "dict[float, np.ndarray | pd.Series] | None",
+        tau: float,
+    ) -> "np.ndarray | pd.Series | None":
+        if not isinstance(quantile_forecasts, dict):
+            return None
+        try:
+            tau_value = float(tau)
+        except Exception:
+            return None
+        direct = quantile_forecasts.get(tau_value)
+        if direct is not None and VaRBacktester._has_forecast_input(direct):
+            return direct
+        for raw_tau, series in quantile_forecasts.items():
+            try:
+                candidate = float(raw_tau)
+            except Exception:
+                continue
+            if math.isclose(candidate, tau_value, rel_tol=0.0, abs_tol=1e-9) and VaRBacktester._has_forecast_input(series):
+                return series
+        return None
+
+    def _compute_parametric_quantile(
+        self,
+        volatility_forecast: "np.ndarray | pd.Series",
+        *,
+        tau: float,
+        dist: str,
+        nu: float | None,
+    ) -> "np.ndarray":
+        cl_for_tau = 1.0 - tau if tau < 0.5 else tau
+        var_t = self.compute_var(
+            volatility_forecast,
+            confidence_level=cl_for_tau,
+            dist=dist,
+            nu=nu,
+        )
+        return -var_t if tau < 0.5 else var_t
+
     def full_report(
         self,
         actual_returns: "np.ndarray | pd.Series",
-        garch_vol: "np.ndarray | pd.Series",
+        garch_vol: "np.ndarray | pd.Series | None",
         confidence_levels: tuple[float, ...] = (0.95, 0.99),
         taus: tuple[float, ...] = _DEFAULT_TAUS,
         dist: str = "normal",
         nu: float | None = None,
+        quantile_forecasts: "dict[float, np.ndarray | pd.Series] | None" = None,
+        coverage_quantile_forecasts: "dict[float, np.ndarray | pd.Series] | None" = None,
     ) -> dict:
         """
         Run all tests and return a unified dict for audit logging.
+
+        When `quantile_forecasts` is supplied, provided taus are preferred for
+        pinball loss.
+
+        VaR coverage can be driven by a separate `coverage_quantile_forecasts`
+        dict. If that argument is omitted, `quantile_forecasts` is reused for
+        backward compatibility. Passing an explicit empty mapping disables
+        coverage-side empirical quantile preference and preserves parametric
+        VaR as the first live source.
         """
-        report: dict = {"confidence_levels": {}, "pinball": {}}
+        report: dict = {"confidence_levels": {}, "pinball": {}, "pinball_sources": {}}
+        coverage_quantiles = (
+            quantile_forecasts
+            if coverage_quantile_forecasts is None
+            else coverage_quantile_forecasts
+        )
 
         for cl in confidence_levels:
-            var_series = self.compute_var(garch_vol, confidence_level=cl, dist=dist, nu=nu)
+            cl_value = float(cl)
+            lower_tail_tau = 1.0 - cl_value
+            lower_q = self._resolve_quantile_forecast(coverage_quantiles, lower_tail_tau)
+            source = "missing"
+            if lower_q is not None:
+                var_series = -np.asarray(lower_q, dtype=float)
+                source = "empirical_quantile"
+            elif self._has_forecast_input(garch_vol):
+                var_series = self.compute_var(garch_vol, confidence_level=cl_value, dist=dist, nu=nu)
+                source = "parametric_var"
+            else:
+                error = {
+                    "error": (
+                        f"missing lower-tail quantile forecast for tau={lower_tail_tau:.6f} "
+                        "and volatility forecast unavailable"
+                    )
+                }
+                report["confidence_levels"][cl_value] = {
+                    "source": source,
+                    "tau": lower_tail_tau,
+                    "kupiec": dict(error),
+                    "christoffersen": dict(error),
+                }
+                continue
             kupiec = self.kupiec_test(actual_returns, var_series, cl)
             cc = self.christoffersen_test(actual_returns, var_series, cl)
-            report["confidence_levels"][cl] = {"kupiec": kupiec, "christoffersen": cc}
+            report["confidence_levels"][cl_value] = {
+                "source": source,
+                "tau": lower_tail_tau,
+                "kupiec": kupiec,
+                "christoffersen": cc,
+            }
 
-        # Pinball: use VaR at each tau as the tau-quantile forecast
+        # Pinball: prefer supplied empirical quantiles, with explicit parametric fallback.
         q_forecasts = {}
         for tau in taus:
-            cl_for_tau = 1.0 - tau if tau < 0.5 else tau
-            var_t = self.compute_var(garch_vol, confidence_level=cl_for_tau, dist=dist, nu=nu)
-            q_forecasts[tau] = -var_t if tau < 0.5 else var_t  # sign convention
+            tau_value = float(tau)
+            quantile = self._resolve_quantile_forecast(quantile_forecasts, tau_value)
+            if quantile is not None:
+                q_forecasts[tau_value] = quantile
+                report["pinball_sources"][tau_value] = "empirical_quantile"
+            elif self._has_forecast_input(garch_vol):
+                q_forecasts[tau_value] = self._compute_parametric_quantile(
+                    garch_vol,
+                    tau=tau_value,
+                    dist=dist,
+                    nu=nu,
+                )
+                report["pinball_sources"][tau_value] = "parametric_var"
+            else:
+                q_forecasts[tau_value] = np.array([], dtype=float)
+                report["pinball_sources"][tau_value] = "missing"
 
         report["pinball"] = self.pinball_loss(actual_returns, q_forecasts)
         return report

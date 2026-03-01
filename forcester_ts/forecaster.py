@@ -538,6 +538,12 @@ class TimeSeriesForecaster:
             forecaster.load_fitted(snapshot)
             if not self._snapshot_loaded(component, forecaster):
                 return False
+            self._record_restored_order_usage(
+                component=component,
+                forecaster=forecaster,
+                ticker=ticker,
+                regime=regime,
+            )
             self._record_model_event(
                 component,
                 "snapshot_restore",
@@ -586,6 +592,68 @@ class TimeSeriesForecaster:
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("[TS_MODEL] %s snapshot save skipped: %s", component.upper(), exc)
+
+    def _record_restored_order_usage(
+        self,
+        *,
+        component: str,
+        forecaster: Any,
+        ticker: str,
+        regime: Optional[str],
+    ) -> None:
+        """Touch last_used for an exact snapshot restore without counting a new fit."""
+        learner = self._order_learner
+        if learner is None or not ticker:
+            return
+
+        model_type = ""
+        order_params: Dict[str, Any] = {}
+        try:
+            if component == "garch":
+                if getattr(forecaster, "fitted_model", None) is None:
+                    return
+                model_type = "GARCH"
+                order_params = {
+                    "p": int(getattr(forecaster, "p", 1) or 1),
+                    "q": int(getattr(forecaster, "q", 1) or 1),
+                    "dist": str(getattr(forecaster, "dist", "skewt") or "skewt"),
+                    "mean": str(getattr(forecaster, "mean", "AR") or "AR"),
+                }
+            elif component == "sarimax":
+                if getattr(forecaster, "fitted_model", None) is None:
+                    return
+                model_type = "SARIMAX"
+                order_params = {
+                    "order": list(getattr(forecaster, "best_order", None) or [1, 1, 1]),
+                    "seasonal": list(
+                        getattr(forecaster, "best_seasonal_order", None) or [0, 0, 0, 0]
+                    ),
+                }
+            elif component == "samossa":
+                if not bool(getattr(forecaster, "_fitted", False)):
+                    return
+                ar_lag = getattr(forecaster, "_learned_ar_lag", None)
+                if ar_lag is None:
+                    residual_model = getattr(forecaster, "_residual_model", None)
+                    ar_lag = getattr(residual_model, "k_ar", None)
+                if ar_lag is None:
+                    return
+                model_type = "SAMOSSA_ARIMA"
+                order_params = {"ar_lag": int(ar_lag)}
+            else:
+                return
+        except Exception:
+            return
+
+        try:
+            learner.record_usage(
+                ticker=ticker,
+                model_type=model_type,
+                regime=regime,
+                order_params=order_params,
+            )
+        except Exception:
+            logger.debug("[TS_MODEL] %s snapshot usage bookkeeping skipped", component.upper(), exc_info=True)
 
     def _build_monte_carlo_summary(
         self,
@@ -901,6 +969,11 @@ class TimeSeriesForecaster:
                                 "target_freq": getattr(self._samossa, "_target_freq", None),
                                 "last_observed": getattr(self._samossa, "_last_observed", None),
                                 "normalized_stats": dict(getattr(self._samossa, "_normalized_stats", {})),
+                                "config_window_length": getattr(self._samossa.config, "window_length", None),
+                                "config_n_components": getattr(self._samossa.config, "n_components", None),
+                                "learned_ar_lag": getattr(self._samossa, "_learned_ar_lag", None),
+                                "learned_ar_aic": getattr(self._samossa, "_learned_ar_aic", None),
+                                "learned_ar_bic": getattr(self._samossa, "_learned_ar_bic", None),
                             },
                             series=price_series,
                             exogenous=None,
