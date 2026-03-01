@@ -97,12 +97,14 @@ Cron jobs use `agentTurn` mode with agent-specific routing:
 | [P1] Signal Linkage Monitor | Daily 8 AM | trading | New orphan opens or unlinked closes detected |
 | [P1] Ticker Health Monitor | Daily 8:30 AM | trading | 3+ consecutive losses or PnL below -$300 |
 | [P1] Platt Contract Audit | Weekly Mon 9:30 AM | training | Any FAIL finding (wrong classifier, broken fallback chain, bootstrap produced 0 closes, no active calibration tier) |
+| [P1] Model Improvement Check | Daily 10 AM | training | Any WARN or FAIL layer (SKIP = neutral, never announce) |
 | [P2] GARCH Unit-Root Guard | Weekly Mon 9 AM | training | Unit-root rate >= 35% (above 28% baseline) |
 | [P2] Overnight Hold Monitor | Weekly Fri 9 AM | training | Overnight drag > 25% of intraday profits |
 | System Health Check | Every 6h | ops | Any model offline or error monitor issues |
 | Weekly Session Cleanup | Sunday 3 AM | ops | Never (silent maintenance) |
 
 Platt cron command: `exec` -> `python scripts/platt_contract_audit.py --json`
+Model improvement cron command: `exec` -> `.\\simpleTrader_env\\Scripts\\python.exe scripts\\check_model_improvement.py --json`
 
 **If the cron fires and everything is healthy: respond NO_REPLY. Do not say "all checks passed".**
 
