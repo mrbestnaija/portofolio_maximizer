@@ -2,19 +2,24 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.16 Hardened](https://img.shields.io/badge/Phase%207.16-Hardened-green.svg)](MEMORY.md)
-[![Fast Lane: 1200 passing](https://img.shields.io/badge/fast%20lane-1200%20passing-success.svg)](tests/)
+[![Phase 7.17 Complete](https://img.shields.io/badge/Phase%207.17-Complete-green.svg)](Documentation/PHASE_7.17_ENSEMBLE_HEALTH_AUDIT.md)
+[![Fast Lane: 1332 passing](https://img.shields.io/badge/fast%20lane-1332%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 4.3
-**Status**: Phase 7.16 hardening, Monte Carlo forecast summaries, and truthful capability audits
-**Last Updated**: 2026-02-28
+**Version**: 4.4
+**Status**: Phase 7.17 complete — Ensemble Health Audit, Adaptive Weighting, 4-Layer Improvement Checker
+**Last Updated**: 2026-03-01
 
-## Current Repo Truth (2026-02-28)
+## Current Repo Truth (2026-03-01)
 
+- Phase 7.17 (Ensemble Health Audit) is complete. SAMOSSA DA=0 anomaly is
+  diagnosed and mitigated via `_apply_da_cap()` in `forcester_ts/ensemble.py`.
+  Adaptive candidate weights are written nightly by `scripts/ensemble_health_audit.py`.
+  Exit quality analysis (`scripts/exit_quality_audit.py`) explains the 14pp
+  forecast-DA → trade-WR gap. Three bugs found and fixed by Hypothesis property tests.
 - The Phase 7.16 auto-learning stack is present and hardened: `OrderLearner`,
   `ModelSnapshotStore`, walk-forward learning, VaR backtesting, and Shapley
   attribution are implemented in `forcester_ts/`.
@@ -32,7 +37,7 @@
 - Latest verification snapshot:
   - `python scripts/verify_emerging_market_claims.py --json`
   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
-  - Result: `1200 passed, 3 skipped, 28 deselected, 7 xfailed`
+  - Result: `1332 passed, 1 skipped, 28 deselected, 7 xfailed` (Phase 7.17 baseline)
 
 Historical sections below preserve earlier phase notes for chronology; use this
 section as the current repo baseline.
@@ -81,7 +86,17 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-### Latest Enhancements (Feb 2026)
+### Latest Enhancements (Mar 2026)
+
+**Phase 7.17: Ensemble Health Audit & Adaptive Weighting (2026-03-01)**:
+
+- **SAMOSSA DA=0 fix**: `_apply_da_cap()` in `forcester_ts/ensemble.py` caps and penalizes models with chronic near-zero directional accuracy; budget redistributed only to non-penalized models (DA >= da_floor)
+- **`scripts/ensemble_health_audit.py`**: per-model RMSE/DA stats, proxy Shapley attribution, adaptive candidate weights (3 candidates: primary, top-2 hedge, pure winner), markdown report, GOLDEN_METRICS structured JSON log
+- **`scripts/dedupe_audit_windows.py`**: SHA1 fingerprint deduplication of audit windows, exit-1 on duplicates
+- **`scripts/exit_quality_audit.py`**: exit-reason breakdown (stop_loss / time_exit / signal_exit) to diagnose the 14pp forecast-DA → trade-WR gap
+- **`scripts/check_model_improvement.py`**: unified 4-layer CLI — forecast quality, gate status, trade quality, and calibration in one command
+- **Hypothesis property testing**: 8 property-based tests (300 + 250 examples each); found and fixed 3 bugs: redistribution-to-penalized-models, same bug in health audit, `round(4)` midpoint rounding violation
+- **Regression**: 1332 passed, 1 skipped, 28 deselected, 7 xfailed
 
 **Phase 7.9 Achievements**:
 
@@ -107,6 +122,41 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - SQLite read-only connections with immutable URI mode (WSL/DrvFS robustness)
 - Concurrent process guard with lockfile + PID-based stale detection
 - Adversarial test isolation with `_IsolatedConnection` wrapper (always rolls back)
+
+## Verifying Model Improvement
+
+Run all 4 measurement layers with one command:
+
+```bash
+python scripts/check_model_improvement.py
+```
+
+| Layer | What it measures | Green signal | Script |
+|-------|-----------------|--------------|--------|
+| 1 — Forecast Quality | Ensemble lift over best single model; SAMOSSA DA anomaly; data coverage | lift_global >= 5%, samossa_da_zero < 40%, n_used >= 50 | `ensemble_health_audit.py` |
+| 2 — Gate Status | 4 CI gates: integrity, quant health, audit lift, institutional | overall_passed = True | `run_all_gates.py` |
+| 3 — Trade Quality | Win rate, profit factor, exit-reason gap diagnosis | win_rate >= 45%, pf >= 1.3 | `exit_quality_audit.py` |
+| 4 — Calibration | Platt scaling active tier, Brier score, ECE | tier = db_local/jsonl, brier < 0.25 | `platt_contract_audit.py` |
+
+> **SKIP != PASS.** SKIP means "no measurement data available" (empty audit dir, DB not found,
+> etc.). A SKIP layer provides no health signal.
+
+Save a baseline before model changes and compare after:
+
+```bash
+python scripts/check_model_improvement.py --save-baseline logs/baseline_before.json
+# ... make changes, run overnight pipeline ...
+python scripts/check_model_improvement.py --baseline logs/baseline_before.json
+```
+
+Layer-specific runs:
+
+```bash
+python scripts/check_model_improvement.py --layer 1          # forecast quality only
+python scripts/check_model_improvement.py --layer 3 --json   # trade quality as JSON
+```
+
+---
 
 ## Academic Rigor & Reproducibility (MIT-style)
 
