@@ -75,6 +75,25 @@ def test_check_coverage_ok_when_qualified_rows_exist() -> None:
     assert result["qualified_entries"] == 1
 
 
+def test_check_coverage_ignores_generic_series_rows() -> None:
+    conn = _make_conn()
+    conn.execute(
+        """
+        INSERT INTO model_order_stats
+            (ticker, model_type, regime, order_params, n_fits, aic_sum, bic_sum, best_aic, last_used, first_seen)
+        VALUES ('Close', 'GARCH', '__none__', '{}', 9, 900.0, 990.0, 90.0, DATE('now'), DATE('now'))
+        """
+    )
+    result = mod.check_coverage(conn, min_fits=3)
+    conn.close()
+
+    assert result["status"] == "WARN"
+    assert result["raw_total_entries"] == 1
+    assert result["total_entries"] == 0
+    assert result["ignored_invalid_ticker_entries"] == 1
+    assert result["qualified_entries"] == 0
+
+
 def test_check_aic_drift_uses_best_cached_entry_per_model() -> None:
     conn = _make_conn()
     conn.execute(
@@ -99,6 +118,55 @@ def test_check_aic_drift_uses_best_cached_entry_per_model() -> None:
 
     assert result["status"] == "OK"
     assert result["alerts"] == []
+
+
+def test_check_aic_drift_ignores_generic_series_rows() -> None:
+    conn = _make_conn()
+    conn.execute(
+        """
+        INSERT INTO time_series_forecasts (ticker, model_type, aic, created_at)
+        VALUES ('AAPL', 'SARIMAX', 100.0, DATETIME('now'))
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO model_order_stats
+            (ticker, model_type, regime, order_params, n_fits, aic_sum, bic_sum, best_aic, last_used, first_seen)
+        VALUES (?, 'SARIMAX', '__none__', ?, 3, ?, 0.0, ?, DATE('now'), DATE('now'))
+        """,
+        [
+            ("Close", '{"order":[9,1,9]}', 900.0, 300.0),
+            ("AAPL", '{"order":[1,1,1]}', 315.0, 105.0),
+        ],
+    )
+    result = mod.check_aic_drift(conn, lookback_days=30, drift_threshold=0.10)
+    conn.close()
+
+    assert result["status"] == "OK"
+    assert result["alerts"] == []
+
+
+def test_check_stale_ignores_generic_series_rows() -> None:
+    conn = _make_conn()
+    conn.executemany(
+        """
+        INSERT INTO model_order_stats
+            (ticker, model_type, regime, order_params, n_fits, aic_sum, bic_sum, best_aic, last_used, first_seen)
+        VALUES (?, 'GARCH', '__none__', '{}', 3, 300.0, 330.0, 90.0, ?, DATE('now'))
+        """,
+        [
+            ("Close", "2000-01-01"),
+            ("AAPL", "2000-01-01"),
+        ],
+    )
+    result = mod.check_stale(conn, max_age_days=90)
+    conn.close()
+
+    assert result["status"] == "WARN"
+    assert result["raw_total_entries"] == 2
+    assert result["total_entries"] == 1
+    assert result["ignored_invalid_ticker_entries"] == 1
+    assert result["stale_entries"] == 1
 
 
 def test_run_health_check_missing_db_fails_closed(tmp_path: Path) -> None:

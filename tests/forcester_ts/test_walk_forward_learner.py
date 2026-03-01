@@ -149,6 +149,17 @@ class TestVaRMetrics:
             for tau in taus:
                 assert tau in fold.pinball_loss, f"Missing tau={tau} in fold {fold.fold_idx}"
 
+    def test_var_and_pinball_sources_are_explicit_and_decoupled(self, price_series):
+        taus = (0.01, 0.5, 0.99)
+        wfl = WalkForwardLearner({}, min_train_length=120, fold_step=20,
+                                 forecast_horizon=10, confidence_level=0.99, taus=taus)
+        result = wfl.run(price_series, ticker="TEST")
+        for fold in result.fold_metrics:
+            assert fold.var_source == "parametric_var"
+            assert fold.pinball_sources[0.01] == "empirical_quantile"
+            assert fold.pinball_sources[0.5] == "empirical_quantile"
+            assert fold.pinball_sources[0.99] == "empirical_quantile"
+
 
 # ---------------------------------------------------------------------------
 # Shapley attribution

@@ -67,6 +67,7 @@ class RollingWindowValidator:
         self,
         price_series: pd.Series,
         returns_series: Optional[pd.Series] = None,
+        ticker: str = "",
     ) -> Dict[str, Any]:
         price_series = price_series.sort_index()
         folds = self._iter_folds(price_series)
@@ -88,6 +89,7 @@ class RollingWindowValidator:
             rolling_forecaster.fit(
                 price_series=train,
                 returns_series=returns_subset,
+                ticker=ticker,
             )
             rolling_forecaster.forecast(steps=horizon)
             metrics = rolling_forecaster.evaluate(test)

@@ -307,11 +307,110 @@ class TimeSeriesSignalGenerator:
             logger.warning("Unable to read forecasting config %s: %s", path, exc)
             return {}
 
-        if isinstance(payload, dict) and "forecasting" in payload:
-            return payload["forecasting"]
+        if isinstance(payload, dict):
+            if "forecasting" in payload:
+                nested = payload["forecasting"]
+                return nested if isinstance(nested, dict) else {}
+            return payload
 
-        return payload
-        return payload if isinstance(payload, dict) else None
+        return {}
+
+    def _build_forecast_edge_forecaster_config(
+        self,
+        *,
+        horizon: int,
+        baseline_key: str,
+        fast_intraday_cv: bool,
+        interval_hint: Optional[str],
+    ) -> TimeSeriesForecasterConfig:
+        """Build the CV forecaster config from the same shared forecasting config as runtime."""
+        root_cfg = self._forecasting_config if isinstance(self._forecasting_config, dict) else {}
+
+        def _cfg_section(name: str) -> Dict[str, Any]:
+            section = root_cfg.get(name, {})
+            return section if isinstance(section, dict) else {}
+
+        ensemble_cfg = _cfg_section("ensemble")
+        regime_cfg = _cfg_section("regime_detection")
+        order_learning_cfg = _cfg_section("order_learning")
+        monte_carlo_cfg = _cfg_section("monte_carlo")
+        sarimax_cfg = _cfg_section("sarimax")
+        garch_cfg = _cfg_section("garch")
+        samossa_cfg = _cfg_section("samossa")
+        mssa_cfg = _cfg_section("mssa_rl")
+
+        ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
+        regime_detection_enabled = bool(regime_cfg.get("enabled", False))
+        regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != "enabled"}
+        sarimax_kwargs = {k: v for k, v in sarimax_cfg.items() if k != "enabled"}
+        garch_kwargs = {k: v for k, v in garch_cfg.items() if k != "enabled"}
+        samossa_kwargs = {k: v for k, v in samossa_cfg.items() if k != "enabled"}
+        mssa_kwargs = {k: v for k, v in mssa_cfg.items() if k != "enabled"}
+
+        if fast_intraday_cv:
+            sarimax_enabled = baseline_key == "sarimax"
+            samossa_enabled = baseline_key == "samossa"
+            mssa_enabled = baseline_key == "mssa_rl"
+
+            if sarimax_enabled:
+                sarimax_kwargs.update(_pmx_intraday_sarimax_kwargs(interval_hint))
+            else:
+                sarimax_kwargs = {}
+            if samossa_enabled:
+                samossa_kwargs = {**samossa_kwargs, "forecast_horizon": int(horizon)}
+            else:
+                samossa_kwargs = {}
+            if mssa_enabled:
+                mssa_kwargs = {**mssa_kwargs, "forecast_horizon": int(horizon)}
+                if "use_gpu" not in mssa_kwargs:
+                    mssa_kwargs["use_gpu"] = bool(_pmx_env_flag("MSSA_RL_USE_GPU") or False)
+            else:
+                mssa_kwargs = {}
+
+            return TimeSeriesForecasterConfig(
+                forecast_horizon=horizon,
+                sarimax_enabled=sarimax_enabled,
+                samossa_enabled=samossa_enabled,
+                mssa_rl_enabled=mssa_enabled,
+                garch_enabled=False,
+                ensemble_enabled=True,
+                sarimax_kwargs=sarimax_kwargs,
+                garch_kwargs={},
+                samossa_kwargs=samossa_kwargs,
+                mssa_rl_kwargs=mssa_kwargs,
+                ensemble_kwargs=ensemble_kwargs,
+                regime_detection_enabled=regime_detection_enabled,
+                regime_detection_kwargs=regime_detection_kwargs,
+                order_learning_config=order_learning_cfg,
+                monte_carlo_config=monte_carlo_cfg,
+            )
+
+        if samossa_cfg.get("enabled", True):
+            samossa_kwargs = {**samossa_kwargs, "forecast_horizon": int(horizon)}
+        else:
+            samossa_kwargs = {}
+        if mssa_cfg.get("enabled", True):
+            mssa_kwargs = {**mssa_kwargs, "forecast_horizon": int(horizon)}
+        else:
+            mssa_kwargs = {}
+
+        return TimeSeriesForecasterConfig(
+            forecast_horizon=horizon,
+            sarimax_enabled=bool(sarimax_cfg.get("enabled", False)),
+            garch_enabled=bool(garch_cfg.get("enabled", True)),
+            samossa_enabled=bool(samossa_cfg.get("enabled", True)),
+            mssa_rl_enabled=bool(mssa_cfg.get("enabled", True)),
+            ensemble_enabled=bool(ensemble_cfg.get("enabled", True)),
+            sarimax_kwargs=sarimax_kwargs,
+            garch_kwargs=garch_kwargs,
+            samossa_kwargs=samossa_kwargs,
+            mssa_rl_kwargs=mssa_kwargs,
+            ensemble_kwargs=ensemble_kwargs,
+            regime_detection_enabled=regime_detection_enabled,
+            regime_detection_kwargs=regime_detection_kwargs,
+            order_learning_config=order_learning_cfg,
+            monte_carlo_config=monte_carlo_cfg,
+        )
 
     def _load_execution_cost_model(self) -> Dict[str, Any]:
         """Load LOB/execution cost model configuration from disk when available."""
@@ -1114,6 +1213,10 @@ class TimeSeriesSignalGenerator:
             raw_confidence *= 0.75
 
         if not self._quant_validation_enabled:
+            # Clear calibration state so _log_quant_validation never inherits stale
+            # Platt values from a prior signal generated with calibration enabled.
+            self._platt_calibrated = None
+            self._last_raw_confidence = float(self._clamp01(raw_confidence))
             return self._clamp01(raw_confidence)
 
         # Calibrate confidence from realised trade outcomes in trade_executions.
@@ -1774,9 +1877,13 @@ class TimeSeriesSignalGenerator:
         if cached is not None:
             return cached
 
+        baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
+        if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
+            baseline_key = "samossa"
+
         edge_payload: Dict[str, Any] = {
             "mode": "forecast_edge",
-            "baseline_model": baseline_model,
+            "baseline_model": baseline_key,
             "horizon": horizon,
         }
         edge_criteria: Dict[str, bool] = {}
@@ -1799,56 +1906,12 @@ class TimeSeriesSignalGenerator:
             if fast_intraday_cv:
                 cv_max_folds = 1
 
-            baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
-            if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
-                baseline_key = "samossa"
-
-            # Phase 7.4 FIX: Extract ensemble_kwargs from loaded forecasting config
-            ensemble_cfg = self._forecasting_config.get('ensemble', {}) if self._forecasting_config else {}
-            ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != 'enabled'}
-
-            # Phase 7.5: Extract regime_detection parameters from loaded forecasting config
-            regime_cfg = self._forecasting_config.get('regime_detection', {}) if self._forecasting_config else {}
-            regime_detection_enabled = regime_cfg.get('enabled', False)
-            regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != 'enabled'}
-
-            # Phase 7.16: Thread order-learning config so OrderLearner.record_fit() fires
-            order_learning_cfg = (
-                self._forecasting_config.get('order_learning', {}) if self._forecasting_config else {}
+            forecaster_config = self._build_forecast_edge_forecaster_config(
+                horizon=horizon,
+                baseline_key=baseline_key,
+                fast_intraday_cv=fast_intraday_cv,
+                interval_hint=interval_hint,
             )
-
-            if fast_intraday_cv:
-                sarimax_enabled = baseline_key == "sarimax"
-                samossa_enabled = baseline_key == "samossa"
-                mssa_enabled = baseline_key == "mssa_rl"
-                forecaster_config = TimeSeriesForecasterConfig(
-                    forecast_horizon=horizon,
-                    sarimax_enabled=sarimax_enabled,
-                    samossa_enabled=samossa_enabled,
-                    mssa_rl_enabled=mssa_enabled,
-                    garch_enabled=False,
-                    ensemble_enabled=True,
-                    sarimax_kwargs=_pmx_intraday_sarimax_kwargs(interval_hint) if sarimax_enabled else {},
-                    samossa_kwargs={"forecast_horizon": int(horizon)} if samossa_enabled else {},
-                    mssa_rl_kwargs={
-                        "forecast_horizon": int(horizon),
-                        "use_gpu": bool(_pmx_env_flag("MSSA_RL_USE_GPU") or False),
-                    }
-                    if mssa_enabled
-                    else {},
-                    ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
-                    regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
-                    regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
-                    order_learning_config=order_learning_cfg,  # Phase 7.16
-                )
-            else:
-                forecaster_config = TimeSeriesForecasterConfig(
-                    forecast_horizon=horizon,
-                    ensemble_kwargs=ensemble_kwargs,  # Phase 7.4 FIX: Preserve ensemble config
-                    regime_detection_enabled=regime_detection_enabled,  # Phase 7.5: Enable regime detection
-                    regime_detection_kwargs=regime_detection_kwargs,  # Phase 7.5: Regime thresholds and prefs
-                    order_learning_config=order_learning_cfg,  # Phase 7.16
-                )
 
             validator = RollingWindowValidator(
                 forecaster_config=forecaster_config,
@@ -1859,11 +1922,15 @@ class TimeSeriesSignalGenerator:
                     max_folds=cv_max_folds,
                 ),
             )
-            report = validator.run(price_series=price_series, returns_series=returns_series)
+            report = validator.run(
+                price_series=price_series,
+                returns_series=returns_series,
+                ticker=symbol,
+            )
             aggregate = report.get("aggregate_metrics") or {}
             fold_count = int(report.get("fold_count") or 0)
             ens = aggregate.get("ensemble") or {}
-            base = aggregate.get(baseline_model) or {}
+            base = aggregate.get(baseline_key) or {}
             edge_payload.update(
                 {
                     "fold_count": fold_count,
@@ -2144,10 +2211,14 @@ class TimeSeriesSignalGenerator:
         blending so it can be written to the confidence_calibrated DB column.
         """
         self._platt_calibrated = None
+        self._last_raw_confidence: Optional[float] = None
         if raw_confidence is None:
             return 0.50
 
         raw_conf = float(raw_confidence)
+        # Record pre-blend raw confidence so JSONL entries store the value that
+        # LR predict_proba is evaluated on (fixes train/predict distribution mismatch).
+        self._last_raw_confidence = raw_conf
 
         # 1. JSONL-based (conf, outcome) pairs — populated by update_platt_outcomes.py.
         pairs_conf, pairs_win = self._load_jsonl_outcome_pairs(limit=2000)
@@ -2209,8 +2280,15 @@ class TimeSeriesSignalGenerator:
             except (TypeError, ValueError):
                 max_downside = 0.15
             max_downside = max(0.0, min(1.0, max_downside))
+            try:
+                max_upside = float(calibration_cfg.get("max_upside_adjustment", 0.10))
+            except (TypeError, ValueError):
+                max_upside = 0.10
+            max_upside = max(0.0, min(1.0, max_upside))
             blended = (raw_weight * raw_conf) + ((1.0 - raw_weight) * calibrated)
+            # Symmetric correction window: prevent both over-deflation and over-inflation.
             blended = max(blended, raw_conf - max_downside)
+            blended = min(blended, raw_conf + max_upside)
             logger.debug(
                 (
                     "Outcome calibration: raw=%.3f model=%.3f blended=%.3f "
@@ -2220,7 +2298,7 @@ class TimeSeriesSignalGenerator:
             )
             return float(max(0.05, min(0.95, blended)))
         except Exception as exc:
-            logger.debug("Outcome calibration fit failed (%s); using raw confidence.", exc)
+            logger.warning("Outcome calibration fit failed (%s); using raw confidence.", exc)
             return float(max(0.05, min(0.95, raw_conf)))
 
     def _load_jsonl_outcome_pairs(
@@ -2260,7 +2338,13 @@ class TimeSeriesSignalGenerator:
                 entry = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            conf_raw = entry.get("confidence")
+            action = str(entry.get("action", "")).upper()
+            if action and action not in {"BUY", "SELL"}:
+                continue
+            # Prefer raw_confidence (pre-blend) so LR trains on the same distribution
+            # that predict_proba is evaluated on.  Fall back to blended 'confidence'
+            # for backward-compatible reads of older JSONL entries (Phase 7.16-C1).
+            conf_raw = entry.get("raw_confidence") if entry.get("raw_confidence") is not None else entry.get("confidence")
             outcome = entry.get("outcome")
             if conf_raw is None or outcome is None:
                 continue
@@ -2299,7 +2383,9 @@ class TimeSeriesSignalGenerator:
             "WHERE realized_pnl IS NOT NULL",
             "  AND action IN ('BUY', 'SELL')",
             "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) IS NOT NULL",
-            "  AND (is_close = 1 OR is_close IS NULL)",
+            "  AND is_close = 1",
+            "  AND COALESCE(is_diagnostic, 0) = 0",
+            "  AND COALESCE(is_synthetic, 0) = 0",
         ]
         params: List[Any] = []
         ticker_norm = str(ticker or "").strip().upper()
@@ -2442,6 +2528,9 @@ class TimeSeriesSignalGenerator:
             'proof_mode': self._to_bool(proof_mode, default=False),
             'confidence': signal.confidence,
             'confidence_calibrated': signal.confidence_calibrated,  # Phase 7.13-B1: Platt-scaled probability
+            # Pre-blend raw confidence — used by _load_jsonl_outcome_pairs so LR trains
+            # and predicts on the same (raw) distribution (fixes mismatch, Phase 7.16-C1).
+            'raw_confidence': getattr(self, '_last_raw_confidence', None),
             'expected_return': signal.expected_return,
             'risk_score': signal.risk_score,
             'volatility': signal.volatility,

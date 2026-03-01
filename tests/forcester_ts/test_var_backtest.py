@@ -230,3 +230,135 @@ class TestFullReport:
         report = bt.full_report(returns, vol, confidence_levels=(0.99,),
                                 taus=(0.01, 0.50, 0.99))
         assert "mean" in report["pinball"]
+
+    def test_full_report_uses_supplied_empirical_quantiles_without_parametric_fallback(self):
+        class _NoParametricBacktester(VaRBacktester):
+            def compute_var(self, *args, **kwargs):
+                raise AssertionError("compute_var should not run when full empirical quantiles are supplied")
+
+        bt = _NoParametricBacktester()
+        actual = np.array([-0.01, 0.0, 0.01, -0.005])
+        quantiles = {
+            0.01: np.full(4, -0.02),
+            0.50: np.zeros(4),
+            0.99: np.full(4, 0.02),
+        }
+
+        report = bt.full_report(
+            actual,
+            None,
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=quantiles,
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "empirical_quantile"
+        assert report["confidence_levels"][0.99]["tau"] == pytest.approx(0.01)
+        assert report["pinball_sources"][0.01] == "empirical_quantile"
+        assert report["pinball_sources"][0.5] == "empirical_quantile"
+        assert report["pinball_sources"][0.99] == "empirical_quantile"
+
+    def test_full_report_reports_mixed_sources_explicitly(self):
+        bt = VaRBacktester()
+        actual, vol = _make_data(n=16)
+        quantiles = {
+            0.50: np.zeros(16),
+        }
+
+        report = bt.full_report(
+            actual,
+            vol,
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=quantiles,
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "parametric_var"
+        assert report["pinball_sources"][0.01] == "parametric_var"
+        assert report["pinball_sources"][0.5] == "empirical_quantile"
+        assert report["pinball_sources"][0.99] == "parametric_var"
+
+    def test_full_report_marks_missing_sources_without_silent_fallback(self):
+        bt = VaRBacktester()
+        actual = np.array([-0.01, 0.0, 0.01, -0.005])
+        quantiles = {
+            0.50: np.zeros(4),
+        }
+
+        report = bt.full_report(
+            actual,
+            None,
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=quantiles,
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "missing"
+        assert "error" in report["confidence_levels"][0.99]["kupiec"]
+        assert report["pinball_sources"][0.01] == "missing"
+        assert report["pinball_sources"][0.5] == "empirical_quantile"
+        assert report["pinball_sources"][0.99] == "missing"
+        assert np.isnan(report["pinball"][0.01])
+        assert np.isnan(report["pinball"][0.99])
+
+    def test_full_report_decouples_coverage_quantiles_from_pinball_quantiles(self):
+        bt = VaRBacktester()
+        actual, vol = _make_data(n=16)
+        quantiles = {
+            0.01: np.full(16, -0.02),
+            0.50: np.zeros(16),
+            0.99: np.full(16, 0.02),
+        }
+
+        report = bt.full_report(
+            actual,
+            vol,
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=quantiles,
+            coverage_quantile_forecasts={},
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "parametric_var"
+        assert report["pinball_sources"][0.01] == "empirical_quantile"
+        assert report["pinball_sources"][0.5] == "empirical_quantile"
+        assert report["pinball_sources"][0.99] == "empirical_quantile"
+
+    def test_full_report_treats_nan_only_quantiles_as_missing(self):
+        bt = VaRBacktester()
+        actual = np.array([-0.01, 0.0, 0.01, -0.005])
+        quantiles = {
+            0.01: np.full(4, np.nan),
+            0.50: np.zeros(4),
+            0.99: np.full(4, np.nan),
+        }
+
+        report = bt.full_report(
+            actual,
+            None,
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=quantiles,
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "missing"
+        assert report["pinball_sources"][0.01] == "missing"
+        assert report["pinball_sources"][0.5] == "empirical_quantile"
+        assert report["pinball_sources"][0.99] == "missing"
+
+    def test_full_report_treats_nan_only_volatility_as_missing(self):
+        bt = VaRBacktester()
+        actual = np.array([-0.01, 0.0, 0.01, -0.005])
+
+        report = bt.full_report(
+            actual,
+            np.full(4, np.nan),
+            confidence_levels=(0.99,),
+            taus=(0.01, 0.50, 0.99),
+            quantile_forecasts=None,
+        )
+
+        assert report["confidence_levels"][0.99]["source"] == "missing"
+        assert report["pinball_sources"][0.01] == "missing"
+        assert report["pinball_sources"][0.5] == "missing"
+        assert report["pinball_sources"][0.99] == "missing"

@@ -29,6 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from forcester_ts.order_learner import _clean_ticker_key
+
 DB_PATH = ROOT / "data" / "portfolio_maximizer.db"
 
 
@@ -57,25 +59,32 @@ def _row_count(conn, table: str) -> int:
 def check_coverage(conn, min_fits: int = 3) -> dict:
     """Ensure qualified entries exist after >0 pipeline runs."""
     try:
-        total = conn.execute("SELECT COUNT(*) FROM model_order_stats").fetchone()[0]
-        qualified = conn.execute(
-            "SELECT COUNT(*) FROM model_order_stats WHERE n_fits >= ? AND best_aic IS NOT NULL",
-            (min_fits,),
-        ).fetchone()[0]
-        by_model = conn.execute(
-            "SELECT model_type, COUNT(*) FROM model_order_stats "
-            "WHERE n_fits >= ? AND best_aic IS NOT NULL GROUP BY model_type",
-            (min_fits,),
+        rows = conn.execute(
+            "SELECT ticker, model_type, n_fits, best_aic FROM model_order_stats"
         ).fetchall()
     except Exception as exc:
         return {"status": "ERROR", "detail": str(exc)}
 
+    eligible_rows = [row for row in rows if _clean_ticker_key(row[0])]
+    qualified_rows = [
+        row for row in eligible_rows
+        if int(row[2] or 0) >= min_fits and row[3] is not None
+    ]
+    by_model: dict[str, int] = {}
+    for _, model_type, _, _ in qualified_rows:
+        by_model[model_type] = by_model.get(model_type, 0) + 1
+
+    total = len(eligible_rows)
+    qualified = len(qualified_rows)
+    ignored = len(rows) - total
     status = "OK" if qualified > 0 else "WARN"
     return {
         "status": status,
+        "raw_total_entries": len(rows),
         "total_entries": total,
         "qualified_entries": qualified,
-        "by_model": {r[0]: r[1] for r in by_model},
+        "ignored_invalid_ticker_entries": ignored,
+        "by_model": by_model,
     }
 
 
@@ -102,14 +111,13 @@ def check_aic_drift(conn, lookback_days: int = 30, drift_threshold: float = 0.10
             (cutoff,),
         ).fetchall()
 
-        cached = conn.execute(
+        cached_rows = conn.execute(
             """
-            SELECT model_type, MIN(aic_sum / NULLIF(n_fits, 0)) AS mean_aic
+            SELECT ticker, model_type, n_fits, aic_sum
             FROM model_order_stats
             WHERE n_fits > 0
               AND best_aic IS NOT NULL
               AND last_used >= ?
-            GROUP BY model_type
             """,
             (cutoff,),
         ).fetchall()
@@ -117,8 +125,23 @@ def check_aic_drift(conn, lookback_days: int = 30, drift_threshold: float = 0.10
         return {"status": "ERROR", "detail": str(exc)}
 
     recent_by_model = {r[0]: float(r[1]) for r in recent if r[1] is not None}
+    cached_by_model: dict[str, float] = {}
+    for ticker, model_type, n_fits, aic_sum in cached_rows:
+        if not _clean_ticker_key(ticker):
+            continue
+        try:
+            fit_count = float(n_fits)
+            if fit_count <= 0:
+                continue
+            mean_aic = float(aic_sum) / fit_count
+        except Exception:
+            continue
+        prior = cached_by_model.get(model_type)
+        if prior is None or mean_aic < prior:
+            cached_by_model[model_type] = mean_aic
+
     alerts = []
-    for model_type, cached_mean in cached:
+    for model_type, cached_mean in cached_by_model.items():
         recent_mean = recent_by_model.get(model_type)
         if recent_mean is None or recent_mean <= 0:
             continue
@@ -145,18 +168,23 @@ def check_aic_drift(conn, lookback_days: int = 30, drift_threshold: float = 0.10
 def check_stale(conn, max_age_days: int = 90) -> dict:
     cutoff = (date.today() - timedelta(days=max_age_days)).isoformat()
     try:
-        stale = conn.execute(
-            "SELECT COUNT(*) FROM model_order_stats WHERE last_used < ?", (cutoff,)
-        ).fetchone()[0]
-        total = conn.execute("SELECT COUNT(*) FROM model_order_stats").fetchone()[0]
+        rows = conn.execute(
+            "SELECT ticker, last_used FROM model_order_stats"
+        ).fetchall()
     except Exception as exc:
         return {"status": "ERROR", "detail": str(exc)}
 
+    eligible_rows = [row for row in rows if _clean_ticker_key(row[0])]
+    stale = sum(1 for _, last_used in eligible_rows if str(last_used or "") < cutoff)
+    total = len(eligible_rows)
+    ignored = len(rows) - total
     pct = (stale / total * 100) if total > 0 else 0.0
     return {
         "status": "WARN" if pct > 30 else "OK",
         "stale_entries": stale,
+        "raw_total_entries": len(rows),
         "total_entries": total,
+        "ignored_invalid_ticker_entries": ignored,
         "stale_pct": round(pct, 1),
     }
 

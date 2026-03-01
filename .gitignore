@@ -35,6 +35,8 @@ __pycache__/
 .Python
 *.so
 .pytest_cache/
+.hypothesis/
+logs/ensemble_health/
 .coverage
 htmlcov/
 

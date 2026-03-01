@@ -1,211 +1,221 @@
-# Time Series Forecasting Configuration
-# SARIMAX and GARCH models
-
 forecasting:
   enabled: true
-  default_forecast_horizon: 30  # Days ahead
-  minimum_history_required: 90  # Soft requirement; below this we skip walk-forward metrics
-  minimum_history_strict: 30    # Hard minimum; below this we skip forecasting entirely
-
-  # SARIMAX configuration
+  default_forecast_horizon: 30
+  minimum_history_required: 90
+  minimum_history_strict: 30
   sarimax:
-    enabled: false  # Phase 7.10: Disabled by default (15x speedup); re-enable with --enable-sarimax
+    enabled: false
     auto_select_order: true
-    max_p: 3  # Phase 7.3: Increased from 2 to capture more complex AR dynamics
+    max_p: 3
     max_d: 1
     max_q: 2
-    seasonal_periods: null  # Auto-detect (null) or specify (12=monthly, 4=quarterly)
+    seasonal_periods: null
     max_P: 2
     max_D: 1
     max_Q: 2
-    trend: "c"  # Options: 'c' (constant), 't' (trend), 'ct' (both), 'n' (none)
+    trend: c
     enforce_stationarity: true
     enforce_invertibility: true
-
-  # GARCH configuration
   garch:
     enabled: true
-    p: 1  # ARCH order (starting point for auto-search)
-    q: 1  # GARCH order (starting point for auto-search)
-    # Phase 7.16: Cap auto-search to (1,1)-(2,2).  Constructor default was 3 each,
-    # allowing (1,3), (2,3) etc. which have persistence >=0.97 and trigger
-    # near-IGARCH GJR fallback on nearly every fit.  (2,2) stays in stable territory.
+    p: 1
+    q: 1
     max_p: 2
     max_q: 2
-    vol: "GARCH"               # Options: 'GARCH', 'EGARCH', 'EGARCH'
-    dist: "skewt"              # Phase 7.10b: skewt handles fat tails + negative skew (was 'normal')
-    mean: "AR"                 # Phase 7.10b: AR(1) conditional mean for directional signal (was 'Zero')
-    enforce_stationarity: true # ADF test before fit; difference if unit root detected
-    igarch_fallback: "gjr"     # Phase 7.10b: try GJR-GARCH (asymmetric vol) before EWMA
-
-  # SAMOSSA configuration
+    vol: GARCH
+    dist: skewt
+    mean: AR
+    enforce_stationarity: true
+    igarch_fallback: gjr
   samossa:
     enabled: true
-    window_length: null      # Phase 7.10b: Auto = min(T//3, 40); paper recommends <= T/3 (was fixed 60)
-    n_components: 8          # Phase 7.3: Increased from 6 for complex patterns (or -1 for auto)
-    use_residual_arima: true # Fit ARIMA on residual component (now actually used via statsmodels)
-    # Phase 7.16: Changed from [1,0,1] ARMA(1,1) to [1,0,0] pure AR(1).
-    # ARMA(1,1) on SSA residuals (which are near-white-noise) causes near-
-    # cancellation of AR/MA roots -> flat MLE likelihood surface -> ConvergenceWarning.
-    # Pure AR(1) has a globally unique MLE solution; phi->0 for white noise without
-    # convergence failure.  The MA term added no forecasting value over AR-only.
-    arima_order: [1, 0, 0]   # AR(1) on residuals; MA term removed (convergence fix)
-    seasonal_order: [0, 0, 0, 0] # Seasonal order (P,D,Q,s)
-    min_series_length: 120   # Minimum observations required before fit
-    max_forecast_steps: 63   # Guardrail for horizon when using standalone SAMOSSA
-    reconstruction_method: "diagonal_averaging"  # SSA reconstruction technique
-    trend_slope_bars: 10     # Phase 7.10b: Bars over which to compute directional slope signal
-
-  # MSSA-RL configuration (change-point + RL forecaster)
+    window_length: null
+    n_components: 8
+    use_residual_arima: true
+    arima_order:
+    - 1
+    - 0
+    - 0
+    seasonal_order:
+    - 0
+    - 0
+    - 0
+    - 0
+    min_series_length: 120
+    max_forecast_steps: 63
+    reconstruction_method: diagonal_averaging
+    trend_slope_bars: 10
   mssa_rl:
     enabled: true
-    window_length: 30              # Window for mSSA Page matrix
-    rank: null                     # Let MSSARLConfig choose rank to hit ~90% variance
-    change_point_threshold: 4.0    # Phase 7.10b: Raised from 3.5 to reduce false change-points (audit: oversensitive)
+    window_length: 30
+    rank: null
+    change_point_threshold: 4.0
     q_learning_alpha: 0.3
     q_learning_gamma: 0.85
     q_learning_epsilon: 0.1
-    use_gpu: true            # Optional CuPy acceleration; keep false on Tier-1 CPU runs but changed to true to speed up on Tier-2+GPU
-    min_series_length: 150   # Minimum observations required before fit
-    max_forecast_steps: 30   # Guardrail for horizon when using standalone MSSA-RL
-    use_q_strategy_selection: true  # Phase 7.10b: Wire Q-values to forecast direction (activates dead code)
-    reward_mode: "directional_pnl" # Phase 7.10b: reward = sign(forecast) * realized_return
-
-  # Combined forecasting
+    use_gpu: true
+    min_series_length: 150
+    max_forecast_steps: 30
+    use_q_strategy_selection: true
+    reward_mode: directional_pnl
   combined:
     enabled: true
     use_sarimax_mean: true
     use_garch_volatility: true
     combine_confidence_intervals: true
-
-  # Ensemble orchestration
   ensemble:
     enabled: true
-    confidence_scaling: true  # REQUIRED in production
-    # NOTE: Setting confidence_scaling=false is RESEARCH-ONLY mode.
-    # See Documentation/PRIORITY_ANALYSIS_20260212.md.
-    track_directional_accuracy: true  # Phase 7.10b: inject auto_directional candidate using per-model CV hit rates
+    confidence_scaling: true
+    track_directional_accuracy: true
     prefer_diversified_candidate: true
-    diversity_tolerance: 0.05  # Phase 7.15: lowered from 0.15 -> 0.05. Pure mssa_rl wins if >5% better than blend (was 15% bar; mssa_rl beats blend by ~12% but was losing to 15% threshold). Audit data shows mssa_rl is best model (RMSE 3.08) but ensemble weights samossa 42.7% (worst at 4.05), causing 1.14x RMSE regression.
+    diversity_tolerance: 0.05
     candidate_weights:
-      # SARIMAX is disabled by default; keep ensemble candidates aligned with active models.
-      - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
-      - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
-      - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
-      - {samossa: 0.60, mssa_rl: 0.40}
-      - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
-      - {mssa_rl: 0.70, garch: 0.30}
-      - {mssa_rl: 0.70, samossa: 0.30}
-      - {garch: 1.0}
-      - {samossa: 1.0}
-      - {mssa_rl: 1.0}
-    minimum_component_weight: 0.05  # Align with EnsembleConfig default guardrail
-
-  # Phase 7.5: Regime Detection for Adaptive Model Selection
+    - garch: 0.85
+      samossa: 0.1
+      mssa_rl: 0.05
+    - garch: 0.7
+      samossa: 0.2
+      mssa_rl: 0.1
+    - garch: 0.6
+      samossa: 0.25
+      mssa_rl: 0.15
+    - samossa: 0.6
+      mssa_rl: 0.4
+    - samossa: 0.45
+      garch: 0.35
+      mssa_rl: 0.2
+    - mssa_rl: 0.7
+      garch: 0.3
+    - mssa_rl: 0.7
+      samossa: 0.3
+    - garch: 1.0
+    - samossa: 1.0
+    - mssa_rl: 1.0
+    minimum_component_weight: 0.05
+    da_floor: 0.1
+    da_weight_cap: 0.1
   regime_detection:
-    enabled: true  # Phase 7.9: regime kept ON; A/B test (2026-02-05) showed no >10% PnL lift from disabling.
-    lookback_window: 60  # Days to analyze for regime classification (should match forecasting history)
-
-    # Volatility thresholds (annualized)
-    vol_threshold_low: 0.15   # Below 15% annual vol = low volatility regime
-    vol_threshold_high: 0.25  # Above 25% annual vol = high volatility (lowered from 0.40; Phase 7.10 audit: 90% in catch-all buckets)
-
-    # Trend strength thresholds (0-1 scale, based on R² from linear regression)
-    trend_threshold_weak: 0.30    # Below 0.30 = weak/no trend (rangebound)
-    trend_threshold_strong: 0.60  # Above 0.60 = strong directional trend
-
-    # Phase 7.9: Regime-specific ensemble candidate weights (GARCH-floor tuning)
-    # Constraint: GARCH >= 40% in first candidate to preserve Phase 7.4 RMSE baseline (1.043).
-    # With confidence_scaling=false, first candidate always wins -- GARCH floor prevents
-    # the +42% RMSE regression seen with SAMOSSA-dominant overrides in Phase 7.5/7.8.
+    enabled: true
+    lookback_window: 60
+    vol_threshold_low: 0.15
+    vol_threshold_high: 0.25
+    trend_threshold_weak: 0.3
+    trend_threshold_strong: 0.6
     regime_candidate_weights:
       CRISIS:
-        # Defensive: GARCH-led for volatility forecasting, SAMOSSA support
-        - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
-        - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
+      - garch: 0.5
+        samossa: 0.35
+        mssa_rl: 0.15
+      - garch: 0.4
+        samossa: 0.45
+        mssa_rl: 0.15
       MODERATE_MIXED:
-        # Phase 7.15: MSSA-RL led. Audit data shows mssa_rl RMSE=3.08 beats garch=3.55 and samossa=4.05
-        - {mssa_rl: 0.55, garch: 0.30, samossa: 0.15}
-        - {garch: 0.45, samossa: 0.35, mssa_rl: 0.20}
+      - mssa_rl: 0.55
+        garch: 0.3
+        samossa: 0.15
+      - garch: 0.45
+        samossa: 0.35
+        mssa_rl: 0.2
       MODERATE_TRENDING:
-        # Trend-aware but GARCH-anchored
-        - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
-        - {garch: 0.55, samossa: 0.35, mssa_rl: 0.10}
+      - garch: 0.4
+        samossa: 0.45
+        mssa_rl: 0.15
+      - garch: 0.55
+        samossa: 0.35
+        mssa_rl: 0.1
       HIGH_VOL_TRENDING:
-        # High vol: GARCH for vol forecasting, SAMOSSA for pattern decomposition
-        - {garch: 0.45, samossa: 0.40, mssa_rl: 0.15}
-        - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
-
-    # Regime-specific model preferences (optional overrides)
-    # If not specified, uses RegimeDetector's built-in recommendations
-    # Format: List models in preference order (highest priority first)
+      - garch: 0.45
+        samossa: 0.4
+        mssa_rl: 0.15
+      - garch: 0.55
+        samossa: 0.3
+        mssa_rl: 0.15
     regime_model_preferences:
       LIQUID_RANGEBOUND:
-        # Low vol, mean-reverting, stationary → GARCH excels
-        preferred_models: ['garch', 'samossa', 'mssa_rl']
-        description: "Stable low-volatility markets, GARCH volatility forecasting optimal"
-
+        preferred_models:
+        - garch
+        - samossa
+        - mssa_rl
+        description: Stable low-volatility markets, GARCH volatility forecasting optimal
       MODERATE_RANGEBOUND:
-        # Low vol, stationary, some trend → Mixed approach
-        preferred_models: ['garch', 'samossa', 'mssa_rl']
-        description: "Low volatility with some directional bias"
-
+        preferred_models:
+        - garch
+        - samossa
+        - mssa_rl
+        description: Low volatility with some directional bias
       MODERATE_TRENDING:
-        # Medium vol/trend → Trend-following models
-        preferred_models: ['samossa', 'garch', 'mssa_rl']
-        description: "Clear trend with moderate volatility"
-
+        preferred_models:
+        - samossa
+        - garch
+        - mssa_rl
+        description: Clear trend with moderate volatility
       HIGH_VOL_TRENDING:
-        # High vol, strong trend → Advanced pattern recognition
-        preferred_models: ['samossa', 'mssa_rl', 'garch']
-        description: "Volatile directional moves, complex patterns"
-
+        preferred_models:
+        - samossa
+        - mssa_rl
+        - garch
+        description: Volatile directional moves, complex patterns
       CRISIS:
-        # Extreme volatility (>50% annual) → Defensive, stick to volatility
-        preferred_models: ['garch', 'samossa']
-        description: "Crisis mode, focus on volatility and simple models"
-
+        preferred_models:
+        - garch
+        - samossa
+        description: Crisis mode, focus on volatility and simple models
       MODERATE_MIXED:
-        # Fallback for unclear regimes → Balanced ensemble
-        preferred_models: ['garch', 'samossa', 'mssa_rl']
-        description: "No clear regime, use balanced ensemble"
-
-  # Phase 7.16: Auto-learning of model orders and statistical properties
+        preferred_models:
+        - garch
+        - samossa
+        - mssa_rl
+        description: No clear regime, use balanced ensemble
   order_learning:
     enabled: true
-    min_fits_to_suggest: 3      # Minimum recorded fits before making a warm-start suggestion
-    max_order_age_days: 90      # Discard cache entries not used within this many days
-    skip_grid_threshold: 5      # Skip grid search entirely after this many confident fits
-    regime_aware: true          # Separate cache entry per detected regime
-    # SAMOSSA residual AR lag auto-search (null = AIC-guided 1..max_ar_lag)
-    samossa_max_ar_lag: 4       # AR lags to try when arima_order is set to null (auto)
-
-  # Phase 7.16: Walk-forward rolling/expanding retraining harness
+    min_fits_to_suggest: 3
+    max_order_age_days: 90
+    skip_grid_threshold: 5
+    regime_aware: true
+    samossa_max_ar_lag: 4
   walk_forward:
     enabled: true
-    window_type: "expanding"    # "expanding" (grow window) or "rolling" (fixed window)
-    min_train_length: 120       # Minimum training bars before first fold
-    fold_step: 5                # Advance window by this many bars per fold
-    forecast_horizon: 10        # Bars to forecast per fold
-    confidence_level: 0.99      # VaR confidence level used in each fold
-
-  # Phase 7.16: Additive Monte Carlo forecast summaries (opt-in, fail-closed)
+    window_type: expanding
+    min_train_length: 120
+    fold_step: 5
+    forecast_horizon: 10
+    confidence_level: 0.99
   monte_carlo:
     enabled: false
     paths: 1000
     seed: null
-
-  # Phase 7.16: Value-at-Risk backtesting for GARCH/SARIMAX confidence intervals
   var_backtest:
     enabled: true
-    confidence_levels: [0.95, 0.99]
-    pinball_taus: [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
-    max_violation_excess: 0.02  # Alert if actual violation rate > target + this margin
-
-  # Phase 7.16: Shapley-based PBSV ensemble attribution
+    confidence_levels:
+    - 0.95
+    - 0.99
+    pinball_taus:
+    - 0.01
+    - 0.05
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 0.9
+    - 0.95
+    - 0.99
+    max_violation_excess: 0.02
   shapley_attribution:
     enabled: true
-    loss_fn: "mae"              # "mae" | "mse" | "pinball"
-    pinball_tau: 0.5            # Used when loss_fn="pinball"
-    regime_aggregation: true    # Group Shapley results by detected regime
-    dominant_driver_threshold: 0.05  # Flag model if |shapley| > threshold * ensemble_loss
+    loss_fn: mae
+    pinball_tau: 0.5
+    regime_aggregation: true
+    dominant_driver_threshold: 0.05
+adaptive_candidate_weights:
+  computed_at: '2026-02-28'
+  recent_n: 20
+  lambda_decay: 1.0
+  da_floor: 0.1
+  da_cap_weight: 0.1
+  weights:
+  - garch: 0.352316
+    samossa: 0.311711
+    mssa_rl: 0.335973
+  - garch: 0.7
+    mssa_rl: 0.3
+  - garch: 1.0

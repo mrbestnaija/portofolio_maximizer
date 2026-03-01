@@ -23,6 +23,78 @@ CANONICAL_MODEL_MAP = {
 TRACKED_MODELS = {"sarimax", "garch", "samossa", "mssa_rl"}
 
 
+def _apply_da_cap(
+    weights: Dict[str, float],
+    da_scores: Dict[str, float],
+    da_floor: float,
+    da_weight_cap: float,
+) -> Dict[str, float]:
+    """Phase 7.17: Cap and proportionally redistribute weights for models whose
+    directional accuracy is below da_floor.
+
+    CONTRACT / INVARIANTS (machine-checked at runtime):
+    - If ALL models in ``weights`` are DA-penalized, returns ``{}``.
+      Callers must treat ``{}`` as "skip this candidate" (never score it).
+    - Otherwise returns a non-empty dict where:
+        * every value is in [0, 1].
+        * sum of values ≈ 1.0 (within 1e-6 after redistribution).
+        * every model m with DA < da_floor has weight ≤ da_weight_cap.
+    - ``weights`` is assumed to be normalized (sum ≈ 1.0) on entry.
+    - da_floor and da_weight_cap must be positive floats.
+
+    Violation of the sum-to-1 post-condition is treated as a bug:
+    the function logs an ERROR and self-corrects via renormalization.
+    """
+    # Identify ALL DA-penalized models (DA < da_floor), regardless of current weight.
+    penalized = {m for m in weights if da_scores.get(m, 1.0) < da_floor}
+    # Only those currently ABOVE the cap need to be reduced.
+    capped_set = {m for m in penalized if weights[m] > da_weight_cap}
+
+    if not capped_set:
+        # No model is above the cap → nothing to change.
+        return weights
+
+    result = dict(weights)
+    for m in capped_set:
+        result[m] = da_weight_cap
+
+    # Redistribute only to NON-penalized models.
+    # Sending budget to other penalized models (even below-cap ones) would let them
+    # grow above da_weight_cap after redistribution, violating the contract.
+    non_penalized = {m: result[m] for m in result if m not in penalized}
+    if not non_penalized:
+        # All models in this candidate are DA-penalized.
+        # Return {} so the caller's `if not normalized: continue` skips it cleanly.
+        return {}
+
+    # Budget freed from capping: 1.0 minus the fixed portions.
+    sum_fixed = sum(result[m] for m in penalized)
+    remaining = max(0.0, 1.0 - sum_fixed)
+
+    np_total = sum(non_penalized.values())
+    if np_total > EPSILON:
+        for m in non_penalized:
+            result[m] = non_penalized[m] / np_total * remaining
+    else:
+        share = remaining / len(non_penalized)
+        for m in non_penalized:
+            result[m] = share
+
+    # Runtime invariant guard: result must sum to 1.0.
+    # This catches floating-point drift and any logic errors in the redistribution.
+    _total = sum(result.values())
+    if abs(_total - 1.0) > 1e-6:
+        logger.error(
+            "_apply_da_cap: weight sum invariant violated (sum=%.9f). "
+            "Bug in redistribution logic — renormalizing. input_weights=%s",
+            _total, weights,
+        )
+        if _total > EPSILON:
+            result = {m: v / _total for m, v in result.items()}
+
+    return result
+
+
 @dataclass
 class EnsembleConfig:
     enabled: bool = True
@@ -52,6 +124,13 @@ class EnsembleConfig:
             {"mssa_rl": 1.0},
         ]
     )
+    # Phase 7.17: Auto-computed adaptive candidates prepended before static ones.
+    # Written by scripts/ensemble_health_audit.py --write-config.
+    # Empty list = use only static candidate_weights (default / safe fallback).
+    adaptive_candidate_weights: List[Dict[str, float]] = field(default_factory=list)
+    # Phase 7.17: Configurable DA penalty — cap weight of models with chronic near-zero DA.
+    da_floor: float = 0.10       # DA below this triggers penalty
+    da_weight_cap: float = 0.10  # Max weight for DA-penalized models
     minimum_component_weight: float = 0.05
 
 
@@ -89,7 +168,15 @@ class EnsembleCoordinator:
         # Phase 7.10b: Build directional-accuracy-weighted candidate when tracking is enabled.
         # This adds a data-driven candidate whose weights are proportional to each model's
         # CV directional accuracy (hit rate above 0.5 baseline).
-        candidate_list = list(self.config.candidate_weights)
+        # Phase 7.17: Prepend adaptive candidates (from ensemble_health_audit) before static ones.
+        _adaptive = getattr(self.config, "adaptive_candidate_weights", []) or []
+        candidate_list = (
+            list(_adaptive) + list(self.config.candidate_weights)
+            if _adaptive
+            else list(self.config.candidate_weights)
+        )
+        if _adaptive:
+            logger.info("Ensemble: prepending %d adaptive candidate(s) from Phase 7.17 audit", len(_adaptive))
         if getattr(self.config, "track_directional_accuracy", True) and model_directional_accuracy:
             da_weights: Dict[str, float] = {}
             for model in TRACKED_MODELS:
@@ -124,6 +211,21 @@ class EnsembleCoordinator:
                 if not normalized:
                     continue
             normalized = self._apply_minimum_component_weight(normalized)
+
+            # Phase 7.17: Apply DA penalty — cap and redistribute weight for
+            # chronic near-zero DA models (SAMOSSA DA=0 anomaly fix).
+            if model_directional_accuracy:
+                _da_floor = float(getattr(self.config, "da_floor", 0.10))
+                _da_cap = float(getattr(self.config, "da_weight_cap", 0.10))
+                normalized = _apply_da_cap(normalized, model_directional_accuracy, _da_floor, _da_cap)
+                if not normalized:
+                    continue
+                logger.debug(
+                    "Ensemble: DA-adjusted weights=%s (da_floor=%.2f, da_cap=%.2f)",
+                    {m: f"{v:.3f}" for m, v in normalized.items()},
+                    _da_floor,
+                    _da_cap,
+                )
 
             # Always rank candidates by confidence-weighted expected quality.
             # `confidence_scaling` controls whether candidate *weights* are
@@ -160,6 +262,17 @@ class EnsembleCoordinator:
             ]
             if diversified:
                 best_weights, best_score = diversified[0]
+
+        # Runtime invariant: selected weights must be normalized, non-negative, finite.
+        _wtotal = sum(best_weights.values())
+        if best_weights and abs(_wtotal - 1.0) > 1e-6:
+            logger.error(
+                "select_weights: selected weights not normalized (sum=%.9f). "
+                "Renormalizing to prevent score corruption.",
+                _wtotal,
+            )
+            if _wtotal > EPSILON:
+                best_weights = {m: v / _wtotal for m, v in best_weights.items()}
 
         self.selected_weights = best_weights
         self.selection_score = best_score

@@ -55,7 +55,9 @@ class FoldMetrics:
     var_violations: int                # count at 99% VaR
     var_violation_rate: float
     kupiec_p_value: float
+    var_source: str | None             # explicit VaR source used for coverage
     pinball_loss: dict[float, float]   # tau -> mean pinball loss
+    pinball_sources: dict[float, str]  # tau -> empirical_quantile | parametric_var | missing
     shapley: dict[str, float]          # model -> Shapley value
     regime: str | None
     order_used: dict[str, Any]         # {garch: ..., sarimax: ..., samossa: ...}
@@ -280,7 +282,8 @@ class WalkForwardLearner:
                 rmse=float("nan"), mae=float("nan"), dir_acc=float("nan"),
                 var_violations=0, var_violation_rate=float("nan"),
                 kupiec_p_value=float("nan"),
-                pinball_loss={}, shapley={}, regime=regime, order_used={},
+                var_source=None, pinball_loss={}, pinball_sources={},
+                shapley={}, regime=regime, order_used={},
             )
 
         actual_ret = test_ret[:h_actual]
@@ -296,11 +299,25 @@ class WalkForwardLearner:
         from forcester_ts.var_backtest import VaRBacktester
         bt = VaRBacktester()
         vol_fc = np.full(h_actual, sigma)
-        var_series = bt.compute_var(vol_fc, confidence_level=self._confidence_level)
-        kupiec = bt.kupiec_test(actual_ret, var_series, self._confidence_level)
         pinball_q = {tau: np.full(h_actual, np.quantile(train_ret, tau))
                      for tau in self._taus}
-        pinball = bt.pinball_loss(actual_ret, pinball_q)
+        var_report = bt.full_report(
+            actual_ret,
+            vol_fc,
+            confidence_levels=(self._confidence_level,),
+            taus=self._taus,
+            quantile_forecasts=pinball_q,
+            coverage_quantile_forecasts={},
+        )
+        cl_report = var_report.get("confidence_levels", {}).get(float(self._confidence_level), {})
+        kupiec = cl_report.get("kupiec", {}) if isinstance(cl_report, dict) else {}
+        pinball = var_report.get("pinball", {}) if isinstance(var_report, dict) else {}
+        var_source = cl_report.get("source") if isinstance(cl_report, dict) else None
+        pinball_sources = (
+            var_report.get("pinball_sources", {})
+            if isinstance(var_report.get("pinball_sources", {}), dict)
+            else {}
+        )
 
         # ---- Shapley attribution ----
         from forcester_ts.shapley_attribution import ShapleyAttributor
@@ -320,7 +337,9 @@ class WalkForwardLearner:
             var_violations=kupiec.get("violations", 0),
             var_violation_rate=kupiec.get("violation_rate", float("nan")),
             kupiec_p_value=kupiec.get("p_value", float("nan")),
+            var_source=var_source,
             pinball_loss={k: v for k, v in pinball.items() if isinstance(k, float)},
+            pinball_sources={k: v for k, v in pinball_sources.items() if isinstance(k, float)},
             shapley=shapley,
             regime=regime,
             order_used=order_used,

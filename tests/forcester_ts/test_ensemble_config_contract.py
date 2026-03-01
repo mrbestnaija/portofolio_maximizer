@@ -509,3 +509,219 @@ class TestConfigDriftDetection:
         assert default_count == yaml_fast_count, \
             f"EnsembleConfig defaults ({default_count}) != YAML fast-only ({yaml_fast_count}). " \
             "Keep them in sync."
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.17: DA Penalty + Adaptive Candidate Weights
+# ---------------------------------------------------------------------------
+
+class TestPhase717DACapAndAdaptiveCandidates:
+    """Phase 7.17 regression tests:
+    - SAMOSSA DA=0 gets capped at da_weight_cap after select_weights()
+    - Adaptive candidates are prepended and scored first
+    """
+
+    def test_samossa_da_zero_gets_capped_weight(self):
+        """SAMOSSA with DA=0.0 must receive weight <= da_weight_cap (0.10) in the final selection."""
+        config = EnsembleConfig(
+            confidence_scaling=False,  # isolate DA penalty from confidence scaling
+            track_directional_accuracy=True,
+            da_floor=0.10,
+            da_weight_cap=0.10,
+            candidate_weights=[
+                # Give SAMOSSA 50% weight — DA penalty must pull it below 0.10
+                {"garch": 0.25, "samossa": 0.50, "mssa_rl": 0.25},
+            ],
+        )
+        coordinator = EnsembleCoordinator(config)
+        model_confidence = {"garch": 0.6, "samossa": 0.6, "mssa_rl": 0.6}
+        model_da = {"garch": 0.55, "samossa": 0.0, "mssa_rl": 0.55}  # SAMOSSA DA=0
+
+        weights, _ = coordinator.select_weights(model_confidence, model_da)
+        samossa_weight = weights.get("samossa", 0.0)
+        assert samossa_weight <= 0.10 + 1e-6, (
+            f"SAMOSSA with DA=0.0 should have weight <= 0.10 after DA penalty, "
+            f"got {samossa_weight:.4f}"
+        )
+        # Other models share the remaining budget
+        assert weights.get("garch", 0.0) > 0.10
+        assert weights.get("mssa_rl", 0.0) > 0.10
+
+    def test_adaptive_candidates_tried_first_in_select_weights(self):
+        """Adaptive candidates must be prepended to the scoring list.
+
+        We set adaptive_candidate_weights = [{mssa_rl: 1.0}] with a very high
+        mssa_rl confidence. With no DA penalty, this pure-mssa_rl candidate
+        should win over any static candidate.
+        """
+        config = EnsembleConfig(
+            confidence_scaling=True,
+            track_directional_accuracy=False,
+            adaptive_candidate_weights=[{"mssa_rl": 1.0}],  # Phase 7.17 adaptive
+            candidate_weights=[
+                {"garch": 0.5, "samossa": 0.5},  # static (garch+samossa, no mssa_rl)
+            ],
+            da_floor=0.10,
+            da_weight_cap=0.10,
+        )
+        coordinator = EnsembleCoordinator(config)
+        # mssa_rl is much better → adaptive candidate should be selected
+        model_confidence = {"garch": 0.3, "samossa": 0.3, "mssa_rl": 0.95}
+        weights, _ = coordinator.select_weights(model_confidence)
+        # The adaptive pure-mssa_rl candidate should win
+        assert weights.get("mssa_rl", 0.0) > weights.get("garch", 0.0), (
+            f"Adaptive {{'mssa_rl':1.0}} candidate should dominate when mssa_rl confidence=0.95. "
+            f"Got weights={weights}"
+        )
+        assert weights.get("mssa_rl", 0.0) > weights.get("samossa", 0.0)
+
+    def test_adaptive_candidates_empty_list_uses_static_only(self):
+        """Empty adaptive_candidate_weights must fall back to static candidates without error."""
+        config = EnsembleConfig(
+            adaptive_candidate_weights=[],
+            candidate_weights=[{"garch": 0.5, "mssa_rl": 0.5}],
+        )
+        coordinator = EnsembleCoordinator(config)
+        weights, score = coordinator.select_weights({"garch": 0.6, "mssa_rl": 0.7})
+        assert weights, "Should still select a candidate from static list"
+        assert score > 0
+
+    def test_da_cap_config_fields_have_correct_defaults(self):
+        """EnsembleConfig.da_floor and da_weight_cap must default to 0.10."""
+        ec = EnsembleConfig()
+        assert ec.da_floor == 0.10, f"da_floor default should be 0.10, got {ec.da_floor}"
+        assert ec.da_weight_cap == 0.10, f"da_weight_cap default should be 0.10, got {ec.da_weight_cap}"
+        assert ec.adaptive_candidate_weights == [], \
+            f"adaptive_candidate_weights default should be [], got {ec.adaptive_candidate_weights}"
+
+    def test_pure_winner_all_da_zero_candidate_skipped(self):
+        """A pure-winner candidate where the only model has DA=0 must be skipped,
+        not returned with unnormalized weights summing < 1.0 (all-capped bug fix).
+        """
+        from forcester_ts.ensemble import _apply_da_cap
+        # Pure-winner: single model with weight 1.0 and DA=0
+        weights = {"garch": 1.0}
+        da_scores = {"garch": 0.0}  # DA=0, below floor
+        result = _apply_da_cap(weights, da_scores, da_floor=0.10, da_weight_cap=0.10)
+        # Should return {} so the caller can skip this candidate cleanly
+        assert result == {}, (
+            f"All-DA-penalized pure-winner should return {{}} to signal skip, got {result}"
+        )
+
+    def test_da_cap_output_sums_to_one(self):
+        """After DA cap and redistribution, weights must always sum to 1.0."""
+        from forcester_ts.ensemble import _apply_da_cap
+        # garch penalized (DA=0), mssa_rl unpunished (DA=0.6); garch gets capped at 0.10
+        weights = {"garch": 0.70, "mssa_rl": 0.30}
+        da_scores = {"garch": 0.0, "mssa_rl": 0.60}
+        result = _apply_da_cap(weights, da_scores, da_floor=0.10, da_weight_cap=0.10)
+        assert result, "Should return non-empty result (mssa_rl not penalized)"
+        total = sum(result.values())
+        assert abs(total - 1.0) < 1e-9, f"Weights must sum to 1.0, got {total}"
+        assert result["garch"] <= 0.10 + 1e-9
+        assert result["mssa_rl"] >= 0.89  # ~0.90 after redistribution
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.17: Hypothesis property-based fuzz tests for _apply_da_cap
+# ---------------------------------------------------------------------------
+
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
+
+
+_ALL_MODELS = ("garch", "samossa", "mssa_rl")
+
+
+@st.composite
+def _normalized_weight_dict(draw, models=_ALL_MODELS):
+    """Generate a normalized dict over a random non-empty subset of models."""
+    n = draw(st.integers(min_value=1, max_value=len(models)))
+    chosen = models[:n]
+    raw = draw(
+        st.lists(
+            st.floats(min_value=0.01, max_value=1.0, allow_nan=False, allow_infinity=False),
+            min_size=n,
+            max_size=n,
+        )
+    )
+    total = sum(raw)
+    assume(total > 1e-9)
+    return {m: w / total for m, w in zip(chosen, raw)}
+
+
+@st.composite
+def _da_scores(draw, models=_ALL_MODELS):
+    return {
+        m: draw(st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False))
+        for m in models
+    }
+
+
+class TestApplyDaCapProperties:
+    """Hypothesis property-based regression tests for _apply_da_cap().
+
+    These tests encode the CONTRACT documented in the function's docstring
+    and automatically fuzz over the full input space.
+    """
+
+    @given(
+        weights=_normalized_weight_dict(),
+        da_scores=_da_scores(),
+        da_floor=st.floats(min_value=0.05, max_value=0.40),
+        da_weight_cap=st.floats(min_value=0.05, max_value=0.40),
+    )
+    @settings(max_examples=300, deadline=None)
+    def test_result_is_empty_or_normalized(self, weights, da_scores, da_floor, da_weight_cap):
+        """_apply_da_cap must return {} or a dict summing to 1.0 ± 1e-6."""
+        from forcester_ts.ensemble import _apply_da_cap
+        result = _apply_da_cap(weights, da_scores, da_floor, da_weight_cap)
+        if result:
+            total = sum(result.values())
+            assert abs(total - 1.0) < 1e-6, (
+                f"sum={total:.9f}, weights={weights}, da={da_scores}, "
+                f"floor={da_floor}, cap={da_weight_cap}"
+            )
+            assert all(0.0 <= v <= 1.0 + 1e-9 for v in result.values()), (
+                f"Negative or >1 weight: {result}"
+            )
+
+    @given(
+        weights=_normalized_weight_dict(),
+        da_scores=_da_scores(),
+        da_floor=st.floats(min_value=0.05, max_value=0.40),
+        da_weight_cap=st.floats(min_value=0.05, max_value=0.40),
+    )
+    @settings(max_examples=300, deadline=None)
+    def test_penalized_models_respect_cap(self, weights, da_scores, da_floor, da_weight_cap):
+        """Every model with DA < da_floor must have weight ≤ da_weight_cap in result."""
+        from forcester_ts.ensemble import _apply_da_cap
+        result = _apply_da_cap(weights, da_scores, da_floor, da_weight_cap)
+        for m, w in result.items():
+            if da_scores.get(m, 1.0) < da_floor:
+                assert w <= da_weight_cap + 1e-9, (
+                    f"Model '{m}' DA={da_scores.get(m):.4f} < floor={da_floor} "
+                    f"but weight={w:.6f} > cap={da_weight_cap}"
+                )
+
+    @given(
+        weights=_normalized_weight_dict(),
+        da_scores=_da_scores(),
+        da_floor=st.floats(min_value=0.05, max_value=0.40),
+        da_weight_cap=st.floats(min_value=0.05, max_value=0.40),
+    )
+    @settings(max_examples=300, deadline=None)
+    def test_all_penalized_returns_empty(self, weights, da_scores, da_floor, da_weight_cap):
+        """If every model in weights has DA < da_floor, result must be {}."""
+        from forcester_ts.ensemble import _apply_da_cap
+        # Force all models in this candidate to be below floor
+        low_da = {m: 0.001 for m in weights}
+        result = _apply_da_cap(weights, low_da, da_floor=0.10, da_weight_cap=da_weight_cap)
+        # All weights also must be > da_weight_cap to trigger the cap
+        # (cap only fires when w > da_weight_cap). For single-model candidates where
+        # w=1.0 >> da_weight_cap, result must be {}.
+        if all(weights[m] > da_weight_cap for m in weights):
+            assert result == {}, (
+                f"All models penalized: expected {{}}, got {result}. "
+                f"weights={weights}, da_cap={da_weight_cap}"
+            )

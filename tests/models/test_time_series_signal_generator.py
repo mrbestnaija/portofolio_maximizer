@@ -708,7 +708,7 @@ class TestTimeSeriesSignalGenerator:
 
         import models.time_series_signal_generator as tsg_mod
 
-        def fake_run(self, price_series, returns_series=None):  # noqa: ARG001
+        def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
             return {
                 "aggregate_metrics": {
                     "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
@@ -740,6 +740,154 @@ class TestTimeSeriesSignalGenerator:
         assert quant_profile["forecast_edge"]["directional_accuracy"] == pytest.approx(0.60)
         assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
         assert quant_profile["criteria"]["directional_accuracy"] is True
+
+    def test_quant_validation_forecast_edge_mode_uses_shared_forecaster_config(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+        ts_routing_config,
+    ):
+        """Forecast-edge CV should inherit runtime config caps instead of falling back to defaults."""
+        cfg = copy.deepcopy(quant_validation_config)
+        cfg["validation_mode"] = "forecast_edge"
+        cfg["forecast_edge_cv"] = {
+            "min_train_size": 10,
+            "horizon": 5,
+            "step_size": 5,
+            "max_folds": 1,
+            "baseline_model": "samossa",
+        }
+
+        forecasting_cfg = {
+            "forecasting": {
+                "ensemble": {"enabled": False, "minimum_component_weight": 0.12},
+                "regime_detection": {"enabled": True, "lookback_window": 42},
+                "order_learning": {
+                    "enabled": True,
+                    "min_fits_to_suggest": 3,
+                    "skip_grid_threshold": 5,
+                },
+                "monte_carlo": {"enabled": True, "paths": 400, "seed": 7},
+                "sarimax": {"enabled": False},
+                "garch": {"enabled": True, "max_p": 2, "max_q": 2},
+                "samossa": {"enabled": True, "window_length": 33},
+                "mssa_rl": {"enabled": True, "window_length": 21, "use_gpu": False},
+            }
+        }
+        forecasting_path = tmp_path / "forecasting_config.yml"
+        forecasting_path.write_text(yaml.safe_dump(forecasting_cfg), encoding="utf-8")
+
+        import models.time_series_signal_generator as tsg_mod
+
+        captured = {}
+
+        def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
+            captured["ticker"] = ticker
+            captured["garch_kwargs"] = dict(self.forecaster_config.garch_kwargs)
+            captured["samossa_kwargs"] = dict(self.forecaster_config.samossa_kwargs)
+            captured["mssa_rl_kwargs"] = dict(self.forecaster_config.mssa_rl_kwargs)
+            captured["monte_carlo_config"] = dict(self.forecaster_config.monte_carlo_config)
+            captured["order_learning_config"] = dict(self.forecaster_config.order_learning_config)
+            captured["ensemble_enabled"] = bool(self.forecaster_config.ensemble_enabled)
+            captured["regime_detection_enabled"] = bool(self.forecaster_config.regime_detection_enabled)
+            return {
+                "aggregate_metrics": {
+                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
+                    "samossa": {"rmse": 1.0, "directional_accuracy": 0.55},
+                },
+                "fold_count": 1,
+                "horizon": 5,
+            }
+
+        monkeypatch.setattr(tsg_mod.RollingWindowValidator, "run", fake_run)
+
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=cfg,
+            forecasting_config_path=str(forecasting_path),
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+
+        quant_profile = signal.provenance.get("quant_validation")
+        assert quant_profile is not None
+        assert captured["ticker"] == "AAPL"
+        assert captured["garch_kwargs"]["max_p"] == 2
+        assert captured["garch_kwargs"]["max_q"] == 2
+        assert captured["samossa_kwargs"]["window_length"] == 33
+        assert captured["samossa_kwargs"]["forecast_horizon"] == 5
+        assert captured["mssa_rl_kwargs"]["window_length"] == 21
+        assert captured["mssa_rl_kwargs"]["forecast_horizon"] == 5
+        assert captured["monte_carlo_config"]["enabled"] is True
+        assert captured["monte_carlo_config"]["paths"] == 400
+        assert captured["order_learning_config"]["enabled"] is True
+        assert captured["ensemble_enabled"] is False
+        assert captured["regime_detection_enabled"] is True
+
+    def test_quant_validation_forecast_edge_mode_normalizes_baseline_model_lookup(
+        self,
+        monkeypatch,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+        ts_routing_config,
+    ):
+        """Hyphenated baseline aliases should resolve to the canonical aggregate key."""
+        cfg = copy.deepcopy(quant_validation_config)
+        cfg["validation_mode"] = "forecast_edge"
+        cfg["forecast_edge_cv"] = {
+            "min_train_size": 10,
+            "horizon": 5,
+            "step_size": 5,
+            "max_folds": 1,
+            "baseline_model": "mssa-rl",
+        }
+        cfg["success_criteria"]["max_rmse_ratio_vs_baseline"] = 1.10
+
+        import models.time_series_signal_generator as tsg_mod
+
+        def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
+            return {
+                "aggregate_metrics": {
+                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
+                    "mssa_rl": {"rmse": 1.0, "directional_accuracy": 0.55},
+                },
+                "fold_count": 1,
+                "horizon": 5,
+            }
+
+        monkeypatch.setattr(tsg_mod.RollingWindowValidator, "run", fake_run)
+
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=cfg,
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+
+        quant_profile = signal.provenance.get("quant_validation")
+        assert quant_profile is not None
+        assert quant_profile["forecast_edge"]["baseline_model"] == "mssa_rl"
+        assert quant_profile["forecast_edge"]["baseline"]["rmse"] == pytest.approx(1.0)
+        assert quant_profile["forecast_edge"]["rmse_ratio_vs_baseline"] == pytest.approx(0.9)
+        assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
 
     def test_quant_validation_failure_updates_reasoning(self,
                                                         sample_forecast_bundle,
