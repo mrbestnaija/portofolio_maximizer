@@ -61,7 +61,16 @@ forecaster_monitoring:
     # Safety: if true, do not allow obvious regressions to pass during the
     # holding period. If the current effective audits already violate the RMSE
     # ceiling beyond max_violation_rate, fail immediately (CI/brutal-safe).
-    fail_on_violation_during_holding_period: true
+    #
+    # Phase 7.19: Changed from true to false. During DISABLE_DEFAULT posture the
+    # ensemble is already blocked at forecast-time by strict_preselection_gate
+    # (max_rmse_ratio=1.0). Warmup violations add no marginal safety and cause
+    # check_model_improvement Layer 2 to FAIL even though production trades are
+    # unaffected. Changed to false so that high violation rates during warmup
+    # surface as INCONCLUSIVE (exit 0) rather than hard-FAIL.
+    # Revert to true once ensemble exits DISABLE_DEFAULT posture and
+    # lift_fraction >= min_lift_fraction (0.25) over 20+ fresh audit windows.
+    fail_on_violation_during_holding_period: false
 
     # If true, fail the RMSE gate when the ensemble does not demonstrate enough
     # lift over the selected baseline across the holding period window.

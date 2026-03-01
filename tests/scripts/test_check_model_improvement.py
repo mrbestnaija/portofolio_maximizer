@@ -320,7 +320,7 @@ class TestBaselineSaveCompare:
                         {"lift_fraction_global": 0.03, "lift_fraction_recent": 0.05,
                          "samossa_da_zero_pct": 0.55, "n_used_windows": 3,
                          "n_skipped_malformed": 0, "n_skipped_missing_metrics": 0,
-                         "n_total_files": 3},
+                         "n_total_files": 3, "coverage_ratio": 1.0},
                         "WARN | summary"),
         ]
         out = tmp_path / "baseline.json"
@@ -336,7 +336,7 @@ class TestBaselineSaveCompare:
                         {"lift_fraction_global": 0.03, "lift_fraction_recent": 0.04,
                          "samossa_da_zero_pct": 0.55, "n_used_windows": 10,
                          "n_skipped_malformed": 0, "n_skipped_missing_metrics": 0,
-                         "n_total_files": 10},
+                         "n_total_files": 10, "coverage_ratio": 1.0},
                         "WARN"),
         ]
         baseline_path = tmp_path / "baseline.json"
@@ -347,7 +347,7 @@ class TestBaselineSaveCompare:
                         {"lift_fraction_global": 0.12, "lift_fraction_recent": 0.10,
                          "samossa_da_zero_pct": 0.20, "n_used_windows": 15,
                          "n_skipped_malformed": 0, "n_skipped_missing_metrics": 0,
-                         "n_total_files": 15},
+                         "n_total_files": 15, "coverage_ratio": 1.0},
                         "PASS"),
         ]
         comparison = compare_baseline(current_results, baseline_path)
@@ -396,3 +396,120 @@ class TestCLIExitCodes:
             "--db", str(tmp_path / "nonexistent.db"),
         ])
         assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.19: New tests — coverage_ratio, SKIP semantics, inconclusive gate
+# ---------------------------------------------------------------------------
+class TestPhase719Hardening:
+    def test_warns_when_coverage_ratio_below_threshold(self, tmp_path):
+        """1 valid + 9 old-format files → coverage_ratio=10% < 20% → WARN."""
+        valid_audit = {
+            "dataset": {"ticker": "A", "start": "2025-01-01", "end": "2025-06-30", "length": 126},
+            "summary": {"forecast_horizon": 5},
+            "artifacts": {
+                "evaluation_metrics": {
+                    "garch":    {"rmse": 1.5, "directional_accuracy": 0.5, "smape": 3.0},
+                    "samossa":  {"rmse": 1.2, "directional_accuracy": 0.6, "smape": 2.5},
+                    "mssa_rl":  {"rmse": 1.8, "directional_accuracy": 0.6, "smape": 4.0},
+                    "ensemble": {"rmse": 1.1, "directional_accuracy": 0.7},
+                },
+                "ensemble_weights": {"garch": 0.3, "samossa": 0.4, "mssa_rl": 0.3},
+            },
+        }
+        # 9 old-format files with no evaluation_metrics → n_skipped_missing_metrics = 9
+        for i in range(9):
+            (tmp_path / f"forecast_audit_old_{i}.json").write_text(
+                json.dumps({"dataset": {"ticker": f"X{i}", "start": f"2024-0{i+1}-01",
+                                        "end": f"2024-0{i+1}-30", "length": 50},
+                            "summary": {"forecast_horizon": 5}})
+            )
+        (tmp_path / "forecast_audit_new_0.json").write_text(json.dumps(valid_audit))
+
+        result = run_layer1_forecast_quality(
+            tmp_path,
+            warn_coverage_threshold=0,  # disable count-based WARN to isolate ratio check
+        )
+        assert result.metrics["n_total_files"] == 10
+        assert result.metrics["n_used_windows"] == 1
+        assert result.metrics["coverage_ratio"] == pytest.approx(0.10, abs=0.01)
+        assert result.status == "WARN"
+        assert "coverage_ratio" in result.summary
+
+    def test_coverage_ratio_above_threshold_does_not_trigger_warn(self, tmp_path):
+        """5 valid out of 5 total → coverage_ratio=100% → no coverage_ratio WARN."""
+        for i in range(5):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": f"2025-0{i+1}-01",
+                            "end": f"2025-0{i+1}-28", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.5, "directional_accuracy": 0.5, "smape": 3.0},
+                        "samossa":  {"rmse": 1.2, "directional_accuracy": 0.6, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.8, "directional_accuracy": 0.6, "smape": 4.0},
+                        "ensemble": {"rmse": 1.1, "directional_accuracy": 0.7},
+                    },
+                    "ensemble_weights": {"garch": 0.3, "samossa": 0.4, "mssa_rl": 0.3},
+                },
+            }
+            (tmp_path / f"forecast_audit_t{i}.json").write_text(json.dumps(audit))
+
+        result = run_layer1_forecast_quality(
+            tmp_path,
+            warn_coverage_threshold=0,  # disable count-based WARN
+            warn_lift_threshold=0.0,    # disable lift WARN
+            warn_da_zero_pct=1.1,       # disable DA WARN
+        )
+        assert result.metrics["coverage_ratio"] == pytest.approx(1.0, abs=0.01)
+        # No coverage_ratio WARN reason in summary
+        assert "coverage_ratio" not in result.summary
+
+    def test_skip_semantics_include_no_measurement_notice(self, tmp_path):
+        """SKIP layers must explicitly say 'skip' — they are not green."""
+        l1 = run_layer1_forecast_quality(tmp_path / "nonexistent")
+        l3 = run_layer3_trade_quality(tmp_path / "nonexistent.db")
+        l4 = run_layer4_calibration(
+            tmp_path / "no_db.db",
+            tmp_path / "no_jsonl.jsonl",
+        )
+        for result in [l1, l3, l4]:
+            assert result.status == "SKIP"
+            # Summary must explicitly say SKIP and convey "no data" — not a healthy signal
+            summary_lower = result.summary.lower()
+            assert "skip" in summary_lower
+            assert any(kw in summary_lower for kw in ("not found", "unknown", "missing", "no forecast"))
+
+    def test_layer2_overall_passed_surfaced_without_reinterpretation(self, monkeypatch):
+        """Layer 2 surfaces run_all_gates overall_passed; inconclusive-treated-as-pass
+        is handled by run_all_gates itself (--allow-inconclusive-lift). Layer 2 must
+        NOT reinterpret: if overall_passed=True, Layer 2 is PASS regardless of details."""
+        # Simulate run_all_gates returning True even though production_audit_gate was
+        # inconclusive (lift gate passed via --allow-inconclusive-lift in run_all_gates)
+        fake_json = json.dumps({
+            "overall_passed": True,
+            "gates": [
+                {"label": "ci_integrity_gate", "passed": True},
+                {"label": "check_quant_validation_health", "passed": True},
+                {"label": "production_audit_gate", "passed": True},  # inconclusive -> pass
+                {"label": "institutional_unattended_gate", "passed": True},
+            ],
+        })
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: _fake_proc(fake_json, 0))
+        result = run_layer2_gate_status()
+        assert result.status == "PASS"
+        # Layer 2 must not re-inspect individual gate results
+        assert result.metrics["overall_passed"] is True
+        assert result.metrics["n_gates_passed"] == 4
+        assert result.metrics["n_gates_failed"] == 0
+
+    def test_layer1_coverage_ratio_in_required_keys(self):
+        """coverage_ratio must be in LAYER_REQUIRED_KEYS[1]."""
+        assert "coverage_ratio" in LAYER_REQUIRED_KEYS[1]
+
+    def test_layer1_coverage_ratio_populated_on_skip(self, tmp_path):
+        """Even when Layer 1 SKIPs, coverage_ratio must be present (None or 0.0)."""
+        result = run_layer1_forecast_quality(tmp_path / "nonexistent_dir")
+        assert result.status == "SKIP"
+        # coverage_ratio in metrics (may be None from _empty_metrics or 0.0 from n_used==0)
+        assert "coverage_ratio" in result.metrics

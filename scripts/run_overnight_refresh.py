@@ -57,7 +57,7 @@ BOOTSTRAP_ANCHOR_DATES = [
     "2023-06-01",   # recovery
     "2024-06-01",   # bull market
 ]
-BOOTSTRAP_LADDER_DAYS = 10      # business days per anchor (enough for max_holding=5 to fire)
+BOOTSTRAP_LADDER_DAYS = 10      # business days per anchor (enough for max_holding=8 to fire; Phase 7.19)
 BOOTSTRAP_TARGET_PAIRS = 30     # stop early when matched pairs reach threshold
 AUDIT_MIN_UNIQUE_WINDOWS = 20   # unique dedup keys required for lift gate to exit INCONCLUSIVE
 

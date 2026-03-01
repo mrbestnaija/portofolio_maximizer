@@ -207,15 +207,15 @@ forecasting:
     regime_aggregation: true
     dominant_driver_threshold: 0.05
 adaptive_candidate_weights:
-  computed_at: '2026-02-28'
+  computed_at: '2026-03-01'
   recent_n: 20
   lambda_decay: 1.0
   da_floor: 0.1
   da_cap_weight: 0.1
   weights:
-  - garch: 0.352316
-    samossa: 0.311711
-    mssa_rl: 0.335973
+  - garch: 0.347987
+    samossa: 0.31219
+    mssa_rl: 0.339823
   - garch: 0.7
     mssa_rl: 0.3
   - garch: 1.0
