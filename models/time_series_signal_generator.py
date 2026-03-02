@@ -13,6 +13,7 @@ Per refactoring plan:
 
 import json
 import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -2295,6 +2296,15 @@ class TimeSeriesSignalGenerator:
                     return float(max(0.05, min(0.95, raw_conf)))
 
             calibrated = float(clf.predict_proba([[raw_conf]])[0][1])
+            # Phase 7.31: NaN/inf guard — LogisticRegression can produce non-finite
+            # values on degenerate inputs; fall back to clamped raw_conf if so.
+            if not math.isfinite(calibrated):
+                logger.warning(
+                    "Platt calibration returned non-finite %.6f; "
+                    "falling back to raw_conf=%.4f",
+                    calibrated, raw_conf,
+                )
+                return float(max(0.05, min(0.95, raw_conf)))
             # Store pure Platt probability for the confidence_calibrated DB column.
             self._platt_calibrated = float(max(0.05, min(0.95, calibrated)))
             qv_cfg = getattr(self, "quant_validation_config", None) or {}

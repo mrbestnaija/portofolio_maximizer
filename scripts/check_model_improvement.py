@@ -84,7 +84,12 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
         "n_skipped_malformed",
         "n_skipped_missing_metrics",
         "n_total_files",
-        "coverage_ratio",  # Phase 7.19: n_used / n_total; WARN when < 0.20
+        "coverage_ratio",       # Phase 7.19: n_used / n_total; WARN when < 0.20
+        "lift_mean",            # Phase 7.25: bootstrap mean(delta), delta=best_single-ensemble
+        "lift_ci_low",          # Phase 7.25: lower 95% bootstrap CI bound
+        "lift_ci_high",         # Phase 7.25: upper 95% bootstrap CI bound
+        "lift_win_fraction",    # Phase 7.25: fraction of windows with positive lift
+        "lift_ci_insufficient_data",  # Phase 7.25: True when < 5 valid windows for CI
     },
     2: {"overall_passed", "n_gates_passed", "n_gates_failed"},
     3: {"win_rate", "profit_factor", "total_pnl", "n_trades", "interpretation"},
@@ -147,6 +152,7 @@ def run_layer1_forecast_quality(
     try:
         from ensemble_health_audit import (  # noqa: PLC0415
             _window_fingerprint,
+            compute_lift_significance,
             compute_per_model_summary,
             extract_window_metrics,
         )
@@ -228,6 +234,11 @@ def run_layer1_forecast_quality(
                 "lift_fraction_global": 0.0,
                 "lift_fraction_recent": 0.0,
                 "samossa_da_zero_pct": 0.0,
+                "lift_mean": float("nan"),
+                "lift_ci_low": float("nan"),
+                "lift_ci_high": float("nan"),
+                "lift_win_fraction": 0.0,
+                "lift_ci_insufficient_data": True,
             },
             summary=(
                 f"SKIP -- 0 usable windows "
@@ -270,11 +281,19 @@ def run_layer1_forecast_quality(
     except Exception as exc:
         log.warning("Could not compute per-model summary: %s", exc)
 
+    # Phase 7.25: bootstrap CI for mean lift
+    sig = compute_lift_significance(windows_sorted)
+
     metrics = {
         **quality,
         "lift_fraction_global": lift_global,
         "lift_fraction_recent": lift_recent,
         "samossa_da_zero_pct": samossa_da_zero_pct,
+        "lift_mean": sig["mean_lift"],
+        "lift_ci_low": sig["ci_low"],
+        "lift_ci_high": sig["ci_high"],
+        "lift_win_fraction": sig["lift_win_fraction"],
+        "lift_ci_insufficient_data": sig["insufficient_data"],
     }
 
     # Determine status (FAIL > WARN > PASS, checked in order)
@@ -305,6 +324,13 @@ def run_layer1_forecast_quality(
             reasons.append(
                 f"coverage_ratio={coverage_ratio:.1%} < 20% "
                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
+            )
+        # Phase 7.25: advisory WARN when CI spans zero (informational — does not override FAIL)
+        if not sig["insufficient_data"] and sig["ci_low"] <= 0.0 and n_used >= 20:
+            status = "WARN"
+            reasons.append(
+                f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
+                f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
             )
 
     reason_str = " | " + "; ".join(reasons) if reasons else ""

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from scripts.ensemble_health_audit import (
     MODELS,
     compute_adaptive_weights,
+    compute_lift_significance,
     compute_per_model_summary,
     compute_shapley_attribution,
     extract_window_metrics,
@@ -575,3 +576,74 @@ class TestComputeAdaptiveWeightsProperties:
                 f"mean_da[{m}]={mean_da.get(m, 0):.4f} < da_floor={da_floor:.4f}. "
                 f"n_windows={len(windows)}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.25 — TestLiftSignificance
+# ---------------------------------------------------------------------------
+
+def _win(best_single_rmse: float, ensemble_rmse: float) -> dict:
+    """Helper: minimal window dict for compute_lift_significance."""
+    return {
+        "best_single_rmse": best_single_rmse,
+        "ensemble_rmse": ensemble_rmse,
+        "rmse_ratio": ensemble_rmse / best_single_rmse if best_single_rmse else None,
+    }
+
+
+class TestLiftSignificance:
+    """Unit tests for compute_lift_significance (Phase 7.25)."""
+
+    def test_lift_significance_all_positive_ci_above_zero(self):
+        """When ensemble always beats best-single, CI_low should be > 0."""
+        windows = [_win(2.0, 1.5) for _ in range(20)]  # delta = 0.5 always
+        result = compute_lift_significance(windows, n_boot=200, seed=42)
+        assert not result["insufficient_data"]
+        assert result["ci_low"] > 0.0, f"ci_low={result['ci_low']:.4f} should be > 0"
+        assert result["lift_win_fraction"] == 1.0
+
+    def test_lift_significance_all_negative_ci_below_zero(self):
+        """When ensemble always loses, CI_high should be < 0."""
+        windows = [_win(1.0, 2.0) for _ in range(20)]  # delta = -1.0 always
+        result = compute_lift_significance(windows, n_boot=200, seed=42)
+        assert not result["insufficient_data"]
+        assert result["ci_high"] < 0.0, f"ci_high={result['ci_high']:.4f} should be < 0"
+        assert result["lift_win_fraction"] == 0.0
+
+    def test_lift_significance_mixed_ci_spans_zero(self):
+        """With half wins / half losses near zero, CI should span zero."""
+        wins = [_win(2.0, 1.9) for _ in range(10)]   # delta ~ +0.1
+        losses = [_win(1.9, 2.0) for _ in range(10)]  # delta ~ -0.1
+        windows = wins + losses
+        result = compute_lift_significance(windows, n_boot=500, seed=42)
+        assert not result["insufficient_data"]
+        assert result["ci_low"] <= 0.0, "CI low should be <= 0 for balanced mix"
+        assert result["ci_high"] >= 0.0, "CI high should be >= 0 for balanced mix"
+
+    def test_lift_significance_insufficient_data_flag_at_low_n(self):
+        """With fewer than min_windows=5 valid windows, insufficient_data=True."""
+        windows = [_win(2.0, 1.5), _win(2.0, 1.5), _win(2.0, 1.5)]  # only 3
+        result = compute_lift_significance(windows, min_windows=5, seed=42)
+        assert result["insufficient_data"] is True
+        assert math.isnan(result["mean_lift"])
+        assert math.isnan(result["ci_low"])
+        assert math.isnan(result["ci_high"])
+
+    def test_lift_significance_nan_windows_excluded_from_computation(self):
+        """Windows missing both best_single_rmse+ensemble_rmse and rmse_ratio are skipped."""
+        good = [_win(2.0, 1.5) for _ in range(10)]
+        bad = [{"best_single_rmse": None, "ensemble_rmse": None, "rmse_ratio": None}] * 5
+        windows = good + bad
+        result = compute_lift_significance(windows, seed=42)
+        assert not result["insufficient_data"]
+        assert result["n_windows"] == 10  # only good windows counted
+        assert result["lift_win_fraction"] == 1.0
+
+    def test_lift_significance_no_nan_inf_in_output(self):
+        """Output dict must contain no NaN/inf when sufficient data is present."""
+        windows = [_win(2.0 + i * 0.01, 1.8 + i * 0.005) for i in range(30)]
+        result = compute_lift_significance(windows, n_boot=300, seed=42)
+        assert not result["insufficient_data"]
+        for key, val in result.items():
+            if isinstance(val, float):
+                assert math.isfinite(val), f"Key '{key}' is non-finite: {val}"

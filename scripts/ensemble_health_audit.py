@@ -353,6 +353,11 @@ def compute_adaptive_weights(
         # Pre-normalization DA cap
         for m in MODELS:
             if mean_da.get(m, 1.0) < da_floor and raw_weights[m] > da_cap_weight:
+                log.warning(
+                    "[WARN] DA floor clamp: %s mean_da=%.4f < da_floor=%.2f — "
+                    "capping raw_weight %.4f -> %.4f (da_cap_weight)",
+                    m, mean_da.get(m, 0.0), da_floor, raw_weights[m], da_cap_weight,
+                )
                 raw_weights[m] = da_cap_weight
 
     # Normalize
@@ -475,6 +480,86 @@ def _lift_fraction(windows: list[dict]) -> float:
         if not math.isnan(w.get("rmse_ratio", float("nan"))) and w["rmse_ratio"] < 1.0
     )
     return lifting / len(windows)
+
+
+def compute_lift_significance(
+    windows: list[dict],
+    n_boot: int = 1000,
+    confidence_level: float = 0.95,
+    min_windows: int = 5,
+    seed: int = 42,
+) -> dict:
+    """Bootstrap confidence interval for ensemble lift over best-single-model RMSE.
+
+    Per-window lift delta_i = best_single_rmse_i - ensemble_rmse_i.
+    Positive delta means ensemble wins that window.
+
+    Returns a dict with keys:
+        mean_lift           -- mean(delta) over valid windows
+        ci_low              -- lower bootstrap percentile
+        ci_high             -- upper bootstrap percentile
+        lift_win_fraction   -- fraction of windows with delta > 0
+        n_windows           -- number of valid windows used
+        insufficient_data   -- True when n_valid < min_windows
+
+    All float fields are NaN when insufficient_data=True.
+    Invariants (when sufficient data):
+        ci_low <= mean_lift <= ci_high
+        0.0 <= lift_win_fraction <= 1.0
+    """
+    # Extract per-window lift deltas; skip NaN/inf entries.
+    deltas: list[float] = []
+    for w in windows:
+        best = w.get("best_single_rmse")
+        ens = w.get("ensemble_rmse")
+        if best is None or ens is None:
+            # Fall back to rmse_ratio if direct RMSE values missing.
+            ratio = w.get("rmse_ratio")
+            if ratio is None or not math.isfinite(ratio):
+                continue
+            # delta sign: ratio < 1 means ensemble wins, so delta = 1 - ratio as proxy.
+            # We use actual RMSE when available; ratio-derived delta for legacy windows.
+            deltas.append(1.0 - ratio)
+        else:
+            d = float(best) - float(ens)
+            if math.isfinite(d):
+                deltas.append(d)
+
+    n_valid = len(deltas)
+    nan = float("nan")
+    if n_valid < min_windows:
+        return {
+            "mean_lift": nan,
+            "ci_low": nan,
+            "ci_high": nan,
+            "lift_win_fraction": 0.0 if n_valid == 0 else sum(1 for d in deltas if d > 0) / n_valid,
+            "n_windows": n_valid,
+            "insufficient_data": True,
+        }
+
+    arr = np.array(deltas, dtype=float)
+    mean_lift = float(arr.mean())
+    lift_win_fraction = float((arr > 0).mean())
+
+    # Bootstrap CI: resample with replacement, compute mean each time.
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty(n_boot, dtype=float)
+    for b in range(n_boot):
+        sample = rng.choice(arr, size=n_valid, replace=True)
+        boot_means[b] = sample.mean()
+
+    alpha = (1.0 - confidence_level) / 2.0
+    ci_low = float(np.percentile(boot_means, 100.0 * alpha))
+    ci_high = float(np.percentile(boot_means, 100.0 * (1.0 - alpha)))
+
+    return {
+        "mean_lift": mean_lift,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "lift_win_fraction": lift_win_fraction,
+        "n_windows": n_valid,
+        "insufficient_data": False,
+    }
 
 
 def generate_markdown_report(
