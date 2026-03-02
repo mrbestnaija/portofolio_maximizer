@@ -294,6 +294,7 @@ class PnLIntegrityEnforcer:
         violations = []
         violations.extend(self._check_opening_legs_with_pnl())
         violations.extend(self._check_orphaned_positions())
+        violations.extend(self._check_short_orphaned_positions())  # INT-04: SELL opens
         violations.extend(self._check_diagnostic_contamination())
         violations.extend(self._check_closing_without_entry_link())
         violations.extend(self._check_pnl_arithmetic())
@@ -499,6 +500,104 @@ class PnLIntegrityEnforcer:
                 f"(max_open_age_days={max_open_age_days}). "
                 f"Exemptions: whitelist={covered_as_whitelist}, active_inventory={covered_as_active}, "
                 f"recent_open={covered_as_recent}."
+            ),
+            affected_ids=[int(r["id"]) for r in problematic],
+            count=len(problematic),
+        )]
+
+    def _check_short_orphaned_positions(self) -> List[IntegrityViolation]:
+        """HIGH: stale SELL opening entries (short positions) not covered by BUY closes.
+
+        INT-04 fix: parallel check to _check_orphaned_positions for short legs.
+        Uses the same orphan_threshold_days and whitelist logic.
+        """
+        known_historical: set[int] = {5, 6, 11, 13}
+        raw_whitelist = os.getenv("INTEGRITY_ORPHAN_WHITELIST_IDS", "")
+        if raw_whitelist.strip():
+            for token in raw_whitelist.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    known_historical.add(int(token))
+                except ValueError:
+                    pass
+
+        max_open_age_days = 3
+        raw_max_age = os.getenv("INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS", "").strip()
+        if raw_max_age:
+            try:
+                max_open_age_days = max(0, int(raw_max_age))
+            except ValueError:
+                pass
+
+        # All SELL opening legs (short positions): action = 'SELL' AND is_close = 0
+        sell_rows = self.conn.execute(
+            "SELECT id, ticker, trade_date "
+            "FROM trade_executions "
+            "WHERE action = 'SELL' AND is_close = 0 "
+            "  AND COALESCE(is_diagnostic, 0) = 0 "
+            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "ORDER BY trade_date, id"
+        ).fetchall()
+        if not sell_rows:
+            return []
+
+        # BUY close legs that cover these short opens via entry_trade_id link.
+        covered_sell_ids: set[int] = set()
+        buy_close_rows = self.conn.execute(
+            "SELECT entry_trade_id FROM trade_executions "
+            "WHERE action = 'BUY' AND is_close = 1 "
+            "  AND entry_trade_id IS NOT NULL "
+            "  AND COALESCE(is_diagnostic, 0) = 0 "
+            "  AND COALESCE(is_synthetic, 0) = 0"
+        ).fetchall()
+        for row in buy_close_rows:
+            if row["entry_trade_id"]:
+                covered_sell_ids.add(int(row["entry_trade_id"]))
+
+        now_utc = datetime.now(timezone.utc)
+        problematic: List[Dict[str, Any]] = []
+        for row in sell_rows:
+            sell_id = int(row["id"])
+            if sell_id in known_historical or sell_id in covered_sell_ids:
+                continue
+
+            trade_date_raw = row["trade_date"]
+            trade_dt = None
+            if isinstance(trade_date_raw, datetime):
+                trade_dt = trade_date_raw
+            elif isinstance(trade_date_raw, str) and trade_date_raw.strip():
+                raw = trade_date_raw.strip()
+                try:
+                    trade_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    try:
+                        trade_dt = datetime.strptime(raw[:10], "%Y-%m-%d")
+                    except ValueError:
+                        trade_dt = None
+
+            age_days = (
+                max_open_age_days + 1
+                if trade_dt is None
+                else max(0, (now_utc.date() - trade_dt.date()).days)
+            )
+            if age_days <= max_open_age_days:
+                continue
+            problematic.append(
+                {"id": sell_id, "ticker": str(row["ticker"]), "age_days": int(age_days)}
+            )
+
+        if not problematic:
+            return []
+
+        return [IntegrityViolation(
+            check_name="ORPHANED_SHORT_POSITION",
+            severity="HIGH",
+            description=(
+                f"{len(problematic)} stale SELL opening leg(s) (short positions) are not "
+                f"covered by BUY closes (max_open_age_days={max_open_age_days}). "
+                "INT-04 fix: short orphan detection is now symmetric with long orphan check."
             ),
             affected_ids=[int(r["id"]) for r in problematic],
             count=len(problematic),

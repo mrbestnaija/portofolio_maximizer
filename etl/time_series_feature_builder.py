@@ -217,15 +217,17 @@ class TimeSeriesFeatureBuilder:
 
         # Signal Quality A: merge optional macro context columns.
         # Only columns in MACRO_COLUMNS that are present in macro_context are merged.
-        # Values are forward-filled then back-filled to handle business-day gaps.
+        # LEAK-02 fix: clip macro_context to price_history date range before alignment
+        # to prevent bfill() from filling past feature rows with future macro values.
         if macro_context is not None and not macro_context.empty:
+            price_end = df.index.max()
+            clipped_macro = macro_context[macro_context.index <= price_end]
             for col in self.MACRO_COLUMNS:
-                if col in macro_context.columns:
+                if col in clipped_macro.columns:
                     aligned = (
-                        macro_context[col]
+                        clipped_macro[col]
                         .reindex(df.index)
                         .ffill()
-                        .bfill()
                         .fillna(0.0)
                     )
                     features[col] = aligned.astype(float)

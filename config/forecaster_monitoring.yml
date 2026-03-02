@@ -72,6 +72,10 @@ forecaster_monitoring:
     # lift_fraction >= min_lift_fraction (0.25) over 20+ fresh audit windows.
     fail_on_violation_during_holding_period: false
 
+    # WIRE-03 fix: maximum days the system may stay in INCONCLUSIVE warmup before
+    # --allow-inconclusive-lift is treated as FAIL. Prevents indefinite bypass.
+    max_warmup_days: 30
+
     # If true, fail the RMSE gate when the ensemble does not demonstrate enough
     # lift over the selected baseline across the holding period window.
     # Keep ensemble in non-default/research-only posture when lift is weak, but

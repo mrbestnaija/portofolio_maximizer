@@ -69,18 +69,27 @@ def main():
         print("\n[PASS] All integrity checks passed.")
         sys.exit(0)
 
-    # Categorize violations
-    fail_severities = {"CRITICAL", "HIGH"}
-    if args.strict:
-        fail_severities.add("MEDIUM")
+    # INT-05 fix: MEDIUM violations are always counted; they become blocking when the
+    # count exceeds max_medium_violations (default 10) or when --strict is set.
+    max_medium_violations = 0 if args.strict else 10
+    medium_violations = [v for v in violations if v.severity == "MEDIUM"]
 
-    blocking = [v for v in violations if v.severity in fail_severities]
-    warnings = [v for v in violations if v.severity not in fail_severities]
+    # Build blocking set: CRITICAL and HIGH always block; MEDIUM blocks when threshold exceeded.
+    blocking_levels = frozenset({"CRITICAL", "HIGH"})
+    if args.strict or len(medium_violations) > max_medium_violations:
+        blocking_levels = frozenset({"CRITICAL", "HIGH", "MEDIUM"})
+
+    blocking = [v for v in violations if v.severity in blocking_levels]
+    warnings = [v for v in violations if v.severity not in blocking_levels]
 
     for v in violations:
-        status = "FAIL" if v.severity in fail_severities else "WARN"
+        status = "FAIL" if v.severity in blocking_levels else "WARN"
         print(f"\n  [{status}] [{v.severity}] {v.check_name}")
         print(f"         {v.description}")
+
+    if medium_violations and len(medium_violations) <= max_medium_violations and not args.strict:
+        print(f"\n  [NOTE] {len(medium_violations)} MEDIUM violation(s) below threshold "
+              f"({max_medium_violations} max); non-blocking. Use --strict to enforce.")
 
     if blocking:
         print(f"\n[FAIL] {len(blocking)} blocking violation(s) found.")
