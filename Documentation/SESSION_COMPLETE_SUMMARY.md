@@ -1,3 +1,68 @@
+# Phases 7.25 / 7.29 / 7.30 / 7.31 — Session Complete Summary
+
+**Date**: 2026-03-02
+**Regression baseline**: 1489 passed, 1 skipped, 7 xfailed
+**Commit**: b0c686d (phases 7.25/7.29/7.30/7.31 + hardening fixes)
+
+## What Was Done
+
+### Phase 7.25 — Statistical Lift Validation
+- Added `compute_lift_significance()` to `scripts/ensemble_health_audit.py`
+  (bootstrap 95% CI for mean ensemble lift; NaN-clean, deterministic with `seed=42`)
+- `LAYER_REQUIRED_KEYS[1]` extended with 5 new CI keys
+- `run_layer1_forecast_quality` now emits `lift_mean / lift_ci_low / lift_ci_high /
+  lift_win_fraction / lift_ci_insufficient_data`; CI-span-zero with n_used >= 20 → WARN
+- +6 unit tests in `test_ensemble_health_audit.py`
+- New `tests/integration/test_lift_significance.py` (+4 tests)
+
+### Phase 7.29 — BYP-01 Clean Close
+- `chk_gate_skip_bypass` in `adversarial_diagnostic_runner.py` now detects
+  `MAX_SKIPPED_OPTIONAL_GATES` enforcement; result: BYP-01 → CLEARED (0 CRITICAL confirmed)
+- Anti-regression lock: none of the 6 formerly-CRITICAL IDs may appear as confirmed
+- `TestSkipLimitEnforcement` class added to `test_run_all_gates.py` (+2 tests)
+- +2 unit tests in `test_adversarial_diagnostic_runner.py`
+
+### Phase 7.30 — Capital Readiness Gate
+- New `scripts/capital_readiness_check.py`: R1 (adversarial), R2 (gate artifact freshness),
+  R3 (trade quality), R4 (calibration) hard gates; R5 (lift CI) advisory-only
+- New `tests/scripts/test_capital_readiness_check.py` (+10 tests, all monkeypatched)
+- CLI: `--json`, `--db`, `--audit-dir`, `--jsonl`; exits 0/1/2
+
+### Phase 7.31 (subset) — Numerical Stability Guards
+- `ensemble_health_audit.py`: DA-cap clamp log promoted DEBUG → WARNING
+- `time_series_signal_generator.py`: NaN/inf guard after `predict_proba`; `import math` added
+- New `tests/scripts/test_numerical_stability.py` (+12 tests covering
+  `_apply_da_cap`, `EnsembleCoordinator.select_weights`, rank normalization,
+  Platt clamp, CI stability)
+
+### Post-Phase Hardening Fixes (this session)
+- **HIGH**: Capital readiness verdict bug fixed — when R1 fails alongside R3/R4 insufficient
+  data, verdict was incorrectly "INSUFFICIENT_DATA"; now always "FAIL" when R1/R2 fail
+- **MEDIUM**: `generate_markdown_report` in `ensemble_health_audit.py` now prints "N/A"
+  instead of "nan" when per-model mean RMSE/DA is not finite
+- **MEDIUM**: `ensemble_loss` computation in same function now filters non-finite RMSE
+  values before `np.mean` to avoid NaN propagating into Shapley interpretation
+
+### Documentation
+- Created `Documentation/DOCUMENTATION_INDEX.md` — canonical navigator with
+  Institutional Runbooks, Core Standards, Planning/Status, Archived History, and
+  Compatibility Policy sections
+
+## Regression Key Numbers
+- Previous baseline (Phase 7.21-7.24): 1452 passed
+- This session net: +37 new tests
+- Final: **1489 passed, 1 skipped, 7 xfailed**
+
+## Known Deferred Issues
+- OrderLearner wiring: appears already fixed in Phase 7.16 (MEMORY.md confirms);
+  investigation finding was stale
+- `confidence_calibrated` NULL when calibration is inactive: by-design (no pairs → NULL)
+- `== 0.0` division guard in `_normalize`: correct — filtered dict is always > 0
+- ShapleyAttributor `0.0` default: conservative/acceptable; "neutral" is correct label
+  when computation is unavailable
+
+---
+
 # Phase 7.3 Ensemble GARCH Integration - Session Complete Summary
 
 **Date:** 2026-01-21
