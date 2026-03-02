@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Add item to GitHub Project 7
-        uses: actions/add-to-project@v0.5.0
+        uses: actions/add-to-project@v1.0.2
         with:
           project-url: https://github.com/users/mrbestnaija/projects/7
           github-token: ${{ secrets.PROJECTS_TOKEN }}
