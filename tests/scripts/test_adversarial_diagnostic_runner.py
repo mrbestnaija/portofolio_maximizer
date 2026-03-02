@@ -281,6 +281,7 @@ class TestGateSkipBypass:
     """BYP-01 — CRITICAL: all optional gates skippable simultaneously."""
 
     def test_confirmed_when_all_three_skip_flags_present(self):
+        """All 3 flags + no enforcement → CONFIRMED."""
         src = (
             "--skip-forecast-gate ... --skip-profitability-gate ... "
             "--skip-institutional-gate ... 'passed': True"
@@ -290,9 +291,37 @@ class TestGateSkipBypass:
         assert result.passed is False
 
     def test_cleared_when_not_all_skip_flags_present(self):
+        """Only 1 of 3 flags → CLEARED (skip flags not all present)."""
         src = "--skip-forecast-gate ... 'passed': True"
         result = chk_gate_skip_bypass(src)
         assert result.passed is True
+
+    def test_byp01_cleared_when_enforcement_code_present(self):
+        """Phase 7.29: all 3 flags + MAX_SKIPPED_OPTIONAL_GATES + overall_passed=False → CLEARED."""
+        src = (
+            "--skip-forecast-gate ... --skip-profitability-gate ... "
+            "--skip-institutional-gate ...\n"
+            "MAX_SKIPPED_OPTIONAL_GATES = 1\n"
+            "overall_passed = False\n"
+            "'passed': True"
+        )
+        result = chk_gate_skip_bypass(src)
+        assert result.passed is True, (
+            "BYP-01 should be CLEARED when MAX_SKIPPED_OPTIONAL_GATES enforcement is present"
+        )
+        assert "CLEARED" in result.detail
+
+    def test_byp01_confirmed_when_no_enforcement(self):
+        """All 3 flags with no MAX_SKIPPED_OPTIONAL_GATES guard → CONFIRMED."""
+        src = (
+            "--skip-forecast-gate ... --skip-profitability-gate ... "
+            "--skip-institutional-gate ... 'passed': True\n"
+            "# no enforcement here"
+        )
+        result = chk_gate_skip_bypass(src)
+        assert result.passed is False, (
+            "BYP-01 should be CONFIRMED when skip flags present with no enforcement"
+        )
 
 
 class TestLayer2ExitCodeIgnored:
@@ -638,10 +667,10 @@ class TestRunAllChecks:
                 assert f.passed, "All confirmed findings must precede cleared findings"
 
     def test_critical_confirmed_findings_exist_in_production_codebase(self, tmp_path):
-        """CRITICAL findings baseline after Phase 7.21-7.23 fixes.
+        """CRITICAL findings baseline after Phase 7.21-7.29 fixes.
 
-        INT-03, BYP-02, BYP-03, BYP-04, LEAK-01 are now CLEARED.
-        BYP-01 remains confirmed (skip flags still exist; enforcement bounds them).
+        Phase 7.29 clears BYP-01: MAX_SKIPPED_OPTIONAL_GATES enforcement is now
+        recognised by the detection check.  0 CRITICAL findings should be confirmed.
         """
         db_real = ROOT / "data" / "portfolio_maximizer.db"
         audit_dir = ROOT / "logs" / "forecast_audits"
@@ -650,18 +679,17 @@ class TestRunAllChecks:
             f for f in findings if f.severity == "CRITICAL" and not f.passed
         ]
         critical_ids = {f.id for f in critical_confirmed}
-        # BYP-01 remains: skip flags still present (now bounded to max 1, but
-        # the detection check flags the presence of skip flags + gate passing).
-        assert "BYP-01" in critical_ids, (
-            "BYP-01 (gate skip bypass) must remain CONFIRMED. "
-            "The enforcement limit exists but skip flags themselves are still present."
+        # Phase 7.29: all CRITICAL findings are now CLEARED — 0 confirmed expected.
+        assert len(critical_confirmed) == 0, (
+            f"Expected 0 CRITICAL confirmed findings after Phase 7.29, "
+            f"but got: {critical_ids}"
         )
-        # INT-03, BYP-02, BYP-03, BYP-04, LEAK-01 must now be CLEARED
-        for cleared_id in ("INT-03", "BYP-02", "BYP-03", "BYP-04", "LEAK-01"):
-            assert cleared_id not in critical_ids, (
-                f"{cleared_id} was fixed in Phase 7.21-7.23 and must be CLEARED. "
-                f"If it reappears, a regression was introduced."
-            )
+        # Anti-regression lock: formerly-CRITICAL IDs must never reappear as confirmed.
+        formerly_critical = {"INT-03", "BYP-01", "BYP-02", "BYP-03", "BYP-04", "LEAK-01"}
+        regressions = formerly_critical & critical_ids
+        assert not regressions, (
+            f"Regression detected: {regressions} were previously CLEARED but are now CONFIRMED."
+        )
 
 
 class TestJsonOutputSchema:

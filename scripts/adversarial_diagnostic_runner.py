@@ -368,15 +368,27 @@ def chk_gate_skip_bypass(src_run_all: str) -> Finding:
         "--skip-profitability-gate" in src_run_all,
         "--skip-institutional-gate" in src_run_all,
     ]
-    if all(skip_flags):
-        # Verify skipped ones are marked passed=True
-        if '"passed": True' in src_run_all or "'passed': True" in src_run_all:
-            f.passed = False
-            f.detail += " CONFIRMED: all 3 skip flags exist and skipped gates marked passed=True."
-        else:
-            f.passed = False
+    has_all_skip_flags = all(skip_flags)
+    # Phase 7.22 enforcement: MAX_SKIPPED_OPTIONAL_GATES = 1 sets overall_passed = False
+    # when more than 1 optional gate is skipped, preventing the all-skip bypass.
+    has_enforcement = (
+        "MAX_SKIPPED_OPTIONAL_GATES" in src_run_all
+        and (
+            "overall_pass = False" in src_run_all
+            or "overall_passed = False" in src_run_all
+        )
+    )
+    if not has_all_skip_flags:
+        f.passed = True  # CLEARED: skip flags removed from source
+    elif has_enforcement:
+        f.passed = True  # CLEARED: MAX_SKIPPED_OPTIONAL_GATES enforcement prevents all-skip bypass
+        f.detail += (
+            " CLEARED: MAX_SKIPPED_OPTIONAL_GATES enforcement is present and sets "
+            "overall_passed=False when > 1 optional gate is skipped."
+        )
     else:
-        f.passed = True
+        f.passed = False  # CONFIRMED: all 3 skip flags present with no enforcement guard
+        f.detail += " CONFIRMED: all 3 skip flags exist with no enforcement to prevent bypass."
     return f
 
 
