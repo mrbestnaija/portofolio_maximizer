@@ -49,31 +49,58 @@ read target at the start of every session.
 
 ## Archived Historical Notes
 
-Historical session summaries, status snapshots, and run logs.
-New entries go into the appropriate subdirectory; do not edit archived files.
+Historical session summaries, status snapshots, and run logs.  All files here are
+read-only records; do not edit archived files — append new entries in the canonical
+planning files above instead.
+
+### Session Notes
+
+Completed session summaries archived after the rolling window in `SESSION_COMPLETE_SUMMARY.md`
+moves on.
+
+| File | Contents |
+|------|----------|
+| [history/sessions/SESSION_SUMMARY_2026_01_21.md](history/sessions/SESSION_SUMMARY_2026_01_21.md) | Phase 7.3 multi-session GARCH ensemble integration |
+
+Add new entries to `history/sessions/` using the naming convention
+`SESSION_SUMMARY_YYYY_MM_DD.md` before removing them from the rolling canonical record.
+
+### Pipeline Run Logs
+
+Reference records of notable pipeline runs (dry-run baselines and live execution evidence).
+
+| File | Contents |
+|------|----------|
+| [history/run_logs/pipeline_live_run_log.md](history/run_logs/pipeline_live_run_log.md) | Live pipeline run evidence log |
+| [history/run_logs/pipeline_dry_run_log.md](history/run_logs/pipeline_dry_run_log.md) | Dry-run / smoke-test baseline log |
+
+Add new run logs to `history/run_logs/` using the naming convention
+`pipeline_<mode>_run_log_YYYYMMDD.md`.
+
+### Status Snapshots
 
 | Path | Contents |
 |------|----------|
 | [history/status/](history/status/) | Phase-end status snapshots (e.g., PROJECT_STATUS_2026-01-23.md) |
-| [history/sessions/](history/sessions/) | Session summaries older than the current rolling window |
-| [history/run_logs/](history/run_logs/) | Pipeline and audit run output archives |
 
 ---
 
 ## Compatibility Policy
 
-When a document is moved or renamed, a stub is left at the previous path that redirects
-to the new canonical location.  This prevents broken links in existing cron jobs, agent
-references, and external tooling.
+Historical files that have been moved under `Documentation/history/` retain compatibility
+stubs at their previous paths.  **Do not delete a stub until all inbound references
+(cron jobs, agent instructions, external tooling) have been updated and validated.**
 
-**Stub format** (insert at top of old file):
+**Stub format** (insert at the top of the old file when moving it):
 
 ```markdown
-> **[MOVED]** This document has been moved to [NEW_FILENAME.md](NEW_FILENAME.md).
-> This stub will be removed after 2026-06-01.
+> **[MOVED]** This document has been moved to
+> [history/sessions/SESSION_SUMMARY_YYYY_MM_DD.md](history/sessions/SESSION_SUMMARY_YYYY_MM_DD.md).
+> This stub will be removed once all inbound references are updated.
 ```
 
-Stubs older than 90 days are removed in the next hygiene cleanup pass.
+Stubs are reviewed quarterly; confirmed-dead stubs are removed in the next hygiene
+cleanup pass after all referencing systems have been updated.
 
 ---
 
