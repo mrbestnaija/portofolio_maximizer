@@ -260,11 +260,28 @@ def run_layer1_forecast_quality(
             "using window_end order for recency (may indicate stale file timestamps)"
         )
 
+    # WIRE-01 fix: read min_lift_rmse_ratio from forecaster_monitoring.yml so Layer 1 lift
+    # computation is aligned with check_forecast_audits.py (which also uses this value).
+    _min_lift_rmse_ratio = 0.0
+    try:
+        import yaml as _yaml_wire01
+        _fm_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if _fm_path.exists():
+            _fm_cfg = _yaml_wire01.safe_load(_fm_path.read_text(encoding="utf-8")) or {}
+            _min_lift_rmse_ratio = float(
+                _fm_cfg.get("forecaster_monitoring", {})
+                .get("regression_metrics", {})
+                .get("min_lift_rmse_ratio", 0.0)
+            )
+    except Exception:
+        pass
+    _lift_threshold = 1.0 - _min_lift_rmse_ratio  # 1.0 when min_lift_rmse_ratio=0.0 (default)
+
     # Lift fractions
     def _lift_frac(ws: list[dict]) -> float:
         if not ws:
             return 0.0
-        lift_count = sum(1 for w in ws if (w.get("rmse_ratio") or math.inf) < 1.0)
+        lift_count = sum(1 for w in ws if (w.get("rmse_ratio") or math.inf) < _lift_threshold)
         return lift_count / len(ws)
 
     lift_global = _lift_frac(windows_sorted)
@@ -299,6 +316,15 @@ def run_layer1_forecast_quality(
     # Determine status (FAIL > WARN > PASS, checked in order)
     status = "PASS"
     reasons: list[str] = []
+
+    # THR-01 fix: critically-low coverage_ratio escalates to FAIL (not just WARN) when there
+    # are enough windows to be statistically meaningful. coverage_ratio < 5% with n_used >= 50
+    # means lift evidence is drawn from a non-representative sample -- hard failure.
+    if coverage_ratio < 0.05 and n_used >= 50:
+        status = "FAIL"
+        reasons.append(
+            f"coverage_ratio={coverage_ratio:.1%} < 5% FAIL escalation (n_used={n_used} >= 50)"
+        )
 
     if n_used >= min_windows_for_fail and lift_global < fail_lift_threshold:
         status = "FAIL"

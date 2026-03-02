@@ -43,13 +43,16 @@ from scripts.adversarial_diagnostic_runner import (  # noqa: E402
     Finding,
     chk_allow_inconclusive_lift,
     chk_audit_file_no_validation,
+    chk_coverage_ratio_warn_not_fail,
     chk_duplicate_close_null_bypass,
     chk_gate_skip_bypass,
     chk_institutional_gate_doesnt_verify_prior_gates,
     chk_layer2_exit_code_ignored,
+    chk_lift_computation_mismatch,
     chk_macro_bfill_lookahead,
     chk_medium_violations_in_ci_gate,
     chk_null_flag_bypass,
+    chk_order_learner_aic_bounds,
     chk_orphan_shorts,
     chk_overnight_exit_code,
     chk_platt_no_train_test_split,
@@ -613,6 +616,93 @@ class TestWhitelistDivergence:
         src_gate = "WHITELIST_IDS = os.environ.get('INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS')"
         result = chk_whitelist_divergence(src_enforcer, src_gate)
         assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# Group 4b: MEDIUM findings — Phase 7.33 fixes
+# ---------------------------------------------------------------------------
+
+class TestOrderLearnerAicBounds:
+    """POI-01 — MEDIUM: OrderLearner AIC lower bound prevents grid-search poisoning."""
+
+    def test_confirmed_when_only_finite_check_no_lower_bound(self):
+        src = (
+            "if not math.isfinite(aic_val):\n"
+            "    return\n"
+        )
+        result = chk_order_learner_aic_bounds(src)
+        assert result.id == "POI-01"
+        assert result.passed is False, "isfinite-only guard should confirm POI-01"
+
+    def test_cleared_when_lower_bound_aic_1e6_present(self):
+        src = (
+            "if not math.isfinite(aic_val):\n"
+            "    return\n"
+            "if aic_val < -1e6:\n"
+            "    logger.warning('AIC below floor')\n"
+            "    return\n"
+        )
+        result = chk_order_learner_aic_bounds(src)
+        assert result.passed is True, "aic < -1e6 guard should clear POI-01"
+
+    def test_cleared_when_lower_bound_pattern_aic_lt_dash(self):
+        src = (
+            "if aic_val < -500000:\n"
+            "    return\n"
+        )
+        result = chk_order_learner_aic_bounds(src)
+        assert result.passed is True, "aic < - pattern should clear POI-01"
+
+
+class TestCoverageRatioWarnNotFail:
+    """THR-01 — MEDIUM: coverage_ratio critically low must escalate to FAIL."""
+
+    def test_confirmed_when_only_warn_on_low_coverage(self):
+        src = (
+            "if coverage_ratio < 0.20:\n"
+            "    status = 'WARN'\n"
+        )
+        result = chk_coverage_ratio_warn_not_fail(src)
+        assert result.id == "THR-01"
+        assert result.passed is False, "WARN-only on coverage_ratio should confirm THR-01"
+
+    def test_cleared_when_fail_on_critically_low_coverage(self):
+        src = (
+            "if coverage_ratio < 0.05 and n_used >= 50:\n"
+            "    status = 'FAIL'\n"
+            "    reasons.append(f'coverage_ratio={coverage_ratio:.1%} < 5% FAIL escalation')\n"
+        )
+        result = chk_coverage_ratio_warn_not_fail(src)
+        assert result.passed is True, "coverage_ratio FAIL escalation should clear THR-01"
+
+
+class TestLiftComputationMismatch:
+    """WIRE-01 — MEDIUM: Layer 1 lift threshold must use config value, not hardcode 1.0."""
+
+    def test_confirmed_when_hardcoded_1_0_and_gate_configurable(self, monkeypatch):
+        import scripts.adversarial_diagnostic_runner as mod
+        src_cmi = "rmse_ratio < 1.0\n# uses rmse_ratio"
+        src_gate = "min_lift_rmse_ratio = cfg.get('min_lift_rmse_ratio', 0.0)"
+        result = chk_lift_computation_mismatch(src_cmi, src_gate)
+        assert result.id == "WIRE-01"
+        assert result.passed is False, "hardcoded < 1.0 with configurable gate confirms WIRE-01"
+
+    def test_cleared_when_layer1_uses_config_threshold(self):
+        src_cmi = (
+            "_min_lift_rmse_ratio = 0.0\n"
+            "_lift_threshold = 1.0 - _min_lift_rmse_ratio\n"
+            "if (rmse_ratio or math.inf) < _lift_threshold:\n"
+        )
+        src_gate = "min_lift_rmse_ratio = cfg.get('min_lift_rmse_ratio', 0.0)"
+        result = chk_lift_computation_mismatch(src_cmi, src_gate)
+        assert result.passed is True, "removing < 1.0 literal should clear WIRE-01"
+
+    def test_cleared_when_gate_has_no_configurable_lift_threshold(self):
+        # If gate doesn't use configurable threshold, no mismatch detected
+        src_cmi = "rmse_ratio < 1.0"
+        src_gate = "# gate uses hardcoded threshold only"  # no configurable threshold key
+        result = chk_lift_computation_mismatch(src_cmi, src_gate)
+        assert result.passed is True, "no gate config means no mismatch to detect"
 
 
 # ---------------------------------------------------------------------------

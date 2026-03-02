@@ -183,6 +183,14 @@ class OrderLearner:
                 aic,
             )
             return
+        # POI-01 fix: AIC lower bound — values below -1e6 are physically implausible for
+        # financial time series and indicate numerical blow-up or DB poisoning.
+        if aic_val < -1e6:
+            logger.warning(
+                "OrderLearner.record_fit: AIC=%r below plausibility floor (-1e6) for %s/%s; rejected.",
+                aic_val, ticker, model_type,
+            )
+            return
         regime_key = _regime_key(regime)
         op_json = _canonical_json(order_params)
         today = date.today().isoformat()
