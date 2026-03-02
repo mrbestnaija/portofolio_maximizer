@@ -1,10 +1,32 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified (focused)**: 2026-01-29
-**Last full-suite**: 2026-01-07
+**Last verified (focused)**: 2026-03-02
+**Last full-suite**: 2026-03-02
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-02-25
+**Document updated**: 2026-03-02
+
+## Phase 7.25-7.31 Complete (2026-03-02)
+
+**Regression baseline**: 1489 passed, 1 skipped, 7 xfailed (`pytest -m "not gpu and not slow"`)
+**Commit**: b0c686d
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 7.25 | Statistical lift validation — bootstrap 95% CI for mean ensemble lift | COMPLETE |
+| 7.29 | BYP-01 clean close — `MAX_SKIPPED_OPTIONAL_GATES` enforcement recognized | COMPLETE |
+| 7.30 | Capital readiness gate (`scripts/capital_readiness_check.py`) | COMPLETE |
+| 7.31-subset | Numerical stability guards (NaN/inf guards in Platt + ensemble health) | COMPLETE |
+
+**Post-hardening fixes applied (2026-03-02)**:
+- Capital readiness verdict logic: R1/R2 failures now always yield FAIL (not INSUFFICIENT_DATA)
+- Markdown NaN guard: `generate_markdown_report` emits "N/A" instead of "nan" for missing RMSE/DA
+- Non-finite ensemble RMSE values filtered before `np.mean` in Shapley computation
+
+**Deferred phases**:
+- 7.26 (DA→WR gap), 7.27 (Sharpe monitoring), 7.28 (position sizing), 7.32 (viz) — awaiting DB join infrastructure or trading-engine changes
+
+**Adversarial status**: 0 CRITICAL findings confirmed (BYP-01 cleared Phase 7.29)
 
 **Metric definitions (canonical)**: `Documentation/METRICS_AND_EVALUATION.md` (implementations in `etl/database_manager.py`, `etl/portfolio_math.py`, `etl/statistical_tests.py`).
 

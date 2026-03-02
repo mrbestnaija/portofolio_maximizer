@@ -251,15 +251,17 @@ def run_capital_readiness(
         warnings.append(r5_warn)
 
     # Verdict
+    # INSUFFICIENT_DATA only when ALL failures are missing-data (R3/R4 only) and
+    # both hard gates (R1, R2) passed.  If either R1 or R2 failed, always FAIL —
+    # adversarial/gate-artifact failures are hard failures regardless of data depth.
     if reasons:
         if insufficient and all(
             msg.startswith(("R3:", "R4:")) for msg in reasons
         ) and r1_ok and r2_ok:
             verdict = "INSUFFICIENT_DATA"
-            ready = False
         else:
-            verdict = "FAIL" if not insufficient else "INSUFFICIENT_DATA"
-            ready = False
+            verdict = "FAIL"
+        ready = False
     else:
         verdict = "PASS"
         ready = True

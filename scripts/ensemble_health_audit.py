@@ -571,7 +571,12 @@ def generate_markdown_report(
     duplicate_count: int,
 ) -> str:
     lift = _lift_fraction(windows)
-    ensemble_loss = float(np.mean([w["ensemble_rmse"] for w in windows])) if windows else 1.0
+    _ens_rmse_vals = [
+        float(w["ensemble_rmse"])
+        for w in windows
+        if math.isfinite(float(w.get("ensemble_rmse", float("nan"))))
+    ]
+    ensemble_loss = float(np.mean(_ens_rmse_vals)) if _ens_rmse_vals else 1.0
     lines = [
         "# Ensemble Health Audit",
         f"**Generated**: {datetime.datetime.now().isoformat(timespec='seconds')}",
@@ -647,7 +652,9 @@ def generate_markdown_report(
     for m in MODELS:
         p = params.get("mean_rmse", {}).get(m, float("nan"))
         d = params.get("mean_da", {}).get(m, float("nan"))
-        lines.append(f"- **{m}**: RMSE={p:.4f}, DA={d:.3f}")
+        p_str = f"{p:.4f}" if math.isfinite(p) else "N/A"
+        d_str = f"{d:.3f}" if math.isfinite(d) else "N/A"
+        lines.append(f"- **{m}**: RMSE={p_str}, DA={d_str}")
     lines.append("")
 
     return "\n".join(lines)
