@@ -97,3 +97,10 @@ quant_validation:
     log_dir: "logs/signals"
     filename: "quant_validation.jsonl"
     tail_entries: 10            # Used by bash helpers when printing summaries
+
+# THR-03 fix: canonical accessor path used by adversarial checker and Layer 3 of
+# check_model_improvement.py (quant_success.quant_validation.min_directional_accuracy).
+# Value must stay in sync with quant_validation.success_criteria.min_directional_accuracy above.
+quant_success:
+  quant_validation:
+    min_directional_accuracy: 0.45

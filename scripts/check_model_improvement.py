@@ -858,7 +858,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             elif layer == 2:
                 results.append(run_layer2_gate_status())
             elif layer == 3:
-                results.append(run_layer3_trade_quality(db_path))
+                # THR-03 fix: wire win_rate_warn to quant_success_config.yml
+                # min_directional_accuracy so Layer 3 and quant_validation_health agree.
+                win_rate_warn = 0.45  # default; overridden by config if present
+                try:
+                    import yaml as _yaml  # type: ignore[import]
+                    _qs_path = REPO_ROOT / "config" / "quant_success_config.yml"
+                    if _qs_path.exists():
+                        _qs_cfg = _yaml.safe_load(_qs_path.read_text(encoding="utf-8")) or {}
+                        win_rate_warn = float(
+                            _qs_cfg.get("quant_success", {})
+                            .get("quant_validation", {})
+                            .get("min_directional_accuracy", win_rate_warn)
+                        )
+                except Exception:
+                    pass
+                results.append(run_layer3_trade_quality(db_path, win_rate_warn=win_rate_warn))
             elif layer == 4:
                 results.append(run_layer4_calibration(db_path, jsonl_path))
     except Exception as exc:

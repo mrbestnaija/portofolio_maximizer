@@ -213,9 +213,9 @@ adaptive_candidate_weights:
   da_floor: 0.1
   da_cap_weight: 0.1
   weights:
-  - garch: 0.347987
-    samossa: 0.31219
-    mssa_rl: 0.339823
+  - garch: 0.348818
+    samossa: 0.314581
+    mssa_rl: 0.336602
   - garch: 0.7
     mssa_rl: 0.3
   - garch: 1.0

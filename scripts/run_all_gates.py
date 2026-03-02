@@ -149,6 +149,9 @@ def main() -> None:
 
     # Gate 3: production audit gate
     if not args.skip_profitability_gate:
+        # BYP-05 fix: --allow-inconclusive-lift is time-bounded by max_warmup_days in
+        # forecaster_monitoring.yml (regression_metrics.max_warmup_days = 30).
+        # After max_warmup_days from first audit, INCONCLUSIVE must be treated as FAIL.
         cmd3 = [python, "scripts/production_audit_gate.py",
                 "--reconcile",              # dry-run: surface unlinked closes without applying; overnight job applies
                 "--allow-inconclusive-lift",  # Phase 7.19: INCONCLUSIVE during warmup = ok (ensemble is DISABLE_DEFAULT)

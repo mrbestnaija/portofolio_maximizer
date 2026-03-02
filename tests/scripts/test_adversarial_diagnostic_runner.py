@@ -733,15 +733,34 @@ class TestJsonOutputSchema:
 class TestExitCodeLogic:
     """Exit code must be 1 when any CRITICAL or HIGH finding is confirmed."""
 
-    def test_exit_code_is_1_when_critical_high_confirmed(self, tmp_path):
+    def test_exit_code_is_0_when_all_critical_high_cleared(self, tmp_path):
+        """Phase 7.32 adversarial hardening: all 17 findings are CLEARED (0 confirmed).
+
+        Previous versions of this test asserted expected_code == 1 because Phase 7.20
+        had known CONFIRMED CRITICAL/HIGH findings.  After INT-04, INT-05, BYP-05,
+        WIRE-03, LEAK-02, THR-03, POI-02 were fixed in Phase 7.32, all findings are
+        CLEARED and the correct exit code is 0.
+
+        Anti-regression: if any future code change re-introduces a CRITICAL/HIGH
+        confirmed finding, this test will FAIL with a helpful message.
+        """
         db = _make_trade_db(tmp_path, [])
+        # WIRE-02 requires production_closed_trades view with all three filters.
+        _add_production_view(db, """
+            CREATE VIEW production_closed_trades AS
+            SELECT * FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+        """)
         findings = run_all_checks(db, tmp_path / "audits", None, None)
         blocking = [f for f in findings if not f.passed and f.severity in ("CRITICAL", "HIGH")]
         expected_code = 1 if blocking else 0
-        # In Phase 7.20, there are known CRITICAL findings -- exit code must be 1
-        assert expected_code == 1, (
-            "With known CRITICAL/HIGH confirmed findings, exit code must be 1. "
-            "If 0 is returned, all findings were incorrectly cleared."
+        confirmed_ids = {f.id for f in blocking}
+        assert expected_code == 0, (
+            f"Phase 7.32: 0 CRITICAL/HIGH findings should be confirmed; "
+            f"but found confirmed: {confirmed_ids}. "
+            "A code change has re-introduced a vulnerability. Fix or explicitly acknowledge it."
         )
 
     def test_exit_code_is_0_when_only_medium_or_lower(self):

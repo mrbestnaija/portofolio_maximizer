@@ -73,6 +73,16 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
     if not db_path.exists():
         return None, [], f"db_not_found:{db_path}"
 
+    # POI-02 fix: apply the same INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS used by
+    # PnLIntegrityEnforcer so that whitelisted resume-originated closes are excluded
+    # from the unlinked-close count (prevents enforcer/gate divergence).
+    _whitelist_raw = os.environ.get("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+    _whitelist_ids: set[int] = set()
+    for _tok in _whitelist_raw.split(","):
+        _tok = _tok.strip()
+        if _tok.isdigit():
+            _whitelist_ids.add(int(_tok))
+
     where = [
         "is_close = 1",
         "entry_trade_id IS NULL",
@@ -81,6 +91,13 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
         # so that reconcile PASS ↔ zero integrity violations, not just zero PnL-carrying ones.
     ]
     params: list[Any] = []
+
+    # Exclude whitelisted resume-originated closes (same whitelist as enforcer).
+    if _whitelist_ids:
+        placeholders_wl = ",".join("?" for _ in _whitelist_ids)
+        where.append(f"id NOT IN ({placeholders_wl})")
+        params.extend(sorted(_whitelist_ids))
+
     filtered_ids = [int(x) for x in (close_ids or []) if int(x) > 0]
     if filtered_ids:
         placeholders = ",".join("?" for _ in filtered_ids)
