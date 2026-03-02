@@ -1,7 +1,7 @@
 # GPU extras validated on Python >=3.10,<3.13 under WSL `simpleTrader_env` (see Documentation/RUNTIME_GUARDRAILS.md)
 # Last updated: 2026-01-31 (no version changes; torch 2.9.1 + CUDA 12.x pinned)
 # Optional ML/GPU extras (torch is also in requirements.txt for GPU-first defaults)
-cupy-cuda12x==13.1.0
+cupy-cuda12x==14.0.0
 fastrlock==0.8.3
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
