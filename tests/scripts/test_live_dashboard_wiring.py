@@ -21,5 +21,26 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
     assert "return null;" in html
 
     # Must include the trade panels + required DOM anchors.
-    for element_id in ("equity-chart", "trades-chart", "trade-pnl-chart", "trade-ticker", "signals-body"):
+    for element_id in (
+        "equity-chart",
+        "trades-chart",
+        "trade-pnl-chart",
+        "trade-ticker",
+        "signals-body",
+        "robustness-status",
+        "robustness-eligibility",
+        "robustness-coverage",
+        "robustness-calibration",
+    ):
         assert f'id="{element_id}"' in html
+
+    assert "No robustness data available." in html
+
+
+def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
+    html = Path("visualizations/live_dashboard.html").read_text(encoding="utf-8")
+
+    assert "const status = robustness.overall_status || robustness.status ||" in html
+    assert "statusEl.textContent = suff.status ||" not in html
+    assert "statusEl.classList.add('status-warn');" in html
+    assert ".status-warn { color: var(--accent-2); }" in html
