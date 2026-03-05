@@ -41,6 +41,30 @@ Configure targets via environment variables (recommended so you do not hardcode 
 - `OPENCLAW_REPLY_CHANNEL` / `OPENCLAW_REPLY_TO` / `OPENCLAW_REPLY_ACCOUNT` (prompt mode optional)  
   Lets prompt mode deliver the reply to a different channel/target.
 
+### Exec Environment Enforcement (Host, Sandbox, ACP)
+
+To avoid host/sandbox/ACP drift between Windows and WSL maintenance paths, use
+the enforcement script before running OpenClaw maintenance flows:
+
+- `python scripts/enforce_openclaw_exec_environment.py`
+- dry-run: `python scripts/enforce_openclaw_exec_environment.py --dry-run`
+
+`scripts/run_openclaw_maintenance.ps1` now enforces this in both paths:
+
+- Windows path: runs `scripts/enforce_openclaw_exec_environment.py` before maintenance.
+- WSL path: runs the same enforcement command inside WSL before invoking cron maintenance.
+
+Runtime health snapshot:
+
+- `python scripts/project_runtime_status.py --pretty`
+
+The runtime status payload now includes explicit `openclaw_exec_env` signals:
+
+- `invalid_exec_host` (`tools.exec.host` not in `sandbox|gateway|node`)
+- `invalid_sandbox_mode` (when host is `sandbox` but sandbox mode is not `non-main|all`)
+- `missing_acp_default_agent`
+- `exec_env_valid`
+
 ### Autonomous-Run Security Guard (Prompt Injection + Sensitive Actions)
 
 Prompt-mode runs (`python scripts/openclaw_notify.py --prompt ...`) now enforce a guard in
@@ -361,9 +385,34 @@ See: `Documentation/INBOX_WORKFLOWS.md`
 
 ## Cron Automation (Updated 2026-02-17)
 
-OpenClaw runs 9 audit-aligned cron jobs via `agentTurn` mode. The local LLM (qwen3:8b)
+OpenClaw runs an audit-aligned cron set via `agentTurn` mode. The local LLM (qwen3:8b)
 receives the cron message, prefers structured orchestrator tools (not generic exec chaining), and either
 reports anomalies or responds `NO_REPLY` (suppressing the notification).
+
+### Read-Only Robustness Jobs (2026-03-03)
+
+Two additional read-only automation jobs now belong to the supported cron set:
+
+- **Quality pipeline**  
+  Runs `.\simpleTrader_env\Scripts\python.exe scripts\run_quality_pipeline.py --json`
+  on a schedule and announces only `WARN`/`ERROR` states. `PASS` must return
+  `NO_REPLY`.
+- **Nightly training curation**  
+  Runs `.\simpleTrader_env\Scripts\python.exe scripts\build_training_dataset.py --json`
+  and announces only when curation fails closed, writes zero rows unexpectedly,
+  or errors.
+
+Operational rules:
+
+- These jobs are advisory/read-only. They do not edit routing config or relax any
+  gate thresholds.
+- Cron payloads must use checked-in scripts only; no inline `python -c`
+  maintenance logic for these tasks.
+- Notification posture remains anomaly-only:
+  - routine success -> `NO_REPLY`
+  - partial-data / fail-closed / hard error -> concise announcement
+- Canonical operator reference:
+  - `Documentation/ROBUSTNESS_AUTOMATION_RUNBOOK.md`
 
 For production gate/reconciliation requests, prompt templates now bias to:
 - `run_production_audit_gate` tool (inside `scripts/llm_multi_model_orchestrator.py`)
@@ -825,6 +874,8 @@ Assign cron jobs to specific agents to isolate workloads:
 | Quant Validation Health (daily) | trading | Signal quality |
 | Signal Linkage Monitor (daily) | trading | Trade linkage |
 | Ticker Health Monitor (daily) | trading | Per-ticker PnL |
+| Quality Pipeline (daily) | trading | Read-only eligibility/context/chart refresh |
+| Nightly Training Curation (nightly) | training | Read-only curated dataset build |
 | GARCH Unit-Root Guard (weekly) | training | Model diagnostics |
 | Overnight Hold Monitor (weekly) | training | Strategy analysis |
 | System Health Check (6h) | ops | General health |

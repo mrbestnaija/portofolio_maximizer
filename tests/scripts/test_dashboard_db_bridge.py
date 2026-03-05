@@ -138,6 +138,56 @@ def test_positions_fallback_uses_average_cost(tmp_path) -> None:
     assert pos["entry_price"] == 10.0
 
 
+def test_robustness_sidecars_merge_without_breaking_payload(tmp_path, monkeypatch) -> None:
+    elig = tmp_path / "elig.json"
+    ctx = tmp_path / "ctx.json"
+    perf = tmp_path / "metrics.json"
+    elig.write_text('{"summary":{"HEALTHY":1,"WEAK":1,"LAB_ONLY":0},"tickers":{"GS":{"status":"WEAK"}},"warnings":[]}', encoding="utf-8")
+    ctx.write_text('{"n_total_trades":4,"n_trades_no_confidence":1,"partial_data":true,"regime_quality":{"A":{}}, "confidence_bin_quality":{"0.60-0.65":{}}}', encoding="utf-8")
+    perf.write_text('{"status":"WARN","warnings":["sufficiency_not_green"],"sufficiency":{"status":"INSUFFICIENT"},"chart_paths":{"a":"b"},"coverage_ratio":0.2}', encoding="utf-8")
+
+    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
+    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+
+    robustness = mod._robustness_payload()
+    assert robustness["status"] == "WARN"
+    assert robustness["eligibility_summary"]["WEAK"] == 1
+    assert robustness["weak_tickers"] == ["GS"]
+    assert robustness["context_quality_summary"]["partial_data"] is True
+    assert robustness["sufficiency"]["status"] == "INSUFFICIENT"
+
+
+def test_robustness_warns_when_chart_paths_missing(tmp_path, monkeypatch) -> None:
+    elig = tmp_path / "elig.json"
+    ctx = tmp_path / "ctx.json"
+    perf = tmp_path / "metrics.json"
+    elig.write_text('{"summary":{"HEALTHY":1,"WEAK":0,"LAB_ONLY":0},"tickers":{"GS":{"status":"HEALTHY"}},"warnings":[]}', encoding="utf-8")
+    ctx.write_text('{"n_total_trades":4,"n_trades_no_confidence":0,"partial_data":false,"regime_quality":{"A":{}}, "confidence_bin_quality":{"0.60-0.65":{}}}', encoding="utf-8")
+    perf.write_text(
+        '{"status":"PASS","warnings":[],"sufficiency":{"status":"SUFFICIENT"},"chart_paths":{"per_ticker_wr_pf":"visualizations/performance/missing_chart.png"}}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
+    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+
+    robustness = mod._robustness_payload()
+    assert robustness["status"] == "WARN"
+    assert "chart_missing:per_ticker_wr_pf" in robustness["warnings"]
+
+
+def test_robustness_payload_marks_missing_without_sidecars(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", tmp_path / "missing_elig.json")
+    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", tmp_path / "missing_ctx.json")
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", tmp_path / "missing_perf.json")
+
+    robustness = mod._robustness_payload()
+    assert robustness["status"] == "MISSING"
+    assert robustness["warnings"]
+
+
 # ---------------------------------------------------------------------------
 # P0 guardrail smoke tests: verify both connect helpers harden connections
 # ---------------------------------------------------------------------------

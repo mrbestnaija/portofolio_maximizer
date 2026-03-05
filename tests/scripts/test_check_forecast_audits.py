@@ -18,6 +18,8 @@ def _write_audit(
     horizon: int,
     weights: dict,
     eval_metrics: dict,
+    ticker: str | None = None,
+    regime: str | None = None,
 ) -> None:
     payload = {
         "dataset": {
@@ -25,6 +27,8 @@ def _write_audit(
             "end": end,
             "length": length,
             "forecast_horizon": horizon,
+            "ticker": ticker,
+            "detected_regime": regime,
         },
         "artifacts": {
             "ensemble_weights": weights,
@@ -129,6 +133,166 @@ def test_check_forecast_audits_dedupes_by_dataset_window(tmp_path: Path, monkeyp
     with pytest.raises(SystemExit) as excinfo:
         mod.main()
     assert excinfo.value.code == 0
+
+
+def test_check_forecast_audits_reports_parse_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    valid = audit_dir / "forecast_audit_valid.json"
+    invalid = audit_dir / "forecast_audit_invalid.json"
+    _write_audit(
+        valid,
+        start="2024-01-01",
+        end="2024-01-31",
+        length=180,
+        horizon=30,
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+    )
+    invalid.write_text("{not-json", encoding="utf-8")
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    output = capsys.readouterr().out
+    assert "parseable=1" in output
+    assert "parse_errors=1" in output
+
+
+def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_1.json",
+        start="2024-01-01",
+        end="2024-01-05",
+        length=180,
+        horizon=30,
+        ticker="GOOG",
+        regime="HIGH_VOL_TRENDING",
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+    )
+    _write_audit(
+        audit_dir / "forecast_audit_2.json",
+        start="2024-01-08",
+        end="2024-01-10",
+        length=185,
+        horizon=30,
+        ticker="MSFT",
+        regime="LOW_VOL",
+        weights={"garch": 1.0},
+        eval_metrics={
+            "garch": {"rmse": 3.0},
+            "ensemble": {"rmse": 3.0},
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    output = capsys.readouterr().out
+    assert "RMSE coverage  : raw=2 parseable=2 deduped=2 processed=2 usable=2" in output
+    assert "Outcome cov.   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0" in output
+    assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"] == {
+        "n_raw_windows": 2,
+        "n_parseable_windows": 2,
+        "n_deduped_windows": 2,
+        "n_rmse_windows_processed": 2,
+        "n_rmse_windows_usable": 2,
+        "n_outcome_windows_eligible": 0,
+        "n_outcome_windows_matched": 0,
+    }
+    assert summary["telemetry_contract"]["schema_version"] == 2
+    assert summary["telemetry_contract"]["outcomes_loaded"] is False
+    assert "cache_status" in summary
+    assert summary["window_diversity"] == {
+        "regime_count": 2,
+        "healthy_ticker_count": 2,
+        "distinct_trading_days": 2,
+    }
 
 
 def test_check_audit_file_uses_requested_baseline(tmp_path: Path) -> None:

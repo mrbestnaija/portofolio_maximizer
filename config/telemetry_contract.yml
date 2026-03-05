@@ -1,0 +1,29 @@
+telemetry_contract:
+  current_schema_version: 2
+  schema_definitions:
+    2:
+      required_adversarial_ids:
+        - TCON-01
+        - TCON-02
+        - TCON-03
+        - TCON-04
+        - TCON-05
+      required_contract_fields:
+        - telemetry_contract
+        - telemetry_contract.schema_version
+        - telemetry_contract.outcomes_loaded
+        - telemetry_contract.outcome_join_attempted
+        - window_counts
+        - window_diversity
+        - cache_status
+      required_window_count_keys:
+        - n_raw_windows
+        - n_parseable_windows
+        - n_deduped_windows
+        - n_rmse_windows_processed
+        - n_rmse_windows_usable
+        - n_outcome_windows_eligible
+        - n_outcome_windows_matched
+      forbidden_window_count_keys:
+        - n_matched_windows
+        - n_eligible_windows

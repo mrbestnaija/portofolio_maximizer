@@ -11,7 +11,12 @@
 
 **Version**: 4.4
 **Status**: Phase 7.17 complete — Ensemble Health Audit, Adaptive Weighting, 4-Layer Improvement Checker
-**Last Updated**: 2026-03-01
+**Last Updated**: 2026-03-05
+
+## Contributing
+
+Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
+Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
 ## Current Repo Truth (2026-03-01)
 
@@ -87,6 +92,29 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 ---
 
 ### Latest Enhancements (Mar 2026)
+
+**Phase 7.34: Paranoid Hardening (2026-03-05)**:
+
+- **Data sufficiency fail-closed fixes**:
+  - `scripts/data_sufficiency_monitor.py` now treats `profit_factor=0.0` as below the R3 gate (no threshold dodge path).
+  - Non-finite numeric metrics (`NaN`, `Inf`) are classified as `DATA_ERROR`.
+  - CLI exit codes are now contract-stable: `0=SUFFICIENT`, `1=INSUFFICIENT`, `2=DATA_ERROR` for both JSON and text modes.
+- **Visualization truthfulness hardening**:
+  - `scripts/generate_performance_charts.py` now validates required chart artifacts after generation.
+  - In strict mode, missing chart files produce `chart_missing:<name>` errors and force `status=ERROR`.
+  - `scripts/dashboard_db_bridge.py` now validates chart paths before reporting robustness `OK`; missing chart artifacts downgrade robustness to `WARN`.
+- **Wiring and short-circuit hardening**:
+  - `scripts/run_quality_pipeline.py` now passes one precomputed sufficiency snapshot into chart generation to avoid duplicated evaluation drift.
+  - Eligibility/context/chart-stage surfaced errors now escalate pipeline status to `ERROR`.
+  - `scripts/compute_ticker_eligibility.py` now surfaces DB/query failures via explicit `errors` and `eligibility_query_error` warnings.
+- **OpenClaw host enforcement consistency**:
+  - `scripts/run_openclaw_maintenance.ps1` now runs `scripts/enforce_openclaw_exec_environment.py` on both Windows and WSL paths before maintenance execution.
+  - `scripts/project_runtime_status.py` now emits explicit exec-environment signals for invalid `tools.exec.host`, sandbox mode drift, and missing ACP default agent.
+- **Verification evidence (2026-03-05)**:
+  - `python scripts/adversarial_diagnostic_runner.py --json --severity --fix-report`
+  - `python -m pytest tests/scripts/test_data_sufficiency_monitor.py tests/scripts/test_generate_performance_charts.py tests/scripts/test_run_quality_pipeline.py tests/scripts/test_dashboard_db_bridge.py -q`
+  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
+  - Latest fast-lane result in this cycle: `1590 passed, 3 skipped, 28 deselected, 7 xfailed`.
 
 **Phase 7.17: Ensemble Health Audit & Adaptive Weighting (2026-03-01)**:
 

@@ -10,7 +10,25 @@
 
 **Version**: 3.0
 **Status**: Production Ready âœ…
-**Last Updated**: 2025-12-04
+**Last Updated**: 2026-03-05
+
+## Evidence Integrity Contract (Telemetry)
+
+Canonical policy: [../CONTRIBUTING.md](../CONTRIBUTING.md)
+
+Telemetry changes are contract-bound and must include:
+
+1. `telemetry_contract.schema_version` bump in `config/telemetry_contract.yml`
+2. Adversarial coverage update (`TCON-*` checks in `scripts/adversarial_diagnostic_runner.py`)
+3. Test evidence in PR notes:
+   - `python -m pytest tests/scripts/test_telemetry_contract_policy.py -q`
+   - `python scripts/adversarial_diagnostic_runner.py --json --severity LOW --fix-report`
+
+Hard fail conditions:
+
+- Telemetry changed without schema bump.
+- Schema bumped without adversarial/test coverage update.
+- UI displays a less severe telemetry state than backend robustness/overall status.
 
 ---
 
@@ -38,6 +56,26 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - Centralised logging configuration by removing `logging.basicConfig` calls from extractor modules; entry points now own verbosity without side effects.
 - Improved `etl/yfinance_extractor.py` error handling by dropping recursive session patches and guarding log-return metrics against short or zero-valued series.
 - Reused a persistent `requests.Session` inside `ai_llm/ollama_client.py`, exposing a `close()` helper to trim LLM handshake latency and release sockets cleanly.
+
+### Latest Hardening (Mar 2026)
+
+- Fail-closed quality automation hardening:
+  - `scripts/data_sufficiency_monitor.py` closes the `profit_factor=0.0` threshold dodge and returns `DATA_ERROR` for non-finite metrics.
+  - CLI status contract is stable: `0=SUFFICIENT`, `1=INSUFFICIENT`, `2=DATA_ERROR`.
+- Chart/report truthfulness hardening:
+  - `scripts/generate_performance_charts.py` validates expected chart artifacts and returns `ERROR` in strict mode when artifacts are missing.
+  - `scripts/run_quality_pipeline.py` escalates chart-stage errors to pipeline `ERROR`.
+  - `scripts/dashboard_db_bridge.py` validates chart paths before reporting robustness `OK`; missing artifacts force `WARN`.
+- Wiring consistency hardening:
+  - `scripts/run_quality_pipeline.py` passes one precomputed sufficiency snapshot to chart generation (removes duplicated sufficiency evaluation path).
+  - `scripts/compute_ticker_eligibility.py` now surfaces DB/query failures using explicit `errors` and warnings.
+  - `scripts/run_openclaw_maintenance.ps1` now enforces OpenClaw exec host/sandbox/ACP defaults before maintenance on both Windows and WSL paths.
+  - `scripts/project_runtime_status.py` emits explicit exec-environment health signals.
+- Verification snapshot (2026-03-05):
+  - `python scripts/adversarial_diagnostic_runner.py --json --severity --fix-report`
+  - `python -m pytest tests/scripts/test_data_sufficiency_monitor.py tests/scripts/test_generate_performance_charts.py tests/scripts/test_run_quality_pipeline.py tests/scripts/test_dashboard_db_bridge.py -q`
+  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
+  - Fast lane: `1590 passed, 3 skipped, 28 deselected, 7 xfailed`.
 
 ## Academic Rigor & Reproducibility (MIT-style)
 
@@ -722,6 +760,6 @@ For questions or issues:
 
 **Status**: Production Ready âœ…
 **Version**: 3.0
-**Last Updated**: 2025-12-04
+**Last Updated**: 2026-03-05
 
 
