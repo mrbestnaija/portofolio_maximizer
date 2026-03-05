@@ -110,6 +110,9 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **OpenClaw host enforcement consistency**:
   - `scripts/run_openclaw_maintenance.ps1` now runs `scripts/enforce_openclaw_exec_environment.py` on both Windows and WSL paths before maintenance execution.
   - `scripts/project_runtime_status.py` now emits explicit exec-environment signals for invalid `tools.exec.host`, sandbox mode drift, and missing ACP default agent.
+- **OpenClaw notification storm guard hardening**:
+  - `utils/openclaw_cli.py` now applies persistent adaptive cooldown for repeated transport failures (DNS/listener/timeout/gateway churn) instead of repeatedly attempting sends.
+  - New controls: `OPENCLAW_STORM_GUARD_ENABLED`, `OPENCLAW_STORM_BASE_COOLDOWN_SECONDS`, `OPENCLAW_STORM_MAX_COOLDOWN_SECONDS`, `OPENCLAW_STORM_BACKOFF_MULTIPLIER`, `OPENCLAW_STORM_RESET_WINDOW_SECONDS`.
 - **Verification evidence (2026-03-05)**:
   - `python scripts/adversarial_diagnostic_runner.py --json --severity LOW --fix-report`
   - `python -m pytest tests/scripts/test_data_sufficiency_monitor.py tests/scripts/test_generate_performance_charts.py tests/scripts/test_run_quality_pipeline.py tests/scripts/test_dashboard_db_bridge.py -q`
@@ -818,6 +821,7 @@ pytest tests/ -v --tb=short
 - **[Metrics & Evaluation](Documentation/METRICS_AND_EVALUATION.md)**: Unambiguous metric definitions (PF/WR/Sharpe/DM-style tests)
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
 - **[OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md)**: OpenClaw + 3-model LLM strategy + Interactions API security
+- **[OpenClaw Implementation Policy](Documentation/OPENCLAW_IMPLEMENTATION_POLICY.md)**: Repo-wide implementation contracts and anti-regression evidence requirements
 - **[Adversarial Audit](Documentation/ADVERSARIAL_AUDIT_20260216.md)**: 10-finding stress test with P0-P3 recommendations
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
 

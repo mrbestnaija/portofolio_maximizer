@@ -2,6 +2,8 @@
 
 This repository includes an optional integration with OpenClaw (https://openclaw.ai): a personal AI assistant you run on your own devices.
 
+Implementation policy (repo-wide contract): `Documentation/OPENCLAW_IMPLEMENTATION_POLICY.md`
+
 ## Security Notes (Practical Defaults)
 
 - `.env` remains local and git-ignored. Do not paste secret values into chats.
@@ -375,6 +377,15 @@ All outbound notifications are intentionally short and rate-limited by default:
 - Error alert cooldown: `config/error_monitoring_config.yml` -> `error_thresholds.alert_cooldown_minutes`
 - OpenClaw max length: `config/error_monitoring_config.yml` -> `alerts.openclaw.max_message_chars`
 - Email max length: `config/error_monitoring_config.yml` -> `alerts.email.max_body_chars`
+
+OpenClaw send-path storm suppression is also enabled by default in `utils/openclaw_cli.py`:
+
+- `OPENCLAW_STORM_GUARD_ENABLED=1` (default) enables persistent cross-process suppression.
+- `OPENCLAW_STORM_BASE_COOLDOWN_SECONDS` (default: `60`) sets first failure cooldown.
+- `OPENCLAW_STORM_MAX_COOLDOWN_SECONDS` (default: `1800`) caps exponential backoff.
+- `OPENCLAW_STORM_BACKOFF_MULTIPLIER` (default: `2.0`) controls cooldown growth.
+- `OPENCLAW_STORM_RESET_WINDOW_SECONDS` (default: `900`) resets failure streak after quiet time.
+- Storm state persists in `OPENCLAW_PERSISTENT_GUARD_STATE_PATH` so process restarts do not reset suppression.
 
 Inbox workflows have their own safe limits:
 
