@@ -111,7 +111,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
   - `scripts/run_openclaw_maintenance.ps1` now runs `scripts/enforce_openclaw_exec_environment.py` on both Windows and WSL paths before maintenance execution.
   - `scripts/project_runtime_status.py` now emits explicit exec-environment signals for invalid `tools.exec.host`, sandbox mode drift, and missing ACP default agent.
 - **Verification evidence (2026-03-05)**:
-  - `python scripts/adversarial_diagnostic_runner.py --json --severity --fix-report`
+  - `python scripts/adversarial_diagnostic_runner.py --json --severity LOW --fix-report`
   - `python -m pytest tests/scripts/test_data_sufficiency_monitor.py tests/scripts/test_generate_performance_charts.py tests/scripts/test_run_quality_pipeline.py tests/scripts/test_dashboard_db_bridge.py -q`
   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
   - Latest fast-lane result in this cycle: `1590 passed, 3 skipped, 28 deselected, 7 xfailed`.
