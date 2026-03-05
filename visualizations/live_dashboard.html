@@ -153,6 +153,10 @@
     .diag { background: var(--panel-2); border:1px solid rgba(255,255,255,0.06); border-radius:10px; padding:10px; }
     .diag .label { color: var(--muted); font-size:12px; text-transform: uppercase; letter-spacing:0.6px; }
     .diag .value { font-size:15px; margin-top:4px; }
+    .status-ok { color: var(--success); }
+    .status-warn { color: var(--accent-2); }
+    .status-error { color: var(--danger); }
+    .status-unknown { color: var(--muted); }
     .diag-figure { background: var(--panel-2); border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:10px; }
     .diag-figure h4 { margin:0 0 6px; font-size:13px; color: var(--muted); text-transform: uppercase; letter-spacing:0.6px; }
     .diag-figure img { width:100%; border-radius:10px; border:1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.02); }
@@ -340,6 +344,31 @@
               <div class="value" id="diag-largest">--</div>
             </div>
           </div>
+        </div>
+        <div class="card">
+          <h3>Robustness</h3>
+          <div class="subtitle">Read-only quality pipeline summary (advisory only)</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Pipeline Status</div>
+              <div class="value" id="robustness-status">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Eligibility</div>
+              <div class="value" id="robustness-eligibility">H:-- W:-- L:--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Coverage / Lift</div>
+              <div class="value" id="robustness-coverage">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Calibration</div>
+              <div class="value" id="robustness-calibration">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="robustness-tickers" style="margin-top:8px;">No robustness sidecars loaded.</div>
+          <div class="subtitle" id="robustness-context" style="margin-top:6px;">Context: --</div>
+          <div id="robustness-charts" class="subtitle" style="margin-top:8px; display:flex; flex-direction:column; gap:4px;"></div>
         </div>
       </div>
 
@@ -1174,6 +1203,74 @@
       });
     }
 
+    function renderRobustness(data) {
+      const statusEl = document.getElementById('robustness-status');
+      const eligEl = document.getElementById('robustness-eligibility');
+      const covEl = document.getElementById('robustness-coverage');
+      const calEl = document.getElementById('robustness-calibration');
+      const tickersEl = document.getElementById('robustness-tickers');
+      const contextEl = document.getElementById('robustness-context');
+      const chartsEl = document.getElementById('robustness-charts');
+      if (!statusEl || !eligEl || !covEl || !calEl || !tickersEl || !contextEl || !chartsEl) return;
+
+      const robustness = data?.robustness || {};
+      const perf = robustness.performance_metrics || {};
+      const eligibility = robustness.eligibility_summary || {};
+      const context = robustness.context_quality_summary || {};
+      const chartPaths = robustness.chart_paths || {};
+      const warnings = Array.isArray(robustness.warnings) ? robustness.warnings : [];
+      const status = robustness.overall_status || robustness.status || (warnings.length ? 'WARN' : (data?.robustness ? 'UNKNOWN' : 'MISSING'));
+      const normalizedStatus = String(status || 'UNKNOWN').toUpperCase();
+
+      const healthy = Number(eligibility.HEALTHY || 0);
+      const weak = Number(eligibility.WEAK || 0);
+      const lab = Number(eligibility.LAB_ONLY || 0);
+      const coverage = Number(perf.coverage_ratio);
+      const lift = Number(perf.lift_metrics?.lift_fraction_recent);
+      const calibTier = perf.calibration_metrics?.calibration_tier || '--';
+      const brier = Number(perf.calibration_metrics?.brier_score);
+      const weakTickers = Array.isArray(robustness.weak_tickers) ? robustness.weak_tickers : [];
+
+      statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
+      if (['ERROR', 'FAIL', 'FATAL'].includes(normalizedStatus)) {
+        statusEl.classList.add('status-error');
+      } else if (['WARN', 'STALE', 'DEGRADED'].includes(normalizedStatus)) {
+        statusEl.classList.add('status-warn');
+      } else if (['PASS', 'SUFFICIENT', 'OK'].includes(normalizedStatus)) {
+        statusEl.classList.add('status-ok');
+      } else {
+        statusEl.classList.add('status-unknown');
+      }
+      statusEl.textContent = normalizedStatus;
+      eligEl.textContent = `H:${healthy} W:${weak} L:${lab}`;
+      covEl.textContent = `${Number.isFinite(coverage) ? (coverage * 100).toFixed(1) + '%' : '--'} / ${Number.isFinite(lift) ? (lift * 100).toFixed(1) + '%' : '--'}`;
+      calEl.textContent = `${calibTier}${Number.isFinite(brier) ? ` / Brier ${brier.toFixed(3)}` : ''}`;
+      tickersEl.textContent = normalizedStatus === 'MISSING'
+        ? 'No robustness data available.'
+        : weakTickers.length
+          ? `Weak tickers: ${weakTickers.join(', ')}`
+          : (warnings.length ? `Robustness warnings: ${warnings.join(', ')}` : 'No weak tickers flagged.');
+      contextEl.textContent = normalizedStatus === 'MISSING'
+        ? 'Context: No robustness data'
+        : `Context: ${Number(context.regime_count || 0)} regimes, ${Number(context.confidence_bin_count || 0)} confidence bins, ${Number(context.n_trades_no_confidence || 0)} no-confidence trades${context.partial_data ? ' (partial data)' : ''}`;
+
+      chartsEl.innerHTML = '';
+      const entries = Object.entries(chartPaths);
+      if (!entries.length) {
+        chartsEl.textContent = normalizedStatus === 'MISSING' ? 'No robustness chart artifacts linked.' : 'No chart artifacts linked.';
+        return;
+      }
+      entries.slice(0, 5).forEach(([label, relPath]) => {
+        const a = document.createElement('a');
+        a.href = String(relPath || '#');
+        a.textContent = label;
+        a.className = 'subtitle';
+        a.style.color = 'var(--accent)';
+        a.target = '_blank';
+        chartsEl.appendChild(a);
+      });
+    }
+
     function populateDiagTickerSelect(data, forceRefresh = false) {
       const select = document.getElementById('diag-ticker');
       if (!select) return;
@@ -1270,6 +1367,7 @@
         renderSignals([]);
         renderEquity([], []);
         populateTradeTickerSelect({ price_series: {}, meta: { tickers: [] } });
+        renderRobustness(null);
         return;
       }
 
@@ -1393,6 +1491,7 @@
       populateDiagTickerSelect(data, runChanged);
       renderModelParams(data);
       renderChecks(data);
+      renderRobustness(data);
     }
 
     let refreshBusy = false;
