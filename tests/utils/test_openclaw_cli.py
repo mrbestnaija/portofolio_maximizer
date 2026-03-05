@@ -161,6 +161,170 @@ def test_send_message_persistent_guard_can_be_disabled(
     assert mock_run.call_count == 2
 
 
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_storm_guard_suppresses_repeated_retryable_failures(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    fail = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="WebSocket Error (getaddrinfo ENOTFOUND web.whatsapp.com)",
+    )
+    mock_run.side_effect = [fail]
+    state_path = tmp_path / "persistent_guard_state.json"
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_PERSISTENT_GUARD_ENABLED": "1",
+            "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+            "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
+            "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+            "OPENCLAW_STORM_GUARD_ENABLED": "1",
+            "OPENCLAW_STORM_BASE_COOLDOWN_SECONDS": "120",
+            "OPENCLAW_STORM_MAX_COOLDOWN_SECONDS": "120",
+            "OPENCLAW_STORM_BACKOFF_MULTIPLIER": "2.0",
+        },
+        clear=False,
+    ):
+        first = send_message(
+            to="+15551234567",
+            message="storm attempt 1",
+            command="openclaw",
+            timeout_seconds=5.0,
+            max_retries=0,
+            skip_rate_limit=True,
+        )
+        second = send_message(
+            to="+15551234567",
+            message="storm attempt 2",
+            command="openclaw",
+            timeout_seconds=5.0,
+            max_retries=0,
+            skip_rate_limit=True,
+        )
+
+    assert first.ok is False
+    assert second.ok is True
+    assert "suppressed notification storm" in second.stdout.lower()
+    assert mock_run.call_count == 1
+
+
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_storm_guard_allows_send_after_cooldown_expires(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    fail = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="WebSocket Error (Opening handshake has timed out)",
+    )
+    mock_run.side_effect = [fail, fail]
+    state_path = tmp_path / "persistent_guard_state.json"
+    fake_clock = {"now": 1000.0}
+
+    def _fake_time() -> float:
+        return float(fake_clock["now"])
+
+    with patch("utils.openclaw_cli.time.time", side_effect=_fake_time):
+        with patch.dict(
+            "utils.openclaw_cli.os.environ",
+            {
+                "OPENCLAW_PERSISTENT_GUARD_ENABLED": "1",
+                "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+                "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
+                "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+                "OPENCLAW_STORM_GUARD_ENABLED": "1",
+                "OPENCLAW_STORM_BASE_COOLDOWN_SECONDS": "2",
+                "OPENCLAW_STORM_MAX_COOLDOWN_SECONDS": "2",
+                "OPENCLAW_STORM_BACKOFF_MULTIPLIER": "2.0",
+            },
+            clear=False,
+        ):
+            first = send_message(
+                to="+15551234567",
+                message="storm attempt 1",
+                command="openclaw",
+                timeout_seconds=5.0,
+                max_retries=0,
+                skip_rate_limit=True,
+            )
+            second = send_message(
+                to="+15551234567",
+                message="storm attempt 2",
+                command="openclaw",
+                timeout_seconds=5.0,
+                max_retries=0,
+                skip_rate_limit=True,
+            )
+            fake_clock["now"] = 1003.0
+            third = send_message(
+                to="+15551234567",
+                message="storm attempt 3",
+                command="openclaw",
+                timeout_seconds=5.0,
+                max_retries=0,
+                skip_rate_limit=True,
+            )
+
+    assert first.ok is False
+    assert second.ok is True
+    assert "suppressed notification storm" in second.stdout.lower()
+    assert third.ok is False
+    assert mock_run.call_count == 2
+
+
+@patch("utils.openclaw_cli._deduplicator.is_duplicate", return_value=False)
+@patch("utils.openclaw_cli.subprocess.run")
+def test_send_message_storm_guard_does_not_suppress_non_retryable_errors(
+    mock_run: MagicMock,
+    _mock_dedup: MagicMock,
+    tmp_path,
+) -> None:
+    auth_fail = MagicMock(returncode=1, stdout="", stderr="api key invalid")
+    mock_run.side_effect = [auth_fail, auth_fail]
+    state_path = tmp_path / "persistent_guard_state.json"
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_PERSISTENT_GUARD_ENABLED": "1",
+            "OPENCLAW_PERSISTENT_GUARD_STATE_PATH": str(state_path),
+            "OPENCLAW_PERSISTENT_DEDUP_WINDOW_SECONDS": "0",
+            "OPENCLAW_TARGET_COOLDOWN_SECONDS": "0",
+            "OPENCLAW_STORM_GUARD_ENABLED": "1",
+            "OPENCLAW_STORM_BASE_COOLDOWN_SECONDS": "120",
+            "OPENCLAW_STORM_MAX_COOLDOWN_SECONDS": "120",
+            "OPENCLAW_STORM_BACKOFF_MULTIPLIER": "2.0",
+        },
+        clear=False,
+    ):
+        first = send_message(
+            to="+15551234567",
+            message="auth fail 1",
+            command="openclaw",
+            timeout_seconds=5.0,
+            max_retries=0,
+            skip_rate_limit=True,
+        )
+        second = send_message(
+            to="+15551234567",
+            message="auth fail 2",
+            command="openclaw",
+            timeout_seconds=5.0,
+            max_retries=0,
+            skip_rate_limit=True,
+        )
+
+    assert first.ok is False
+    assert second.ok is False
+    assert mock_run.call_count == 2
+
+
 def test_parse_openclaw_targets_e164_implies_whatsapp() -> None:
     targets = parse_openclaw_targets("+15551234567")
     assert targets == [("whatsapp", "+15551234567")]
@@ -432,6 +596,50 @@ class TestRunAgentTurnSafety:
         timeout_val = float(cmd[idx + 1])
         assert timeout_val <= 600.0, "CLI timeout must not exceed 600s"
 
+    @patch("utils.openclaw_cli.send_message")
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_run_agent_turn_preserves_gateway_conflict_from_fallback_send(
+        self,
+        mock_run: MagicMock,
+        mock_send: MagicMock,
+    ) -> None:
+        deliver_fail = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="No active WhatsApp Web listener (account: default).",
+        )
+        no_deliver_ok = MagicMock(returncode=0, stdout='{"response":"reply body"}', stderr="")
+        mock_run.side_effect = [deliver_fail, no_deliver_ok]
+        mock_send.return_value = OpenClawResult(
+            ok=False,
+            returncode=1,
+            command=["openclaw", "message", "send"],
+            stdout="",
+            stderr=(
+                "[PMX] Missing WhatsApp listener recovery attempted: gateway_already_running_conflict.\n"
+                "[PMX] Gateway restart is already owned by a supervised OpenClaw process. "
+                "Skipping further restarts to avoid alert churn."
+            ),
+        )
+
+        with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS": "0"}, clear=False):
+            result = run_agent_turn(
+                to="+15551234567",
+                message="test",
+                command="openclaw",
+                timeout_seconds=5.0,
+                deliver=True,
+                channel="whatsapp",
+                reply_channel="whatsapp",
+                reply_to="+15551234567",
+                reply_account="default",
+            )
+
+        assert result.ok is False
+        assert "gateway_already_running_conflict" in result.stderr
+        assert "already owned by a supervised OpenClaw process" in result.stderr
+        assert "Try `openclaw gateway restart`" not in result.stderr
+
 
 class TestErrorClassification:
     """Safety tests: error classification must correctly identify retryable vs fatal errors."""
@@ -439,6 +647,19 @@ class TestErrorClassification:
     def test_gateway_timeout_is_retryable(self) -> None:
         result = OpenClawResult(ok=False, returncode=1, command=[], stdout="", stderr="gateway timeout after 60000ms")
         assert _is_retryable_error(result) is True
+
+    def test_gateway_already_running_conflict_is_not_retryable(self) -> None:
+        result = OpenClawResult(
+            ok=False,
+            returncode=1,
+            command=[],
+            stdout="",
+            stderr=(
+                "Gateway failed to start: gateway already running (pid 217512); lock timeout after 5000ms\n"
+                "If the gateway is supervised, stop it with: openclaw gateway stop"
+            ),
+        )
+        assert _is_retryable_error(result) is False
 
     def test_missing_listener_detected(self) -> None:
         result = OpenClawResult(
@@ -510,6 +731,48 @@ class TestErrorClassification:
         assert result.ok is True
         calls = [" ".join(str(x) for x in (call.args[0] if call.args else [])) for call in mock_run.call_args_list]
         assert any("gateway restart" in cmd for cmd in calls), "Expected gateway restart recovery call"
+
+    @patch("utils.openclaw_cli.time.sleep", return_value=None)
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_send_message_missing_listener_gateway_conflict_is_stable_and_non_relinking(
+        self, mock_run: MagicMock, _mock_sleep: MagicMock
+    ) -> None:
+        send_fail = MagicMock(returncode=1, stdout="", stderr="No active WhatsApp Web listener (account: default).")
+        status_not_ready = MagicMock(
+            returncode=0,
+            stdout=(
+                '{"channels":{"whatsapp":{"running":false,"connected":false}},'
+                '"channelAccounts":{"whatsapp":[{"enabled":true,"running":false,"connected":false}]}}'
+            ),
+            stderr="",
+        )
+        restart_conflict = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Gateway failed to start: gateway already running (pid 217512); lock timeout after 5000ms\n"
+                "If the gateway is supervised, stop it with: openclaw gateway stop"
+            ),
+        )
+        mock_run.side_effect = [send_fail, status_not_ready, restart_conflict]
+
+        with patch.dict("utils.openclaw_cli._listener_recovery_state", {"last_restart_monotonic": 0.0}, clear=True):
+            with patch.dict("utils.openclaw_cli.os.environ", {"OPENCLAW_AUTO_RECOVER_LISTENER": "1"}, clear=False):
+                result = send_message(
+                    to="+15551234567",
+                    message="hello",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                    max_retries=0,
+                    skip_dedup=True,
+                    skip_rate_limit=True,
+                )
+
+        assert result.ok is False
+        assert "gateway_already_running_conflict" in result.stderr
+        assert "already owned by a supervised OpenClaw process" in result.stderr
+        assert "relink with" not in result.stderr.lower()
+        assert mock_run.call_count == 3
 
     @patch("utils.openclaw_cli.time.sleep", return_value=None)
     @patch("utils.openclaw_cli.subprocess.run")

@@ -300,6 +300,43 @@ class _PersistentNotificationGuard:
             value = 15.0
         return max(0.0, float(value))
 
+    def _storm_guard_enabled(self) -> bool:
+        return _env_enabled("OPENCLAW_STORM_GUARD_ENABLED", default=True)
+
+    def _storm_base_cooldown_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_STORM_BASE_COOLDOWN_SECONDS", "60"))
+        except Exception:
+            value = 60.0
+        return max(1.0, float(value))
+
+    def _storm_max_cooldown_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_STORM_MAX_COOLDOWN_SECONDS", "1800"))
+        except Exception:
+            value = 1800.0
+        return max(1.0, float(value))
+
+    def _storm_backoff_multiplier(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_STORM_BACKOFF_MULTIPLIER", "2.0"))
+        except Exception:
+            value = 2.0
+        return max(1.0, float(value))
+
+    def _storm_reset_window_seconds(self) -> float:
+        try:
+            value = float(os.getenv("OPENCLAW_STORM_RESET_WINDOW_SECONDS", "900"))
+        except Exception:
+            value = 900.0
+        return max(30.0, float(value))
+
+    def _storm_retention_seconds(self) -> float:
+        base = self._storm_base_cooldown_seconds()
+        max_cooldown = self._storm_max_cooldown_seconds()
+        reset_window = self._storm_reset_window_seconds()
+        return max(3600.0, base * 40.0, max_cooldown * 2.0, reset_window * 2.0)
+
     def _max_entries(self) -> int:
         try:
             value = int(
@@ -371,7 +408,7 @@ class _PersistentNotificationGuard:
         except Exception:
             pass
 
-    def _load_state(self, path: Path) -> dict[str, dict[str, float]]:
+    def _load_state(self, path: Path) -> dict[str, Any]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -388,6 +425,11 @@ class _PersistentNotificationGuard:
             if isinstance(entries.get("target_last_sent"), dict)
             else {}
         )
+        storm_raw = (
+            entries.get("storm_failures")
+            if isinstance(entries.get("storm_failures"), dict)
+            else {}
+        )
 
         def _coerce_map(raw_map: dict[str, Any]) -> dict[str, float]:
             out: dict[str, float] = {}
@@ -400,19 +442,47 @@ class _PersistentNotificationGuard:
                     continue
             return out
 
+        def _coerce_storm_map(raw_map: dict[str, Any]) -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for key, value in raw_map.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    continue
+                try:
+                    count = max(0, int(float(value.get("count", 0))))
+                except Exception:
+                    count = 0
+                try:
+                    last_failure = float(value.get("last_failure", 0.0))
+                except Exception:
+                    last_failure = 0.0
+                try:
+                    cooldown_until = float(value.get("cooldown_until", 0.0))
+                except Exception:
+                    cooldown_until = 0.0
+                error_class = str(value.get("error_class") or "").strip().lower()
+                out[key] = {
+                    "count": float(count),
+                    "last_failure": float(last_failure),
+                    "cooldown_until": float(cooldown_until),
+                    "error_class": error_class,
+                }
+            return out
+
         return {
             "dedup": _coerce_map(dedup_raw),
             "target_last_sent": _coerce_map(target_raw),
+            "storm_failures": _coerce_storm_map(storm_raw),
         }
 
-    def _save_state(self, path: Path, state: dict[str, dict[str, float]]) -> None:
+    def _save_state(self, path: Path, state: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
             "updated_at_utc": time.time(),
             "entries": {
                 "dedup": state.get("dedup", {}),
                 "target_last_sent": state.get("target_last_sent", {}),
+                "storm_failures": state.get("storm_failures", {}),
             },
         }
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -434,6 +504,81 @@ class _PersistentNotificationGuard:
         ranked = sorted(data.items(), key=lambda row: float(row[1]), reverse=True)
         return {key: float(ts) for key, ts in ranked[:max_entries]}
 
+    def _prune_storm_map(
+        self,
+        data: dict[str, dict[str, Any]],
+        *,
+        now: float,
+        retention_seconds: float,
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            try:
+                count = max(0, int(float(value.get("count", 0))))
+            except Exception:
+                count = 0
+            try:
+                last_failure = float(value.get("last_failure", 0.0))
+            except Exception:
+                last_failure = 0.0
+            try:
+                cooldown_until = float(value.get("cooldown_until", 0.0))
+            except Exception:
+                cooldown_until = 0.0
+            error_class = str(value.get("error_class") or "").strip().lower()
+            most_recent = max(last_failure, cooldown_until, 0.0)
+            if retention_seconds > 0 and most_recent > 0 and (now - most_recent) > retention_seconds:
+                continue
+            if count <= 0 and cooldown_until <= now:
+                continue
+            out[key] = {
+                "count": float(count),
+                "last_failure": float(last_failure),
+                "cooldown_until": float(cooldown_until),
+                "error_class": error_class,
+            }
+        return out
+
+    def _cap_storm_entries(
+        self,
+        data: dict[str, dict[str, Any]],
+        *,
+        max_entries: int,
+    ) -> dict[str, dict[str, Any]]:
+        if len(data) <= max_entries:
+            return data
+
+        def _rank(row: tuple[str, dict[str, Any]]) -> float:
+            payload = row[1] if isinstance(row[1], dict) else {}
+            try:
+                cooldown_until = float(payload.get("cooldown_until", 0.0))
+            except Exception:
+                cooldown_until = 0.0
+            try:
+                last_failure = float(payload.get("last_failure", 0.0))
+            except Exception:
+                last_failure = 0.0
+            return max(cooldown_until, last_failure)
+
+        ranked = sorted(data.items(), key=_rank, reverse=True)
+        return {key: value for key, value in ranked[:max_entries]}
+
+    def _snapshot_state(
+        self,
+        *,
+        dedup: dict[str, float],
+        target_last_sent: dict[str, float],
+        storm_failures: dict[str, dict[str, Any]],
+        max_entries: int,
+    ) -> dict[str, Any]:
+        return {
+            "dedup": self._cap_entries(dedup, max_entries=max_entries),
+            "target_last_sent": self._cap_entries(target_last_sent, max_entries=max_entries),
+            "storm_failures": self._cap_storm_entries(storm_failures, max_entries=max_entries),
+        }
+
     def should_suppress(
         self,
         *,
@@ -447,7 +592,8 @@ class _PersistentNotificationGuard:
 
         dedup_window = self._dedup_window_seconds()
         target_cooldown = self._target_cooldown_seconds()
-        if dedup_window <= 0 and target_cooldown <= 0:
+        storm_enabled = self._storm_guard_enabled()
+        if dedup_window <= 0 and target_cooldown <= 0 and not storm_enabled:
             return False, ""
 
         state_path = self._state_path()
@@ -469,8 +615,37 @@ class _PersistentNotificationGuard:
                     now=now,
                     age_limit_seconds=max(target_cooldown * 20.0, 3600.0),
                 )
+                storm_failures = self._prune_storm_map(
+                    state.get("storm_failures", {}),
+                    now=now,
+                    retention_seconds=self._storm_retention_seconds(),
+                )
 
                 target_key = self._target_key(to=to, channel=channel)
+                if storm_enabled:
+                    storm_entry = storm_failures.get(target_key)
+                    if isinstance(storm_entry, dict):
+                        try:
+                            cooldown_until = float(storm_entry.get("cooldown_until", 0.0))
+                        except Exception:
+                            cooldown_until = 0.0
+                        if cooldown_until > now:
+                            remaining = max(1, int(round(cooldown_until - now)))
+                            error_class = str(storm_entry.get("error_class") or "transient_transport")
+                            self._save_state(
+                                state_path,
+                                self._snapshot_state(
+                                    dedup=dedup,
+                                    target_last_sent=target_last_sent,
+                                    storm_failures=storm_failures,
+                                    max_entries=max_entries,
+                                ),
+                            )
+                            return True, (
+                                "[guard] Suppressed notification storm "
+                                f"(recent {error_class}; cooldown active: {remaining}s remaining)."
+                            )
+
                 if target_cooldown > 0:
                     last_target = target_last_sent.get(target_key)
                     if isinstance(last_target, (int, float)):
@@ -479,12 +654,12 @@ class _PersistentNotificationGuard:
                             remaining = max(1, int(round(target_cooldown - elapsed)))
                             self._save_state(
                                 state_path,
-                                {
-                                    "dedup": self._cap_entries(dedup, max_entries=max_entries),
-                                    "target_last_sent": self._cap_entries(
-                                        target_last_sent, max_entries=max_entries
-                                    ),
-                                },
+                                self._snapshot_state(
+                                    dedup=dedup,
+                                    target_last_sent=target_last_sent,
+                                    storm_failures=storm_failures,
+                                    max_entries=max_entries,
+                                ),
                             )
                             return True, (
                                 "[guard] Suppressed message burst "
@@ -497,12 +672,12 @@ class _PersistentNotificationGuard:
                 if dedup_window > 0 and fingerprint in dedup:
                     self._save_state(
                         state_path,
-                        {
-                            "dedup": self._cap_entries(dedup, max_entries=max_entries),
-                            "target_last_sent": self._cap_entries(
-                                target_last_sent, max_entries=max_entries
-                            ),
-                        },
+                        self._snapshot_state(
+                            dedup=dedup,
+                            target_last_sent=target_last_sent,
+                            storm_failures=storm_failures,
+                            max_entries=max_entries,
+                        ),
                     )
                     return True, "[guard] Duplicate message suppressed (persistent dedup window)."
 
@@ -513,12 +688,101 @@ class _PersistentNotificationGuard:
 
                 self._save_state(
                     state_path,
-                    {
-                        "dedup": self._cap_entries(dedup, max_entries=max_entries),
-                        "target_last_sent": self._cap_entries(target_last_sent, max_entries=max_entries),
-                    },
+                    self._snapshot_state(
+                        dedup=dedup,
+                        target_last_sent=target_last_sent,
+                        storm_failures=storm_failures,
+                        max_entries=max_entries,
+                    ),
                 )
                 return False, ""
+            finally:
+                self._release_lock(lock_path, lock_fd)
+
+    def record_delivery_result(
+        self,
+        *,
+        to: str,
+        channel: Optional[str],
+        result: OpenClawResult,
+    ) -> None:
+        if not self._enabled() or not self._storm_guard_enabled():
+            return
+
+        target_key = self._target_key(to=to, channel=channel)
+        error_class = _classify_notification_storm_error(result)
+        now = time.time()
+        state_path = self._state_path()
+        lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+        max_entries = self._max_entries()
+
+        with self._lock:
+            lock_fd = self._acquire_lock(lock_path)
+            if lock_fd is None:
+                return
+
+            try:
+                state = self._load_state(state_path)
+                dedup = self._prune_map(
+                    state.get("dedup", {}),
+                    now=now,
+                    age_limit_seconds=self._dedup_window_seconds(),
+                )
+                target_last_sent = self._prune_map(
+                    state.get("target_last_sent", {}),
+                    now=now,
+                    age_limit_seconds=max(self._target_cooldown_seconds() * 20.0, 3600.0),
+                )
+                storm_failures = self._prune_storm_map(
+                    state.get("storm_failures", {}),
+                    now=now,
+                    retention_seconds=self._storm_retention_seconds(),
+                )
+
+                if result.ok:
+                    storm_failures.pop(target_key, None)
+                elif error_class:
+                    reset_window = self._storm_reset_window_seconds()
+                    base = self._storm_base_cooldown_seconds()
+                    max_cooldown = self._storm_max_cooldown_seconds()
+                    multiplier = self._storm_backoff_multiplier()
+
+                    previous = storm_failures.get(target_key, {})
+                    try:
+                        prev_count = max(0, int(float(previous.get("count", 0))))
+                    except Exception:
+                        prev_count = 0
+                    try:
+                        prev_last_failure = float(previous.get("last_failure", 0.0))
+                    except Exception:
+                        prev_last_failure = 0.0
+
+                    if prev_last_failure <= 0 or (now - prev_last_failure) > reset_window:
+                        prev_count = 0
+
+                    count = min(prev_count + 1, 32)
+                    cooldown_seconds = min(
+                        max_cooldown,
+                        max(1.0, base * (multiplier ** max(0, count - 1))),
+                    )
+                    storm_failures[target_key] = {
+                        "count": float(count),
+                        "last_failure": now,
+                        "cooldown_until": now + cooldown_seconds,
+                        "error_class": error_class,
+                    }
+                else:
+                    storm_failures.pop(target_key, None)
+
+                self._save_state(
+                    state_path,
+                    self._snapshot_state(
+                        dedup=dedup,
+                        target_last_sent=target_last_sent,
+                        storm_failures=storm_failures,
+                        max_entries=max_entries,
+                    ),
+                )
             finally:
                 self._release_lock(lock_path, lock_fd)
 
@@ -625,6 +889,8 @@ def _retry_whatsapp_dns_resolution(
 def _is_retryable_error(result: OpenClawResult) -> bool:
     """Check if the error is transient and worth retrying."""
     combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    if _is_gateway_supervision_conflict_error(result):
+        return False
     retryable_patterns = [
         "econnrefused",
         "connection refused",
@@ -1038,6 +1304,20 @@ def _is_session_lock_error(result: OpenClawResult) -> bool:
     return "session file locked" in combined
 
 
+def _is_gateway_supervision_conflict_error(result: OpenClawResult) -> bool:
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    if any(
+        token in combined
+        for token in (
+            "gateway already running",
+            "port 18789 is already in use",
+            "gateway_already_running_conflict",
+        )
+    ):
+        return True
+    return "lock timeout" in combined and "openclaw gateway stop" in combined
+
+
 def _is_missing_listener_error(result: OpenClawResult) -> bool:
     combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
     return "no active whatsapp web listener" in combined
@@ -1093,6 +1373,27 @@ def _append_operator_hints(result: OpenClawResult) -> OpenClawResult:
 def _is_whatsapp_dns_error(result: OpenClawResult) -> bool:
     combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
     return ("enotfound" in combined or "getaddrinfo" in combined) and "web.whatsapp.com" in combined
+
+
+def _classify_notification_storm_error(result: OpenClawResult) -> str:
+    if result.ok:
+        return ""
+    combined = ((result.stderr or "") + " " + (result.stdout or "")).lower()
+    if _is_whatsapp_dns_error(result):
+        return "whatsapp_dns"
+    if _is_missing_listener_error(result):
+        return "whatsapp_listener_missing"
+    if _is_gateway_supervision_conflict_error(result):
+        return "gateway_supervision_conflict"
+    if "opening handshake has timed out" in combined:
+        return "whatsapp_handshake_timeout"
+    if "statuscode\":405" in combined and "connection failure" in combined:
+        return "whatsapp_connection_failure"
+    if "econnrefused" in combined or "connection refused" in combined or "gateway closed" in combined:
+        return "gateway_unreachable"
+    if _is_retryable_error(result):
+        return "transient_transport"
+    return ""
 
 
 def _run_openclaw_control(
@@ -1218,6 +1519,8 @@ def _maybe_recover_missing_whatsapp_listener(
             timeout_seconds=45.0,
         )
         if not restart.ok:
+            if _is_gateway_supervision_conflict_error(restart):
+                return False, "gateway_already_running_conflict"
             last_reason = f"gateway_restart_failed:attempt={attempt}:rc={restart.returncode}"
             continue
 
@@ -1287,6 +1590,18 @@ def send_message(
         cmd.extend([str(arg) for arg in extra_args])
     is_dry_run = any(a == "--dry-run" for a in (extra_args or []))
 
+    def _finalize_result(result: OpenClawResult, *, record_for_storm: bool) -> OpenClawResult:
+        if record_for_storm and not is_dry_run:
+            try:
+                _persistent_notification_guard.record_delivery_result(
+                    to=to,
+                    channel=channel,
+                    result=result,
+                )
+            except Exception:
+                pass
+        return result
+
     # --- Deduplication guard ---
     if not skip_dedup and not is_dry_run:
         if _deduplicator.is_duplicate(to, message or ""):
@@ -1346,21 +1661,24 @@ def send_message(
                     failfast_after = _env_int("OPENCLAW_DNS_FAILFAST_CONSECUTIVE_FAILURES", 3, minimum=1)
                     last_dns_error = str((dns_history[-1] if dns_history else {}).get("error") or "").strip()
                     if consecutive_failures >= failfast_after:
-                        return OpenClawResult(
-                            ok=False,
-                            returncode=1,
-                            command=cmd,
-                            stdout="",
-                            stderr=(
-                                "[PMX] Pre-send probe: DNS resolution failed for web.whatsapp.com.\n"
-                                f"[PMX] Consecutive DNS probe failures: {consecutive_failures}/{failfast_after}.\n"
-                                + (
-                                    f"[PMX] Last resolver error: {last_dns_error}\n"
-                                    if last_dns_error
-                                    else ""
-                                )
-                                + "[PMX] Skipping send to avoid timeout. Check network/DNS/firewall."
+                        return _finalize_result(
+                            OpenClawResult(
+                                ok=False,
+                                returncode=1,
+                                command=cmd,
+                                stdout="",
+                                stderr=(
+                                    "[PMX] Pre-send probe: DNS resolution failed for web.whatsapp.com.\n"
+                                    f"[PMX] Consecutive DNS probe failures: {consecutive_failures}/{failfast_after}.\n"
+                                    + (
+                                        f"[PMX] Last resolver error: {last_dns_error}\n"
+                                        if last_dns_error
+                                        else ""
+                                    )
+                                    + "[PMX] Skipping send to avoid timeout. Check network/DNS/firewall."
+                                ),
                             ),
+                            record_for_storm=True,
                         )
                     logger.warning(
                         "Pre-send probe DNS failure for web.whatsapp.com (%d/%d). Continuing send in case transient resolves.",
@@ -1384,10 +1702,15 @@ def send_message(
                             command=command, cwd=cwd,
                         )
                         if not recovered:
-                            logger.warning(
-                                "Pre-send probe: WhatsApp listener not ready, recovery failed (%s)",
-                                _probe_reason,
-                            )
+                            if _probe_reason == "gateway_already_running_conflict":
+                                logger.info(
+                                    "Pre-send probe: gateway restart already owned by supervisor; skipping local restart."
+                                )
+                            else:
+                                logger.warning(
+                                    "Pre-send probe: WhatsApp listener not ready, recovery failed (%s)",
+                                    _probe_reason,
+                                )
         except Exception:
             pass  # Probe is best-effort; don't block sends on probe failure.
 
@@ -1469,7 +1792,7 @@ def send_message(
     last_result = _try_send(cmd)
     if last_result.ok:
         _reset_dns_probe_failures()
-        return last_result
+        return _finalize_result(last_result, record_for_storm=True)
 
     for attempt in range(max_retries):
         if not _is_retryable_error(last_result):
@@ -1479,7 +1802,7 @@ def send_message(
         last_result = _try_send(cmd)
         if last_result.ok:
             _reset_dns_probe_failures()
-            return last_result
+            return _finalize_result(last_result, record_for_storm=True)
 
     auto_recover_listener = str(os.getenv("OPENCLAW_AUTO_RECOVER_LISTENER", "1")).strip().lower() not in {
         "0",
@@ -1493,13 +1816,18 @@ def send_message(
             post_recovery = _try_send(cmd)
             if post_recovery.ok:
                 _reset_dns_probe_failures()
-                return post_recovery
+                return _finalize_result(post_recovery, record_for_storm=True)
             last_result = post_recovery
         note_lines = [
             str(last_result.stderr or "").strip(),
             f"[PMX] Missing WhatsApp listener recovery attempted: {reason}.",
         ]
-        if reason == "dns_resolution_failed":
+        if reason == "gateway_already_running_conflict":
+            note_lines.append(
+                "[PMX] Gateway restart is already owned by a supervised OpenClaw process. "
+                "Skipping further restarts to avoid alert churn."
+            )
+        elif reason == "dns_resolution_failed":
             note_lines.append(
                 "[PMX] DNS lookup to web.whatsapp.com failed. Verify DNS/network/firewall before retrying."
             )
@@ -1507,9 +1835,10 @@ def send_message(
             note_lines.append(
                 "[PMX] Listener recovery restart is in cooldown. Retrying too quickly can cause gateway churn."
             )
-        note_lines.append(
-            "[PMX] If this persists, relink with: openclaw channels login --channel whatsapp --account default --verbose"
-        )
+        if reason != "gateway_already_running_conflict":
+            note_lines.append(
+                "[PMX] If this persists, relink with: openclaw channels login --channel whatsapp --account default --verbose"
+            )
         last_result = OpenClawResult(
             ok=False,
             returncode=last_result.returncode,
@@ -1545,7 +1874,7 @@ def send_message(
             ),
         )
 
-    return _append_operator_hints(last_result)
+    return _finalize_result(_append_operator_hints(last_result), record_for_storm=True)
 
 
 def build_agent_turn_command(
@@ -1774,6 +2103,7 @@ def run_agent_turn(
             return last_result
 
     if deliver and _is_missing_listener_error(last_result):
+        fallback_send_result: Optional[OpenClawResult] = None
         no_deliver_cmd = build_agent_turn_command(
             command=command,
             to=to,
@@ -1811,18 +2141,32 @@ def run_agent_turn(
                         stdout=no_deliver_result.stdout,
                         stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
                     )
+                fallback_send_result = send_result
         if _is_missing_listener_error(last_result):
-            last_result = OpenClawResult(
-                ok=False,
-                returncode=last_result.returncode,
-                command=last_result.command,
-                stdout=last_result.stdout,
-                stderr=(
-                    (last_result.stderr or "").strip()
-                    + "\n[PMX] Missing WhatsApp listener. Try `openclaw gateway restart` and, if needed, "
-                    "`openclaw channels login --channel whatsapp --account default --verbose`."
-                ).strip(),
-            )
+            if fallback_send_result and _is_gateway_supervision_conflict_error(fallback_send_result):
+                detail_lines = [
+                    str(last_result.stderr or "").strip(),
+                    str(fallback_send_result.stderr or "").strip(),
+                ]
+                last_result = OpenClawResult(
+                    ok=False,
+                    returncode=fallback_send_result.returncode,
+                    command=fallback_send_result.command,
+                    stdout=no_deliver_result.stdout or last_result.stdout,
+                    stderr="\n".join(line for line in detail_lines if line).strip(),
+                )
+            else:
+                last_result = OpenClawResult(
+                    ok=False,
+                    returncode=last_result.returncode,
+                    command=last_result.command,
+                    stdout=last_result.stdout,
+                    stderr=(
+                        (last_result.stderr or "").strip()
+                        + "\n[PMX] Missing WhatsApp listener. Try `openclaw gateway restart` and, if needed, "
+                        "`openclaw channels login --channel whatsapp --account default --verbose`."
+                    ).strip(),
+                )
 
     return _append_operator_hints(last_result)
 
