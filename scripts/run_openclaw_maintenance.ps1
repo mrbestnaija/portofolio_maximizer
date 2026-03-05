@@ -42,6 +42,15 @@ if (Test-WslReady) {
         throw "Failed to resolve WSL path for repo root."
     }
 
+    $enforceCmd = "cd '$repoWsl' && python scripts/enforce_openclaw_exec_environment.py"
+    if (-not $Apply) {
+        $enforceCmd += " --dry-run"
+    }
+    & wsl bash -lc $enforceCmd
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     $envParts = @(
         "CRON_OPENCLAW_MAINTENANCE_APPLY=$([int]$Apply)",
         "CRON_OPENCLAW_DISABLE_BROKEN_CHANNELS=$([int]$DisableBrokenChannels)",
@@ -59,6 +68,17 @@ if (Test-WslReady) {
 
 Set-Location $repoRoot
 $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
+
+# Keep OpenClaw exec host/sandbox/ACP defaults aligned before maintenance logic.
+$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")
+if (-not $Apply) {
+    $execEnvArgs += "--dry-run"
+}
+& $pythonExe @execEnvArgs
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 $args = @(
     "scripts/openclaw_maintenance.py",
     "--primary-channel", $PrimaryChannel,

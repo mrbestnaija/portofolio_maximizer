@@ -21,6 +21,8 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+VALID_EXEC_HOSTS = {"sandbox", "gateway", "node"}
+VALID_SANDBOX_MODES_FOR_SANDBOX_HOST = {"non-main", "all"}
 
 
 def _trim(text: str, max_chars: int = 1400) -> str:
@@ -86,6 +88,61 @@ def _run_check(
         }
 
 
+def _openclaw_exec_environment_check() -> dict[str, Any]:
+    cfg_path = Path.home() / ".openclaw" / "openclaw.json"
+    check = {
+        "name": "openclaw_exec_env",
+        "ok": False,
+        "returncode": 1,
+        "duration_seconds": 0.0,
+        "command": f"validate {cfg_path}",
+        "stdout": "",
+        "stderr": "",
+        "signals": [],
+    }
+    if not cfg_path.exists():
+        check["stderr"] = f"openclaw config missing: {cfg_path}"
+        return check
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        check["stderr"] = f"openclaw config unreadable: {exc}"
+        return check
+    if not isinstance(cfg, dict):
+        check["stderr"] = "openclaw config is not a JSON object"
+        return check
+
+    tools = cfg.get("tools", {}) if isinstance(cfg.get("tools"), dict) else {}
+    exec_cfg = tools.get("exec", {}) if isinstance(tools.get("exec"), dict) else {}
+    host = str(exec_cfg.get("host") or "").strip().lower()
+    if host not in VALID_EXEC_HOSTS:
+        check["signals"] = ["invalid_exec_host"]
+        check["stderr"] = "tools.exec.host missing/invalid"
+        return check
+
+    agents = cfg.get("agents", {}) if isinstance(cfg.get("agents"), dict) else {}
+    defaults = agents.get("defaults", {}) if isinstance(agents.get("defaults"), dict) else {}
+    sandbox = defaults.get("sandbox", {}) if isinstance(defaults.get("sandbox"), dict) else {}
+    sandbox_mode = str(sandbox.get("mode") or "").strip().lower()
+    if host == "sandbox" and sandbox_mode not in VALID_SANDBOX_MODES_FOR_SANDBOX_HOST:
+        check["signals"] = ["invalid_sandbox_mode"]
+        check["stderr"] = "agents.defaults.sandbox.mode invalid for sandbox host"
+        return check
+
+    acp = cfg.get("acp", {}) if isinstance(cfg.get("acp"), dict) else {}
+    default_agent = str(acp.get("defaultAgent") or "").strip()
+    if not default_agent:
+        check["signals"] = ["missing_acp_default_agent"]
+        check["stderr"] = "acp.defaultAgent missing"
+        return check
+
+    check["ok"] = True
+    check["returncode"] = 0
+    check["signals"] = ["exec_env_valid"]
+    check["stdout"] = f"host={host} sandbox_mode={sandbox_mode or '<unset>'} acp.defaultAgent={default_agent}"
+    return check
+
+
 def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
     py = sys.executable
     db_path = PROJECT_ROOT / "data" / "portfolio_maximizer.db"
@@ -133,6 +190,7 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
             timeout_seconds=timeout_seconds,
         )
     )
+    checks.append(_openclaw_exec_environment_check())
 
     failed = [c["name"] for c in checks if not bool(c.get("ok"))]
     return {

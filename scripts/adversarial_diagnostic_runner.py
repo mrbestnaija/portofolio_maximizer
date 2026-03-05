@@ -913,6 +913,194 @@ def chk_warmup_indefinite(src_gate: str) -> Finding:
     return f
 
 
+def chk_tcon_semantic_denominator(src_gate: str) -> Finding:
+    """Telemetry contract: RMSE-only counters must not use outcome-implying labels."""
+    f = Finding(
+        id="TCON-01",
+        severity="MEDIUM",
+        category="wiring",
+        location="scripts/check_forecast_audits.py",
+        title="Outcome-implying telemetry labels used without outcome joins",
+        detail=(
+            "Legacy counters such as matched/eligible windows can imply outcome linkage "
+            "even when the script only processes RMSE audit inputs."
+        ),
+        attack_vector=(
+            "Reporting layer prints matched/eligible semantics for RMSE-only windows. "
+            "Operators infer outcome-qualified readiness when no outcome join occurred."
+        ),
+        fix=(
+            "Use RMSE-explicit naming (processed/usable) and publish explicit outcome "
+            "counters with outcomes_loaded/outcome_join_attempted contract flags."
+        ),
+    )
+    has_legacy_labels = any(
+        token in src_gate
+        for token in (
+            "n_matched_windows",
+            "n_eligible_windows",
+            "matched_windows = len(results)",
+            "Eligibility    :",
+        )
+    )
+    has_contract_flags = "outcomes_loaded" in src_gate and "outcome_join_attempted" in src_gate
+    if has_legacy_labels:
+        f.passed = False
+        f.detail += " CONFIRMED: legacy matched/eligible labels found in source."
+    elif has_contract_flags:
+        f.passed = True
+        f.detail = "RMSE/outcome telemetry split is present with explicit contract flags."
+    else:
+        f.passed = False
+        f.detail += " Missing explicit telemetry contract flags for outcome linkage."
+    return f
+
+
+def chk_tcon_execution_loaded_integrity(src_update_outcomes: str) -> Finding:
+    """Telemetry contract: execution_log_loaded=1 requires parsed evidence."""
+    f = Finding(
+        id="TCON-02",
+        severity="MEDIUM",
+        category="integrity",
+        location="scripts/update_platt_outcomes.py",
+        title="Execution log can be reported loaded without parsed events",
+        detail=(
+            "Execution-log health must be parse-based, not file-visibility based. "
+            "loaded=1 with zero parsed lines is evidence corruption."
+        ),
+        attack_vector=(
+            "Provide malformed execution JSONL where file exists but no line parses. "
+            "If loaded is derived from visibility, telemetry reports loaded=1."
+        ),
+        fix=(
+            "Publish parser integrity stats (total/parsed/bad/fatal) and compute loaded "
+            "strictly from parsed>0."
+        ),
+    )
+    has_visibility_loaded = (
+        "execution_log_visible = int(bool(" in src_update_outcomes
+        and "execution_log_loaded={execution_log_visible}" in src_update_outcomes
+    )
+    loader_returns_true_on_exists = (
+        "if not path.exists():" in src_update_outcomes
+        and "return True, by_ts_signal_id, by_run_ticker_time, by_run_ticker" in src_update_outcomes
+    )
+    if has_visibility_loaded or loader_returns_true_on_exists:
+        f.passed = False
+        f.detail += " CONFIRMED: loaded semantics can bypass parse integrity."
+    else:
+        f.passed = True
+    return f
+
+
+def chk_tcon_datetime_eligibility(src_update_outcomes: str) -> Finding:
+    """Telemetry contract: eligibility must be timestamp-level, not date truncation."""
+    f = Finding(
+        id="TCON-03",
+        severity="MEDIUM",
+        category="wiring",
+        location="scripts/update_platt_outcomes.py",
+        title="Eligibility logic truncates to day granularity",
+        detail=(
+            "Date-level eligibility can mark same-day future closes as eligible too early, "
+            "which pollutes outcome reconciliation telemetry."
+        ),
+        attack_vector=(
+            "Forecast due later the same UTC day is treated eligible before close timestamp, "
+            "causing premature NO_ROW/TIME_MISMATCH classifications."
+        ),
+        fix=(
+            "Store expected_close as timezone-aware datetime and require "
+            "expected_close_ts + buffer <= now_utc()."
+        ),
+    )
+    uses_date_truncation = (
+        "expected_close_date = (forecast_time + timedelta(days=forecast_horizon)).date()" in src_update_outcomes
+        and "expected_close_date > datetime.now(timezone.utc).date()" in src_update_outcomes
+    )
+    if uses_date_truncation:
+        f.passed = False
+        f.detail += " CONFIRMED: .date() truncation drives eligibility decisions."
+    else:
+        f.passed = True
+    return f
+
+
+def chk_tcon_dashboard_severity_inversion(src_live_dashboard: str) -> Finding:
+    """Telemetry contract: UI status must not be less severe than backend status."""
+    f = Finding(
+        id="TCON-04",
+        severity="MEDIUM",
+        category="wiring",
+        location="visualizations/live_dashboard.html",
+        title="UI robustness status can downplay backend severity",
+        detail=(
+            "If UI prioritizes sufficiency over backend robustness/overall status, WARN/ERROR "
+            "states can be masked as SUFFICIENT."
+        ),
+        attack_vector=(
+            "Backend emits robustness WARN with sufficiency SUFFICIENT. "
+            "UI renders SUFFICIENT when it should render WARN."
+        ),
+        fix=(
+            "Render robustness.overall_status first, then fallback to robustness.status."
+        ),
+    )
+    uses_sufficiency_precedence = "statusEl.textContent = suff.status ||" in src_live_dashboard
+    has_overall_status_precedence = "overall_status" in src_live_dashboard
+    if uses_sufficiency_precedence and not has_overall_status_precedence:
+        f.passed = False
+        f.detail += " CONFIRMED: sufficiency precedence can mask backend WARN/ERROR."
+    else:
+        f.passed = True
+    return f
+
+
+def chk_tcon_cache_fail_open(src_gate: str) -> Finding:
+    """Telemetry contract: cache write failures must be observable."""
+    f = Finding(
+        id="TCON-05",
+        severity="MEDIUM",
+        category="wiring",
+        location="scripts/check_forecast_audits.py",
+        title="Forecast cache write failures can be silently swallowed",
+        detail=(
+            "Telemetry cache write failures must emit visible warnings and a cache status field."
+        ),
+        attack_vector=(
+            "Cache write exception is swallowed, stale summary persists, no operator signal."
+        ),
+        fix=(
+            "Record cache_status.write_ok/errors in summary and emit warning logs on write failure."
+        ),
+    )
+    has_silent_swallow = bool(
+        re.search(
+            r"_write_json_atomic\(cache_path.*?except Exception:\s*pass",
+            src_gate,
+            re.DOTALL,
+        )
+    ) or bool(
+        re.search(
+            r"_write_json_atomic\(dash_path.*?except Exception:\s*pass",
+            src_gate,
+            re.DOTALL,
+        )
+    )
+    has_cache_status = "cache_status" in src_gate
+    has_warning_emit = "forecast_audits_cache_write_failed" in src_gate
+    if has_silent_swallow:
+        f.passed = False
+        f.detail += " CONFIRMED: silent pass on cache write failure."
+    elif has_cache_status and has_warning_emit:
+        f.passed = True
+        f.detail = "Cache write failures are surfaced via cache_status and warning output."
+    else:
+        f.passed = False
+        f.detail += " Missing cache_status or warning emission on write failure."
+    return f
+
+
 # ===========================================================================
 # CATEGORY: poisoning
 # ===========================================================================
@@ -1017,6 +1205,8 @@ def run_all_checks(
     src_health_audit = _read(ROOT / "scripts" / "ensemble_health_audit.py")
     src_sig_gen = _read(ROOT / "models" / "time_series_signal_generator.py")
     src_ol = _read(ROOT / "forcester_ts" / "order_learner.py")
+    src_update_outcomes = _read(ROOT / "scripts" / "update_platt_outcomes.py")
+    src_live_dashboard = _read(ROOT / "visualizations" / "live_dashboard.html")
 
     conn = _db_connect(db_path)
 
@@ -1048,6 +1238,12 @@ def run_all_checks(
         # Wiring
         chk_layer3_threshold_not_from_config(),
         chk_lift_computation_mismatch(src_cmi, src_gate),
+        # Telemetry contract
+        chk_tcon_semantic_denominator(src_gate),
+        chk_tcon_execution_loaded_integrity(src_update_outcomes),
+        chk_tcon_datetime_eligibility(src_update_outcomes),
+        chk_tcon_dashboard_severity_inversion(src_live_dashboard),
+        chk_tcon_cache_fail_open(src_gate),
     ]
 
     if conn:

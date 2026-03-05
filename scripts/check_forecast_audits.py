@@ -20,7 +20,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,6 +42,7 @@ DEFAULT_DECISION_DISABLE = "DISABLE_DEFAULT"
 DEFAULT_MANIFEST_FILENAME = "forecast_audit_manifest.jsonl"
 DEFAULT_MANIFEST_MODE = "off"
 MANIFEST_MODES = {"off", "warn", "fail"}
+TELEMETRY_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -52,12 +56,17 @@ class AuditCheckResult:
     ensemble_missing: bool = False
 
 
-def _load_audit(path: Path) -> Optional[Dict[str, Any]]:
+def _load_audit_with_error(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except Exception:
-        return None
+            return json.load(handle), None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _load_audit(path: Path) -> Optional[Dict[str, Any]]:
+    payload, _ = _load_audit_with_error(path)
+    return payload
 
 
 def _sha256_file(path: Path) -> Optional[str]:
@@ -69,6 +78,53 @@ def _sha256_file(path: Path) -> Optional[str]:
         return digest.hexdigest()
     except Exception:
         return None
+
+
+def _parse_window_day(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        return datetime.fromisoformat(normalized).date().isoformat()
+    except Exception:
+        return text[:10] if len(text) >= 10 else None
+
+
+def _extract_window_metadata(audit: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    dataset = audit.get("dataset") or {}
+    ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
+    regime = str(dataset.get("detected_regime") or dataset.get("regime") or "").strip().upper() or None
+    return {
+        "ticker": ticker,
+        "detected_regime": regime,
+        "end_day": _parse_window_day(dataset.get("end")),
+    }
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    last_error: Optional[Exception] = None
+    for _attempt in range(2):
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}_", suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            with tmp_path.open("r", encoding="utf-8") as handle:
+                json.load(handle)
+            os.replace(tmp_path, path)
+            return
+        except Exception as exc:
+            last_error = exc
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+    if last_error is not None:
+        raise last_error
 
 
 def _load_manifest_index(manifest_path: Path) -> Tuple[Dict[str, str], Dict[str, Any]]:
@@ -474,6 +530,8 @@ def main() -> None:
 
     unique_map: dict[Tuple[Any, ...], Path] = {}
     horizon_filtered_count = 0
+    parseable_count = 0
+    parse_error_count = 0
 
     manifest_index: Dict[str, str] = {}
     manifest_stats: Dict[str, Any] = {
@@ -492,9 +550,12 @@ def main() -> None:
         manifest_stats.update(loaded_stats)
 
     for f in files:
-        audit = _load_audit(f)
+        audit, load_error = _load_audit_with_error(f)
         if not audit:
+            if load_error:
+                parse_error_count += 1
             continue
+        parseable_count += 1
 
         if min_forecast_horizon is not None:
             horizon = _forecast_horizon_from_audit(audit)
@@ -530,6 +591,16 @@ def main() -> None:
     print(f"Audit directory : {audit_dir}")
     print(
         f"Files inspected : {len(results)} unique (raw={len(files)}, max_files={args.max_files})"
+    )
+    print(
+        "Parse stats     : "
+        f"parseable={parseable_count} "
+        f"parse_errors={parse_error_count}"
+    )
+    print(
+        "Window stats    : "
+        f"deduped={len(unique_map)} "
+        f"checked={len(results)}"
     )
     print(f"Baseline model  : {baseline_model}")
     print(f"RMSE tolerance  : ensemble_rmse <= (1 + {tolerance:.2f}) * baseline_rmse")
@@ -598,6 +669,7 @@ def main() -> None:
                 )
 
     violation_count = sum(1 for r in results if r.violation)
+    rmse_windows_processed = len(results)
     effective_n = sum(
         1
         for r in results
@@ -658,6 +730,36 @@ def main() -> None:
         if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
     ]
     recent_pct = _percentiles(recent_ratios, [0.5, 0.9]) if recent_ratios else {}
+    rmse_windows_usable = effective_n
+    outcomes_loaded = False
+    outcome_join_attempted = False
+    outcome_windows_eligible = 0
+    outcome_windows_matched = 0
+
+    if (
+        (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
+        and (not outcomes_loaded or not outcome_join_attempted)
+    ):
+        raise SystemExit(
+            "Telemetry contract violation: outcome window counts > 0 without "
+            "outcomes_loaded=true and outcome_join_attempted=true."
+        )
+
+    print(
+        "RMSE coverage  : "
+        f"raw={len(files)} "
+        f"parseable={parseable_count} "
+        f"deduped={len(unique_map)} "
+        f"processed={rmse_windows_processed} "
+        f"usable={rmse_windows_usable}"
+    )
+    print(
+        "Outcome cov.   : "
+        f"outcomes_loaded={int(outcomes_loaded)} "
+        f"join_attempted={int(outcome_join_attempted)} "
+        f"eligible={outcome_windows_eligible} "
+        f"matched={outcome_windows_matched}"
+    )
 
     print(f"\nEffective audits with RMSE: {effective_n}")
     print(f"Violations (ensemble worse than baseline beyond tolerance): {violation_count}")
@@ -862,15 +964,20 @@ def main() -> None:
         ],
     }
     dataset_entries = []
+    eligible_window_entries = []
     for f in unique_files:
         audit = _load_audit(f)
         ds = (audit or {}).get("dataset") or {}
+        meta = _extract_window_metadata(audit or {})
         entry = {
             "file": f.name,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
             "forecast_horizon": ds.get("forecast_horizon"),
+            "ticker": meta.get("ticker"),
+            "detected_regime": meta.get("detected_regime"),
+            "end_day": meta.get("end_day"),
         }
         matching = next((r for r in results if r.path == f), None)
         if matching:
@@ -878,7 +985,44 @@ def main() -> None:
             entry["ensemble_rmse"] = matching.ensemble_rmse
             entry["baseline_rmse"] = matching.baseline_rmse
             entry["ensemble_missing"] = bool(matching.ensemble_missing)
+            if (
+                matching.ensemble_rmse is not None
+                and matching.baseline_rmse is not None
+                and matching.baseline_rmse > 0
+            ):
+                eligible_window_entries.append(entry)
         dataset_entries.append(entry)
+
+    healthy_tickers = {"NVDA", "MSFT", "GOOG", "JPM"}
+    diversity = {
+        "regime_count": len(
+            {
+                str(entry.get("detected_regime")).strip()
+                for entry in eligible_window_entries
+                if str(entry.get("detected_regime") or "").strip()
+            }
+        ),
+        "healthy_ticker_count": len(
+            {
+                str(entry.get("ticker")).strip().upper()
+                for entry in eligible_window_entries
+                if str(entry.get("ticker") or "").strip().upper() in healthy_tickers
+            }
+        ),
+        "distinct_trading_days": len(
+            {
+                str(entry.get("end_day")).strip()
+                for entry in eligible_window_entries
+                if str(entry.get("end_day") or "").strip()
+            }
+        ),
+    }
+    print(
+        "Diversity      : "
+        f"regimes={diversity['regime_count']} "
+        f"healthy_tickers={diversity['healthy_ticker_count']} "
+        f"trading_days={diversity['distinct_trading_days']}"
+    )
 
     summary = {
         "audit_dir": str(audit_dir),
@@ -911,15 +1055,39 @@ def main() -> None:
         "recent_window_max_violation_rate": recent_window_max_violation_rate,
         "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
         "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+        "telemetry_contract": {
+            "schema_version": TELEMETRY_SCHEMA_VERSION,
+            "rmse_inputs_present": bool(results),
+            "outcomes_loaded": outcomes_loaded,
+            "execution_log_loaded": False,
+            "outcome_join_attempted": outcome_join_attempted,
+        },
+        "window_counts": {
+            "n_raw_windows": len(files),
+            "n_parseable_windows": parseable_count,
+            "n_deduped_windows": len(unique_map),
+            "n_rmse_windows_processed": rmse_windows_processed,
+            "n_rmse_windows_usable": rmse_windows_usable,
+            "n_outcome_windows_eligible": outcome_windows_eligible,
+            "n_outcome_windows_matched": outcome_windows_matched,
+        },
+        "window_diversity": diversity,
         "dataset_windows": dataset_entries,
     }
     cache_path = cache_dir / "latest_summary.json"
     dash_path = cache_dir / "ratio_distribution.json"
+    cache_status = {"write_ok": True, "errors": []}
     try:
-        cache_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        dash_path.write_text(json.dumps(ratio_stats, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        _write_json_atomic(dash_path, ratio_stats)
+    except Exception as exc:
+        cache_status["write_ok"] = False
+        cache_status["errors"].append(f"ratio_distribution:{exc}")
+        print(f"[WARN] forecast_audits_cache_write_failed target=ratio_distribution error={exc}")
+    summary["cache_status"] = cache_status
+    try:
+        _write_json_atomic(cache_path, summary)
+    except Exception as exc:
+        print(f"[WARN] forecast_audits_cache_write_failed target=latest_summary error={exc}")
 
     raise SystemExit(0)
 

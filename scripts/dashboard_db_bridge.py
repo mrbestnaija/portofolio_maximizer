@@ -27,6 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = Path(os.getenv("PORTFOLIO_DB_PATH") or (ROOT / "data" / "portfolio_maximizer.db"))
 DEFAULT_OUTPUT_PATH = ROOT / "visualizations" / "dashboard_data.json"
 DEFAULT_AUDIT_DB_PATH = ROOT / "data" / "dashboard_audit.db"
+DEFAULT_ELIGIBILITY_PATH = ROOT / "logs" / "ticker_eligibility.json"
+DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
+DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
+DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -945,6 +949,7 @@ def build_dashboard_payload(
         "price_series": {t: _price_series(conn, t, lookback_days) for t in tickers},
         "model_params": model_params,
         "checks": checks,
+        "robustness": _robustness_payload(),
     }
     return payload
 
@@ -954,6 +959,124 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def _load_sidecar_json(path: Path) -> tuple[Dict[str, Any], Optional[str]]:
+    if not path.exists():
+        return {}, "missing"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}, "unreadable"
+    if not isinstance(payload, dict):
+        return {}, "invalid"
+    return payload, None
+
+
+def _robustness_payload() -> Dict[str, Any]:
+    load_warnings: List[str] = []
+    semantic_warnings: List[str] = []
+    eligibility, elig_err = _load_sidecar_json(DEFAULT_ELIGIBILITY_PATH)
+    context, ctx_err = _load_sidecar_json(DEFAULT_CONTEXT_QUALITY_PATH)
+    performance, perf_err = _load_sidecar_json(DEFAULT_PERFORMANCE_METRICS_PATH)
+    forecast_summary, forecast_summary_err = _load_sidecar_json(DEFAULT_FORECAST_SUMMARY_PATH)
+
+    if elig_err:
+        load_warnings.append(f"eligibility_{elig_err}")
+    if ctx_err:
+        load_warnings.append(f"context_quality_{ctx_err}")
+    if perf_err:
+        load_warnings.append(f"performance_metrics_{perf_err}")
+    if forecast_summary_err and forecast_summary_err != "missing":
+        load_warnings.append(f"forecast_summary_{forecast_summary_err}")
+
+    tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
+    weak_tickers = sorted(
+        ticker for ticker, info in tickers.items()
+        if isinstance(info, dict) and info.get("status") == "WEAK"
+    )
+    perf_metrics = performance if isinstance(performance, dict) else {}
+    sufficiency = perf_metrics.get("sufficiency", {}) if isinstance(perf_metrics.get("sufficiency"), dict) else {}
+    chart_paths = perf_metrics.get("chart_paths", {}) if isinstance(perf_metrics, dict) else {}
+    chart_missing: List[str] = []
+    if isinstance(chart_paths, dict):
+        for name, raw_path in chart_paths.items():
+            chart_name = str(name).strip() or "unknown"
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                chart_missing.append(f"chart_missing:{chart_name}")
+                continue
+            path_obj = Path(raw_path)
+            if not path_obj.is_absolute():
+                path_obj = ROOT / path_obj
+            if not path_obj.exists():
+                chart_missing.append(f"chart_missing:{chart_name}")
+    elif perf_metrics:
+        semantic_warnings.append("chart_paths_invalid")
+    semantic_warnings.extend(chart_missing)
+    telemetry_contract = (
+        forecast_summary.get("telemetry_contract", {})
+        if isinstance(forecast_summary, dict)
+        else {}
+    )
+    telemetry_schema_version: Optional[int] = None
+    if isinstance(telemetry_contract, dict) and telemetry_contract:
+        raw_schema = telemetry_contract.get("schema_version")
+        try:
+            telemetry_schema_version = int(raw_schema) if raw_schema is not None else None
+        except (TypeError, ValueError):
+            telemetry_schema_version = None
+        if telemetry_schema_version is None or telemetry_schema_version < 2:
+            semantic_warnings.append("telemetry_contract_legacy_schema")
+    elif isinstance(forecast_summary, dict) and forecast_summary:
+        semantic_warnings.append("telemetry_contract_missing")
+
+    for warning in eligibility.get("warnings", []) if isinstance(eligibility, dict) else []:
+        if isinstance(warning, str):
+            semantic_warnings.append(warning)
+    for warning in context.get("warnings", []) if isinstance(context, dict) else []:
+        if isinstance(warning, str):
+            semantic_warnings.append(warning)
+    for warning in perf_metrics.get("warnings", []) if isinstance(perf_metrics, dict) else []:
+        if isinstance(warning, str):
+            semantic_warnings.append(warning)
+    if isinstance(context, dict) and context.get("partial_data"):
+        semantic_warnings.append("context_partial_data")
+    missing_count = sum(1 for err in (elig_err, ctx_err, perf_err) if err == "missing")
+    present_count = sum(1 for payload in (eligibility, context, performance) if isinstance(payload, dict) and payload)
+    all_warnings = sorted(set(load_warnings + semantic_warnings))
+    if missing_count == 3 and present_count == 0:
+        robustness_status = "MISSING"
+    elif load_warnings:
+        robustness_status = "STALE"
+    elif (
+        (isinstance(perf_metrics, dict) and perf_metrics.get("status") == "WARN")
+        or (isinstance(sufficiency, dict) and sufficiency.get("status") not in (None, "SUFFICIENT"))
+        or bool(semantic_warnings)
+    ):
+        robustness_status = "WARN"
+    else:
+        robustness_status = "OK"
+
+    return {
+        "status": robustness_status,
+        "eligibility_summary": eligibility.get("summary", {}) if isinstance(eligibility, dict) else {},
+        "weak_tickers": weak_tickers,
+        "telemetry_contract": telemetry_contract if isinstance(telemetry_contract, dict) else {},
+        "window_counts": forecast_summary.get("window_counts", {}) if isinstance(forecast_summary, dict) else {},
+        "window_diversity": forecast_summary.get("window_diversity", {}) if isinstance(forecast_summary, dict) else {},
+        "cache_status": forecast_summary.get("cache_status", {}) if isinstance(forecast_summary, dict) else {},
+        "context_quality_summary": {
+            "n_total_trades": context.get("n_total_trades", 0),
+            "n_trades_no_confidence": context.get("n_trades_no_confidence", 0),
+            "partial_data": bool(context.get("partial_data", False)),
+            "regime_count": len(context.get("regime_quality", {}) or {}),
+            "confidence_bin_count": len(context.get("confidence_bin_quality", {}) or {}),
+        },
+        "sufficiency": sufficiency,
+        "performance_metrics": perf_metrics,
+        "chart_paths": chart_paths if isinstance(chart_paths, dict) else {},
+        "warnings": all_warnings,
+    }
 
 
 def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, Any]:
