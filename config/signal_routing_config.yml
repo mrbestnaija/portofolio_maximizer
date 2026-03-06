@@ -9,7 +9,9 @@ signal_routing:
   llm_fallback: false  # Disable LLM fallback to speed up runs
   llm_redundancy: false  # Disable redundancy to avoid latency overhead
 
-  # Time Series model flags
+  # Deprecated routing knobs (currently no-op in SignalRouter).
+  # They remain for backward compatibility and will emit warnings.
+  # Enable PMX_STRICT_ROUTING_CONFIG=1 to fail fast when these are present.
   enable_samossa: true
   enable_sarimax: true
   enable_garch: true
@@ -49,8 +51,11 @@ signal_routing:
         confidence_threshold: 0.55
         min_expected_return: 0.0020
       "AAPL":
-        confidence_threshold: 0.55
-        min_expected_return: 0.0020  # 20 bps floor; 5 bps was below roundtrip cost
+        confidence_threshold: 0.60  # Raised from 0.55: require higher conviction given 14% WR history
+        min_expected_return: 0.0080  # 80 bps (4x base): only very strong AAPL signals trade (P0 routing gate)
+      "GS":
+        confidence_threshold: 0.65  # Raised to near-maximum: GS has 0% WR over 5 trades; very high bar
+        min_expected_return: 0.0120  # 120 bps (6x base): effectively gates out weak GS signals (P0 routing gate)
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.
@@ -72,7 +77,7 @@ signal_routing:
       include_route_type: true
       include_fill_timestamp: true
 
-  # Routing mode
+  # Deprecated routing mode hint (currently no-op; runtime derives mode from active flags).
   routing_mode: "TIME_SERIES_PRIMARY_LLM_FALLBACK"  # Options:
   # - TIME_SERIES_PRIMARY_LLM_FALLBACK (default)
   # - TIME_SERIES_PRIMARY_LLM_REDUNDANCY

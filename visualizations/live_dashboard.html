@@ -1230,6 +1230,8 @@
       const calibTier = perf.calibration_metrics?.calibration_tier || '--';
       const brier = Number(perf.calibration_metrics?.brier_score);
       const weakTickers = Array.isArray(robustness.weak_tickers) ? robustness.weak_tickers : [];
+      const freshnessStatus = String(robustness.freshness_status || 'UNKNOWN').toUpperCase();
+      const freshnessReason = robustness.freshness_reason ? ` (${robustness.freshness_reason})` : '';
 
       statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
       if (['ERROR', 'FAIL', 'FATAL'].includes(normalizedStatus)) {
@@ -1252,7 +1254,7 @@
           : (warnings.length ? `Robustness warnings: ${warnings.join(', ')}` : 'No weak tickers flagged.');
       contextEl.textContent = normalizedStatus === 'MISSING'
         ? 'Context: No robustness data'
-        : `Context: ${Number(context.regime_count || 0)} regimes, ${Number(context.confidence_bin_count || 0)} confidence bins, ${Number(context.n_trades_no_confidence || 0)} no-confidence trades${context.partial_data ? ' (partial data)' : ''}`;
+        : `Context: ${Number(context.regime_count || 0)} regimes, ${Number(context.confidence_bin_count || 0)} confidence bins, ${Number(context.n_trades_no_confidence || 0)} no-confidence trades${context.partial_data ? ' (partial data)' : ''}; freshness=${freshnessStatus}${freshnessReason}`;
 
       chartsEl.innerHTML = '';
       const entries = Object.entries(chartPaths);

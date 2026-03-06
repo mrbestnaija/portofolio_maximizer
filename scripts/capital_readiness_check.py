@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -154,6 +155,10 @@ def _check_r4_calibration(db_path: Path, jsonl_path: Path) -> tuple[Optional[boo
         metrics.update({"calibration_tier": tier, "brier_score": brier})
         if tier == "inactive":
             return False, "R4: calibration tier is 'inactive' (no trained calibrator)", metrics
+        # WIR-02 fix: tier='unknown' means the audit finding was absent or format changed;
+        # treat as insufficient data rather than silently passing the gate.
+        if tier is None or tier == "unknown":
+            return None, "R4: calibration tier could not be determined (audit format mismatch or no finding)", metrics
         if brier is not None and brier >= R4_MAX_BRIER:
             return False, f"R4: brier_score={brier:.3f} >= {R4_MAX_BRIER} (miscalibrated)", metrics
         return True, "", metrics
@@ -186,6 +191,89 @@ def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
     except Exception as exc:
         log.warning("R5 lift CI check failed: %s", exc)
         return "", metrics
+
+
+def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, dict]:
+    """R6: no HIGH lifecycle violations (close_ts < entry_ts, missing exit_reason)."""
+    metrics: dict[str, Any] = {
+        "close_before_entry_count": None,
+        "closed_missing_exit_reason_count": None,
+        "high_integrity_violation_count": None,
+    }
+    if not db_path.exists():
+        return None, f"R6: db not found -- {db_path}", metrics
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        close_before_entry_count = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.bar_timestamp IS NOT NULL
+                  AND e.bar_timestamp IS NOT NULL
+                  AND c.bar_timestamp < e.bar_timestamp
+                """
+            ).fetchone()
+            close_before_entry_count = int(row["n"]) if row else 0
+        except sqlite3.OperationalError:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.trade_date IS NOT NULL
+                  AND e.trade_date IS NOT NULL
+                  AND c.trade_date < e.trade_date
+                """
+            ).fetchone()
+            close_before_entry_count = int(row["n"]) if row else 0
+
+        missing_exit_reason_count = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades
+                WHERE COALESCE(TRIM(exit_reason), '') = ''
+                """
+            ).fetchone()
+            missing_exit_reason_count = int(row["n"]) if row else 0
+        except sqlite3.OperationalError:
+            missing_exit_reason_count = 0
+
+        high_count = close_before_entry_count + missing_exit_reason_count
+        metrics.update(
+            {
+                "close_before_entry_count": close_before_entry_count,
+                "closed_missing_exit_reason_count": missing_exit_reason_count,
+                "high_integrity_violation_count": high_count,
+            }
+        )
+        if high_count > 0:
+            return (
+                False,
+                (
+                    "R6: HIGH lifecycle violation(s): "
+                    f"close_before_entry={close_before_entry_count}, "
+                    f"closed_missing_exit_reason={missing_exit_reason_count}"
+                ),
+                metrics,
+            )
+        return True, "", metrics
+    except Exception as exc:
+        log.warning("R6 lifecycle integrity check failed: %s", exc)
+        return None, f"R6: error -- {exc}", metrics
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +338,22 @@ def run_capital_readiness(
     if r5_warn:
         warnings.append(r5_warn)
 
+    # R6: lifecycle integrity (hard gate)
+    r6_ok, r6_msg, r6_m = _check_r6_lifecycle_integrity(db_path)
+    all_metrics.update(r6_m)
+    if r6_ok is None:
+        insufficient = True
+        reasons.append(r6_msg)
+    elif not r6_ok:
+        reasons.append(r6_msg)
+
     # Verdict
     # INSUFFICIENT_DATA only when ALL failures are missing-data (R3/R4 only) and
     # both hard gates (R1, R2) passed.  If either R1 or R2 failed, always FAIL —
     # adversarial/gate-artifact failures are hard failures regardless of data depth.
     if reasons:
         if insufficient and all(
-            msg.startswith(("R3:", "R4:")) for msg in reasons
+            msg.startswith(("R3:", "R4:", "R6:")) for msg in reasons
         ) and r1_ok and r2_ok:
             verdict = "INSUFFICIENT_DATA"
         else:

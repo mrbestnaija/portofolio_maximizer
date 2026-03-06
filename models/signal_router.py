@@ -27,6 +27,34 @@ from ai_llm.signal_generator import LLMSignalGenerator
 logger = logging.getLogger(__name__)
 
 
+UNSUPPORTED_ROUTING_NOOP_KEYS = (
+    "enable_samossa",
+    "enable_sarimax",
+    "enable_garch",
+    "enable_mssa_rl",
+    "routing_mode",
+)
+
+
+def validate_routing_contract(config: Optional[Dict[str, Any]], *, strict: bool = False) -> List[str]:
+    """
+    Warn or fail on config keys that are currently no-ops in SignalRouter.
+
+    Backward compatibility: warn-only by default; strict mode raises ValueError.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    warnings: List[str] = []
+    for key in UNSUPPORTED_ROUTING_NOOP_KEYS:
+        if key in cfg:
+            warnings.append(f"unsupported_routing_knob:{key}")
+    if strict and warnings:
+        raise ValueError(
+            "Unsupported routing knob(s) in strict mode: "
+            + ", ".join(warning.split(":", 1)[1] for warning in warnings)
+        )
+    return warnings
+
+
 @dataclass
 class SignalBundle:
     """Bundle of signals from multiple sources"""
@@ -60,6 +88,16 @@ class SignalRouter:
             llm_generator: LLM signal generator instance (optional, for fallback)
         """
         self.config = config or {}
+        strict_contract = bool(self.config.get("strict_routing_config", False))
+        self.routing_contract_warnings = validate_routing_contract(
+            self.config,
+            strict=strict_contract,
+        )
+        for warning in self.routing_contract_warnings:
+            logger.warning(
+                "SignalRouter config warning: %s (currently ignored/no-op).",
+                warning,
+            )
 
         # Feature flags (default: Time Series enabled, LLM as fallback)
         self.feature_flags = {
@@ -392,6 +430,7 @@ class SignalRouter:
         return {
             'stats': self.routing_stats.copy(),
             'feature_flags': self.feature_flags.copy(),
+            'routing_contract_warnings': list(self.routing_contract_warnings),
             'routing_mode': self._get_routing_mode(),
             'total_signals': sum(self.routing_stats.values())
         }

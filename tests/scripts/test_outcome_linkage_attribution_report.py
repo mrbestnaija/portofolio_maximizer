@@ -116,6 +116,9 @@ def test_build_report_links_closed_trade_to_forecast_audit(tmp_path: Path) -> No
     assert summary["linked_ts_trade_ratio"] == 1.0
     assert summary["ts_trade_coverage"] == 0.5
     assert summary["linked_correct_direction_negative_count"] == 0
+    assert summary["high_integrity_violation_count"] == 0
+    assert summary["close_before_entry_count"] == 0
+    assert summary["closed_missing_exit_reason_count"] == 0
 
     assert len(records) == 2
     ts_rec = next(r for r in records if r["ts_signal_id"] == "ts_AAPL_1")
@@ -129,3 +132,40 @@ def test_build_report_links_closed_trade_to_forecast_audit(tmp_path: Path) -> No
 
     assert legacy_rec["outcome_linked"] is False
     assert legacy_rec["realized_direction"] == "DOWN"
+
+
+def test_build_report_flags_lifecycle_integrity_violations(tmp_path: Path) -> None:
+    db_path = tmp_path / "pmx_integrity.db"
+    audit_dir = tmp_path / "audits"
+    _seed_db(db_path)
+    _seed_audit(audit_dir)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_executions
+            (id, ticker, trade_date, bar_timestamp, action, price, ts_signal_id, is_close)
+            VALUES
+            (10, 'NVDA', '2026-03-05', '2026-03-05T00:00:00Z', 'BUY', 300.0, 'legacy_nvda', 0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_executions
+            (id, ticker, trade_date, bar_timestamp, action, price, realized_pnl, exit_reason,
+             ts_signal_id, holding_period_days, entry_trade_id, entry_price, exit_price, is_close)
+            VALUES
+            (11, 'NVDA', '2026-03-04', '2026-03-04T00:00:00Z', 'SELL', 295.0, -5.0, NULL,
+             'legacy_nvda', 1, 10, 300.0, 295.0, 1)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    payload = build_report(db_path=db_path, audit_dir=audit_dir, limit=20)
+    summary = payload["summary"]
+    assert summary["high_integrity_violation_count"] >= 1
+    assert summary["close_before_entry_count"] >= 1
+    assert summary["closed_missing_exit_reason_count"] >= 1

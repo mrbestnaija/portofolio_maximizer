@@ -49,7 +49,7 @@ from etl.data_storage import DataStorage
 from etl.preprocessor import Preprocessor
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
-from models.signal_router import SignalRouter
+from models.signal_router import SignalRouter, validate_routing_contract
 from etl.data_universe import resolve_ticker_universe
 from risk.barbell_policy import BarbellConfig
 from risk.barbell_promotion_gate import load_promotion_evidence
@@ -851,6 +851,19 @@ def _generate_time_series_forecast(
         )
         forecaster.fit(price_series=close_series, returns_series=returns_series, ticker=ticker)
         forecast_bundle = forecaster.forecast()
+        if isinstance(forecast_bundle, dict) and not forecast_bundle.get("forecast_audit_path"):
+            try:
+                audit_dir = getattr(forecaster, "_audit_dir", None)
+                if isinstance(audit_dir, Path) and audit_dir.exists():
+                    latest = max(
+                        audit_dir.glob("forecast_audit_*.json"),
+                        key=lambda p: p.stat().st_mtime,
+                        default=None,
+                    )
+                    if latest is not None:
+                        forecast_bundle["forecast_audit_path"] = str(latest)
+            except Exception:
+                logger.debug("Unable to infer forecast_audit_path for %s", ticker, exc_info=True)
     except Exception as exc:
         logger.error("Forecasting failed: %s", exc)
         return None, None
@@ -1154,6 +1167,125 @@ def _persist_forecast_snapshots(
             logger.debug("Failed to persist %s forecast snapshot for %s", model_type, ticker, exc_info=True)
 
 
+def _attach_signal_context_to_forecast_audit(
+    *,
+    forecast_bundle: Dict[str, Any],
+    execution_report: Dict[str, Any],
+    ticker: str,
+    run_id: Optional[str],
+) -> None:
+    """
+    Patch the just-written forecast_audit artifact with causal signal identity.
+
+    Keeps scope bounded to one write-path: forecast audit files gain a top-level
+    signal_context block carrying ts_signal_id and routing metadata.
+    """
+    if not isinstance(forecast_bundle, dict) or not isinstance(execution_report, dict):
+        return
+
+    tsid_source = execution_report.get("ts_signal_id")
+    if not tsid_source and isinstance(execution_report.get("signal_id"), str):
+        tsid_source = execution_report.get("signal_id")
+    incoming_tsid = str(tsid_source or "").strip()
+    incoming_entry_ts = (
+        execution_report.get("signal_timestamp")
+        or execution_report.get("bar_timestamp")
+        or execution_report.get("timestamp")
+    )
+    canonical_context = {
+        "ts_signal_id": incoming_tsid or None,
+        "ticker": ticker,
+        "run_id": run_id,
+        "entry_ts": incoming_entry_ts,
+        "forecast_horizon": forecast_bundle.get("horizon"),
+        "signal_context_missing": not bool(incoming_tsid),
+    }
+    target_ticker = str(ticker or "").strip().upper()
+
+    audit_dir = ROOT_PATH / "logs" / "forecast_audits"
+    candidate_paths: List[Path] = []
+    raw_path = forecast_bundle.get("forecast_audit_path")
+    if raw_path:
+        try:
+            direct_path = Path(str(raw_path))
+            if not direct_path.is_absolute():
+                direct_path = ROOT_PATH / direct_path
+            if direct_path.exists():
+                candidate_paths.append(direct_path)
+                audit_dir = direct_path.parent
+        except Exception:
+            logger.debug("Failed to resolve forecast_audit_path=%r", raw_path, exc_info=True)
+
+    cutoff_ts = time.time() - 180.0
+    try:
+        for path in sorted(
+            audit_dir.glob("forecast_audit_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:20]:
+            if path in candidate_paths:
+                continue
+            if path.stat().st_mtime < cutoff_ts:
+                continue
+            candidate_paths.append(path)
+    except Exception:
+        logger.debug("Unable to scan recent forecast audits in %s", audit_dir, exc_info=True)
+
+    for audit_path in candidate_paths:
+        try:
+            payload = json.loads(audit_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug(
+                "Skipping signal_context patch; unreadable audit JSON %s",
+                audit_path,
+                exc_info=True,
+            )
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        dataset = payload.get("dataset")
+        dataset_ticker = ""
+        if isinstance(dataset, dict):
+            dataset_ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper()
+        if target_ticker and dataset_ticker and dataset_ticker != target_ticker:
+            continue
+
+        signal_context = payload.get("signal_context")
+        if not isinstance(signal_context, dict):
+            signal_context = {}
+        existing_tsid = str(signal_context.get("ts_signal_id") or "").strip()
+        if existing_tsid and incoming_tsid and existing_tsid != incoming_tsid:
+            continue
+
+        merged = dict(signal_context)
+        # Never clobber a valid existing linkage with missing incoming metadata.
+        merged["ts_signal_id"] = incoming_tsid or (existing_tsid or None)
+        merged["ticker"] = canonical_context.get("ticker") or merged.get("ticker")
+        merged["run_id"] = canonical_context.get("run_id") or merged.get("run_id")
+        merged["entry_ts"] = canonical_context.get("entry_ts") or merged.get("entry_ts")
+
+        incoming_horizon = canonical_context.get("forecast_horizon")
+        merged["forecast_horizon"] = (
+            incoming_horizon if incoming_horizon is not None else merged.get("forecast_horizon")
+        )
+
+        merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
+        payload["signal_context"] = merged
+
+        tmp_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp_path, audit_path)
+        except Exception:
+            logger.debug("Failed to patch signal_context into %s", audit_path, exc_info=True)
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def _backfill_forecast_regression_metrics(
     *,
     db_manager: DatabaseManager,
@@ -1299,6 +1431,11 @@ def _execute_signal(
         return None
 
     primary_payload = dict(primary)
+    if not primary_payload.get("ts_signal_id"):
+        # Backward-compatible bridge: some legacy callers only provide string signal_id.
+        raw_signal_id = primary_payload.get("signal_id")
+        if isinstance(raw_signal_id, str) and raw_signal_id.strip():
+            primary_payload["ts_signal_id"] = raw_signal_id.strip()
     if run_id:
         primary_payload["run_id"] = run_id
     if execution_mode:
@@ -1393,6 +1530,14 @@ def _execute_signal(
             "ticker": ticker,
             "status": result.status,
             "reason": result.reason,
+            "executed": False,
+            "signal_id": primary_payload.get("signal_id"),
+            "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "action": primary_payload.get("action"),
+            "signal_source": primary.get("source", "TIME_SERIES"),
+            "signal_confidence": primary.get("confidence"),
+            "signal_timestamp": primary_payload.get("signal_timestamp"),
+            "bar_timestamp": primary_payload.get("bar_timestamp"),
             "warnings": result.validation_warnings,
             "quality": quality,
             "data_source": data_source,
@@ -1415,6 +1560,9 @@ def _execute_signal(
     return {
         "ticker": ticker,
         "status": result.status,
+        "executed": True,
+        "signal_id": primary_payload.get("signal_id"),
+        "ts_signal_id": primary_payload.get("ts_signal_id"),
         "shares": result.trade.shares if result.trade else 0,
         "action": result.trade.action if result.trade else primary.get("action", "HOLD"),
         "entry_price": entry_price,
@@ -2022,6 +2170,20 @@ def main(
         except Exception as exc:
             logger.warning("Failed to load signal routing config: %s", exc)
 
+    strict_routing_contract = bool(_env_flag("PMX_STRICT_ROUTING_CONFIG"))
+    try:
+        routing_contract_warnings = validate_routing_contract(
+            routing_cfg,
+            strict=strict_routing_contract,
+        )
+    except ValueError as exc:
+        raise click.UsageError(
+            "signal_routing_config.yml has unsupported no-op knobs in strict mode: "
+            f"{exc}"
+        ) from exc
+    for warning in routing_contract_warnings:
+        logger.warning("%s (ignored/no-op unless strict mode enabled)", warning)
+
     ts_cfg = dict(routing_cfg.get("time_series") or {})
     strict_ts = str(os.getenv("PMX_PROOF_STRICT_THRESHOLDS") or "0") == "1"
     if proof_mode and strict_ts:
@@ -2050,6 +2212,7 @@ def main(
         "enable_sarimax": routing_cfg.get("enable_sarimax", True),
         "enable_garch": routing_cfg.get("enable_garch", True),
         "enable_mssa_rl": routing_cfg.get("enable_mssa_rl", True),
+        "strict_routing_config": strict_routing_contract,
         "time_series": ts_cfg,
     }
     signal_router = SignalRouter(config=router_config, llm_generator=llm_generator)
@@ -2339,6 +2502,12 @@ def main(
             )
 
             if execution_report:
+                _attach_signal_context_to_forecast_audit(
+                    forecast_bundle=forecast_bundle,
+                    execution_report=execution_report,
+                    ticker=ticker,
+                    run_id=run_id,
+                )
                 execution_report["quality"] = quality
                 execution_report["data_source"] = data_source
                 if execution_report.get("mid_price") is None and mid_price is not None:

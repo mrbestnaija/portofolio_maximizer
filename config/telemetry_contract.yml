@@ -1,5 +1,5 @@
 telemetry_contract:
-  current_schema_version: 2
+  current_schema_version: 3
   schema_definitions:
     2:
       required_adversarial_ids:
@@ -24,6 +24,54 @@ telemetry_contract:
         - n_rmse_windows_usable
         - n_outcome_windows_eligible
         - n_outcome_windows_matched
+      forbidden_window_count_keys:
+        - n_matched_windows
+        - n_eligible_windows
+    3:
+      required_adversarial_ids:
+        - TCON-01
+        - TCON-02
+        - TCON-03
+        - TCON-04
+        - TCON-05
+        - TCON-06
+        - TCON-07
+        - TCON-08
+      required_contract_fields:
+        - schema_version
+        - generated_utc
+        - source_script
+        - telemetry_contract
+        - telemetry_contract.schema_version
+        - telemetry_contract.status
+        - telemetry_contract.reason_code
+        - telemetry_contract.context_type
+        - telemetry_contract.severity
+        - telemetry_contract.blocking
+        - telemetry_contract.counts_toward_readiness_denominator
+        - telemetry_contract.counts_toward_linkage_denominator
+        - telemetry_contract.generated_utc
+        - telemetry_contract.source_script
+        - telemetry_contract.outcomes_loaded
+        - telemetry_contract.outcome_join_attempted
+        - window_counts
+        - window_diversity
+        - cache_status
+      required_window_count_keys:
+        - n_raw_windows
+        - n_parseable_windows
+        - n_deduped_windows
+        - n_outcome_deduped_windows
+        - n_rmse_windows_processed
+        - n_rmse_windows_usable
+        - n_outcome_windows_eligible
+        - n_outcome_windows_matched
+        - n_outcome_windows_missing
+        - n_outcome_windows_not_due
+        - n_outcome_windows_invalid_context
+        - n_outcome_windows_non_trade_context
+        - n_readiness_denominator_included
+        - n_linkage_denominator_included
       forbidden_window_count_keys:
         - n_matched_windows
         - n_eligible_windows

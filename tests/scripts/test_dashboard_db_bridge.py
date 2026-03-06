@@ -188,6 +188,38 @@ def test_robustness_payload_marks_missing_without_sidecars(tmp_path, monkeypatch
     assert robustness["warnings"]
 
 
+def test_robustness_marks_stale_when_sidecar_age_exceeds_policy(tmp_path, monkeypatch) -> None:
+    elig = tmp_path / "elig.json"
+    ctx = tmp_path / "ctx.json"
+    perf = tmp_path / "metrics.json"
+    old_ts = "2026-01-01T00:00:00Z"
+    elig.write_text(
+        '{"generated_utc":"%s","summary":{"HEALTHY":1,"WEAK":0,"LAB_ONLY":0},"tickers":{},"warnings":[]}'
+        % old_ts,
+        encoding="utf-8",
+    )
+    ctx.write_text(
+        '{"generated_utc":"%s","n_total_trades":4,"n_trades_no_confidence":0,"partial_data":false,"regime_quality":{"A":{}}, "confidence_bin_quality":{"0.60-0.65":{}}}'
+        % old_ts,
+        encoding="utf-8",
+    )
+    perf.write_text(
+        '{"generated_utc":"%s","status":"PASS","warnings":[],"sufficiency":{"status":"SUFFICIENT"},"chart_paths":{}}'
+        % old_ts,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
+    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+    monkeypatch.setenv("PMX_SIDECAR_MAX_AGE_MINUTES", "120")
+
+    robustness = mod._robustness_payload()
+    assert robustness["status"] == "STALE"
+    assert robustness["freshness_status"] == "STALE"
+    assert robustness["freshness_reason"] == "STALE_SIDECAR"
+
+
 # ---------------------------------------------------------------------------
 # P0 guardrail smoke tests: verify both connect helpers harden connections
 # ---------------------------------------------------------------------------

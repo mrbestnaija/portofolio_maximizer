@@ -33,8 +33,14 @@ try:
 except Exception:  # pragma: no cover - script execution path fallback
     from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
 
+try:
+    from scripts.telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
 
-DEFAULT_AUDIT_DIR = Path("logs/forecast_audits")
+DEFAULT_AUDIT_ROOT = Path("logs/forecast_audits")
+DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
+DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
 DEFAULT_MONITORING_CONFIG = Path("config/forecaster_monitoring.yml")
 DEFAULT_BASELINE_MODEL = "BEST_SINGLE"
 DEFAULT_DECISION_KEEP = "KEEP"
@@ -43,7 +49,7 @@ DEFAULT_DECISION_DISABLE = "DISABLE_DEFAULT"
 DEFAULT_MANIFEST_FILENAME = "forecast_audit_manifest.jsonl"
 DEFAULT_MANIFEST_MODE = "off"
 MANIFEST_MODES = {"off", "warn", "fail"}
-TELEMETRY_SCHEMA_VERSION = 2
+TELEMETRY_SCHEMA_VERSION = 3
 OUTCOME_ELIGIBILITY_BUFFER = timedelta(minutes=5)
 
 
@@ -232,6 +238,52 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
                 pass
     if last_error is not None:
         raise last_error
+
+
+def _resolve_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
+    roots: List[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        rp = path.resolve()
+        if rp in seen:
+            return
+        seen.add(rp)
+        roots.append(path)
+
+    _add(audit_dir)
+    if include_research:
+        if audit_dir.name.lower() == "production":
+            research_dir = audit_dir.parent / "research"
+            if research_dir != audit_dir:
+                _add(research_dir)
+        elif audit_dir.resolve() == DEFAULT_AUDIT_ROOT.resolve():
+            _add(audit_dir / "research")
+        else:
+            sibling_research = audit_dir.parent / "research"
+            if sibling_research != audit_dir:
+                _add(sibling_research)
+    return roots
+
+
+def _collect_audit_files(
+    *,
+    audit_roots: List[Path],
+    max_files: int,
+) -> List[Path]:
+    files: List[Path] = []
+    seen: set[Path] = set()
+    for root in audit_roots:
+        if not root.exists():
+            continue
+        for path in root.glob("forecast_audit_*.json"):
+            rp = path.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            files.append(path)
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[:max(0, int(max_files))]
 
 
 def _load_manifest_index(manifest_path: Path) -> Tuple[Dict[str, str], Dict[str, Any]]:
@@ -441,7 +493,15 @@ def main() -> None:
         "--audit-dir",
         default=str(DEFAULT_AUDIT_DIR),
         help="Directory containing forecast_audit_*.json files "
-        "(default: logs/forecast_audits)",
+        "(default: logs/forecast_audits/production when present, else logs/forecast_audits)",
+    )
+    parser.add_argument(
+        "--include-research",
+        action="store_true",
+        help=(
+            "Include logs/forecast_audits/research alongside the selected audit directory. "
+            "Default mode inspects production audits only."
+        ),
     )
     parser.add_argument(
         "--max-files",
@@ -537,19 +597,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    audit_dir = Path(args.audit_dir)
+    requested_audit_dir = Path(args.audit_dir)
+    audit_dir = requested_audit_dir
+    if (
+        requested_audit_dir.resolve() == DEFAULT_AUDIT_PRODUCTION_DIR.resolve()
+        and not requested_audit_dir.exists()
+        and DEFAULT_AUDIT_ROOT.exists()
+    ):
+        # Backward-compatible fallback for repos that still keep audits under
+        # logs/forecast_audits without production/research partitioning.
+        audit_dir = DEFAULT_AUDIT_ROOT
     db_path = Path(args.db) if args.db else None
-    if not audit_dir.exists():
-        raise SystemExit(f"Audit directory not found: {audit_dir}")
-
-    files = sorted(
-        audit_dir.glob("forecast_audit_*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    files = files[: args.max_files]
+    audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
+    files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
     if not files:
-        raise SystemExit("No forecast_audit_*.json files found.")
+        roots_text = ", ".join(str(root) for root in audit_roots)
+        raise SystemExit(f"No forecast_audit_*.json files found in: {roots_text}")
 
     monitoring_cfg = _load_monitoring_thresholds(
         Path(args.config_path) if args.config_path else None
@@ -723,6 +786,11 @@ def main() -> None:
     print("=== Forecast Audit Regression Check ===")
     print(f"Audit directory : {audit_dir}")
     print(
+        "Audit roots    : "
+        + ", ".join(str(root) for root in audit_roots)
+        + f" (include_research={int(bool(args.include_research))})"
+    )
+    print(
         f"Files inspected : {len(results)} unique (raw={len(files)}, max_files={args.max_files})"
     )
     print(
@@ -877,6 +945,7 @@ def main() -> None:
     outcome_windows_outcomes_not_loaded = 0
     outcome_windows_no_signal_id = 0
     outcome_windows_non_trade_context = 0
+    outcome_windows_missing_execution_metadata = 0
 
     print(
         "RMSE coverage  : "
@@ -1179,6 +1248,15 @@ def main() -> None:
                     outcome_windows_non_trade_context += 1
                     continue
 
+                run_id = str(entry.get("run_id") or "").strip()
+                entry_ts_raw = str(entry.get("entry_ts") or "").strip()
+                if not run_id or not entry_ts_raw:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "MISSING_EXECUTION_METADATA"
+                    outcome_windows_missing_execution_metadata += 1
+                    outcome_windows_invalid_context += 1
+                    continue
+
                 ts_signal_id = str(entry.get("ts_signal_id") or "").strip()
                 if not ts_signal_id:
                     entry["outcome_status"] = "INVALID_CONTEXT"
@@ -1243,6 +1321,67 @@ def main() -> None:
                 entry["outcome_reason"] = "OUTCOME_JOIN_UNAVAILABLE"
                 outcome_windows_outcomes_not_loaded += 1
 
+    generated_utc = telemetry_now_utc()
+
+    def _legacy_to_status(outcome_status: str) -> str:
+        mapping = {
+            "MATCHED": "PASS",
+            "OUTCOME_MISSING": "FAIL",
+            "NOT_DUE": "INCONCLUSIVE_ALLOWED",
+            "INVALID_CONTEXT": "INVALID_CONTEXT",
+            "NON_TRADE_CONTEXT": "WARN",
+            "OUTCOMES_NOT_LOADED": "WARN",
+        }
+        return mapping.get(outcome_status, "WARN")
+
+    for entry in dataset_entries:
+        outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
+        outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
+        context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
+        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+        counts_toward_readiness = (
+            context_type == "TRADE"
+            and outcome_status not in {"INVALID_CONTEXT", "NON_TRADE_CONTEXT", "OUTCOMES_NOT_LOADED"}
+        )
+        severity = "LOW"
+        blocking = False
+        if outcome_status == "INVALID_CONTEXT":
+            severity = "HIGH"
+            blocking = True
+        elif outcome_status == "OUTCOME_MISSING":
+            severity = "MEDIUM"
+        elif outcome_status == "OUTCOMES_NOT_LOADED":
+            severity = "MEDIUM"
+        normalized = normalize_telemetry_payload(
+            {
+                "status": _legacy_to_status(outcome_status),
+                "reason_code": outcome_reason,
+                "context_type": context_type,
+                "severity": severity,
+                "blocking": blocking,
+                "counts_toward_readiness_denominator": counts_toward_readiness,
+                "counts_toward_linkage_denominator": counts_toward_linkage,
+                "generated_utc": generated_utc,
+                "source_script": "scripts/check_forecast_audits.py",
+            },
+            source_script="scripts/check_forecast_audits.py",
+            generated_utc=generated_utc,
+        )
+        entry.update(normalized)
+
+    readiness_denominator_included = sum(
+        1 for entry in dataset_entries if bool(entry.get("counts_toward_readiness_denominator"))
+    )
+    linkage_denominator_included = sum(
+        1 for entry in dataset_entries if bool(entry.get("counts_toward_linkage_denominator"))
+    )
+    readiness_excluded_non_trade = sum(
+        1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "NON_TRADE_CONTEXT"
+    )
+    readiness_excluded_invalid = sum(
+        1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "INVALID_CONTEXT"
+    )
+
     if (
         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
         and (not outcomes_loaded or not outcome_join_attempted)
@@ -1266,7 +1405,15 @@ def main() -> None:
         f"invalid_context={outcome_windows_invalid_context} "
         f"not_yet_eligible={outcome_windows_not_yet_eligible} "
         f"no_signal_id={outcome_windows_no_signal_id} "
-        f"non_trade_context={outcome_windows_non_trade_context}"
+        f"non_trade_context={outcome_windows_non_trade_context} "
+        f"missing_exec_meta={outcome_windows_missing_execution_metadata}"
+    )
+    print(
+        "Denominators   : "
+        f"readiness_included={readiness_denominator_included} "
+        f"linkage_included={linkage_denominator_included} "
+        f"excluded_non_trade={readiness_excluded_non_trade} "
+        f"excluded_invalid={readiness_excluded_invalid}"
     )
 
     healthy_tickers = {"NVDA", "MSFT", "GOOG", "JPM"}
@@ -1302,6 +1449,10 @@ def main() -> None:
 
     summary = {
         "audit_dir": str(audit_dir),
+        "audit_roots": [str(root) for root in audit_roots],
+        "generated_utc": generated_utc,
+        "source_script": "scripts/check_forecast_audits.py",
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
         "effective_audits": effective_n,
         "effective_outcome_audits": outcome_windows_matched,
         "total_unique_audits": len(results),
@@ -1336,6 +1487,10 @@ def main() -> None:
             "db_path": str(db_path) if db_path is not None else None,
             "error": outcome_join_error,
             "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
+            "readiness_denominator_included": readiness_denominator_included,
+            "linkage_denominator_included": linkage_denominator_included,
+            "readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+            "readiness_excluded_invalid_context": readiness_excluded_invalid,
             "status_taxonomy": [
                 "MATCHED",
                 "OUTCOME_MISSING",
@@ -1350,6 +1505,19 @@ def main() -> None:
             "outcomes_loaded": outcomes_loaded,
             "execution_log_loaded": False,
             "outcome_join_attempted": outcome_join_attempted,
+            "status": "PASS" if decision in {DEFAULT_DECISION_KEEP, DEFAULT_DECISION_RESEARCH} else decision,
+            "reason_code": str(decision_reason).upper().replace(" ", "_"),
+            "context_type": "TRADE",
+            "severity": "LOW",
+            "blocking": False,
+            "counts_toward_readiness_denominator": True,
+            "counts_toward_linkage_denominator": False,
+            "generated_utc": generated_utc,
+            "source_script": "scripts/check_forecast_audits.py",
+        },
+        "scope": {
+            "include_research": bool(args.include_research),
+            "production_audit_only": not bool(args.include_research),
         },
         "window_counts": {
             "n_raw_windows": len(files),
@@ -1368,10 +1536,20 @@ def main() -> None:
             "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
+            "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
+            "n_readiness_denominator_included": readiness_denominator_included,
+            "n_linkage_denominator_included": linkage_denominator_included,
+            "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+            "n_readiness_excluded_invalid_context": readiness_excluded_invalid,
         },
         "window_diversity": diversity,
         "dataset_windows": dataset_entries,
     }
+    summary["telemetry_contract"] = normalize_telemetry_payload(
+        summary.get("telemetry_contract", {}),
+        source_script="scripts/check_forecast_audits.py",
+        generated_utc=generated_utc,
+    )
     cache_path = cache_dir / "latest_summary.json"
     dash_path = cache_dir / "ratio_distribution.json"
     cache_status = {"write_ok": True, "errors": []}

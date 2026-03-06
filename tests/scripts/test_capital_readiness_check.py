@@ -74,6 +74,19 @@ def _patch_all_passing(monkeypatch):
         mod, "_check_r5_lift_ci",
         lambda db, audit: ("", {"lift_ci_low": 0.05}),
     )
+    # R6: no lifecycle integrity issues
+    monkeypatch.setattr(
+        mod, "_check_r6_lifecycle_integrity",
+        lambda db: (
+            True,
+            "",
+            {
+                "close_before_entry_count": 0,
+                "closed_missing_exit_reason_count": 0,
+                "high_integrity_violation_count": 0,
+            },
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +232,25 @@ class TestCapitalReadinessPasses:
         result = run_capital_readiness(tmp_path / "x.db", tmp_path, tmp_path / "q.jsonl")
         assert result["ready"] is False
         assert result["verdict"] == "INSUFFICIENT_DATA"
+
+    def test_fails_when_r6_lifecycle_integrity_violations_present(self, monkeypatch, tmp_path):
+        import scripts.capital_readiness_check as mod
+
+        _patch_all_passing(monkeypatch)
+        monkeypatch.setattr(
+            mod,
+            "_check_r6_lifecycle_integrity",
+            lambda db: (
+                False,
+                "R6: HIGH lifecycle violation(s): close_before_entry=1, closed_missing_exit_reason=1",
+                {
+                    "close_before_entry_count": 1,
+                    "closed_missing_exit_reason_count": 1,
+                    "high_integrity_violation_count": 2,
+                },
+            ),
+        )
+        result = run_capital_readiness(tmp_path / "x.db", tmp_path, tmp_path / "q.jsonl")
+        assert result["ready"] is False
+        assert result["verdict"] == "FAIL"
+        assert any(reason.startswith("R6:") for reason in result["reasons"])
