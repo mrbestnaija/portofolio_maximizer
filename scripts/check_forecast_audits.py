@@ -21,9 +21,10 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,6 +44,7 @@ DEFAULT_MANIFEST_FILENAME = "forecast_audit_manifest.jsonl"
 DEFAULT_MANIFEST_MODE = "off"
 MANIFEST_MODES = {"off", "warn", "fail"}
 TELEMETRY_SCHEMA_VERSION = 2
+OUTCOME_ELIGIBILITY_BUFFER = timedelta(minutes=5)
 
 
 @dataclass
@@ -89,6 +91,111 @@ def _parse_window_day(raw: Any) -> Optional[str]:
         return datetime.fromisoformat(normalized).date().isoformat()
     except Exception:
         return text[:10] if len(text) >= 10 else None
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_utc_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            # Date-only windows are interpreted as end-of-day UTC to avoid
+            # prematurely treating same-day windows as outcome-eligible.
+            day_start = datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+            return day_start + timedelta(days=1) - timedelta(seconds=1)
+        normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _expected_close_ts(end_raw: Any, horizon_raw: Any) -> Optional[datetime]:
+    end_ts = _parse_utc_datetime(end_raw)
+    if end_ts is None:
+        return None
+    try:
+        horizon = int(horizon_raw)
+    except (TypeError, ValueError):
+        return None
+    if horizon < 0:
+        return None
+    return end_ts + timedelta(days=horizon)
+
+
+def _parse_non_negative_int(raw: Any) -> Optional[int]:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def compute_expected_close(
+    signal_context: Dict[str, Any],
+    dataset: Dict[str, Any],
+) -> Tuple[Optional[datetime], str]:
+    """Prefer signal-context timing for outcome eligibility.
+
+    Returns (expected_close_ts, source) where source is one of:
+      - signal_context
+      - dataset_fallback
+      - signal_context_invalid
+      - unavailable
+    """
+    ctx = signal_context if isinstance(signal_context, dict) else {}
+    has_signal_context = bool(ctx) and not bool(ctx.get("signal_context_missing"))
+    if has_signal_context:
+        entry_ts = _parse_utc_datetime(ctx.get("entry_ts"))
+        horizon = _parse_non_negative_int(ctx.get("forecast_horizon"))
+        if entry_ts is None or horizon is None:
+            return None, "signal_context_invalid"
+        return entry_ts + timedelta(days=horizon), "signal_context"
+
+    fallback = _expected_close_ts(dataset.get("end"), dataset.get("forecast_horizon"))
+    if fallback is None:
+        return None, "unavailable"
+    return fallback, "dataset_fallback"
+
+
+def _load_closed_trade_match_counts(
+    db_path: Optional[Path],
+) -> Tuple[bool, Dict[str, int], Optional[str]]:
+    if db_path is None:
+        return False, {}, "db_not_configured"
+    if not db_path.exists():
+        return False, {}, f"db_not_found:{db_path}"
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT ts_signal_id, COUNT(*) AS n
+            FROM production_closed_trades
+            WHERE ts_signal_id IS NOT NULL AND TRIM(ts_signal_id) <> ''
+            GROUP BY ts_signal_id
+            """
+        )
+        mapping = {}
+        for ts_signal_id, count in cur.fetchall():
+            sid = str(ts_signal_id or "").strip()
+            if sid:
+                mapping[sid] = int(count or 0)
+        return True, mapping, None
+    except Exception as exc:
+        return False, {}, str(exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _extract_window_metadata(audit: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -366,6 +473,14 @@ def main() -> None:
         "(default: config/forecaster_monitoring.yml if present)",
     )
     parser.add_argument(
+        "--db",
+        default=None,
+        help=(
+            "Optional path to SQLite DB for deterministic ts_signal_id outcome joins. "
+            "If omitted, outcome join telemetry stays disabled."
+        ),
+    )
+    parser.add_argument(
         "--baseline-model",
         default=None,
         help="Baseline model for the RMSE gate: BEST_SINGLE, SAMOSSA, GARCH, or SARIMAX. "
@@ -423,6 +538,7 @@ def main() -> None:
     args = parser.parse_args()
 
     audit_dir = Path(args.audit_dir)
+    db_path = Path(args.db) if args.db else None
     if not audit_dir.exists():
         raise SystemExit(f"Audit directory not found: {audit_dir}")
 
@@ -504,7 +620,7 @@ def main() -> None:
     if min_forecast_horizon is not None and min_forecast_horizon < 0:
         min_forecast_horizon = 0
 
-    def _dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
+    def _rmse_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
         dataset = audit.get("dataset") or {}
         ds_key = (
             dataset.get("start"),
@@ -518,6 +634,17 @@ def main() -> None:
         # the violation rate and aligns with "latest evidence wins" monitoring.
         return ds_key
 
+    def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
+        dataset = audit.get("dataset") or {}
+        ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
+        return (
+            ticker,
+            dataset.get("start"),
+            dataset.get("end"),
+            dataset.get("length"),
+            dataset.get("forecast_horizon"),
+        )
+
     def _forecast_horizon_from_audit(audit: Dict[str, Any]) -> Optional[int]:
         dataset = audit.get("dataset") or {}
         raw = dataset.get("forecast_horizon")
@@ -529,6 +656,7 @@ def main() -> None:
             return None
 
     unique_map: dict[Tuple[Any, ...], Path] = {}
+    outcome_unique_map: dict[Tuple[Any, ...], Path] = {}
     horizon_filtered_count = 0
     parseable_count = 0
     parse_error_count = 0
@@ -572,14 +700,19 @@ def main() -> None:
                 if manifest_mode == "fail":
                     manifest_stats["excluded_unverified"] += 1
                     continue
-        key = _dedupe_key_from_audit(audit)
+        key = _rmse_dedupe_key_from_audit(audit)
         # Files are sorted newest-first, so keep the first (newest) entry we see
         # for each dataset window and ignore older duplicates.
         if key in unique_map:
-            continue
-        unique_map[key] = f
+            pass
+        else:
+            unique_map[key] = f
+        outcome_key = _outcome_dedupe_key_from_audit(audit)
+        if outcome_key not in outcome_unique_map:
+            outcome_unique_map[outcome_key] = f
 
     unique_files: List[Path] = list(unique_map.values())
+    outcome_unique_files: List[Path] = list(outcome_unique_map.values())
 
     results: List[AuditCheckResult] = []
     for f in unique_files:
@@ -733,17 +866,17 @@ def main() -> None:
     rmse_windows_usable = effective_n
     outcomes_loaded = False
     outcome_join_attempted = False
+    outcome_join_error: Optional[str] = None
     outcome_windows_eligible = 0
     outcome_windows_matched = 0
-
-    if (
-        (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
-        and (not outcomes_loaded or not outcome_join_attempted)
-    ):
-        raise SystemExit(
-            "Telemetry contract violation: outcome window counts > 0 without "
-            "outcomes_loaded=true and outcome_join_attempted=true."
-        )
+    outcome_windows_missing = 0
+    outcome_windows_ambiguous = 0
+    outcome_windows_not_due = 0
+    outcome_windows_not_yet_eligible = 0  # legacy alias for telemetry schema v2
+    outcome_windows_invalid_context = 0
+    outcome_windows_outcomes_not_loaded = 0
+    outcome_windows_no_signal_id = 0
+    outcome_windows_non_trade_context = 0
 
     print(
         "RMSE coverage  : "
@@ -754,11 +887,9 @@ def main() -> None:
         f"usable={rmse_windows_usable}"
     )
     print(
-        "Outcome cov.   : "
-        f"outcomes_loaded={int(outcomes_loaded)} "
-        f"join_attempted={int(outcome_join_attempted)} "
-        f"eligible={outcome_windows_eligible} "
-        f"matched={outcome_windows_matched}"
+        "Outcome dedupe : "
+        f"raw={len(files)} "
+        f"deduped={len(outcome_unique_map)}"
     )
 
     print(f"\nEffective audits with RMSE: {effective_n}")
@@ -823,6 +954,7 @@ def main() -> None:
                 )
 
     warmup_required = max(min_effective_audits, holding_period, 0)
+    rmse_inconclusive = False
     if warmup_required > 0 and effective_n < warmup_required:
         explicit_required: Optional[int] = None
         if args.require_holding_period and holding_period > 0:
@@ -848,28 +980,29 @@ def main() -> None:
             f"\nRMSE gate inconclusive: effective_audits={effective_n} "
             f"< required_audits={warmup_required}.",
         )
-        raise SystemExit(0)
-
-    print("\nSample details (most recent first):")
-    header = f"{'File':<32} {'ens_rmse':>10} {'base_rmse':>10} {'ratio':>8} {'VIOL':>6}"
-    print(header)
-    print("-" * len(header))
-    for r in results[:10]:
-        ratio_str = f"{r.rmse_ratio:.3f}" if r.rmse_ratio is not None else "n/a"
-        ens_str = f"{r.ensemble_rmse:.4f}" if r.ensemble_rmse is not None else "n/a"
-        base_str = f"{r.baseline_rmse:.4f}" if r.baseline_rmse is not None else "n/a"
-        viol_flag = "YES" if r.violation else ""
-        display_name = r.path.name
-        if r.baseline_model:
-            display_name = f"{display_name} ({r.baseline_model})"
-        display_name = display_name[:32]
-        print(
-            f"{display_name:<32} {ens_str:>10} {base_str:>10} {ratio_str:>8} {viol_flag:>6}"
-        )
+        rmse_inconclusive = True
 
     if effective_n == 0:
-        # No usable metrics; do not fail hard, but signal that checks were inconclusive.
-        raise SystemExit(0)
+        print("\nRMSE gate inconclusive: no usable RMSE metrics.")
+        rmse_inconclusive = True
+
+    if not rmse_inconclusive:
+        print("\nSample details (most recent first):")
+        header = f"{'File':<32} {'ens_rmse':>10} {'base_rmse':>10} {'ratio':>8} {'VIOL':>6}"
+        print(header)
+        print("-" * len(header))
+        for r in results[:10]:
+            ratio_str = f"{r.rmse_ratio:.3f}" if r.rmse_ratio is not None else "n/a"
+            ens_str = f"{r.ensemble_rmse:.4f}" if r.ensemble_rmse is not None else "n/a"
+            base_str = f"{r.baseline_rmse:.4f}" if r.baseline_rmse is not None else "n/a"
+            viol_flag = "YES" if r.violation else ""
+            display_name = r.path.name
+            if r.baseline_model:
+                display_name = f"{display_name} ({r.baseline_model})"
+            display_name = display_name[:32]
+            print(
+                f"{display_name:<32} {ens_str:>10} {base_str:>10} {ratio_str:>8} {viol_flag:>6}"
+            )
 
     decision = DEFAULT_DECISION_KEEP
     decision_reason = "ensemble within tolerance"
@@ -888,51 +1021,58 @@ def main() -> None:
         )
         lift_fraction = lift_count / effective_n
 
-    if holding_period > 0 and effective_n >= holding_period:
-        print(
-            f"\nEnsemble lift fraction: {lift_fraction:.2%} "
-            f"(required >= {min_lift_fraction:.2%})"
-        )
-        if lift_fraction < min_lift_fraction:
-            decision = DEFAULT_DECISION_DISABLE
-            decision_reason = "insufficient lift vs baseline"
-            if disable_if_no_lift:
-                raise SystemExit(
-                    "Ensemble shows insufficient lift over baseline during holding period; "
-                    "disable ensemble as default source of truth (reward-to-effort)."
-                )
-            print(
-                "No-lift hard fail disabled by config; keeping ensemble in "
-                "non-default/research-only posture."
-            )
-        else:
-            decision_reason = "lift demonstrated during holding period"
-
-    if violation_rate > max_violation_rate:
-        decision = DEFAULT_DECISION_RESEARCH
+    if rmse_inconclusive:
+        required = warmup_required if warmup_required > 0 else 1
+        decision = "INCONCLUSIVE"
         decision_reason = (
-            f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
+            f"effective_audits={effective_n} < required_audits={required}"
         )
-        raise SystemExit(
-            f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
-            f"max-violation-rate {max_violation_rate:.2%}"
-        )
+    else:
+        if holding_period > 0 and effective_n >= holding_period:
+            print(
+                f"\nEnsemble lift fraction: {lift_fraction:.2%} "
+                f"(required >= {min_lift_fraction:.2%})"
+            )
+            if lift_fraction < min_lift_fraction:
+                decision = DEFAULT_DECISION_DISABLE
+                decision_reason = "insufficient lift vs baseline"
+                if disable_if_no_lift:
+                    raise SystemExit(
+                        "Ensemble shows insufficient lift over baseline during holding period; "
+                        "disable ensemble as default source of truth (reward-to-effort)."
+                    )
+                print(
+                    "No-lift hard fail disabled by config; keeping ensemble in "
+                    "non-default/research-only posture."
+                )
+            else:
+                decision_reason = "lift demonstrated during holding period"
 
-    if promotion_margin > 0 and effective_n > 0 and decision == DEFAULT_DECISION_KEEP:
-        margin_threshold = 1.0 - promotion_margin
-        margin_lift = sum(
-            1
-            for r in results
-            if r.rmse_ratio is not None
-            and isinstance(r.rmse_ratio, (int, float))
-            and float(r.rmse_ratio) < float(margin_threshold)
-        )
-        margin_lift_fraction = (margin_lift / effective_n) if effective_n else 0.0
-        if margin_lift_fraction <= 0.0:
+        if violation_rate > max_violation_rate:
             decision = DEFAULT_DECISION_RESEARCH
             decision_reason = (
-                f"no ensemble lift >= {promotion_margin:.2%} across recent audits"
+                f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
             )
+            raise SystemExit(
+                f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
+                f"max-violation-rate {max_violation_rate:.2%}"
+            )
+
+        if promotion_margin > 0 and effective_n > 0 and decision == DEFAULT_DECISION_KEEP:
+            margin_threshold = 1.0 - promotion_margin
+            margin_lift = sum(
+                1
+                for r in results
+                if r.rmse_ratio is not None
+                and isinstance(r.rmse_ratio, (int, float))
+                and float(r.rmse_ratio) < float(margin_threshold)
+            )
+            margin_lift_fraction = (margin_lift / effective_n) if effective_n else 0.0
+            if margin_lift_fraction <= 0.0:
+                decision = DEFAULT_DECISION_RESEARCH
+                decision_reason = (
+                    f"no ensemble lift >= {promotion_margin:.2%} across recent audits"
+                )
 
     print(f"\nDecision: {decision} ({decision_reason})")
 
@@ -963,11 +1103,23 @@ def main() -> None:
             ]
         ],
     }
+    results_by_path = {r.path: r for r in results}
     dataset_entries = []
-    eligible_window_entries = []
-    for f in unique_files:
+    rmse_usable_entries = []
+    for f in outcome_unique_files:
         audit = _load_audit(f)
         ds = (audit or {}).get("dataset") or {}
+        signal_context = (audit or {}).get("signal_context") or {}
+        if not isinstance(signal_context, dict):
+            signal_context = {}
+        raw_ts_signal_id = signal_context.get("ts_signal_id")
+        ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
+        ts_signal_id = ts_signal_id or None
+        signal_context_missing = bool(signal_context.get("signal_context_missing"))
+        expected_close, expected_close_source = compute_expected_close(signal_context, ds)
+        context_type = str(signal_context.get("context_type") or "").strip().upper()
+        if not context_type:
+            context_type = "TRADE"
         meta = _extract_window_metadata(audit or {})
         entry = {
             "file": f.name,
@@ -978,8 +1130,19 @@ def main() -> None:
             "ticker": meta.get("ticker"),
             "detected_regime": meta.get("detected_regime"),
             "end_day": meta.get("end_day"),
+            "context_type": context_type,
+            "ts_signal_id": ts_signal_id,
+            "run_id": signal_context.get("run_id"),
+            "entry_ts": signal_context.get("entry_ts"),
+            "signal_context_missing": signal_context_missing,
+            "dataset_forecast_horizon": ds.get("forecast_horizon"),
+            "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+            "expected_close_ts": expected_close.isoformat() if expected_close else None,
+            "expected_close_source": expected_close_source,
+            "outcome_status": None,
+            "outcome_reason": None,
         }
-        matching = next((r for r in results if r.path == f), None)
+        matching = results_by_path.get(f)
         if matching:
             entry["rmse_ratio"] = matching.rmse_ratio
             entry["ensemble_rmse"] = matching.ensemble_rmse
@@ -990,29 +1153,142 @@ def main() -> None:
                 and matching.baseline_rmse is not None
                 and matching.baseline_rmse > 0
             ):
-                eligible_window_entries.append(entry)
+                rmse_usable_entries.append(entry)
         dataset_entries.append(entry)
+
+    if db_path is not None:
+        outcome_join_attempted = True
+        closed_trade_counts: Dict[str, int] = {}
+        outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(
+            db_path
+        )
+        if outcomes_loaded:
+            now = now_utc()
+            for entry in dataset_entries:
+                context_type = str(entry.get("context_type") or "").strip().upper()
+                if context_type and context_type != "TRADE":
+                    entry["outcome_status"] = "NON_TRADE_CONTEXT"
+                    entry["outcome_reason"] = "NON_TRADE_CONTEXT"
+                    outcome_windows_non_trade_context += 1
+                    continue
+
+                ticker = str(entry.get("ticker") or "").strip().upper()
+                if not ticker:
+                    entry["outcome_status"] = "NON_TRADE_CONTEXT"
+                    entry["outcome_reason"] = "MISSING_TICKER"
+                    outcome_windows_non_trade_context += 1
+                    continue
+
+                ts_signal_id = str(entry.get("ts_signal_id") or "").strip()
+                if not ts_signal_id:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "MISSING_SIGNAL_ID"
+                    outcome_windows_no_signal_id += 1
+                    outcome_windows_invalid_context += 1
+                    continue
+
+                signal_horizon = _parse_non_negative_int(entry.get("signal_forecast_horizon"))
+                dataset_horizon = _parse_non_negative_int(entry.get("dataset_forecast_horizon"))
+                if (
+                    signal_horizon is not None
+                    and dataset_horizon is not None
+                    and signal_horizon != dataset_horizon
+                ):
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "HORIZON_MISMATCH"
+                    outcome_windows_invalid_context += 1
+                    continue
+
+                expected_close_ts = _parse_utc_datetime(entry.get("expected_close_ts"))
+                entry_ts = _parse_utc_datetime(entry.get("entry_ts"))
+                if expected_close_ts is None:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "EXPECTED_CLOSE_UNAVAILABLE"
+                    outcome_windows_invalid_context += 1
+                    continue
+                if entry_ts is not None and expected_close_ts < entry_ts:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "CAUSALITY_VIOLATION"
+                    outcome_windows_invalid_context += 1
+                    continue
+                if (
+                    (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now
+                ):
+                    entry["outcome_status"] = "NOT_DUE"
+                    entry["outcome_reason"] = "OUTCOME_WINDOW_OPEN"
+                    outcome_windows_not_due += 1
+                    outcome_windows_not_yet_eligible += 1
+                    continue
+
+                match_count = int(closed_trade_counts.get(ts_signal_id, 0))
+                entry["outcome_match_count"] = match_count
+                if match_count == 1:
+                    entry["outcome_status"] = "MATCHED"
+                    entry["outcome_reason"] = "ONE_TO_ONE_MATCH"
+                    outcome_windows_eligible += 1
+                    outcome_windows_matched += 1
+                elif match_count == 0:
+                    entry["outcome_status"] = "OUTCOME_MISSING"
+                    entry["outcome_reason"] = "DUE_BUT_MISSING_CLOSE"
+                    outcome_windows_eligible += 1
+                    outcome_windows_missing += 1
+                else:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "AMBIGUOUS_MATCH"
+                    outcome_windows_invalid_context += 1
+                    outcome_windows_ambiguous += 1
+        else:
+            for entry in dataset_entries:
+                entry["outcome_status"] = "OUTCOMES_NOT_LOADED"
+                entry["outcome_reason"] = "OUTCOME_JOIN_UNAVAILABLE"
+                outcome_windows_outcomes_not_loaded += 1
+
+    if (
+        (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
+        and (not outcomes_loaded or not outcome_join_attempted)
+    ):
+        raise SystemExit(
+            "Telemetry contract violation: outcome window counts > 0 without "
+            "outcomes_loaded=true and outcome_join_attempted=true."
+        )
+
+    if outcome_join_attempted and outcome_join_error:
+        print(f"[WARN] outcome_join_unavailable db={db_path} error={outcome_join_error}")
+    print(
+        "Outcome join   : "
+        f"outcomes_loaded={int(outcomes_loaded)} "
+        f"join_attempted={int(outcome_join_attempted)} "
+        f"eligible={outcome_windows_eligible} "
+        f"matched={outcome_windows_matched} "
+        f"missing={outcome_windows_missing} "
+        f"ambiguous={outcome_windows_ambiguous} "
+        f"not_due={outcome_windows_not_due} "
+        f"invalid_context={outcome_windows_invalid_context} "
+        f"not_yet_eligible={outcome_windows_not_yet_eligible} "
+        f"no_signal_id={outcome_windows_no_signal_id} "
+        f"non_trade_context={outcome_windows_non_trade_context}"
+    )
 
     healthy_tickers = {"NVDA", "MSFT", "GOOG", "JPM"}
     diversity = {
         "regime_count": len(
             {
                 str(entry.get("detected_regime")).strip()
-                for entry in eligible_window_entries
+                for entry in rmse_usable_entries
                 if str(entry.get("detected_regime") or "").strip()
             }
         ),
         "healthy_ticker_count": len(
             {
                 str(entry.get("ticker")).strip().upper()
-                for entry in eligible_window_entries
+                for entry in rmse_usable_entries
                 if str(entry.get("ticker") or "").strip().upper() in healthy_tickers
             }
         ),
         "distinct_trading_days": len(
             {
                 str(entry.get("end_day")).strip()
-                for entry in eligible_window_entries
+                for entry in rmse_usable_entries
                 if str(entry.get("end_day") or "").strip()
             }
         ),
@@ -1027,6 +1303,7 @@ def main() -> None:
     summary = {
         "audit_dir": str(audit_dir),
         "effective_audits": effective_n,
+        "effective_outcome_audits": outcome_windows_matched,
         "total_unique_audits": len(results),
         "violation_count": violation_count,
         "violation_rate": violation_rate,
@@ -1055,6 +1332,18 @@ def main() -> None:
         "recent_window_max_violation_rate": recent_window_max_violation_rate,
         "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
         "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+        "outcome_join": {
+            "db_path": str(db_path) if db_path is not None else None,
+            "error": outcome_join_error,
+            "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
+            "status_taxonomy": [
+                "MATCHED",
+                "OUTCOME_MISSING",
+                "NOT_DUE",
+                "INVALID_CONTEXT",
+                "NON_TRADE_CONTEXT",
+            ],
+        },
         "telemetry_contract": {
             "schema_version": TELEMETRY_SCHEMA_VERSION,
             "rmse_inputs_present": bool(results),
@@ -1066,10 +1355,19 @@ def main() -> None:
             "n_raw_windows": len(files),
             "n_parseable_windows": parseable_count,
             "n_deduped_windows": len(unique_map),
+            "n_outcome_deduped_windows": len(outcome_unique_map),
             "n_rmse_windows_processed": rmse_windows_processed,
             "n_rmse_windows_usable": rmse_windows_usable,
             "n_outcome_windows_eligible": outcome_windows_eligible,
             "n_outcome_windows_matched": outcome_windows_matched,
+            "n_outcome_windows_missing": outcome_windows_missing,
+            "n_outcome_windows_ambiguous": outcome_windows_ambiguous,
+            "n_outcome_windows_not_due": outcome_windows_not_due,
+            "n_outcome_windows_not_yet_eligible": outcome_windows_not_yet_eligible,
+            "n_outcome_windows_invalid_context": outcome_windows_invalid_context,
+            "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
+            "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
+            "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
         },
         "window_diversity": diversity,
         "dataset_windows": dataset_entries,

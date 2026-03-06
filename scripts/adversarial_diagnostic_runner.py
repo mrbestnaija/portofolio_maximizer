@@ -1101,6 +1101,116 @@ def chk_tcon_cache_fail_open(src_gate: str) -> Finding:
     return f
 
 
+def chk_tcon_outcome_ticker_dedupe(src_gate: str) -> Finding:
+    """Telemetry contract: outcome denominator must dedupe per ticker+window."""
+    f = Finding(
+        id="TCON-06",
+        severity="HIGH",
+        category="wiring",
+        location="scripts/check_forecast_audits.py",
+        title="Outcome dedupe can suppress cross-ticker evidence",
+        detail=(
+            "If outcome linkage reuses window-only dedupe, audits for different tickers "
+            "sharing a time window collapse into one denominator record."
+        ),
+        attack_vector=(
+            "Write two audits with same start/end/length/horizon but different tickers. "
+            "Window-only dedupe drops one and understates outcome evidence."
+        ),
+        fix=(
+            "Use separate dedupe maps: RMSE key=(start,end,length,horizon), "
+            "outcome key=(ticker,start,end,length,horizon)."
+        ),
+    )
+    has_outcome_key = "def _outcome_dedupe_key_from_audit" in src_gate
+    outcome_key_has_ticker = bool(
+        re.search(
+            r"def _outcome_dedupe_key_from_audit\(.*?\):.*?ticker",
+            src_gate,
+            re.DOTALL,
+        )
+    )
+    uses_outcome_map = "outcome_unique_map" in src_gate and "outcome_unique_files" in src_gate
+    if has_outcome_key and outcome_key_has_ticker and uses_outcome_map:
+        f.passed = True
+        f.detail = "Ticker-aware outcome dedupe path detected."
+    else:
+        f.passed = False
+        f.detail += " CONFIRMED: ticker-aware outcome dedupe path not detected."
+    return f
+
+
+def chk_tcon_expected_close_anchor(src_gate: str) -> Finding:
+    """Telemetry contract: expected_close must be signal-anchored when context exists."""
+    f = Finding(
+        id="TCON-07",
+        severity="HIGH",
+        category="wiring",
+        location="scripts/check_forecast_audits.py",
+        title="Outcome eligibility can be anchored to dataset window instead of signal entry",
+        detail=(
+            "Using dataset.end + horizon for expected_close can violate causality and "
+            "misclassify due windows."
+        ),
+        attack_vector=(
+            "Dataset window ends far before trade entry. "
+            "dataset.end + horizon marks outcome due before trade exists."
+        ),
+        fix=(
+            "Introduce compute_expected_close(signal_context, dataset) and prefer "
+            "entry_ts + signal_context.forecast_horizon; fallback only when signal context missing."
+        ),
+    )
+    has_helper = "def compute_expected_close(" in src_gate
+    prefers_signal_context = bool(
+        re.search(
+            r"def compute_expected_close\(.*?\):.*?entry_ts.*?signal_context",
+            src_gate,
+            re.DOTALL,
+        )
+    )
+    callsite_uses_helper = "compute_expected_close(signal_context, ds)" in src_gate
+    if has_helper and prefers_signal_context and callsite_uses_helper:
+        f.passed = True
+        f.detail = "Signal-anchored expected_close helper detected."
+    else:
+        f.passed = False
+        f.detail += " CONFIRMED: signal-anchored expected_close helper missing."
+    return f
+
+
+def chk_tcon_not_due_status(src_gate: str) -> Finding:
+    """Telemetry contract: open/not-due windows must not be counted as missing."""
+    f = Finding(
+        id="TCON-08",
+        severity="MEDIUM",
+        category="integrity",
+        location="scripts/check_forecast_audits.py",
+        title="Not-due windows can be misclassified as missing outcomes",
+        detail=(
+            "If status taxonomy lacks NOT_DUE, windows with open outcome horizons can "
+            "fall through to missing, overstating linkage failures."
+        ),
+        attack_vector=(
+            "Set expected_close in the future with no close row. "
+            "Without NOT_DUE classification, system reports missing outcome."
+        ),
+        fix=(
+            "Emit explicit NOT_DUE status when expected_close_ts + buffer > now. "
+            "Exclude NOT_DUE from eligible denominator."
+        ),
+    )
+    has_not_due_status = "NOT_DUE" in src_gate and "OUTCOME_WINDOW_OPEN" in src_gate
+    checks_time_buffer = "OUTCOME_ELIGIBILITY_BUFFER" in src_gate and "> now" in src_gate
+    if has_not_due_status and checks_time_buffer:
+        f.passed = True
+        f.detail = "NOT_DUE status and eligibility buffer checks detected."
+    else:
+        f.passed = False
+        f.detail += " CONFIRMED: NOT_DUE status or buffer check missing."
+    return f
+
+
 # ===========================================================================
 # CATEGORY: poisoning
 # ===========================================================================
@@ -1244,6 +1354,9 @@ def run_all_checks(
         chk_tcon_datetime_eligibility(src_update_outcomes),
         chk_tcon_dashboard_severity_inversion(src_live_dashboard),
         chk_tcon_cache_fail_open(src_gate),
+        chk_tcon_outcome_ticker_dedupe(src_gate),
+        chk_tcon_expected_close_anchor(src_gate),
+        chk_tcon_not_due_status(src_gate),
     ]
 
     if conn:
