@@ -254,3 +254,45 @@ class TestCapitalReadinessPasses:
         assert result["ready"] is False
         assert result["verdict"] == "FAIL"
         assert any(reason.startswith("R6:") for reason in result["reasons"])
+
+    def test_r6_legacy_trades_excluded_from_close_before_entry(self, tmp_path):
+        """Legacy trades (ts_signal_id LIKE 'legacy_%') are not flagged for close_before_entry
+        even when bar_timestamp is inverted — those timestamps come from forecast windows."""
+        import sqlite3
+        from scripts.capital_readiness_check import _check_r6_lifecycle_integrity
+
+        db = tmp_path / "test.db"
+        conn = sqlite3.connect(str(db))
+        conn.executescript(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ticker TEXT,
+                trade_date TEXT,
+                action TEXT,
+                realized_pnl REAL,
+                is_close INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                bar_timestamp TEXT,
+                exit_reason TEXT,
+                entry_trade_id INTEGER,
+                ts_signal_id TEXT
+            );
+            -- Legacy open leg (entry bar = July 25)
+            INSERT INTO trade_executions VALUES
+              (1,'MSFT','2026-02-10','BUY',NULL,0,0,0,'2025-07-25T00:00:00+00:00','TIME_EXIT',NULL,'legacy_2026-02-10_1');
+            -- Legacy close leg (close bar = July 18, EARLIER than entry — legacy artifact)
+            INSERT INTO trade_executions VALUES
+              (2,'MSFT','2026-02-10','SELL',72.5,1,0,0,'2025-07-18T00:00:00+00:00','TIME_EXIT',1,'legacy_2026-02-10_2');
+            CREATE VIEW production_closed_trades AS
+              SELECT * FROM trade_executions
+              WHERE is_close=1 AND COALESCE(is_diagnostic,0)=0 AND COALESCE(is_synthetic,0)=0;
+            """
+        )
+        conn.close()
+
+        ok, msg, metrics = _check_r6_lifecycle_integrity(db)
+        assert ok is True, f"Legacy trade should not trigger R6: {msg}"
+        assert metrics["close_before_entry_count"] == 0
+        assert metrics["high_integrity_violation_count"] == 0

@@ -219,6 +219,8 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
                   AND c.bar_timestamp IS NOT NULL
                   AND e.bar_timestamp IS NOT NULL
                   AND c.bar_timestamp < e.bar_timestamp
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry_count = int(row["n"]) if row else 0
@@ -232,6 +234,8 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
                   AND c.trade_date IS NOT NULL
                   AND e.trade_date IS NOT NULL
                   AND c.trade_date < e.trade_date
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry_count = int(row["n"]) if row else 0
