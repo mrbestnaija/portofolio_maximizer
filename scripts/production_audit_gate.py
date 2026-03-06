@@ -530,6 +530,8 @@ def _compute_lifecycle_integrity(
                   AND c.bar_timestamp IS NOT NULL
                   AND e.bar_timestamp IS NOT NULL
                   AND c.bar_timestamp < e.bar_timestamp
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry = _safe_int(row["n"] if row else 0)
@@ -543,6 +545,8 @@ def _compute_lifecycle_integrity(
                   AND c.trade_date IS NOT NULL
                   AND e.trade_date IS NOT NULL
                   AND c.trade_date < e.trade_date
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry = _safe_int(row["n"] if row else 0)
