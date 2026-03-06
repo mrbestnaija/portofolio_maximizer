@@ -20,9 +20,14 @@ This is the canonical navigator for documentation in this repository.
 - [QUANT_VALIDATION_MONITORING_POLICY.md](QUANT_VALIDATION_MONITORING_POLICY.md)
 - [REWARD_TO_EFFORT_INTEGRATION_PLAN.md](REWARD_TO_EFFORT_INTEGRATION_PLAN.md)
 
+## Research and Experiment Protocol
+
+- [RESEARCH_EXPERIMENT_PROTOCOL.md](RESEARCH_EXPERIMENT_PROTOCOL.md) — v3 protocol: sequential phases, telemetry integrity, anti-gaming safeguards, autonomous decision logic
+
 ## Planning and Status (Canonical)
 
 - [PROJECT_STATUS.md](PROJECT_STATUS.md)
+- [NEXT_IMMEDIATE_ACTION.md](NEXT_IMMEDIATE_ACTION.md) — current Phase 1 action plan (execution freshness → linkage → evaluation coverage → attribution → experiments)
 - [NEXT_TO_DO_SEQUENCED.md](NEXT_TO_DO_SEQUENCED.md)
 - [SESSION_COMPLETE_SUMMARY.md](SESSION_COMPLETE_SUMMARY.md)
 - [PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md](PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)

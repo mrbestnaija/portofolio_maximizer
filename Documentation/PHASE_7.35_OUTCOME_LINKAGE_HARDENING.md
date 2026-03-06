@@ -72,3 +72,15 @@ Phase 3 remains blocked until refreshed telemetry confirms:
 - `outcome_matched >= 10`
 - `matched / eligible >= 0.8`
 - `linked_ts_trades / total_ts_trades >= 0.8`
+
+## Governing Experiment Protocol
+
+All subsequent work to unblock Phase 3 follows:
+[Research-Grade Experiment Protocol v3](RESEARCH_EXPERIMENT_PROTOCOL.md)
+
+The protocol defines the sequential path: Phase 1 (telemetry freshness) →
+Phase 2 (linkage coverage) → Phase 3 (evaluation completeness) →
+Phase 4 (attribution) → Phase 5 (lift experiments) → Phase 6 (readiness validation).
+
+Current protocol decision: **Phase 1** — execution_log_freshness = 63h, must be <= 24h.
+Immediate action: `python scripts/run_auto_trader.py --tickers NVDA,MSFT,GOOG,JPM --cycles 3`

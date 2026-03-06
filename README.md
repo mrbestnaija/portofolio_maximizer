@@ -2,15 +2,15 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.17 Complete](https://img.shields.io/badge/Phase%207.17-Complete-green.svg)](Documentation/PHASE_7.17_ENSEMBLE_HEALTH_AUDIT.md)
-[![Fast Lane: 1332 passing](https://img.shields.io/badge/fast%20lane-1332%20passing-success.svg)](tests/)
+[![Phase 7.35 Complete](https://img.shields.io/badge/Phase%207.35-Complete-green.svg)](Documentation/PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)
+[![Fast Lane: 1640 passing](https://img.shields.io/badge/fast%20lane-1640%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
-[![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
+[![Research Protocol](https://img.shields.io/badge/research-experiment%20protocol%20v3-purple.svg)](Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 4.4
-**Status**: Phase 7.17 complete — Ensemble Health Audit, Adaptive Weighting, 4-Layer Improvement Checker
+**Version**: 4.5
+**Status**: Phase 7.35 complete — Signal Quality Pipeline, R6 Lifecycle Gate, Research Experiment Protocol v3
 **Last Updated**: 2026-03-06
 
 ## Contributing
@@ -18,31 +18,21 @@
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-03-01)
+## Current Repo Truth (2026-03-06)
 
-- Phase 7.17 (Ensemble Health Audit) is complete. SAMOSSA DA=0 anomaly is
-  diagnosed and mitigated via `_apply_da_cap()` in `forcester_ts/ensemble.py`.
-  Adaptive candidate weights are written nightly by `scripts/ensemble_health_audit.py`.
-  Exit quality analysis (`scripts/exit_quality_audit.py`) explains the 14pp
-  forecast-DA → trade-WR gap. Three bugs found and fixed by Hypothesis property tests.
-- The Phase 7.16 auto-learning stack is present and hardened: `OrderLearner`,
-  `ModelSnapshotStore`, walk-forward learning, VaR backtesting, and Shapley
-  attribution are implemented in `forcester_ts/`.
-- `TimeSeriesForecaster.forecast(mc_enabled=...)` now supports an opt-in additive
-  Monte Carlo summary via `forcester_ts/monte_carlo_simulator.py`. It consumes
-  existing forecast outputs and does not change training, model selection, or
-  default routing.
-- Weather context and net-edge cost gating are wired through the real signal path:
-  `utils/weather_context.py`, `ai_llm/signal_validator.py`,
-  `models/time_series_signal_generator.py`, `models/signal_router.py`, and
-  `execution/paper_trading_engine.py`.
-- `config/xtb_config.yml` enables broker-side stocks, but there is no checked-in
-  XTB runtime execution adapter yet. The repo's truthful audit state for
-  `emerging_market_equity_execution` is `partial`, not `implemented`.
+- **Phase 7.35** (Signal Quality Pipeline + R6 Lifecycle Gate) is complete.
+  New scripts: `compute_ticker_eligibility.py` (HEALTHY/WEAK/LAB_ONLY), `compute_context_quality.py`
+  (regime+confidence-bin WR breakdown), `build_training_dataset.py` (fail-closed curated parquet).
+  R6 lifecycle gate clears legacy bar_timestamp artifacts. All 21 adversarial checks 0 confirmed.
+- **Research Experiment Protocol v3** is now the governing document for all trading experiments.
+  See [Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md](Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md).
+  Current state: Phase 1 (evidence stabilization) — execution telemetry stale at 63h.
+- **Capital readiness**: FAIL on R3 only (WR=40% < 45%, PF=0.80 < 1.30). R6 cleared.
+  Phase-3 strategy work blocked until Phases 1–4 complete.
+- **Adversarial audit**: 0/21 confirmed findings, all cleared. Anti-regression locks in place.
 - Latest verification snapshot:
-  - `python scripts/verify_emerging_market_claims.py --json`
   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
-  - Result: `1332 passed, 1 skipped, 28 deselected, 7 xfailed` (Phase 7.17 baseline)
+  - Result: `1640 passed, 1 skipped, 28 deselected, 7 xfailed` (Phase 7.35 baseline)
 
 Historical sections below preserve earlier phase notes for chronology; use this
 section as the current repo baseline.

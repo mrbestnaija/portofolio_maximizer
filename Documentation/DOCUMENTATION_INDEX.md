@@ -34,6 +34,12 @@ Reference specifications enforced across all phases and agents.
 
 ---
 
+## Research and Experiment Protocol
+
+| Document | Description |
+|----------|-------------|
+| [RESEARCH_EXPERIMENT_PROTOCOL.md](RESEARCH_EXPERIMENT_PROTOCOL.md) | v3 protocol — sequential experiment phases, hard telemetry integrity rules, anti-gaming safeguards, autonomous decision logic, Phase-3 readiness contract |
+
 ## Planning and Status (Canonical)
 
 Current state, next actions, and session records.  These three files are the primary
@@ -42,6 +48,7 @@ read target at the start of every session.
 | Document | Description |
 |----------|-------------|
 | [PROJECT_STATUS.md](PROJECT_STATUS.md) | Current phase status, regression baseline, gate snapshot, pending tasks |
+| [NEXT_IMMEDIATE_ACTION.md](NEXT_IMMEDIATE_ACTION.md) | Current Phase 1 action plan — execution freshness, linkage, evaluation coverage, attribution, experiments |
 | [NEXT_TO_DO_SEQUENCED.md](NEXT_TO_DO_SEQUENCED.md) | Sequenced to-do list with reward-to-effort alignment |
 | [SESSION_COMPLETE_SUMMARY.md](SESSION_COMPLETE_SUMMARY.md) | Rolling session record — most recent session at the top |
 

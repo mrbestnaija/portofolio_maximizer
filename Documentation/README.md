@@ -7,6 +7,8 @@
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
 > Canonical documentation navigator: [DOCS_INDEX.md](DOCS_INDEX.md)
+> Active experiment protocol: [RESEARCH_EXPERIMENT_PROTOCOL.md](RESEARCH_EXPERIMENT_PROTOCOL.md)
+> Current next action: [NEXT_IMMEDIATE_ACTION.md](NEXT_IMMEDIATE_ACTION.md)
 
 **Version**: 3.0
 **Status**: Production Ready âœ…

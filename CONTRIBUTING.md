@@ -38,3 +38,37 @@ CI/review is considered failed when any of these occur:
 - Telemetry changed without schema version bump.
 - Schema version bumped without adversarial coverage update.
 - UI shows a less severe state than backend `overall_status`.
+
+---
+
+## Experiment Integrity Contract
+
+All trading experiments must comply with the
+[Research-Grade Experiment Protocol v3](Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md).
+
+### Anti-gaming safeguards (enforced)
+
+The following practices are **explicitly rejected**:
+
+- Exclude losing trades from denominators without a causal reason documented in the experiment log.
+- Include `NON_TRADE_CONTEXT`, `INVALID_CONTEXT`, `NOT_DUE`, or `RESEARCH` windows in outcome denominators.
+- Declare lift when the 95% bootstrap CI for the improvement crosses zero.
+- Change gate thresholds in `config/forecaster_monitoring.yml` or `config/quant_success_config.yml` as part of an experiment.
+- Use execution telemetry older than 24 hours as evidence of system health.
+- Report `profit_factor` improvement when the post-experiment value is below 1.0.
+
+### Strategy freeze rule
+
+Experiments in Phases 1–3 (evidence stabilization, linkage coverage, evaluation completeness)
+**must not modify** exit rules, risk caps, model weights, position sizing, or trade filtering
+logic. Strategy changes are only permitted from Phase 5 onward and only after Phase-4
+attribution analysis is complete.
+
+### Experiment prerequisite
+
+No Phase-5 experiment may run until:
+1. `execution_log_freshness <= 24h`
+2. `high_integrity_violation_count = 0`
+3. `outcome_matched >= 10` with `matched/eligible >= 0.80`
+4. `evaluation_metrics_coverage >= 80%`
+5. Phase-4 attribution report generated
