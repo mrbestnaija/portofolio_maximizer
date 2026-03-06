@@ -19,7 +19,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +27,11 @@ try:
     from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
 except Exception:  # pragma: no cover - script execution path fallback
     from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+
+try:
+    from scripts.telemetry_adapter import normalize_telemetry_payload
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import normalize_telemetry_payload
 
 
 # Phase 7.13-C1: central path constants
@@ -36,6 +41,14 @@ except ImportError:
     _root = Path(__file__).resolve().parent.parent
     _DEFAULT_DB_PATH = _root / "data" / "portfolio_maximizer.db"
     _DEFAULT_AUDIT_DIR = _root / "logs" / "forecast_audits"
+
+_LEGACY_FORECAST_AUDIT_ROOT = Path(_DEFAULT_AUDIT_DIR)
+_PRODUCTION_AUDIT_DIR = _LEGACY_FORECAST_AUDIT_ROOT / "production"
+if _PRODUCTION_AUDIT_DIR.exists():
+    _DEFAULT_AUDIT_DIR = _PRODUCTION_AUDIT_DIR
+
+PASS_SEMANTICS_VERSION = 3
+DEFAULT_MAX_WARMUP_DAYS = 30
 
 
 def _resolve_path(root: Path, raw_path: str) -> Path:
@@ -421,6 +434,143 @@ def _load_profitability_requirements(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def _load_regression_monitoring_config(path: Path) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        fm = raw.get("forecaster_monitoring") if isinstance(raw, dict) else {}
+        rmse = fm.get("regression_metrics") if isinstance(fm, dict) else {}
+        return rmse if isinstance(rmse, dict) else {}
+    except Exception:
+        return {}
+
+
+def _first_audit_ts_utc(audit_dir: Path) -> Optional[datetime]:
+    try:
+        files = list(audit_dir.glob("forecast_audit_*.json"))
+    except Exception:
+        return None
+    if not files:
+        return None
+    try:
+        oldest = min(files, key=lambda p: p.stat().st_mtime)
+        return datetime.fromtimestamp(oldest.stat().st_mtime, tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def _compute_warmup_window(
+    *,
+    audit_dir: Path,
+    monitor_config: Path,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    now_utc = now or datetime.now(timezone.utc)
+    rmse_cfg = _load_regression_monitoring_config(monitor_config)
+    raw_days = rmse_cfg.get("max_warmup_days", DEFAULT_MAX_WARMUP_DAYS)
+    try:
+        max_warmup_days = max(int(raw_days), 0)
+    except Exception:
+        max_warmup_days = DEFAULT_MAX_WARMUP_DAYS
+    first_audit_ts = _first_audit_ts_utc(audit_dir)
+    allow_until: Optional[datetime] = None
+    warmup_expired = True
+    if first_audit_ts is not None:
+        allow_until = first_audit_ts + timedelta(days=max_warmup_days)
+        warmup_expired = now_utc >= allow_until
+    return {
+        "max_warmup_days": max_warmup_days,
+        "first_audit_ts_utc": first_audit_ts.isoformat() if first_audit_ts else None,
+        "allow_inconclusive_until_utc": allow_until.isoformat() if allow_until else None,
+        "warmup_expired": bool(warmup_expired),
+    }
+
+
+def _safe_int(raw: Any, default: int = 0) -> int:
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def _safe_ratio(num: int, den: int) -> float:
+    if den <= 0:
+        return 0.0
+    return float(num) / float(den)
+
+
+def _compute_lifecycle_integrity(
+    db_path: Path,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "close_before_entry_count": 0,
+        "closed_missing_exit_reason_count": 0,
+        "query_error": None,
+    }
+    if not db_path.exists():
+        result["query_error"] = f"db_not_found:{db_path}"
+        return result
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        close_before_entry = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.bar_timestamp IS NOT NULL
+                  AND e.bar_timestamp IS NOT NULL
+                  AND c.bar_timestamp < e.bar_timestamp
+                """
+            ).fetchone()
+            close_before_entry = _safe_int(row["n"] if row else 0)
+        except sqlite3.OperationalError:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.trade_date IS NOT NULL
+                  AND e.trade_date IS NOT NULL
+                  AND c.trade_date < e.trade_date
+                """
+            ).fetchone()
+            close_before_entry = _safe_int(row["n"] if row else 0)
+
+        closed_missing_exit_reason = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades
+                WHERE COALESCE(TRIM(exit_reason), '') = ''
+                """
+            ).fetchone()
+            closed_missing_exit_reason = _safe_int(row["n"] if row else 0)
+        except sqlite3.OperationalError:
+            closed_missing_exit_reason = 0
+
+        result["close_before_entry_count"] = close_before_entry
+        result["closed_missing_exit_reason_count"] = closed_missing_exit_reason
+        return result
+    except Exception as exc:
+        result["query_error"] = str(exc)
+        return result
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _build_evidence_progress(
     *,
     metrics: Dict[str, Any],
@@ -610,9 +760,25 @@ def main() -> int:
         help="Treat inconclusive lift checks as pass (default: fail).",
     )
     parser.add_argument(
+        "--unattended-profile",
+        action="store_true",
+        help=(
+            "Enable strict unattended semantics: INCONCLUSIVE lift allowed only before warmup expiry "
+            "and profitability proof must be profitable."
+        ),
+    )
+    parser.add_argument(
         "--require-profitable",
         action="store_true",
         help="Require strictly positive PnL (in addition to proof validity).",
+    )
+    parser.add_argument(
+        "--include-research",
+        action="store_true",
+        help=(
+            "Include research audit artifacts in lift checks (manual diagnostics only). "
+            "Default behavior inspects production audits only."
+        ),
     )
     parser.add_argument(
         "--output-json",
@@ -673,6 +839,12 @@ def main() -> int:
     proof_script = repo_root / "scripts" / "validate_profitability_proof.py"
     summary_cache_path = repo_root / "logs" / "forecast_audits_cache" / "latest_summary.json"
 
+    warmup_policy = _compute_warmup_window(audit_dir=audit_dir, monitor_config=monitor_config)
+    lift_inconclusive_allowed = bool(args.allow_inconclusive_lift)
+    if args.unattended_profile:
+        lift_inconclusive_allowed = not bool(warmup_policy.get("warmup_expired", True))
+    proof_profitable_required = bool(args.require_profitable or args.unattended_profile)
+
     reconcile_result: Dict[str, Any] = {"requested": False}
     if args.reconcile is not None:
         reconcile_ids = [int(x) for x in (args.reconcile or []) if int(x) > 0]
@@ -689,6 +861,8 @@ def main() -> int:
         str(check_script),
         "--audit-dir",
         str(audit_dir),
+        "--db",
+        str(db_path),
         "--config-path",
         str(monitor_config),
         "--max-files",
@@ -696,6 +870,8 @@ def main() -> int:
     ]
     if args.require_holding_period:
         lift_cmd.append("--require-holding-period")
+    if args.include_research:
+        lift_cmd.append("--include-research")
 
     lift_proc = _run_command(lift_cmd, cwd=repo_root)
     lift_output = f"{lift_proc.stdout or ''}\n{lift_proc.stderr or ''}".strip()
@@ -719,7 +895,7 @@ def main() -> int:
         lift_status = "INCONCLUSIVE"
 
     lift_pass = lift_proc.returncode == 0 and (
-        args.allow_inconclusive_lift or not lift_inconclusive
+        lift_inconclusive_allowed or not lift_inconclusive
     )
 
     lift_decision = lift_output_metrics.get("decision") or lift_summary.get("decision")
@@ -762,7 +938,9 @@ def main() -> int:
 
     proof_is_valid = bool(proof_payload.get("is_proof_valid", False))
     proof_is_profitable = bool(proof_payload.get("is_profitable", False))
-    proof_pass = proof_is_valid and (proof_is_profitable if args.require_profitable else True)
+    proof_pass = proof_is_valid and (
+        proof_is_profitable if proof_profitable_required else True
+    )
     proof_status = "PASS" if proof_pass and proof_proc.returncode == 0 else "FAIL"
 
     metrics = proof_payload.get("metrics") if isinstance(proof_payload.get("metrics"), dict) else {}
@@ -777,6 +955,59 @@ def main() -> int:
 
     gate_pass = lift_pass and proof_pass and reconcile_pass
     gate_status = "PASS" if gate_pass else "FAIL"
+    if lift_inconclusive:
+        gate_semantics_status = (
+            "INCONCLUSIVE_ALLOWED" if lift_inconclusive_allowed else "INCONCLUSIVE_BLOCKED"
+        )
+    elif gate_pass:
+        gate_semantics_status = "PASS"
+    else:
+        gate_semantics_status = "FAIL"
+
+    window_counts = (
+        lift_summary.get("window_counts", {})
+        if isinstance(lift_summary.get("window_counts"), dict)
+        else {}
+    )
+    outcome_matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
+    outcome_eligible = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
+    matched_over_eligible = _safe_ratio(outcome_matched, outcome_eligible)
+    linkage_pass = outcome_matched >= 10 and matched_over_eligible >= 0.8
+
+    non_trade_count = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
+    invalid_context_count = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    scope_block = lift_summary.get("scope", {}) if isinstance(lift_summary.get("scope"), dict) else {}
+    production_audit_only = bool(
+        scope_block.get(
+            "production_audit_only",
+            str(audit_dir.name).strip().lower() == "production",
+        )
+    )
+    evidence_hygiene_pass = (
+        production_audit_only and non_trade_count == 0 and invalid_context_count == 0
+    )
+
+    integrity_metrics = _compute_lifecycle_integrity(db_path)
+    close_before_entry_count = _safe_int(integrity_metrics.get("close_before_entry_count"), 0)
+    missing_exit_reason_count = _safe_int(
+        integrity_metrics.get("closed_missing_exit_reason_count"), 0
+    )
+    high_integrity_violation_count = close_before_entry_count + missing_exit_reason_count
+    integrity_query_error = integrity_metrics.get("query_error")
+    integrity_pass = high_integrity_violation_count == 0 and not integrity_query_error
+
+    gates_pass = bool(gate_pass)
+    phase3_ready = bool(gates_pass and linkage_pass and evidence_hygiene_pass and integrity_pass)
+    phase3_fail_reasons: List[str] = []
+    if not gates_pass:
+        phase3_fail_reasons.append("GATES_FAIL")
+    if not linkage_pass:
+        phase3_fail_reasons.append("THIN_LINKAGE")
+    if not evidence_hygiene_pass:
+        phase3_fail_reasons.append("EVIDENCE_HYGIENE_FAIL")
+    if not integrity_pass:
+        phase3_fail_reasons.append("HIGH_INTEGRITY_VIOLATION")
+    phase3_reason = "READY" if phase3_ready else ",".join(phase3_fail_reasons)
 
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -785,6 +1016,14 @@ def main() -> int:
 
     payload: Dict[str, Any] = {
         "timestamp_utc": timestamp_utc,
+        "pass_semantics_version": PASS_SEMANTICS_VERSION,
+        "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
+        "proof_profitable_required": bool(proof_profitable_required),
+        "first_audit_ts_utc": warmup_policy.get("first_audit_ts_utc"),
+        "allow_inconclusive_until_utc": warmup_policy.get("allow_inconclusive_until_utc"),
+        "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
+        "phase3_ready": bool(phase3_ready),
+        "phase3_reason": phase3_reason,
         "repo_state": _collect_git_state(repo_root),
         "inputs": {
             "db": str(db_path),
@@ -794,7 +1033,9 @@ def main() -> int:
             "max_files": int(args.max_files),
             "require_holding_period": bool(args.require_holding_period),
             "allow_inconclusive_lift": bool(args.allow_inconclusive_lift),
+            "include_research": bool(args.include_research),
             "require_profitable": bool(args.require_profitable),
+            "unattended_profile": bool(args.unattended_profile),
             "unknown_args_ignored": unknown,
         },
         "reconciliation": reconcile_result,
@@ -803,6 +1044,7 @@ def main() -> int:
             "pass": lift_pass,
             "exit_code": int(lift_proc.returncode),
             "inconclusive": lift_inconclusive,
+            "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
             "decision": lift_decision,
             "decision_reason": lift_decision_reason,
             "effective_audits": lift_effective_audits,
@@ -818,6 +1060,7 @@ def main() -> int:
             "command_exit_code": int(proof_proc.returncode),
             "is_proof_valid": proof_is_valid,
             "is_profitable": proof_is_profitable,
+            "proof_profitable_required": bool(proof_profitable_required),
             "total_pnl": metrics.get("total_pnl"),
             "profit_factor": metrics.get("profit_factor"),
             "win_rate": metrics.get("win_rate"),
@@ -833,8 +1076,45 @@ def main() -> int:
             "status": gate_status,
             "pass": gate_pass,
             "reconcile_pass": reconcile_pass,
+            "gate_semantics_status": gate_semantics_status,
+            "first_audit_ts_utc": warmup_policy.get("first_audit_ts_utc"),
+            "allow_inconclusive_until_utc": warmup_policy.get("allow_inconclusive_until_utc"),
+            "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
+        },
+        "readiness": {
+            "phase3_ready": bool(phase3_ready),
+            "phase3_reason": phase3_reason,
+            "gates_pass": bool(gates_pass),
+            "linkage_pass": bool(linkage_pass),
+            "evidence_hygiene_pass": bool(evidence_hygiene_pass),
+            "integrity_pass": bool(integrity_pass),
+            "outcome_matched": outcome_matched,
+            "outcome_eligible": outcome_eligible,
+            "matched_over_eligible": matched_over_eligible,
+            "non_trade_context_count": non_trade_count,
+            "invalid_context_count": invalid_context_count,
+            "production_audit_only": production_audit_only,
+            "high_integrity_violation_count": high_integrity_violation_count,
+            "close_before_entry_count": close_before_entry_count,
+            "closed_missing_exit_reason_count": missing_exit_reason_count,
+            "integrity_query_error": integrity_query_error,
         },
     }
+    payload["telemetry_contract"] = normalize_telemetry_payload(
+        {
+            "status": gate_semantics_status,
+            "reason_code": phase3_reason,
+            "context_type": "TRADE",
+            "severity": "HIGH" if not gate_pass else "LOW",
+            "blocking": not gate_pass,
+            "counts_toward_readiness_denominator": True,
+            "counts_toward_linkage_denominator": False,
+            "generated_utc": timestamp_utc,
+            "source_script": "scripts/production_audit_gate.py",
+        },
+        source_script="scripts/production_audit_gate.py",
+        generated_utc=timestamp_utc,
+    )
 
     artifact_text = json.dumps(payload, indent=2)
     output_path.write_text(artifact_text, encoding="utf-8")
@@ -853,12 +1133,24 @@ def main() -> int:
         f"(valid={proof_is_valid}, profitable={proof_is_profitable})"
     )
     print(
+        "Semantics      : "
+        f"v{PASS_SEMANTICS_VERSION} "
+        f"inconclusive_allowed={int(lift_inconclusive_allowed)} "
+        f"profitable_required={int(proof_profitable_required)} "
+        f"warmup_expired={int(bool(warmup_policy.get('warmup_expired', True)))}"
+    )
+    print(
         "Proof runway   : "
         f"closed={evidence_progress.get('closed_trades')}/{evidence_progress.get('min_closed_trades')} "
         f"days={evidence_progress.get('trading_days')}/{evidence_progress.get('min_trading_days')} "
         f"remaining_days={evidence_progress.get('remaining_trading_days')}"
     )
     print(f"Gate status    : {gate_status}")
+    print(
+        "Phase3 ready   : "
+        f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "
+        f"integrity_high={high_integrity_violation_count})"
+    )
     if reconcile_result.get("requested"):
         print(
             "Reconcile step : "

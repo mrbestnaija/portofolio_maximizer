@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,6 +59,21 @@ def _safe_float(raw: Any) -> Optional[float]:
         if raw is None:
             return None
         return float(raw)
+    except Exception:
+        return None
+
+
+def _parse_utc_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     except Exception:
         return None
 
@@ -135,6 +151,8 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
         conn.close()
 
     records: List[Dict[str, Any]] = []
+    close_before_entry_count = 0
+    closed_missing_exit_reason_count = 0
     for row in closed_rows:
         ts_signal_id = str(row.get("ts_signal_id") or "").strip()
         audit_meta = audit_index.get(ts_signal_id)
@@ -152,15 +170,28 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
         direction_match = _direction_match(forecast_direction, realized_direction)
         pnl = _safe_float(row.get("realized_pnl"))
         correct_direction_negative_pnl = bool(direction_match is True and (pnl or 0.0) < 0.0)
+        entry_ts_raw = row.get("entry_ts") or row.get("entry_date")
+        close_ts_raw = row.get("close_ts") or row.get("close_date")
+        entry_ts = _parse_utc_datetime(entry_ts_raw)
+        close_ts = _parse_utc_datetime(close_ts_raw)
+        integrity_reasons: List[str] = []
+        if entry_ts is not None and close_ts is not None and close_ts < entry_ts:
+            integrity_reasons.append("CAUSALITY_VIOLATION")
+            close_before_entry_count += 1
+        exit_reason = row.get("exit_reason")
+        if str(exit_reason or "").strip() == "":
+            integrity_reasons.append("MISSING_EXIT_REASON")
+            closed_missing_exit_reason_count += 1
+        integrity_status = "HIGH" if integrity_reasons else "OK"
 
         record = {
             "close_id": row.get("close_id"),
             "ts_signal_id": ts_signal_id or None,
             "ticker": row.get("ticker"),
-            "entry_ts": row.get("entry_ts") or row.get("entry_date"),
-            "close_ts": row.get("close_ts") or row.get("close_date"),
+            "entry_ts": entry_ts_raw,
+            "close_ts": close_ts_raw,
             "pnl": pnl,
-            "exit_reason": row.get("exit_reason"),
+            "exit_reason": exit_reason,
             "holding_period_days": row.get("holding_period_days"),
             "forecast_direction": forecast_direction,
             "realized_direction": realized_direction,
@@ -171,6 +202,11 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
             "forecast_horizon": audit_meta.get("forecast_horizon") if audit_meta else None,
             "excursion_min_pct": None,
             "excursion_max_pct": None,
+            "integrity_status": integrity_status,
+            "integrity_blocking": bool(integrity_reasons),
+            "integrity_reasons": integrity_reasons,
+            "counts_toward_readiness_denominator": not bool(integrity_reasons),
+            "counts_toward_linkage_denominator": bool(outcome_linked and not integrity_reasons),
         }
         records.append(record)
 
@@ -211,6 +247,12 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
         "linked_correct_direction_negative_count": len(right_dir_negative_linked),
         "linked_correct_direction_negative_rate": (
             len(right_dir_negative_linked) / len(linked_records) if linked_records else 0.0
+        ),
+        "close_before_entry_count": close_before_entry_count,
+        "closed_missing_exit_reason_count": closed_missing_exit_reason_count,
+        "high_integrity_violation_count": close_before_entry_count + closed_missing_exit_reason_count,
+        "readiness_denominator_exclusion_count": sum(
+            1 for r in records if not bool(r.get("counts_toward_readiness_denominator"))
         ),
     }
 
@@ -298,6 +340,12 @@ def main() -> int:
             "Linked correct-direction-negative rate: "
             f"{float(summary.get('linked_correct_direction_negative_rate') or 0.0):.1%} "
             f"({summary.get('linked_correct_direction_negative_count', 0)})"
+        )
+        print(
+            "Integrity high: "
+            f"{summary.get('high_integrity_violation_count', 0)} "
+            f"(close_before_entry={summary.get('close_before_entry_count', 0)}, "
+            f"missing_exit_reason={summary.get('closed_missing_exit_reason_count', 0)})"
         )
         print(f"Rows emitted: {len(payload.get('records', []))}")
     return 0

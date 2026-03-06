@@ -37,13 +37,115 @@ except ImportError:
 logger = logging.getLogger(__name__)
 MATCH_DIAGNOSTIC_SAMPLE_LIMIT = 5
 MATCH_TIME_TOLERANCE_DAYS = 1
+MATCH_TIME_TOLERANCE_MINUTES = 90
 _DEFAULT_EXECUTION_LOG_PATH = Path("logs/automation/execution_log.jsonl")
+_DEFAULT_DATE_FALLBACK_HISTORY_PATH = Path("logs/audit_gate/date_fallback_rate_history.jsonl")
 ELIGIBILITY_BUFFER = timedelta(minutes=5)
 EXECUTION_LOG_MALFORMED_SAMPLE_LIMIT = 3
+DATE_FALLBACK_WINDOW_RUNS_DEFAULT = 30
+DATE_FALLBACK_SLO_MAX_RATE_DEFAULT = 0.05
+DATE_FALLBACK_HISTORY_RETENTION_RUNS = 300
 
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _coerce_rate(value: Any) -> float:
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if rate < 0.0:
+        return 0.0
+    if rate > 1.0:
+        return 1.0
+    return rate
+
+
+def _load_date_fallback_history(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def _write_date_fallback_history(path: Path, rows: List[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = "\n".join(json.dumps(row, sort_keys=True) for row in rows)
+    if payload:
+        payload += "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(payload)
+        tmp_name = handle.name
+    os.replace(tmp_name, path)
+
+
+def _evaluate_date_fallback_slo(
+    *,
+    date_fallback_rate: float,
+    matched_new: int,
+    timestamp_match_rate: float,
+    history_path: Optional[Path],
+    window_runs: int,
+    max_rate: float,
+    persist_history: bool,
+) -> Dict[str, Any]:
+    window = max(int(window_runs), 1)
+    slo_max_rate = _coerce_rate(max_rate)
+    run_entry = {
+        "generated_utc": now_utc().isoformat(),
+        "date_fallback_rate": _coerce_rate(date_fallback_rate),
+        "matched_new": int(matched_new),
+        "timestamp_match_rate": _coerce_rate(timestamp_match_rate),
+    }
+    if history_path is None:
+        tail = [run_entry]
+        rolling_rate = _coerce_rate(date_fallback_rate)
+        return {
+            "pass": rolling_rate <= slo_max_rate,
+            "rolling_rate": rolling_rate,
+            "records_considered": 1,
+            "window_runs": window,
+            "slo_max_rate": slo_max_rate,
+            "history_path": None,
+            "history_persisted": False,
+        }
+
+    history = _load_date_fallback_history(history_path)
+    history.append(run_entry)
+    if len(history) > DATE_FALLBACK_HISTORY_RETENTION_RUNS:
+        history = history[-DATE_FALLBACK_HISTORY_RETENTION_RUNS :]
+    if persist_history:
+        _write_date_fallback_history(history_path, history)
+    tail = history[-window:]
+    rates = [_coerce_rate(item.get("date_fallback_rate")) for item in tail]
+    rolling_rate = (sum(rates) / len(rates)) if rates else 0.0
+    return {
+        "pass": rolling_rate <= slo_max_rate,
+        "rolling_rate": rolling_rate,
+        "records_considered": len(rates),
+        "window_runs": window,
+        "slo_max_rate": slo_max_rate,
+        "history_path": str(history_path),
+        "history_persisted": bool(persist_history),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +309,7 @@ def _candidate_row(
     *,
     ticker: Any,
     trade_date: Any,
+    close_ts: Any,
     pnl: Any,
     pnl_pct: Any,
     close_ts_signal_id: Any,
@@ -223,6 +326,7 @@ def _candidate_row(
     return {
         "ticker": ticker,
         "trade_date": trade_date,
+        "close_ts": close_ts,
         "outcome": {
             "win": pnl_f > 0,
             "pnl": round(pnl_f, 4),
@@ -239,12 +343,13 @@ def _append_candidate_rows(
     *,
     source: str,
 ) -> None:
-    for match_id, ticker, trade_date, pnl, pnl_pct, close_ts_signal_id in rows:
+    for match_id, ticker, trade_date, close_ts, pnl, pnl_pct, close_ts_signal_id in rows:
         if match_id is None:
             continue
         candidate = _candidate_row(
             ticker=ticker,
             trade_date=trade_date,
+            close_ts=close_ts,
             pnl=pnl,
             pnl_pct=pnl_pct,
             close_ts_signal_id=close_ts_signal_id,
@@ -273,6 +378,15 @@ def _fetch_outcome_candidates_for_signals(
     cur = conn.cursor()
     ticker_expr = "ticker AS ticker" if "ticker" in columns else "NULL AS ticker"
     trade_date_expr = "trade_date AS trade_date" if "trade_date" in columns else "NULL AS trade_date"
+    close_ts_expr = (
+        "bar_timestamp AS close_ts"
+        if "bar_timestamp" in columns
+        else (
+            "created_at AS close_ts"
+            if "created_at" in columns
+            else ("trade_date AS close_ts" if "trade_date" in columns else "NULL AS close_ts")
+        )
+    )
 
     try:
         cur.execute(
@@ -281,6 +395,7 @@ def _fetch_outcome_candidates_for_signals(
                 ts_signal_id AS match_id,
                 {ticker_expr},
                 {trade_date_expr},
+                {close_ts_expr},
                 realized_pnl,
                 realized_pnl_pct,
                 ts_signal_id AS close_ts_signal_id
@@ -299,6 +414,15 @@ def _fetch_outcome_candidates_for_signals(
     if "entry_trade_id" in columns and "id" in columns:
         close_ticker_expr = "c.ticker AS ticker" if "ticker" in columns else "NULL AS ticker"
         close_trade_date_expr = "c.trade_date AS trade_date" if "trade_date" in columns else "NULL AS trade_date"
+        close_ts_expr_joined = (
+            "c.bar_timestamp AS close_ts"
+            if "bar_timestamp" in columns
+            else (
+                "c.created_at AS close_ts"
+                if "created_at" in columns
+                else ("c.trade_date AS close_ts" if "trade_date" in columns else "NULL AS close_ts")
+            )
+        )
         try:
             cur.execute(
                 f"""
@@ -306,6 +430,7 @@ def _fetch_outcome_candidates_for_signals(
                     o.ts_signal_id AS match_id,
                     {close_ticker_expr},
                     {close_trade_date_expr},
+                    {close_ts_expr_joined},
                     c.realized_pnl,
                     c.realized_pnl_pct,
                     c.ts_signal_id AS close_ts_signal_id
@@ -329,19 +454,32 @@ def _fetch_symbol_time_candidates(
     conn: sqlite3.Connection,
     *,
     symbol: str,
-    expected_close_date: datetime.date,
+    expected_close_ts: Optional[datetime],
+    expected_close_date: Optional[datetime.date],
 ) -> List[Dict[str, Any]]:
     columns = _trade_execution_columns(conn)
     if "ticker" not in columns or "trade_date" not in columns:
         return []
 
     cur = conn.cursor()
-    start_date = (expected_close_date - timedelta(days=MATCH_TIME_TOLERANCE_DAYS)).isoformat()
-    end_date = (expected_close_date + timedelta(days=MATCH_TIME_TOLERANCE_DAYS)).isoformat()
+    anchor_date: Optional[datetime.date] = expected_close_ts.date() if expected_close_ts else expected_close_date
+    if anchor_date is None:
+        return []
+    start_date = (anchor_date - timedelta(days=MATCH_TIME_TOLERANCE_DAYS)).isoformat()
+    end_date = (anchor_date + timedelta(days=MATCH_TIME_TOLERANCE_DAYS)).isoformat()
+    close_ts_expr = (
+        "bar_timestamp AS close_ts"
+        if "bar_timestamp" in columns
+        else (
+            "created_at AS close_ts"
+            if "created_at" in columns
+            else ("trade_date AS close_ts" if "trade_date" in columns else "NULL AS close_ts")
+        )
+    )
     try:
         cur.execute(
-            """
-            SELECT ticker, trade_date, realized_pnl, realized_pnl_pct, ts_signal_id
+            f"""
+            SELECT ticker, trade_date, {close_ts_expr}, realized_pnl, realized_pnl_pct, ts_signal_id
             FROM trade_executions
             WHERE is_close = 1
               AND realized_pnl IS NOT NULL
@@ -355,12 +493,13 @@ def _fetch_symbol_time_candidates(
         return []
 
     matches: List[Dict[str, Any]] = []
-    for ticker, trade_date, pnl, pnl_pct, close_ts_signal_id in cur.fetchall():
+    for ticker, trade_date, close_ts, pnl, pnl_pct, close_ts_signal_id in cur.fetchall():
         if _normalize_symbol(ticker) != symbol:
             continue
         candidate = _candidate_row(
             ticker=ticker,
             trade_date=trade_date,
+            close_ts=close_ts,
             pnl=pnl,
             pnl_pct=pnl_pct,
             close_ts_signal_id=close_ts_signal_id,
@@ -409,6 +548,8 @@ def _select_candidate_for_record(
     *,
     query_mode: str,
 ) -> Tuple[Optional[Dict[str, Any]], str, Dict[str, Any]]:
+    expected_close_ts = record.get("expected_close_ts")
+    expected_close_date = record.get("expected_close_date")
     query: Dict[str, Any] = {
         "mode": query_mode,
         "filters": {
@@ -416,10 +557,14 @@ def _select_candidate_for_record(
             "forecast_time": record.get("forecast_time").isoformat() if record.get("forecast_time") else None,
             "forecast_horizon": record.get("forecast_horizon"),
             "ts_signal_id": record.get("ts_signal_id"),
+            "expected_close_ts": (
+                expected_close_ts.isoformat() if isinstance(expected_close_ts, datetime) else None
+            ),
             "expected_close_date": record.get("expected_close_date").isoformat()
             if record.get("expected_close_date") is not None
             else None,
             "time_tolerance_days": MATCH_TIME_TOLERANCE_DAYS,
+            "time_tolerance_minutes": MATCH_TIME_TOLERANCE_MINUTES,
         },
         "candidate_count": len(candidates),
         "candidate_sources": sorted(
@@ -449,19 +594,39 @@ def _select_candidate_for_record(
     valid_candidates: List[Dict[str, Any]] = []
     time_mismatch_count = 0
     time_unvalidated_count = 0
-    expected_close_date = record.get("expected_close_date")
+    date_fallback_count = 0
+    time_tolerance = timedelta(minutes=MATCH_TIME_TOLERANCE_MINUTES)
     for candidate in same_symbol_candidates:
+        raw_close_ts = candidate.get("close_ts")
+        candidate_close_ts = _parse_forecast_time(raw_close_ts)
+        close_ts_text = str(raw_close_ts).strip() if raw_close_ts is not None else ""
+        if len(close_ts_text) == 10:
+            # Date-only close timestamps are coarse; treat as fallback-grade evidence.
+            candidate_close_ts = None
         candidate_trade_date = _parse_trade_date(candidate.get("trade_date"))
+        if expected_close_ts is not None and candidate_close_ts is not None:
+            if abs(candidate_close_ts - expected_close_ts) > time_tolerance:
+                time_mismatch_count += 1
+                continue
+            candidate_copy = dict(candidate)
+            candidate_copy["match_anchor"] = "timestamp"
+            valid_candidates.append(candidate_copy)
+            continue
+
         if expected_close_date is not None and candidate_trade_date is not None:
             if abs((candidate_trade_date - expected_close_date).days) > MATCH_TIME_TOLERANCE_DAYS:
                 time_mismatch_count += 1
                 continue
         elif expected_close_date is not None and candidate_trade_date is None:
             time_unvalidated_count += 1
-        valid_candidates.append(candidate)
+        candidate_copy = dict(candidate)
+        candidate_copy["match_anchor"] = "date_fallback"
+        date_fallback_count += 1
+        valid_candidates.append(candidate_copy)
 
     query["symbol_unknown_count"] = symbol_unknown_count
     query["time_unvalidated_count"] = time_unvalidated_count
+    query["date_fallback_candidates"] = date_fallback_count
     if not valid_candidates and time_mismatch_count > 0:
         query["time_mismatch_count"] = time_mismatch_count
         return None, "TIME_MISMATCH", query
@@ -474,7 +639,10 @@ def _select_candidate_for_record(
             return valid_candidates[0], "MATCHED", query
         query["matching_rows"] = len(valid_candidates)
         return None, "MULTIPLE_ROWS", query
-    return valid_candidates[0], "MATCHED", query
+    selected = valid_candidates[0]
+    if selected.get("match_anchor") == "date_fallback":
+        query["reason_code"] = "DATE_FALLBACK_USED"
+    return selected, "MATCHED", query
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +902,10 @@ def reconcile(
     log_path: Path,
     execution_log_path: Optional[Path] = None,
     dry_run: bool = False,
+    date_fallback_history_path: Optional[Path] = _DEFAULT_DATE_FALLBACK_HISTORY_PATH,
+    date_fallback_window_runs: int = DATE_FALLBACK_WINDOW_RUNS_DEFAULT,
+    date_fallback_slo_max_rate: float = DATE_FALLBACK_SLO_MAX_RATE_DEFAULT,
+    enforce_date_fallback_slo: bool = False,
 ) -> Tuple[int, int, int]:
     """Run the reconciliation.
 
@@ -857,6 +1029,15 @@ def reconcile(
         eligibility_summary = _summarize_not_yet_eligible(diagnostics)
         matched_new = 0
         matched_total = already_done + matched_new
+        date_fallback_slo = _evaluate_date_fallback_slo(
+            date_fallback_rate=0.0,
+            matched_new=matched_new,
+            timestamp_match_rate=0.0,
+            history_path=date_fallback_history_path,
+            window_runs=date_fallback_window_runs,
+            max_rate=date_fallback_slo_max_rate,
+            persist_history=not dry_run,
+        )
         print(
             f"[update_platt_outcomes] total={total} pending=0 "
             f"matched={matched_total} matched_new={matched_new} "
@@ -864,12 +1045,18 @@ def reconcile(
             f"still_pending=0 "
             f"hold_skipped={hold_skipped} no_sid={other_no_sid} "
             f"not_yet_eligible={not_yet_eligible} "
+            f"timestamp_match_rate={0.0:.2%} "
+            f"date_fallback_rate={0.0:.2%} "
+            f"date_fallback_slo_pass={int(bool(date_fallback_slo['pass']))} "
+            f"date_fallback_slo_rolling_rate={date_fallback_slo['rolling_rate']:.2%} "
+            f"date_fallback_slo_window={int(date_fallback_slo['records_considered'])} "
             f"execution_log_loaded={int(execution_log_loaded)} "
             f"execution_log_integrity={execution_log_integrity} "
             f"evidence_status={execution_evidence_status}"
         )
         if execution_gate_enabled:
             print(f"[update_platt_outcomes] execution_log_stats={json.dumps(execution_log_metrics, sort_keys=True)}")
+        print(f"[update_platt_outcomes] date_fallback_slo={json.dumps(date_fallback_slo, sort_keys=True)}")
         if failure_counts:
             print(f"[update_platt_outcomes] failure_reasons={json.dumps(dict(sorted(failure_counts.items())))}")
         if eligibility_summary:
@@ -887,10 +1074,20 @@ def reconcile(
                 "ts_signal_id": sample.get("ts_signal_id"),
                 "execution_status": sample.get("execution_status"),
                 "match_source": sample.get("match_source"),
+                "match_anchor": sample.get("match_anchor"),
+                "reason_code": sample.get("reason_code"),
                 "failure_reason": sample.get("failure_reason"),
                 "query": sample.get("query"),
             }
             print(f"[update_platt_outcomes][sample] {json.dumps(payload, default=_json_default, sort_keys=True)}")
+        if enforce_date_fallback_slo and not bool(date_fallback_slo["pass"]):
+            logger.error(
+                "Date fallback SLO violated (rolling_rate=%.4f > max_rate=%.4f over %d run(s)).",
+                float(date_fallback_slo["rolling_rate"]),
+                float(date_fallback_slo["slo_max_rate"]),
+                int(date_fallback_slo["records_considered"]),
+            )
+            raise SystemExit(1)
         return total, 0, already_done
 
     seen_keys: set[Tuple[str, str, str, str]] = set()
@@ -973,6 +1170,7 @@ def reconcile(
                 fallback_candidates = _fetch_symbol_time_candidates(
                     conn,
                     symbol=record["symbol"],
+                    expected_close_ts=record.get("expected_close_ts"),
                     expected_close_date=record["expected_close_date"],
                 )
                 candidate, status, query = _select_candidate_for_record(
@@ -985,6 +1183,9 @@ def reconcile(
             if candidate is not None:
                 record["entry"]["outcome"] = candidate["outcome"]
                 record["match_source"] = candidate.get("match_source")
+                record["match_anchor"] = candidate.get("match_anchor") or "timestamp"
+                if record["match_anchor"] == "date_fallback":
+                    record["reason_code"] = "DATE_FALLBACK_USED"
                 updated += 1
             else:
                 if (
@@ -1003,6 +1204,27 @@ def reconcile(
     matched_new = sum(1 for item in diagnostics if item.get("match_source"))
     matched_count = already_done + matched_new
     still_pending = pending_count - matched_new
+    timestamp_matched = sum(
+        1
+        for item in diagnostics
+        if item.get("match_source") and str(item.get("match_anchor") or "").lower() == "timestamp"
+    )
+    date_fallback_matched = sum(
+        1
+        for item in diagnostics
+        if item.get("match_source") and str(item.get("match_anchor") or "").lower() == "date_fallback"
+    )
+    timestamp_match_rate = (timestamp_matched / matched_new) if matched_new else 0.0
+    date_fallback_rate = (date_fallback_matched / matched_new) if matched_new else 0.0
+    date_fallback_slo = _evaluate_date_fallback_slo(
+        date_fallback_rate=date_fallback_rate,
+        matched_new=matched_new,
+        timestamp_match_rate=timestamp_match_rate,
+        history_path=date_fallback_history_path,
+        window_runs=date_fallback_window_runs,
+        max_rate=date_fallback_slo_max_rate,
+        persist_history=not dry_run,
+    )
     failure_counts = Counter(
         str(item.get("failure_reason"))
         for item in diagnostics
@@ -1017,12 +1239,18 @@ def reconcile(
         f"still_pending={still_pending} "
         f"hold_skipped={hold_skipped} no_sid={other_no_sid} "
         f"not_yet_eligible={not_yet_eligible} "
+        f"timestamp_match_rate={timestamp_match_rate:.2%} "
+        f"date_fallback_rate={date_fallback_rate:.2%} "
+        f"date_fallback_slo_pass={int(bool(date_fallback_slo['pass']))} "
+        f"date_fallback_slo_rolling_rate={date_fallback_slo['rolling_rate']:.2%} "
+        f"date_fallback_slo_window={int(date_fallback_slo['records_considered'])} "
         f"execution_log_loaded={int(execution_log_loaded)} "
         f"execution_log_integrity={execution_log_integrity} "
         f"evidence_status={execution_evidence_status}"
     )
     if execution_gate_enabled:
         print(f"[update_platt_outcomes] execution_log_stats={json.dumps(execution_log_metrics, sort_keys=True)}")
+    print(f"[update_platt_outcomes] date_fallback_slo={json.dumps(date_fallback_slo, sort_keys=True)}")
     if failure_counts:
         print(f"[update_platt_outcomes] failure_reasons={json.dumps(dict(sorted(failure_counts.items())))}")
     if eligibility_summary:
@@ -1041,6 +1269,8 @@ def reconcile(
             "ts_signal_id": sample.get("ts_signal_id"),
             "execution_status": sample.get("execution_status"),
             "match_source": sample.get("match_source"),
+            "match_anchor": sample.get("match_anchor"),
+            "reason_code": sample.get("reason_code"),
             "failure_reason": sample.get("failure_reason"),
             "query": sample.get("query"),
         }
@@ -1051,6 +1281,15 @@ def reconcile(
         print(f"[update_platt_outcomes] Wrote {total} entries back to {log_path}")
     elif dry_run and updated > 0:
         print(f"[update_platt_outcomes] dry-run: would update {updated} entries (no file written)")
+
+    if enforce_date_fallback_slo and not bool(date_fallback_slo["pass"]):
+        logger.error(
+            "Date fallback SLO violated (rolling_rate=%.4f > max_rate=%.4f over %d run(s)).",
+            float(date_fallback_slo["rolling_rate"]),
+            float(date_fallback_slo["slo_max_rate"]),
+            int(date_fallback_slo["records_considered"]),
+        )
+        raise SystemExit(1)
 
     return total, updated, already_done
 
@@ -1082,6 +1321,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to execution_log.jsonl (default: logs/automation/execution_log.jsonl)",
     )
     p.add_argument(
+        "--date-fallback-history",
+        default=str(_DEFAULT_DATE_FALLBACK_HISTORY_PATH),
+        metavar="PATH",
+        help=(
+            "Path to rolling date-fallback history JSONL "
+            "(default: logs/audit_gate/date_fallback_rate_history.jsonl)."
+        ),
+    )
+    p.add_argument(
+        "--date-fallback-window-runs",
+        type=int,
+        default=DATE_FALLBACK_WINDOW_RUNS_DEFAULT,
+        metavar="N",
+        help=f"Rolling run window for date fallback SLO (default: {DATE_FALLBACK_WINDOW_RUNS_DEFAULT}).",
+    )
+    p.add_argument(
+        "--date-fallback-slo-max-rate",
+        type=float,
+        default=DATE_FALLBACK_SLO_MAX_RATE_DEFAULT,
+        metavar="RATIO",
+        help=f"Maximum allowed rolling date_fallback_rate (default: {DATE_FALLBACK_SLO_MAX_RATE_DEFAULT:.2f}).",
+    )
+    p.add_argument(
+        "--enforce-date-fallback-slo",
+        action="store_true",
+        help="Fail with exit code 1 when rolling date fallback rate exceeds the configured SLO.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be updated without writing anything.",
@@ -1105,12 +1372,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     db_path = Path(args.db) if args.db else _DEFAULT_DB_PATH
     log_path = Path(args.log) if args.log else _DEFAULT_JSONL_PATH
     execution_log_path = Path(args.execution_log) if args.execution_log else _DEFAULT_EXECUTION_LOG_PATH
+    date_fallback_history_path = (
+        Path(args.date_fallback_history) if args.date_fallback_history else None
+    )
 
     reconcile(
         db_path=db_path,
         log_path=log_path,
         execution_log_path=execution_log_path,
         dry_run=args.dry_run,
+        date_fallback_history_path=date_fallback_history_path,
+        date_fallback_window_runs=args.date_fallback_window_runs,
+        date_fallback_slo_max_rate=args.date_fallback_slo_max_rate,
+        enforce_date_fallback_slo=args.enforce_date_fallback_slo,
     )
 
 

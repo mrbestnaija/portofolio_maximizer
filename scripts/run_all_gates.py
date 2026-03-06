@@ -40,6 +40,9 @@ MAX_SKIPPED_OPTIONAL_GATES = 1
 # Artifact written after every run so downstream tools (e.g. institutional gate) can
 # verify gates ran recently without re-running them (BYP-03 fix).
 GATE_STATUS_ARTIFACT = Path(__file__).resolve().parents[1] / "logs" / "gate_status_latest.json"
+PRODUCTION_GATE_ARTIFACT = (
+    Path(__file__).resolve().parents[1] / "logs" / "audit_gate" / "production_gate_latest.json"
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -83,6 +86,14 @@ def _print_gate_result(result: dict[str, Any], *, emit_json: bool) -> None:
     stdout = str(result.get("stdout") or "").strip()
     if stdout:
         print(stdout)
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def main() -> None:
@@ -149,13 +160,14 @@ def main() -> None:
 
     # Gate 3: production audit gate
     if not args.skip_profitability_gate:
-        # BYP-05 fix: --allow-inconclusive-lift is time-bounded by max_warmup_days in
-        # forecaster_monitoring.yml (regression_metrics.max_warmup_days = 30).
-        # After max_warmup_days from first audit, INCONCLUSIVE must be treated as FAIL.
-        cmd3 = [python, "scripts/production_audit_gate.py",
-                "--reconcile",              # dry-run: surface unlinked closes without applying; overnight job applies
-                "--allow-inconclusive-lift",  # Phase 7.19: INCONCLUSIVE during warmup = ok (ensemble is DISABLE_DEFAULT)
-                ]
+        cmd3 = [
+            python,
+            "scripts/production_audit_gate.py",
+            "--reconcile",  # dry-run: surface unlinked closes without applying; overnight job applies
+            "--unattended-profile",
+            "--output-json",
+            str(PRODUCTION_GATE_ARTIFACT),
+        ]
         if args.db:
             cmd3 += ["--db", args.db]
         r3 = _run(cmd3, "production_audit_gate")
@@ -192,6 +204,22 @@ def main() -> None:
         if not args.emit_json:
             print(skip_fail_msg)
 
+    production_gate_ran = any(
+        str(r.get("label")) == "production_audit_gate" and not bool(r.get("skipped"))
+        for r in results
+    )
+    production_gate_payload = _load_json_file(PRODUCTION_GATE_ARTIFACT) if production_gate_ran else {}
+    readiness = (
+        production_gate_payload.get("readiness", {})
+        if isinstance(production_gate_payload.get("readiness"), dict)
+        else {}
+    )
+    gate_payload_block = (
+        production_gate_payload.get("production_profitability_gate", {})
+        if isinstance(production_gate_payload.get("production_profitability_gate"), dict)
+        else {}
+    )
+
     summary = {
         "phase": "institutional_unattended_hardening",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -199,6 +227,19 @@ def main() -> None:
         "skipped_optional_gates": skipped_optional,
         "max_skipped_optional_gates": MAX_SKIPPED_OPTIONAL_GATES,
         "gates": results,
+        "pass_semantics_version": production_gate_payload.get("pass_semantics_version"),
+        "lift_inconclusive_allowed": production_gate_payload.get("lift_inconclusive_allowed"),
+        "proof_profitable_required": production_gate_payload.get("proof_profitable_required"),
+        "warmup_expired": production_gate_payload.get("warmup_expired"),
+        "gate_semantics_status": gate_payload_block.get("gate_semantics_status"),
+        "phase3_ready": bool(production_gate_payload.get("phase3_ready", False)),
+        "phase3_reason": production_gate_payload.get("phase3_reason"),
+        "readiness_components": {
+            "gates_pass": readiness.get("gates_pass"),
+            "linkage_pass": readiness.get("linkage_pass"),
+            "evidence_hygiene_pass": readiness.get("evidence_hygiene_pass"),
+            "integrity_pass": readiness.get("integrity_pass"),
+        },
     }
 
     # BYP-03 fix: write a status artifact so downstream tools can verify gates ran recently.
@@ -214,10 +255,15 @@ def main() -> None:
         status = "[PASS]" if overall_pass else "[FAIL]"
         passed_count = sum(1 for r in results if bool(r.get("passed")))
         print(f"\n{status} run_all_gates: {passed_count}/{len(results)} gates passed")
+        if summary.get("phase3_reason") is not None:
+            print(
+                "Phase3 ready  : "
+                f"{int(bool(summary.get('phase3_ready')))} "
+                f"(reason={summary.get('phase3_reason')})"
+            )
 
     sys.exit(0 if overall_pass else 1)
 
 
 if __name__ == "__main__":
     main()
-

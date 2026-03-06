@@ -100,6 +100,30 @@ class TestSignalRouter:
         assert router.feature_flags['llm_fallback'] is False
         assert router.feature_flags['llm_redundancy'] is True
 
+    def test_unsupported_routing_knobs_emit_warning(self, caplog):
+        caplog.set_level("WARNING")
+        router = SignalRouter(
+            config={
+                'time_series_primary': True,
+                'llm_fallback': True,
+                'enable_samossa': True,
+                'routing_mode': 'TIME_SERIES_ONLY',
+            }
+        )
+        assert "unsupported_routing_knob:enable_samossa" in router.routing_contract_warnings
+        assert "unsupported_routing_knob:routing_mode" in router.routing_contract_warnings
+
+    def test_strict_routing_contract_raises_on_unsupported_knob(self):
+        with pytest.raises(ValueError):
+            SignalRouter(
+                config={
+                    'time_series_primary': True,
+                    'llm_fallback': True,
+                    'enable_samossa': True,
+                    'strict_routing_config': True,
+                }
+            )
+
     def test_route_time_series_primary(self, ts_signal_generator, sample_forecast_bundle):
         """Test routing with Time Series as primary"""
         router = SignalRouter(
@@ -357,6 +381,36 @@ class TestSignalRouter:
         # Primary should come from LLM, since TS is disabled for this ticker.
         assert bundle.primary_signal is not None
         assert bundle.primary_signal["source"] == "LLM"
+
+    def test_gs_disable_time_series_in_forecaster_monitoring(self):
+        """GS (0 wins / 5 trades) must appear in the TS-disabled list loaded from
+        forecaster_monitoring.yml so the kill-switch config change takes effect at runtime."""
+        router = SignalRouter(config={'time_series_primary': True, 'llm_fallback': False})
+        assert "GS" in router._ts_disabled_tickers, (
+            "GS should be TS-disabled (0% WR); add disable_time_series: true under GS in "
+            "config/forecaster_monitoring.yml"
+        )
+
+    def test_aapl_min_expected_return_above_base_threshold(self):
+        """AAPL's per-ticker min_expected_return must be >= 0.0080 (P0 routing gate).
+        Only very strong signals should pass; 14% historical WR demands a high evidence bar."""
+        import yaml
+        from pathlib import Path
+
+        cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "signal_routing_config.yml"
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        aapl_cfg = (
+            raw.get("signal_routing", {})
+            .get("time_series", {})
+            .get("per_ticker", {})
+            .get("AAPL", {})
+        )
+        aapl_mer = aapl_cfg.get("min_expected_return", 0.0)
+        assert aapl_mer >= 0.0080, (
+            f"AAPL min_expected_return={aapl_mer} is too low; "
+            "must be >= 0.0080 (80 bps) to gate out weak signals (14% WR history). "
+            "Update config/signal_routing_config.yml."
+        )
 
 
 class TestSignalBundle:

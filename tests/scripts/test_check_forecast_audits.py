@@ -244,6 +244,92 @@ def test_check_forecast_audits_reports_parse_errors(
     assert "parse_errors=1" in output
 
 
+def test_check_forecast_audits_include_research_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    production_dir = tmp_path / "logs" / "forecast_audits" / "production"
+    research_dir = tmp_path / "logs" / "forecast_audits" / "research"
+    production_dir.mkdir(parents=True, exist_ok=True)
+    research_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        production_dir / "forecast_audit_prod.json",
+        start="2024-01-01",
+        end="2024-01-02",
+        length=120,
+        horizon=1,
+        ticker="AAPL",
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+    _write_audit(
+        research_dir / "forecast_audit_research.json",
+        start="2024-01-03",
+        end="2024-01-04",
+        length=120,
+        horizon=1,
+        ticker="MSFT",
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(production_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+    summary_prod = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary_prod["window_counts"]["n_raw_windows"] == 1
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(production_dir),
+            "--include-research",
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+    summary_all = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary_all["window_counts"]["n_raw_windows"] == 2
+
+
 def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -321,30 +407,31 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     assert (
         "Outcome join   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0 "
         "missing=0 ambiguous=0 not_due=0 invalid_context=0 not_yet_eligible=0 "
-        "no_signal_id=0 non_trade_context=0"
+        "no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
     ) in output
     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
 
     summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
-    assert summary["window_counts"] == {
-        "n_raw_windows": 2,
-        "n_parseable_windows": 2,
-        "n_deduped_windows": 2,
-        "n_outcome_deduped_windows": 2,
-        "n_rmse_windows_processed": 2,
-        "n_rmse_windows_usable": 2,
-        "n_outcome_windows_eligible": 0,
-        "n_outcome_windows_matched": 0,
-        "n_outcome_windows_missing": 0,
-        "n_outcome_windows_ambiguous": 0,
-        "n_outcome_windows_not_due": 0,
-        "n_outcome_windows_not_yet_eligible": 0,
-        "n_outcome_windows_invalid_context": 0,
-        "n_outcome_windows_outcomes_not_loaded": 0,
-        "n_outcome_windows_no_signal_id": 0,
-        "n_outcome_windows_non_trade_context": 0,
-    }
-    assert summary["telemetry_contract"]["schema_version"] == 2
+    assert summary["window_counts"]["n_raw_windows"] == 2
+    assert summary["window_counts"]["n_parseable_windows"] == 2
+    assert summary["window_counts"]["n_deduped_windows"] == 2
+    assert summary["window_counts"]["n_outcome_deduped_windows"] == 2
+    assert summary["window_counts"]["n_rmse_windows_processed"] == 2
+    assert summary["window_counts"]["n_rmse_windows_usable"] == 2
+    assert summary["window_counts"]["n_outcome_windows_eligible"] == 0
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 0
+    assert summary["window_counts"]["n_outcome_windows_missing"] == 0
+    assert summary["window_counts"]["n_outcome_windows_ambiguous"] == 0
+    assert summary["window_counts"]["n_outcome_windows_not_due"] == 0
+    assert summary["window_counts"]["n_outcome_windows_not_yet_eligible"] == 0
+    assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 0
+    assert summary["window_counts"]["n_outcome_windows_outcomes_not_loaded"] == 0
+    assert summary["window_counts"]["n_outcome_windows_no_signal_id"] == 0
+    assert summary["window_counts"]["n_outcome_windows_non_trade_context"] == 0
+    assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
+    assert summary["window_counts"]["n_readiness_denominator_included"] == 0
+    assert summary["window_counts"]["n_linkage_denominator_included"] == 0
+    assert summary["telemetry_contract"]["schema_version"] == 3
     assert summary["telemetry_contract"]["outcomes_loaded"] is False
     assert "cache_status" in summary
     assert summary["window_diversity"] == {

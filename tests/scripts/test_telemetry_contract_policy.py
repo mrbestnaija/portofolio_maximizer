@@ -16,6 +16,16 @@ from scripts import dashboard_db_bridge as bridge_mod
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = ROOT / "config" / "telemetry_contract.yml"
 SCHEMA2_REQUIRED_IDS = ["TCON-01", "TCON-02", "TCON-03", "TCON-04", "TCON-05"]
+SCHEMA3_REQUIRED_IDS = [
+    "TCON-01",
+    "TCON-02",
+    "TCON-03",
+    "TCON-04",
+    "TCON-05",
+    "TCON-06",
+    "TCON-07",
+    "TCON-08",
+]
 SCHEMA2_REQUIRED_WINDOW_COUNT_KEYS = [
     "n_raw_windows",
     "n_parseable_windows",
@@ -101,6 +111,8 @@ def test_schema_version_policy_and_schema2_baseline_are_pinned() -> None:
     if current_version == 2:
         assert active.get("required_adversarial_ids") == SCHEMA2_REQUIRED_IDS
         assert active.get("required_window_count_keys") == SCHEMA2_REQUIRED_WINDOW_COUNT_KEYS
+    if current_version == 3:
+        assert active.get("required_adversarial_ids") == SCHEMA3_REQUIRED_IDS
 
 
 def test_required_adversarial_ids_exist_in_runner_output() -> None:

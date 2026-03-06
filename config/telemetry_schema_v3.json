@@ -1,0 +1,41 @@
+{
+  "schema_version": 3,
+  "required_keys": [
+    "schema_version",
+    "status",
+    "reason_code",
+    "context_type",
+    "severity",
+    "blocking",
+    "counts_toward_readiness_denominator",
+    "counts_toward_linkage_denominator",
+    "generated_utc",
+    "source_script"
+  ],
+  "status_vocabulary": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "INCONCLUSIVE_ALLOWED",
+    "INCONCLUSIVE_BLOCKED",
+    "WARN",
+    "STALE",
+    "INVALID_CONTEXT"
+  ],
+  "reason_code_vocabulary": [
+    "WARMUP_NOT_EXPIRED",
+    "UNPROFITABLE_PROOF",
+    "HORIZON_MISMATCH",
+    "CAUSALITY_VIOLATION",
+    "MISSING_TS_SIGNAL_ID",
+    "NON_TRADE_CONTEXT",
+    "DATE_FALLBACK_USED",
+    "STALE_SIDECAR",
+    "INSUFFICIENT_PRESELECTION_EVIDENCE"
+  ],
+  "legacy_status_shims": {
+    "INCONCLUSIVE": "INCONCLUSIVE_ALLOWED",
+    "OK": "PASS",
+    "SUCCESS": "PASS"
+  }
+}

@@ -59,6 +59,28 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ### Latest Hardening (Mar 2026)
 
+### Phase 7.36 (2026-03-06): Paranoid Hardening Plan v3 (Backward-Compatible)
+
+- Gate semantics:
+  - `run_all_gates.py` now runs `production_audit_gate.py --unattended-profile`.
+  - In unattended mode, `proof_valid=true && profitable=false` is now hard FAIL.
+  - Inconclusive lift is allowed only before warmup expiry (`first_audit_ts + max_warmup_days`).
+  - Additive outputs: `pass_semantics_version`, `lift_inconclusive_allowed`, `proof_profitable_required`, `warmup_expired`, `phase3_ready`, `phase3_reason`.
+- Telemetry v3:
+  - Added `config/telemetry_schema_v3.json`.
+  - Added serializer shim `scripts/telemetry_adapter.py` (`INCONCLUSIVE->INCONCLUSIVE_ALLOWED`, `OK/SUCCESS->PASS`).
+  - `config/telemetry_contract.yml` now tracks schema version 3 and requires `TCON-01..TCON-08`.
+- Linkage precision and denominator integrity:
+  - `check_forecast_audits.py` defaults to production audits, supports `--include-research`, and emits explicit denominator inclusion/exclusion counts.
+  - Timestamp-primary matching with date fallback telemetry added to `update_platt_outcomes.py`.
+  - Rolling date-fallback SLO controls (`window_runs=30`, max rate 5%) were added with optional enforcement and persisted history in `logs/audit_gate/date_fallback_rate_history.jsonl`.
+- Reporting truthfulness:
+  - `dashboard_db_bridge.py` now computes sidecar freshness (`freshness_status`, `freshness_reason`, per-sidecar ages).
+  - `outcome_linkage_attribution_report.py` surfaces HIGH lifecycle violations.
+  - `capital_readiness_check.py` adds R6 lifecycle integrity hard gate.
+- Routing contract:
+  - `signal_router.py` warns on unsupported no-op routing knobs by default and supports strict fail mode via `PMX_STRICT_ROUTING_CONFIG=1`.
+
 - Fail-closed quality automation hardening:
   - `scripts/data_sufficiency_monitor.py` closes the `profit_factor=0.0` threshold dodge and returns `DATA_ERROR` for non-finite metrics.
   - CLI status contract is stable: `0=SUFFICIENT`, `1=INSUFFICIENT`, `2=DATA_ERROR`.
@@ -588,6 +610,8 @@ Comprehensive documentation is available in the `Documentation/` directory:
 - **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
 - **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
+- **[Next Immediate Action](Documentation/NEXT_IMMEDIATE_ACTION.md)**: Current execution priority and verification loop
+- **[Phase 7.35 Outcome Linkage Hardening](Documentation/PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)**: Linkage integrity status and Phase 3 entry gate
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status
 - **[Research Plan](Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md)**: Research questions, protocols, and reproducibility checklist
 - **[Cron Automation](Documentation/CRON_AUTOMATION.md)**: Production-style scheduling + evidence freshness wiring

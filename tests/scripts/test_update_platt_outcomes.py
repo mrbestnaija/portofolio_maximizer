@@ -54,6 +54,8 @@ def _make_db(path: Path, trades: List[Dict[str, Any]]) -> None:
             ts_signal_id TEXT,
             ticker TEXT,
             trade_date TEXT,
+            bar_timestamp TEXT,
+            created_at TEXT,
             realized_pnl REAL,
             realized_pnl_pct REAL,
             is_close INTEGER,
@@ -67,13 +69,15 @@ def _make_db(path: Path, trades: List[Dict[str, Any]]) -> None:
         if ts_sid is None and raw_sid is not None:
             ts_sid = str(raw_sid)
         cur.execute(
-            "INSERT INTO trade_executions (signal_id, ts_signal_id, ticker, trade_date, realized_pnl, realized_pnl_pct, is_close, entry_trade_id, holding_period_days) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO trade_executions (signal_id, ts_signal_id, ticker, trade_date, bar_timestamp, created_at, realized_pnl, realized_pnl_pct, is_close, entry_trade_id, holding_period_days) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 raw_sid,
                 ts_sid,
                 t.get("ticker"),
                 t.get("trade_date"),
+                t.get("bar_timestamp"),
+                t.get("created_at"),
                 t.get("realized_pnl"),
                 t.get("realized_pnl_pct"),
                 t.get("is_close", 1),
@@ -816,3 +820,226 @@ class TestReconcile:
         assert "NOT_YET_ELIGIBLE" in output
         assert "expected_close_ts_in_future" in output
         assert "outcome" not in _read_jsonl(log)[0]
+
+    def test_timestamp_primary_match_within_90_minutes(self, tmp_path, capsys):
+        from scripts.update_platt_outcomes import reconcile
+
+        db = tmp_path / "test.db"
+        log = tmp_path / "qv.jsonl"
+        execution_log = tmp_path / "execution.jsonl"
+
+        _make_db(
+            db,
+            [
+                {
+                    "signal_id": 500,
+                    "ticker": "AAPL",
+                    "trade_date": "2024-01-06",
+                    "bar_timestamp": "2024-01-06T00:30:00+00:00",
+                    "realized_pnl": 6.0,
+                    "realized_pnl_pct": 0.006,
+                    "is_close": 1,
+                }
+            ],
+        )
+        _make_execution_log(
+            [{"ts_signal_id": "500", "status": "EXECUTED", "executed": True}],
+            execution_log,
+        )
+        _make_jsonl(
+            [
+                {
+                    "signal_id": 500,
+                    "ticker": "AAPL",
+                    "forecast_time": "2024-01-01T00:00:00+00:00",
+                    "forecast_horizon": 5,
+                }
+            ],
+            log,
+        )
+
+        total, updated, already_done = reconcile(
+            db_path=db,
+            log_path=log,
+            execution_log_path=execution_log,
+            dry_run=False,
+        )
+
+        assert total == 1
+        assert updated == 1
+        assert already_done == 0
+        output = capsys.readouterr().out
+        assert "timestamp_match_rate=100.00%" in output
+        assert "date_fallback_rate=0.00%" in output
+
+    def test_date_fallback_reason_emitted_when_close_timestamp_missing(self, tmp_path, capsys):
+        from scripts.update_platt_outcomes import reconcile
+
+        db = tmp_path / "test.db"
+        log = tmp_path / "qv.jsonl"
+        execution_log = tmp_path / "execution.jsonl"
+
+        _make_db(
+            db,
+            [
+                {
+                    "signal_id": 501,
+                    "ticker": "MSFT",
+                    "trade_date": "2024-01-06",
+                    "bar_timestamp": None,
+                    "realized_pnl": 4.0,
+                    "realized_pnl_pct": 0.004,
+                    "is_close": 1,
+                }
+            ],
+        )
+        _make_execution_log(
+            [{"ts_signal_id": "501", "status": "EXECUTED", "executed": True}],
+            execution_log,
+        )
+        _make_jsonl(
+            [
+                {
+                    "signal_id": 501,
+                    "ticker": "MSFT",
+                    "forecast_time": "2024-01-01T00:00:00+00:00",
+                    "forecast_horizon": 5,
+                }
+            ],
+            log,
+        )
+
+        total, updated, already_done = reconcile(
+            db_path=db,
+            log_path=log,
+            execution_log_path=execution_log,
+            dry_run=False,
+        )
+
+        assert total == 1
+        assert updated == 1
+        assert already_done == 0
+        output = capsys.readouterr().out
+        assert "date_fallback_rate=100.00%" in output
+        assert "DATE_FALLBACK_USED" in output
+
+    def test_date_fallback_slo_enforced_over_rolling_window(self, tmp_path, capsys):
+        from scripts.update_platt_outcomes import reconcile
+
+        db = tmp_path / "test.db"
+        log = tmp_path / "qv.jsonl"
+        execution_log = tmp_path / "execution.jsonl"
+        history_path = tmp_path / "date_fallback_history.jsonl"
+
+        history_payload = "\n".join(
+            json.dumps({"generated_utc": "2026-03-01T00:00:00+00:00", "date_fallback_rate": 0.10})
+            for _ in range(29)
+        )
+        history_path.write_text(history_payload + "\n", encoding="utf-8")
+
+        _make_db(
+            db,
+            [
+                {
+                    "signal_id": 900,
+                    "ticker": "MSFT",
+                    "trade_date": "2024-01-06",
+                    "bar_timestamp": None,
+                    "realized_pnl": 2.5,
+                    "realized_pnl_pct": 0.0025,
+                    "is_close": 1,
+                }
+            ],
+        )
+        _make_execution_log(
+            [{"ts_signal_id": "900", "status": "EXECUTED", "executed": True}],
+            execution_log,
+        )
+        _make_jsonl(
+            [
+                {
+                    "signal_id": 900,
+                    "ticker": "MSFT",
+                    "forecast_time": "2024-01-01T00:00:00+00:00",
+                    "forecast_horizon": 5,
+                }
+            ],
+            log,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            reconcile(
+                db_path=db,
+                log_path=log,
+                execution_log_path=execution_log,
+                date_fallback_history_path=history_path,
+                date_fallback_window_runs=30,
+                date_fallback_slo_max_rate=0.05,
+                enforce_date_fallback_slo=True,
+                dry_run=False,
+            )
+
+        assert exc_info.value.code == 1
+        output = capsys.readouterr().out
+        assert "date_fallback_slo_pass=0" in output
+
+    def test_date_fallback_slo_passes_with_clean_rolling_window(self, tmp_path, capsys):
+        from scripts.update_platt_outcomes import reconcile
+
+        db = tmp_path / "test.db"
+        log = tmp_path / "qv.jsonl"
+        execution_log = tmp_path / "execution.jsonl"
+        history_path = tmp_path / "date_fallback_history.jsonl"
+
+        history_payload = "\n".join(
+            json.dumps({"generated_utc": "2026-03-01T00:00:00+00:00", "date_fallback_rate": 0.0})
+            for _ in range(29)
+        )
+        history_path.write_text(history_payload + "\n", encoding="utf-8")
+
+        _make_db(
+            db,
+            [
+                {
+                    "signal_id": 901,
+                    "ticker": "AAPL",
+                    "trade_date": "2024-01-06",
+                    "bar_timestamp": "2024-01-06T00:15:00+00:00",
+                    "realized_pnl": 5.0,
+                    "realized_pnl_pct": 0.005,
+                    "is_close": 1,
+                }
+            ],
+        )
+        _make_execution_log(
+            [{"ts_signal_id": "901", "status": "EXECUTED", "executed": True}],
+            execution_log,
+        )
+        _make_jsonl(
+            [
+                {
+                    "signal_id": 901,
+                    "ticker": "AAPL",
+                    "forecast_time": "2024-01-01T00:00:00+00:00",
+                    "forecast_horizon": 5,
+                }
+            ],
+            log,
+        )
+
+        total, updated, already_done = reconcile(
+            db_path=db,
+            log_path=log,
+            execution_log_path=execution_log,
+            date_fallback_history_path=history_path,
+            date_fallback_window_runs=30,
+            date_fallback_slo_max_rate=0.05,
+            enforce_date_fallback_slo=True,
+            dry_run=False,
+        )
+
+        assert total == 1
+        assert updated == 1
+        assert already_done == 0
+        output = capsys.readouterr().out
+        assert "date_fallback_slo_pass=1" in output

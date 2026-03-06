@@ -271,3 +271,176 @@ def test_main_fails_gate_when_reconcile_status_is_fail(
 
     out = capsys.readouterr().out
     assert "Reconcile step : FAIL" in out
+
+
+def test_unattended_profile_requires_profitable_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "Effective audits with RMSE: 21",
+                        "Violations (ensemble worse than baseline beyond tolerance): 0",
+                        "Violation rate: 0.00% (max allowed 35.00%)",
+                        "Decision: KEEP (lift demonstrated during holding period)",
+                    ]
+                ),
+                stderr="",
+            )
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": false, "metrics": {"total_pnl": -10.0, "profit_factor": 0.9, "win_rate": 0.4, "winning_trades": 4, "losing_trades": 6, "trading_days": 10}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_compute_warmup_window",
+        lambda **kwargs: {
+            "max_warmup_days": 30,
+            "first_audit_ts_utc": "2026-01-01T00:00:00+00:00",
+            "allow_inconclusive_until_utc": "2026-01-31T00:00:00+00:00",
+            "warmup_expired": False,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+            "--unattended-profile",
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 1
+    payload = mod._safe_load_json(output_json)
+    assert payload is not None
+    assert payload["proof_profitable_required"] is True
+    assert payload["profitability_proof"]["is_proof_valid"] is True
+    assert payload["profitability_proof"]["is_profitable"] is False
+    assert payload["production_profitability_gate"]["status"] == "FAIL"
+
+
+def test_unattended_profile_blocks_inconclusive_after_warmup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "Effective audits with RMSE: 7",
+                        "Violations (ensemble worse than baseline beyond tolerance): 0",
+                        "Violation rate: 0.00% (max allowed 35.00%)",
+                        "RMSE gate inconclusive: effective_audits=7 < required_audits=20.",
+                    ]
+                ),
+                stderr="",
+            )
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 10.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 10}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_compute_warmup_window",
+        lambda **kwargs: {
+            "max_warmup_days": 30,
+            "first_audit_ts_utc": "2026-01-01T00:00:00+00:00",
+            "allow_inconclusive_until_utc": "2026-01-31T00:00:00+00:00",
+            "warmup_expired": True,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+            "--unattended-profile",
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 1
+    payload = mod._safe_load_json(output_json)
+    assert payload is not None
+    assert payload["lift_inconclusive_allowed"] is False
+    assert payload["warmup_expired"] is True
+    assert payload["lift_gate"]["inconclusive"] is True
+    assert payload["lift_gate"]["pass"] is False
+    assert payload["production_profitability_gate"]["gate_semantics_status"] == "INCONCLUSIVE_BLOCKED"

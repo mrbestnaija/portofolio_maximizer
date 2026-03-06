@@ -31,6 +31,7 @@ DEFAULT_ELIGIBILITY_PATH = ROOT / "logs" / "ticker_eligibility.json"
 DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
 DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
+DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -973,6 +974,38 @@ def _load_sidecar_json(path: Path) -> tuple[Dict[str, Any], Optional[str]]:
     return payload, None
 
 
+def _parse_utc_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _sidecar_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]:
+    generated = (
+        payload.get("generated_utc")
+        if isinstance(payload, dict)
+        else None
+    )
+    parsed = _parse_utc_datetime(generated)
+    if parsed is None:
+        try:
+            parsed = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            return None
+    now = datetime.now(timezone.utc)
+    age = (now - parsed).total_seconds() / 60.0
+    return age if age >= 0 else 0.0
+
+
 def _robustness_payload() -> Dict[str, Any]:
     load_warnings: List[str] = []
     semantic_warnings: List[str] = []
@@ -980,6 +1013,14 @@ def _robustness_payload() -> Dict[str, Any]:
     context, ctx_err = _load_sidecar_json(DEFAULT_CONTEXT_QUALITY_PATH)
     performance, perf_err = _load_sidecar_json(DEFAULT_PERFORMANCE_METRICS_PATH)
     forecast_summary, forecast_summary_err = _load_sidecar_json(DEFAULT_FORECAST_SUMMARY_PATH)
+    try:
+        sidecar_max_age_minutes = float(
+            os.getenv("PMX_SIDECAR_MAX_AGE_MINUTES", str(DEFAULT_SIDECAR_MAX_AGE_MINUTES))
+        )
+    except Exception:
+        sidecar_max_age_minutes = float(DEFAULT_SIDECAR_MAX_AGE_MINUTES)
+    sidecar_age_minutes: Dict[str, Optional[float]] = {}
+    stale_sidecars: List[str] = []
 
     if elig_err:
         load_warnings.append(f"eligibility_{elig_err}")
@@ -989,6 +1030,21 @@ def _robustness_payload() -> Dict[str, Any]:
         load_warnings.append(f"performance_metrics_{perf_err}")
     if forecast_summary_err and forecast_summary_err != "missing":
         load_warnings.append(f"forecast_summary_{forecast_summary_err}")
+
+    for name, path, payload, err in (
+        ("eligibility", DEFAULT_ELIGIBILITY_PATH, eligibility, elig_err),
+        ("context_quality", DEFAULT_CONTEXT_QUALITY_PATH, context, ctx_err),
+        ("performance_metrics", DEFAULT_PERFORMANCE_METRICS_PATH, performance, perf_err),
+        ("forecast_summary", DEFAULT_FORECAST_SUMMARY_PATH, forecast_summary, forecast_summary_err),
+    ):
+        if err:
+            sidecar_age_minutes[name] = None
+            continue
+        age = _sidecar_age_minutes(path, payload)
+        sidecar_age_minutes[name] = round(age, 2) if age is not None else None
+        if age is not None and age > sidecar_max_age_minutes:
+            stale_sidecars.append(name)
+            semantic_warnings.append(f"stale_sidecar:{name}")
 
     tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
     weak_tickers = sorted(
@@ -1044,9 +1100,19 @@ def _robustness_payload() -> Dict[str, Any]:
     missing_count = sum(1 for err in (elig_err, ctx_err, perf_err) if err == "missing")
     present_count = sum(1 for payload in (eligibility, context, performance) if isinstance(payload, dict) and payload)
     all_warnings = sorted(set(load_warnings + semantic_warnings))
+    if stale_sidecars:
+        freshness_status = "STALE"
+        freshness_reason = "STALE_SIDECAR"
+    elif any(value is not None for value in sidecar_age_minutes.values()):
+        freshness_status = "FRESH"
+        freshness_reason = None
+    else:
+        freshness_status = "UNKNOWN"
+        freshness_reason = None
+
     if missing_count == 3 and present_count == 0:
         robustness_status = "MISSING"
-    elif load_warnings:
+    elif load_warnings or stale_sidecars:
         robustness_status = "STALE"
     elif (
         (isinstance(perf_metrics, dict) and perf_metrics.get("status") == "WARN")
@@ -1059,6 +1125,11 @@ def _robustness_payload() -> Dict[str, Any]:
 
     return {
         "status": robustness_status,
+        "overall_status": robustness_status,
+        "freshness_status": freshness_status,
+        "freshness_reason": freshness_reason,
+        "sidecar_max_age_minutes": sidecar_max_age_minutes,
+        "sidecar_age_minutes": sidecar_age_minutes,
         "eligibility_summary": eligibility.get("summary", {}) if isinstance(eligibility, dict) else {},
         "weak_tickers": weak_tickers,
         "telemetry_contract": telemetry_contract if isinstance(telemetry_contract, dict) else {},

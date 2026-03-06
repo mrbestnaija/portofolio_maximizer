@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import scripts.run_all_gates as mod
@@ -99,3 +101,57 @@ class TestSkipLimitEnforcement:
         summary = _json.loads(out)
         assert summary["overall_passed"] is True
 
+
+def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    artifact = tmp_path / "production_gate_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "pass_semantics_version": 3,
+                "lift_inconclusive_allowed": False,
+                "proof_profitable_required": True,
+                "warmup_expired": True,
+                "phase3_ready": False,
+                "phase3_reason": "THIN_LINKAGE",
+                "production_profitability_gate": {"gate_semantics_status": "INCONCLUSIVE_BLOCKED"},
+                "readiness": {
+                    "gates_pass": False,
+                    "linkage_pass": False,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    seen_cmds: list[list[str]] = []
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        seen_cmds.append(cmd)
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", artifact)
+
+    with monkeypatch.context() as m:
+        m.setattr(mod.sys, "argv", ["run_all_gates.py", "--json"])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+    assert exc_info.value.code == 0
+
+    production_cmd = next(cmd for cmd in seen_cmds if "scripts/production_audit_gate.py" in cmd)
+    assert "--unattended-profile" in production_cmd
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["pass_semantics_version"] == 3
+    assert summary["lift_inconclusive_allowed"] is False
+    assert summary["proof_profitable_required"] is True
+    assert summary["warmup_expired"] is True
+    assert summary["phase3_ready"] is False
+    assert summary["phase3_reason"] == "THIN_LINKAGE"
