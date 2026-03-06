@@ -11,7 +11,7 @@
 
 **Version**: 4.4
 **Status**: Phase 7.17 complete — Ensemble Health Audit, Adaptive Weighting, 4-Layer Improvement Checker
-**Last Updated**: 2026-03-05
+**Last Updated**: 2026-03-06
 
 ## Contributing
 
@@ -92,6 +92,38 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 ---
 
 ### Latest Enhancements (Mar 2026)
+
+**Phase 7.35: Outcome Linkage Denominator + Causality Hardening (2026-03-06)**:
+
+- **Ticker-aware outcome dedupe (P0)**:
+  - `scripts/check_forecast_audits.py` now keeps separate dedupe strategies:
+    - RMSE gate: `(start, end, length, forecast_horizon)`
+    - Outcome linkage: `(ticker, start, end, length, forecast_horizon)`
+  - Prevents cross-ticker evidence suppression in linkage denominators.
+- **Eligibility anchor fixed to signal context (P0)**:
+  - Added `compute_expected_close(signal_context, dataset)` and made signal-context timing primary:
+    - `expected_close = entry_ts + signal_context.forecast_horizon`
+    - dataset fallback only when signal context is absent.
+- **Fail-closed context integrity guards (P0)**:
+  - Added explicit `INVALID_CONTEXT` classification and reasons:
+    - `CAUSALITY_VIOLATION` (`expected_close < entry_ts`)
+    - `HORIZON_MISMATCH` (dataset horizon != signal horizon)
+    - `MISSING_SIGNAL_ID`, `EXPECTED_CLOSE_UNAVAILABLE`, `AMBIGUOUS_MATCH`
+  - Added explicit `NOT_DUE` status for open outcome windows (prevents false `OUTCOME_MISSING`).
+- **Linkage denominator truth metrics (P1)**:
+  - `scripts/outcome_linkage_attribution_report.py` now reports:
+    - `linked_ts_trades / total_ts_trades`
+    - `ts_trade_coverage = total_ts_trades / total_closed_trades`
+  - Keeps global linkage ratio while separating legacy-ID denominator drag.
+- **Adversarial anti-regression coverage (P2)**:
+  - Added telemetry contract checks in `scripts/adversarial_diagnostic_runner.py`:
+    - `TCON-06` outcome ticker-aware dedupe enforcement
+    - `TCON-07` signal-anchored expected-close enforcement
+    - `TCON-08` explicit `NOT_DUE` status enforcement
+  - Added test coverage in:
+    - `tests/scripts/test_check_forecast_audits.py`
+    - `tests/scripts/test_outcome_linkage_attribution_report.py`
+    - `tests/scripts/test_adversarial_diagnostic_runner.py`
 
 **Phase 7.34: Paranoid Hardening (2026-03-05)**:
 

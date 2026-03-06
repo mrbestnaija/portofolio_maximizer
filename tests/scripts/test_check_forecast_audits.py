@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ def _write_audit(
     eval_metrics: dict,
     ticker: str | None = None,
     regime: str | None = None,
+    signal_context: dict | None = None,
 ) -> None:
     payload = {
         "dataset": {
@@ -35,6 +37,8 @@ def _write_audit(
             "evaluation_metrics": eval_metrics,
         },
     }
+    if signal_context is not None:
+        payload["signal_context"] = signal_context
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -58,6 +62,48 @@ def _write_manifest(audit_dir: Path, audit_paths: list[Path]) -> Path:
         )
     manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return manifest
+
+
+def _write_closed_trades_db(path: Path, rows: list[dict]) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_signal_id TEXT,
+                is_close INTEGER DEFAULT 1,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0
+            )
+            """
+        )
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO trade_executions (ts_signal_id, is_close, is_diagnostic, is_synthetic)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    row.get("ts_signal_id"),
+                    int(row.get("is_close", 1)),
+                    int(row.get("is_diagnostic", 0)),
+                    int(row.get("is_synthetic", 0)),
+                ),
+            )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT *
+            FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_check_forecast_audits_dedupes_by_dataset_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +318,11 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
 
     output = capsys.readouterr().out
     assert "RMSE coverage  : raw=2 parseable=2 deduped=2 processed=2 usable=2" in output
-    assert "Outcome cov.   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0" in output
+    assert (
+        "Outcome join   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0 "
+        "missing=0 ambiguous=0 not_due=0 invalid_context=0 not_yet_eligible=0 "
+        "no_signal_id=0 non_trade_context=0"
+    ) in output
     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
 
     summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
@@ -280,10 +330,19 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
         "n_raw_windows": 2,
         "n_parseable_windows": 2,
         "n_deduped_windows": 2,
+        "n_outcome_deduped_windows": 2,
         "n_rmse_windows_processed": 2,
         "n_rmse_windows_usable": 2,
         "n_outcome_windows_eligible": 0,
         "n_outcome_windows_matched": 0,
+        "n_outcome_windows_missing": 0,
+        "n_outcome_windows_ambiguous": 0,
+        "n_outcome_windows_not_due": 0,
+        "n_outcome_windows_not_yet_eligible": 0,
+        "n_outcome_windows_invalid_context": 0,
+        "n_outcome_windows_outcomes_not_loaded": 0,
+        "n_outcome_windows_no_signal_id": 0,
+        "n_outcome_windows_non_trade_context": 0,
     }
     assert summary["telemetry_contract"]["schema_version"] == 2
     assert summary["telemetry_contract"]["outcomes_loaded"] is False
@@ -317,6 +376,487 @@ def test_check_audit_file_uses_requested_baseline(tmp_path: Path) -> None:
     assert res is not None
     assert res.baseline_model == "SAMOSSA"
     assert res.rmse_ratio == pytest.approx(1.5)
+
+
+def test_outcome_join_happy_path_ts_signal_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    ts_signal_id = "legacy_2026-02-13_91"
+
+    _write_audit(
+        audit_dir / "forecast_audit_join_ok.json",
+        start="2024-01-01",
+        end="2024-01-05",
+        length=180,
+        horizon=1,
+        ticker="GS",
+        regime="LOW_VOL",
+        signal_context={
+            "ts_signal_id": ts_signal_id,
+            "ticker": "GS",
+            "run_id": "20260214_202138",
+            "entry_ts": "2024-01-05T00:00:00Z",
+            "forecast_horizon": 1,
+            "signal_context_missing": False,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+    )
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [{"ts_signal_id": ts_signal_id}])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["telemetry_contract"]["outcomes_loaded"] is True
+    assert summary["telemetry_contract"]["outcome_join_attempted"] is True
+    assert summary["window_counts"]["n_outcome_windows_eligible"] == 1
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 1
+    assert summary["window_counts"]["n_outcome_windows_missing"] == 0
+    assert summary["window_counts"]["n_outcome_windows_ambiguous"] == 0
+    assert summary["effective_outcome_audits"] == 1
+    assert summary["dataset_windows"][0]["outcome_status"] == "MATCHED"
+
+
+def test_outcome_join_ambiguous_duplicate_ts_signal_id_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    ts_signal_id = "legacy_2026-02-13_DUP"
+
+    _write_audit(
+        audit_dir / "forecast_audit_join_ambiguous.json",
+        start="2024-01-01",
+        end="2024-01-05",
+        length=180,
+        horizon=1,
+        ticker="GS",
+        regime="LOW_VOL",
+        signal_context={
+            "ts_signal_id": ts_signal_id,
+            "ticker": "GS",
+            "run_id": "20260214_202138",
+            "entry_ts": "2024-01-05T00:00:00Z",
+            "forecast_horizon": 1,
+            "signal_context_missing": False,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+    )
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(
+        db_path,
+        [
+            {"ts_signal_id": ts_signal_id},
+            {"ts_signal_id": ts_signal_id},
+        ],
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"]["n_outcome_windows_eligible"] == 0
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 0
+    assert summary["window_counts"]["n_outcome_windows_ambiguous"] == 1
+    assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 1
+    assert summary["effective_outcome_audits"] == 0
+    assert summary["dataset_windows"][0]["outcome_status"] == "INVALID_CONTEXT"
+    assert summary["dataset_windows"][0]["outcome_reason"] == "AMBIGUOUS_MATCH"
+
+
+def test_outcome_join_uses_ticker_aware_dedupe_for_linkage_denominator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    common_dataset = {
+        "start": "2024-01-01",
+        "end": "2024-01-05",
+        "length": 180,
+        "horizon": 1,
+        "regime": "LOW_VOL",
+    }
+    _write_audit(
+        audit_dir / "forecast_audit_aapl.json",
+        ticker="AAPL",
+        signal_context={
+            "ts_signal_id": "ts_AAPL_1",
+            "ticker": "AAPL",
+            "run_id": "run_aapl",
+            "entry_ts": "2024-01-05T00:00:00Z",
+            "forecast_horizon": 1,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+        **common_dataset,
+    )
+    _write_audit(
+        audit_dir / "forecast_audit_msft.json",
+        ticker="MSFT",
+        signal_context={
+            "ts_signal_id": "ts_MSFT_1",
+            "ticker": "MSFT",
+            "run_id": "run_msft",
+            "entry_ts": "2024-01-05T00:00:00Z",
+            "forecast_horizon": 1,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+        **common_dataset,
+    )
+
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [{"ts_signal_id": "ts_AAPL_1"}])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"]["n_deduped_windows"] == 1
+    assert summary["window_counts"]["n_outcome_deduped_windows"] == 2
+    assert summary["window_counts"]["n_outcome_windows_eligible"] == 2
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 1
+    assert summary["window_counts"]["n_outcome_windows_missing"] == 1
+    statuses_by_ticker = {
+        str(entry.get("ticker")): entry.get("outcome_status")
+        for entry in summary["dataset_windows"]
+    }
+    assert statuses_by_ticker["AAPL"] == "MATCHED"
+    assert statuses_by_ticker["MSFT"] == "OUTCOME_MISSING"
+
+
+def test_outcome_join_flags_causality_violation_as_invalid_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_causality_invalid.json",
+        start="2026-01-01",
+        end="2026-02-01",
+        length=180,
+        horizon=1,
+        ticker="AAPL",
+        regime="LOW_VOL",
+        signal_context={
+            "ts_signal_id": "ts_AAPL_2",
+            "ticker": "AAPL",
+            "run_id": "run_aapl_2",
+            "entry_ts": "2026-03-04T00:00:00Z",
+            "forecast_horizon": 1,
+            "signal_context_missing": True,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 1
+    assert summary["dataset_windows"][0]["outcome_status"] == "INVALID_CONTEXT"
+    assert summary["dataset_windows"][0]["outcome_reason"] == "CAUSALITY_VIOLATION"
+
+
+def test_outcome_join_flags_horizon_mismatch_as_invalid_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_horizon_mismatch.json",
+        start="2026-01-01",
+        end="2026-01-31",
+        length=180,
+        horizon=30,
+        ticker="AAPL",
+        regime="LOW_VOL",
+        signal_context={
+            "ts_signal_id": "ts_AAPL_3",
+            "ticker": "AAPL",
+            "run_id": "run_aapl_3",
+            "entry_ts": "2026-01-31T00:00:00Z",
+            "forecast_horizon": 1,
+            "signal_context_missing": False,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 1
+    assert summary["window_counts"]["n_outcome_windows_eligible"] == 0
+    assert summary["dataset_windows"][0]["outcome_status"] == "INVALID_CONTEXT"
+    assert summary["dataset_windows"][0]["outcome_reason"] == "HORIZON_MISMATCH"
+
+
+def test_outcome_join_marks_future_window_as_not_due_not_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_not_due.json",
+        start="2099-01-01",
+        end="2099-01-31",
+        length=180,
+        horizon=7,
+        ticker="AAPL",
+        regime="LOW_VOL",
+        signal_context={
+            "ts_signal_id": "ts_AAPL_4",
+            "ticker": "AAPL",
+            "run_id": "run_aapl_4",
+            "entry_ts": "2099-01-31T00:00:00Z",
+            "forecast_horizon": 7,
+            "signal_context_missing": False,
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["window_counts"]["n_outcome_windows_not_due"] == 1
+    assert summary["window_counts"]["n_outcome_windows_missing"] == 0
+    assert summary["dataset_windows"][0]["outcome_status"] == "NOT_DUE"
 
 
 def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:

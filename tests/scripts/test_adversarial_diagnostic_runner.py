@@ -58,6 +58,9 @@ from scripts.adversarial_diagnostic_runner import (  # noqa: E402
     chk_platt_no_train_test_split,
     chk_production_view_integrity,
     chk_proof_raw_table,
+    chk_tcon_expected_close_anchor,
+    chk_tcon_not_due_status,
+    chk_tcon_outcome_ticker_dedupe,
     chk_warmup_indefinite,
     chk_whitelist_divergence,
     run_all_checks,
@@ -703,6 +706,68 @@ class TestLiftComputationMismatch:
         src_gate = "# gate uses hardcoded threshold only"  # no configurable threshold key
         result = chk_lift_computation_mismatch(src_cmi, src_gate)
         assert result.passed is True, "no gate config means no mismatch to detect"
+
+
+class TestTelemetryContractLinkageChecks:
+    """TCON-06/07/08 anti-regression tests for outcome linkage integrity checks."""
+
+    def test_tcon06_confirmed_without_ticker_aware_outcome_dedupe(self):
+        src = (
+            "def _dedupe_key_from_audit(audit):\n"
+            "    dataset = audit.get('dataset') or {}\n"
+            "    return (dataset.get('start'), dataset.get('end'), dataset.get('length'), dataset.get('forecast_horizon'))\n"
+        )
+        result = chk_tcon_outcome_ticker_dedupe(src)
+        assert result.id == "TCON-06"
+        assert result.passed is False
+
+    def test_tcon06_cleared_with_ticker_aware_outcome_dedupe(self):
+        src = (
+            "def _outcome_dedupe_key_from_audit(audit):\n"
+            "    dataset = audit.get('dataset') or {}\n"
+            "    ticker = str(dataset.get('ticker') or '').upper()\n"
+            "    return (ticker, dataset.get('start'), dataset.get('end'), dataset.get('length'), dataset.get('forecast_horizon'))\n"
+            "outcome_unique_map = {}\n"
+            "outcome_unique_files = list(outcome_unique_map.values())\n"
+        )
+        result = chk_tcon_outcome_ticker_dedupe(src)
+        assert result.passed is True
+
+    def test_tcon07_confirmed_without_signal_anchored_expected_close(self):
+        src = (
+            "expected_close = _expected_close_ts(ds.get('end'), ds.get('forecast_horizon'))\n"
+        )
+        result = chk_tcon_expected_close_anchor(src)
+        assert result.id == "TCON-07"
+        assert result.passed is False
+
+    def test_tcon07_cleared_with_compute_expected_close_helper(self):
+        src = (
+            "def compute_expected_close(signal_context, dataset):\n"
+            "    entry_ts = signal_context.get('entry_ts')\n"
+            "    return entry_ts, 'signal_context'\n"
+            "expected_close, source = compute_expected_close(signal_context, ds)\n"
+        )
+        result = chk_tcon_expected_close_anchor(src)
+        assert result.passed is True
+
+    def test_tcon08_confirmed_without_not_due_status(self):
+        src = (
+            "if expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER > now:\n"
+            "    entry['outcome_status'] = 'OUTCOME_MISSING'\n"
+        )
+        result = chk_tcon_not_due_status(src)
+        assert result.id == "TCON-08"
+        assert result.passed is False
+
+    def test_tcon08_cleared_with_not_due_status(self):
+        src = (
+            "if (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now:\n"
+            "    entry['outcome_status'] = 'NOT_DUE'\n"
+            "    entry['outcome_reason'] = 'OUTCOME_WINDOW_OPEN'\n"
+        )
+        result = chk_tcon_not_due_status(src)
+        assert result.passed is True
 
 
 # ---------------------------------------------------------------------------
