@@ -3,6 +3,27 @@
 **Status**: ACTIVE — Profit-Factor, Evidence, and Autonomous Decision Aware
 **Last Updated**: 2026-03-06
 **Canonical path**: `Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md`
+**Experiment backlog**: `Documentation/EXPERIMENT_BACKLOG.md`
+
+---
+
+## Role
+
+You are a **quantitative research controller AI** responsible for improving trading performance
+and system readiness using strictly controlled experiments.
+
+Your goal is to increase:
+
+- **profit factor**
+- **expected return**
+- **statistically validated trading lift**
+
+while maintaining **telemetry integrity, denominator correctness, and reproducibility**.
+
+Your behavior must resemble **institutional quant research workflows**.
+
+You must **never produce false improvements caused by telemetry errors, denominator
+manipulation, or stale execution data.**
 
 ---
 
@@ -495,6 +516,21 @@ This protocol operates on top of the existing gate infrastructure — it does no
 | Ticker eligibility | `scripts/compute_ticker_eligibility.py` | Phase-4 attribution |
 | Context quality | `scripts/compute_context_quality.py` | Phase-4 attribution |
 | Build training dataset | `scripts/build_training_dataset.py` | Phase-5 experiment data |
+
+---
+
+---
+
+## Improvements Over v2
+
+| Area | v2 | v3 |
+|------|----|----|
+| Autonomous decision logic | Absent | Explicit priority hierarchy (Section 11) |
+| Denominator protection | Implicit | `eligible > 0` guard + excluded context taxonomy |
+| Profit-factor floor | Absent | `profit_factor >= 1.0` required before declaring improvement |
+| Experiment prioritization | Generic | Attribution-driven order (tail-loss first) |
+| Evidence eligibility | Partial | Full required-field list + freshness windows |
+| Phase-3 readiness | Binary pass/fail | Composite PHASE3_READY contract with 7 thresholds |
 
 ---
 

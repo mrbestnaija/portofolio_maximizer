@@ -23,6 +23,7 @@ This is the canonical navigator for documentation in this repository.
 ## Research and Experiment Protocol
 
 - [RESEARCH_EXPERIMENT_PROTOCOL.md](RESEARCH_EXPERIMENT_PROTOCOL.md) — v3 protocol: sequential phases, telemetry integrity, anti-gaming safeguards, autonomous decision logic
+- [EXPERIMENT_BACKLOG.md](EXPERIMENT_BACKLOG.md) — 5 prioritized experiments for profit_factor ≈ 0.80 baseline; full EXP templates, expected PF path, completion log
 
 ## Planning and Status (Canonical)
 
