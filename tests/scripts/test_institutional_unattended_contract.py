@@ -52,6 +52,14 @@ def test_repo_has_no_shadow_duplicate_runtime_files() -> None:
     assert not Path("execution/lob_simulator (1).py").exists()
 
 
+def test_config_tree_has_no_tracked_backup_files() -> None:
+    backup_files = sorted(Path("config").glob("*.backup_*"))
+    assert not backup_files, (
+        "Tracked backup configs must not live in config/: "
+        + ", ".join(str(path) for path in backup_files)
+    )
+
+
 def test_run_all_gates_wires_institutional_gate() -> None:
     source = Path("scripts/run_all_gates.py").read_text(encoding="utf-8")
     assert "institutional_unattended_gate.py" in source

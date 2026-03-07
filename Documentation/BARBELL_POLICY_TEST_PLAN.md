@@ -49,9 +49,9 @@ max_rmse_ratio_vs_baseline: 1.5  # Allow up to 50% regression
 
 **Impact**: Allows forecasts with ratio 1.22x - 1.68x to pass → converts DISABLE_DEFAULT to KEEP
 
-### Backup Created
-- Original config saved to: `config/forecaster_monitoring.yml.backup_20260119`
-- **CRITICAL**: Revert changes after testing before production use
+### Historical Rollback Note
+- Tracked backup files are no longer kept under `config/`.
+- **CRITICAL**: Revert changes after testing before production use using git history or your local working copy snapshot.
 
 ## Expected Outcomes
 
@@ -175,7 +175,7 @@ Based on results, choose next action:
 ### Risk 3: Accidental Production Deployment
 **Mitigation**:
 - Keep `execution_mode=live` (paper trading only)
-- Backup config created: `forecaster_monitoring.yml.backup_20260119`
+- Historical config rollback is handled via git history (`git checkout <commit> -- config/forecaster_monitoring.yml`)
 - Revert changes immediately after test
 
 ### Risk 4: False Positive (Lucky Trades)
@@ -189,8 +189,8 @@ If test shows negative results or system instability:
 # 1. Stop any running pipelines
 pkill -f run_etl_pipeline
 
-# 2. Restore original config
-cp config/forecaster_monitoring.yml.backup_20260119 config/forecaster_monitoring.yml
+# 2. Restore original config (example: recover from git history)
+git checkout <commit> -- config/forecaster_monitoring.yml
 
 # 3. Verify restoration
 git diff config/forecaster_monitoring.yml

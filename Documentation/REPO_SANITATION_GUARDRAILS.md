@@ -87,7 +87,7 @@ If any item fails, sanitation is not complete.
 - Category: UNALIGNED_IMPL
 - Action: `ENFORCE_CONFIG` for supported keys; `MARK_DEPRECATED` for unsupported knobs with explicit warnings
 
-5. `config/forecaster_monitoring.yml.backup_20260119`, `config/signal_routing_config.hyperopt.yml`
+5. `config/signal_routing_config.hyperopt.yml`
 - Category: BLOAT
 - Action: `MARK_DEPRECATED` then remove after reference scan confirms no inbound usage
 
