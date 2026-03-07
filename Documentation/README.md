@@ -364,8 +364,9 @@ HYPEROPT_ROUNDS=5 bash/bash/run_post_eval.sh
 ```
 
 Each round:
-- Generates temporary override configs (`config/quant_success_config.hyperopt.yml`,
-  `config/signal_routing_config.hyperopt.yml`),
+- Generates temporary override configs under
+  `logs/hyperopt/config_overrides/<RUN_ID>/`
+  (`quant_success_config.hyperopt.yml`, `signal_routing_config.hyperopt.yml`),
 - Runs `scripts/run_etl_pipeline.py`, `scripts/run_auto_trader.py`,
   and `scripts/run_strategy_optimization.py` against a dedicated DB,
 - Scores the run by realized `total_profit` over a short evaluation window,

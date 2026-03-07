@@ -58,8 +58,10 @@ MIN_RETURN_CANDIDATES=(0.0005 0.001 0.002 0.003)
 
 QUANT_CFG_BASE="config/quant_success_config.yml"
 SIGNAL_CFG_BASE="config/signal_routing_config.yml"
-QUANT_CFG_HYPER="config/quant_success_config.hyperopt.yml"
-SIGNAL_CFG_HYPER="config/signal_routing_config.hyperopt.yml"
+CONFIG_OVERRIDE_DIR="logs/hyperopt/config_overrides/${RUN_ID}"
+QUANT_CFG_HYPER="${CONFIG_OVERRIDE_DIR}/quant_success_config.hyperopt.yml"
+SIGNAL_CFG_HYPER="${CONFIG_OVERRIDE_DIR}/signal_routing_config.hyperopt.yml"
+mkdir -p "${CONFIG_OVERRIDE_DIR}"
 
 write_quant_override() {
   local target=$1
@@ -298,6 +300,7 @@ echo "Artifacts:"
 echo "  - DB: data/portfolio_maximizer_${FINAL_RUN_ID}.db (plus hyperopt variants if run)"
 echo "  - Drift JSON: visualizations/split_drift_latest.json"
 echo "  - Dashboard JSON/PNG: visualizations/dashboard_data.json, visualizations/dashboard_snapshot.png"
+echo "  - Hyperopt config overrides: ${CONFIG_OVERRIDE_DIR}/"
 echo "  - Dashboard URL: http://127.0.0.1:${DASHBOARD_PORT}/visualizations/live_dashboard.html"
 echo "  - Dashboard HTML: ${PROJECT_ROOT}/visualizations/live_dashboard.html"
 
