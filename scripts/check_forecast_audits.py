@@ -706,65 +706,46 @@ def _resolve_monitoring_settings(
     }
 
 
-def main() -> None:
-    args = _build_parser().parse_args()
-    audit_dir, db_path, audit_roots, files = _resolve_main_inputs(args)
-    settings = _resolve_monitoring_settings(args, audit_dir=audit_dir)
-    monitoring_cfg = settings["monitoring_cfg"]
-    rmse_cfg = settings["rmse_cfg"]
-    tolerance = settings["tolerance"]
-    max_violation_rate = settings["max_violation_rate"]
-    min_effective_audits = settings["min_effective_audits"]
-    baseline_model = settings["baseline_model"]
-    holding_period = settings["holding_period"]
-    fail_on_violation_during_holding_period = settings["fail_on_violation_during_holding_period"]
-    disable_if_no_lift = settings["disable_if_no_lift"]
-    min_lift_rmse_ratio = settings["min_lift_rmse_ratio"]
-    min_lift_fraction = settings["min_lift_fraction"]
-    promotion_margin = settings["promotion_margin"]
-    recent_window_audits = settings["recent_window_audits"]
-    recent_window_max_violation_rate = settings["recent_window_max_violation_rate"]
-    recent_window_max_p90_rmse_ratio = settings["recent_window_max_p90_rmse_ratio"]
-    manifest_mode = settings["manifest_mode"]
-    manifest_path = settings["manifest_path"]
-    max_missing_ensemble_rate = settings["max_missing_ensemble_rate"]
-    min_forecast_horizon = settings["min_forecast_horizon"]
+def _rmse_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
+    dataset = audit.get("dataset") or {}
+    return (
+        dataset.get("start"),
+        dataset.get("end"),
+        dataset.get("length"),
+        dataset.get("forecast_horizon"),
+    )
 
-    def _rmse_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
-        dataset = audit.get("dataset") or {}
-        ds_key = (
-            dataset.get("start"),
-            dataset.get("end"),
-            dataset.get("length"),
-            dataset.get("forecast_horizon"),
-        )
-        # Deduplicate by data window (start/end/length/horizon) only and keep the
-        # most recent file as the authoritative result. This prevents stale
-        # earlier runs (often with different ensemble weights) from inflating
-        # the violation rate and aligns with "latest evidence wins" monitoring.
-        return ds_key
 
-    def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
-        dataset = audit.get("dataset") or {}
-        ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
-        return (
-            ticker,
-            dataset.get("start"),
-            dataset.get("end"),
-            dataset.get("length"),
-            dataset.get("forecast_horizon"),
-        )
+def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
+    dataset = audit.get("dataset") or {}
+    ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
+    return (
+        ticker,
+        dataset.get("start"),
+        dataset.get("end"),
+        dataset.get("length"),
+        dataset.get("forecast_horizon"),
+    )
 
-    def _forecast_horizon_from_audit(audit: Dict[str, Any]) -> Optional[int]:
-        dataset = audit.get("dataset") or {}
-        raw = dataset.get("forecast_horizon")
-        if raw is None:
-            return None
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
 
+def _forecast_horizon_from_audit(audit: Dict[str, Any]) -> Optional[int]:
+    dataset = audit.get("dataset") or {}
+    raw = dataset.get("forecast_horizon")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _select_audit_windows(
+    *,
+    files: List[Path],
+    min_forecast_horizon: Optional[int],
+    manifest_mode: str,
+    manifest_path: Path,
+) -> Dict[str, Any]:
     unique_map: dict[Tuple[Any, ...], Path] = {}
     outcome_unique_map: dict[Tuple[Any, ...], Path] = {}
     horizon_filtered_count = 0
@@ -787,8 +768,8 @@ def main() -> None:
         manifest_index, loaded_stats = _load_manifest_index(manifest_path)
         manifest_stats.update(loaded_stats)
 
-    for f in files:
-        audit, load_error = _load_audit_with_error(f)
+    for path in files:
+        audit, load_error = _load_audit_with_error(path)
         if not audit:
             if load_error:
                 parse_error_count += 1
@@ -802,7 +783,7 @@ def main() -> None:
                 continue
 
         if manifest_mode != "off":
-            status = _verify_manifest_entry(f, manifest_index)
+            status = _verify_manifest_entry(path, manifest_index)
             if status == "ok":
                 manifest_stats["verified"] += 1
             else:
@@ -810,35 +791,80 @@ def main() -> None:
                 if manifest_mode == "fail":
                     manifest_stats["excluded_unverified"] += 1
                     continue
+
         key = _rmse_dedupe_key_from_audit(audit)
         # Files are sorted newest-first, so keep the first (newest) entry we see
         # for each dataset window and ignore older duplicates.
-        if key in unique_map:
-            pass
-        else:
-            unique_map[key] = f
+        if key not in unique_map:
+            unique_map[key] = path
+
         outcome_key = _outcome_dedupe_key_from_audit(audit)
         if outcome_key not in outcome_unique_map:
-            outcome_unique_map[outcome_key] = f
+            outcome_unique_map[outcome_key] = path
 
-    unique_files: List[Path] = list(unique_map.values())
-    outcome_unique_files: List[Path] = list(outcome_unique_map.values())
+    return {
+        "unique_map": unique_map,
+        "outcome_unique_map": outcome_unique_map,
+        "unique_files": list(unique_map.values()),
+        "outcome_unique_files": list(outcome_unique_map.values()),
+        "horizon_filtered_count": horizon_filtered_count,
+        "parseable_count": parseable_count,
+        "parse_error_count": parse_error_count,
+        "manifest_stats": manifest_stats,
+    }
 
+
+def _evaluate_rmse_audits(
+    *,
+    unique_files: List[Path],
+    tolerance: float,
+    baseline_model: str,
+) -> List[AuditCheckResult]:
     results: List[AuditCheckResult] = []
-    for f in unique_files:
-        res = check_audit_file(f, tolerance, baseline_model=baseline_model)
-        if res is not None:
-            results.append(res)
+    for path in unique_files:
+        result = check_audit_file(path, tolerance, baseline_model=baseline_model)
+        if result is not None:
+            results.append(result)
+    return results
 
+
+def _emit_initial_summary(
+    *,
+    audit_dir: Path,
+    audit_roots: List[Path],
+    include_research: bool,
+    raw_files_count: int,
+    max_files: int,
+    parseable_count: int,
+    parse_error_count: int,
+    deduped_count: int,
+    checked_count: int,
+    baseline_model: str,
+    tolerance: float,
+    min_effective_audits: int,
+    holding_period: int,
+    fail_on_violation_during_holding_period: bool,
+    disable_if_no_lift: bool,
+    min_lift_rmse_ratio: float,
+    min_lift_fraction: float,
+    promotion_margin: float,
+    recent_window_audits: int,
+    recent_window_max_violation_rate: float,
+    min_forecast_horizon: Optional[int],
+    horizon_filtered_count: int,
+    recent_window_max_p90_rmse_ratio: Optional[float],
+    manifest_mode: str,
+    manifest_stats: Dict[str, Any],
+) -> None:
     print("=== Forecast Audit Regression Check ===")
     print(f"Audit directory : {audit_dir}")
     print(
         "Audit roots    : "
         + ", ".join(str(root) for root in audit_roots)
-        + f" (include_research={int(bool(args.include_research))})"
+        + f" (include_research={int(bool(include_research))})"
     )
     print(
-        f"Files inspected : {len(results)} unique (raw={len(files)}, max_files={args.max_files})"
+        f"Files inspected : {checked_count} unique (raw={raw_files_count}, max_files={max_files})"
     )
     print(
         "Parse stats     : "
@@ -847,8 +873,8 @@ def main() -> None:
     )
     print(
         "Window stats    : "
-        f"deduped={len(unique_map)} "
-        f"checked={len(results)}"
+        f"deduped={deduped_count} "
+        f"checked={checked_count}"
     )
     print(f"Baseline model  : {baseline_model}")
     print(f"RMSE tolerance  : ensemble_rmse <= (1 + {tolerance:.2f}) * baseline_rmse")
@@ -896,25 +922,98 @@ def main() -> None:
             f"hash_failed={manifest_stats.get('hash_failed', 0)} "
             f"invalid_records={manifest_stats.get('invalid_records', 0)}"
         )
-        if manifest_mode == "fail":
-            unverified = (
-                int(manifest_stats.get("missing", 0))
-                + int(manifest_stats.get("mismatch", 0))
-                + int(manifest_stats.get("hash_failed", 0))
-                + int(manifest_stats.get("invalid_records", 0))
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    audit_dir, db_path, audit_roots, files = _resolve_main_inputs(args)
+    settings = _resolve_monitoring_settings(args, audit_dir=audit_dir)
+    monitoring_cfg = settings["monitoring_cfg"]
+    rmse_cfg = settings["rmse_cfg"]
+    tolerance = settings["tolerance"]
+    max_violation_rate = settings["max_violation_rate"]
+    min_effective_audits = settings["min_effective_audits"]
+    baseline_model = settings["baseline_model"]
+    holding_period = settings["holding_period"]
+    fail_on_violation_during_holding_period = settings["fail_on_violation_during_holding_period"]
+    disable_if_no_lift = settings["disable_if_no_lift"]
+    min_lift_rmse_ratio = settings["min_lift_rmse_ratio"]
+    min_lift_fraction = settings["min_lift_fraction"]
+    promotion_margin = settings["promotion_margin"]
+    recent_window_audits = settings["recent_window_audits"]
+    recent_window_max_violation_rate = settings["recent_window_max_violation_rate"]
+    recent_window_max_p90_rmse_ratio = settings["recent_window_max_p90_rmse_ratio"]
+    manifest_mode = settings["manifest_mode"]
+    manifest_path = settings["manifest_path"]
+    max_missing_ensemble_rate = settings["max_missing_ensemble_rate"]
+    min_forecast_horizon = settings["min_forecast_horizon"]
+
+    selection = _select_audit_windows(
+        files=files,
+        min_forecast_horizon=min_forecast_horizon,
+        manifest_mode=manifest_mode,
+        manifest_path=manifest_path,
+    )
+    unique_map: dict[Tuple[Any, ...], Path] = selection["unique_map"]
+    outcome_unique_map: dict[Tuple[Any, ...], Path] = selection["outcome_unique_map"]
+    unique_files: List[Path] = selection["unique_files"]
+    outcome_unique_files: List[Path] = selection["outcome_unique_files"]
+    horizon_filtered_count = int(selection["horizon_filtered_count"])
+    parseable_count = int(selection["parseable_count"])
+    parse_error_count = int(selection["parse_error_count"])
+    manifest_stats: Dict[str, Any] = selection["manifest_stats"]
+
+    results = _evaluate_rmse_audits(
+        unique_files=unique_files,
+        tolerance=tolerance,
+        baseline_model=baseline_model,
+    )
+    _emit_initial_summary(
+        audit_dir=audit_dir,
+        audit_roots=audit_roots,
+        include_research=bool(args.include_research),
+        raw_files_count=len(files),
+        max_files=int(args.max_files),
+        parseable_count=parseable_count,
+        parse_error_count=parse_error_count,
+        deduped_count=len(unique_map),
+        checked_count=len(results),
+        baseline_model=baseline_model,
+        tolerance=tolerance,
+        min_effective_audits=min_effective_audits,
+        holding_period=holding_period,
+        fail_on_violation_during_holding_period=fail_on_violation_during_holding_period,
+        disable_if_no_lift=disable_if_no_lift,
+        min_lift_rmse_ratio=min_lift_rmse_ratio,
+        min_lift_fraction=min_lift_fraction,
+        promotion_margin=promotion_margin,
+        recent_window_audits=recent_window_audits,
+        recent_window_max_violation_rate=recent_window_max_violation_rate,
+        min_forecast_horizon=min_forecast_horizon,
+        horizon_filtered_count=horizon_filtered_count,
+        recent_window_max_p90_rmse_ratio=recent_window_max_p90_rmse_ratio,
+        manifest_mode=manifest_mode,
+        manifest_stats=manifest_stats,
+    )
+    if manifest_mode == "fail":
+        unverified = (
+            int(manifest_stats.get("missing", 0))
+            + int(manifest_stats.get("mismatch", 0))
+            + int(manifest_stats.get("hash_failed", 0))
+            + int(manifest_stats.get("invalid_records", 0))
+        )
+        if not bool(manifest_stats.get("manifest_exists", False)):
+            raise SystemExit(
+                f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}"
             )
-            if not bool(manifest_stats.get("manifest_exists", False)):
-                raise SystemExit(
-                    f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}"
-                )
-            if unverified > 0:
-                raise SystemExit(
-                    "Manifest integrity failed: "
-                    f"missing={manifest_stats.get('missing', 0)} "
-                    f"mismatch={manifest_stats.get('mismatch', 0)} "
-                    f"hash_failed={manifest_stats.get('hash_failed', 0)} "
-                    f"invalid_records={manifest_stats.get('invalid_records', 0)}"
-                )
+        if unverified > 0:
+            raise SystemExit(
+                "Manifest integrity failed: "
+                f"missing={manifest_stats.get('missing', 0)} "
+                f"mismatch={manifest_stats.get('mismatch', 0)} "
+                f"hash_failed={manifest_stats.get('hash_failed', 0)} "
+                f"invalid_records={manifest_stats.get('invalid_records', 0)}"
+            )
 
     violation_count = sum(1 for r in results if r.violation)
     rmse_windows_processed = len(results)
