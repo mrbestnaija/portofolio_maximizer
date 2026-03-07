@@ -90,6 +90,13 @@ def _query_per_ticker(db_path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return rows, errors
 
 
+def load_per_ticker_aggregates(db_path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """
+    Canonical per-ticker aggregation for read-only quality/reporting pipelines.
+    """
+    return _query_per_ticker(db_path)
+
+
 def classify_ticker(row: dict[str, Any], lab_only_set: set[str]) -> str:
     status, _ = classify_ticker_details(row, lab_only_set)
     return status
@@ -141,7 +148,7 @@ def compute_eligibility(
     lab_only_tickers: list[str] | None = None,
 ) -> dict[str, Any]:
     lab_only_set: set[str] = {str(t).upper() for t in (lab_only_tickers or [])}
-    rows, errors = _query_per_ticker(db_path)
+    rows, errors = load_per_ticker_aggregates(db_path)
 
     ticker_map: dict[str, dict[str, Any]] = {}
     for row in rows:

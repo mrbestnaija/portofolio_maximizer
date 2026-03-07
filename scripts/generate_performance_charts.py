@@ -20,6 +20,7 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from scripts.data_sufficiency_monitor import run_data_sufficiency
+from scripts.compute_ticker_eligibility import load_per_ticker_aggregates
 from scripts.quality_pipeline_common import append_threshold_hash_change_warning
 from scripts.robustness_thresholds import (
     BREAK_EVEN_PROFIT_FACTOR,
@@ -71,53 +72,21 @@ def _lift_axis_bounds(
 
 
 def _load_per_ticker(db_path: Path) -> list[dict[str, Any]]:
-    if not db_path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    try:
-        import sqlite3
-
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            raw = conn.execute(
-                """
-                SELECT ticker,
-                       COUNT(*) AS n,
-                       SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS wins,
-                       SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END) AS gross_win,
-                       SUM(CASE WHEN realized_pnl <= 0 THEN ABS(realized_pnl) ELSE 0 END) AS gross_loss,
-                       SUM(realized_pnl) AS total_pnl
-                FROM production_closed_trades
-                GROUP BY ticker
-                ORDER BY ticker
-                """
-            ).fetchall()
-        finally:
-            conn.close()
-        for row in raw:
-            n = int(row["n"] or 0)
-            wins = int(row["wins"] or 0)
-            gross_win = _finite_float(row["gross_win"])
-            gross_loss = _finite_float(row["gross_loss"])
-            if gross_loss > 0:
-                pf = gross_win / gross_loss
-            elif gross_win > 0:
-                pf = 99.0
-            else:
-                pf = 0.0
-            rows.append(
-                {
-                    "ticker": str(row["ticker"] or "").upper(),
-                    "n": n,
-                    "win_rate": wins / n if n else 0.0,
-                    "profit_factor": min(pf, 99.0),
-                    "total_pnl": _finite_float(row["total_pnl"]),
-                }
-            )
-    except Exception as exc:
-        log.warning("Per-ticker load failed: %s", exc)
-    return rows
+    rows, errors = load_per_ticker_aggregates(db_path)
+    if errors:
+        log.warning("Per-ticker load warnings: %s", ",".join(errors))
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        normalized.append(
+            {
+                "ticker": str(row.get("ticker") or "").upper(),
+                "n": int(row.get("n_trades") or 0),
+                "win_rate": _finite_float(row.get("win_rate")),
+                "profit_factor": _finite_float(row.get("profit_factor")),
+                "total_pnl": _finite_float(row.get("total_pnl")),
+            }
+        )
+    return normalized
 
 
 def _load_wr_over_time(db_path: Path) -> list[dict[str, Any]]:
