@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,7 +20,20 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "data" / "portfolio_maximizer.db"
-DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+try:
+    from scripts.quality_pipeline_common import resolve_forecast_audit_dir
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import resolve_forecast_audit_dir
+
+DEFAULT_AUDIT_ROOT = ROOT / "logs" / "forecast_audits"
+DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
+DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
 
 
 def _load_audit_index(audit_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -141,6 +155,11 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
     if not db_path.exists():
         raise FileNotFoundError(f"DB not found: {db_path}")
 
+    audit_dir = resolve_forecast_audit_dir(
+        Path(audit_dir),
+        default_audit_root=DEFAULT_AUDIT_ROOT,
+        default_audit_production_dir=DEFAULT_AUDIT_PRODUCTION_DIR,
+    )
     audit_index = _load_audit_index(audit_dir)
 
     conn = sqlite3.connect(str(db_path))

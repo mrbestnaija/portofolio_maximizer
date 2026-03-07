@@ -45,15 +45,23 @@ if _SCRIPTS_DIR not in sys.path:
 log = logging.getLogger(__name__)
 
 try:
-    from scripts.quality_pipeline_common import compute_lifecycle_integrity_metrics
+    from scripts.quality_pipeline_common import (
+        compute_lifecycle_integrity_metrics,
+        resolve_forecast_audit_dir,
+    )
 except Exception:  # pragma: no cover - script execution path fallback
-    from quality_pipeline_common import compute_lifecycle_integrity_metrics
+    from quality_pipeline_common import (
+        compute_lifecycle_integrity_metrics,
+        resolve_forecast_audit_dir,
+    )
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_DB = ROOT / "data" / "portfolio_maximizer.db"
-DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
+DEFAULT_AUDIT_ROOT = ROOT / "logs" / "forecast_audits"
+DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
+DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
 DEFAULT_JSONL = ROOT / "logs" / "signals" / "quant_validation.jsonl"
 GATE_ARTIFACT = ROOT / "logs" / "gate_status_latest.json"
 
@@ -269,8 +277,14 @@ def run_capital_readiness(
     all_metrics: dict[str, Any] = {}
     insufficient = False
 
+    resolved_audit_dir = resolve_forecast_audit_dir(
+        Path(audit_dir),
+        default_audit_root=DEFAULT_AUDIT_ROOT,
+        default_audit_production_dir=DEFAULT_AUDIT_PRODUCTION_DIR,
+    )
+
     # R1: adversarial
-    r1_ok, r1_msg, r1_m = _check_r1_adversarial(db_path, audit_dir)
+    r1_ok, r1_msg, r1_m = _check_r1_adversarial(db_path, resolved_audit_dir)
     all_metrics.update(r1_m)
     if not r1_ok:
         reasons.append(r1_msg)
@@ -300,7 +314,7 @@ def run_capital_readiness(
         reasons.append(r4_msg)
 
     # R5: lift CI (advisory)
-    r5_warn, r5_m = _check_r5_lift_ci(db_path, audit_dir)
+    r5_warn, r5_m = _check_r5_lift_ci(db_path, resolved_audit_dir)
     all_metrics.update(r5_m)
     if r5_warn:
         warnings.append(r5_warn)
@@ -349,8 +363,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB,
                         help="Path to portfolio_maximizer.db (default: data/portfolio_maximizer.db)")
-    parser.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR,
-                        help="Forecast audit directory (default: logs/forecast_audits)")
+    parser.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=DEFAULT_AUDIT_DIR,
+        help=(
+            "Forecast audit directory (default: logs/forecast_audits/production "
+            "with legacy fallback to logs/forecast_audits)."
+        ),
+    )
     parser.add_argument("--jsonl", type=Path, default=DEFAULT_JSONL,
                         help="Quant validation JSONL (default: logs/signals/quant_validation.jsonl)")
     parser.add_argument("--json", action="store_true", dest="emit_json",

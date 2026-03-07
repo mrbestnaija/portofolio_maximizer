@@ -126,6 +126,67 @@ def append_threshold_hash_change_warning(output_path: Path, payload: dict[str, A
         warnings.append("threshold_source_hash_changed")
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except Exception:
+        return Path(left) == Path(right)
+
+
+def resolve_forecast_audit_dir(
+    requested_audit_dir: Path,
+    *,
+    default_audit_root: Path,
+    default_audit_production_dir: Path,
+) -> Path:
+    """
+    Resolve the canonical audit directory with production-first semantics:
+    use production when present, else fallback to legacy root.
+    """
+    requested = Path(requested_audit_dir)
+    if _same_path(requested, default_audit_production_dir) and not requested.exists():
+        return Path(default_audit_root)
+    return requested
+
+
+def resolve_forecast_audit_roots(
+    audit_dir: Path,
+    *,
+    include_research: bool,
+    default_audit_root: Path,
+) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        key = Path(path)
+        try:
+            key = key.resolve()
+        except Exception:
+            pass
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(Path(path))
+
+    audit_dir = Path(audit_dir)
+    _add(audit_dir)
+
+    if include_research:
+        if audit_dir.name.lower() == "production":
+            research_dir = audit_dir.parent / "research"
+            if research_dir != audit_dir:
+                _add(research_dir)
+        elif _same_path(audit_dir, default_audit_root):
+            _add(audit_dir / "research")
+        else:
+            sibling_research = audit_dir.parent / "research"
+            if sibling_research != audit_dir:
+                _add(sibling_research)
+
+    return roots
+
+
 def _safe_int(raw: Any, default: int = 0) -> int:
     try:
         return int(raw)

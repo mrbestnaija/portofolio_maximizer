@@ -50,6 +50,15 @@ if _SCRIPTS_DIR not in sys.path:
 
 log = logging.getLogger(__name__)
 
+try:
+    from scripts.quality_pipeline_common import resolve_forecast_audit_dir
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import resolve_forecast_audit_dir
+
+DEFAULT_AUDIT_ROOT = REPO_ROOT / "logs" / "forecast_audits"
+DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
+DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
+
 # ---------------------------------------------------------------------------
 # Module-level optional imports (fallback to None enables monkeypatching in tests)
 # ---------------------------------------------------------------------------
@@ -333,6 +342,24 @@ def run_layer1_forecast_quality(
             f"(n={n_used} >= {min_windows_for_fail})"
         )
 
+    # Phase 7.36: definitively-negative CI (both bounds < 0) is a hard FAIL — ensemble is
+    # provably worse than best-single, not merely inconclusive.  Must check before the
+    # `if status == "PASS"` block so it can override a PASS even when lift_global passes.
+    _ci_high_val = sig.get("ci_high", float("nan"))
+    _ci_low_val = sig.get("ci_low", float("nan"))
+    import math as _math
+    if (
+        not sig.get("insufficient_data", True)
+        and _math.isfinite(_ci_high_val)
+        and _ci_high_val < 0.0
+        and n_used >= 20
+    ):
+        status = "FAIL"
+        reasons.append(
+            f"lift CI [{_ci_low_val:.4f}, {_ci_high_val:.4f}] both bounds negative "
+            f"(win_fraction={sig['lift_win_fraction']:.1%}) -- ensemble definitively underperforming"
+        )
+
     if status == "PASS":
         if lift_global < warn_lift_threshold:
             status = "WARN"
@@ -351,11 +378,17 @@ def run_layer1_forecast_quality(
                 f"coverage_ratio={coverage_ratio:.1%} < 20% "
                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
             )
-        # Phase 7.25: advisory WARN when CI spans zero (informational — does not override FAIL)
-        if not sig["insufficient_data"] and sig["ci_low"] <= 0.0 and n_used >= 20:
+        # Phase 7.25: advisory WARN when CI spans zero (inconclusive; ci_low<=0 but ci_high>=0)
+        if (
+            not sig.get("insufficient_data", True)
+            and _ci_low_val <= 0.0
+            and _math.isfinite(_ci_high_val)
+            and _ci_high_val >= 0.0
+            and n_used >= 20
+        ):
             status = "WARN"
             reasons.append(
-                f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
+                f"lift CI [{_ci_low_val:.4f}, {_ci_high_val:.4f}] spans zero "
                 f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
             )
 
@@ -846,8 +879,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--audit-dir",
-        default=str(REPO_ROOT / "logs" / "forecast_audits"),
-        help="Directory containing forecast_audit_*.json files (Layer 1)",
+        default=str(DEFAULT_AUDIT_DIR),
+        help=(
+            "Directory containing forecast_audit_*.json files (Layer 1). "
+            "Default resolves to logs/forecast_audits/production, "
+            "falling back to logs/forecast_audits when needed."
+        ),
     )
     parser.add_argument(
         "--db",
@@ -872,7 +909,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     layers_to_run: list[int] = [1, 2, 3, 4] if args.layer == "all" else [int(args.layer)]
-    audit_dir = Path(args.audit_dir)
+    requested_audit_dir = Path(args.audit_dir)
+    audit_dir = resolve_forecast_audit_dir(
+        requested_audit_dir,
+        default_audit_root=DEFAULT_AUDIT_ROOT,
+        default_audit_production_dir=DEFAULT_AUDIT_PRODUCTION_DIR,
+    )
     db_path = Path(args.db)
     jsonl_path = Path(args.jsonl_path)
 

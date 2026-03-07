@@ -24,9 +24,22 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+_SCRIPTS_DIR = str(REPO_ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+try:
+    from scripts.quality_pipeline_common import resolve_forecast_audit_dir
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import resolve_forecast_audit_dir
+
 DEFAULT_PYTHON = REPO_ROOT / "simpleTrader_env" / "Scripts" / "python.exe"
 PYTHON = str(DEFAULT_PYTHON) if DEFAULT_PYTHON.exists() else sys.executable
 DEFAULT_LOG_DIR = REPO_ROOT / "logs" / "overnight_denominator"
+DEFAULT_AUDIT_ROOT = Path("logs/forecast_audits")
+DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
 
 
 def utc_now() -> datetime:
@@ -162,8 +175,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--audit-dir",
-        default="logs/forecast_audits",
-        help="Forecast audit directory passed to check_forecast_audits.py.",
+        default=str(DEFAULT_AUDIT_PRODUCTION_DIR),
+        help=(
+            "Forecast audit directory passed to check_forecast_audits.py. "
+            "Default resolves to logs/forecast_audits/production with legacy fallback."
+        ),
     )
     parser.add_argument(
         "--db",
@@ -234,6 +250,14 @@ def main() -> int:
         raise SystemExit("--sleep-seconds must be >= 0")
     if args.progress_linkage_threshold < 1:
         raise SystemExit("--progress-linkage-threshold must be >= 1")
+
+    args.audit_dir = str(
+        resolve_forecast_audit_dir(
+            Path(args.audit_dir),
+            default_audit_root=DEFAULT_AUDIT_ROOT,
+            default_audit_production_dir=DEFAULT_AUDIT_PRODUCTION_DIR,
+        )
+    )
 
     DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
     run_id = utc_now().strftime("%Y%m%d_%H%M%S")

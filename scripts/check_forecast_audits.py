@@ -38,6 +38,17 @@ try:
 except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
 
+try:
+    from scripts.quality_pipeline_common import (
+        resolve_forecast_audit_dir,
+        resolve_forecast_audit_roots,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import (
+        resolve_forecast_audit_dir,
+        resolve_forecast_audit_roots,
+    )
+
 DEFAULT_AUDIT_ROOT = Path("logs/forecast_audits")
 DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
 DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
@@ -241,29 +252,11 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _resolve_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
-    roots: List[Path] = []
-    seen: set[Path] = set()
-
-    def _add(path: Path) -> None:
-        rp = path.resolve()
-        if rp in seen:
-            return
-        seen.add(rp)
-        roots.append(path)
-
-    _add(audit_dir)
-    if include_research:
-        if audit_dir.name.lower() == "production":
-            research_dir = audit_dir.parent / "research"
-            if research_dir != audit_dir:
-                _add(research_dir)
-        elif audit_dir.resolve() == DEFAULT_AUDIT_ROOT.resolve():
-            _add(audit_dir / "research")
-        else:
-            sibling_research = audit_dir.parent / "research"
-            if sibling_research != audit_dir:
-                _add(sibling_research)
-    return roots
+    return resolve_forecast_audit_roots(
+        audit_dir,
+        include_research=include_research,
+        default_audit_root=DEFAULT_AUDIT_ROOT,
+    )
 
 
 def _collect_audit_files(
@@ -598,15 +591,18 @@ def main() -> None:
     args = parser.parse_args()
 
     requested_audit_dir = Path(args.audit_dir)
-    audit_dir = requested_audit_dir
+    audit_dir = resolve_forecast_audit_dir(
+        requested_audit_dir,
+        default_audit_root=DEFAULT_AUDIT_ROOT,
+        default_audit_production_dir=DEFAULT_AUDIT_PRODUCTION_DIR,
+    )
     if (
-        requested_audit_dir.resolve() == DEFAULT_AUDIT_PRODUCTION_DIR.resolve()
-        and not requested_audit_dir.exists()
-        and DEFAULT_AUDIT_ROOT.exists()
+        audit_dir == DEFAULT_AUDIT_ROOT
+        and not DEFAULT_AUDIT_ROOT.exists()
+        and requested_audit_dir == DEFAULT_AUDIT_PRODUCTION_DIR
     ):
-        # Backward-compatible fallback for repos that still keep audits under
-        # logs/forecast_audits without production/research partitioning.
-        audit_dir = DEFAULT_AUDIT_ROOT
+        # Keep legacy behavior when neither production nor root audit directories exist.
+        audit_dir = requested_audit_dir
     db_path = Path(args.db) if args.db else None
     audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
     files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
