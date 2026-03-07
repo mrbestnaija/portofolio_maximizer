@@ -32,6 +32,7 @@ This is the canonical navigator for documentation in this repository.
 - [NEXT_IMMEDIATE_ACTION.md](NEXT_IMMEDIATE_ACTION.md) — current Phase 1 action plan (execution freshness → linkage → evaluation coverage → attribution → experiments)
 - [NEXT_TO_DO_SEQUENCED.md](NEXT_TO_DO_SEQUENCED.md)
 - [SESSION_COMPLETE_SUMMARY.md](SESSION_COMPLETE_SUMMARY.md)
+- [PHASE_7.39_PARANOID_REVIEW.md](PHASE_7.39_PARANOID_REVIEW.md) — paranoid architectural review: threshold misalignment, stub documentation, dead code, ticker gating pipeline, audit collision fix (2026-03-07)
 - [PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md](PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)
 
 ## Archived Historical Notes

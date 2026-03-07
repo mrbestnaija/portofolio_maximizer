@@ -6,6 +6,28 @@
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
 **Document updated**: 2026-03-07
 
+## Phase 7.39 — Paranoid Architectural Review (2026-03-07)
+
+**Regression baseline**: 1683 passed, 1 skipped, 7 xfailed
+**Commit**: cddd477
+**Doc**: [PHASE_7.39_PARANOID_REVIEW.md](PHASE_7.39_PARANOID_REVIEW.md)
+
+Three confirmed architectural bugs fixed:
+
+| Bug | File | Severity | Description |
+|-----|------|----------|-------------|
+| Threshold mismatch | `check_model_improvement.py` | HIGH | Layer 1 `warn_lift_threshold` was hardcoded 5%; gate requires 25%. Added `_load_min_lift_fraction()` — operators saw Layer 1 PASS while gate simultaneously FAILed. |
+| Undocumented stub | `outcome_linkage_attribution_report.py` | MEDIUM | `excursion_min_pct`/`excursion_max_pct` always `None` with no machine-readable flag. Added `excursion_data_available: False` to summary. |
+| Dead code | `generate_performance_charts.py` | LOW | `_build_metrics_summary` computed `"status"` always overwritten by caller. Removed. |
+
+Additional hardening in this phase:
+- Ticker eligibility gate pipeline wired: `run_quality_pipeline.py` Step 1b calls `apply_eligibility_gates()` autonomously
+- `TimeSeriesSignalGenerator._load_lab_only_override()` blocks lab-only tickers at signal time (TTL-aware, fail-open)
+- `forecaster.py` `_next_audit_path()` adds UUID + microseconds; `save_audit_report` backfills `signal_context` for FORECAST_ONLY payloads
+- `exit_quality_audit.py:93` NumPy dtype fix — the `Invalid value '[]' for dtype 'float64'` error referenced in the section below is now RESOLVED
+
+---
+
 ## Current Focus - Denominator Recovery Only (2026-03-07)
 
 Current production truth:
