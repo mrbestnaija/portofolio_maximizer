@@ -21,7 +21,8 @@
 - `NON_TRADE_CONTEXT` rows are tracked outside the fresh TRADE denominator as diagnostics, not denominator members.
 - `scripts/dashboard_db_bridge.py` now publishes a `live_denominator` block, `visualizations/live_dashboard.html` renders it, and `scripts/windows_dashboard_manager.py ensure` can start the bridge, HTTP server, and watcher after reboot. If audit snapshot persistence is unavailable, the manager retries the bridge without it.
 - `scripts/run_live_denominator_overnight.py` is the canonical low-noise watcher: daily cadence, weekdays only, stop on real progress.
-- `python scripts/capital_readiness_check.py --json` still treats negative lift CI (`R5`) as advisory only; the current hard blocker in that command path is an `R3` error through `scripts/exit_quality_audit.py`.
+- `python scripts/capital_readiness_check.py --json` still treats negative lift CI (`R5`) as advisory only; the current verified blocker in that command path is `R3` failing on low win rate / profit factor.
+- The current `master` dashboard path is still audit-incomplete: stale `portfolio_positions` rows are not age-gated, unavailable performance fields can render as literal zeros, and recent trade events still omit `exit_reason`.
 
 ## Evidence Integrity Contract (Telemetry)
 

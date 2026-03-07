@@ -62,6 +62,18 @@ python scripts/windows_dashboard_manager.py ensure --status-json logs/dashboard_
 
 This keeps the dashboard bridge, local HTTP server, and live denominator watcher connected from one entry point.
 
+### Action 4 - Correct the reporting-layer architectural mismatches before trusting dashboard/readiness surfaces
+
+Current verified review findings on `master`:
+
+- `capital_readiness_check.py` still treats definitively negative lift CI as advisory only
+- `dashboard_db_bridge.py` still trusts stale `portfolio_positions` rows and can replay raw executions without production filters
+- unavailable performance metrics can still surface as `0.0`
+- recent trade events still omit `exit_reason`
+- `RegimeDetector` still emits non-finite values on flat inputs
+
+These are audit/reporting hardening tasks, not strategy changes. They should be fixed before any new readiness claim based on dashboard or capital-readiness surfaces.
+
 ---
 
 ## What To Watch Next
@@ -85,7 +97,7 @@ Anything else is secondary until those three conditions are met.
 |------|--------|--------|
 | R1 adversarial | PASS | telemetry contract and TCON checks remain active |
 | R2 gate artifact | FAIL | `run_all_gates.py` currently fails on `production_audit_gate` |
-| R3 trade quality | ERROR | `scripts/exit_quality_audit.py:93` still errors in the automated path |
+| R3 trade quality | FAIL | current metrics are below threshold (`win_rate=40.0%`, `profit_factor=0.80`) |
 | R4 calibration | PASS | last verified Brier path remains below hard-fail threshold |
 | R5 lift CI | WARNING | negative CI remains advisory only in `capital_readiness_check.py` |
 | R6 lifecycle | PASS | lifecycle integrity remains cleared |

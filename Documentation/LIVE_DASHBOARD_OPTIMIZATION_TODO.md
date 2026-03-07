@@ -3,15 +3,14 @@
 Purpose: keep the dashboard audit-relevant without building a second stack.
 
 Status:
-- The dashboard already has payload freshness/status handling, audit snapshot persistence, pause/refresh controls, run-id-aware diagnostics refresh, missing-asset TTL, live denominator surfacing, and robustness/evidence status precedence.
-- The remaining work is the small set of gaps that are not already implemented in code.
+- The dashboard already has payload freshness/status handling for sidecars, audit snapshot persistence, pause/refresh controls, run-id-aware diagnostics refresh, missing-asset TTL, live denominator surfacing, and robustness/evidence status precedence.
+- Current `master` still has open truth gaps in DB-backed reporting: stale `portfolio_positions` are not age-gated, unavailable performance fields can render as `0.0`, and recent trade events still omit `exit_reason`.
 
 ## Completed
 
 ### Reliability and payload integrity
 - [x] Payload schema version is emitted by the bridge and validated on load in the dashboard UI.
 - [x] Data freshness and stale-sidecar status are surfaced from bridge sidecars.
-- [x] Derived metric rendering is guarded against missing data.
 - [x] Safe-mode style warnings are shown when payload sections are missing or partial.
 - [x] Health summary block is present in the header (`Data: OK/Partial/Stale/Error`).
 - [x] `run_id` is propagated through the payload and used to control diagnostics refresh behavior.
@@ -38,7 +37,10 @@ Status:
 ## Remaining gaps worth implementing
 
 ### P1
-- [ ] Upstream persistence hardening for `portfolio_positions` and `performance_metrics` so the dashboard relies less on fallback derivations.
+- [ ] Make `portfolio_positions` authoritative and stale-aware: surface DB age/source in payload and warn or degrade when the latest snapshot is stale.
+- [ ] Remove raw `trade_executions` replay as a silent live-position source unless the payload explicitly marks it as degraded and excludes diagnostic/synthetic rows.
+- [ ] Stop rendering unavailable performance metrics as literal `0.0`; emit explicit unknown/null semantics and render `N/A` in the UI.
+- [ ] Pass `exit_reason` through dashboard trade events so the UI remains audit-relevant for stop/time/target diagnostics.
 - [ ] Surface the last successful pipeline run explicitly from provenance metadata, not just the current dashboard payload timestamp.
 - [ ] Add a compact key-decisions strip for highest-risk position, biggest recent PnL move, and top actionable signal.
 - [ ] Add realized vs unrealized PnL split in the header.
