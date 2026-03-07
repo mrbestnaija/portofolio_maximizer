@@ -9,7 +9,8 @@ renaming/removing existing keys.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional
 
 
 TELEMETRY_SCHEMA_VERSION_V3 = 3
@@ -49,6 +50,45 @@ VALID_SEVERITY = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 
 def telemetry_now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_utc_datetime(raw: Any) -> Optional[datetime]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def telemetry_age_minutes(
+    payload: Dict[str, Any] | None,
+    *,
+    timestamp_keys: Iterable[str] = ("generated_utc", "timestamp_utc"),
+    fallback_path: Path | None = None,
+    now_utc: datetime | None = None,
+) -> Optional[float]:
+    parsed: Optional[datetime] = None
+    if isinstance(payload, dict):
+        for key in timestamp_keys:
+            parsed = parse_utc_datetime(payload.get(key))
+            if parsed is not None:
+                break
+    if parsed is None and fallback_path is not None:
+        try:
+            parsed = datetime.fromtimestamp(Path(fallback_path).stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            parsed = None
+    if parsed is None:
+        return None
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age = (now - parsed).total_seconds() / 60.0
+    return age if age >= 0 else 0.0
 
 
 def normalize_status(raw: Any) -> str:
@@ -104,4 +144,3 @@ def normalize_telemetry_payload(
     out["generated_utc"] = str(generated_utc or out.get("generated_utc") or telemetry_now_utc())
     out["source_script"] = str(out.get("source_script") or source_script)
     return out
-

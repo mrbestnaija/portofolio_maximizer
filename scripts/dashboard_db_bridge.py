@@ -55,6 +55,13 @@ except ModuleNotFoundError:  # pragma: no cover - direct script fallback
         sys.path.insert(0, str(ROOT))
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
 
+try:
+    from scripts.telemetry_adapter import telemetry_age_minutes
+except ModuleNotFoundError:  # pragma: no cover - direct script fallback
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from telemetry_adapter import telemetry_age_minutes
+
 def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
     if os.name != "posix":
         return None
@@ -1152,6 +1159,9 @@ def _robustness_payload() -> Dict[str, Any]:
     except Exception:
         sidecar_max_age_minutes = float(DEFAULT_SIDECAR_MAX_AGE_MINUTES)
     sidecar_age_minutes: Dict[str, Optional[float]] = {}
+    freshness_shadow_old: Dict[str, Optional[float]] = {}
+    freshness_shadow_new: Dict[str, Optional[float]] = {}
+    freshness_shadow_drift: Dict[str, bool] = {}
     stale_sidecars: List[str] = []
 
     if elig_err:
@@ -1171,10 +1181,24 @@ def _robustness_payload() -> Dict[str, Any]:
     ):
         if err:
             sidecar_age_minutes[name] = None
+            freshness_shadow_old[name] = None
+            freshness_shadow_new[name] = None
+            freshness_shadow_drift[name] = False
             continue
-        age = _sidecar_age_minutes(path, payload)
-        sidecar_age_minutes[name] = round(age, 2) if age is not None else None
-        if age is not None and age > sidecar_max_age_minutes:
+        old_age = _sidecar_age_minutes(path, payload)
+        new_age = telemetry_age_minutes(
+            payload if isinstance(payload, dict) else {},
+            timestamp_keys=("generated_utc", "timestamp_utc"),
+            fallback_path=path,
+        )
+        sidecar_age_minutes[name] = round(old_age, 2) if old_age is not None else None
+        freshness_shadow_old[name] = round(old_age, 2) if old_age is not None else None
+        freshness_shadow_new[name] = round(new_age, 2) if new_age is not None else None
+        old_is_stale = bool(old_age is not None and old_age > sidecar_max_age_minutes)
+        new_is_stale = bool(new_age is not None and new_age > sidecar_max_age_minutes)
+        freshness_shadow_drift[name] = old_is_stale != new_is_stale
+        # Old decision path stays active during shadow phase.
+        if old_is_stale:
             stale_sidecars.append(name)
             semantic_warnings.append(f"stale_sidecar:{name}")
 
@@ -1262,6 +1286,9 @@ def _robustness_payload() -> Dict[str, Any]:
         "freshness_reason": freshness_reason,
         "sidecar_max_age_minutes": sidecar_max_age_minutes,
         "sidecar_age_minutes": sidecar_age_minutes,
+        "freshness_shadow_old": freshness_shadow_old,
+        "freshness_shadow_new": freshness_shadow_new,
+        "freshness_shadow_drift": freshness_shadow_drift,
         "eligibility_summary": eligibility.get("summary", {}) if isinstance(eligibility, dict) else {},
         "weak_tickers": weak_tickers,
         "telemetry_contract": telemetry_contract if isinstance(telemetry_contract, dict) else {},

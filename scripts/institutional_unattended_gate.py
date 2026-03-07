@@ -21,6 +21,14 @@ from typing import Iterable, List
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+_SCRIPTS_DIR = str(ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+try:
+    from scripts.telemetry_adapter import telemetry_age_minutes
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_age_minutes
 
 
 @dataclass
@@ -287,9 +295,10 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     overall_passed = bool(data.get("overall_passed", False))
     ts_str = data.get("timestamp_utc", "")
 
-    # Check freshness
+    # Check freshness (old path): timestamp-only logic remains active in P0.3a.
     age_ok = False
     age_detail = "timestamp unknown"
+    age_hours: float | None = None
     if ts_str:
         try:
             ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -302,25 +311,44 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
         except Exception:
             age_detail = "unparseable timestamp"
 
+    # Shadow freshness path: timestamp-first with filesystem fallback.
+    new_age_minutes = telemetry_age_minutes(
+        data if isinstance(data, dict) else {},
+        timestamp_keys=("timestamp_utc", "generated_utc"),
+        fallback_path=artifact,
+    )
+    new_age_hours = (new_age_minutes / 60.0) if new_age_minutes is not None else None
+    new_age_ok = (new_age_hours <= 26.0) if new_age_hours is not None else None
+    shadow_drift = bool(new_age_ok is not None and new_age_ok != age_ok)
+    shadow_suffix = (
+        " "
+        f"[freshness_shadow_old={round(age_hours, 2) if age_hours is not None else None}h,"
+        f" freshness_shadow_new={round(new_age_hours, 2) if new_age_hours is not None else None}h,"
+        f" freshness_shadow_drift={shadow_drift}]"
+    )
+
     if not overall_passed:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "FAIL",
             f"run_all_gates.py last result: overall_passed=False ({age_detail}). "
-            "Fix failing gates before autonomous runs.",
+            "Fix failing gates before autonomous runs."
+            f"{shadow_suffix}",
         ))
     elif not age_ok:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "WARN",
             f"run_all_gates.py last success was {age_detail} ago (limit: 26h). "
-            "Run gates before next autonomous cycle.",
+            "Run gates before next autonomous cycle."
+            f"{shadow_suffix}",
         ))
     else:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "PASS",
-            f"run_all_gates.py: overall_passed=True, run {age_detail}.",
+            f"run_all_gates.py: overall_passed=True, run {age_detail}."
+            f"{shadow_suffix}",
         ))
 
     return out

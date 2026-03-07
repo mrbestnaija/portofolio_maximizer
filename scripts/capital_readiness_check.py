@@ -55,6 +55,11 @@ except Exception:  # pragma: no cover - script execution path fallback
         resolve_forecast_audit_dir,
     )
 
+try:
+    from scripts.telemetry_adapter import telemetry_age_minutes
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_age_minutes
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -100,16 +105,46 @@ def _check_r1_adversarial(db_path: Path, audit_dir: Path) -> tuple[bool, str, di
 
 def _check_r2_gate_artifact() -> tuple[bool, str, dict]:
     """R2: gate artifact present, overall_passed=True, age < 26 h."""
-    metrics: dict[str, Any] = {"gate_overall_passed": None, "gate_age_hours": None}
+    metrics: dict[str, Any] = {
+        "gate_overall_passed": None,
+        "gate_age_hours": None,
+        "freshness_shadow_old": None,
+        "freshness_shadow_new": None,
+        "freshness_shadow_drift": False,
+    }
     if not GATE_ARTIFACT.exists():
         return False, "R2: gate_status_latest.json not found -- run python scripts/run_all_gates.py", metrics
     try:
         data = json.loads(GATE_ARTIFACT.read_text(encoding="utf-8"))
         overall = bool(data.get("overall_passed", False))
+
+        # Old behavior: mtime-only staleness check (decision path remains active in P0.3a).
         mtime = GATE_ARTIFACT.stat().st_mtime
         age_hours = (time.time() - mtime) / 3600.0
+        old_ok = age_hours < R2_MAX_AGE_HOURS
+
+        # Shadow path: timestamp-first with mtime fallback via shared helper.
+        new_age_minutes = telemetry_age_minutes(
+            data if isinstance(data, dict) else {},
+            timestamp_keys=("timestamp_utc", "generated_utc"),
+            fallback_path=GATE_ARTIFACT,
+        )
+        new_age_hours = (new_age_minutes / 60.0) if new_age_minutes is not None else None
+        new_ok = (new_age_hours < R2_MAX_AGE_HOURS) if new_age_hours is not None else None
+
         metrics["gate_overall_passed"] = overall
         metrics["gate_age_hours"] = round(age_hours, 2)
+        metrics["freshness_shadow_old"] = {
+            "source": "mtime",
+            "age_hours": round(age_hours, 2),
+            "ok": old_ok,
+        }
+        metrics["freshness_shadow_new"] = {
+            "source": "timestamp_first_with_mtime_fallback",
+            "age_hours": round(new_age_hours, 2) if new_age_hours is not None else None,
+            "ok": new_ok,
+        }
+        metrics["freshness_shadow_drift"] = bool(new_ok is not None and new_ok != old_ok)
         if not overall:
             return False, f"R2: gate artifact overall_passed=False (age={age_hours:.1f}h)", metrics
         if age_hours >= R2_MAX_AGE_HOURS:
