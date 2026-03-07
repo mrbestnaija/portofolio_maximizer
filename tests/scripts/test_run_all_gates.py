@@ -155,3 +155,58 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
     assert summary["warmup_expired"] is True
     assert summary["phase3_ready"] is False
     assert summary["phase3_reason"] == "THIN_LINKAGE"
+
+
+def test_run_all_gates_writes_pre_p4_artifact_for_current_state(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    gate_artifact = tmp_path / "gate_status_latest.json"
+    production_artifact = tmp_path / "production_gate_latest.json"
+    production_artifact.parent.mkdir(parents=True, exist_ok=True)
+    production_artifact.write_text(
+        json.dumps(
+            {
+                "pass_semantics_version": 3,
+                "lift_inconclusive_allowed": True,
+                "proof_profitable_required": True,
+                "warmup_expired": False,
+                "phase3_ready": False,
+                "phase3_reason": "GATES_FAIL",
+                "production_profitability_gate": {"gate_semantics_status": "FAIL"},
+                "readiness": {
+                    "gates_pass": False,
+                    "linkage_pass": False,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        if label == "production_audit_gate":
+            return {"label": label, "exit_code": 1, "passed": False, "stdout": "", "stderr": ""}
+        if label == "institutional_unattended_gate":
+            assert gate_artifact.exists(), "Pre-P4 gate artifact must exist before institutional gate runs."
+            pre_payload = json.loads(gate_artifact.read_text(encoding="utf-8"))
+            assert pre_payload.get("overall_passed") is False, (
+                "Pre-P4 artifact must reflect failing gates from the current run."
+            )
+            return {"label": label, "exit_code": 1, "passed": False, "stdout": "", "stderr": ""}
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "GATE_STATUS_ARTIFACT", gate_artifact)
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", production_artifact)
+
+    with monkeypatch.context() as m:
+        m.setattr(mod.sys, "argv", ["run_all_gates.py", "--json"])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+    assert exc_info.value.code == 1
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["overall_passed"] is False

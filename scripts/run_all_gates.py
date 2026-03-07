@@ -96,6 +96,14 @@ def _load_json_file(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _write_gate_status_artifact(payload: dict[str, Any]) -> None:
+    try:
+        GATE_STATUS_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+        GATE_STATUS_ARTIFACT.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass  # Non-fatal: artifact is best-effort
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -180,6 +188,22 @@ def main() -> None:
         if not args.emit_json:
             print("[SKIP] production_audit_gate (--skip-profitability-gate)")
 
+    # WIRE fix: publish current gate status before Gate 4 runs so
+    # institutional_unattended_gate(P4) reads this run's state, not stale prior runs.
+    pre_p4_skipped_optional = sum(1 for r in results if r.get("skipped", False))
+    pre_p4_overall_pass = bool(overall_pass)
+    if pre_p4_skipped_optional > MAX_SKIPPED_OPTIONAL_GATES:
+        pre_p4_overall_pass = False
+    pre_p4_summary = {
+        "phase": "institutional_unattended_hardening_pre_p4",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "overall_passed": bool(pre_p4_overall_pass),
+        "skipped_optional_gates": pre_p4_skipped_optional,
+        "max_skipped_optional_gates": MAX_SKIPPED_OPTIONAL_GATES,
+        "gates": results,
+    }
+    _write_gate_status_artifact(pre_p4_summary)
+
     # Gate 4: unattended-run hardening contracts
     if not args.skip_institutional_gate:
         r4 = _run([python, "scripts/institutional_unattended_gate.py"], "institutional_unattended_gate")
@@ -242,12 +266,8 @@ def main() -> None:
         },
     }
 
-    # BYP-03 fix: write a status artifact so downstream tools can verify gates ran recently.
-    try:
-        GATE_STATUS_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-        GATE_STATUS_ARTIFACT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    except Exception:
-        pass  # Non-fatal: artifact is best-effort
+    # BYP-03 fix: write a final status artifact so downstream tools can verify gates ran recently.
+    _write_gate_status_artifact(summary)
 
     if args.emit_json:
         print(json.dumps(summary, indent=2))
