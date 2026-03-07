@@ -104,10 +104,6 @@ class SignalRouter:
             'time_series_primary': self.config.get('time_series_primary', True),  # DEFAULT: True
             'llm_fallback': self.config.get('llm_fallback', True),  # DEFAULT: True
             'llm_redundancy': self.config.get('llm_redundancy', False),  # Run both for validation
-            'enable_samossa': self.config.get('enable_samossa', True),
-            'enable_sarimax': self.config.get('enable_sarimax', True),
-            'enable_garch': self.config.get('enable_garch', True),
-            'enable_mssa_rl': self.config.get('enable_mssa_rl', True),
         }
 
         # Time Series routing thresholds (optional, supplied via config)
