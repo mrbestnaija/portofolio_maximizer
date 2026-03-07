@@ -124,3 +124,92 @@ def append_threshold_hash_change_warning(output_path: Path, payload: dict[str, A
     warnings = payload.setdefault("warnings", [])
     if isinstance(warnings, list) and "threshold_source_hash_changed" not in warnings:
         warnings.append("threshold_source_hash_changed")
+
+
+def _safe_int(raw: Any, default: int = 0) -> int:
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
+def compute_lifecycle_integrity_metrics(db_path: Path) -> dict[str, Any]:
+    """
+    Shared lifecycle integrity probe used by readiness and production gate paths.
+
+    Returns:
+      close_before_entry_count
+      closed_missing_exit_reason_count
+      high_integrity_violation_count
+      query_error (None on success)
+    """
+    result: dict[str, Any] = {
+        "close_before_entry_count": 0,
+        "closed_missing_exit_reason_count": 0,
+        "high_integrity_violation_count": 0,
+        "query_error": None,
+    }
+    if not Path(db_path).exists():
+        result["query_error"] = f"db_not_found:{db_path}"
+        return result
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        close_before_entry = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.bar_timestamp IS NOT NULL
+                  AND e.bar_timestamp IS NOT NULL
+                  AND c.bar_timestamp < e.bar_timestamp
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
+                """
+            ).fetchone()
+            close_before_entry = _safe_int(row["n"] if row else 0)
+        except sqlite3.OperationalError:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades c
+                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
+                WHERE c.entry_trade_id IS NOT NULL
+                  AND c.trade_date IS NOT NULL
+                  AND e.trade_date IS NOT NULL
+                  AND c.trade_date < e.trade_date
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
+                """
+            ).fetchone()
+            close_before_entry = _safe_int(row["n"] if row else 0)
+
+        missing_exit_reason = 0
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM production_closed_trades
+                WHERE COALESCE(TRIM(exit_reason), '') = ''
+                """
+            ).fetchone()
+            missing_exit_reason = _safe_int(row["n"] if row else 0)
+        except sqlite3.OperationalError:
+            missing_exit_reason = 0
+
+        result["close_before_entry_count"] = close_before_entry
+        result["closed_missing_exit_reason_count"] = missing_exit_reason
+        result["high_integrity_violation_count"] = close_before_entry + missing_exit_reason
+        return result
+    except Exception as exc:
+        result["query_error"] = str(exc)
+        return result
+    finally:
+        if conn is not None:
+            conn.close()

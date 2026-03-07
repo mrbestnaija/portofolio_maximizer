@@ -33,6 +33,11 @@ try:
 except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload
 
+try:
+    from scripts.quality_pipeline_common import compute_lifecycle_integrity_metrics
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import compute_lifecycle_integrity_metrics
+
 
 # Phase 7.13-C1: central path constants
 try:
@@ -505,74 +510,14 @@ def _safe_ratio(num: int, den: int) -> float:
 def _compute_lifecycle_integrity(
     db_path: Path,
 ) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "close_before_entry_count": 0,
-        "closed_missing_exit_reason_count": 0,
-        "query_error": None,
+    shared = compute_lifecycle_integrity_metrics(db_path)
+    return {
+        "close_before_entry_count": _safe_int(shared.get("close_before_entry_count", 0)),
+        "closed_missing_exit_reason_count": _safe_int(
+            shared.get("closed_missing_exit_reason_count", 0)
+        ),
+        "query_error": shared.get("query_error"),
     }
-    if not db_path.exists():
-        result["query_error"] = f"db_not_found:{db_path}"
-        return result
-
-    conn: Optional[sqlite3.Connection] = None
-    try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-
-        close_before_entry = 0
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades c
-                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
-                WHERE c.entry_trade_id IS NOT NULL
-                  AND c.bar_timestamp IS NOT NULL
-                  AND e.bar_timestamp IS NOT NULL
-                  AND c.bar_timestamp < e.bar_timestamp
-                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
-                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
-                """
-            ).fetchone()
-            close_before_entry = _safe_int(row["n"] if row else 0)
-        except sqlite3.OperationalError:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades c
-                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
-                WHERE c.entry_trade_id IS NOT NULL
-                  AND c.trade_date IS NOT NULL
-                  AND e.trade_date IS NOT NULL
-                  AND c.trade_date < e.trade_date
-                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
-                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
-                """
-            ).fetchone()
-            close_before_entry = _safe_int(row["n"] if row else 0)
-
-        closed_missing_exit_reason = 0
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades
-                WHERE COALESCE(TRIM(exit_reason), '') = ''
-                """
-            ).fetchone()
-            closed_missing_exit_reason = _safe_int(row["n"] if row else 0)
-        except sqlite3.OperationalError:
-            closed_missing_exit_reason = 0
-
-        result["close_before_entry_count"] = close_before_entry
-        result["closed_missing_exit_reason_count"] = closed_missing_exit_reason
-        return result
-    except Exception as exc:
-        result["query_error"] = str(exc)
-        return result
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def _build_evidence_progress(
@@ -645,16 +590,28 @@ def _summary_matches_invocation(
     *,
     audit_dir: Path,
     max_files: int,
+    min_lift_fraction: Optional[float] = None,
 ) -> bool:
     if not _summary_matches_audit_dir(summary, audit_dir):
         return False
     raw_max_files = summary.get("max_files")
-    if raw_max_files is None:
-        return True
-    try:
-        return int(raw_max_files) == int(max_files)
-    except Exception:
-        return False
+    if raw_max_files is not None:
+        try:
+            if int(raw_max_files) != int(max_files):
+                return False
+        except Exception:
+            return False
+    # Invalidate cache when min_lift_fraction config threshold has changed.
+    # A stale cache with a lower threshold would silently pass a higher gate.
+    if min_lift_fraction is not None:
+        cached_thresh = summary.get("min_lift_fraction")
+        if cached_thresh is not None:
+            try:
+                if abs(float(cached_thresh) - float(min_lift_fraction)) > 1e-6:
+                    return False
+            except Exception:
+                return False
+    return True
 
 
 def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
@@ -882,11 +839,20 @@ def main() -> int:
     lift_inconclusive = "RMSE gate inconclusive" in lift_output
     lift_output_metrics = _extract_lift_output_metrics(lift_output)
 
+    # Load config min_lift_fraction to detect threshold-drift cache staleness.
+    _rmse_cfg = _load_regression_monitoring_config(monitor_config)
+    _cfg_min_lift = None
+    try:
+        _cfg_min_lift = float(_rmse_cfg.get("min_lift_fraction", 0.0)) if _rmse_cfg else None
+    except Exception:
+        pass
+
     lift_summary = _safe_load_json(summary_cache_path) or {}
     if lift_summary and not _summary_matches_invocation(
         lift_summary,
         audit_dir=audit_dir,
         max_files=int(args.max_files),
+        min_lift_fraction=_cfg_min_lift,
     ):
         lift_summary = {}
 

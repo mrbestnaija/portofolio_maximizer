@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -44,6 +43,11 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 log = logging.getLogger(__name__)
+
+try:
+    from scripts.quality_pipeline_common import compute_lifecycle_integrity_metrics
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import compute_lifecycle_integrity_metrics
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -183,6 +187,12 @@ def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
             import math
             ci_high = result.metrics.get("lift_ci_high", float("nan"))
             win_frac = result.metrics.get("lift_win_fraction", float("nan"))
+            if math.isfinite(ci_high) and ci_high < 0.0:
+                return (
+                    f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] both bounds negative "
+                    f"(win_fraction={win_frac:.1%}) -- ensemble definitively underperforming, "
+                    f"not merely inconclusive (advisory; see Layer 1 for gate impact)"
+                ), metrics
             return (
                 f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] spans zero "
                 f"(win_fraction={win_frac:.1%}) -- lift not statistically confirmed"
@@ -202,58 +212,11 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
     }
     if not db_path.exists():
         return None, f"R6: db not found -- {db_path}", metrics
-
-    conn: Optional[sqlite3.Connection] = None
     try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-
-        close_before_entry_count = 0
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades c
-                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
-                WHERE c.entry_trade_id IS NOT NULL
-                  AND c.bar_timestamp IS NOT NULL
-                  AND e.bar_timestamp IS NOT NULL
-                  AND c.bar_timestamp < e.bar_timestamp
-                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
-                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
-                """
-            ).fetchone()
-            close_before_entry_count = int(row["n"]) if row else 0
-        except sqlite3.OperationalError:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades c
-                LEFT JOIN trade_executions e ON c.entry_trade_id = e.id
-                WHERE c.entry_trade_id IS NOT NULL
-                  AND c.trade_date IS NOT NULL
-                  AND e.trade_date IS NOT NULL
-                  AND c.trade_date < e.trade_date
-                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
-                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
-                """
-            ).fetchone()
-            close_before_entry_count = int(row["n"]) if row else 0
-
-        missing_exit_reason_count = 0
-        try:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS n
-                FROM production_closed_trades
-                WHERE COALESCE(TRIM(exit_reason), '') = ''
-                """
-            ).fetchone()
-            missing_exit_reason_count = int(row["n"]) if row else 0
-        except sqlite3.OperationalError:
-            missing_exit_reason_count = 0
-
-        high_count = close_before_entry_count + missing_exit_reason_count
+        shared = compute_lifecycle_integrity_metrics(db_path)
+        close_before_entry_count = int(shared.get("close_before_entry_count", 0) or 0)
+        missing_exit_reason_count = int(shared.get("closed_missing_exit_reason_count", 0) or 0)
+        high_count = int(shared.get("high_integrity_violation_count", 0) or 0)
         metrics.update(
             {
                 "close_before_entry_count": close_before_entry_count,
@@ -261,6 +224,9 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
                 "high_integrity_violation_count": high_count,
             }
         )
+        query_error = shared.get("query_error")
+        if query_error:
+            raise RuntimeError(str(query_error))
         if high_count > 0:
             return (
                 False,
@@ -275,9 +241,6 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
     except Exception as exc:
         log.warning("R6 lifecycle integrity check failed: %s", exc)
         return None, f"R6: error -- {exc}", metrics
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
