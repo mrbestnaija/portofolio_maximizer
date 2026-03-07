@@ -34,7 +34,8 @@ This document is intentionally “policy-like”: it tells you what must be true
 - Dashboard payloads now include a `live_denominator` block from `logs/overnight_denominator/live_denominator_latest.json`, and `visualizations/live_dashboard.html` renders that watcher state directly.
 - `scripts/windows_dashboard_manager.py ensure` is now the canonical reboot/startup entry point for the dashboard stack: it can ensure the bridge, local HTTP server, and live denominator watcher together, and it retries the bridge without audit snapshot persistence if that optional path is not authorized.
 - Readiness and linkage-quality claims remain blocked until multiple fresh cycles show near-zero TRADE exclusions, `fresh_linkage_included > 1`, and at least one fresh production-valid matched row.
-- `scripts/capital_readiness_check.py` continues to treat negative lift CI (`R5`) as advisory. The current hard blocker in that command path is the `R3` error path through `scripts/exit_quality_audit.py`.
+- `scripts/capital_readiness_check.py` now fail-closes on definitively negative lift CI (`R5` where both CI bounds are below zero); CI bands that straddle zero remain advisory.
+- `scripts/dashboard_db_bridge.py` now emits stale/unknown truth fields (`positions_stale`, `positions_source`, `positions_age_days`, `performance_unknown`) and passes `exit_reason` through trade events; `visualizations/live_dashboard.html` renders these explicitly (`N/A`, stale warning, last exit reason).
 
 ---
 
