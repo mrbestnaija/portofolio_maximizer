@@ -3188,6 +3188,206 @@ class DatabaseManager:
 
         return result
 
+    def save_portfolio_positions_snapshot(
+        self,
+        *,
+        positions: Dict[str, Any],
+        entry_prices: Dict[str, Any],
+        entry_timestamps: Dict[str, Any],
+        current_prices: Optional[Dict[str, Any]] = None,
+        total_value: Optional[float] = None,
+        snapshot_at: Optional[Any] = None,
+    ) -> None:
+        """Persist the latest authoritative portfolio_positions snapshot.
+
+        The dashboard should prefer this table over reconstructing positions
+        from executions. When the book is flat, we still record snapshot
+        metadata so the bridge can treat the empty snapshot as authoritative.
+        """
+        current_prices = current_prices or {}
+        snapshot_dt = ensure_utc(snapshot_at) or utc_now()
+        snapshot_date = snapshot_dt.date().isoformat()
+        inserted = 0
+
+        try:
+            self.cursor.execute(
+                "DELETE FROM portfolio_positions WHERE position_date = ?",
+                (snapshot_date,),
+            )
+            for raw_ticker, raw_shares in (positions or {}).items():
+                ticker = str(raw_ticker or "").strip().upper()
+                if not ticker:
+                    continue
+                try:
+                    shares = float(raw_shares or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if shares == 0:
+                    continue
+
+                try:
+                    average_cost = float(entry_prices.get(raw_ticker, entry_prices.get(ticker, 0.0)) or 0.0)
+                except (TypeError, ValueError):
+                    average_cost = 0.0
+                try:
+                    current_price = float(current_prices.get(raw_ticker, current_prices.get(ticker, average_cost)) or average_cost)
+                except (TypeError, ValueError):
+                    current_price = average_cost
+
+                market_value = shares * current_price
+                cost_basis = abs(shares * average_cost)
+                unrealized_pnl = shares * (current_price - average_cost)
+                unrealized_pnl_pct = (unrealized_pnl / cost_basis) if cost_basis > 0 else 0.0
+
+                entry_ts = ensure_utc(
+                    entry_timestamps.get(raw_ticker, entry_timestamps.get(ticker))
+                )
+                days_held = None
+                if entry_ts is not None:
+                    try:
+                        days_held = max(0, (snapshot_dt - entry_ts).days)
+                    except Exception:
+                        days_held = None
+
+                portfolio_weight = None
+                if total_value not in (None, 0):
+                    try:
+                        denominator = abs(float(total_value))
+                        if denominator > 0:
+                            portfolio_weight = abs(market_value) / denominator
+                    except (TypeError, ValueError):
+                        portfolio_weight = None
+
+                self.cursor.execute(
+                    """
+                    INSERT INTO portfolio_positions
+                    (ticker, position_date, shares, average_cost, current_price,
+                     market_value, unrealized_pnl, unrealized_pnl_pct,
+                     portfolio_weight, days_held, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        ticker,
+                        snapshot_date,
+                        shares,
+                        average_cost,
+                        current_price,
+                        market_value,
+                        unrealized_pnl,
+                        unrealized_pnl_pct,
+                        portfolio_weight,
+                        days_held,
+                    ),
+                )
+                inserted += 1
+
+            self.conn.commit()
+            self.set_metadata("portfolio_positions_last_snapshot_date", snapshot_date)
+            self.set_metadata("portfolio_positions_last_snapshot_at", snapshot_dt.isoformat())
+            self.set_metadata("portfolio_positions_last_snapshot_count", inserted)
+        except Exception as exc:
+            self.conn.rollback()
+            logger.error(
+                "Failed to save portfolio_positions snapshot: %s",
+                sanitize_error(exc),
+            )
+
+    def save_performance_metrics_snapshot(
+        self,
+        *,
+        total_value: float,
+        initial_capital: float,
+        snapshot_at: Optional[Any] = None,
+    ) -> None:
+        """Persist a daily performance_metrics snapshot for dashboard consumers."""
+        snapshot_dt = ensure_utc(snapshot_at) or utc_now()
+        metric_date = snapshot_dt.date().isoformat()
+
+        try:
+            summary = self.get_performance_summary()
+            commission_row = self.cursor.execute(
+                "SELECT COALESCE(SUM(commission), 0.0) AS total_commission FROM trade_executions"
+            ).fetchone()
+            total_commission = float(commission_row["total_commission"] or 0.0) if commission_row else 0.0
+        except Exception:
+            summary = self.get_performance_summary()
+            total_commission = 0.0
+
+        try:
+            total_value_f = float(total_value)
+        except (TypeError, ValueError):
+            total_value_f = 0.0
+        try:
+            initial_capital_f = float(initial_capital)
+        except (TypeError, ValueError):
+            initial_capital_f = 0.0
+
+        total_return = total_value_f - initial_capital_f
+        total_return_pct = (total_return / initial_capital_f) if initial_capital_f > 0 else 0.0
+
+        try:
+            with self.conn:
+                self.cursor.execute(
+                    """
+                    INSERT INTO performance_metrics
+                    (metric_date, period, total_value, total_return, total_return_pct,
+                     sharpe_ratio, sortino_ratio, max_drawdown, win_rate, profit_factor,
+                     alpha, beta, num_trades, num_winning_trades, num_losing_trades,
+                     avg_win, avg_loss, largest_win, largest_loss, total_commission,
+                     benchmark_return, created_at)
+                    VALUES (?, 'daily', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(metric_date, period) DO UPDATE SET
+                        total_value = excluded.total_value,
+                        total_return = excluded.total_return,
+                        total_return_pct = excluded.total_return_pct,
+                        sharpe_ratio = excluded.sharpe_ratio,
+                        sortino_ratio = excluded.sortino_ratio,
+                        max_drawdown = excluded.max_drawdown,
+                        win_rate = excluded.win_rate,
+                        profit_factor = excluded.profit_factor,
+                        alpha = excluded.alpha,
+                        beta = excluded.beta,
+                        num_trades = excluded.num_trades,
+                        num_winning_trades = excluded.num_winning_trades,
+                        num_losing_trades = excluded.num_losing_trades,
+                        avg_win = excluded.avg_win,
+                        avg_loss = excluded.avg_loss,
+                        largest_win = excluded.largest_win,
+                        largest_loss = excluded.largest_loss,
+                        total_commission = excluded.total_commission,
+                        benchmark_return = excluded.benchmark_return,
+                        created_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        metric_date,
+                        total_value_f,
+                        total_return,
+                        total_return_pct,
+                        None,
+                        None,
+                        None,
+                        float(summary.get("win_rate") or 0.0),
+                        float(summary.get("profit_factor") or 0.0),
+                        None,
+                        None,
+                        int(summary.get("total_trades") or 0),
+                        int(summary.get("winning_trades") or 0),
+                        int(summary.get("losing_trades") or 0),
+                        float(summary.get("avg_win") or 0.0),
+                        float(summary.get("avg_loss") or 0.0),
+                        float(summary.get("largest_win") or 0.0),
+                        float(summary.get("smallest_loss") or 0.0),
+                        total_commission,
+                        None,
+                    ),
+                )
+            self.set_metadata("performance_metrics_last_snapshot_at", snapshot_dt.isoformat())
+        except Exception as exc:
+            logger.error(
+                "Failed to save performance_metrics snapshot: %s",
+                sanitize_error(exc),
+            )
+
     # ------------------------------------------------------------------
     # Portfolio State Persistence (cross-session position continuity)
     # ------------------------------------------------------------------

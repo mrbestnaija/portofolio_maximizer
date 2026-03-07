@@ -19,6 +19,7 @@ Every test is self-contained (no network, no GPU, no live DB).
 import copy
 import importlib
 import os
+import sqlite3
 import tempfile
 from dataclasses import fields as dc_fields
 from datetime import datetime, timedelta, timezone
@@ -619,6 +620,62 @@ class TestPortfolioPersistenceRoundTrip:
         db_manager.clear_portfolio_state()
         loaded = db_manager.load_portfolio_state()
         assert loaded is None, "State should be None after clearing"
+
+    def test_engine_save_state_persists_dashboard_snapshot_tables(self, tmp_db):
+        from execution.paper_trading_engine import PaperTradingEngine
+
+        engine = PaperTradingEngine(initial_capital=10000.0, db_path=tmp_db)
+        ts_now = datetime.now(timezone.utc) - timedelta(days=2)
+        engine.portfolio.cash = 9000.0
+        engine.portfolio.positions = {"AAPL": 10}
+        engine.portfolio.entry_prices = {"AAPL": 100.0}
+        engine.portfolio.entry_timestamps = {"AAPL": ts_now}
+        engine.mark_to_market({"AAPL": 120.0})
+
+        engine.save_state()
+
+        conn = sqlite3.connect(tmp_db)
+        conn.row_factory = sqlite3.Row
+        try:
+            pos_row = conn.execute(
+                """
+                SELECT ticker, shares, average_cost, current_price, market_value, unrealized_pnl, days_held
+                FROM portfolio_positions
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            perf_row = conn.execute(
+                """
+                SELECT total_value, total_return, total_return_pct, num_trades, win_rate, profit_factor
+                FROM performance_metrics
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            meta_row = conn.execute(
+                "SELECT value FROM db_metadata WHERE key = 'portfolio_positions_last_snapshot_at'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert pos_row is not None
+        assert pos_row["ticker"] == "AAPL"
+        assert float(pos_row["shares"]) == 10.0
+        assert float(pos_row["average_cost"]) == 100.0
+        assert float(pos_row["current_price"]) == 120.0
+        assert float(pos_row["market_value"]) == 1200.0
+        assert float(pos_row["unrealized_pnl"]) == 200.0
+        assert int(pos_row["days_held"]) >= 1
+
+        assert perf_row is not None
+        assert float(perf_row["total_value"]) == 10200.0
+        assert float(perf_row["total_return"]) == 200.0
+        assert float(perf_row["total_return_pct"]) == 0.02
+        assert int(perf_row["num_trades"]) == 0
+        assert float(perf_row["win_rate"]) == 0.0
+        assert float(perf_row["profit_factor"]) == 0.0
+        assert meta_row is not None and meta_row["value"]
 
 
 class TestEngineResumeFromDB:

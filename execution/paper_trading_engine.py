@@ -180,6 +180,7 @@ class PaperTradingEngine:
         self.signal_validator = signal_validator or SignalValidator()
         self._lob_config: Optional[LOBConfig] = None
         self._lob_enabled: Optional[bool] = None
+        self._last_price_map: Dict[str, float] = {}
 
         # Initialize portfolio (with optional resume from DB)
         loaded = False
@@ -206,6 +207,10 @@ class PaperTradingEngine:
                     self.portfolio.last_bar_timestamps.update(state["last_bar_timestamps"])
                 # Recalculate total value using entry prices as proxy
                 self.portfolio.update_value(state["entry_prices"])
+                self._last_price_map = {
+                    str(ticker).upper(): float(price)
+                    for ticker, price in state["entry_prices"].items()
+                }
                 # Phase 7.10: Backfill entry_trade_ids for open positions so
                 # closing legs get proper entry linkage (prevents orphan opens
                 # and unlinked closes after resume).
@@ -239,6 +244,7 @@ class PaperTradingEngine:
 
         if not loaded:
             self.portfolio = Portfolio(cash=initial_capital, total_value=initial_capital)
+            self._last_price_map = {}
 
         # Trade history
         self.trades: list[Trade] = []
@@ -1089,11 +1095,17 @@ class PaperTradingEngine:
 
     def mark_to_market(self, price_map: Dict[str, float]) -> float:
         """Refresh portfolio valuation using the latest market prices."""
+        self._last_price_map = {
+            str(ticker).upper(): float(price)
+            for ticker, price in (price_map or {}).items()
+            if price is not None
+        }
         self.portfolio.update_value(price_map)
+        self._persist_dashboard_snapshots()
         return self.portfolio.total_value
 
     def save_state(self) -> None:
-        """Persist current portfolio state to database for cross-session continuity."""
+        """Persist current portfolio state plus dashboard-facing snapshots."""
         self.db_manager.save_portfolio_state(
             cash=self.portfolio.cash,
             initial_capital=self.initial_capital,
@@ -1106,6 +1118,21 @@ class PaperTradingEngine:
             holding_bars=self.portfolio.holding_bars,
             entry_bar_timestamps=self.portfolio.entry_bar_timestamps,
             last_bar_timestamps=self.portfolio.last_bar_timestamps,
+        )
+        self._persist_dashboard_snapshots()
+
+    def _persist_dashboard_snapshots(self) -> None:
+        """Best-effort persistence for dashboard-facing portfolio snapshots."""
+        self.db_manager.save_portfolio_positions_snapshot(
+            positions=self.portfolio.positions,
+            entry_prices=self.portfolio.entry_prices,
+            entry_timestamps=self.portfolio.entry_timestamps,
+            current_prices=self._last_price_map or self.portfolio.entry_prices,
+            total_value=self.portfolio.total_value,
+        )
+        self.db_manager.save_performance_metrics_snapshot(
+            total_value=self.portfolio.total_value or self.portfolio.cash,
+            initial_capital=self.initial_capital,
         )
 
     def _evaluate_exit_reason(

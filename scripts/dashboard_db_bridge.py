@@ -368,10 +368,16 @@ def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
-    row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
-    if not row or not row["d"]:
+    metadata_row = _safe_fetchone(
+        conn,
+        "SELECT value FROM db_metadata WHERE key = 'portfolio_positions_last_snapshot_date'",
+    )
+    latest = str(metadata_row["value"]) if metadata_row and metadata_row["value"] else None
+    if not latest:
+        row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
+        latest = str(row["d"]) if row and row["d"] else None
+    if not latest:
         return _positions_from_executions(conn)
-    latest = str(row["d"])
     # Backward-compatible: some environments/tests may have a minimal schema.
     query_full = """
     SELECT ticker, shares, average_cost, current_price, unrealized_pnl, unrealized_pnl_pct, market_value
@@ -432,6 +438,8 @@ def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
             )
         except Exception:
             market_value = None
+        if shares == 0:
+            continue
         out[t] = {"shares": shares, "entry_price": entry}
         if current_price is not None:
             out[t]["current_price"] = current_price
@@ -1418,7 +1426,12 @@ def _data_checks(conn: sqlite3.Connection) -> List[str]:
     # positions present?
     try:
         pos_count = _safe_fetchone(conn, "SELECT COUNT(*) AS c FROM portfolio_positions") or {"c": 0}
-        if int(pos_count["c"] or 0) == 0:
+        pos_meta = _safe_fetchone(
+            conn,
+            "SELECT value FROM db_metadata WHERE key = 'portfolio_positions_last_snapshot_at'",
+        )
+        has_snapshot = bool(pos_meta and pos_meta["value"])
+        if int(pos_count["c"] or 0) == 0 and not has_snapshot:
             checks.append("No portfolio_positions rows found (positions table empty).")
     except Exception:
         checks.append("portfolio_positions table unavailable.")

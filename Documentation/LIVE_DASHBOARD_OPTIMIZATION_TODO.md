@@ -15,6 +15,7 @@ Status:
 - [x] Safe-mode style warnings are shown when payload sections are missing or partial.
 - [x] Health summary block is present in the header (`Data: OK/Partial/Stale/Error`).
 - [x] `run_id` is propagated through the payload and used to control diagnostics refresh behavior.
+- [x] Live engine state now snapshots authoritative `portfolio_positions` and `performance_metrics` rows during the run instead of leaving the dashboard to reconstruct them from fallbacks.
 
 ### Observability and auditability
 - [x] Dashboard payload snapshots are persisted by the bridge.
@@ -38,7 +39,6 @@ Status:
 ## Remaining gaps worth implementing
 
 ### P1
-- [ ] Upstream persistence hardening for `portfolio_positions` and `performance_metrics` so the dashboard relies less on fallback derivations.
 - [ ] Surface the last successful pipeline run explicitly from provenance metadata, not just the current dashboard payload timestamp.
 - [ ] Add a compact key-decisions strip for highest-risk position, biggest recent PnL move, and top actionable signal.
 - [ ] Add realized vs unrealized PnL split in the header.

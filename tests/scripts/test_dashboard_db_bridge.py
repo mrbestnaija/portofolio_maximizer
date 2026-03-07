@@ -143,6 +143,47 @@ def test_positions_fallback_uses_average_cost(tmp_path) -> None:
     assert pos["entry_price"] == 10.0
 
 
+def test_positions_respect_authoritative_empty_snapshot_metadata(tmp_path) -> None:
+    db_path = tmp_path / "pmx_empty_positions.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL, trade_date TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT, position_date TEXT, shares REAL, average_cost REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE db_metadata(key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at) VALUES (?,?,?,?,?,?)",
+            ("AAPL", "BUY", 10, 100.0, "2026-01-01", "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO db_metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("portfolio_positions_last_snapshot_date", "2026-01-02", "2026-01-02T12:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO db_metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("portfolio_positions_last_snapshot_at", "2026-01-02T12:00:00Z", "2026-01-02T12:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        positions = mod._positions(conn)
+        checks = mod._data_checks(conn)
+    finally:
+        conn.close()
+
+    assert positions == {}
+    assert "No portfolio_positions rows found (positions table empty)." not in checks
+
+
 def test_robustness_sidecars_merge_without_breaking_payload(tmp_path, monkeypatch) -> None:
     elig = tmp_path / "elig.json"
     ctx = tmp_path / "ctx.json"
