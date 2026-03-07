@@ -11,13 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+try:
+    from scripts.telemetry_adapter import telemetry_now_utc
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_now_utc
 
 
 def _clean(value: str, max_len: int = 4000) -> str:
@@ -47,7 +47,7 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     payload: Dict[str, Any] = {
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": telemetry_now_utc(),
         "host_pid": os.getpid(),
         "run_id": _clean(args.run_id, 200),
         "parent_run_id": _clean(args.parent_run_id, 200),
@@ -70,4 +70,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

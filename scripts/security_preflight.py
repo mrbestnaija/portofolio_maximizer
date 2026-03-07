@@ -17,13 +17,13 @@ import importlib.util
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+try:
+    from scripts.telemetry_adapter import telemetry_now_utc
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_now_utc
 
 
 def _run(cmd: List[str], timeout: int) -> Tuple[int, str, str]:
@@ -140,7 +140,7 @@ def main() -> int:
     checks["python"] = {
         "executable": python_bin,
         "version": sys.version.split()[0],
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": telemetry_now_utc(),
     }
 
     # 1) pip check (dependency consistency)
@@ -228,7 +228,7 @@ def main() -> int:
 
     passed = len(failures) == 0
     payload: Dict[str, Any] = {
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": telemetry_now_utc(),
         "caller": str(args.caller or ""),
         "run_id": str(args.run_id or ""),
         "strict": bool(args.strict),

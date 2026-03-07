@@ -23,7 +23,6 @@ import sys
 import time
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -32,9 +31,10 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCALHOST_BIND = "127.0.0.1"
 DEFAULT_LIVE_WATCHER_TICKERS = ["AAPL", "AMZN", "GOOG", "GS", "JPM", "META", "MSFT", "NVDA", "TSLA", "V"]
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+try:
+    from scripts.telemetry_adapter import telemetry_now_utc
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_now_utc
 
 
 def _creation_flags() -> int:
@@ -309,7 +309,7 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
             result.warnings.append("failed to auto-open default browser")
 
     status: Dict[str, Any] = {
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": telemetry_now_utc(),
         "caller": str(args.caller or ""),
         "run_id": str(args.run_id or ""),
         "url": result.url,

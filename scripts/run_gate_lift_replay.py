@@ -18,14 +18,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+try:
+    from scripts.telemetry_adapter import telemetry_now_utc
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import telemetry_now_utc
 
 UTC = timezone.utc
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = ROOT / "logs" / "audit_gate"
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _append_log(log_path: Path | None, message: str) -> None:
@@ -239,7 +239,7 @@ def main() -> int:
         artifact_path = DEFAULT_OUTPUT_DIR / f"gate_lift_replay_{root_run_id}.json"
 
     payload = {
-        "timestamp_utc": _utc_now(),
+        "timestamp_utc": telemetry_now_utc(),
         "run_id": root_run_id,
         "parent_run_id": parent_run_id,
         "inputs": {
