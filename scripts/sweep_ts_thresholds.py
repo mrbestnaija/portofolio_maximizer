@@ -37,16 +37,12 @@ if str(ROOT_PATH) not in __import__("sys").modules["sys"].path:
     __import__("sys").modules["sys"].path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager  # noqa: E402
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 @dataclass
@@ -287,7 +283,7 @@ def main(
     mutate configs or choose/persist “best” parameters; callers are expected
     to consume the JSON output and decide how to apply any recommendations.
     """
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
 
     confidences = _parse_float_list(grid_confidence)
     min_returns = _parse_float_list(grid_min_return)

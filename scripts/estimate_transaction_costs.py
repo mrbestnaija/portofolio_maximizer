@@ -37,16 +37,12 @@ if str(ROOT_PATH) not in __import__("sys").modules["sys"].path:
     __import__("sys").modules["sys"].path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager  # noqa: E402
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 @dataclass
@@ -293,7 +289,7 @@ def main(
     realised PnL distributions. Callers can use this to calibrate
     friction buffers and minimum expected returns in configs.
     """
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
 
     if as_of:
         ref_date = datetime.fromisoformat(as_of).date()

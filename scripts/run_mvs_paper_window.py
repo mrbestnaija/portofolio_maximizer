@@ -38,6 +38,10 @@ if str(ROOT_PATH) not in sys.path:
 
 from etl.database_manager import DatabaseManager
 from execution.paper_trading_engine import PaperTradingEngine
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -47,14 +51,6 @@ UTC = timezone.utc
 class WindowConfig:
     start_date: str
     end_date: str
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _split_tickers(raw: str) -> List[str]:
@@ -254,7 +250,7 @@ def main(
     report_out: Optional[str],
     verbose: bool,
 ) -> None:
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
     run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     ticker_list = _split_tickers(tickers)

@@ -6,6 +6,7 @@ Library-style helper only: no CLI entrypoint.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
@@ -86,6 +87,14 @@ def load_json_dict(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(payload, dict):
         return None, "invalid"
     return payload, None
+
+
+def configure_cli_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
 
 def _extract_threshold_block(payload: dict[str, Any]) -> dict[str, Any] | None:

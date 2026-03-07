@@ -33,17 +33,13 @@ if str(ROOT_PATH) not in sys.path:
 
 from etl.database_manager import DatabaseManager
 from etl.strategy_optimizer import StrategyOptimizer, StrategyCandidate
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -92,7 +88,7 @@ def main(
     verbose: bool,
 ) -> None:
     """Entry point for stochastic strategy optimization."""
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
 
     cfg = _load_config(ROOT_PATH / config_path)
     search_space = cfg.get("search_space", {})

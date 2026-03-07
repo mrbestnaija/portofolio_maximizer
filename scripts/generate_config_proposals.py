@@ -36,16 +36,12 @@ import click
 ROOT_PATH = Path(__file__).resolve().parent.parent
 if str(ROOT_PATH) not in __import__("sys").modules["sys"].path:
     __import__("sys").modules["sys"].path.insert(0, str(ROOT_PATH))
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 @dataclass
@@ -281,7 +277,7 @@ def main(
     reviewed and then mapped onto actual YAML config diffs (e.g., adjustments
     to config/signal_routing_config.yml and config/quant_success_config.yml).
     """
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
 
     ts_payload = _load_json(Path(ts_sweep_path))
     cost_payload = _load_json(Path(costs_path))

@@ -34,16 +34,12 @@ if str(ROOT_PATH) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _load_quant_guardrails(path: Optional[Path]) -> Dict[str, Any]:
@@ -122,7 +118,7 @@ def main(
     higher-order hyper-parameter search; that orchestration is handled by
     shell helpers (e.g., bash/run_post_eval.sh) which may invoke this script.
     """
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
 
     guardrails = _load_quant_guardrails(ROOT_PATH / quant_config_path)
     min_expected_return = guardrails.get("min_expected_return")

@@ -40,17 +40,13 @@ from etl.model_profiles import (
 )
 from etl.statistical_tests import diebold_mariano
 from risk.barbell_policy import BarbellConfig
+try:
+    from scripts.quality_pipeline_common import configure_cli_logging
+except Exception:  # pragma: no cover - script execution path fallback
+    from quality_pipeline_common import configure_cli_logging
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
-
-
-def _configure_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
 
 
 def _load_price_series(
@@ -265,7 +261,7 @@ def main(
     verbose: bool,
 ) -> None:
     """Run a TS model search and persist CV metrics per candidate."""
-    _configure_logging(verbose)
+    configure_cli_logging(verbose)
     ticker_list = [t.strip() for t in tickers.split(",") if t.strip()]
     if not ticker_list:
         raise click.UsageError("At least one ticker is required.")
