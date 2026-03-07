@@ -35,7 +35,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,6 +126,101 @@ def _empty_metrics(layer: int, **overrides) -> dict:
     return base
 
 
+def _load_forecast_audit_payloads(audit_dir: Path) -> tuple[int, int, list[dict]]:
+    files = sorted(Path(audit_dir).glob("forecast_audit_*.json"))
+    n_total = len(files)
+    n_malformed = 0
+    raw_audits: list[dict] = []
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["_path"] = path.name
+            data["_mtime"] = path.stat().st_mtime
+            raw_audits.append(data)
+        except Exception:
+            n_malformed += 1
+    return n_total, n_malformed, raw_audits
+
+
+def _dedupe_forecast_audits(
+    raw_audits: list[dict],
+    *,
+    window_fingerprint: Any,
+) -> list[dict]:
+    seen: dict[str, dict] = {}
+    for audit in sorted(raw_audits, key=lambda a: (a.get("_mtime", 0.0), a.get("_path", ""))):
+        try:
+            fp = window_fingerprint(audit)
+        except Exception:
+            fp = audit.get("_path", str(id(audit)))
+        seen[fp] = audit
+    return list(seen.values())
+
+
+def _extract_layer1_windows(
+    deduped_audits: list[dict],
+    *,
+    extract_window_metrics: Any,
+) -> tuple[list[dict], int]:
+    windows: list[dict] = []
+    n_missing = 0
+    for raw in deduped_audits:
+        window = extract_window_metrics(raw)
+        if window is None:
+            n_missing += 1
+        else:
+            windows.append(window)
+    return windows, n_missing
+
+
+def _layer1_quality_metrics(
+    *,
+    n_total: int,
+    n_malformed: int,
+    n_missing: int,
+    n_used: int,
+) -> dict[str, Any]:
+    coverage_ratio = n_used / n_total if n_total > 0 else 0.0
+    return {
+        "n_total_files": n_total,
+        "n_skipped_malformed": n_malformed,
+        "n_skipped_missing_metrics": n_missing,
+        "n_used_windows": n_used,
+        "coverage_ratio": coverage_ratio,
+    }
+
+
+def _load_layer1_lift_threshold() -> float:
+    # WIRE-01 fix: read min_lift_rmse_ratio from forecaster_monitoring.yml so Layer 1 lift
+    # computation is aligned with check_forecast_audits.py (which also uses this value).
+    min_lift_rmse_ratio = 0.0
+    try:
+        import yaml as _yaml_wire01
+
+        monitoring_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if monitoring_path.exists():
+            monitoring_cfg = _yaml_wire01.safe_load(monitoring_path.read_text(encoding="utf-8")) or {}
+            min_lift_rmse_ratio = float(
+                monitoring_cfg.get("forecaster_monitoring", {})
+                .get("regression_metrics", {})
+                .get("min_lift_rmse_ratio", 0.0)
+            )
+    except Exception:
+        pass
+    return 1.0 - min_lift_rmse_ratio
+
+
+def _lift_fraction(
+    windows: list[dict],
+    *,
+    threshold: float,
+) -> float:
+    if not windows:
+        return 0.0
+    lift_count = sum(1 for row in windows if (row.get("rmse_ratio") or math.inf) < threshold)
+    return lift_count / len(windows)
+
+
 # ---------------------------------------------------------------------------
 # Layer 1: Forecast Quality
 # ---------------------------------------------------------------------------
@@ -176,8 +271,7 @@ def run_layer1_forecast_quality(
         )
 
     # --- Load all forecast_audit_*.json files and track quality ---
-    files = sorted(audit_dir.glob("forecast_audit_*.json"))
-    n_total = len(files)
+    n_total, n_malformed, raw_audits = _load_forecast_audit_payloads(audit_dir)
 
     if n_total == 0:
         return LayerResult(
@@ -188,50 +282,23 @@ def run_layer1_forecast_quality(
             summary="SKIP -- no forecast_audit_*.json files in audit_dir",
         )
 
-    n_malformed = 0
-    raw_audits: list[dict] = []
-    for f in files:
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            data["_path"] = f.name
-            data["_mtime"] = f.stat().st_mtime
-            raw_audits.append(data)
-        except Exception:
-            n_malformed += 1
-
-    # Deduplicate: keep newest per fingerprint
-    seen: dict[str, dict] = {}
-    for audit in sorted(raw_audits, key=lambda a: (a.get("_mtime", 0.0), a.get("_path", ""))):
-        try:
-            fp = _window_fingerprint(audit)
-        except Exception:
-            fp = audit.get("_path", str(id(audit)))
-        seen[fp] = audit
-    deduped = list(seen.values())
-
-    # Extract metrics, count skipped-missing
-    n_missing = 0
-    windows: list[dict] = []
-    for raw in deduped:
-        w = extract_window_metrics(raw)
-        if w is None:
-            n_missing += 1
-        else:
-            windows.append(w)
-
+    deduped = _dedupe_forecast_audits(raw_audits, window_fingerprint=_window_fingerprint)
+    windows, n_missing = _extract_layer1_windows(
+        deduped,
+        extract_window_metrics=extract_window_metrics,
+    )
     n_used = len(windows)
     # coverage_ratio = usable windows / total files (after dedup); WARN when < 20%.
     # Low coverage_ratio means most audit files are in old pre-Phase-7.15-F format
     # and should not be silently treated as "no data" — they are structurally missing
     # the evaluation_metrics.ensemble key needed for lift calculations.
-    coverage_ratio = n_used / n_total if n_total > 0 else 0.0
-    quality: dict = {
-        "n_total_files": n_total,
-        "n_skipped_malformed": n_malformed,
-        "n_skipped_missing_metrics": n_missing,
-        "n_used_windows": n_used,
-        "coverage_ratio": coverage_ratio,
-    }
+    quality: dict = _layer1_quality_metrics(
+        n_total=n_total,
+        n_malformed=n_malformed,
+        n_missing=n_missing,
+        n_used=n_used,
+    )
+    coverage_ratio = quality["coverage_ratio"]
 
     if n_used == 0:
         return LayerResult(
@@ -269,33 +336,10 @@ def run_layer1_forecast_quality(
             "using window_end order for recency (may indicate stale file timestamps)"
         )
 
-    # WIRE-01 fix: read min_lift_rmse_ratio from forecaster_monitoring.yml so Layer 1 lift
-    # computation is aligned with check_forecast_audits.py (which also uses this value).
-    _min_lift_rmse_ratio = 0.0
-    try:
-        import yaml as _yaml_wire01
-        _fm_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
-        if _fm_path.exists():
-            _fm_cfg = _yaml_wire01.safe_load(_fm_path.read_text(encoding="utf-8")) or {}
-            _min_lift_rmse_ratio = float(
-                _fm_cfg.get("forecaster_monitoring", {})
-                .get("regression_metrics", {})
-                .get("min_lift_rmse_ratio", 0.0)
-            )
-    except Exception:
-        pass
-    _lift_threshold = 1.0 - _min_lift_rmse_ratio  # 1.0 when min_lift_rmse_ratio=0.0 (default)
-
-    # Lift fractions
-    def _lift_frac(ws: list[dict]) -> float:
-        if not ws:
-            return 0.0
-        lift_count = sum(1 for w in ws if (w.get("rmse_ratio") or math.inf) < _lift_threshold)
-        return lift_count / len(ws)
-
-    lift_global = _lift_frac(windows_sorted)
+    _lift_threshold = _load_layer1_lift_threshold()
+    lift_global = _lift_fraction(windows_sorted, threshold=_lift_threshold)
     recent_ws = windows_sorted[-recent_n:] if len(windows_sorted) > recent_n else windows_sorted
-    lift_recent = _lift_frac(recent_ws)
+    lift_recent = _lift_fraction(recent_ws, threshold=_lift_threshold)
 
     # SAMOSSA DA=0 pct
     samossa_da_zero_pct = 0.0
