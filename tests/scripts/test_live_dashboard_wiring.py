@@ -35,11 +35,21 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
         "live-denominator-cohort",
         "live-denominator-linkage",
         "live-denominator-matched",
+        "polling-select",
+        "payload-schema",
+        "payload-quant",
+        "audit-open-issues",
+        "audit-schema-version",
+        "audit-cache-state",
+        "audit-diversity",
+        "audit-denominator",
+        "audit-issues",
     ):
         assert f'id="{element_id}"' in html
 
     assert "No robustness data available." in html
     assert "Watcher not connected." in html
+    assert "No audit evidence loaded." in html
 
 
 def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
@@ -58,3 +68,14 @@ def test_live_dashboard_live_denominator_wiring() -> None:
     assert "const watcher = data?.live_denominator || {};" in html
     assert "renderLiveDenominator(null);" in html
     assert "renderLiveDenominator(data);" in html
+
+
+def test_live_dashboard_audit_console_and_polling_wiring() -> None:
+    html = Path("visualizations/live_dashboard.html").read_text(encoding="utf-8")
+
+    assert "function renderAuditConsole(data)" in html
+    assert "function validatePayloadShape(data)" in html
+    assert "dashboardRefreshMs" in html
+    assert "const DEFAULT_REFRESH_MS = 15000;" in html
+    assert "const REFRESH_MS = 5000;" not in html
+    assert "auditConsoleState.focus = btn.dataset.focus || 'all';" in html

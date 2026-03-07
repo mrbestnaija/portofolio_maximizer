@@ -66,11 +66,16 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
             lookback_days=10,
             max_signals=10,
             max_trades=10,
+            db_path=db_path,
+            read_path=db_path,
         )
     finally:
         conn.close()
 
     assert payload["meta"]["run_id"]
+    assert payload["meta"]["payload_schema_version"] == 2
+    assert payload["meta"]["payload_digest"]
+    assert payload["meta"]["storage"]["db_path"] == str(db_path)
     assert payload["meta"]["tickers"] == ["AAPL"]
     assert payload["meta"]["ticker_buckets"]["AAPL"] in {"safe", "core", "speculative", "other"}
     assert payload["pnl"]["absolute"] == 5.0
@@ -256,6 +261,41 @@ def test_live_denominator_payload_merges_watcher_sidecar(tmp_path, monkeypatch) 
     assert payload["cycles_completed"] == 1
     assert payload["current"]["fresh_trade_rows"] == 1
     assert payload["run_meta"]["tickers"] == ["AAPL", "MSFT"]
+
+
+def test_quant_validation_payload_summarizes_status(tmp_path, monkeypatch) -> None:
+    quant_log = tmp_path / "quant_validation.jsonl"
+    quant_log.write_text(
+        '\n'.join(
+            [
+                '{"status":"PASS","expected_profit":1.0,"timestamp":"2026-03-07T00:00:00Z"}',
+                '{"status":"FAIL","expected_profit":-1.0,"timestamp":"2026-03-07T00:05:00Z"}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        """
+forecaster_monitoring:
+  quant_validation:
+    max_fail_fraction: 0.95
+    max_negative_expected_profit_fraction: 0.50
+    warn_fail_fraction: 0.25
+    warn_negative_expected_profit_fraction: 0.25
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "DEFAULT_QUANT_VALIDATION_LOG_PATH", quant_log)
+    monkeypatch.setattr(mod, "DEFAULT_MONITORING_CONFIG_PATH", cfg)
+
+    payload = mod._quant_validation_payload()
+
+    assert payload["status"] == "YELLOW"
+    assert payload["total"] == 2
+    assert payload["pass_count"] == 1
+    assert payload["fail_count"] == 1
+    assert payload["path"] == str(quant_log)
 
 
 # ---------------------------------------------------------------------------

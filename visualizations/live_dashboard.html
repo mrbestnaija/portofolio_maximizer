@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Portfolio Maximizer · Live Dashboard</title>
+  <title>Portfolio Maximizer - Live Dashboard</title>
   <style>
     :root {
       --bg: #0f1720;
@@ -161,6 +161,55 @@
     .diag-figure h4 { margin:0 0 6px; font-size:13px; color: var(--muted); text-transform: uppercase; letter-spacing:0.6px; }
     .diag-figure img { width:100%; border-radius:10px; border:1px solid rgba(255,255,255,0.05); background: rgba(255,255,255,0.02); }
     .diag-figure .placeholder { padding:12px; color: var(--muted); font-size:12px; }
+    .audit-toolbar { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .audit-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .audit-chip.active {
+      border-color: rgba(37,194,160,0.35);
+      background: rgba(37,194,160,0.12);
+      color: var(--accent);
+    }
+    .audit-list {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 320px;
+      overflow: auto;
+    }
+    .audit-item {
+      width: 100%;
+      text-align: left;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: var(--panel-2);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .audit-item:hover { border-color: rgba(37,194,160,0.25); background: rgba(255,255,255,0.05); }
+    .audit-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .audit-title { font-size: 13px; color: var(--text); }
+    .audit-detail, .audit-meta { font-size: 12px; color: var(--muted); }
+    .audit-meta { font-size: 11px; }
+    .audit-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .sev { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; font-size: 11px; border: 1px solid rgba(255,255,255,0.08); }
+    .sev.error { color: var(--danger); border-color: rgba(240,82,82,0.30); background: rgba(240,82,82,0.10); }
+    .sev.warn { color: var(--accent-2); border-color: rgba(246,166,33,0.30); background: rgba(246,166,33,0.10); }
+    .sev.info { color: #64d2ff; border-color: rgba(100,210,255,0.25); background: rgba(100,210,255,0.10); }
+    .audit-empty { padding: 12px; border-radius: 12px; background: var(--panel-2); color: var(--muted); border: 1px solid rgba(255,255,255,0.06); }
     .universe { margin-top: 12px; }
     .universe-list { margin-top: 10px; max-height: 260px; overflow: auto; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); }
     .universe-item { display:flex; justify-content:space-between; align-items:center; gap:10px; padding: 10px 10px; border-bottom: 1px solid rgba(255,255,255,0.06); cursor: pointer; }
@@ -222,13 +271,13 @@
   <div class="hero">
     <header>
       <div>
-        <h1>Portfolio Maximizer · Live Dashboard</h1>
-        <div class="subtitle">Time-Series primary · LLM fallback · Latency-aware</div>
+        <h1>Portfolio Maximizer - Live Dashboard</h1>
+        <div class="subtitle">Time-Series primary - LLM fallback - Latency-aware</div>
       </div>
       <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
         <div class="capsule-row">
-          <span class="chip"><span class="refresh-dot"></span> <span id="last-refresh">Waiting…</span></span>
-          <span class="pill" id="run-meta">Awaiting data…</span>
+          <span class="chip"><span class="refresh-dot"></span> <span id="last-refresh">Waiting...</span></span>
+          <span class="pill" id="run-meta">Awaiting data...</span>
           <span class="pill neutral" id="origin-meta">Origin: --</span>
           <span class="pill neutral" id="dataset-meta">Dataset: --</span>
           <span class="pill neutral" id="source-meta">Source: --</span>
@@ -245,6 +294,12 @@
       <div class="toolbar-right">
         <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <span class="subtitle" id="scope-meta"></span>
+          <select id="polling-select" aria-label="Refresh cadence">
+            <option value="5000">5s</option>
+            <option value="15000" selected>15s</option>
+            <option value="30000">30s</option>
+            <option value="60000">60s</option>
+          </select>
           <select id="tz-select" aria-label="Timezone">
             <option value="local">Local</option>
             <option value="UTC">UTC</option>
@@ -269,7 +324,7 @@
           <h3>PnL</h3>
           <div class="metric" id="pnl-abs">$0</div>
           <div class="pill neutral" id="pnl-pct">0%</div>
-          <div class="subtitle" id="pnl-trend">Awaiting data…</div>
+          <div class="subtitle" id="pnl-trend">Awaiting data...</div>
         </div>
         <div class="card">
           <h3>Win Rate</h3>
@@ -278,18 +333,18 @@
         </div>
         <div class="card">
           <h3>Latency</h3>
-          <div class="metric" id="latency">—</div>
-          <div class="pill neutral" id="llm-latency">LLM: —</div>
+          <div class="metric" id="latency">--</div>
+          <div class="pill neutral" id="llm-latency">LLM: --</div>
         </div>
         <div class="card">
           <h3>Routing</h3>
           <div class="metric" id="routing">TS / LLM</div>
-          <div class="pill neutral" id="fallback-usage">Fallback used: —</div>
+          <div class="pill neutral" id="fallback-usage">Fallback used: --</div>
         </div>
         <div class="card">
           <h3>Data Quality</h3>
-          <div class="metric" id="quality-avg">—</div>
-          <div class="pill neutral" id="quality-min">Min: —</div>
+          <div class="metric" id="quality-avg">--</div>
+          <div class="pill neutral" id="quality-min">Min: --</div>
         </div>
         <div class="card">
           <h3>Payload Status</h3>
@@ -299,17 +354,49 @@
             <span class="badge" id="payload-signals">Signals: 0</span>
             <span class="badge" id="payload-trades">Trades: 0</span>
             <span class="badge" id="payload-prices">Price series: 0</span>
+            <span class="badge" id="payload-schema">Schema: --</span>
+            <span class="badge" id="payload-quant">Quant: --</span>
           </div>
+          <div class="subtitle" id="payload-digest" style="margin-top:8px;">Digest: --</div>
+          <div class="subtitle" id="payload-storage" style="margin-top:6px;">DB: --</div>
           <div class="subtitle" id="payload-warning" style="margin-top:8px; color: var(--danger); display:none;">Missing price_series/trade_events; add them to dashboard_data.json.</div>
         </div>
         <div class="card">
-          <h3>Exit Readiness</h3>
-          <div class="subtitle">Cross-session persistence + exit logic are required to move from paper to real trading behavior.</div>
-          <div class="mini" style="margin-top:8px;">• Positions persist across sessions (resume closes positions over multiple runs).</div>
-          <div class="mini">• Exit checks run each cycle (stop/target/time) — see `[EXIT_CHECK]` logs.</div>
-          <div class="mini">• Fresh market data is required to trigger closes; rerun with new bars.</div>
-          <div class="mini">• Proof mode (`--proof-mode`) forces round trips for profitability validation.</div>
-          <div class="mini">• Reference: `Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md`</div>
+          <h3>Audit Console</h3>
+          <div class="subtitle">Interactive evidence triage from payload provenance, robustness sidecars, and live denominator watcher.</div>
+          <div class="audit-toolbar" id="audit-focus-bar" role="tablist" aria-label="Audit focus">
+            <button class="audit-chip active" id="audit-focus-all" type="button" data-focus="all">All</button>
+            <button class="audit-chip" id="audit-focus-blockers" type="button" data-focus="blockers">Blockers</button>
+            <button class="audit-chip" id="audit-focus-freshness" type="button" data-focus="freshness">Freshness</button>
+            <button class="audit-chip" id="audit-focus-linkage" type="button" data-focus="linkage">Linkage</button>
+            <button class="audit-chip" id="audit-focus-coverage" type="button" data-focus="coverage">Coverage</button>
+          </div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Open Issues</div>
+              <div class="value" id="audit-open-issues">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Schema</div>
+              <div class="value" id="audit-schema-version">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Cache</div>
+              <div class="value" id="audit-cache-state">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Diversity</div>
+              <div class="value" id="audit-diversity">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Denominator</div>
+              <div class="value" id="audit-denominator">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="audit-context" style="margin-top:8px;">Context: --</div>
+          <div class="audit-list" id="audit-issues">
+            <div class="audit-empty">No audit evidence loaded.</div>
+          </div>
         </div>
         <div class="card">
           <h3>Model Diagnostics</h3>
@@ -426,7 +513,7 @@
 
         <div class="universe">
           <div class="row-controls">
-            <input id="ticker-discovery" type="text" placeholder="Discover tickers (e.g., AAPL, SAFE, CORE, BUY…)" aria-label="Ticker discovery" />
+            <input id="ticker-discovery" type="text" placeholder="Discover tickers (e.g., AAPL, SAFE, CORE, BUY...)" aria-label="Ticker discovery" />
             <label class="subtitle" style="display:flex; gap:6px; align-items:center;">
               <input type="checkbox" id="only-active" />
               Active
@@ -473,13 +560,13 @@
 
         <div class="subtitle" style="margin-top:10px;">
           Legend:
-          <span style="color:#9fb6cc;">— Close</span> ·
-          <span style="color:#4ea1ff;">■ Entry (Open)</span> ·
-          <span style="color:#30c48d;">■ Exit-Profit</span> ·
-          <span style="color:#f05252;">■ Exit-Loss</span> ·
-          <span style="color:#f6a621;">● Active</span> ·
-          <span style="color:#30c48d;">● Closed-Profit</span> ·
-          <span style="color:#f05252;">● Closed-Loss</span>
+          <span style="color:#9fb6cc;">Close</span> |
+          <span style="color:#4ea1ff;">Entry (Open)</span> |
+          <span style="color:#30c48d;">Exit-Profit</span> |
+          <span style="color:#f05252;">Exit-Loss</span> |
+          <span style="color:#f6a621;">Active</span> |
+          <span style="color:#30c48d;">Closed-Profit</span> |
+          <span style="color:#f05252;">Closed-Loss</span>
         </div>
       </div>
 
@@ -487,7 +574,7 @@
         <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:12px; flex-wrap:wrap;">
           <div>
             <h3 style="margin-bottom:6px;">Ensemble Diagnostics</h3>
-            <div class="subtitle">Error decomposition · confidence calibration · weight optimization</div>
+            <div class="subtitle">Error decomposition  |  confidence calibration  |  weight optimization</div>
           </div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
             <div style="display:flex; flex-direction:column; gap:6px;">
@@ -540,7 +627,7 @@
     <div class="card scroll-card" style="margin-top:0;">
       <h3>Recent Signals</h3>
       <div class="row-controls" style="margin-top:10px;">
-        <input id="signals-filter" type="text" placeholder="Filter by ticker/source/action…" aria-label="Filter signals" />
+        <input id="signals-filter" type="text" placeholder="Filter by ticker/source/action..." aria-label="Filter signals" />
         <button id="btn-clear-filter" type="button">Clear</button>
       </div>
       <div class="scroll-table" style="margin-top:10px;">
@@ -549,7 +636,7 @@
             <tr><th>Ticker</th><th>Action</th><th>Conf.</th><th>Exp. Return</th><th>Source</th><th>Quality</th><th>When</th></tr>
           </thead>
           <tbody id="signals-body">
-            <tr><td class="muted" colspan="7">Waiting for data…</td></tr>
+            <tr><td class="muted" colspan="7">Waiting for data...</td></tr>
           </tbody>
         </table>
       </div>
@@ -563,6 +650,9 @@
     const DATA_SOURCE = DEFAULT_DATA_SOURCE;
     const DATA_CACHE_TTL_MS = 4000;
     const DATA_STALE_TTL_MS = 60000;
+    const DEFAULT_REFRESH_MS = 15000;
+    const DASHBOARD_SCHEMA_VERSION = 2;
+    const REQUIRED_PAYLOAD_KEYS = ['meta', 'pnl', 'signals', 'trade_events', 'price_series', 'robustness', 'live_denominator', 'quant_validation'];
     const loadState = {
       lastFetchAt: 0,
       lastSuccessAt: 0,
@@ -572,6 +662,7 @@
     let lastData = null;
     let activeController = null;
     let activeRequestId = 0;
+    const auditConsoleState = { focus: 'all' };
 
     function cacheBust(url) {
       const joiner = url.includes('?') ? '&' : '?';
@@ -664,6 +755,35 @@
       const h = Math.round(m / 60);
       return `${h}h`;
     }
+    function getRefreshIntervalMs() {
+      const raw = Number(localStorage.getItem('dashboardRefreshMs'));
+      return Number.isFinite(raw) && raw >= 5000 ? raw : DEFAULT_REFRESH_MS;
+    }
+    function setRefreshIntervalMs(ms) {
+      const value = Number(ms);
+      if (!Number.isFinite(value) || value < 5000) return;
+      localStorage.setItem('dashboardRefreshMs', String(value));
+    }
+    function validatePayloadShape(data) {
+      const warnings = [];
+      if (!data || typeof data !== 'object') {
+        return { valid: false, warnings: ['payload_missing'] };
+      }
+      const meta = data.meta || {};
+      const schemaVersion = Number(meta.payload_schema_version);
+      if (!Number.isFinite(schemaVersion) || schemaVersion !== DASHBOARD_SCHEMA_VERSION) {
+        warnings.push(`schema_mismatch:${Number.isFinite(schemaVersion) ? schemaVersion : 'missing'}`);
+      }
+      REQUIRED_PAYLOAD_KEYS.forEach(key => {
+        if (!(key in data)) warnings.push(`missing:${key}`);
+      });
+      return {
+        valid: warnings.length === 0,
+        warnings,
+        schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : null,
+        digest: meta.payload_digest || null,
+      };
+    }
     function setPillState(el, val) {
       if (!el) return;
       el.classList.remove('success', 'danger', 'neutral');
@@ -687,7 +807,7 @@
 
     function gradeFromScore(score) {
       const s = Number(score);
-      if (!Number.isFinite(s)) return { label: '—', cls: 'grade-d' };
+      if (!Number.isFinite(s)) return { label: '--', cls: 'grade-d' };
       if (s >= 0.85) return { label: 'A', cls: 'grade-a' };
       if (s >= 0.70) return { label: 'B', cls: 'grade-b' };
       if (s >= 0.55) return { label: 'C', cls: 'grade-c' };
@@ -906,8 +1026,8 @@
               <span class="tag ${sentiment.cls}">${sentiment.label}</span>
             </div>
             <div class="mini">
-              ${r.sig ? `${r.sig.action} · ${(Number(r.sig.confidence) * 100).toFixed(0)}% · ${(Number(r.sig.expected_return) * 100).toFixed(2)}%` : 'No recent signal'}
-              ${mv ? ` · W ${(wPct*100).toFixed(1)}%` : ''}
+              ${r.sig ? `${r.sig.action}  |  ${(Number(r.sig.confidence) * 100).toFixed(0)}%  |  ${(Number(r.sig.expected_return) * 100).toFixed(2)}%` : 'No recent signal'}
+              ${mv ? `  |  W ${(wPct*100).toFixed(1)}%` : ''}
             </div>
           </div>
           <div class="universe-right">
@@ -996,7 +1116,7 @@
           }
         }
         const posLabel = (pos && pos.shares)
-          ? `ACTIVE · ${pos.shares} sh @ ${pos.entry_price ? formatUsd(Number(pos.entry_price)) : 'n/a'}`
+          ? `ACTIVE  |  ${pos.shares} sh @ ${pos.entry_price ? formatUsd(Number(pos.entry_price)) : 'n/a'}`
           : 'FLAT';
         setText('kpi-position', posLabel);
 
@@ -1064,7 +1184,7 @@
       if (!tickers.length) {
         const opt = document.createElement('option');
         opt.value = '';
-        opt.textContent = '—';
+        opt.textContent = '--';
         select.appendChild(opt);
         return;
       }
@@ -1074,7 +1194,7 @@
         const sigTxt = sig ? `${String(sig.action || '').toUpperCase()} ${(Number(sig.confidence) * 100).toFixed(0)}%` : 'no-signal';
         const opt = document.createElement('option');
         opt.value = t;
-        opt.textContent = `${t} · ${bucket} · ${sigTxt}`;
+        opt.textContent = `${t}  |  ${bucket}  |  ${sigTxt}`;
         select.appendChild(opt);
       });
       if (!select.value) select.value = tickers[0];
@@ -1203,7 +1323,7 @@
         const mtxt = models.map(m => {
           const params = typeof m.params === 'object' ? JSON.stringify(m.params) : String(m.params || '');
           return `${m.model_type || 'MODEL'}: ${params}`;
-        }).join(' · ');
+        }).join('  |  ');
         parts.push(`${t}: ${mtxt}`);
       });
       el.textContent = parts.join(' | ');
@@ -1222,8 +1342,304 @@
       }
       checks.forEach(msg => {
         const span = document.createElement('span');
-        span.textContent = `⚠ ${msg}`;
+        span.textContent = `WARN: ${msg}`;
         el.appendChild(span);
+      });
+    }
+
+    function severityRank(level) {
+      const normalized = String(level || 'INFO').toUpperCase();
+      if (normalized === 'ERROR') return 3;
+      if (normalized === 'WARN') return 2;
+      return 1;
+    }
+
+    function auditIssue(title, detail, severity, focus, options = {}) {
+      return {
+        title,
+        detail,
+        severity: String(severity || 'INFO').toUpperCase(),
+        focus: String(focus || 'coverage'),
+        ticker: options.ticker || '',
+        meta: options.meta || '',
+        targetId: options.targetId || '',
+      };
+    }
+
+    function focusTickerAcrossAuditViews(ticker) {
+      const normalized = String(ticker || '').trim().toUpperCase();
+      if (!normalized) return;
+      const tradeSelect = document.getElementById('trade-ticker');
+      if (tradeSelect) {
+        const match = Array.from(tradeSelect.options || []).find(opt => String(opt.value || '').toUpperCase() === normalized);
+        if (match) {
+          tradeSelect.value = match.value;
+          renderTradesForTicker(window.__dashData || {}, match.value);
+        }
+      }
+      const diagSelect = document.getElementById('diag-ticker');
+      if (diagSelect) {
+        const match = Array.from(diagSelect.options || []).find(opt => String(opt.value || '').toUpperCase() === normalized);
+        if (match) {
+          diagSelect.value = match.value;
+          diagState.selectedTicker = match.value;
+          populateDiagTickerSelect(window.__dashData || {}, true);
+        }
+      }
+    }
+
+    function buildAuditIssues(data) {
+      const issues = [];
+      if (!data || typeof data !== 'object') {
+        issues.push(auditIssue('Dashboard payload missing', 'No dashboard payload has been loaded yet.', 'ERROR', 'blockers', { targetId: 'payload-warning' }));
+        return issues;
+      }
+
+      const payloadCheck = validatePayloadShape(data);
+      const meta = data.meta || {};
+      const storage = meta.storage || {};
+      const provenance = meta.provenance || {};
+      const robustness = data.robustness || {};
+      const live = data.live_denominator || {};
+      const quant = data.quant_validation || {};
+      const current = live.current || {};
+      const warnings = Array.isArray(robustness.warnings) ? robustness.warnings : [];
+      const weakTickers = Array.isArray(robustness.weak_tickers) ? robustness.weak_tickers : [];
+      const quantStatus = String(quant.status || 'UNKNOWN').toUpperCase();
+      const runMeta = live.run_meta || {};
+      const origin = String(meta.data_origin || provenance.origin || '--');
+      const cacheStatus = robustness.cache_status || {};
+      const windowDiversity = robustness.window_diversity || {};
+      const windowCounts = robustness.window_counts || {};
+      const cyclesCompleted = Number(live.cycles_completed || 0);
+      const linkageIncluded = Number(current.fresh_linkage_included || 0);
+      const matched = Number(current.fresh_production_valid_matched || 0);
+      const nonTrade = Number(current.fresh_trade_diagnostics?.non_trade_context_rows || 0);
+      const invalid = Number(current.fresh_trade_exclusions?.invalid_context || 0);
+      const missingExec = Number(current.fresh_trade_exclusions?.missing_execution_metadata || 0);
+
+      if (!payloadCheck.valid) {
+        issues.push(auditIssue(
+          'Payload schema mismatch',
+          `Schema validation warnings: ${payloadCheck.warnings.join(', ')}`,
+          'ERROR',
+          'blockers',
+          { meta: `digest=${payloadCheck.digest || '--'}`, targetId: 'payload-warning' }
+        ));
+      }
+
+      if (origin && origin.toLowerCase() === 'synthetic') {
+        issues.push(auditIssue(
+          'Dashboard payload is synthetic-origin',
+          'Current payload provenance is synthetic, so audit conclusions are not production-valid.',
+          'WARN',
+          'blockers',
+          { meta: `dataset=${meta.dataset_id || '--'}`, targetId: 'origin-meta' }
+        ));
+      }
+
+      if (['MISSING', 'STALE', 'WARN', 'ERROR', 'FAIL'].includes(String(robustness.overall_status || robustness.status || '').toUpperCase())) {
+        issues.push(auditIssue(
+          'Robustness sidecars need attention',
+          `Robustness status is ${(robustness.overall_status || robustness.status || 'UNKNOWN').toUpperCase()} with warnings: ${warnings.slice(0, 4).join(', ') || 'none'}.`,
+          'WARN',
+          'freshness',
+          { meta: `freshness=${robustness.freshness_status || '--'}`, targetId: 'robustness-status' }
+        ));
+      }
+
+      const schemaVersion = robustness.telemetry_contract?.schema_version;
+      if (!Number.isFinite(Number(schemaVersion)) || Number(schemaVersion) < 2) {
+        issues.push(auditIssue(
+          'Telemetry contract schema is missing or legacy',
+          'Forecast-audit telemetry should expose a current schema version before the dashboard treats it as healthy.',
+          'WARN',
+          'freshness',
+          { meta: `schema=${schemaVersion [ ]'--'}`, targetId: 'payload-schema' }
+        ));
+      }
+
+      if (cacheStatus && cacheStatus.write_ok === false) {
+        issues.push(auditIssue(
+          'Forecast audit cache writes are failing',
+          `Cache write failure is surfaced in telemetry: ${(cacheStatus.errors || []).join(', ') || 'unknown error'}.`,
+          'WARN',
+          'freshness',
+          { targetId: 'audit-cache-state' }
+        ));
+      }
+
+      if (quantStatus && !['GREEN', 'UNKNOWN', 'MISSING'].includes(quantStatus)) {
+        issues.push(auditIssue(
+          'Quant validation is outside green status',
+          `Quant validation status is ${quantStatus}; PASS=${quant.pass_count || 0}, FAIL=${quant.fail_count || 0}.`,
+          quantStatus === 'RED' ? 'ERROR' : 'WARN',
+          'coverage',
+          { meta: `fail_fraction=${Number.isFinite(Number(quant.fail_fraction)) ? (Number(quant.fail_fraction) * 100).toFixed(1) + '%' : '--'}`, targetId: 'payload-quant' }
+        ));
+      }
+
+      if (nonTrade > 0) {
+        issues.push(auditIssue(
+          'Fresh watcher diagnostics still see non-TRADE rows',
+          `${nonTrade} non-TRADE rows were kept out of the fresh TRADE denominator.`,
+          'WARN',
+          'linkage',
+          { targetId: 'live-denominator-cohort' }
+        ));
+      }
+      if (invalid > 0 || missingExec > 0) {
+        issues.push(auditIssue(
+          'Fresh TRADE cohort still has invalid rows',
+          `invalid_context=${invalid}, missing_execution_metadata=${missingExec}.`,
+          'WARN',
+          'linkage',
+          { targetId: 'live-denominator-context' }
+        ));
+      }
+      if (linkageIncluded <= 1) {
+        issues.push(auditIssue(
+          'Fresh linkage denominator is still thin',
+          `fresh_linkage_included=${linkageIncluded}; keep accumulating clean TRADE rows before interpreting readiness.`,
+          'WARN',
+          'linkage',
+          { meta: `matched=${matched}`, targetId: 'live-denominator-linkage' }
+        ));
+      }
+      if (matched <= 0) {
+        issues.push(auditIssue(
+          'No fresh production-valid matched row yet',
+          'Minimal viable linkage has not been reached because matched fresh rows are still zero.',
+          'WARN',
+          'linkage',
+          { targetId: 'live-denominator-matched' }
+        ));
+      }
+      if (cyclesCompleted === 0 && runMeta.weekdays_only) {
+        issues.push(auditIssue(
+          'Watcher is waiting for the next trading day',
+          'No live watcher cycles have completed yet; weekend waiting is expected under weekday-only mode.',
+          'INFO',
+          'linkage',
+          { meta: `cadence=${Math.round(Number(runMeta.sleep_seconds || 0) / 3600) || '--'}h`, targetId: 'live-denominator-status' }
+        ));
+      }
+
+      weakTickers.slice(0, 3).forEach(ticker => {
+        issues.push(auditIssue(
+          `Weak ticker flagged: ${ticker}`,
+          'Eligibility sidecar currently marks this ticker as weak; click to sync charts and diagnostics.',
+          'INFO',
+          'coverage',
+          { ticker, targetId: 'robustness-tickers' }
+        ));
+      });
+
+      const regimeCount = Number(windowDiversity.regime_count || 0);
+      const healthyTickerCount = Number(windowDiversity.healthy_ticker_count || 0);
+      const tradingDays = Number(windowDiversity.distinct_trading_days || 0);
+      if (regimeCount <= 1 || healthyTickerCount <= 1 || tradingDays <= 5) {
+        issues.push(auditIssue(
+          'Forecast audit diversity is still thin',
+          `regimes=${regimeCount}, healthy_tickers=${healthyTickerCount}, trading_days=${tradingDays}.`,
+          'INFO',
+          'coverage',
+          { meta: `usable_rmse=${windowCounts.n_rmse_windows_usable [ ]'--'}`, targetId: 'audit-diversity' }
+        ));
+      }
+
+      if (storage.read_path && storage.mirror_path && storage.read_path === storage.mirror_path) {
+        issues.push(auditIssue(
+          'Dashboard is reading from the mirror path',
+          'The bridge is currently using the mirror copy instead of the canonical DB path.',
+          'WARN',
+          'freshness',
+          { meta: storage.read_path, targetId: 'payload-storage' }
+        ));
+      }
+
+      return issues.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+    }
+
+    function renderAuditConsole(data) {
+      const listEl = document.getElementById('audit-issues');
+      const contextEl = document.getElementById('audit-context');
+      const openIssuesEl = document.getElementById('audit-open-issues');
+      const schemaEl = document.getElementById('audit-schema-version');
+      const cacheEl = document.getElementById('audit-cache-state');
+      const diversityEl = document.getElementById('audit-diversity');
+      const denominatorEl = document.getElementById('audit-denominator');
+      if (!listEl || !contextEl || !openIssuesEl || !schemaEl || !cacheEl || !diversityEl || !denominatorEl) return;
+
+      const issues = buildAuditIssues(data);
+      const focus = auditConsoleState.focus || 'all';
+      const filtered = issues.filter(issue => {
+        if (focus === 'all') return true;
+        if (focus === 'blockers') return severityRank(issue.severity) >= 2;
+        return issue.focus === focus;
+      });
+      const meta = data?.meta || {};
+      const robustness = data?.robustness || {};
+      const live = data?.live_denominator || {};
+      const current = live.current || {};
+      const cacheStatus = robustness.cache_status || {};
+      const diversity = robustness.window_diversity || {};
+      const payloadCheck = validatePayloadShape(data);
+      const openIssues = issues.filter(issue => severityRank(issue.severity) >= 2).length;
+
+      openIssuesEl.textContent = String(openIssues);
+      schemaEl.textContent = `v${payloadCheck.schemaVersion || '--'}`;
+      cacheEl.textContent = cacheStatus.write_ok === false ? 'WARN' : 'OK';
+      diversityEl.textContent = `${Number(diversity.regime_count || 0)} / ${Number(diversity.healthy_ticker_count || 0)} / ${Number(diversity.distinct_trading_days || 0)}`;
+      denominatorEl.textContent = `${Number(current.fresh_linkage_included || 0)} incl / ${Number(current.fresh_production_valid_matched || 0)} matched`;
+      contextEl.textContent = `Context: focus=${focus}  |  digest=${meta.payload_digest || '--'}  |  read_path=${meta.storage?.read_path || '--'}`;
+
+      ['all', 'blockers', 'freshness', 'linkage', 'coverage'].forEach(name => {
+        const btn = document.getElementById(`audit-focus-${name}`);
+        if (!btn) return;
+        const count = issues.filter(issue => {
+          if (name === 'all') return true;
+          if (name === 'blockers') return severityRank(issue.severity) >= 2;
+          return issue.focus === name;
+        }).length;
+        btn.classList.toggle('active', focus === name);
+        btn.textContent = `${btn.dataset.focus === 'all' ? 'All' : btn.dataset.focus.charAt(0).toUpperCase() + btn.dataset.focus.slice(1)} ${count}`;
+      });
+
+      listEl.innerHTML = '';
+      if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'audit-empty';
+        empty.textContent = 'No audit issues in this focus filter.';
+        listEl.appendChild(empty);
+        return;
+      }
+
+      filtered.forEach(issue => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'audit-item';
+        button.innerHTML = `
+          <div class="audit-main">
+            <div class="audit-title">${issue.title}</div>
+            <div class="audit-detail">${issue.detail}</div>
+            <div class="audit-meta">${issue.meta || `focus=${issue.focus}`}</div>
+          </div>
+          <div class="audit-badges">
+            <span class="sev ${issue.severity.toLowerCase()}">${issue.severity}</span>
+            <span class="sev info">${issue.focus.toUpperCase()}</span>
+          </div>
+        `;
+        button.addEventListener('click', () => {
+          if (issue.ticker) {
+            focusTickerAcrossAuditViews(issue.ticker);
+          }
+          if (issue.targetId) {
+            const target = document.getElementById(issue.targetId);
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        });
+        listEl.appendChild(button);
       });
     }
 
@@ -1360,7 +1776,7 @@
       if (warnings.length) {
         parts.push(`warnings=${warnings.join(',')}`);
       }
-      contextEl.textContent = `Context: ${parts.join(' · ')}`;
+      contextEl.textContent = `Context: ${parts.join('  |  ')}`;
     }
 
     function populateDiagTickerSelect(data, forceRefresh = false) {
@@ -1377,7 +1793,7 @@
         if (tickersChanged) {
           const opt = document.createElement('option');
           opt.value = '';
-          opt.textContent = '—';
+          opt.textContent = '--';
           select.appendChild(opt);
         }
         setDiagImage('diag-img-error', 'diag-msg-error', '', '');
@@ -1432,12 +1848,12 @@
         setText('dataset-meta', 'Dataset: --');
         setText('source-meta', 'Source: --');
         setText('strategy-meta', '');
-        setText('last-refresh', 'Waiting…');
+        setText('last-refresh', 'Waiting...');
         setText('pnl-abs', '$0.00');
         const pnlPctEl = document.getElementById('pnl-pct');
         pnlPctEl.textContent = '0.00%';
         pnlPctEl.className = 'pill neutral';
-        setText('pnl-trend', 'Awaiting data…');
+        setText('pnl-trend', 'Awaiting data...');
         setText('win-rate', '0.00%');
         setText('trade-count', '0 trades');
         setText('latency', '--');
@@ -1450,17 +1866,26 @@
         setText('payload-signals', 'Signals: 0');
         setText('payload-trades', 'Trades: 0');
         setText('payload-prices', 'Price series: 0');
+        setText('payload-schema', 'Schema: --');
+        setText('payload-quant', 'Quant: --');
+        setText('payload-digest', 'Digest: --');
+        setText('payload-storage', 'DB: --');
         setText('diag-pf', '--'); setText('diag-win', '--'); setText('diag-trades', '--');
         setText('diag-sharpe', '--'); setText('diag-dd', '--'); setText('diag-avg', '--'); setText('diag-largest', '--');
         setText('kpi-last-close', '--');
         setText('kpi-position', '--');
         setText('kpi-last-pnl', '--');
-        document.getElementById('payload-warning').style.display = 'block';
+        const payloadWarningEl = document.getElementById('payload-warning');
+        if (payloadWarningEl) {
+          payloadWarningEl.textContent = 'Missing dashboard payload; waiting for dashboard_data.json.';
+          payloadWarningEl.style.display = 'block';
+        }
         renderSignals([]);
         renderEquity([], []);
         populateTradeTickerSelect({ price_series: {}, meta: { tickers: [] } });
         renderRobustness(null);
         renderLiveDenominator(null);
+        renderAuditConsole(null);
         return;
       }
 
@@ -1468,7 +1893,7 @@
       const runId = data.meta?.run_id || 'n/a';
       const runChanged = runId !== diagState.lastRunId;
       diagState.lastRunId = runId;
-      const scope = (data.meta?.scope && Array.isArray(data.meta.scope)) ? ` · Scope: ${data.meta.scope.join(', ')}` : '';
+      const scope = (data.meta?.scope && Array.isArray(data.meta.scope)) ? `  |  Scope: ${data.meta.scope.join(', ')}` : '';
       setText('run-meta', `Run: ${runId}${scope}`);
       const payloadLabel = data.meta?.dashboard_version ? `Payload: ${data.meta.dashboard_version}` : '';
       setText('scope-meta', payloadLabel);
@@ -1476,7 +1901,7 @@
       const ageMs = Number.isFinite(dataTs) ? (Date.now() - dataTs) : (loadState.lastSuccessAt ? (Date.now() - loadState.lastSuccessAt) : null);
       const ageLabel = Number.isFinite(ageMs) ? ` (${formatAge(ageMs)} old)` : '';
       const lastRefreshTs = data.meta?.ts ? formatTimestamp(data.meta.ts) : (loadState.lastSuccessAt ? formatTimestamp(loadState.lastSuccessAt) : '');
-      setText('last-refresh', data.meta?.ts ? `Updated ${lastRefreshTs}${ageLabel}` : (loadState.lastSuccessAt ? `Fetched ${lastRefreshTs}${ageLabel}` : 'Awaiting data…'));
+      setText('last-refresh', data.meta?.ts ? `Updated ${lastRefreshTs}${ageLabel}` : (loadState.lastSuccessAt ? `Fetched ${lastRefreshTs}${ageLabel}` : 'Awaiting data...'));
 
       const meta = data.meta || {};
       const prov = meta.provenance || data.provenance || {};
@@ -1494,7 +1919,7 @@
       const keys = params ? Object.keys(params) : [];
       const sample = keys.slice(0, 3).map(k => `${k}=${params[k]}`).join(', ');
       const stratText = strat && strat.regime
-        ? `Strategy regime: ${strat.regime} (score=${(strat.score ?? 0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
+        ? `Strategy regime: ${strat.regime} (score=${(strat.score [ ]0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
         : '';
       setText('strategy-meta', stratText);
 
@@ -1514,13 +1939,13 @@
       const perf = data.performance || {};
       const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(2) : '--';
       const fmtPct = (v) => Number.isFinite(v) ? `${(v * 100).toFixed(2)}%` : '--';
-      setText('diag-pf', fmtNum(perf.profit_factor ?? data.profit_factor));
-      setText('diag-win', fmtPct((perf.win_rate ?? data.win_rate) || 0));
-      setText('diag-trades', String(perf.trade_count ?? data.trade_count ?? 0));
-      setText('diag-sharpe', `${fmtNum(perf.sharpe ?? 0)} / ${fmtNum(perf.sortino ?? 0)}`);
-      setText('diag-dd', fmtPct(perf.max_drawdown ?? 0));
-      setText('diag-avg', `${fmtNum(perf.avg_win ?? 0)} / ${fmtNum(perf.avg_loss ?? 0)}`);
-      setText('diag-largest', `${fmtNum(perf.largest_win ?? 0)} / ${fmtNum(perf.largest_loss ?? 0)}`);
+      setText('diag-pf', fmtNum(perf.profit_factor [ ]data.profit_factor));
+      setText('diag-win', fmtPct((perf.win_rate [ ]data.win_rate) || 0));
+      setText('diag-trades', String(perf.trade_count [ ]data.trade_count [ ]0));
+      setText('diag-sharpe', `${fmtNum(perf.sharpe [ ]0)} / ${fmtNum(perf.sortino [ ]0)}`);
+      setText('diag-dd', fmtPct(perf.max_drawdown [ ]0));
+      setText('diag-avg', `${fmtNum(perf.avg_win [ ]0)} / ${fmtNum(perf.avg_loss [ ]0)}`);
+      setText('diag-largest', `${fmtNum(perf.largest_win [ ]0)} / ${fmtNum(perf.largest_loss [ ]0)}`);
 
       setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '--');
       const llmEl = document.getElementById('llm-latency');
@@ -1538,17 +1963,27 @@
       const signalsCount = (data.signals || []).length;
       const tradesCount = (data.trade_events || []).length;
       const priceSeriesCount = Object.keys(data.price_series || {}).length;
+      const payloadValidation = validatePayloadShape(data);
+      const quantStatus = String(data.quant_validation?.status || 'UNKNOWN').toUpperCase();
+      const storage = data.meta?.storage || {};
       setText('payload-tickers', `Tickers: ${tickersCount}`);
       setText('payload-signals', `Signals: ${signalsCount}`);
       setText('payload-trades', `Trades: ${tradesCount}`);
       setText('payload-prices', `Price series: ${priceSeriesCount}`);
+      setText('payload-schema', `Schema: v${payloadValidation.schemaVersion || '--'}`);
+      setText('payload-quant', `Quant: ${quantStatus}`);
+      setText('payload-digest', `Digest: ${payloadValidation.digest || '--'}`);
+      setText(
+        'payload-storage',
+        `DB: ${storage.read_path || '--'}${storage.using_mirror ? ' (mirror)' : ''}`
+      );
       const healthEl = document.getElementById('data-health');
       const healthScore = (tradesCount > 0 ? 1 : 0) + (priceSeriesCount > 0 ? 1 : 0) + (signalsCount > 0 ? 1 : 0);
       const stale = Number.isFinite(ageMs) && ageMs > DATA_STALE_TTL_MS;
       if (healthEl) {
         let healthText = '';
         let healthVal = 0;
-        if (loadState.lastError) {
+        if (loadState.lastError || !payloadValidation.valid) {
           healthText = `Data: Error${ageLabel}`;
           healthVal = -1;
         } else if (stale) {
@@ -1567,8 +2002,18 @@
         healthEl.textContent = healthText;
         setPillState(healthEl, healthVal);
       }
-      const warnNeeded = tradesCount === 0 || priceSeriesCount === 0;
-      document.getElementById('payload-warning').style.display = warnNeeded ? 'block' : 'none';
+      const warnMessages = [];
+      if (!payloadValidation.valid) {
+        warnMessages.push(`Schema validation: ${payloadValidation.warnings.join(', ')}`);
+      }
+      if (tradesCount === 0 || priceSeriesCount === 0) {
+        warnMessages.push('Missing price_series/trade_events; add them to dashboard_data.json.');
+      }
+      const payloadWarningEl = document.getElementById('payload-warning');
+      if (payloadWarningEl) {
+        payloadWarningEl.textContent = warnMessages.join(' | ');
+        payloadWarningEl.style.display = warnMessages.length ? 'block' : 'none';
+      }
 
       const derivedRealized = (data.equity_realized && data.equity_realized.length)
         ? data.equity_realized
@@ -1586,6 +2031,7 @@
       renderChecks(data);
       renderRobustness(data);
       renderLiveDenominator(data);
+      renderAuditConsole(data);
     }
 
     let refreshBusy = false;
@@ -1633,6 +2079,7 @@
       const wnd = document.getElementById('trade-window');
       const diagTtl = document.getElementById('diag-ttl');
       const tzSelect = document.getElementById('tz-select');
+      const pollingSelect = document.getElementById('polling-select');
 
       if (btnRefresh) btnRefresh.addEventListener('click', () => refreshDashboard({ force: true }));
       if (filter) filter.addEventListener('input', () => renderSignals((window.__dashData || {}).signals || []));
@@ -1678,20 +2125,35 @@
       if (tabPrice) tabPrice.addEventListener('click', () => setActiveTab('price'));
       if (tabPnl) tabPnl.addEventListener('click', () => setActiveTab('pnl'));
       if (tabEquity) tabEquity.addEventListener('click', () => setActiveTab('equity'));
+      document.querySelectorAll('#audit-focus-bar .audit-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+          auditConsoleState.focus = btn.dataset.focus || 'all';
+          renderAuditConsole(window.__dashData || null);
+        });
+      });
 
       let paused = false;
       let autoPaused = false;
       let intervalId = null;
-      const REFRESH_MS = 5000;
       const start = () => {
         if (intervalId) return;
-        intervalId = setInterval(refreshDashboard, REFRESH_MS);
+        intervalId = setInterval(refreshDashboard, getRefreshIntervalMs());
       };
       const stop = () => {
         if (!intervalId) return;
         clearInterval(intervalId);
         intervalId = null;
       };
+      if (pollingSelect) {
+        pollingSelect.value = String(getRefreshIntervalMs());
+        pollingSelect.addEventListener('change', () => {
+          setRefreshIntervalMs(pollingSelect.value);
+          if (!paused && !document.hidden) {
+            stop();
+            start();
+          }
+        });
+      }
       if (btnPause) {
         btnPause.addEventListener('click', () => {
           paused = !paused;
@@ -1725,3 +2187,4 @@
   </script>
 </body>
 </html>
+

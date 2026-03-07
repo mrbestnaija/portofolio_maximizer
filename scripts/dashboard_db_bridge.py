@@ -14,6 +14,7 @@ persisting writes into a separate audit DB to avoid contention.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -32,7 +33,20 @@ DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
 DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
+DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
+DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
+DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
+DASHBOARD_REQUIRED_TOP_LEVEL_KEYS = (
+    "meta",
+    "pnl",
+    "signals",
+    "trade_events",
+    "price_series",
+    "robustness",
+    "live_denominator",
+    "quant_validation",
+)
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -100,6 +114,15 @@ def _connect_ro_with_fallback(db_path: Path) -> sqlite3.Connection:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _payload_digest(payload: Dict[str, Any]) -> str:
+    cloned = json.loads(json.dumps(payload, sort_keys=True))
+    meta = cloned.get("meta")
+    if isinstance(meta, dict):
+        meta.pop("payload_digest", None)
+    raw = json.dumps(cloned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -879,6 +902,97 @@ def _canonical_metrics_pnl_integrity(db_path: str) -> Dict[str, Any]:
         return {}
 
 
+def _quant_validation_payload() -> Dict[str, Any]:
+    path = DEFAULT_QUANT_VALIDATION_LOG_PATH
+    if not path.exists():
+        return {
+            "status": "MISSING",
+            "path": str(path),
+            "warnings": ["quant_validation_missing"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+
+    try:
+        from scripts.check_quant_validation_health import (
+            _load_entries,
+            _load_monitoring_cfg,
+            _summarize_global,
+        )
+
+        entries = _load_entries(path)
+        monitoring_cfg = _load_monitoring_cfg(DEFAULT_MONITORING_CONFIG_PATH)
+        qv_cfg = monitoring_cfg.get("quant_validation") or {}
+        max_fail_frac = float(qv_cfg.get("max_fail_fraction", 0.95))
+        max_neg_exp_frac = float(qv_cfg.get("max_negative_expected_profit_fraction", 0.50))
+        warn_fail_frac = float(qv_cfg.get("warn_fail_fraction", max_fail_frac))
+        warn_neg_exp_frac = float(
+            qv_cfg.get("warn_negative_expected_profit_fraction", max_neg_exp_frac)
+        )
+
+        summary = _summarize_global(entries)
+        violations: List[str] = []
+        if summary.fail_fraction > max_fail_frac:
+            violations.append("FAIL_fraction_exceeds_max")
+        if summary.negative_expected_profit_fraction > max_neg_exp_frac:
+            violations.append("negative_expected_profit_fraction_exceeds_max")
+
+        if violations:
+            status = "RED"
+        elif (
+            summary.fail_fraction > warn_fail_frac
+            or summary.negative_expected_profit_fraction > warn_neg_exp_frac
+        ):
+            status = "YELLOW"
+        else:
+            status = "GREEN"
+
+        age = _sidecar_age_minutes(path, {})
+        return {
+            "status": status,
+            "path": str(path),
+            "warnings": violations,
+            "total": int(summary.total),
+            "pass_count": int(summary.pass_count),
+            "fail_count": int(summary.fail_count),
+            "fail_fraction": float(summary.fail_fraction),
+            "negative_expected_profit_count": int(summary.negative_expected_profit_count),
+            "negative_expected_profit_fraction": float(summary.negative_expected_profit_fraction),
+            "age_minutes": round(age, 2) if age is not None else None,
+        }
+    except SystemExit as exc:
+        return {
+            "status": "ERROR",
+            "path": str(path),
+            "warnings": [f"quant_validation_error:{exc}"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "path": str(path),
+            "warnings": [f"quant_validation_error:{exc}"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+
+
 def build_dashboard_payload(
     *,
     conn: sqlite3.Connection,
@@ -887,6 +1001,10 @@ def build_dashboard_payload(
     max_signals: int,
     max_trades: int,
     latest_run_only: bool = True,
+    db_path: Optional[Path] = None,
+    read_path: Optional[Path] = None,
+    mirror_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     perf = _latest_performance(conn)
     run_id = _latest_run_id(conn) or "db_bridge"
@@ -895,6 +1013,7 @@ def build_dashboard_payload(
     model_params = _model_params(conn)
     checks = _data_checks(conn)
     provenance = _provenance_summary(conn)
+    quant_validation = _quant_validation_payload()
 
     qual_records: List[Dict[str, Any]] = []
     for t in tickers:
@@ -913,11 +1032,20 @@ def build_dashboard_payload(
             "cycles": None,
             "llm_enabled": None,
             "dashboard_version": "db_bridge_v1",
+            "payload_schema_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
+            "payload_required_sections": list(DASHBOARD_REQUIRED_TOP_LEVEL_KEYS),
             "data_origin": provenance.get("origin"),
             "dataset_id": provenance.get("dataset_id"),
             "data_source": provenance.get("data_source"),
             "execution_mode": provenance.get("execution_mode"),
             "provenance": provenance,
+            "storage": {
+                "db_path": str(db_path) if db_path else None,
+                "read_path": str(read_path) if read_path else None,
+                "mirror_path": str(mirror_path) if mirror_path else None,
+                "using_mirror": bool(read_path and mirror_path and Path(read_path) == Path(mirror_path)),
+                "output_path": str(output_path) if output_path else None,
+            },
             "scope": [
                 "Close",
                 "Entry",
@@ -953,7 +1081,9 @@ def build_dashboard_payload(
         "checks": checks,
         "robustness": _robustness_payload(),
         "live_denominator": _live_denominator_payload(),
+        "quant_validation": quant_validation,
     }
+    payload["meta"]["payload_digest"] = _payload_digest(payload)
     return payload
 
 
@@ -1353,6 +1483,7 @@ def main() -> None:
         return _default_tickers(conn)
 
     while True:
+        read_path_used = _select_read_path(db_path)
         conn = _connect_ro_with_fallback(db_path)
         try:
             try:
@@ -1364,6 +1495,10 @@ def main() -> None:
                     max_signals=int(args.max_signals),
                     max_trades=int(args.max_trades),
                     latest_run_only=bool(args.latest_run_only),
+                    db_path=db_path,
+                    read_path=read_path_used,
+                    mirror_path=mirror_path,
+                    output_path=out_path,
                 )
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
@@ -1378,6 +1513,7 @@ def main() -> None:
                     if mirror_path.exists():
                         conn.close()
                         conn = _connect_ro(mirror_path)
+                        read_path_used = mirror_path
                         tickers = _tickers(conn)
                         payload = build_dashboard_payload(
                             conn=conn,
@@ -1385,6 +1521,11 @@ def main() -> None:
                             lookback_days=int(args.lookback_days),
                             max_signals=int(args.max_signals),
                             max_trades=int(args.max_trades),
+                            latest_run_only=bool(args.latest_run_only),
+                            db_path=db_path,
+                            read_path=read_path_used,
+                            mirror_path=mirror_path,
+                            output_path=out_path,
                         )
                     else:
                         raise
@@ -1394,6 +1535,8 @@ def main() -> None:
             conn.close()
 
         merged = _maybe_merge_with_existing(out_path, payload)
+        if isinstance(merged.get("meta"), dict):
+            merged["meta"]["payload_digest"] = _payload_digest(merged)
         _atomic_write_json(out_path, merged)
         if args.persist_snapshot:
             _persist_snapshot(Path(args.audit_db_path).expanduser(), merged)
