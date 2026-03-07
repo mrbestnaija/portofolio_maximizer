@@ -181,7 +181,8 @@ def _build_metrics_summary(
     calibration = _load_calibration_metrics(db_path)
     return {
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "status": "WARN" if warnings else "PASS",
+        # NOTE: "status" is intentionally absent here — caller (generate_performance_artifacts)
+        # sets it authoritatively after evaluating both warnings and errors.
         "overall_trade_metrics": {
             "overall_win_rate": overall_wr,
             "n_trades": n_trades,

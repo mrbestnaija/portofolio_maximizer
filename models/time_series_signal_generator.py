@@ -196,6 +196,9 @@ class TimeSeriesSignalGenerator:
         self.use_volatility_filter = use_volatility_filter
         self._diag_mode = diag_mode
         self._per_ticker_thresholds = per_ticker_thresholds or {}
+        # Load autonomous lab-only gate override (written by apply_ticker_eligibility_gates.py).
+        # Loaded once at init so there is no per-call file I/O.  Stale files (past TTL) are ignored.
+        self._lab_only_tickers: frozenset[str] = self._load_lab_only_override()
         self._cost_model = cost_model or self._load_execution_cost_model()
         self._default_roundtrip_cost_bps = {
             "US_EQUITY": 10.0,
@@ -873,8 +876,58 @@ class TimeSeriesSignalGenerator:
                 return False
         return default
 
+    @staticmethod
+    def _load_lab_only_override() -> frozenset[str]:
+        """
+        Load the autonomous lab-only gate override written by
+        ``apply_ticker_eligibility_gates.py``.
+
+        Returns a frozenset of uppercase ticker symbols that must be blocked.
+        Returns an empty frozenset when the file is absent, unreadable, or past TTL.
+        """
+        import datetime as _dt
+        import json as _json
+
+        override_path = (
+            Path(__file__).resolve().parents[1]
+            / "logs" / "ticker_gating" / "active_lab_only.json"
+        )
+        if not override_path.exists():
+            return frozenset()
+        try:
+            data = _json.loads(override_path.read_text(encoding="utf-8"))
+        except Exception:
+            return frozenset()
+        if not isinstance(data, dict):
+            return frozenset()
+
+        # Respect TTL: if expires_utc is past, treat as expired.
+        expires_raw = data.get("expires_utc")
+        if expires_raw:
+            try:
+                expires = _dt.datetime.fromisoformat(str(expires_raw))
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=_dt.timezone.utc)
+                if _dt.datetime.now(_dt.timezone.utc) > expires:
+                    return frozenset()
+            except Exception:
+                pass  # unparseable expiry → treat as non-expired (safe default)
+
+        raw_list = data.get("lab_only_tickers")
+        if not isinstance(raw_list, list):
+            return frozenset()
+        return frozenset(str(t).upper() for t in raw_list if isinstance(t, str) and t.strip())
+
     def _resolve_thresholds_for_ticker(self, ticker: str) -> Dict[str, Any]:
-        """Resolve per-ticker overrides for routing thresholds."""
+        """Resolve per-ticker overrides for routing thresholds.
+
+        Priority (highest first):
+          1. Autonomous lab-only gate override (active_lab_only.json) — blocks all signals.
+          2. Per-ticker overrides from signal_routing_config.yml.
+          3. Global defaults.
+
+        Diagnostic mode bypasses all overrides to maximise signal flow.
+        """
         thresholds = {
             "confidence_threshold": float(self.confidence_threshold),
             "min_expected_return": float(self.min_expected_return),
@@ -883,11 +936,17 @@ class TimeSeriesSignalGenerator:
         if self._diag_mode:
             return thresholds
 
-        key = (ticker or "").strip()
+        key = (ticker or "").strip().upper()
         if not key:
             return thresholds
 
-        raw = self._per_ticker_thresholds.get(key) or self._per_ticker_thresholds.get(key.upper())
+        # Lab-only override: block signal by setting an unreachable return floor.
+        if key in self._lab_only_tickers:
+            thresholds["min_expected_return"] = 1.0  # 100% — never reachable in practice
+            thresholds["_lab_only_gate"] = True
+            return thresholds
+
+        raw = self._per_ticker_thresholds.get(key) or self._per_ticker_thresholds.get(ticker.strip())
         if not isinstance(raw, dict):
             return thresholds
 

@@ -9,6 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+_GATE_PASS = {"written": True, "lab_only_tickers": [], "mode": "autonomous", "applied_reasons": {}}
+
+
 def test_all_steps_pass(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
     db = tmp_path / "db.db"
@@ -17,6 +20,9 @@ def test_all_steps_pass(tmp_path):
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
         return_value={"summary": {"HEALTHY": 1, "WEAK": 0, "LAB_ONLY": 0}, "warnings": [], "n_tickers": 1},
+    ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        return_value=_GATE_PASS,
     ), patch(
         "scripts.run_quality_pipeline.compute_context_quality",
         return_value={"warnings": [], "partial_data": False},
@@ -44,7 +50,10 @@ def test_all_steps_pass(tmp_path):
     assert "started_at" in result
     assert "finished_at" in result
     assert "duration_seconds" in result
-    assert len(result["steps"]) == 4
+    assert len(result["steps"]) == 5  # +1 for apply_ticker_eligibility_gates
+    gate_step = next(s for s in result["steps"] if s["name"] == "apply_ticker_eligibility_gates")
+    assert gate_step["status"] == "PASS"
+    assert gate_step["gate_written"] is True
 
 
 def test_warn_when_partial_data(tmp_path):
@@ -55,6 +64,9 @@ def test_warn_when_partial_data(tmp_path):
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
         return_value={"summary": {"HEALTHY": 0, "WEAK": 0, "LAB_ONLY": 0}, "warnings": [], "n_tickers": 0},
+    ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        return_value=_GATE_PASS,
     ), patch(
         "scripts.run_quality_pipeline.compute_context_quality",
         return_value={"warnings": ["missing_optional_confidence_columns"], "partial_data": True},
@@ -84,6 +96,9 @@ def test_error_when_data_error(tmp_path):
         "scripts.run_quality_pipeline.compute_eligibility",
         return_value={"summary": {"HEALTHY": 0, "WEAK": 0, "LAB_ONLY": 0}, "warnings": [], "n_tickers": 0},
     ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        return_value=_GATE_PASS,
+    ), patch(
         "scripts.run_quality_pipeline.compute_context_quality",
         return_value={"warnings": [], "partial_data": False},
     ), patch(
@@ -111,6 +126,9 @@ def test_error_when_chart_stage_reports_missing_artifacts(tmp_path):
         "scripts.run_quality_pipeline.compute_eligibility",
         return_value={"summary": {"HEALTHY": 1, "WEAK": 0, "LAB_ONLY": 0}, "warnings": [], "errors": [], "n_tickers": 1},
     ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        return_value=_GATE_PASS,
+    ), patch(
         "scripts.run_quality_pipeline.compute_context_quality",
         return_value={"warnings": [], "partial_data": False},
     ), patch(
@@ -137,6 +155,79 @@ def test_error_when_chart_stage_reports_missing_artifacts(tmp_path):
     assert "chart_missing:per_ticker_wr_pf" in result["errors"]
     chart_step = next(step for step in result["steps"] if step["name"] == "generate_performance_charts")
     assert chart_step["status"] == "ERROR"
+
+
+def test_gate_step_lab_only_tickers_propagated(tmp_path):
+    """Gate step records lab_only_tickers returned by apply_eligibility_gates."""
+    from scripts.run_quality_pipeline import run_quality_pipeline
+    db = tmp_path / "db.db"
+    db.write_bytes(b"")
+
+    with patch(
+        "scripts.run_quality_pipeline.compute_eligibility",
+        return_value={"summary": {"HEALTHY": 0, "WEAK": 0, "LAB_ONLY": 1}, "warnings": [], "n_tickers": 1},
+    ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        return_value={"written": True, "lab_only_tickers": ["MSFT"], "mode": "autonomous", "applied_reasons": {}},
+    ), patch(
+        "scripts.run_quality_pipeline.compute_context_quality",
+        return_value={"warnings": [], "partial_data": False},
+    ), patch(
+        "scripts.run_quality_pipeline.run_data_sufficiency",
+        return_value={"status": "SUFFICIENT", "sufficient": True, "recommendations": []},
+    ), patch(
+        "scripts.run_quality_pipeline.generate_performance_artifacts",
+        return_value={"warnings": [], "errors": [], "metrics_path": str(tmp_path / "m.json")},
+    ):
+        result = run_quality_pipeline(
+            db_path=db,
+            audit_dir=tmp_path / "audits",
+            eligibility_out=tmp_path / "elig.json",
+            context_out=tmp_path / "ctx.json",
+            charts_out_dir=tmp_path / "charts",
+            metrics_out=tmp_path / "m.json",
+        )
+
+    gate_step = next(s for s in result["steps"] if s["name"] == "apply_ticker_eligibility_gates")
+    assert gate_step["lab_only_tickers"] == ["MSFT"]
+    assert gate_step["gate_written"] is True
+
+
+def test_gate_step_exception_is_captured_as_error(tmp_path):
+    """Exception in apply_eligibility_gates escalates pipeline to ERROR status."""
+    from scripts.run_quality_pipeline import run_quality_pipeline
+    db = tmp_path / "db.db"
+    db.write_bytes(b"")
+
+    with patch(
+        "scripts.run_quality_pipeline.compute_eligibility",
+        return_value={"summary": {"HEALTHY": 1, "WEAK": 0, "LAB_ONLY": 0}, "warnings": [], "n_tickers": 1},
+    ), patch(
+        "scripts.run_quality_pipeline.apply_eligibility_gates",
+        side_effect=RuntimeError("disk write failed"),
+    ), patch(
+        "scripts.run_quality_pipeline.compute_context_quality",
+        return_value={"warnings": [], "partial_data": False},
+    ), patch(
+        "scripts.run_quality_pipeline.run_data_sufficiency",
+        return_value={"status": "SUFFICIENT", "sufficient": True, "recommendations": []},
+    ), patch(
+        "scripts.run_quality_pipeline.generate_performance_artifacts",
+        return_value={"warnings": [], "errors": [], "metrics_path": str(tmp_path / "m.json")},
+    ):
+        result = run_quality_pipeline(
+            db_path=db,
+            audit_dir=tmp_path / "audits",
+            eligibility_out=tmp_path / "elig.json",
+            context_out=tmp_path / "ctx.json",
+            charts_out_dir=tmp_path / "charts",
+            metrics_out=tmp_path / "m.json",
+        )
+
+    assert result["status"] == "ERROR"
+    gate_step = next(s for s in result["steps"] if s["name"] == "apply_ticker_eligibility_gates")
+    assert gate_step["status"] == "ERROR"
+    assert any("apply_eligibility_gates_failed" in e for e in result["errors"])
 
 
 def test_cli_json_schema(tmp_path, capsys):

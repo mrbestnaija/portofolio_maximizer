@@ -85,3 +85,25 @@ def test_save_audit_report_rewrites_manifest_with_valid_jsonl_only(monkeypatch, 
     assert latest["source"] == "TimeSeriesForecaster.save_audit_report"
     assert latest["bytes"] == audit_path.stat().st_size
     assert not list(tmp_path.glob(".forecast_manifest_*.tmp"))
+
+
+def test_next_audit_path_is_unique_per_write(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
+    from forcester_ts import forecaster as forecaster_mod
+
+    forecaster = _minimal_forecaster()
+    uuids = iter(["aaaabbbbccccdddd", "1111222233334444"])
+    monkeypatch.setattr(
+        forecaster_mod.uuid,
+        "uuid4",
+        lambda: type("_Uuid", (), {"hex": next(uuids)})(),
+    )
+
+    path_one = forecaster._next_audit_path()
+    path_two = forecaster._next_audit_path()
+
+    assert path_one != path_two
+    assert path_one.parent == tmp_path
+    assert path_two.parent == tmp_path
+    assert path_one.name.startswith("forecast_audit_")
+    assert path_two.name.startswith("forecast_audit_")

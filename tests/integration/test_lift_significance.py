@@ -137,6 +137,32 @@ class TestLayer1LiftCIBehaviour:
         insufficient = result.metrics.get("lift_ci_insufficient_data")
         assert insufficient is False
 
+    def test_layer1_fails_when_ci_definitively_negative(self, tmp_path):
+        """Both CI bounds < 0 (ensemble definitively worse) → Layer 1 FAIL, not just WARN.
+
+        Uses 25 windows where ensemble always loses (ens_rmse=2.0, best=1.0).
+        delta = best - ensemble = -1.0 per window.  CI: both bounds << 0.
+        """
+        for i in range(25):
+            _write_audit(tmp_path, f"w{i:02d}", ens_rmse=2.0, best_rmse=1.0)
+
+        result = run_layer1_forecast_quality(
+            audit_dir=tmp_path,
+            warn_coverage_threshold=5,   # prevent coverage WARN from masking CI signal
+            warn_lift_threshold=0.01,
+        )
+        assert result.status == "FAIL", (
+            f"Expected FAIL when CI is definitively negative (both bounds < 0), "
+            f"got {result.status}\nsummary: {result.summary}"
+        )
+        assert "definitively" in result.summary.lower(), (
+            f"FAIL message should mention 'definitively', got: {result.summary}"
+        )
+        ci_high = result.metrics.get("lift_ci_high")
+        assert ci_high is not None and ci_high < 0.0, (
+            f"lift_ci_high should be < 0, got {ci_high}"
+        )
+
 
 class TestLiftSignificanceNumericalStabilityIntegration:
     """Bootstrap CI must be stable under extreme RMSE inputs (no NaN/inf)."""

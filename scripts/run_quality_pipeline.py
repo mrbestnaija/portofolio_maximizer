@@ -18,6 +18,10 @@ if str(ROOT) not in sys.path:
 
 from scripts.compute_context_quality import DEFAULT_OUTPUT as DEFAULT_CONTEXT_OUT
 from scripts.compute_context_quality import compute_context_quality
+from scripts.apply_ticker_eligibility_gates import (
+    DEFAULT_OVERRIDE_PATH as DEFAULT_GATE_OVERRIDE_PATH,
+    apply_eligibility_gates,
+)
 from scripts.compute_ticker_eligibility import DEFAULT_OUTPUT as DEFAULT_ELIGIBILITY_OUT
 from scripts.compute_ticker_eligibility import compute_eligibility
 from scripts.data_sufficiency_monitor import DEFAULT_AUDIT_DIR, DEFAULT_DB, run_data_sufficiency
@@ -65,6 +69,7 @@ def run_quality_pipeline(
     context_out: Path = DEFAULT_CONTEXT_OUT,
     charts_out_dir: Path = DEFAULT_OUT_DIR,
     metrics_out: Path = DEFAULT_METRICS_PATH,
+    gate_override_path: Path = DEFAULT_GATE_OVERRIDE_PATH,
 ) -> dict[str, Any]:
     started_perf = time.perf_counter()
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -95,6 +100,42 @@ def run_quality_pipeline(
     )
     warnings.extend(eligibility_warnings)
     errors.extend(eligibility_errors)
+
+    # --- Step 1b: Apply ticker eligibility gates (autonomous) ----------------
+    # Translates compute_ticker_eligibility output into the runtime override file
+    # consumed by TimeSeriesSignalGenerator at next instantiation.
+    gate_result_written = False
+    gate_lab_only: list[str] = []
+    gate_step_error: str | None = None
+    gate_step_warnings: list[str] = []
+    try:
+        gate_result = apply_eligibility_gates(
+            eligibility_path=eligibility_out,
+            override_path=gate_override_path,
+            recommendation_only=False,
+        )
+        gate_result_written = gate_result["written"]
+        gate_lab_only = gate_result["lab_only_tickers"]
+        if not gate_result_written:
+            gate_step_warnings.append("gate_file_not_written")
+    except FileNotFoundError:
+        gate_step_warnings.append("eligibility_file_not_found_for_gating")
+    except Exception as exc:
+        gate_step_error = f"apply_eligibility_gates_failed: {exc}"
+        errors.append(gate_step_error)
+    gate_step_warnings = _dedupe_preserve_order(gate_step_warnings)
+    steps.append(
+        {
+            "name": "apply_ticker_eligibility_gates",
+            "status": _step_status_from_flags(warnings=gate_step_warnings, error=gate_step_error),
+            "warnings": gate_step_warnings,
+            "errors": [gate_step_error] if gate_step_error else [],
+            "lab_only_tickers": gate_lab_only,
+            "gate_written": gate_result_written,
+            "output": str(gate_override_path) if gate_result_written else None,
+        }
+    )
+    warnings.extend(gate_step_warnings)
 
     context = compute_context_quality(db_path=db_path)
     append_threshold_hash_change_warning(context_out, context)
@@ -195,6 +236,7 @@ def run_quality_pipeline(
         "steps": steps,
         "artifacts": {
             "eligibility": str(eligibility_out),
+            "ticker_gate": str(gate_override_path) if gate_result_written else None,
             "context_quality": str(context_out),
             "charts_out_dir": str(charts_out_dir),
             "metrics_summary": str(metrics_out),

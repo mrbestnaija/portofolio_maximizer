@@ -210,6 +210,27 @@ def _load_layer1_lift_threshold() -> float:
     return 1.0 - min_lift_rmse_ratio
 
 
+def _load_min_lift_fraction() -> float:
+    # Phase 7.39: read min_lift_fraction from forecaster_monitoring.yml so the Layer 1
+    # WARN threshold aligns with the gate's requirement.  Without this, Layer 1 can report
+    # PASS (lift >= 5%) while the gate fails (gate requires lift >= 25%), misleading operators
+    # who run `check_model_improvement.py --layer 1` and see a clean result.
+    try:
+        import yaml as _yaml_mlf
+
+        monitoring_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if monitoring_path.exists():
+            monitoring_cfg = _yaml_mlf.safe_load(monitoring_path.read_text(encoding="utf-8")) or {}
+            return float(
+                monitoring_cfg.get("forecaster_monitoring", {})
+                .get("regression_metrics", {})
+                .get("min_lift_fraction", 0.05)
+            )
+    except Exception:
+        pass
+    return 0.05
+
+
 def _lift_fraction(
     windows: list[dict],
     *,
@@ -226,7 +247,7 @@ def _lift_fraction(
 # ---------------------------------------------------------------------------
 def run_layer1_forecast_quality(
     audit_dir: Path,
-    warn_lift_threshold: float = 0.05,
+    warn_lift_threshold: Optional[float] = None,
     fail_lift_threshold: float = 0.01,
     warn_da_zero_pct: float = 0.40,
     min_windows_for_fail: int = 100,
@@ -241,7 +262,12 @@ def run_layer1_forecast_quality(
       WARN  -- lift_global < warn_lift_threshold, OR samossa_da_zero_pct > warn_da_zero_pct,
                OR n_used < warn_coverage_threshold
       PASS  -- none of the above
+
+    warn_lift_threshold defaults to min_lift_fraction from forecaster_monitoring.yml (0.25)
+    so the Layer 1 diagnostic matches the gate threshold.  Pass an explicit value to override.
     """
+    if warn_lift_threshold is None:
+        warn_lift_threshold = _load_min_lift_fraction()
     audit_dir = Path(audit_dir)
 
     if not audit_dir.exists():

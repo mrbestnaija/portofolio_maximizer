@@ -60,6 +60,40 @@ def test_summary_matches_invocation_max_files_mismatch() -> None:
     assert not mod._summary_matches_invocation(summary, audit_dir=audit_dir, max_files=50)
 
 
+def test_summary_matches_invocation_min_lift_fraction_match() -> None:
+    """Cache with correct min_lift_fraction is accepted."""
+    import scripts.production_audit_gate as mod
+
+    audit_dir = Path.cwd() / "logs" / "forecast_audits"
+    summary = {"audit_dir": str(audit_dir), "min_lift_fraction": 0.25}
+    assert mod._summary_matches_invocation(
+        summary, audit_dir=audit_dir, max_files=500, min_lift_fraction=0.25
+    )
+
+
+def test_summary_matches_invocation_min_lift_fraction_mismatch_invalidates_cache() -> None:
+    """Stale cache with wrong min_lift_fraction (e.g. 0.0) must be rejected when config has 0.25."""
+    import scripts.production_audit_gate as mod
+
+    audit_dir = Path.cwd() / "logs" / "forecast_audits"
+    # Simulate the bug: cache from before config update has min_lift_fraction=0.0
+    summary = {"audit_dir": str(audit_dir), "min_lift_fraction": 0.0}
+    assert not mod._summary_matches_invocation(
+        summary, audit_dir=audit_dir, max_files=500, min_lift_fraction=0.25
+    ), "Stale cache with min_lift_fraction=0.0 must not be accepted when config requires 0.25"
+
+
+def test_summary_matches_invocation_no_cached_thresh_still_accepted() -> None:
+    """Cache without min_lift_fraction key still accepted (legacy / pre-fix caches)."""
+    import scripts.production_audit_gate as mod
+
+    audit_dir = Path.cwd() / "logs" / "forecast_audits"
+    summary = {"audit_dir": str(audit_dir)}  # no min_lift_fraction key
+    assert mod._summary_matches_invocation(
+        summary, audit_dir=audit_dir, max_files=500, min_lift_fraction=0.25
+    )
+
+
 def _seed_trade_exec_table(db_path: Path, *, close_id: int, entry_trade_id: int | None) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(

@@ -134,6 +134,24 @@ def test_build_report_links_closed_trade_to_forecast_audit(tmp_path: Path) -> No
     assert legacy_rec["realized_direction"] == "DOWN"
 
 
+def test_build_report_excursion_stub_flag(tmp_path: Path) -> None:
+    """Phase 7.39: excursion_data_available must be False in summary (MAE/MFE not stored).
+    All records must have excursion_min_pct and excursion_max_pct as None."""
+    db_path = tmp_path / "pmx_exc.db"
+    audit_dir = tmp_path / "audits"
+    _seed_db(db_path)
+    _seed_audit(audit_dir)
+
+    payload = build_report(db_path=db_path, audit_dir=audit_dir, limit=10)
+    summary = payload["summary"]
+    records = payload["records"]
+
+    assert summary["excursion_data_available"] is False
+    for rec in records:
+        assert rec["excursion_min_pct"] is None, f"excursion_min_pct should be None, got {rec['excursion_min_pct']}"
+        assert rec["excursion_max_pct"] is None, f"excursion_max_pct should be None, got {rec['excursion_max_pct']}"
+
+
 def test_build_report_flags_lifecycle_integrity_violations(tmp_path: Path) -> None:
     db_path = tmp_path / "pmx_integrity.db"
     audit_dir = tmp_path / "audits"

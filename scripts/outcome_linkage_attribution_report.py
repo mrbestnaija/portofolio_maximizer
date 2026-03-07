@@ -219,6 +219,9 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
             "outcome_linked": outcome_linked,
             "audit_file": audit_meta.get("audit_file") if audit_meta else None,
             "forecast_horizon": audit_meta.get("forecast_horizon") if audit_meta else None,
+            # MAE/MFE fields: reserved for future bar-level excursion data.
+            # Requires per-bar OHLC during holding period which is not stored in the DB.
+            # Always None until bar storage is added; see summary["excursion_data_available"].
             "excursion_min_pct": None,
             "excursion_max_pct": None,
             "integrity_status": integrity_status,
@@ -273,6 +276,9 @@ def build_report(db_path: Path, audit_dir: Path, limit: int) -> Dict[str, Any]:
         "readiness_denominator_exclusion_count": sum(
             1 for r in records if not bool(r.get("counts_toward_readiness_denominator"))
         ),
+        # Flags that per-record excursion_min_pct / excursion_max_pct are always None
+        # because bar-level OHLC during holding periods is not stored in the DB.
+        "excursion_data_available": False,
     }
 
     return {

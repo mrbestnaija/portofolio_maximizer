@@ -513,3 +513,43 @@ class TestPhase719Hardening:
         assert result.status == "SKIP"
         # coverage_ratio in metrics (may be None from _empty_metrics or 0.0 from n_used==0)
         assert "coverage_ratio" in result.metrics
+
+    def test_layer1_warn_threshold_aligned_with_gate_config(self, tmp_path):
+        """Phase 7.39: default warn_lift_threshold reads min_lift_fraction from config (0.25).
+        Lift of 20% (> old 5% default, < new 25% config) must WARN, not PASS.
+        This prevents operators from seeing Layer 1 PASS while the gate requires >=25% lift."""
+        # 10 audit files: 8 no-lift (ensemble worse than best single), 2 lift
+        # → lift_global = 2/10 = 20%
+        def _make_audit(i, has_lift):
+            # ensemble rmse < best_single rmse → lift  (best single = garch at 1.3)
+            ensemble_rmse = 1.0 if has_lift else 1.5
+            return {
+                "dataset": {"ticker": f"T{i}", "start": f"2025-0{(i%9)+1}-01",
+                            "end": f"2025-0{(i%9)+1}-28", "length": 100},
+                "summary": {"forecast_horizon": 25},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.3, "directional_accuracy": 0.5, "smape": 3.0},
+                        "samossa":  {"rmse": 1.4, "directional_accuracy": 0.5, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.8, "directional_accuracy": 0.6, "smape": 4.0},
+                        "ensemble": {"rmse": ensemble_rmse, "directional_accuracy": 0.5},
+                    },
+                    "ensemble_weights": {"garch": 0.4, "samossa": 0.4, "mssa_rl": 0.2},
+                },
+            }
+        for i in range(8):
+            (tmp_path / f"forecast_audit_nolift_{i}.json").write_text(json.dumps(_make_audit(i, False)))
+        for i in range(2):
+            (tmp_path / f"forecast_audit_lift_{i}.json").write_text(json.dumps(_make_audit(i + 8, True)))
+
+        result = run_layer1_forecast_quality(
+            tmp_path,
+            warn_coverage_threshold=0,   # disable count-based WARN
+            warn_da_zero_pct=1.1,        # disable DA WARN
+            # warn_lift_threshold NOT passed → reads from config (should be 0.25)
+        )
+        assert result.metrics["lift_fraction_global"] == pytest.approx(0.20, abs=0.02)
+        assert result.metrics["coverage_ratio"] == pytest.approx(1.0, abs=0.01)
+        # lift 20% < config min_lift_fraction 25% → must WARN for lift, not just coverage
+        assert result.status == "WARN"
+        assert "lift" in result.summary.lower()

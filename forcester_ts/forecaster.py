@@ -11,6 +11,7 @@ import logging
 import os
 import warnings
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1317,9 +1318,9 @@ class TimeSeriesForecaster:
         results["model_events"] = list(self._model_events)
         results["instrumentation_report"] = self._instrumentation.export()
         if self._audit_dir:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
+            audit_path = self._next_audit_path()
             self.save_audit_report(audit_path)
+            results["forecast_audit_path"] = str(audit_path)
         return results
 
     def _build_forecast_index(self, horizon: int) -> pd.Index:
@@ -1431,9 +1432,34 @@ class TimeSeriesForecaster:
         """Expose the detailed model instrumentation payload."""
         return self._instrumentation.export()
 
+    def _next_audit_path(self) -> Path:
+        if self._audit_dir is None:
+            raise ValueError("Audit directory is disabled")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        suffix = uuid.uuid4().hex[:8]
+        return self._audit_dir / f"forecast_audit_{timestamp}_{suffix}.json"
+
     def save_audit_report(self, output_path: Path) -> None:
         """Persist the instrumentation report to disk for interpretable-AI auditing."""
         self._instrumentation.dump_json(output_path)
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            signal_context = payload.get("signal_context")
+            if not isinstance(signal_context, dict):
+                dataset = payload.get("dataset") if isinstance(payload.get("dataset"), dict) else {}
+                payload["signal_context"] = {
+                    "context_type": "FORECAST_ONLY",
+                    "ts_signal_id": None,
+                    "ticker": dataset.get("ticker") or dataset.get("symbol"),
+                    "run_id": None,
+                    "entry_ts": None,
+                    "forecast_horizon": dataset.get("forecast_horizon"),
+                    "signal_context_missing": True,
+                }
+                output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self._append_audit_manifest_entry(output_path)
 
     @staticmethod
@@ -2003,8 +2029,7 @@ class TimeSeriesForecaster:
             metadata["regression_metrics"] = metrics_map["ensemble"]
 
         if self._audit_dir:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
+            audit_path = self._next_audit_path()
             self.save_audit_report(audit_path)
 
         return metrics_map

@@ -41,3 +41,132 @@ def test_evaluate_promotions_promotes_and_demotes():
     demoted = [d["ticker"] for d in plan["demotions"]]
     assert "MTN" in promoted
     assert "CL=F" in demoted
+
+
+
+def test_save_audit_report_defaults_to_forecast_only_signal_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+    forecaster = TimeSeriesForecaster(
+        config=TimeSeriesForecasterConfig(
+            sarimax_enabled=False,
+            garch_enabled=False,
+            samossa_enabled=False,
+            mssa_rl_enabled=False,
+            ensemble_enabled=False,
+        )
+    )
+
+    def _fake_dump_json(output_path: Path) -> None:
+        output_path.write_text(
+            json.dumps({"dataset": {"ticker": "AAPL", "forecast_horizon": 30}}, indent=2),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(forecaster._instrumentation, "dump_json", _fake_dump_json)
+    monkeypatch.setattr(forecaster, "_append_audit_manifest_entry", lambda _path: None)
+
+    audit_path = tmp_path / "forecast_audit_test.json"
+    forecaster.save_audit_report(audit_path)
+
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    signal_context = payload["signal_context"]
+    assert signal_context["context_type"] == "FORECAST_ONLY"
+    assert signal_context["ticker"] == "AAPL"
+    assert signal_context["forecast_horizon"] == 30
+    assert signal_context["signal_context_missing"] is True
+    assert signal_context["ts_signal_id"] is None
+
+
+
+def test_attach_signal_context_updates_only_authoritative_audit_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    audit_dir = tmp_path / "logs" / "forecast_audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    authoritative = audit_dir / "forecast_audit_authoritative.json"
+    authoritative.write_text(
+        json.dumps({"dataset": {"ticker": "AAPL", "forecast_horizon": 30}}, indent=2),
+        encoding="utf-8",
+    )
+    unrelated = audit_dir / "forecast_audit_unrelated.json"
+    unrelated.write_text(
+        json.dumps(
+            {
+                "dataset": {"ticker": "AAPL", "forecast_horizon": 6},
+                "signal_context": {
+                    "context_type": "FORECAST_ONLY",
+                    "ts_signal_id": None,
+                    "ticker": "AAPL",
+                    "run_id": "run_wrong",
+                    "entry_ts": None,
+                    "forecast_horizon": 2,
+                    "signal_context_missing": True,
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(run_auto_trader, "ROOT_PATH", tmp_path)
+    run_auto_trader._attach_signal_context_to_forecast_audit(
+        forecast_bundle={"horizon": 2, "forecast_audit_path": str(authoritative)},
+        execution_report={
+            "ts_signal_id": "ts_AAPL_1",
+            "executed": True,
+            "context_type": "TRADE",
+            "run_id": "run_exec",
+            "signal_timestamp": "2026-03-04T00:00:00+00:00",
+            "forecast_horizon": 30,
+        },
+        ticker="AAPL",
+        run_id="run_outer",
+    )
+
+    patched = json.loads(authoritative.read_text(encoding="utf-8"))
+    patched_context = patched["signal_context"]
+    assert patched_context["context_type"] == "TRADE"
+    assert patched_context["ts_signal_id"] == "ts_AAPL_1"
+    assert patched_context["run_id"] == "run_exec"
+    assert patched_context["entry_ts"] == "2026-03-04T00:00:00+00:00"
+    assert patched_context["forecast_horizon"] == 30
+    assert patched_context["signal_context_missing"] is False
+
+    untouched = json.loads(unrelated.read_text(encoding="utf-8"))
+    untouched_context = untouched["signal_context"]
+    assert untouched_context["run_id"] == "run_wrong"
+    assert untouched_context["forecast_horizon"] == 2
+    assert untouched_context["ts_signal_id"] is None
+
+
+def test_attach_signal_context_backfills_dataset_ticker_for_forecast_only_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    audit_dir = tmp_path / "logs" / "forecast_audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    authoritative = audit_dir / "forecast_audit_forecast_only.json"
+    authoritative.write_text(
+        json.dumps({"dataset": {"forecast_horizon": 30}}, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(run_auto_trader, "ROOT_PATH", tmp_path)
+    run_auto_trader._attach_signal_context_to_forecast_audit(
+        forecast_bundle={"horizon": 30, "forecast_audit_path": str(authoritative)},
+        execution_report={
+            "ts_signal_id": "ts_GOOG_1",
+            "executed": False,
+            "run_id": "run_exec",
+            "signal_timestamp": "2026-03-05T00:00:00+00:00",
+            "forecast_horizon": 30,
+        },
+        ticker="GOOG",
+        run_id="run_outer",
+    )
+
+    patched = json.loads(authoritative.read_text(encoding="utf-8"))
+    assert patched["dataset"]["ticker"] == "GOOG"
+    patched_context = patched["signal_context"]
+    assert patched_context["context_type"] == "FORECAST_ONLY"
+    assert patched_context["run_id"] == "run_exec"
+    assert patched_context["forecast_horizon"] == 30
+    assert patched_context["ts_signal_id"] == "ts_GOOG_1"
