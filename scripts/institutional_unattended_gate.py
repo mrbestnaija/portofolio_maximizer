@@ -320,6 +320,12 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     new_age_hours = (new_age_minutes / 60.0) if new_age_minutes is not None else None
     new_age_ok = (new_age_hours <= 26.0) if new_age_hours is not None else None
     shadow_drift = bool(new_age_ok is not None and new_age_ok != age_ok)
+    active_age_ok = new_age_ok if new_age_ok is not None else age_ok
+    active_age_detail = (
+        f"{new_age_hours:.1f}h ago"
+        if new_age_hours is not None
+        else age_detail
+    )
     shadow_suffix = (
         " "
         f"[freshness_shadow_old={round(age_hours, 2) if age_hours is not None else None}h,"
@@ -331,15 +337,15 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "FAIL",
-            f"run_all_gates.py last result: overall_passed=False ({age_detail}). "
+            f"run_all_gates.py last result: overall_passed=False ({active_age_detail}). "
             "Fix failing gates before autonomous runs."
             f"{shadow_suffix}",
         ))
-    elif not age_ok:
+    elif not active_age_ok:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "WARN",
-            f"run_all_gates.py last success was {age_detail} ago (limit: 26h). "
+            f"run_all_gates.py last success was {active_age_detail} ago (limit: 26h). "
             "Run gates before next autonomous cycle."
             f"{shadow_suffix}",
         ))
@@ -347,7 +353,7 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
         out.append(Finding(
             "P4", "prior_gate_execution",
             "PASS",
-            f"run_all_gates.py: overall_passed=True, run {age_detail}."
+            f"run_all_gates.py: overall_passed=True, run {active_age_detail}."
             f"{shadow_suffix}",
         ))
 

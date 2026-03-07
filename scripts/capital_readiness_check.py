@@ -118,7 +118,7 @@ def _check_r2_gate_artifact() -> tuple[bool, str, dict]:
         data = json.loads(GATE_ARTIFACT.read_text(encoding="utf-8"))
         overall = bool(data.get("overall_passed", False))
 
-        # Old behavior: mtime-only staleness check (decision path remains active in P0.3a).
+        # Old behavior: mtime-only staleness check (kept as shadow in P0.3b).
         mtime = GATE_ARTIFACT.stat().st_mtime
         age_hours = (time.time() - mtime) / 3600.0
         old_ok = age_hours < R2_MAX_AGE_HOURS
@@ -131,9 +131,10 @@ def _check_r2_gate_artifact() -> tuple[bool, str, dict]:
         )
         new_age_hours = (new_age_minutes / 60.0) if new_age_minutes is not None else None
         new_ok = (new_age_hours < R2_MAX_AGE_HOURS) if new_age_hours is not None else None
+        active_age_hours = new_age_hours if new_age_hours is not None else age_hours
 
         metrics["gate_overall_passed"] = overall
-        metrics["gate_age_hours"] = round(age_hours, 2)
+        metrics["gate_age_hours"] = round(active_age_hours, 2)
         metrics["freshness_shadow_old"] = {
             "source": "mtime",
             "age_hours": round(age_hours, 2),
@@ -146,10 +147,10 @@ def _check_r2_gate_artifact() -> tuple[bool, str, dict]:
         }
         metrics["freshness_shadow_drift"] = bool(new_ok is not None and new_ok != old_ok)
         if not overall:
-            return False, f"R2: gate artifact overall_passed=False (age={age_hours:.1f}h)", metrics
-        if age_hours >= R2_MAX_AGE_HOURS:
+            return False, f"R2: gate artifact overall_passed=False (age={active_age_hours:.1f}h)", metrics
+        if active_age_hours >= R2_MAX_AGE_HOURS:
             return False, (
-                f"R2: gate artifact is stale ({age_hours:.1f}h >= {R2_MAX_AGE_HOURS}h) -- "
+                f"R2: gate artifact is stale ({active_age_hours:.1f}h >= {R2_MAX_AGE_HOURS}h) -- "
                 "re-run python scripts/run_all_gates.py"
             ), metrics
         return True, "", metrics

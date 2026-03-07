@@ -1191,14 +1191,15 @@ def _robustness_payload() -> Dict[str, Any]:
             timestamp_keys=("generated_utc", "timestamp_utc"),
             fallback_path=path,
         )
-        sidecar_age_minutes[name] = round(old_age, 2) if old_age is not None else None
+        active_age = new_age if new_age is not None else old_age
+        sidecar_age_minutes[name] = round(active_age, 2) if active_age is not None else None
         freshness_shadow_old[name] = round(old_age, 2) if old_age is not None else None
         freshness_shadow_new[name] = round(new_age, 2) if new_age is not None else None
         old_is_stale = bool(old_age is not None and old_age > sidecar_max_age_minutes)
         new_is_stale = bool(new_age is not None and new_age > sidecar_max_age_minutes)
         freshness_shadow_drift[name] = old_is_stale != new_is_stale
-        # Old decision path stays active during shadow phase.
-        if old_is_stale:
+        active_is_stale = new_is_stale if new_age is not None else old_is_stale
+        if active_is_stale:
             stale_sidecars.append(name)
             semantic_warnings.append(f"stale_sidecar:{name}")
 
