@@ -370,6 +370,30 @@
           <div class="subtitle" id="robustness-context" style="margin-top:6px;">Context: --</div>
           <div id="robustness-charts" class="subtitle" style="margin-top:8px; display:flex; flex-direction:column; gap:4px;"></div>
         </div>
+        <div class="card">
+          <h3>Live Denominator</h3>
+          <div class="subtitle">Fresh TRADE-only watcher sidecar</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Watcher Status</div>
+              <div class="value" id="live-denominator-status">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Fresh Cohort</div>
+              <div class="value" id="live-denominator-cohort">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Linkage Included</div>
+              <div class="value" id="live-denominator-linkage">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Prod Valid Matched</div>
+              <div class="value" id="live-denominator-matched">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="live-denominator-tickers" style="margin-top:8px;">Watcher not connected.</div>
+          <div class="subtitle" id="live-denominator-context" style="margin-top:6px;">Context: --</div>
+        </div>
       </div>
 
       <div class="card" style="margin-top:14px;">
@@ -1273,6 +1297,72 @@
       });
     }
 
+    function renderLiveDenominator(data) {
+      const statusEl = document.getElementById('live-denominator-status');
+      const cohortEl = document.getElementById('live-denominator-cohort');
+      const linkageEl = document.getElementById('live-denominator-linkage');
+      const matchedEl = document.getElementById('live-denominator-matched');
+      const tickersEl = document.getElementById('live-denominator-tickers');
+      const contextEl = document.getElementById('live-denominator-context');
+      if (!statusEl || !cohortEl || !linkageEl || !matchedEl || !tickersEl || !contextEl) return;
+
+      const watcher = data?.live_denominator || {};
+      const current = watcher.current || {};
+      const runMeta = watcher.run_meta || {};
+      const status = String(watcher.status || 'MISSING').toUpperCase();
+      const warnings = Array.isArray(watcher.warnings) ? watcher.warnings : [];
+      const tickers = Array.isArray(runMeta.tickers) ? runMeta.tickers : [];
+      const cyclesCompleted = Number(watcher.cycles_completed || 0);
+      const cyclesConfigured = Number(runMeta.cycles || 0);
+      const cadenceSeconds = Number(runMeta.sleep_seconds || 0);
+      const diagNonTrade = Number(current.fresh_trade_diagnostics?.non_trade_context_rows || 0);
+      const rawRows = Number(current.fresh_trade_context_rows_raw || 0);
+      const freshRows = Number(current.fresh_trade_rows || 0);
+      const invalid = Number(current.fresh_trade_exclusions?.invalid_context || 0);
+      const missingExec = Number(current.fresh_trade_exclusions?.missing_execution_metadata || 0);
+      const linkageIncluded = Number(current.fresh_linkage_included || 0);
+      const matched = Number(current.fresh_production_valid_matched || 0);
+      const latestDay = current.latest_day || '--';
+      const ageMinutes = Number(watcher.age_minutes);
+
+      statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
+      if (['ERROR', 'FAIL', 'FATAL', 'MISSING'].includes(status)) {
+        statusEl.classList.add('status-error');
+      } else if (['WARN', 'STALE'].includes(status)) {
+        statusEl.classList.add('status-warn');
+      } else if (['PROGRESS', 'WAITING', 'RUNNING', 'OK'].includes(status)) {
+        statusEl.classList.add(status === 'PROGRESS' ? 'status-ok' : 'status-unknown');
+      } else {
+        statusEl.classList.add('status-unknown');
+      }
+      statusEl.textContent = status;
+      cohortEl.textContent = rawRows || freshRows ? `${freshRows}/${rawRows}` : '--';
+      linkageEl.textContent = Number.isFinite(linkageIncluded) ? String(linkageIncluded) : '--';
+      matchedEl.textContent = Number.isFinite(matched) ? String(matched) : '--';
+      tickersEl.textContent = tickers.length
+        ? `Watcher tickers: ${tickers.join(', ')}`
+        : 'Watcher not connected.';
+      const parts = [
+        `Latest day: ${latestDay}`,
+        `diag_non_trade=${diagNonTrade}`,
+        `invalid=${invalid}`,
+        `missing_exec=${missingExec}`,
+      ];
+      if (cyclesConfigured > 0) {
+        parts.push(`cycles=${cyclesCompleted}/${cyclesConfigured}`);
+      }
+      if (cadenceSeconds > 0) {
+        parts.push(`cadence=${Math.round(cadenceSeconds / 3600)}h`);
+      }
+      if (Number.isFinite(ageMinutes)) {
+        parts.push(`age=${ageMinutes.toFixed(1)}m`);
+      }
+      if (warnings.length) {
+        parts.push(`warnings=${warnings.join(',')}`);
+      }
+      contextEl.textContent = `Context: ${parts.join(' · ')}`;
+    }
+
     function populateDiagTickerSelect(data, forceRefresh = false) {
       const select = document.getElementById('diag-ticker');
       if (!select) return;
@@ -1370,6 +1460,7 @@
         renderEquity([], []);
         populateTradeTickerSelect({ price_series: {}, meta: { tickers: [] } });
         renderRobustness(null);
+        renderLiveDenominator(null);
         return;
       }
 
@@ -1494,6 +1585,7 @@
       renderModelParams(data);
       renderChecks(data);
       renderRobustness(data);
+      renderLiveDenominator(data);
     }
 
     let refreshBusy = false;

@@ -1,10 +1,47 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified (focused)**: 2026-03-02
-**Last full-suite**: 2026-03-02
+**Last verified (focused)**: 2026-03-07
+**Last full-suite**: 2026-03-07
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-03-02
+**Document updated**: 2026-03-07
+
+## Current Focus - Denominator Recovery Only (2026-03-07)
+
+Current production truth:
+
+- `python scripts/run_all_gates.py` still fails on `production_audit_gate`.
+- `production_audit_gate` still reports `Phase3 ready = 0` with `GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL`.
+- Fresh linkage evidence is not readiness evidence yet.
+
+Fresh watcher status after the TRADE-only cohort fix:
+
+- `fresh_trade_context_rows_raw = 4`
+- `fresh_trade_rows = 1`
+- `fresh_trade_exclusions.non_trade_context = 0`
+- `fresh_trade_exclusions.invalid_context = 0`
+- `fresh_trade_exclusions.missing_execution_metadata = 0`
+- `fresh_trade_diagnostics.non_trade_context_rows = 3`
+- `fresh_linkage_included = 1`
+- `fresh_production_valid_matched = 0`
+
+Implications:
+
+- Forward-path cohort construction is cleaner, but the fresh denominator is still too small.
+- There is still no fresh production-valid matched row.
+- Readiness and linkage-improvement claims remain blocked until multiple fresh cycles show near-zero TRADE exclusions, `fresh_linkage_included > 1`, and `fresh_production_valid_matched >= 1`.
+
+Operational status:
+
+- `scripts/run_live_denominator_overnight.py` is now the canonical watcher for this lane.
+- It runs daily (`86400` seconds), skips weekends, and stops only on real progress.
+- Because the current date is Saturday, March 7, 2026, no new watcher cycles will execute until Monday, March 9, 2026.
+
+Capital-readiness nuance:
+
+- `python scripts/capital_readiness_check.py --json` currently returns `INSUFFICIENT_DATA`.
+- Negative lift CI (`R5`) is advisory in that script, not a hard fail.
+- The hard blocker in that command path is the current `R3` error from `scripts/exit_quality_audit.py:93` (`Invalid value '[]' for dtype 'float64'`).
 
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 

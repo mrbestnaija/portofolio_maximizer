@@ -220,6 +220,44 @@ def test_robustness_marks_stale_when_sidecar_age_exceeds_policy(tmp_path, monkey
     assert robustness["freshness_reason"] == "STALE_SIDECAR"
 
 
+def test_live_denominator_payload_merges_watcher_sidecar(tmp_path, monkeypatch) -> None:
+    watcher = tmp_path / "live_denominator_latest.json"
+    watcher.write_text(
+        """
+        {
+          "run_meta": {
+            "run_id": "RID",
+            "tickers": ["AAPL", "MSFT"],
+            "cycles": 30,
+            "sleep_seconds": 86400,
+            "progress_linkage_threshold": 2
+          },
+          "cycles": [
+            {
+              "latest_day": "20260306",
+              "fresh_trade_rows": 1,
+              "fresh_trade_context_rows_raw": 4,
+              "fresh_trade_diagnostics": {"non_trade_context_rows": 3},
+              "fresh_trade_exclusions": {"invalid_context": 0, "missing_execution_metadata": 0},
+              "fresh_linkage_included": 1,
+              "fresh_production_valid_matched": 0,
+              "progress_triggered": false
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "DEFAULT_LIVE_DENOMINATOR_PATH", watcher)
+
+    payload = mod._live_denominator_payload()
+
+    assert payload["status"] == "WAITING"
+    assert payload["cycles_completed"] == 1
+    assert payload["current"]["fresh_trade_rows"] == 1
+    assert payload["run_meta"]["tickers"] == ["AAPL", "MSFT"]
+
+
 # ---------------------------------------------------------------------------
 # P0 guardrail smoke tests: verify both connect helpers harden connections
 # ---------------------------------------------------------------------------

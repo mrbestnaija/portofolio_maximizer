@@ -31,10 +31,15 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
         "robustness-eligibility",
         "robustness-coverage",
         "robustness-calibration",
+        "live-denominator-status",
+        "live-denominator-cohort",
+        "live-denominator-linkage",
+        "live-denominator-matched",
     ):
         assert f'id="{element_id}"' in html
 
     assert "No robustness data available." in html
+    assert "Watcher not connected." in html
 
 
 def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
@@ -44,3 +49,12 @@ def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
     assert "statusEl.textContent = suff.status ||" not in html
     assert "statusEl.classList.add('status-warn');" in html
     assert ".status-warn { color: var(--accent-2); }" in html
+
+
+def test_live_dashboard_live_denominator_wiring() -> None:
+    html = Path("visualizations/live_dashboard.html").read_text(encoding="utf-8")
+
+    assert "function renderLiveDenominator(data)" in html
+    assert "const watcher = data?.live_denominator || {};" in html
+    assert "renderLiveDenominator(null);" in html
+    assert "renderLiveDenominator(data);" in html

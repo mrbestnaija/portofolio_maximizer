@@ -31,6 +31,7 @@ DEFAULT_ELIGIBILITY_PATH = ROOT / "logs" / "ticker_eligibility.json"
 DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
 DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
+DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
 
 try:
@@ -951,6 +952,7 @@ def build_dashboard_payload(
         "model_params": model_params,
         "checks": checks,
         "robustness": _robustness_payload(),
+        "live_denominator": _live_denominator_payload(),
     }
     return payload
 
@@ -1147,6 +1149,50 @@ def _robustness_payload() -> Dict[str, Any]:
         "performance_metrics": perf_metrics,
         "chart_paths": chart_paths if isinstance(chart_paths, dict) else {},
         "warnings": all_warnings,
+    }
+
+
+def _live_denominator_payload() -> Dict[str, Any]:
+    payload, payload_err = _load_sidecar_json(DEFAULT_LIVE_DENOMINATOR_PATH)
+    if payload_err:
+        return {
+            "status": "MISSING",
+            "warnings": [f"live_denominator_{payload_err}"],
+            "run_meta": {},
+            "current": {},
+            "cycles_completed": 0,
+        }
+
+    run_meta = payload.get("run_meta", {}) if isinstance(payload.get("run_meta"), dict) else {}
+    cycles = payload.get("cycles", []) if isinstance(payload.get("cycles"), list) else []
+    current = cycles[-1] if cycles and isinstance(cycles[-1], dict) else {}
+    warnings: List[str] = []
+
+    sleep_seconds = 0
+    try:
+        sleep_seconds = int(run_meta.get("sleep_seconds") or 0)
+    except (TypeError, ValueError):
+        sleep_seconds = 0
+
+    age = _sidecar_age_minutes(DEFAULT_LIVE_DENOMINATOR_PATH, current or run_meta)
+    age_minutes = round(age, 2) if age is not None else None
+
+    status = "WAITING"
+    if current.get("progress_triggered"):
+        status = "PROGRESS"
+    if age is not None:
+        stale_limit_minutes = max(180.0, (sleep_seconds / 60.0) * 2.0) if sleep_seconds > 0 else 180.0
+        if age > stale_limit_minutes:
+            status = "STALE"
+            warnings.append("live_denominator_stale")
+
+    return {
+        "status": status,
+        "warnings": warnings,
+        "age_minutes": age_minutes,
+        "run_meta": run_meta,
+        "current": current,
+        "cycles_completed": len(cycles),
     }
 
 

@@ -2,7 +2,7 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Status: Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/mrbestnaija/portofolio_maximizer)
+[![Status: Evidence Recovery](https://img.shields.io/badge/status-evidence%20recovery-orange.svg)](NEXT_IMMEDIATE_ACTION.md)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
@@ -11,8 +11,17 @@
 > Current next action: [NEXT_IMMEDIATE_ACTION.md](NEXT_IMMEDIATE_ACTION.md)
 
 **Version**: 3.0
-**Status**: Production Ready âœ…
-**Last Updated**: 2026-03-05
+**Status**: Evidence recovery in progress; production gate and fresh linkage evidence still block readiness
+**Last Updated**: 2026-03-07
+
+## Current Repo Truth (2026-03-07)
+
+- `python scripts/run_all_gates.py` is still failing on `production_audit_gate`; Phase 3 readiness remains `0`.
+- Fresh outcome monitoring is now strict `context_type=TRADE` only. The latest corrected watcher snapshot is `fresh_trade_rows=1`, `fresh_linkage_included=1`, `fresh_production_valid_matched=0`.
+- `NON_TRADE_CONTEXT` rows are tracked outside the fresh TRADE denominator as diagnostics, not denominator members.
+- `scripts/dashboard_db_bridge.py` now publishes a `live_denominator` block, `visualizations/live_dashboard.html` renders it, and `scripts/windows_dashboard_manager.py ensure` can start the bridge, HTTP server, and watcher after reboot. If audit snapshot persistence is unavailable, the manager retries the bridge without it.
+- `scripts/run_live_denominator_overnight.py` is the canonical low-noise watcher: daily cadence, weekdays only, stop on real progress.
+- `python scripts/capital_readiness_check.py --json` still treats negative lift CI (`R5`) as advisory only; the current hard blocker in that command path is an `R3` error through `scripts/exit_quality_audit.py`.
 
 ## Evidence Integrity Contract (Telemetry)
 
@@ -60,6 +69,22 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - Reused a persistent `requests.Session` inside `ai_llm/ollama_client.py`, exposing a `close()` helper to trim LLM handshake latency and release sockets cleanly.
 
 ### Latest Hardening (Mar 2026)
+
+### Operational Monitoring Addendum (2026-03-07)
+
+- **Daily live denominator watcher**:
+  - `scripts/run_live_denominator_overnight.py` now defaults to `sleep_seconds=86400`, `weekdays_only=true`, and `--stop-on-progress`.
+  - Progress is defined conservatively as either `fresh_linkage_included >= 2` or `fresh_production_valid_matched > 0`.
+- **Strict fresh TRADE cohort semantics**:
+  - `fresh_trade_rows` excludes `NON_TRADE_CONTEXT` rows.
+  - Diagnostic non-trade rows remain visible in `fresh_trade_diagnostics.non_trade_context_rows`.
+- **Live dashboard integration**:
+  - `scripts/dashboard_db_bridge.py` merges `logs/overnight_denominator/live_denominator_latest.json` into the dashboard payload.
+  - `visualizations/live_dashboard.html` renders watcher status, TRADE-only cohort size, linkage denominator, and production-valid matches.
+- **Windows startup manager integration**:
+  - `scripts/windows_dashboard_manager.py ensure` can now ensure the bridge, dashboard server, and live denominator watcher are started together on boot.
+  - If snapshot persistence is not authorized, the manager degrades to bridge-without-persistence rather than leaving the dashboard disconnected.
+  - Default watcher ticker universe: `AAPL,AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V`.
 
 ### Phase 7.36 (2026-03-06): Paranoid Hardening Plan v3 (Backward-Compatible)
 
@@ -787,5 +812,3 @@ For questions or issues:
 **Status**: Production Ready âœ…
 **Version**: 3.0
 **Last Updated**: 2026-03-05
-
-

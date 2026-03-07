@@ -26,6 +26,16 @@ This document is intentionally “policy-like”: it tells you what must be true
 - DB-backed dashboard now **falls back to trade executions** when `portfolio_positions` is empty and **filters trade events to the latest `run_id` by default** (opt-out via `--latest-run-only`).
 - Ops helpers: `bash/run_daily_trader.sh` (daily + intraday passes with resume), `bash/reset_portfolio.sh` (clear persisted state), and `scripts/migrate_add_portfolio_state.py` (add the new state tables for existing DBs).
 
+## Delta (2026-03-07)
+
+- Live denominator accumulation now has a canonical watcher: `scripts/run_live_denominator_overnight.py`.
+- Fresh denominator semantics are explicitly `context_type=TRADE` only. `NON_TRADE_CONTEXT` rows are tracked separately as diagnostics and must never be reintroduced into the fresh TRADE denominator.
+- The watcher is configured for low-noise evidence collection: daily cadence (`86400` seconds), weekday-only execution, and stop-on-progress when either `fresh_linkage_included >= 2` or `fresh_production_valid_matched > 0`.
+- Dashboard payloads now include a `live_denominator` block from `logs/overnight_denominator/live_denominator_latest.json`, and `visualizations/live_dashboard.html` renders that watcher state directly.
+- `scripts/windows_dashboard_manager.py ensure` is now the canonical reboot/startup entry point for the dashboard stack: it can ensure the bridge, local HTTP server, and live denominator watcher together, and it retries the bridge without audit snapshot persistence if that optional path is not authorized.
+- Readiness and linkage-quality claims remain blocked until multiple fresh cycles show near-zero TRADE exclusions, `fresh_linkage_included > 1`, and at least one fresh production-valid matched row.
+- `scripts/capital_readiness_check.py` continues to treat negative lift CI (`R5`) as advisory. The current hard blocker in that command path is the `R3` error path through `scripts/exit_quality_audit.py`.
+
 ---
 
 ## 1. Canonical Documents (Single Source of Truth)

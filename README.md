@@ -2,7 +2,7 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.35 Complete](https://img.shields.io/badge/Phase%207.35-Complete-green.svg)](Documentation/PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)
+[![Status: Evidence Recovery](https://img.shields.io/badge/status-evidence%20recovery-orange.svg)](Documentation/NEXT_IMMEDIATE_ACTION.md)
 [![Fast Lane: 1640 passing](https://img.shields.io/badge/fast%20lane-1640%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Protocol](https://img.shields.io/badge/research-experiment%20protocol%20v3-purple.svg)](Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md)
@@ -10,29 +10,26 @@
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
 **Version**: 4.5
-**Status**: Phase 7.35 complete — Signal Quality Pipeline, R6 Lifecycle Gate, Research Experiment Protocol v3
-**Last Updated**: 2026-03-06
+**Status**: Evidence recovery in progress - live denominator monitoring and dashboard startup wiring are in place, but production readiness remains blocked
+**Last Updated**: 2026-03-07
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-03-06)
+## Current Repo Truth (2026-03-07)
 
-- **Phase 7.35** (Signal Quality Pipeline + R6 Lifecycle Gate) is complete.
-  New scripts: `compute_ticker_eligibility.py` (HEALTHY/WEAK/LAB_ONLY), `compute_context_quality.py`
-  (regime+confidence-bin WR breakdown), `build_training_dataset.py` (fail-closed curated parquet).
-  R6 lifecycle gate clears legacy bar_timestamp artifacts. All 21 adversarial checks 0 confirmed.
-- **Research Experiment Protocol v3** is now the governing document for all trading experiments.
-  See [Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md](Documentation/RESEARCH_EXPERIMENT_PROTOCOL.md).
-  Current state: Phase 1 (evidence stabilization) — execution telemetry stale at 63h.
-- **Capital readiness**: FAIL on R3 only (WR=40% < 45%, PF=0.80 < 1.30). R6 cleared.
-  Phase-3 strategy work blocked until Phases 1–4 complete.
-- **Adversarial audit**: 0/21 confirmed findings, all cleared. Anti-regression locks in place.
-- Latest verification snapshot:
+- **Production readiness is not established.** `python scripts/run_all_gates.py` still fails on `production_audit_gate`, with `Phase3 ready = 0` and reasons `GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL`.
+- **Fresh outcome tracking is in denominator-recovery mode only.** `scripts/run_live_denominator_overnight.py` now tracks a strict `context_type=TRADE` cohort, but the latest corrected snapshot is still `fresh_trade_rows=1`, `fresh_linkage_included=1`, `fresh_production_valid_matched=0`.
+- **Dashboard startup wiring is now explicit.** `scripts/dashboard_db_bridge.py` exposes a `live_denominator` payload, `visualizations/live_dashboard.html` renders it, and `scripts/windows_dashboard_manager.py ensure` can keep the bridge, HTTP server, and live watcher running after reboot. If audit snapshot persistence is unavailable, the manager now retries the bridge without it instead of leaving the dashboard disconnected.
+- **The live watcher now runs at low noise.** Default cadence is daily (`86400` seconds), weekends are skipped, and the watcher stops only on real progress (`fresh_linkage_included >= 2` or `fresh_production_valid_matched > 0`).
+- **Capital readiness lift CI remains advisory only.** `python scripts/capital_readiness_check.py --json` currently reports a negative lift CI warning, but `R5` is not a hard fail; the current automated blocker there is an `R3` error path through `scripts/exit_quality_audit.py`.
+- **Adversarial telemetry contract remains active.** Schema-governed telemetry changes still require `TCON-*` coverage and `tests/scripts/test_telemetry_contract_policy.py`.
+- Latest verification snapshot for the current watcher/dashboard slice:
+  - `python -m pytest tests/scripts/test_run_live_denominator_overnight.py tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_live_dashboard_wiring.py tests/scripts/test_windows_dashboard_manager.py -q`
   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
-  - Result: `1640 passed, 1 skipped, 28 deselected, 7 xfailed` (Phase 7.35 baseline)
+  - Expected current fast-lane blocker: `scripts/exit_quality_audit.py:93` (`Invalid value '[]' for dtype 'float64'`)
 
 Historical sections below preserve earlier phase notes for chronology; use this
 section as the current repo baseline.

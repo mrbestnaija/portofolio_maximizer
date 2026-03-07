@@ -1,149 +1,106 @@
 # Next Immediate Action
 
-**Last Updated**: 2026-03-06
-**Status**: PHASE 1 — Evidence Stabilization
-**Protocol**: [Research-Grade Experiment Protocol v3](RESEARCH_EXPERIMENT_PROTOCOL.md)
+**Last Updated**: 2026-03-07
+**Status**: Denominator recovery only - no readiness or linkage-improvement claims
+**Protocol**: [RESEARCH_EXPERIMENT_PROTOCOL.md](RESEARCH_EXPERIMENT_PROTOCOL.md)
 
 ---
 
-## Autonomous Decision (2026-03-06)
+## Autonomous Decision (2026-03-07)
 
-Applying the protocol decision hierarchy:
+Applying the current evidence hierarchy:
 
+```text
+fresh_trade_rows = 1
+fresh_linkage_included = 1
+fresh_production_valid_matched = 0
+-> stay in denominator-recovery mode
 ```
-execution_log_freshness = 63h  (threshold: <= 24h)
-→ PHASE 1: repair execution telemetry freshness
-```
 
-All Phase-5 strategy experiments are blocked until Phases 1–4 are complete.
+No readiness, linkage-improvement, or strategy-experiment claim is allowed until:
+
+- fresh `TRADE` exclusions stay near zero across multiple cycles
+- `fresh_linkage_included > 1`
+- at least one fresh production-valid matched row appears
 
 ---
 
-## Phase 1 Actions (Unblock Now)
+## Immediate Actions
 
-### Action 1.1 — Restore execution telemetry freshness
+### Action 1 - Keep the fresh cohort strictly TRADE-only
 
-The execution log is 63 hours stale. Cron job `[P1] Trading Cycles` should handle this
-automatically (daily 10 AM), but can be triggered manually:
+Use only the corrected watcher outputs:
 
 ```bash
-source simpleTrader_env/Scripts/activate
-python scripts/run_auto_trader.py \
-    --tickers NVDA,MSFT,GOOG,JPM \
-    --cycles 3 \
-    --execution-mode auto
+python scripts/run_live_denominator_overnight.py \
+  --tickers AAPL,AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V \
+  --cycles 30 \
+  --sleep-seconds 86400 \
+  --resume \
+  --stop-on-progress
 ```
 
-**Success signal**: `project_runtime_status.py` shows `execution_age_hours <= 24`.
+Interpret the watcher using only these three signals:
 
-### Action 1.2 — Verify integrity gate clears
+- fresh `TRADE`-context exclusion counts
+- fresh linkage denominator growth
+- fresh production-valid matched rows
+
+`NON_TRADE_CONTEXT` rows are diagnostics only. They must never be reintroduced into the fresh TRADE denominator.
+
+### Action 2 - Let the watcher accumulate daily evidence, not intraday noise
+
+- Daily bars make sub-daily polling mostly noise.
+- The watcher now sleeps for `86400` seconds and skips weekends by default.
+- Because today is Saturday, March 7, 2026, no new production watcher cycles should be expected until Monday, March 9, 2026.
+
+### Action 3 - Keep dashboard startup wiring active after reboot
 
 ```bash
-python scripts/capital_readiness_check.py --json
+python scripts/windows_dashboard_manager.py ensure --status-json logs/dashboard_manager_status.json
 ```
 
-Expected after Action 1.1:
-- `R6` → cleared (0 lifecycle violations — already fixed)
-- `R3` → FAIL until WR crosses 45% (data-driven, not fixable by a single run)
-- `R2` → passes once `run_all_gates.py` is run post-execution
-
-### Action 1.3 — Run production gates to refresh gate artifact
-
-```bash
-python scripts/run_all_gates.py --json
-```
-
-Writes `logs/gate_status_latest.json`. R2 requires this artifact to be < 26h old.
+This keeps the dashboard bridge, local HTTP server, and live denominator watcher connected from one entry point.
 
 ---
 
-## Phase 2 Preview (Linkage Coverage)
+## What To Watch Next
 
-Once Phase 1 is complete, run:
+Only three watcher signals matter right now:
 
-```bash
-python scripts/update_platt_outcomes.py
-python scripts/outcome_linkage_attribution_report.py --json
-```
+1. Fresh `TRADE`-context exclusion counts
+   - target: near zero across multiple cycles
+2. Fresh linkage denominator growth
+   - target: `fresh_linkage_included > 1`, then stable growth toward `5-10`
+3. Fresh production-valid matched rows
+   - target: `fresh_production_valid_matched >= 1`
 
-Target: `outcome_matched >= 10`, `matched/eligible >= 0.80`.
-
-Current state: `matched = 0/0` (thin linkage — no matched outcomes yet).
-
----
-
-## Phase 3 Preview (Evaluation Completeness)
-
-Many forecast audit files are missing `evaluation_metrics`. Fix by running fresh audit windows:
-
-```bash
-bash bash/overnight_refresh.sh
-python scripts/check_model_improvement.py --layer 1 --json
-```
-
-Target: `evaluation_metrics_coverage >= 80%`.
-Current state: ~30% coverage (many legacy windows missing the field).
+Anything else is secondary until those three conditions are met.
 
 ---
 
-## Phase 4 Preview (Attribution)
-
-Once Phases 1–3 pass, run the full attribution suite:
-
-```bash
-python scripts/exit_quality_audit.py --json
-python scripts/compute_ticker_eligibility.py --json
-python scripts/compute_context_quality.py --json
-python scripts/check_model_improvement.py --json
-```
-
-Largest known leak sources (from current data):
-- `STOP_LOSS` exits dominating losses — avg loss $75.91, PF 0.80
-- Ensemble lift CI [-0.085, -0.035] → ensemble rarely beats best-single (1.4% of windows)
-- WR=40% below 45% R3 gate — signal quality, not execution, is the bottleneck
-
----
-
-## Phase 5 Experiment Backlog (Blocked)
-
-| ID | Hypothesis | Blocked by |
-|----|-----------|------------|
-| EXP-001 | Tighter ATR stop reduces tail-loss magnitude | Phases 1-4 |
-| EXP-002 | Longer max_holding reduces correct-direction-but-loss exits | Phases 1-4 |
-| EXP-003 | Regime filter blocks WEAK ticker entries in high-vol | Phases 1-4 |
-| EXP-004 | Higher confidence gate improves entry quality | Phases 1-4 |
-| EXP-005 | Reduced position size for LAB_ONLY tickers improves PF | Phases 1-4 |
-
----
-
-## Capital Readiness Snapshot (2026-03-06)
+## Capital Readiness Snapshot (2026-03-07)
 
 | Gate | Status | Detail |
 |------|--------|--------|
-| R1 adversarial | PASS | 0/21 confirmed, all cleared |
-| R2 gate artifact | STALE | run_all_gates needed |
-| R3 trade quality | FAIL | WR=40% < 45%, PF=0.80 < 1.30 |
-| R4 calibration | PASS | Brier=0.235, tier=jsonl |
-| R5 lift CI | WARNING | CI [-0.085, -0.035], advisory only |
-| R6 lifecycle | PASS | 0 violations (fixed 2026-03-06) |
+| R1 adversarial | PASS | telemetry contract and TCON checks remain active |
+| R2 gate artifact | FAIL | `run_all_gates.py` currently fails on `production_audit_gate` |
+| R3 trade quality | ERROR | `scripts/exit_quality_audit.py:93` still errors in the automated path |
+| R4 calibration | PASS | last verified Brier path remains below hard-fail threshold |
+| R5 lift CI | WARNING | negative CI remains advisory only in `capital_readiness_check.py` |
+| R6 lifecycle | PASS | lifecycle integrity remains cleared |
 
 ---
 
-## Observability Commands (Run Any Time)
+## Observability Commands
 
 ```bash
-# Full readiness snapshot
-python scripts/capital_readiness_check.py --json
+# Watcher status without waiting for the next trading day
+python scripts/run_live_denominator_overnight.py --tickers AAPL,AMZN,GOOG,GS,JPM,META,MSFT,NVDA,TSLA,V --cycles 1 --sleep-seconds 0 --dry-run
 
-# Execution freshness
-python scripts/project_runtime_status.py --json
+# Dashboard stack + watcher startup
+python scripts/windows_dashboard_manager.py ensure --status-json logs/dashboard_manager_status.json
 
-# Model quality
-python scripts/check_model_improvement.py --json
-
-# Trade quality
-python -m integrity.pnl_integrity_enforcer
-
-# Adversarial health
-python scripts/adversarial_diagnostic_runner.py --severity HIGH --json
+# Gate snapshot
+python scripts/run_all_gates.py --json
 ```
