@@ -243,12 +243,6 @@ signal_routing:
   min_expected_return: 0.02   # 2% minimum expected return
   max_risk_score: 0.7         # Maximum risk score
   
-  # Fallback triggers
-  ts_fallback_triggers:
-    - forecast_unavailable
-    - confidence_below_threshold
-    - model_failure
-    - insufficient_data
 ```
 
 **Estimated Effort**: 1-2 hours

@@ -56,7 +56,7 @@ This document is a standing anti-regression contract for sanitation work.
 - `rg -n "SELECT|FROM trade_executions|close_ts < entry_ts|forecast_horizon|eligible|matched" scripts integrity`
 
 2. Config contract scan
-- `rg -n "enable_|routing_mode|ts_fallback_triggers|sidecar_max_age" config models scripts`
+- `rg -n "enable_|routing_mode|sidecar_max_age" config models scripts`
 
 3. Denominator/status scan
 - `rg -n "NON_TRADE_CONTEXT|INVALID_CONTEXT|counts_toward_|phase3_ready|reason_code|DATE_FALLBACK_USED" scripts tests`
