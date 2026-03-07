@@ -636,6 +636,7 @@ Comprehensive documentation is available in the `Documentation/` directory:
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
 - **[Caching Implementation](Documentation/CACHING_IMPLEMENTATION.md)**: Intelligent caching guide
 - **[Git Workflow](Documentation/GIT_WORKFLOW.md)**: Local-first git workflow
+- **[Repository Sanitation Guardrails](Documentation/REPO_SANITATION_GUARDRAILS.md)**: Mandatory anti-drift contract for duplication, denominator integrity, and fail-open prevention
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
 - **[Next Immediate Action](Documentation/NEXT_IMMEDIATE_ACTION.md)**: Current execution priority and verification loop
 - **[Phase 7.35 Outcome Linkage Hardening](Documentation/PHASE_7.35_OUTCOME_LINKAGE_HARDENING.md)**: Linkage integrity status and Phase 3 entry gate

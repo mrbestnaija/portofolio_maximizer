@@ -1,7 +1,7 @@
 # Documentation Index — Portfolio Maximizer v45
 
 **Purpose**: Canonical navigator for all project documentation.
-**Last updated**: 2026-03-02 (Phase 7.25-7.31 complete)
+**Last updated**: 2026-03-07 (repo sanitation guardrails added)
 
 > For the current phase status and next steps, start with [Planning and Status (Canonical)](#planning-and-status-canonical).
 
@@ -28,6 +28,7 @@ Reference specifications enforced across all phases and agents.
 |----------|-------------|
 | [AGENT_INSTRUCTION.md](AGENT_INSTRUCTION.md) | Agent behavioral guardrails and task execution standards |
 | [AGENT_DEV_CHECKLIST.md](AGENT_DEV_CHECKLIST.md) | Pre-commit and pre-deploy checklist for all code changes |
+| [REPO_SANITATION_GUARDRAILS.md](REPO_SANITATION_GUARDRAILS.md) | Mandatory sanitation contract to prevent duplication, drift, fail-open reporting, and denominator distortion |
 | [QUANT_TIME_SERIES_STACK.md](QUANT_TIME_SERIES_STACK.md) | Canonical description of the TS forecasting stack (GARCH/SAMOSSA/MSSA-RL/ensemble) |
 | [QUANT_VALIDATION_MONITORING_POLICY.md](QUANT_VALIDATION_MONITORING_POLICY.md) | Quant validation gate thresholds, FAIL/WARN/PASS rules, monitoring cadence |
 | [REWARD_TO_EFFORT_INTEGRATION_PLAN.md](REWARD_TO_EFFORT_INTEGRATION_PLAN.md) | Sequencing heuristics — prioritize high-signal, low-effort improvements first |

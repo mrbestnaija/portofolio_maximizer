@@ -841,6 +841,7 @@ pytest tests/ -v --tb=short
 - **[Architecture Tree](Documentation/arch_tree.md)**: Complete architecture overview
 - **[OpenClaw Integration](Documentation/OPENCLAW_INTEGRATION.md)**: OpenClaw + 3-model LLM strategy + Interactions API security
 - **[OpenClaw Implementation Policy](Documentation/OPENCLAW_IMPLEMENTATION_POLICY.md)**: Repo-wide implementation contracts and anti-regression evidence requirements
+- **[Repository Sanitation Guardrails](Documentation/REPO_SANITATION_GUARDRAILS.md)**: Mandatory anti-drift contract for duplication, denominator integrity, fail-open prevention, and config wiring consistency
 - **[Adversarial Audit](Documentation/ADVERSARIAL_AUDIT_20260216.md)**: 10-finding stress test with P0-P3 recommendations
 - **[Project Status](Documentation/PROJECT_STATUS.md)**: Current verified snapshot + reproducible commands
 
