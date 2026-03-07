@@ -85,9 +85,9 @@ Anything else is secondary until those three conditions are met.
 |------|--------|--------|
 | R1 adversarial | PASS | telemetry contract and TCON checks remain active |
 | R2 gate artifact | FAIL | `run_all_gates.py` currently fails on `production_audit_gate` |
-| R3 trade quality | ERROR | `scripts/exit_quality_audit.py:93` still errors in the automated path |
+| R3 trade quality | FAIL | real metrics fail: `win_rate=40.0% < 45%` and `profit_factor=0.80 < 1.30` |
 | R4 calibration | PASS | last verified Brier path remains below hard-fail threshold |
-| R5 lift CI | WARNING | negative CI remains advisory only in `capital_readiness_check.py` |
+| R5 lift CI | FAIL | negative CI now hard-fails in `capital_readiness_check.py`; Layer 1 wording still mislabels it as `spans zero` |
 | R6 lifecycle | PASS | lifecycle integrity remains cleared |
 
 ---
