@@ -643,17 +643,7 @@ def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
     return metrics
 
 
-def main() -> int:
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-    # Load `.env` safely (best-effort) without printing or overwriting existing env vars.
-    try:
-        from etl.secret_loader import bootstrap_dotenv
-
-        bootstrap_dotenv()
-    except Exception:
-        pass
-
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run production lift + profitability proof gates.",
     )
@@ -764,16 +754,20 @@ def main() -> int:
         default=20.0,
         help="OpenClaw command timeout in seconds (default: 20).",
     )
-    args, unknown = parser.parse_known_args()
-    if unknown:
-        print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
+    return parser
+
+
+def _prepare_gate_context(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+) -> Dict[str, Any]:
     python_bin = str(Path(args.python_bin))
     db_path = _resolve_path(repo_root, args.db)
     proof_requirements_path = _resolve_path(repo_root, args.proof_requirements)
     audit_dir = _resolve_path(repo_root, args.audit_dir)
     monitor_config = _resolve_path(repo_root, args.monitor_config)
     output_path = _resolve_path(repo_root, args.output_json)
-
     check_script = repo_root / "scripts" / "check_forecast_audits.py"
     proof_script = repo_root / "scripts" / "validate_profitability_proof.py"
     summary_cache_path = repo_root / "logs" / "forecast_audits_cache" / "latest_summary.json"
@@ -795,6 +789,34 @@ def main() -> int:
             apply=bool(args.reconcile_apply),
         )
 
+    return {
+        "python_bin": python_bin,
+        "db_path": db_path,
+        "proof_requirements_path": proof_requirements_path,
+        "audit_dir": audit_dir,
+        "monitor_config": monitor_config,
+        "output_path": output_path,
+        "check_script": check_script,
+        "proof_script": proof_script,
+        "summary_cache_path": summary_cache_path,
+        "warmup_policy": warmup_policy,
+        "lift_inconclusive_allowed": lift_inconclusive_allowed,
+        "proof_profitable_required": proof_profitable_required,
+        "reconcile_result": reconcile_result,
+    }
+
+
+def _run_lift_stage(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    python_bin: str,
+    check_script: Path,
+    db_path: Path,
+    audit_dir: Path,
+    monitor_config: Path,
+    summary_cache_path: Path,
+) -> Dict[str, Any]:
     lift_cmd = [
         python_bin,
         str(check_script),
@@ -818,10 +840,10 @@ def main() -> int:
     lift_output_metrics = _extract_lift_output_metrics(lift_output)
 
     # Load config min_lift_fraction to detect threshold-drift cache staleness.
-    _rmse_cfg = _load_regression_monitoring_config(monitor_config)
-    _cfg_min_lift = None
+    rmse_cfg = _load_regression_monitoring_config(monitor_config)
+    cfg_min_lift = None
     try:
-        _cfg_min_lift = float(_rmse_cfg.get("min_lift_fraction", 0.0)) if _rmse_cfg else None
+        cfg_min_lift = float(rmse_cfg.get("min_lift_fraction", 0.0)) if rmse_cfg else None
     except Exception:
         pass
 
@@ -830,9 +852,95 @@ def main() -> int:
         lift_summary,
         audit_dir=audit_dir,
         max_files=int(args.max_files),
-        min_lift_fraction=_cfg_min_lift,
+        min_lift_fraction=cfg_min_lift,
     ):
         lift_summary = {}
+
+    return {
+        "lift_cmd": lift_cmd,
+        "lift_proc": lift_proc,
+        "lift_output": lift_output,
+        "lift_inconclusive": lift_inconclusive,
+        "lift_output_metrics": lift_output_metrics,
+        "lift_summary": lift_summary,
+    }
+
+
+def _run_profitability_stage(
+    *,
+    repo_root: Path,
+    python_bin: str,
+    proof_script: Path,
+    db_path: Path,
+    proof_requirements_path: Path,
+) -> Dict[str, Any]:
+    proof_cmd = [
+        python_bin,
+        str(proof_script),
+        "--db",
+        str(db_path),
+        "--json",
+    ]
+    proof_proc = _run_command(proof_cmd, cwd=repo_root)
+    proof_payload = _parse_json_payload(f"{proof_proc.stdout or ''}\n{proof_proc.stderr or ''}") or {}
+    metrics = proof_payload.get("metrics") if isinstance(proof_payload.get("metrics"), dict) else {}
+    proof_requirements = _load_profitability_requirements(proof_requirements_path)
+    evidence_progress = _build_evidence_progress(metrics=metrics, requirements=proof_requirements)
+    return {
+        "proof_cmd": proof_cmd,
+        "proof_proc": proof_proc,
+        "proof_payload": proof_payload,
+        "metrics": metrics,
+        "evidence_progress": evidence_progress,
+    }
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    # Load `.env` safely (best-effort) without printing or overwriting existing env vars.
+    try:
+        from etl.secret_loader import bootstrap_dotenv
+
+        bootstrap_dotenv()
+    except Exception:
+        pass
+
+    parser = _build_parser()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
+    context = _prepare_gate_context(args=args, repo_root=repo_root)
+    python_bin = context["python_bin"]
+    db_path = context["db_path"]
+    proof_requirements_path = context["proof_requirements_path"]
+    audit_dir = context["audit_dir"]
+    monitor_config = context["monitor_config"]
+    output_path = context["output_path"]
+    check_script = context["check_script"]
+    proof_script = context["proof_script"]
+    summary_cache_path = context["summary_cache_path"]
+    warmup_policy = context["warmup_policy"]
+    lift_inconclusive_allowed = bool(context["lift_inconclusive_allowed"])
+    proof_profitable_required = bool(context["proof_profitable_required"])
+    reconcile_result = context["reconcile_result"]
+
+    lift_stage = _run_lift_stage(
+        args=args,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        check_script=check_script,
+        db_path=db_path,
+        audit_dir=audit_dir,
+        monitor_config=monitor_config,
+        summary_cache_path=summary_cache_path,
+    )
+    lift_cmd = lift_stage["lift_cmd"]
+    lift_proc = lift_stage["lift_proc"]
+    lift_output = lift_stage["lift_output"]
+    lift_inconclusive = bool(lift_stage["lift_inconclusive"])
+    lift_output_metrics = lift_stage["lift_output_metrics"]
+    lift_summary = lift_stage["lift_summary"]
 
     lift_status = "PASS"
     if lift_proc.returncode != 0:
@@ -874,15 +982,16 @@ def main() -> int:
     if min_lift_fraction is None:
         min_lift_fraction = lift_summary.get("min_lift_fraction")
 
-    proof_cmd = [
-        python_bin,
-        str(proof_script),
-        "--db",
-        str(db_path),
-        "--json",
-    ]
-    proof_proc = _run_command(proof_cmd, cwd=repo_root)
-    proof_payload = _parse_json_payload(f"{proof_proc.stdout or ''}\n{proof_proc.stderr or ''}") or {}
+    proof_stage = _run_profitability_stage(
+        repo_root=repo_root,
+        python_bin=python_bin,
+        proof_script=proof_script,
+        db_path=db_path,
+        proof_requirements_path=proof_requirements_path,
+    )
+    proof_cmd = proof_stage["proof_cmd"]
+    proof_proc = proof_stage["proof_proc"]
+    proof_payload = proof_stage["proof_payload"]
 
     proof_is_valid = bool(proof_payload.get("is_proof_valid", False))
     proof_is_profitable = bool(proof_payload.get("is_profitable", False))
@@ -891,11 +1000,10 @@ def main() -> int:
     )
     proof_status = "PASS" if proof_pass and proof_proc.returncode == 0 else "FAIL"
 
-    metrics = proof_payload.get("metrics") if isinstance(proof_payload.get("metrics"), dict) else {}
+    metrics = proof_stage["metrics"]
     winning = int(metrics.get("winning_trades", 0) or 0)
     losing = int(metrics.get("losing_trades", 0) or 0)
-    proof_requirements = _load_profitability_requirements(proof_requirements_path)
-    evidence_progress = _build_evidence_progress(metrics=metrics, requirements=proof_requirements)
+    evidence_progress = proof_stage["evidence_progress"]
 
     reconcile_pass = True
     if reconcile_result.get("requested"):
