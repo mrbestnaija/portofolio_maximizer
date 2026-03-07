@@ -12,7 +12,6 @@ but those sources must not import back into the automation pipeline helpers.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 import sys
 from pathlib import Path
@@ -36,6 +35,11 @@ except ModuleNotFoundError:
         R3_MIN_WIN_RATE as _R3_MIN_WIN_RATE,
         R4_MAX_BRIER as _R4_MAX_BRIER,
     )
+
+try:
+    from scripts.telemetry_adapter import sha256_file
+except ModuleNotFoundError:
+    from telemetry_adapter import sha256_file
 
 CAPITAL_READINESS_CHECK_PATH = ROOT / "scripts" / "capital_readiness_check.py"
 FORECASTER_MONITORING_PATH = ROOT / "config" / "forecaster_monitoring.yml"
@@ -72,16 +76,8 @@ def _extract_yaml_float(path: Path, key: str, default: float) -> float:
 
 
 def _sha256_file(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    h = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(8192), b""):
-                h.update(chunk)
-    except Exception:
-        return None
-    return h.hexdigest()
+    digest, _ = sha256_file(path)
+    return digest
 
 
 MIN_LIFT_FRACTION = _extract_yaml_float(FORECASTER_MONITORING_PATH, "min_lift_fraction", 0.25)

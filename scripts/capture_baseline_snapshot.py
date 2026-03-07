@@ -10,7 +10,6 @@ repeatable across roadmap phases.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import io
 import json
 import re
@@ -25,6 +24,16 @@ from typing import Any, Dict, Iterable, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+_SCRIPTS_DIR = str(REPO_ROOT / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+try:
+    from scripts.telemetry_adapter import sha256_file
+except Exception:  # pragma: no cover - script execution path fallback
+    from telemetry_adapter import sha256_file
 
 
 DEFAULT_CONFIG_PATHS = (
@@ -56,11 +65,10 @@ class CaptureResult:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    digest, reason = sha256_file(path)
+    if digest is None:
+        raise OSError(f"sha256_failed:{reason or 'unknown'}:{path}")
+    return digest
 
 
 def _tail_lines(path: Path, n_lines: int) -> list[str]:

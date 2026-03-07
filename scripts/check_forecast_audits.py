@@ -18,7 +18,6 @@ or CI workflows.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sqlite3
@@ -34,9 +33,9 @@ except Exception:  # pragma: no cover - script execution path fallback
     from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
 
 try:
-    from scripts.telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
+    from scripts.telemetry_adapter import normalize_telemetry_payload, sha256_file, telemetry_now_utc
 except Exception:  # pragma: no cover - script execution path fallback
-    from telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
+    from telemetry_adapter import normalize_telemetry_payload, sha256_file, telemetry_now_utc
 
 try:
     from scripts.quality_pipeline_common import (
@@ -89,14 +88,8 @@ def _load_audit(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _sha256_file(path: Path) -> Optional[str]:
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except Exception:
-        return None
+    digest, _ = sha256_file(path)
+    return digest
 
 
 def _parse_window_day(raw: Any) -> Optional[str]:

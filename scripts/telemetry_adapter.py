@@ -8,6 +8,7 @@ renaming/removing existing keys.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -89,6 +90,41 @@ def telemetry_age_minutes(
     now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     age = (now - parsed).total_seconds() / 60.0
     return age if age >= 0 else 0.0
+
+
+def sha256_file(
+    path: Path,
+    *,
+    max_bytes: int = 0,
+    chunk_bytes: int = 1024 * 1024,
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Return (sha256_hex, skip_reason). Never raises.
+
+    skip_reason values:
+      - stat_failed
+      - too_large><max_bytes>
+      - read_failed
+    """
+    try:
+        size = int(Path(path).stat().st_size)
+    except Exception:
+        return None, "stat_failed"
+
+    if max_bytes > 0 and size > max_bytes:
+        return None, f"too_large>{max_bytes}"
+
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as handle:
+            while True:
+                chunk = handle.read(chunk_bytes)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest(), None
+    except Exception:
+        return None, "read_failed"
 
 
 def normalize_status(raw: Any) -> str:

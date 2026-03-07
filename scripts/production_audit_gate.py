@@ -12,7 +12,6 @@ Outputs a machine-readable artifact for operators and batch wrappers.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -29,9 +28,9 @@ except Exception:  # pragma: no cover - script execution path fallback
     from audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
 
 try:
-    from scripts.telemetry_adapter import normalize_telemetry_payload
+    from scripts.telemetry_adapter import normalize_telemetry_payload, sha256_file
 except Exception:  # pragma: no cover - script execution path fallback
-    from telemetry_adapter import normalize_telemetry_payload
+    from telemetry_adapter import normalize_telemetry_payload, sha256_file
 
 try:
     from scripts.quality_pipeline_common import compute_lifecycle_integrity_metrics
@@ -213,28 +212,7 @@ def _run_command_quiet(cmd: list[str], cwd: Path) -> Tuple[int, str, str]:
 
 
 def _sha256_file(path: Path, *, max_bytes: int = 5 * 1024 * 1024) -> Tuple[Optional[str], Optional[str]]:
-    """Return (sha256, skip_reason). Never raises."""
-    try:
-        size = int(path.stat().st_size)
-    except Exception:
-        return None, "stat_failed"
-
-    if max_bytes > 0 and size > max_bytes:
-        return None, f"too_large>{max_bytes}"
-
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            remaining = size
-            while remaining > 0:
-                chunk = handle.read(min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                digest.update(chunk)
-                remaining -= len(chunk)
-        return digest.hexdigest(), None
-    except Exception:
-        return None, "read_failed"
+    return sha256_file(path, max_bytes=max_bytes)
 
 
 def _looks_like_secret_path(path: Path) -> bool:
