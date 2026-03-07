@@ -36,6 +36,7 @@ DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_
 DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
 DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
+DEFAULT_POSITIONS_MAX_AGE_DAYS = 14.0
 DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
 DASHBOARD_REQUIRED_TOP_LEVEL_KEYS = (
     "meta",
@@ -452,6 +453,42 @@ def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _positions_max_age_days() -> float:
+    try:
+        raw = os.getenv("PMX_POSITIONS_MAX_AGE_DAYS", str(DEFAULT_POSITIONS_MAX_AGE_DAYS))
+        value = float(raw)
+        return value if value >= 0 else float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
+    except Exception:
+        return float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
+
+
+def _portfolio_positions_snapshot_meta(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
+    latest_raw = str(row["d"]) if row and row["d"] else None
+    if not latest_raw:
+        return {
+            "latest_position_date": None,
+            "positions_age_days": None,
+            "positions_stale": False,
+        }
+    parsed = _parse_utc_datetime(latest_raw)
+    age_days: Optional[float]
+    if parsed is None:
+        age_days = None
+    else:
+        now = datetime.now(timezone.utc)
+        age_days = (now - parsed).total_seconds() / 86400.0
+        if age_days < 0:
+            age_days = 0.0
+    max_age_days = _positions_max_age_days()
+    is_stale = bool(age_days is not None and age_days > max_age_days)
+    return {
+        "latest_position_date": latest_raw,
+        "positions_age_days": round(age_days, 3) if age_days is not None else None,
+        "positions_stale": is_stale,
+    }
+
+
 def _latest_close(conn: sqlite3.Connection, ticker: str) -> Optional[float]:
     row = _safe_fetchone(
         conn,
@@ -479,12 +516,24 @@ def _positions_from_executions(conn: sqlite3.Connection) -> Dict[str, Dict[str, 
     closes don't distort entry price. Uses latest close from ohlcv_data as
     current price when available.
     """
+    try:
+        cols = {
+            str(r["name"]).lower()
+            for r in _safe_fetchall(conn, "PRAGMA table_info(trade_executions)")
+            if "name" in r.keys()
+        }
+    except Exception:
+        cols = set()
+    diag_clause = "AND COALESCE(is_diagnostic, 0) = 0" if "is_diagnostic" in cols else ""
+    synthetic_clause = "AND COALESCE(is_synthetic, 0) = 0" if "is_synthetic" in cols else ""
     rows = _safe_fetchall(
         conn,
-        """
+        f"""
         SELECT ticker, action, shares, price, trade_date, created_at
         FROM trade_executions
         WHERE ticker IS NOT NULL AND action IS NOT NULL
+          {diag_clause}
+          {synthetic_clause}
         ORDER BY COALESCE(created_at, trade_date) ASC, id ASC
         """,
     )
@@ -711,6 +760,7 @@ def _trade_events_filtered(
         params_base = ticker_list + [latest_run_id, int(limit)]
     query_full = f"""
     SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
+           exit_reason,
            data_source, execution_mode,
            barbell_bucket, barbell_multiplier, base_confidence, effective_confidence
     FROM trade_executions
@@ -719,6 +769,14 @@ def _trade_events_filtered(
     LIMIT ?
     """
     query_min = f"""
+    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
+           exit_reason
+    FROM trade_executions
+    WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
+    ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
+    LIMIT ?
+    """
+    query_legacy = f"""
     SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps
     FROM trade_executions
     WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
@@ -730,7 +788,12 @@ def _trade_events_filtered(
     except sqlite3.OperationalError as exc:
         if "no such column" not in str(exc).lower():
             raise
-        rows = _safe_fetchall(conn, query_min, tuple(params_base))
+        try:
+            rows = _safe_fetchall(conn, query_min, tuple(params_base))
+        except sqlite3.OperationalError as exc_min:
+            if "no such column" not in str(exc_min).lower():
+                raise
+            rows = _safe_fetchall(conn, query_legacy, tuple(params_base))
     out: List[Dict[str, Any]] = []
     for r in rows:
         t = str(r["ticker"]).upper()
@@ -752,6 +815,8 @@ def _trade_events_filtered(
             pnl_pct = float(r["realized_pnl_pct"]) if r["realized_pnl_pct"] is not None else None
         except Exception:
             pnl_pct = None
+        raw_exit_reason = r["exit_reason"] if "exit_reason" in r.keys() else None
+        exit_reason = str(raw_exit_reason).strip().upper() if raw_exit_reason else None
         try:
             slip_bps = float(r["mid_slippage_bps"] or 0.0)
             slippage = slip_bps / 10000.0
@@ -770,7 +835,7 @@ def _trade_events_filtered(
                 "bar_timestamp": str(r["trade_date"]) if r["trade_date"] else None,
                 "realized_pnl": pnl,
                 "realized_pnl_pct": pnl_pct,
-                "exit_reason": None,
+                "exit_reason": exit_reason,
                 "slippage": float(slippage),
                 "data_source": str(r["data_source"] or "") if ("data_source" in r.keys()) else "",
                 "execution_mode": str(r["execution_mode"] or "") if ("execution_mode" in r.keys()) else "",
@@ -791,7 +856,9 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
         # Get DB path from connection
         db_path = conn.execute("PRAGMA database_list").fetchone()[2]
         canonical = _canonical_metrics_pnl_integrity(db_path)
-        if canonical:
+        if canonical and int(canonical.get("trade_count") or 0) > 0:
+            canonical["performance_unknown"] = False
+            canonical["performance_source"] = "pnl_integrity"
             return canonical
     except Exception:
         pass  # Fall back to performance_metrics table
@@ -825,18 +892,20 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
             raise
     if not row:
         return {
-            "pnl_abs": 0.0,
-            "pnl_pct": 0.0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "trade_count": 0,
-            "sharpe": 0.0,
-            "sortino": 0.0,
-            "max_drawdown": 0.0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "largest_win": 0.0,
-            "largest_loss": 0.0,
+            "pnl_abs": None,
+            "pnl_pct": None,
+            "win_rate": None,
+            "profit_factor": None,
+            "trade_count": None,
+            "sharpe": None,
+            "sortino": None,
+            "max_drawdown": None,
+            "avg_win": None,
+            "avg_loss": None,
+            "largest_win": None,
+            "largest_loss": None,
+            "performance_unknown": True,
+            "performance_source": "none",
         }
     def _f(key: str, default: float = 0.0) -> float:
         try:
@@ -866,6 +935,8 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
         "avg_loss": _f("avg_loss"),
         "largest_win": _f("largest_win"),
         "largest_loss": _f("largest_loss"),
+        "performance_unknown": False,
+        "performance_source": "performance_metrics",
     }
 
 
@@ -901,6 +972,8 @@ def _canonical_metrics_pnl_integrity(db_path: str) -> Dict[str, Any]:
                 "diagnostic_excluded": m.diagnostic_trades_excluded,
                 "synthetic_excluded": m.synthetic_trades_excluded,
                 "double_count_violations": m.opening_legs_with_pnl,
+                "performance_unknown": False,
+                "performance_source": "pnl_integrity",
             }
     except ImportError:
         # Fallback if integrity module not available
@@ -1014,11 +1087,39 @@ def build_dashboard_payload(
     output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     perf = _latest_performance(conn)
+    perf_unknown = bool(perf.get("performance_unknown"))
+    positions_meta = _portfolio_positions_snapshot_meta(conn)
+    positions_stale = bool(positions_meta.get("positions_stale"))
+    if positions_stale:
+        positions = _positions_from_executions(conn)
+        positions_source = "trade_executions_fallback"
+    else:
+        positions = _positions(conn)
+        positions_source = "portfolio_positions" if positions_meta.get("latest_position_date") else "trade_executions_fallback"
+
+    def _as_float_or_none(value: Any) -> Optional[float]:
+        try:
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _as_int_or_none(value: Any) -> Optional[int]:
+        try:
+            return int(value) if value is not None else None
+        except Exception:
+            return None
+
     run_id = _latest_run_id(conn) or "db_bridge"
     ts = _utc_now_iso()
     bucket_map = _barbell_bucket_map()
     model_params = _model_params(conn)
     checks = _data_checks(conn)
+    if positions_stale:
+        checks.append(
+            "portfolio_positions snapshot is stale; using filtered trade_executions fallback."
+        )
+    if perf_unknown:
+        checks.append("performance metrics unavailable; reporting as unknown.")
     provenance = _provenance_summary(conn)
     quant_validation = _quant_validation_payload()
 
@@ -1065,11 +1166,16 @@ def build_dashboard_payload(
             ],
             "ticker_buckets": {t: bucket_map.get(t, "other") for t in tickers},
         },
-        "pnl": {"absolute": float(perf["pnl_abs"]), "pct": float(perf["pnl_pct"])},
-        "win_rate": float(perf["win_rate"]),
-        "trade_count": int(perf["trade_count"]),
+        "pnl": {"absolute": _as_float_or_none(perf.get("pnl_abs")), "pct": _as_float_or_none(perf.get("pnl_pct"))},
+        "win_rate": _as_float_or_none(perf.get("win_rate")),
+        "trade_count": _as_int_or_none(perf.get("trade_count")),
         "performance": perf,
-        "positions": _positions(conn),
+        "performance_unknown": perf_unknown,
+        "positions": positions,
+        "positions_stale": positions_stale,
+        "positions_source": positions_source,
+        "positions_age_days": positions_meta.get("positions_age_days"),
+        "positions_latest_date": positions_meta.get("latest_position_date"),
         "latency": {"ts_ms": None, "llm_ms": None},
         "routing": {"ts_signals": 0, "llm_signals": 0, "fallback_used": 0},
         "quality": {"average": float(avg_q), "minimum": float(min_q), "records": qual_records},

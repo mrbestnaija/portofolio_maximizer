@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import pytest
 import sqlite3
 
 from scripts import dashboard_db_bridge as mod
 
 
-def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
+def test_build_dashboard_payload_from_sqlite(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "pmx.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -57,6 +58,7 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
     finally:
         conn.close()
 
+    monkeypatch.setenv("PMX_POSITIONS_MAX_AGE_DAYS", "36500")
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -296,6 +298,240 @@ forecaster_monitoring:
     assert payload["pass_count"] == 1
     assert payload["fail_count"] == 1
     assert payload["path"] == str(quant_log)
+
+
+def test_empty_performance_metrics_reports_unknown(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pmx_perf_unknown.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
+        conn.execute(
+            "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL, realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT, position_date TEXT, shares REAL, average_cost REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT, quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL, win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+        )
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-01','AAPL',100.0)")
+        conn.execute(
+            "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
+            ("AAPL", "2026-01-01", 5, 99.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(mod, "_canonical_metrics_pnl_integrity", lambda _: {})
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn,
+            tickers=["AAPL"],
+            lookback_days=10,
+            max_signals=10,
+            max_trades=10,
+            db_path=db_path,
+            read_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["performance_unknown"] is True
+    assert payload["performance"]["performance_unknown"] is True
+    assert payload["pnl"]["absolute"] is None
+    assert payload["pnl"]["pct"] is None
+    assert payload["win_rate"] is None
+    assert payload["trade_count"] is None
+
+
+def test_positions_stale_falls_back_and_filters_non_production_rows(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pmx_positions_stale.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
+        conn.execute(
+            "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL, realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT, is_diagnostic INTEGER DEFAULT 0, is_synthetic INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT, position_date TEXT, shares REAL, average_cost REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT, quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL, win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
+            ("AAPL", "2026-01-01", 999, 1.0),
+        )
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-02','AAPL',101.0)")
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-02','TSLA',202.0)")
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-02','MSFT',303.0)")
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,run_id,is_diagnostic,is_synthetic) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("AAPL", "BUY", 10, 100.0, "2026-01-02", "2026-01-02T00:00:01Z", "RID", 0, 0),
+        )
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,run_id,is_diagnostic,is_synthetic) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("TSLA", "BUY", 10, 200.0, "2026-01-02", "2026-01-02T00:00:02Z", "RID", 1, 0),
+        )
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,run_id,is_diagnostic,is_synthetic) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("MSFT", "BUY", 10, 300.0, "2026-01-02", "2026-01-02T00:00:03Z", "RID", 0, 1),
+        )
+        conn.execute(
+            "INSERT INTO performance_metrics(total_return,total_return_pct,win_rate,profit_factor,num_trades,created_at) VALUES (?,?,?,?,?,?)",
+            (1.0, 0.001, 0.5, 1.1, 1, "2026-01-02T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("PMX_POSITIONS_MAX_AGE_DAYS", "14")
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn,
+            tickers=["AAPL", "TSLA", "MSFT"],
+            lookback_days=10,
+            max_signals=10,
+            max_trades=20,
+            db_path=db_path,
+            read_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["positions_stale"] is True
+    assert payload["positions_source"] == "trade_executions_fallback"
+    assert "AAPL" in payload["positions"]
+    assert "TSLA" not in payload["positions"]
+    assert "MSFT" not in payload["positions"]
+
+
+def test_positions_fresh_snapshot_remains_authoritative(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "pmx_positions_fresh.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
+        conn.execute(
+            "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL, realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT, is_diagnostic INTEGER DEFAULT 0, is_synthetic INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT, position_date TEXT, shares REAL, average_cost REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT, quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL, win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+        )
+        today = datetime.now(timezone.utc).date().isoformat()
+        conn.execute(
+            "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
+            ("AAPL", today, 7, 123.0),
+        )
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-02','AAPL',124.0)")
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,run_id,is_diagnostic,is_synthetic) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("AAPL", "BUY", 100, 1.0, "2026-01-02", "2026-01-02T00:00:01Z", "RID", 0, 0),
+        )
+        conn.execute(
+            "INSERT INTO performance_metrics(total_return,total_return_pct,win_rate,profit_factor,num_trades,created_at) VALUES (?,?,?,?,?,?)",
+            (1.0, 0.001, 0.5, 1.1, 1, "2026-01-02T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("PMX_POSITIONS_MAX_AGE_DAYS", "14")
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn,
+            tickers=["AAPL"],
+            lookback_days=10,
+            max_signals=10,
+            max_trades=20,
+            db_path=db_path,
+            read_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["positions_stale"] is False
+    assert payload["positions_source"] == "portfolio_positions"
+    assert payload["positions"]["AAPL"]["shares"] == 7
+
+
+def test_trade_events_include_exit_reason(tmp_path) -> None:
+    db_path = tmp_path / "pmx_exit_reason.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
+        conn.execute(
+            "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL, realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT, exit_reason TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT, position_date TEXT, shares REAL, average_cost REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT, quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL, win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+        )
+        conn.execute("INSERT INTO ohlcv_data(date,ticker,close) VALUES ('2026-01-01','AAPL',100.0)")
+        conn.execute(
+            "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,exit_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("AAPL", "SELL", 5, 95.0, "2026-01-02", "2026-01-02T00:00:02Z", -25.0, -0.05, 10.0, "RID", "STOP_LOSS"),
+        )
+        conn.execute(
+            "INSERT INTO performance_metrics(total_return,total_return_pct,win_rate,profit_factor,num_trades,created_at) VALUES (?,?,?,?,?,?)",
+            (-25.0, -0.01, 0.0, 0.0, 1, "2026-01-02T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn,
+            tickers=["AAPL"],
+            lookback_days=10,
+            max_signals=10,
+            max_trades=20,
+            db_path=db_path,
+            read_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["trade_events"], "Expected trade events in payload"
+    assert payload["trade_events"][-1]["exit_reason"] == "STOP_LOSS"
 
 
 # ---------------------------------------------------------------------------

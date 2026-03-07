@@ -281,3 +281,52 @@ class TestLiftSignificanceNumericalStability:
                 assert result["mean_lift"] <= result["ci_high"] + 1e-9, (
                     f"mean_lift={result['mean_lift']} > ci_high={result['ci_high']} (seed={seed})"
                 )
+
+
+# ---------------------------------------------------------------------------
+# TestRegimeDetectorNumericalStability
+# ---------------------------------------------------------------------------
+
+class TestRegimeDetectorNumericalStability:
+    """RegimeDetector._calculate_hurst_exponent must not propagate log(0) = -inf."""
+
+    def test_hurst_constant_series_no_nan_inf(self):
+        """Constant price series: std(diffs)=0 → log(0)=-inf historically.
+        After the tau_safe guard, polyfit receives log(1e-12) everywhere → slope ~0.
+        Key contract: result must be finite and in [0, 1], NOT NaN or -inf."""
+        import pandas as pd
+        from forcester_ts.regime_detector import RegimeDetector
+
+        prices = pd.Series([100.0] * 50)
+        rd = RegimeDetector()
+        result = rd._calculate_hurst_exponent(prices)
+        assert math.isfinite(result), f"Expected finite Hurst for constant series, got {result}"
+        assert 0.0 <= result <= 1.0, f"Expected Hurst in [0,1] for constant series, got {result}"
+
+    def test_hurst_near_constant_series_is_finite(self):
+        """Series with near-zero but non-zero variance must yield finite Hurst."""
+        import pandas as pd
+        from forcester_ts.regime_detector import RegimeDetector
+
+        rng = np.random.default_rng(seed=42)
+        prices = pd.Series(100.0 + rng.normal(0, 1e-10, size=50))
+        rd = RegimeDetector()
+        result = rd._calculate_hurst_exponent(prices)
+        assert math.isfinite(result), f"Expected finite Hurst for near-constant series, got {result}"
+        assert 0.0 <= result <= 1.0
+
+    def test_detect_regime_constant_series_returns_stable_fallbacks(self):
+        """Flat price inputs should never produce NaN/Inf regime fields."""
+        import pandas as pd
+        from forcester_ts.regime_detector import RegimeDetector
+
+        prices = pd.Series([100.0] * 60)
+        rd = RegimeDetector()
+        result = rd.detect_regime(prices)
+
+        assert math.isfinite(float(result["features"]["trend_strength"]))
+        assert math.isfinite(float(result["features"]["hurst_exponent"]))
+        assert math.isfinite(float(result["confidence"]))
+        assert result["features"]["trend_strength"] == 0.0
+        assert result["features"]["hurst_exponent"] == 0.5
+        assert result["confidence"] == 0.0

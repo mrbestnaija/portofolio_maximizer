@@ -72,7 +72,7 @@ def _patch_all_passing(monkeypatch):
     # R5: CI positive (no warning)
     monkeypatch.setattr(
         mod, "_check_r5_lift_ci",
-        lambda db, audit: ("", {"lift_ci_low": 0.05}),
+        lambda db, audit: ("", "", {"lift_ci_low": 0.05}),
     )
     # R6: no lifecycle integrity issues
     monkeypatch.setattr(
@@ -187,12 +187,13 @@ class TestCapitalReadinessR4:
 
 class TestCapitalReadinessR5:
     def test_warns_but_passes_when_lift_ci_spans_zero(self, monkeypatch, tmp_path):
-        """R5 is advisory — CI spanning zero emits WARNING but does not prevent PASS."""
+        """R5 remains advisory only when CI spans zero."""
         import scripts.capital_readiness_check as mod
         _patch_all_passing(monkeypatch)
         monkeypatch.setattr(
             mod, "_check_r5_lift_ci",
             lambda db, audit: (
+                "",
                 "R5: lift CI [-0.003, 0.012] spans zero (win_fraction=48.0%) -- lift not statistically confirmed",
                 {"lift_ci_low": -0.003},
             ),
@@ -204,6 +205,29 @@ class TestCapitalReadinessR5:
         assert result["verdict"] == "PASS"
         assert any("R5" in w for w in result["warnings"]), "R5 warning must appear in warnings list"
         assert result["reasons"] == [], "R5 must not add to reasons list"
+
+    def test_fails_with_definitively_negative_ci(self, monkeypatch, tmp_path):
+        """R5 must block readiness when CI is definitively negative (both bounds < 0)."""
+        import scripts.capital_readiness_check as mod
+        _patch_all_passing(monkeypatch)
+        monkeypatch.setattr(
+            mod, "_check_r5_lift_ci",
+            lambda db, audit: (
+                "R5: lift CI [-0.1139, -0.0572] both bounds negative "
+                "(win_fraction=3.1%) -- ensemble definitively underperforming, "
+                "capital-readiness blocked",
+                "",
+                {"lift_ci_low": -0.1139},
+            ),
+        )
+        result = run_capital_readiness(tmp_path / "x.db", tmp_path, tmp_path / "q.jsonl")
+        assert result["ready"] is False, (
+            f"R5 must block readiness when CI is definitively negative; "
+            f"got verdict={result['verdict']}"
+        )
+        assert result["verdict"] == "FAIL"
+        assert any("R5" in r for r in result["reasons"]), "R5 failure reason must appear in reasons list"
+        assert result["warnings"] == [], "Definitively-negative R5 must not be downgraded to warning"
 
 
 class TestCapitalReadinessPasses:

@@ -545,6 +545,10 @@
               <div class="label">Last Trade PnL</div>
               <div class="value" id="kpi-last-pnl">--</div>
             </div>
+            <div class="kpi">
+              <div class="label">Last Exit</div>
+              <div class="value" id="kpi-exit-reason">--</div>
+            </div>
           </div>
         </div>
 
@@ -1056,6 +1060,15 @@
       const windowVal = wnd ? wnd.value : '180';
       const priceSeries = _filteredSeriesByWindow(rawSeries, windowVal);
       const tickerEvents = ticker ? tradeEvents.filter(e => e.ticker === ticker) : [];
+      const pos = positions[ticker];
+      const posLabel = (pos && pos.shares)
+        ? `ACTIVE  |  ${pos.shares} sh @ ${pos.entry_price ? formatUsd(Number(pos.entry_price)) : 'n/a'}`
+        : 'FLAT';
+      setText('kpi-position', posLabel);
+      const lastExit = [...tickerEvents]
+        .reverse()
+        .find(e => String(e.event_type || '').toUpperCase().startsWith('EXIT'));
+      setText('kpi-exit-reason', (lastExit && lastExit.exit_reason) ? String(lastExit.exit_reason) : '--');
 
       const priceCanvas = document.getElementById('trades-chart');
       const pnlCanvas = document.getElementById('trade-pnl-chart');
@@ -1104,7 +1117,6 @@
           drawMarker(p.ctx, x, y, cls.marker, cls.color);
         }
 
-        const pos = positions[ticker];
         if (pos && pos.shares && ys.length) {
           const last = priceSeries[priceSeries.length - 1];
           const t = parseTime(last.t);
@@ -1115,11 +1127,6 @@
             drawMarker(p.ctx, x, y, 'circle', '#f6a621');
           }
         }
-        const posLabel = (pos && pos.shares)
-          ? `ACTIVE  |  ${pos.shares} sh @ ${pos.entry_price ? formatUsd(Number(pos.entry_price)) : 'n/a'}`
-          : 'FLAT';
-        setText('kpi-position', posLabel);
-
         const q = prepareCanvas(pnlCanvas);
         q.ctx.clearRect(0, 0, q.w, q.h);
         drawAxes(q.ctx, q.w, q.h, pad);
@@ -1455,7 +1462,7 @@
           'Forecast-audit telemetry should expose a current schema version before the dashboard treats it as healthy.',
           'WARN',
           'freshness',
-          { meta: `schema=${schemaVersion [ ]'--'}`, targetId: 'payload-schema' }
+          { meta: `schema=${schemaVersion ?? '--'}`, targetId: 'payload-schema' }
         ));
       }
 
@@ -1544,7 +1551,7 @@
           `regimes=${regimeCount}, healthy_tickers=${healthyTickerCount}, trading_days=${tradingDays}.`,
           'INFO',
           'coverage',
-          { meta: `usable_rmse=${windowCounts.n_rmse_windows_usable [ ]'--'}`, targetId: 'audit-diversity' }
+          { meta: `usable_rmse=${windowCounts.n_rmse_windows_usable ?? '--'}`, targetId: 'audit-diversity' }
         ));
       }
 
@@ -1875,6 +1882,7 @@
         setText('kpi-last-close', '--');
         setText('kpi-position', '--');
         setText('kpi-last-pnl', '--');
+        setText('kpi-exit-reason', '--');
         const payloadWarningEl = document.getElementById('payload-warning');
         if (payloadWarningEl) {
           payloadWarningEl.textContent = 'Missing dashboard payload; waiting for dashboard_data.json.';
@@ -1919,33 +1927,61 @@
       const keys = params ? Object.keys(params) : [];
       const sample = keys.slice(0, 3).map(k => `${k}=${params[k]}`).join(', ');
       const stratText = strat && strat.regime
-        ? `Strategy regime: ${strat.regime} (score=${(strat.score [ ]0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
+        ? `Strategy regime: ${strat.regime} (score=${(strat.score ?? 0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
         : '';
       setText('strategy-meta', stratText);
 
-      setText('pnl-abs', formatUsd(data.pnl?.absolute || 0));
-      const pnlPct = data.pnl?.pct || 0;
+      const performanceUnknown = Boolean(data.performance_unknown || data.performance?.performance_unknown);
+      const pnlAbsVal = Number(data.pnl?.absolute);
+      const pnlPctVal = Number(data.pnl?.pct);
+      if (performanceUnknown) {
+        setText('pnl-abs', 'N/A');
+      } else {
+        setText('pnl-abs', Number.isFinite(pnlAbsVal) ? formatUsd(pnlAbsVal) : 'N/A');
+      }
+      const pnlPct = performanceUnknown ? null : (Number.isFinite(pnlPctVal) ? pnlPctVal : null);
       const pnlPctEl = document.getElementById('pnl-pct');
-      pnlPctEl.textContent = formatPct(pnlPct);
-      setPillState(pnlPctEl, pnlPct);
-      setText('pnl-trend', pnlPct > 0 ? 'Uptrend vs inception' : pnlPct < 0 ? 'Drawdown vs inception' : 'Flat vs inception');
+      pnlPctEl.textContent = pnlPct === null ? 'N/A' : formatPct(pnlPct);
+      setPillState(pnlPctEl, pnlPct === null ? 0 : pnlPct);
+      if (pnlPct === null) {
+        setText('pnl-trend', 'No data');
+      } else {
+        setText('pnl-trend', pnlPct > 0 ? 'Uptrend vs inception' : pnlPct < 0 ? 'Drawdown vs inception' : 'Flat vs inception');
+      }
 
-      setText('win-rate', formatPct(data.win_rate || 0));
+      const winRateValue = Number(data.win_rate);
+      setText('win-rate', (performanceUnknown || !Number.isFinite(winRateValue)) ? 'N/A' : formatPct(winRateValue));
       const tradeCountEl = document.getElementById('trade-count');
-      tradeCountEl.textContent = `${data.trade_count || 0} trades`;
-      setPillState(tradeCountEl, (data.win_rate || 0) - 0.5);
+      const tradeCountValue = Number(data.trade_count);
+      tradeCountEl.textContent = (performanceUnknown || !Number.isFinite(tradeCountValue))
+        ? 'No data'
+        : `${Math.max(0, Math.trunc(tradeCountValue))} trades`;
+      setPillState(
+        tradeCountEl,
+        (performanceUnknown || !Number.isFinite(winRateValue)) ? 0 : (winRateValue - 0.5)
+      );
 
       // Model diagnostics (performance_metrics if present)
       const perf = data.performance || {};
       const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(2) : '--';
       const fmtPct = (v) => Number.isFinite(v) ? `${(v * 100).toFixed(2)}%` : '--';
-      setText('diag-pf', fmtNum(perf.profit_factor [ ]data.profit_factor));
-      setText('diag-win', fmtPct((perf.win_rate [ ]data.win_rate) || 0));
-      setText('diag-trades', String(perf.trade_count [ ]data.trade_count [ ]0));
-      setText('diag-sharpe', `${fmtNum(perf.sharpe [ ]0)} / ${fmtNum(perf.sortino [ ]0)}`);
-      setText('diag-dd', fmtPct(perf.max_drawdown [ ]0));
-      setText('diag-avg', `${fmtNum(perf.avg_win [ ]0)} / ${fmtNum(perf.avg_loss [ ]0)}`);
-      setText('diag-largest', `${fmtNum(perf.largest_win [ ]0)} / ${fmtNum(perf.largest_loss [ ]0)}`);
+      if (performanceUnknown) {
+        setText('diag-pf', 'N/A');
+        setText('diag-win', 'N/A');
+        setText('diag-trades', 'N/A');
+        setText('diag-sharpe', 'N/A');
+        setText('diag-dd', 'N/A');
+        setText('diag-avg', 'N/A');
+        setText('diag-largest', 'N/A');
+      } else {
+        setText('diag-pf', fmtNum(Number(perf.profit_factor ?? data.profit_factor)));
+        setText('diag-win', fmtPct(Number(perf.win_rate ?? data.win_rate)));
+        setText('diag-trades', String(perf.trade_count ?? data.trade_count ?? 0));
+        setText('diag-sharpe', `${fmtNum(Number(perf.sharpe ?? 0))} / ${fmtNum(Number(perf.sortino ?? 0))}`);
+        setText('diag-dd', fmtPct(Number(perf.max_drawdown ?? 0)));
+        setText('diag-avg', `${fmtNum(Number(perf.avg_win ?? 0))} / ${fmtNum(Number(perf.avg_loss ?? 0))}`);
+        setText('diag-largest', `${fmtNum(Number(perf.largest_win ?? 0))} / ${fmtNum(Number(perf.largest_loss ?? 0))}`);
+      }
 
       setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '--');
       const llmEl = document.getElementById('llm-latency');
@@ -2008,6 +2044,12 @@
       }
       if (tradesCount === 0 || priceSeriesCount === 0) {
         warnMessages.push('Missing price_series/trade_events; add them to dashboard_data.json.');
+      }
+      if (data.positions_stale) {
+        warnMessages.push('Positions snapshot stale; using trade_executions fallback.');
+      }
+      if (performanceUnknown) {
+        warnMessages.push('Performance metrics unavailable; showing N/A.');
       }
       const payloadWarningEl = document.getElementById('payload-warning');
       if (payloadWarningEl) {

@@ -60,6 +60,7 @@ class RegimeDetector:
 
         # Extract features
         features = self._extract_regime_features(price_series, returns_series)
+        degenerate = bool(features.get('degenerate_series', 0.0))
 
         # Classify regime
         regime = self._classify_regime(features)
@@ -71,7 +72,7 @@ class RegimeDetector:
             'regime': regime,
             'features': features,
             'recommendations': recommendations,
-            'confidence': self._regime_confidence(features),
+            'confidence': 0.0 if degenerate else self._regime_confidence(features),
         }
 
     def _extract_regime_features(
@@ -81,20 +82,40 @@ class RegimeDetector:
     ) -> Dict[str, float]:
         """Extract quantitative regime features."""
         window = min(self.config.lookback_window, len(returns_series))
-        recent_returns = returns_series.iloc[-window:]
+        if window <= 0:
+            recent_returns = returns_series.dropna()
+        else:
+            recent_returns = returns_series.iloc[-window:]
+        recent_prices = price_series.iloc[-max(window, 1):]
+
+        if self._is_degenerate_series(recent_prices):
+            mean_return = float(recent_returns.mean()) if len(recent_returns) else 0.0
+            if not np.isfinite(mean_return):
+                mean_return = 0.0
+            return {
+                'realized_volatility': 0.0,
+                'vol_of_vol': 0.0,
+                'trend_strength': 0.0,
+                'hurst_exponent': 0.5,
+                'adf_pvalue': 1.0,
+                'skewness': 0.0,
+                'kurtosis': 0.0,
+                'mean_return': mean_return,
+                'degenerate_series': 1.0,
+            }
 
         # Volatility metrics
         realized_vol = recent_returns.std() * np.sqrt(252)  # Annualized
         vol_of_vol = recent_returns.rolling(5).std().std()  # Vol clustering
 
         # Trend strength (using ADX-like calculation)
-        trend_strength = self._calculate_trend_strength(price_series.iloc[-window:])
+        trend_strength = self._calculate_trend_strength(recent_prices)
 
         # Mean reversion test (Hurst exponent)
-        hurst = self._calculate_hurst_exponent(price_series.iloc[-window:])
+        hurst = self._calculate_hurst_exponent(recent_prices)
 
         # Stationarity (ADF test)
-        adf_pvalue = self._adf_test(returns_series.iloc[-window:])
+        adf_pvalue = self._adf_test(recent_returns)
 
         # Jump detection (tail risk)
         skewness = recent_returns.skew()
@@ -109,7 +130,17 @@ class RegimeDetector:
             'skewness': float(skewness),
             'kurtosis': float(kurtosis),
             'mean_return': float(recent_returns.mean()),
+            'degenerate_series': 0.0,
         }
+
+    def _is_degenerate_series(self, series: pd.Series) -> bool:
+        clean = series.dropna()
+        if len(clean) < 2:
+            return True
+        values = clean.values.astype(float, copy=False)
+        if not np.all(np.isfinite(values)):
+            return True
+        return bool(np.ptp(values) <= 1e-12)
 
     def _calculate_trend_strength(self, price_series: pd.Series) -> float:
         """
@@ -121,7 +152,9 @@ class RegimeDetector:
 
         # Simple trend strength: linear regression R²
         x = np.arange(len(price_series))
-        y = price_series.values
+        y = price_series.values.astype(float, copy=False)
+        if not np.all(np.isfinite(y)) or np.ptp(y) <= 1e-12:
+            return 0.0
 
         # Fit linear regression
         slope, intercept, r_value, _, _ = scipy_stats.linregress(x, y)
@@ -140,6 +173,8 @@ class RegimeDetector:
         """
         if len(series) < max_lag + 1:
             return 0.5  # Assume random walk if insufficient data
+        if self._is_degenerate_series(series):
+            return 0.5
 
         lags = range(2, min(max_lag, len(series) // 2))
         tau = []
@@ -149,10 +184,15 @@ class RegimeDetector:
             tau.append(np.std(diffs))
 
         # Fit power law: tau ~ lag^H
-        if len(tau) > 0:
+        # Guard: tau[i] can be 0.0 for constant sub-series; log(0) = -inf
+        # which silently corrupts polyfit output instead of raising.
+        tau_safe = [max(t, 1e-12) for t in tau]
+        if len(tau_safe) > 0:
             try:
-                poly = np.polyfit(np.log(lags), np.log(tau), 1)
+                poly = np.polyfit(np.log(list(lags)), np.log(tau_safe), 1)
                 hurst = poly[0]
+                if not np.isfinite(hurst):
+                    return 0.5
                 return float(np.clip(hurst, 0.0, 1.0))
             except (ValueError, np.linalg.LinAlgError):
                 return 0.5

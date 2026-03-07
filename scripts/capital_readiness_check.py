@@ -5,13 +5,15 @@ One command answers: "Ready to scale capital?"
 Composes Layer 1-4 diagnostics + adversarial status into a single PASS/FAIL/INSUFFICIENT_DATA
 verdict.  This is a *diagnostic* gate, not a production trading gate.
 
-Verdict rules (R1–R4 are hard gates; R5 is advisory):
+Verdict rules (R1–R4 are hard gates; R5 is conditional):
 
   R1  No confirmed CRITICAL or HIGH adversarial findings.
   R2  Gate artifact (logs/gate_status_latest.json) exists, overall_passed=True, age < 26 h.
   R3  Trade quality: n_trades >= 20, win_rate >= 0.45, profit_factor >= 1.30.
   R4  Calibration not inactive: tier != 'inactive', brier < 0.25.
-  R5  Lift CI positive (advisory): lift_ci_low > 0.  Emits WARNING, never FAIL.
+  R5  Lift CI positive:
+      - ci_low < 0 and ci_high < 0 => FAIL (definitively harmful lift)
+      - ci_low <= 0 and ci_high >= 0 => WARNING (inconclusive/advisory)
 
 Usage::
 
@@ -21,8 +23,8 @@ Usage::
         --audit-dir logs/forecast_audits
 
 Exit codes:
-    0  ready=True  (all R1–R4 passed, no errors)
-    1  ready=False (at least one R1–R4 failed)
+    0  ready=True  (all gates passed, no blocking errors)
+    1  ready=False (at least one blocking gate failed)
     2  INSUFFICIENT_DATA (key inputs missing)
 """
 from __future__ import annotations
@@ -215,8 +217,8 @@ def _check_r4_calibration(db_path: Path, jsonl_path: Path) -> tuple[Optional[boo
         return None, f"R4: error -- {exc}", metrics
 
 
-def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
-    """R5 (advisory): lift CI_low > 0.  Returns a warning string or '' if confirmed."""
+def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, str, dict]:
+    """R5: classify lift CI into blocking failure vs advisory warning."""
     metrics: dict[str, Any] = {"lift_ci_low": None}
     try:
         from check_model_improvement import run_layer1_forecast_quality
@@ -226,7 +228,7 @@ def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
         insufficient = result.metrics.get("lift_ci_insufficient_data", True)
         metrics["lift_ci_low"] = ci_low
         if insufficient or ci_low is None:
-            return "", metrics  # not enough data to warn
+            return "", "", metrics  # not enough data to evaluate
         if ci_low <= 0.0:
             import math
             ci_high = result.metrics.get("lift_ci_high", float("nan"))
@@ -235,16 +237,16 @@ def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
                 return (
                     f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] both bounds negative "
                     f"(win_fraction={win_frac:.1%}) -- ensemble definitively underperforming, "
-                    f"not merely inconclusive (advisory; see Layer 1 for gate impact)"
-                ), metrics
-            return (
+                    f"capital-readiness blocked"
+                ), "", metrics
+            return "", (
                 f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] spans zero "
                 f"(win_fraction={win_frac:.1%}) -- lift not statistically confirmed"
             ), metrics
-        return "", metrics
+        return "", "", metrics
     except Exception as exc:
         log.warning("R5 lift CI check failed: %s", exc)
-        return "", metrics
+        return "", "", metrics
 
 
 def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, dict]:
@@ -349,9 +351,11 @@ def run_capital_readiness(
     elif not r4_ok:
         reasons.append(r4_msg)
 
-    # R5: lift CI (advisory)
-    r5_warn, r5_m = _check_r5_lift_ci(db_path, resolved_audit_dir)
+    # R5: lift CI (both-negative CI is blocking, zero-crossing remains advisory)
+    r5_reason, r5_warn, r5_m = _check_r5_lift_ci(db_path, resolved_audit_dir)
     all_metrics.update(r5_m)
+    if r5_reason:
+        reasons.append(r5_reason)
     if r5_warn:
         warnings.append(r5_warn)
 

@@ -292,7 +292,7 @@ def test_behavior_lock_capital_readiness_json(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(
         mod,
         "_check_r5_lift_ci",
-        lambda *_: ("", {"lift_ci_low": 0.01}),
+        lambda *_: ("", "", {"lift_ci_low": 0.01}),
     )
     monkeypatch.setattr(
         mod,
