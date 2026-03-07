@@ -471,7 +471,7 @@ def _load_monitoring_thresholds(config_path: Optional[Path]) -> Dict[str, Any]:
     return fm
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Check TS forecast audit files for ensemble underperformance."
     )
@@ -581,8 +581,12 @@ def main() -> None:
             "regression_metrics.min_forecast_horizon when present."
         ),
     )
-    args = parser.parse_args()
+    return parser
 
+
+def _resolve_main_inputs(
+    args: argparse.Namespace,
+) -> Tuple[Path, Optional[Path], List[Path], List[Path]]:
     requested_audit_dir = Path(args.audit_dir)
     audit_dir = resolve_forecast_audit_dir(
         requested_audit_dir,
@@ -602,7 +606,14 @@ def main() -> None:
     if not files:
         roots_text = ", ".join(str(root) for root in audit_roots)
         raise SystemExit(f"No forecast_audit_*.json files found in: {roots_text}")
+    return audit_dir, db_path, audit_roots, files
 
+
+def _resolve_monitoring_settings(
+    args: argparse.Namespace,
+    *,
+    audit_dir: Path,
+) -> Dict[str, Any]:
     monitoring_cfg = _load_monitoring_thresholds(
         Path(args.config_path) if args.config_path else None
     )
@@ -671,6 +682,53 @@ def main() -> None:
     )
     if min_forecast_horizon is not None and min_forecast_horizon < 0:
         min_forecast_horizon = 0
+
+    return {
+        "monitoring_cfg": monitoring_cfg,
+        "rmse_cfg": rmse_cfg,
+        "tolerance": tolerance,
+        "max_violation_rate": max_violation_rate,
+        "min_effective_audits": min_effective_audits,
+        "baseline_model": baseline_model,
+        "holding_period": holding_period,
+        "fail_on_violation_during_holding_period": fail_on_violation_during_holding_period,
+        "disable_if_no_lift": disable_if_no_lift,
+        "min_lift_rmse_ratio": min_lift_rmse_ratio,
+        "min_lift_fraction": min_lift_fraction,
+        "promotion_margin": promotion_margin,
+        "recent_window_audits": recent_window_audits,
+        "recent_window_max_violation_rate": recent_window_max_violation_rate,
+        "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+        "manifest_mode": manifest_mode,
+        "manifest_path": manifest_path,
+        "max_missing_ensemble_rate": max_missing_ensemble_rate,
+        "min_forecast_horizon": min_forecast_horizon,
+    }
+
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    audit_dir, db_path, audit_roots, files = _resolve_main_inputs(args)
+    settings = _resolve_monitoring_settings(args, audit_dir=audit_dir)
+    monitoring_cfg = settings["monitoring_cfg"]
+    rmse_cfg = settings["rmse_cfg"]
+    tolerance = settings["tolerance"]
+    max_violation_rate = settings["max_violation_rate"]
+    min_effective_audits = settings["min_effective_audits"]
+    baseline_model = settings["baseline_model"]
+    holding_period = settings["holding_period"]
+    fail_on_violation_during_holding_period = settings["fail_on_violation_during_holding_period"]
+    disable_if_no_lift = settings["disable_if_no_lift"]
+    min_lift_rmse_ratio = settings["min_lift_rmse_ratio"]
+    min_lift_fraction = settings["min_lift_fraction"]
+    promotion_margin = settings["promotion_margin"]
+    recent_window_audits = settings["recent_window_audits"]
+    recent_window_max_violation_rate = settings["recent_window_max_violation_rate"]
+    recent_window_max_p90_rmse_ratio = settings["recent_window_max_p90_rmse_ratio"]
+    manifest_mode = settings["manifest_mode"]
+    manifest_path = settings["manifest_path"]
+    max_missing_ensemble_rate = settings["max_missing_ensemble_rate"]
+    min_forecast_horizon = settings["min_forecast_horizon"]
 
     def _rmse_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
         dataset = audit.get("dataset") or {}
