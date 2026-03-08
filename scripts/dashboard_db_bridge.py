@@ -356,8 +356,10 @@ def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
         or trade_sources.get("synthetic")
         or synthetic_dataset_ids
     )
+    has_non_synthetic_ohlcv = any(src for src in ohlcv_sources if src and src != "synthetic")
+    has_non_synthetic_trades = any(src for src in trade_sources if src and src != "synthetic")
     origin = "synthetic" if has_synthetic else "live"
-    if has_synthetic and any(src for src in ohlcv_sources if src and src != "synthetic"):
+    if has_synthetic and (has_non_synthetic_ohlcv or has_non_synthetic_trades):
         origin = "mixed"
 
     data_source = None

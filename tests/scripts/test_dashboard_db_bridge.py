@@ -497,3 +497,58 @@ def test_trade_events_include_exit_reason_when_available(tmp_path) -> None:
     assert "stop_loss" in exit_reasons, (
         f"exit_reason 'stop_loss' not found in trade events. Got: {exit_reasons}"
     )
+
+
+def test_provenance_origin_is_mixed_when_trade_sources_are_mixed(tmp_path) -> None:
+    """data_origin must be 'mixed' when trade_sources contains both synthetic and
+    non-synthetic entries, even if ohlcv_sources contains no non-synthetic rows.
+
+    Regression for: origin stayed 'synthetic' because the mixed-origin check only
+    inspected ohlcv_sources, ignoring trade_sources entirely.
+    """
+    db_path = tmp_path / "mixed_provenance.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS trade_executions("
+        "id INTEGER PRIMARY KEY, ticker TEXT, action TEXT, shares REAL, price REAL,"
+        " trade_date TEXT, created_at TEXT, realized_pnl REAL, realized_pnl_pct REAL,"
+        " mid_slippage_bps REAL, run_id TEXT, is_diagnostic INTEGER DEFAULT 0,"
+        " is_synthetic INTEGER DEFAULT 0, data_source TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ohlcv_data(id INTEGER PRIMARY KEY, source TEXT)"
+    )
+    # Insert synthetic trade source
+    conn.execute(
+        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
+        "realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic,data_source)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("AAPL", "BUY", 1, 100.0, "2026-01-01", "2026-01-01T00:00:00Z",
+         None, None, None, "R1", 0, 0, "synthetic"),
+    )
+    # Insert non-synthetic (yfinance) trade source
+    conn.execute(
+        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
+        "realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic,data_source)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("MSFT", "BUY", 1, 200.0, "2026-01-02", "2026-01-02T00:00:00Z",
+         None, None, None, "R2", 0, 0, "yfinance"),
+    )
+    # ohlcv_data has only synthetic rows — verifies the fix checks trade_sources too
+    conn.execute("INSERT INTO ohlcv_data(source) VALUES (?)", ("synthetic",))
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        provenance = mod._provenance_summary(conn)
+    finally:
+        conn.close()
+
+    assert provenance["origin"] == "mixed", (
+        f"Expected origin='mixed' for mixed trade_sources, got '{provenance['origin']}'. "
+        f"trade_sources={provenance['trade_sources']}, ohlcv_sources={provenance['ohlcv_sources']}"
+    )
+    assert "synthetic" in provenance["trade_sources"]
+    assert "yfinance" in provenance["trade_sources"]
