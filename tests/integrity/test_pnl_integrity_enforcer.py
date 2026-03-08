@@ -167,3 +167,41 @@ def test_pnl_arithmetic_flags_wrong_sign_for_short_buy_close(tmp_path):
     assert len(violations) == 1
     assert violations[0].check_name == "PNL_ARITHMETIC_MISMATCH"
     assert violations[0].affected_ids == [21]
+
+
+def test_orphan_whitelist_ids_249_250_251_253_are_not_flagged(tmp_path):
+    """Anti-regression: AAPL batch-replay duplicate opens from 2026-03-05 must not
+    trigger ORPHANED_POSITION even after max_open_age_days=3 has elapsed.
+    These are confirmed orphans (no close, not in portfolio_positions) whitelisted
+    by policy in _check_orphaned_positions known_historical set.
+    """
+    db_path = tmp_path / "aapl_orphan_whitelist.db"
+    _create_trade_db(db_path)
+    # Insert the 4 stale AAPL BUY opens using the production IDs that triggered the gate.
+    _insert_rows(
+        db_path,
+        [
+            (249, "AAPL", "2026-03-04", "BUY", 1.0, 262.67, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (250, "AAPL", "2026-03-04", "BUY", 1.0, 262.67, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (251, "AAPL", "2026-03-04", "BUY", 1.0, 262.67, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (253, "AAPL", "2026-03-04", "BUY", 1.0, 262.67, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+        ],
+    )
+
+    import os
+    env_backup = os.environ.pop("INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS", None)
+    os.environ["INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS"] = "0"  # force stale for all dates
+    try:
+        with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+            violations = enforcer._check_orphaned_positions()
+    finally:
+        if env_backup is None:
+            os.environ.pop("INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS", None)
+        else:
+            os.environ["INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS"] = env_backup
+
+    orphan_violations = [v for v in violations if v.check_name == "ORPHANED_POSITION"]
+    assert orphan_violations == [], (
+        f"IDs 249,250,251,253 must be in known_historical whitelist and not trigger ORPHANED_POSITION. "
+        f"Got: {orphan_violations}"
+    )

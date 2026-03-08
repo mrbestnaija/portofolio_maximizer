@@ -44,7 +44,7 @@ def test_all_steps_pass(tmp_path):
     assert "started_at" in result
     assert "finished_at" in result
     assert "duration_seconds" in result
-    assert len(result["steps"]) == 4
+    assert len(result["steps"]) == 5
 
 
 def test_warn_when_partial_data(tmp_path):

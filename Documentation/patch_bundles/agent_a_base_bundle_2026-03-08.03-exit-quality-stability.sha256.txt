@@ -1,0 +1,2 @@
+778f92c4c5850aa701f744f862c8f90cd09d4929ba08f70cbc3044c013ef4884  agent_a_base_bundle_2026-03-08.03-exit-quality-stability.patch
+bytes=2843

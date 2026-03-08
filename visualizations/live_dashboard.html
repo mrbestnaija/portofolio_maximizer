@@ -1455,7 +1455,7 @@
           'Forecast-audit telemetry should expose a current schema version before the dashboard treats it as healthy.',
           'WARN',
           'freshness',
-          { meta: `schema=${schemaVersion [ ]'--'}`, targetId: 'payload-schema' }
+          { meta: `schema=${schemaVersion ?? '--'}`, targetId: 'payload-schema' }
         ));
       }
 
@@ -1544,7 +1544,7 @@
           `regimes=${regimeCount}, healthy_tickers=${healthyTickerCount}, trading_days=${tradingDays}.`,
           'INFO',
           'coverage',
-          { meta: `usable_rmse=${windowCounts.n_rmse_windows_usable [ ]'--'}`, targetId: 'audit-diversity' }
+          { meta: `usable_rmse=${windowCounts.n_rmse_windows_usable ?? '--'}`, targetId: 'audit-diversity' }
         ));
       }
 
@@ -1919,33 +1919,61 @@
       const keys = params ? Object.keys(params) : [];
       const sample = keys.slice(0, 3).map(k => `${k}=${params[k]}`).join(', ');
       const stratText = strat && strat.regime
-        ? `Strategy regime: ${strat.regime} (score=${(strat.score [ ]0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
+        ? `Strategy regime: ${strat.regime} (score=${(strat.score ?? 0).toFixed(3)})${sample ? ' [' + sample + ']' : ''}`
         : '';
       setText('strategy-meta', stratText);
 
-      setText('pnl-abs', formatUsd(data.pnl?.absolute || 0));
-      const pnlPct = data.pnl?.pct || 0;
+      const performanceUnknown = Boolean(data.performance_unknown || data.performance?.performance_unknown);
+      const pnlAbs = Number(data.pnl?.absolute);
+      const pnlPct = Number(data.pnl?.pct);
+      setText('pnl-abs', (!performanceUnknown && Number.isFinite(pnlAbs)) ? formatUsd(pnlAbs) : 'N/A');
       const pnlPctEl = document.getElementById('pnl-pct');
-      pnlPctEl.textContent = formatPct(pnlPct);
-      setPillState(pnlPctEl, pnlPct);
-      setText('pnl-trend', pnlPct > 0 ? 'Uptrend vs inception' : pnlPct < 0 ? 'Drawdown vs inception' : 'Flat vs inception');
+      if (pnlPctEl) {
+        if (!performanceUnknown && Number.isFinite(pnlPct)) {
+          pnlPctEl.textContent = formatPct(pnlPct);
+          setPillState(pnlPctEl, pnlPct);
+          setText('pnl-trend', pnlPct > 0 ? 'Uptrend vs inception' : pnlPct < 0 ? 'Drawdown vs inception' : 'Flat vs inception');
+        } else {
+          pnlPctEl.textContent = 'N/A';
+          setPillState(pnlPctEl, 0);
+          setText('pnl-trend', 'No performance data');
+        }
+      }
 
-      setText('win-rate', formatPct(data.win_rate || 0));
+      const winRate = Number(data.win_rate);
+      setText('win-rate', (!performanceUnknown && Number.isFinite(winRate)) ? formatPct(winRate) : 'N/A');
       const tradeCountEl = document.getElementById('trade-count');
-      tradeCountEl.textContent = `${data.trade_count || 0} trades`;
-      setPillState(tradeCountEl, (data.win_rate || 0) - 0.5);
+      const tradeCount = Number(data.trade_count);
+      tradeCountEl.textContent = (!performanceUnknown && Number.isFinite(tradeCount)) ? `${tradeCount} trades` : 'N/A trades';
+      setPillState(tradeCountEl, (!performanceUnknown && Number.isFinite(winRate)) ? (winRate - 0.5) : 0);
 
       // Model diagnostics (performance_metrics if present)
       const perf = data.performance || {};
       const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(2) : '--';
       const fmtPct = (v) => Number.isFinite(v) ? `${(v * 100).toFixed(2)}%` : '--';
-      setText('diag-pf', fmtNum(perf.profit_factor [ ]data.profit_factor));
-      setText('diag-win', fmtPct((perf.win_rate [ ]data.win_rate) || 0));
-      setText('diag-trades', String(perf.trade_count [ ]data.trade_count [ ]0));
-      setText('diag-sharpe', `${fmtNum(perf.sharpe [ ]0)} / ${fmtNum(perf.sortino [ ]0)}`);
-      setText('diag-dd', fmtPct(perf.max_drawdown [ ]0));
-      setText('diag-avg', `${fmtNum(perf.avg_win [ ]0)} / ${fmtNum(perf.avg_loss [ ]0)}`);
-      setText('diag-largest', `${fmtNum(perf.largest_win [ ]0)} / ${fmtNum(perf.largest_loss [ ]0)}`);
+      const diagPf = Number(perf.profit_factor ?? data.profit_factor);
+      const diagWin = Number(perf.win_rate ?? data.win_rate);
+      const diagTrades = Number(perf.trade_count ?? data.trade_count);
+      const diagSharpe = Number(perf.sharpe ?? 0);
+      const diagSortino = Number(perf.sortino ?? 0);
+      const diagDd = Number(perf.max_drawdown ?? 0);
+      const diagAvgWin = Number(perf.avg_win ?? 0);
+      const diagAvgLoss = Number(perf.avg_loss ?? 0);
+      const diagLargestWin = Number(perf.largest_win ?? 0);
+      const diagLargestLoss = Number(perf.largest_loss ?? 0);
+      setText('diag-pf', (!performanceUnknown && Number.isFinite(diagPf)) ? fmtNum(diagPf) : 'N/A');
+      setText('diag-win', (!performanceUnknown && Number.isFinite(diagWin)) ? fmtPct(diagWin) : 'N/A');
+      setText('diag-trades', (!performanceUnknown && Number.isFinite(diagTrades)) ? String(diagTrades) : 'N/A');
+      setText('diag-sharpe', (!performanceUnknown && (Number.isFinite(diagSharpe) || Number.isFinite(diagSortino)))
+        ? `${fmtNum(diagSharpe)} / ${fmtNum(diagSortino)}`
+        : 'N/A');
+      setText('diag-dd', (!performanceUnknown && Number.isFinite(diagDd)) ? fmtPct(diagDd) : 'N/A');
+      setText('diag-avg', (!performanceUnknown && (Number.isFinite(diagAvgWin) || Number.isFinite(diagAvgLoss)))
+        ? `${fmtNum(diagAvgWin)} / ${fmtNum(diagAvgLoss)}`
+        : 'N/A');
+      setText('diag-largest', (!performanceUnknown && (Number.isFinite(diagLargestWin) || Number.isFinite(diagLargestLoss)))
+        ? `${fmtNum(diagLargestWin)} / ${fmtNum(diagLargestLoss)}`
+        : 'N/A');
 
       setText('latency', data.latency?.ts_ms ? `${data.latency.ts_ms.toFixed(0)} ms (TS)` : '--');
       const llmEl = document.getElementById('llm-latency');

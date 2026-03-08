@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import scripts.institutional_unattended_gate as mod
 
@@ -59,3 +60,26 @@ def test_phase_p2_fails_on_empty_findings(monkeypatch) -> None:
     assert findings
     assert findings[0].status == "FAIL"
     assert "empty findings list" in findings[0].detail
+
+
+def test_phase_p4_missing_artifact_fails_closed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    findings = mod._phase_p4_prior_gate_verification()
+    assert findings
+    assert findings[0].status == "FAIL"
+    assert "not found" in findings[0].detail
+
+
+def test_phase_p4_stale_artifact_fails_closed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    artifact = tmp_path / "logs" / "gate_status_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    stale_ts = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    artifact.write_text(
+        json.dumps({"overall_passed": True, "timestamp_utc": stale_ts}),
+        encoding="utf-8",
+    )
+    findings = mod._phase_p4_prior_gate_verification()
+    assert findings
+    assert findings[0].status == "FAIL"
+    assert "stale" in findings[0].detail.lower()

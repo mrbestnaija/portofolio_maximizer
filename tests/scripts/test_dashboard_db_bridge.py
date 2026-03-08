@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import pytest
 import sqlite3
 
@@ -41,9 +42,10 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
             "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
             ("AAPL", "BUY", 10, 100.0, "2026-01-01", "2026-01-01T00:00:01Z", None, None, 10.0, "RID"),
         )
+        recent_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
         conn.execute(
             "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
-            ("AAPL", "2026-01-02", 10, 101.0),
+            ("AAPL", recent_date, 10, 101.0),
         )
         conn.execute(
             "INSERT INTO data_quality_snapshots(ticker,quality_score,missing_pct,coverage,outlier_frac,source,created_at) VALUES (?,?,?,?,?,?,?)",
@@ -225,6 +227,40 @@ def test_robustness_marks_stale_when_sidecar_age_exceeds_policy(tmp_path, monkey
     assert robustness["freshness_reason"] == "STALE_SIDECAR"
 
 
+def test_robustness_optional_forecast_summary_stale_is_warn_only(tmp_path, monkeypatch) -> None:
+    elig = tmp_path / "elig.json"
+    ctx = tmp_path / "ctx.json"
+    perf = tmp_path / "metrics.json"
+    forecast = tmp_path / "forecast_summary.json"
+
+    elig.write_text(
+        '{"generated_utc":"2099-01-01T00:00:00Z","summary":{"HEALTHY":1,"WEAK":0,"LAB_ONLY":0},"tickers":{},"warnings":[]}',
+        encoding="utf-8",
+    )
+    ctx.write_text(
+        '{"generated_utc":"2099-01-01T00:00:00Z","n_total_trades":4,"n_trades_no_confidence":0,"partial_data":false,"regime_quality":{"A":{}}, "confidence_bin_quality":{"0.60-0.65":{}}}',
+        encoding="utf-8",
+    )
+    perf.write_text(
+        '{"generated_utc":"2099-01-01T00:00:00Z","status":"PASS","warnings":[],"sufficiency":{"status":"SUFFICIENT"},"chart_paths":{}}',
+        encoding="utf-8",
+    )
+    forecast.write_text(
+        '{"generated_utc":"2020-01-01T00:00:00Z","telemetry_contract":{"schema_version":3}}',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
+    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
+    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+    monkeypatch.setattr(mod, "DEFAULT_FORECAST_SUMMARY_PATH", forecast)
+    monkeypatch.setenv("PMX_SIDECAR_MAX_AGE_MINUTES", "120")
+
+    robustness = mod._robustness_payload()
+    assert robustness["status"] == "WARN"
+    assert "stale_sidecar:forecast_summary" in robustness["warnings"]
+
+
 def test_live_denominator_payload_merges_watcher_sidecar(tmp_path, monkeypatch) -> None:
     watcher = tmp_path / "live_denominator_latest.json"
     watcher.write_text(
@@ -328,3 +364,136 @@ def test_connect_rw_blocks_dangerous_pragma_after_setup(tmp_path) -> None:
             conn.execute("PRAGMA journal_mode=DELETE")
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent-B dashboard truthfulness contract tests
+# ---------------------------------------------------------------------------
+
+def _make_minimal_db(db_path, *, with_exit_reason: bool = False) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
+    conn.execute(
+        "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT,"
+        " confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
+    )
+    exit_col = ", exit_reason TEXT" if with_exit_reason else ""
+    conn.execute(
+        f"CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT,"
+        f" shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL,"
+        f" realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT, is_diagnostic INTEGER"
+        f" DEFAULT 0, is_synthetic INTEGER DEFAULT 0{exit_col})"
+    )
+    conn.execute(
+        "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT,"
+        " position_date TEXT, shares REAL, average_cost REAL)"
+    )
+    conn.execute(
+        "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT,"
+        " quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_positions_stale_uses_filtered_execution_fallback(tmp_path, monkeypatch) -> None:
+    """When portfolio_positions.position_date is older than max_age_days, the bridge
+    must fall back to trade_executions and set positions_stale=True in the payload."""
+    db_path = tmp_path / "stale_test.db"
+    _make_minimal_db(db_path)
+    conn = sqlite3.connect(db_path)
+    stale_date = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+    conn.execute(
+        "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
+        ("MSFT", stale_date, 5, 300.0),
+    )
+    # Open BUY the fallback will see
+    conn.execute(
+        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
+        " realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("MSFT", "BUY", 3, 300.0, stale_date, stale_date + "T00:00:00Z",
+         None, None, 0.0, "RID", 0, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    monkeypatch.setenv("PMX_POSITIONS_MAX_AGE_DAYS", "14")
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn, tickers=["MSFT"], lookback_days=10,
+            max_signals=5, max_trades=5, db_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["positions_stale"] is True
+    assert payload["positions_source"] in {"trade_executions_fallback_stale", "trade_executions_fallback"}
+    assert any("stale" in c.lower() for c in payload["checks"])
+
+
+def test_performance_unknown_when_metrics_missing(tmp_path) -> None:
+    """When performance_metrics table has no rows (and PnLIntegrityEnforcer is
+    unavailable), the bridge must emit None values and performance_unknown=True
+    rather than zeroes that are indistinguishable from a real zero-PnL session."""
+    db_path = tmp_path / "no_perf.db"
+    _make_minimal_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY,"
+        " total_return REAL, total_return_pct REAL, win_rate REAL,"
+        " profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn, tickers=["AAPL"], lookback_days=10,
+            max_signals=5, max_trades=5, db_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    assert payload["performance_unknown"] is True
+    assert payload["pnl"]["absolute"] is None
+    assert payload["win_rate"] is None
+    assert payload["trade_count"] is None
+
+
+def test_trade_events_include_exit_reason_when_available(tmp_path) -> None:
+    """Trade events payload must include exit_reason from trade_executions when the
+    column exists, rather than always emitting None."""
+    db_path = tmp_path / "exit_reason_test.db"
+    _make_minimal_db(db_path, with_exit_reason=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
+        " realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic,exit_reason)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("NVDA", "SELL", 2, 150.0, "2026-03-01", "2026-03-01T10:00:00Z",
+         30.0, 0.01, 5.0, "RID", 0, 0, "stop_loss"),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        payload = mod.build_dashboard_payload(
+            conn=conn, tickers=["NVDA"], lookback_days=30,
+            max_signals=5, max_trades=10, latest_run_only=False, db_path=db_path,
+        )
+    finally:
+        conn.close()
+
+    events = payload["trade_events"]
+    assert events, "Expected at least one trade event"
+    exit_reasons = [e.get("exit_reason") for e in events]
+    assert "stop_loss" in exit_reasons, (
+        f"exit_reason 'stop_loss' not found in trade events. Got: {exit_reasons}"
+    )

@@ -332,7 +332,10 @@ class PnLIntegrityEnforcer:
         """
         # Historical artifacts accepted by policy; additional ids can be supplied
         # via INTEGRITY_ORPHAN_WHITELIST_IDS=1,2,3.
-        known_historical = {5, 6, 11, 13}
+        # 5,6,11,13: MSFT/NVDA batch-replay opens from 2026-02-10 (bar_ts 2025-06, 2025-07)
+        # 249,250,251,253: AAPL duplicate opens from 2026-03-05 batch runs replaying
+        #   bar 2026-03-04 at the same price; no portfolio_positions entry, no close — orphans.
+        known_historical = {5, 6, 11, 13, 249, 250, 251, 253}
         raw_whitelist = os.getenv("INTEGRITY_ORPHAN_WHITELIST_IDS", "")
         if raw_whitelist.strip():
             for token in raw_whitelist.split(","):

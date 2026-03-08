@@ -111,6 +111,65 @@ class TestLayer1ForecastQuality:
         assert result.status == "WARN"
         assert "coverage_threshold" in result.summary or "n_used" in result.summary
 
+    def test_fails_when_ci_definitively_negative(self, tmp_path):
+        """25 windows where ensemble RMSE > best-single RMSE → CI fully below zero → FAIL."""
+        for i in range(25):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.2, "directional_accuracy": 0.5, "smape": 2.0},
+                        "samossa":  {"rmse": 1.3, "directional_accuracy": 0.5, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.4, "directional_accuracy": 0.4, "smape": 3.0},
+                        "ensemble": {"rmse": 1.6, "directional_accuracy": 0.4},
+                    },
+                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
+                },
+            }
+            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
+        # warn_coverage_threshold=25 so n_used=25 passes; min_windows_for_fail=100 so
+        # existing lift_global FAIL path doesn't fire — only the CI path should produce FAIL.
+        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
+        assert result.status == "FAIL"
+        assert "definitively negative" in result.summary
+
+    def test_warns_when_ci_spans_zero(self, tmp_path, monkeypatch):
+        """CI spanning zero (ci_low<0, ci_high>0) with sufficient windows → WARN, not FAIL."""
+        import ensemble_health_audit  # ensure module is in sys.modules for monkeypatching
+
+        for i in range(25):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.3, "directional_accuracy": 0.6, "smape": 2.0},
+                        "samossa":  {"rmse": 1.4, "directional_accuracy": 0.5, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.5, "directional_accuracy": 0.4, "smape": 3.0},
+                        "ensemble": {"rmse": 1.2, "directional_accuracy": 0.5},
+                    },
+                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
+                },
+            }
+            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
+        # Force CI to span zero: ci_low < 0 but ci_high > 0
+        monkeypatch.setattr(
+            ensemble_health_audit,
+            "compute_lift_significance",
+            lambda *a, **kw: {
+                "mean_lift": 0.02,
+                "ci_low": -0.04,
+                "ci_high": 0.08,
+                "lift_win_fraction": 0.60,
+                "insufficient_data": False,
+            },
+        )
+        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
+        assert result.status == "WARN"
+        assert "spans zero" in result.summary
+        assert "definitively negative" not in result.summary
+
 
 # ---------------------------------------------------------------------------
 # Layer 2 tests

@@ -1,0 +1,2 @@
+7992f4c4ac72dbcf779b72153b0752bf8d20a311ad56d2b75eaaa596753ef290  agent_a_base_bundle_2026-03-08.05-openclaw-maintenance.patch
+bytes=19359

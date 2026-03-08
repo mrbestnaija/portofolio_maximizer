@@ -1,0 +1,1764 @@
+﻿diff --git a/Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md b/Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md
+new file mode 100644
+index 0000000..133d294
+--- /dev/null
++++ b/Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md
+@@ -0,0 +1,175 @@
++# Agent A Integration Bases (From Agent B)
++
++Date: 2026-03-08  
++Scope: structural wiring, diagnostics, and reporting hardening only (no strategy/gate-threshold changes).
++
++## 1) Agent A Current Track (Observed)
++
++Primary anchor commit:
++- `b925045` - Phase 7.40 hardening
++  - R5 lift CI wiring fixed in `scripts/capital_readiness_check.py` (`n_used_windows` path, negative CI hard-fail).
++  - `scripts/validate_profitability_proof.py` import-path collision hardening (lazy guarded sqlite import with fallback).
++  - `forcester_ts/regime_detector.py` degenerate-series numerical stability.
++
++Implication for integration:
++- Keep Agent A semantics as source of truth for R5/proof/regime.
++- Merge only complementary base wiring from this document.
++
++## 2) Merge-Ready Base Deltas in Working Tree
++
++## A. Layer-1 CI semantics parity in model-improvement checks
++
++Files:
++- `scripts/check_model_improvement.py`
++- `tests/scripts/test_check_model_improvement.py`
++
++Delta:
++- CI spans zero (`ci_low <= 0 <= ci_high`) is advisory `WARN`.
++- Definitively negative CI (`ci_high < 0`, sufficient windows) is `FAIL`.
++
++Integration note:
++- Overlaps conceptually with Agent A R5 semantics, but in layer-1 monitoring path.
++- Keep a single consistent CI policy string/wording across readiness and layer-1 outputs.
++
++## B. Ticker eligibility gate sidecar wiring (pipeline base)
++
++Files:
++- `scripts/apply_ticker_eligibility_gates.py` (new)
++- `scripts/run_quality_pipeline.py`
++- `tests/scripts/test_apply_ticker_eligibility_gates.py` (new)
++- `tests/scripts/test_run_quality_pipeline.py`
++
++Delta:
++- Adds a dedicated `apply_ticker_eligibility_gates` pipeline step after eligibility computation.
++- Emits additive artifact key: `artifacts.eligibility_gates`.
++- Adds CLI arg: `--eligibility-gates-out`.
++
++Semantics:
++- Input: `logs/ticker_eligibility.json` with `tickers[*].status`.
++- Output status: `PASS` / `WARN` (missing input) / `ERROR` (reserved for hard failures).
++
++## C. Exit-quality numerical stability hardening
++
++Files:
++- `scripts/exit_quality_audit.py`
++- `tests/scripts/test_exit_quality_audit.py`
++
++Delta:
++- Replaces chained dtype-fragile assignment with vectorized `np.where` ATR-proxy computation.
++- Prevents NaN/dtype assignment failure on all-null ATR inputs.
++
++Semantics:
++- If `bar_high/bar_low` present, ATR proxy = `bar_high - bar_low`.
++- Else fallback = `entry_price * 0.015` when entry price is valid.
++
++## D. Dashboard robustness stale-sidecar truthfulness refinement
++
++Files:
++- `scripts/dashboard_db_bridge.py`
++- `tests/scripts/test_dashboard_db_bridge.py`
++
++Delta:
++- Separates critical sidecars from optional sidecars for freshness severity.
++- `forecast_summary` stale/unreadable now contributes `WARN`, not forced `STALE`.
++
++Critical stale sidecars:
++- `eligibility`, `context_quality`, `performance_metrics`.
++
++Optional stale sidecar:
++- `forecast_summary`.
++
++## E. OpenClaw maintenance safety + detached-listener recovery
++
++Files:
++- `scripts/openclaw_maintenance.py`
++- `tests/scripts/test_openclaw_maintenance.py`
++
++Delta:
++- PID-reuse-safe lock handling via process command-line identity checks.
++- Detached gateway listener recovery with strict identity verification.
++- Auto-terminate only when listener is verified as expected OpenClaw gateway process/port.
++
++Safety semantics:
++- No kill action for unverified listeners.
++- Recovery path only under `apply=True` and conflict conditions.
++
++## F. Runtime-status gate semantics alignment
++
++Files:
++- `scripts/project_runtime_status.py`
++- `tests/scripts/test_project_runtime_status.py`
++
++Delta:
++- Runtime snapshot now invokes `production_audit_gate.py --unattended-profile`.
++- Prevents status-tool drift where runtime snapshots could report a different gate interpretation than unattended gate orchestration.
++
++Semantics:
++- Runtime status uses unattended gate semantics for lift/proof interpretation.
++- No threshold changes; only invocation-mode wiring consistency.
++
++## 3) Suggested Integration Order for Agent A
++
++1. Merge B (eligibility gate sidecar) first; low conflict, additive contract.
++2. Merge C (exit-quality stability) second; unblocks known dtype/runtime fragility.
++3. Merge D (dashboard stale severity split) third; UI truthfulness without gate math changes.
++4. Merge E (OpenClaw maintenance safety) fourth; larger code surface but isolated.
++5. Merge F (runtime-status semantics alignment) fifth.
++6. Merge A only if needed for parity with Agent A branch state (avoid duplicate CI logic edits).
++
++## 4) Contract Assumptions (Explicit)
++
++For Agent C (gate/metric semantics assumed):
++- Layer-1 CI:
++  - spans-zero CI => advisory `WARN`.
++  - both CI bounds negative => `FAIL`.
++- Quality pipeline now has 5 steps (added eligibility-gate stage).
++- Dashboard robustness:
++  - stale critical sidecar => `STALE`.
++  - stale optional forecast summary only => `WARN`.
++- OpenClaw recovery:
++  - restart/terminate only when listener identity is verified.
++- Runtime status gate check:
++  - invokes production gate in unattended profile.
++
++For Agent A (backend fields relied on by these bases):
++- Eligibility input:
++  - `tickers.<symbol>.status` from ticker eligibility sidecar.
++- Dashboard freshness:
++  - `generated_utc` in sidecars (with file mtime fallback).
++  - sidecar paths from `DEFAULT_*_PATH` constants.
++- OpenClaw gateway payload:
++  - `rpc.ok`
++  - `service.runtime.status`, `service.runtime.state`
++  - `gateway.port`
++  - `port.status`
++  - `port.listeners[].pid`, `port.listeners[].command`, `port.listeners[].commandLine`
++- Trade quality data:
++  - `entry_price`, `bar_high`, `bar_low`, `realized_pnl`.
++- Runtime status output:
++  - `failed_checks`, per-check `stdout/stderr`, and production gate semantics reflected from unattended profile.
++
++## 5) Verification Evidence (Current Workspace)
++
++Targeted integration suite:
++- Command:
++  - `python -m pytest tests/scripts/test_check_model_improvement.py tests/scripts/test_exit_quality_audit.py tests/scripts/test_run_quality_pipeline.py tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_openclaw_maintenance.py tests/scripts/test_apply_ticker_eligibility_gates.py -q`
++- Result:
++  - `85 passed`
++
++Fast lane:
++- Command:
++  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
++- Result:
++  - `1672 passed, 3 skipped, 28 deselected, 7 xfailed`
++
++Runtime-status wiring regression:
++- Command:
++  - `python -m pytest tests/scripts/test_project_runtime_status.py tests/scripts/test_openclaw_implementation_contract.py -q`
++- Result:
++  - `12 passed`
++
++## 6) Residual Risks / Conflict Hotspots
++
++- `scripts/check_model_improvement.py` may conflict if Agent A has parallel edits in CI wording or status precedence.
++- `scripts/dashboard_db_bridge.py` can conflict with any concurrent dashboard payload schema edits.
++- `scripts/openclaw_maintenance.py` is high-churn; keep test-backed merge and avoid manual squash edits.
+diff --git a/Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md b/Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md
+new file mode 100644
+index 0000000..3e1d011
+--- /dev/null
++++ b/Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md
+@@ -0,0 +1,106 @@
++# Agent A Patch Bundle (Clean Base)
++
++Bundle ID: `agent_a_base_bundle_2026-03-08`  
++Date: 2026-03-08  
++Owner: Agent B (handoff to Agent A)
++
++Primary artifacts (ordered split patches):
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.01-docs.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.02-eligibility-pipeline.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.03-exit-quality-stability.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.04-dashboard-robustness.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.05-openclaw-maintenance.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.06-runtime-status-semantics.patch`
++
++Per-patch sidecars:
++- each split patch has matching `.files.txt` and `.sha256.txt` in `Documentation/patch_bundles/`
++
++Monolithic fallback artifact:
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.patch`
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.sha256.txt`
++
++Machine-readable file list:
++- `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt`
++
++## Purpose
++
++Provide a clean, conflict-minimized patch bundle containing only structural/additive wiring changes for Agent A integration.
++
++## Included Files (Exact)
++
++1. `Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md`
++2. `Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md`
++3. `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt`
++4. `scripts/apply_ticker_eligibility_gates.py`
++5. `tests/scripts/test_apply_ticker_eligibility_gates.py`
++6. `scripts/run_quality_pipeline.py`
++7. `tests/scripts/test_run_quality_pipeline.py`
++8. `scripts/exit_quality_audit.py`
++9. `tests/scripts/test_exit_quality_audit.py`
++10. `scripts/dashboard_db_bridge.py`
++11. `tests/scripts/test_dashboard_db_bridge.py`
++12. `scripts/openclaw_maintenance.py`
++13. `tests/scripts/test_openclaw_maintenance.py`
++14. `scripts/project_runtime_status.py`
++15. `tests/scripts/test_project_runtime_status.py`
++
++## Explicitly Excluded (Overlap Risk with Agent A Core Track)
++
++1. `scripts/check_model_improvement.py`
++2. `tests/scripts/test_check_model_improvement.py`
++3. `integrity/pnl_integrity_enforcer.py`
++4. `tests/integrity/test_pnl_integrity_enforcer.py`
++5. `logs/**`
++6. `visualizations/**`
++
++## Integration Commands (Agent A)
++
++1. Apply ordered patches:
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.01-docs.patch`
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.02-eligibility-pipeline.patch`
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.03-exit-quality-stability.patch`
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.04-dashboard-robustness.patch`
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.05-openclaw-maintenance.patch`
++   - `git apply --3way Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.06-runtime-status-semantics.patch`
++2. Per-patch targeted tests:
++   - After `.02`: `python -m pytest tests/scripts/test_apply_ticker_eligibility_gates.py tests/scripts/test_run_quality_pipeline.py -q`
++   - After `.03`: `python -m pytest tests/scripts/test_exit_quality_audit.py -q`
++   - After `.04`: `python -m pytest tests/scripts/test_dashboard_db_bridge.py -q`
++   - After `.05`: `python -m pytest tests/scripts/test_openclaw_maintenance.py -q`
++   - After `.06`: `python -m pytest tests/scripts/test_project_runtime_status.py tests/scripts/test_openclaw_implementation_contract.py -q`
++3. Final regression lane:
++   - `python -m pytest -m "not gpu and not slow" --tb=short -q`
++
++## Patch-to-File Mapping
++
++1. `01-docs`
++   - `Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md`
++   - `Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md`
++   - `Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt`
++2. `02-eligibility-pipeline`
++   - `scripts/apply_ticker_eligibility_gates.py`
++   - `tests/scripts/test_apply_ticker_eligibility_gates.py`
++   - `scripts/run_quality_pipeline.py`
++   - `tests/scripts/test_run_quality_pipeline.py`
++3. `03-exit-quality-stability`
++   - `scripts/exit_quality_audit.py`
++   - `tests/scripts/test_exit_quality_audit.py`
++4. `04-dashboard-robustness`
++   - `scripts/dashboard_db_bridge.py`
++   - `tests/scripts/test_dashboard_db_bridge.py`
++5. `05-openclaw-maintenance`
++   - `scripts/openclaw_maintenance.py`
++   - `tests/scripts/test_openclaw_maintenance.py`
++6. `06-runtime-status-semantics`
++   - `scripts/project_runtime_status.py`
++   - `tests/scripts/test_project_runtime_status.py`
++
++## Contract Notes
++
++- No strategy mechanics or thresholds changed.
++- Additive wiring only:
++  - eligibility gate sidecar,
++  - quality pipeline stage wiring,
++  - exit-quality numeric stability,
++  - dashboard optional-sidecar stale handling,
++  - OpenClaw maintenance recovery safety.
+diff --git a/Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt b/Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt
+new file mode 100644
+index 0000000..16d285b
+--- /dev/null
++++ b/Documentation/patch_bundles/agent_a_base_bundle_2026-03-08.files.txt
+@@ -0,0 +1,14 @@
++﻿Documentation/AGENT_A_PATCH_BUNDLE_2026-03-08.md
++Documentation/AGENT_A_INTEGRATION_BASES_2026-03-08.md
++scripts/apply_ticker_eligibility_gates.py
++tests/scripts/test_apply_ticker_eligibility_gates.py
++scripts/run_quality_pipeline.py
++tests/scripts/test_run_quality_pipeline.py
++scripts/exit_quality_audit.py
++tests/scripts/test_exit_quality_audit.py
++scripts/dashboard_db_bridge.py
++tests/scripts/test_dashboard_db_bridge.py
++scripts/openclaw_maintenance.py
++tests/scripts/test_openclaw_maintenance.py
++scripts/project_runtime_status.py
++tests/scripts/test_project_runtime_status.py
+diff --git a/scripts/apply_ticker_eligibility_gates.py b/scripts/apply_ticker_eligibility_gates.py
+new file mode 100644
+index 0000000..0c77b44
+--- /dev/null
++++ b/scripts/apply_ticker_eligibility_gates.py
+@@ -0,0 +1,128 @@
++"""
++Apply eligibility statuses to a gate sidecar consumed by downstream automation.
++
++This script is read-only with respect to strategy/routing config. It only
++translates ticker eligibility output into an explicit gate artifact.
++"""
++from __future__ import annotations
++
++import argparse
++import datetime
++import json
++import logging
++import sys
++from pathlib import Path
++from typing import Any
++
++ROOT = Path(__file__).resolve().parent.parent
++if str(ROOT) not in sys.path:
++    sys.path.insert(0, str(ROOT))
++
++DEFAULT_INPUT = ROOT / "logs" / "ticker_eligibility.json"
++DEFAULT_OUTPUT = ROOT / "logs" / "ticker_eligibility_gates.json"
++
++log = logging.getLogger(__name__)
++
++
++def _write_json(path: Path, payload: dict[str, Any]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
++
++
++def _load_eligibility(path: Path) -> tuple[dict[str, Any] | None, str | None]:
++    if not path.exists():
++        return None, "eligibility_missing"
++    try:
++        raw = json.loads(path.read_text(encoding="utf-8"))
++    except Exception:
++        return None, "eligibility_unreadable"
++    if not isinstance(raw, dict):
++        return None, "eligibility_invalid_payload"
++    return raw, None
++
++
++def apply_eligibility_gates(
++    *,
++    eligibility_path: Path = DEFAULT_INPUT,
++    output_path: Path = DEFAULT_OUTPUT,
++) -> dict[str, Any]:
++    warnings: list[str] = []
++    errors: list[str] = []
++    eligibility, load_error = _load_eligibility(Path(eligibility_path))
++    if load_error:
++        warnings.append(load_error)
++        tickers: dict[str, Any] = {}
++    else:
++        tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
++        if not isinstance(tickers, dict):
++            warnings.append("eligibility_tickers_invalid")
++            tickers = {}
++
++    healthy_tickers: list[str] = []
++    weak_tickers: list[str] = []
++    lab_only_tickers: list[str] = []
++    for ticker, info in tickers.items():
++        status = str((info or {}).get("status", "")).upper()
++        symbol = str(ticker).upper()
++        if status == "HEALTHY":
++            healthy_tickers.append(symbol)
++        elif status == "WEAK":
++            weak_tickers.append(symbol)
++        elif status == "LAB_ONLY":
++            lab_only_tickers.append(symbol)
++
++    healthy_tickers.sort()
++    weak_tickers.sort()
++    lab_only_tickers.sort()
++
++    payload: dict[str, Any] = {
++        "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
++        "eligibility_path": str(eligibility_path),
++        "status": "ERROR" if errors else ("WARN" if warnings else "PASS"),
++        "gate_written": True,
++        "healthy_tickers": healthy_tickers,
++        "weak_tickers": weak_tickers,
++        "lab_only_tickers": lab_only_tickers,
++        "summary": {
++            "HEALTHY": len(healthy_tickers),
++            "WEAK": len(weak_tickers),
++            "LAB_ONLY": len(lab_only_tickers),
++        },
++        "warnings": warnings,
++        "errors": errors,
++    }
++
++    _write_json(Path(output_path), payload)
++    payload["output"] = str(output_path)
++    return payload
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description="Apply ticker eligibility statuses to a gate sidecar.")
++    parser.add_argument("--eligibility", type=Path, default=DEFAULT_INPUT, help="Eligibility JSON input.")
++    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Eligibility gate output path.")
++    parser.add_argument("--json", action="store_true", dest="emit_json", help="Print result as JSON.")
++    args = parser.parse_args(argv)
++
++    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
++    result = apply_eligibility_gates(
++        eligibility_path=args.eligibility,
++        output_path=args.output,
++    )
++
++    if args.emit_json:
++        print(json.dumps(result, indent=2, default=str))
++    else:
++        print(f"Eligibility gate written to {args.output}")
++        print(
++            "  HEALTHY={HEALTHY} WEAK={WEAK} LAB_ONLY={LAB_ONLY}".format(
++                **result["summary"]
++            )
++        )
++        if result["warnings"]:
++            print(f"  warnings: {', '.join(result['warnings'])}")
++    return 0 if result["status"] in {"PASS", "WARN"} else 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/scripts/dashboard_db_bridge.py b/scripts/dashboard_db_bridge.py
+index 3ddea39..fa83676 100644
+--- a/scripts/dashboard_db_bridge.py
++++ b/scripts/dashboard_db_bridge.py
+@@ -36,6 +36,7 @@ DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_
+ DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
+ DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
+ DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
++DEFAULT_POSITIONS_MAX_AGE_DAYS = 14
+ DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
+ DASHBOARD_REQUIRED_TOP_LEVEL_KEYS = (
+     "meta",
+@@ -175,6 +176,20 @@ def _safe_fetchone(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...]
+     return rows[0] if rows else None
+ 
+ 
++def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
++    try:
++        rows = _safe_fetchall(conn, f"PRAGMA table_info({table_name})")
++    except sqlite3.DatabaseError:
++        return set()
++    cols: set = set()
++    for row in rows:
++        try:
++            cols.add(str(row["name"]))
++        except Exception:
++            continue
++    return cols
++
++
+ def _default_tickers(conn: sqlite3.Connection) -> List[str]:
+     tickers: List[str] = []
+     try:
+@@ -367,11 +382,29 @@ def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
+     }
+ 
+ 
+-def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
++def _positions_max_age_days() -> float:
++    try:
++        value = float(os.getenv("PMX_POSITIONS_MAX_AGE_DAYS", str(DEFAULT_POSITIONS_MAX_AGE_DAYS)))
++    except Exception:
++        value = float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
++    return value if value >= 0 else float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
++
++
++def _positions(
++    conn: sqlite3.Connection,
++) -> tuple:
+     row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
+     if not row or not row["d"]:
+-        return _positions_from_executions(conn)
++        return _positions_from_executions(conn), False, None, "trade_executions_fallback"
+     latest = str(row["d"])
++    latest_ts = _parse_utc_datetime(latest)
++    max_age_days = _positions_max_age_days()
++    positions_stale = False
++    if latest_ts is not None:
++        age_days = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 86400.0
++        positions_stale = age_days > max_age_days
++    if positions_stale:
++        return _positions_from_executions(conn), True, latest, "trade_executions_fallback_stale"
+     # Backward-compatible: some environments/tests may have a minimal schema.
+     query_full = """
+     SELECT ticker, shares, average_cost, current_price, unrealized_pnl, unrealized_pnl_pct, market_value
+@@ -442,7 +475,7 @@ def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+         if market_value is not None:
+             out[t]["market_value"] = market_value
+         out[t]["status"] = "ACTIVE" if shares else "FLAT"
+-    return out
++    return out, False, latest, "portfolio_positions"
+ 
+ 
+ def _latest_close(conn: sqlite3.Connection, ticker: str) -> Optional[float]:
+@@ -472,15 +505,23 @@ def _positions_from_executions(conn: sqlite3.Connection) -> Dict[str, Dict[str,
+     closes don't distort entry price. Uses latest close from ohlcv_data as
+     current price when available.
+     """
+-    rows = _safe_fetchall(
+-        conn,
+-        """
++    cols = _table_columns(conn, "trade_executions")
++    where_parts = [
++        "ticker IS NOT NULL",
++        "action IS NOT NULL",
++    ]
++    if "is_diagnostic" in cols:
++        where_parts.append("COALESCE(is_diagnostic, 0) = 0")
++    if "is_synthetic" in cols:
++        where_parts.append("COALESCE(is_synthetic, 0) = 0")
++    where_sql = " AND ".join(where_parts)
++    query = f"""
+         SELECT ticker, action, shares, price, trade_date, created_at
+         FROM trade_executions
+-        WHERE ticker IS NOT NULL AND action IS NOT NULL
++        WHERE {where_sql}
+         ORDER BY COALESCE(created_at, trade_date) ASC, id ASC
+-        """,
+-    )
++    """
++    rows = _safe_fetchall(conn, query)
+     positions: Dict[str, Dict[str, Any]] = {}
+ 
+     def _apply_trade(state: Dict[str, Any], signed_qty: float, price: float) -> None:
+@@ -702,28 +743,24 @@ def _trade_events_filtered(
+     if latest_run_only and latest_run_id:
+         run_clause = " AND run_id = ? "
+         params_base = ticker_list + [latest_run_id, int(limit)]
+-    query_full = f"""
+-    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
+-           data_source, execution_mode,
+-           barbell_bucket, barbell_multiplier, base_confidence, effective_confidence
+-    FROM trade_executions
+-    WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
+-    ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
+-    LIMIT ?
+-    """
+-    query_min = f"""
+-    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps
++    trade_cols = _table_columns(conn, "trade_executions")
++    preferred_cols = [
++        "ticker", "action", "shares", "price", "trade_date", "created_at",
++        "realized_pnl", "realized_pnl_pct", "mid_slippage_bps",
++        "exit_reason", "data_source", "execution_mode",
++        "barbell_bucket", "barbell_multiplier", "base_confidence", "effective_confidence",
++    ]
++    select_cols = [name for name in preferred_cols if not trade_cols or name in trade_cols]
++    if not select_cols:
++        select_cols = ["ticker", "action", "shares", "price", "trade_date", "created_at"]
++    query = f"""
++    SELECT {", ".join(select_cols)}
+     FROM trade_executions
+     WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
+     ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
+     LIMIT ?
+     """
+-    try:
+-        rows = _safe_fetchall(conn, query_full, tuple(params_base))
+-    except sqlite3.OperationalError as exc:
+-        if "no such column" not in str(exc).lower():
+-            raise
+-        rows = _safe_fetchall(conn, query_min, tuple(params_base))
++    rows = _safe_fetchall(conn, query, tuple(params_base))
+     out: List[Dict[str, Any]] = []
+     for r in rows:
+         t = str(r["ticker"]).upper()
+@@ -763,7 +800,11 @@ def _trade_events_filtered(
+                 "bar_timestamp": str(r["trade_date"]) if r["trade_date"] else None,
+                 "realized_pnl": pnl,
+                 "realized_pnl_pct": pnl_pct,
+-                "exit_reason": None,
++                "exit_reason": (
++                    str(r["exit_reason"])
++                    if ("exit_reason" in r.keys() and r["exit_reason"] is not None)
++                    else None
++                ),
+                 "slippage": float(slippage),
+                 "data_source": str(r["data_source"] or "") if ("data_source" in r.keys()) else "",
+                 "execution_mode": str(r["execution_mode"] or "") if ("execution_mode" in r.keys()) else "",
+@@ -785,6 +826,8 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
+         db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+         canonical = _canonical_metrics_pnl_integrity(db_path)
+         if canonical:
++            canonical["performance_unknown"] = False
++            canonical["performance_source"] = "pnl_integrity_enforcer"
+             return canonical
+     except Exception:
+         pass  # Fall back to performance_metrics table
+@@ -818,29 +861,37 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
+             raise
+     if not row:
+         return {
+-            "pnl_abs": 0.0,
+-            "pnl_pct": 0.0,
+-            "win_rate": 0.0,
+-            "profit_factor": 0.0,
+-            "trade_count": 0,
+-            "sharpe": 0.0,
+-            "sortino": 0.0,
+-            "max_drawdown": 0.0,
+-            "avg_win": 0.0,
+-            "avg_loss": 0.0,
+-            "largest_win": 0.0,
+-            "largest_loss": 0.0,
++            "pnl_abs": None,
++            "pnl_pct": None,
++            "win_rate": None,
++            "profit_factor": None,
++            "trade_count": None,
++            "sharpe": None,
++            "sortino": None,
++            "max_drawdown": None,
++            "avg_win": None,
++            "avg_loss": None,
++            "largest_win": None,
++            "largest_loss": None,
++            "performance_unknown": True,
++            "performance_source": "performance_metrics_missing",
+         }
+-    def _f(key: str, default: float = 0.0) -> float:
++    def _f(key: str) -> Optional[float]:
+         try:
+-            return float(row[key] or 0.0)
++            value = row[key]
++            if value is None:
++                return None
++            return float(value)
+         except Exception:
+-            return default
+-    def _i(key: str, default: int = 0) -> int:
++            return None
++    def _i(key: str) -> Optional[int]:
+         try:
+-            return int(row[key] or 0)
++            value = row[key]
++            if value is None:
++                return None
++            return int(value)
+         except Exception:
+-            return default
++            return None
+     pnl_abs = _f("total_return")
+     pnl_pct = _f("total_return_pct")
+     win_rate = _f("win_rate")
+@@ -859,6 +910,8 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
+         "avg_loss": _f("avg_loss"),
+         "largest_win": _f("largest_win"),
+         "largest_loss": _f("largest_loss"),
++        "performance_unknown": False,
++        "performance_source": "performance_metrics",
+     }
+ 
+ 
+@@ -1007,11 +1060,17 @@ def build_dashboard_payload(
+     output_path: Optional[Path] = None,
+ ) -> Dict[str, Any]:
+     perf = _latest_performance(conn)
++    positions, positions_stale, positions_asof, positions_source = _positions(conn)
+     run_id = _latest_run_id(conn) or "db_bridge"
+     ts = _utc_now_iso()
+     bucket_map = _barbell_bucket_map()
+     model_params = _model_params(conn)
+     checks = _data_checks(conn)
++    if positions_stale:
++        checks.append(
++            f"portfolio_positions stale (as_of={positions_asof},"
++            f" max_age_days={_positions_max_age_days():.0f}); using filtered trade_executions fallback."
++        )
+     provenance = _provenance_summary(conn)
+     quant_validation = _quant_validation_payload()
+ 
+@@ -1023,6 +1082,23 @@ def build_dashboard_payload(
+     avg_q = sum(r["quality_score"] for r in qual_records) / len(qual_records) if qual_records else 0.0
+     min_q = min((r["quality_score"] for r in qual_records), default=0.0)
+ 
++    def _opt_float(raw: Any) -> Optional[float]:
++        try:
++            if raw is None:
++                return None
++            value = float(raw)
++            return value if value == value else None  # reject NaN
++        except Exception:
++            return None
++
++    def _opt_int(raw: Any) -> Optional[int]:
++        try:
++            if raw is None:
++                return None
++            return int(raw)
++        except Exception:
++            return None
++
+     payload: Dict[str, Any] = {
+         # NOTE: keep payload self-contained for the static HTML dashboard.
+         "meta": {
+@@ -1058,11 +1134,18 @@ def build_dashboard_payload(
+             ],
+             "ticker_buckets": {t: bucket_map.get(t, "other") for t in tickers},
+         },
+-        "pnl": {"absolute": float(perf["pnl_abs"]), "pct": float(perf["pnl_pct"])},
+-        "win_rate": float(perf["win_rate"]),
+-        "trade_count": int(perf["trade_count"]),
++        "pnl": {
++            "absolute": _opt_float(perf.get("pnl_abs")),
++            "pct": _opt_float(perf.get("pnl_pct")),
++        },
++        "win_rate": _opt_float(perf.get("win_rate")),
++        "trade_count": _opt_int(perf.get("trade_count")),
++        "performance_unknown": bool(perf.get("performance_unknown", False)),
+         "performance": perf,
+-        "positions": _positions(conn),
++        "positions": positions,
++        "positions_stale": positions_stale,
++        "positions_asof": positions_asof,
++        "positions_source": positions_source,
+         "latency": {"ts_ms": None, "llm_ms": None},
+         "routing": {"ts_signals": 0, "llm_signals": 0, "fallback_used": 0},
+         "quality": {"average": float(avg_q), "minimum": float(min_q), "records": qual_records},
+@@ -1141,6 +1224,7 @@ def _sidecar_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]
+ def _robustness_payload() -> Dict[str, Any]:
+     load_warnings: List[str] = []
+     semantic_warnings: List[str] = []
++    optional_warnings: List[str] = []
+     eligibility, elig_err = _load_sidecar_json(DEFAULT_ELIGIBILITY_PATH)
+     context, ctx_err = _load_sidecar_json(DEFAULT_CONTEXT_QUALITY_PATH)
+     performance, perf_err = _load_sidecar_json(DEFAULT_PERFORMANCE_METRICS_PATH)
+@@ -1161,7 +1245,9 @@ def _robustness_payload() -> Dict[str, Any]:
+     if perf_err:
+         load_warnings.append(f"performance_metrics_{perf_err}")
+     if forecast_summary_err and forecast_summary_err != "missing":
+-        load_warnings.append(f"forecast_summary_{forecast_summary_err}")
++        optional_warnings.append(f"forecast_summary_{forecast_summary_err}")
++
++    freshness_critical_sidecars = {"eligibility", "context_quality", "performance_metrics"}
+ 
+     for name, path, payload, err in (
+         ("eligibility", DEFAULT_ELIGIBILITY_PATH, eligibility, elig_err),
+@@ -1175,8 +1261,10 @@ def _robustness_payload() -> Dict[str, Any]:
+         age = _sidecar_age_minutes(path, payload)
+         sidecar_age_minutes[name] = round(age, 2) if age is not None else None
+         if age is not None and age > sidecar_max_age_minutes:
+-            stale_sidecars.append(name)
+-            semantic_warnings.append(f"stale_sidecar:{name}")
++            if name in freshness_critical_sidecars:
++                stale_sidecars.append(name)
++            else:
++                optional_warnings.append(f"stale_sidecar:{name}")
+ 
+     tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
+     weak_tickers = sorted(
+@@ -1231,7 +1319,7 @@ def _robustness_payload() -> Dict[str, Any]:
+         semantic_warnings.append("context_partial_data")
+     missing_count = sum(1 for err in (elig_err, ctx_err, perf_err) if err == "missing")
+     present_count = sum(1 for payload in (eligibility, context, performance) if isinstance(payload, dict) and payload)
+-    all_warnings = sorted(set(load_warnings + semantic_warnings))
++    all_warnings = sorted(set(load_warnings + semantic_warnings + optional_warnings))
+     if stale_sidecars:
+         freshness_status = "STALE"
+         freshness_reason = "STALE_SIDECAR"
+@@ -1247,6 +1335,8 @@ def _robustness_payload() -> Dict[str, Any]:
+     elif load_warnings or stale_sidecars:
+         robustness_status = "STALE"
+     elif (
++        bool(optional_warnings)
++        or
+         (isinstance(perf_metrics, dict) and perf_metrics.get("status") == "WARN")
+         or (isinstance(sufficiency, dict) and sufficiency.get("status") not in (None, "SUFFICIENT"))
+         or bool(semantic_warnings)
+diff --git a/scripts/exit_quality_audit.py b/scripts/exit_quality_audit.py
+index 597052c..9292582 100644
+--- a/scripts/exit_quality_audit.py
++++ b/scripts/exit_quality_audit.py
+@@ -89,11 +89,12 @@ def load_production_trades(db_path: Path, tail_n: int | None = None) -> pd.DataF
+ 
+     # ATR proxy = bar_high - bar_low (single-bar range); fallback to 1.5% of entry
+     has_atr = df["bar_high"].notna() & df["bar_low"].notna() & (df["entry_price"].fillna(0) > 0)
+-    df["atr_proxy"] = np.nan
+-    df.loc[has_atr, "atr_proxy"] = df.loc[has_atr, "bar_high"] - df.loc[has_atr, "bar_low"]
+-    # Fallback: 1.5% of entry_price
+-    no_atr = df["atr_proxy"].isna() & df["entry_price"].notna() & (df["entry_price"] > 0)
+-    df.loc[no_atr, "atr_proxy"] = df.loc[no_atr, "entry_price"] * 0.015
++    has_fallback = ~has_atr & df["entry_price"].notna() & (df["entry_price"] > 0)
++    df["atr_proxy"] = np.where(
++        has_atr,
++        df["bar_high"] - df["bar_low"],
++        np.where(has_fallback, df["entry_price"] * 0.015, np.nan),
++    )
+ 
+     risk_unit = (df["atr_proxy"] * 1.5).replace(0.0, np.nan)
+     df["r_multiple"] = df["realized_pnl"].fillna(0.0) / risk_unit
+diff --git a/scripts/openclaw_maintenance.py b/scripts/openclaw_maintenance.py
+index bb8ffe4..a26e6cf 100644
+--- a/scripts/openclaw_maintenance.py
++++ b/scripts/openclaw_maintenance.py
+@@ -341,6 +341,169 @@ def _pid_running(pid: int) -> bool:
+     return False
+ 
+ 
++def _process_command_line(pid: int) -> str:
++    if pid <= 0:
++        return ""
++
++    if os.name == "nt":
++        cmd = [
++            "powershell",
++            "-NoProfile",
++            "-Command",
++            (
++                f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\" "
++                "-ErrorAction SilentlyContinue; "
++                "if ($p) { $p.CommandLine }"
++            ),
++        ]
++        try:
++            proc = subprocess.run(
++                cmd,
++                capture_output=True,
++                text=True,
++                timeout=5,
++                check=False,
++            )
++            return (proc.stdout or "").strip()
++        except Exception:
++            return ""
++
++    try:
++        proc = subprocess.run(
++            ["ps", "-p", str(int(pid)), "-o", "command="],
++            capture_output=True,
++            text=True,
++            timeout=5,
++            check=False,
++        )
++        return (proc.stdout or "").strip()
++    except Exception:
++        return ""
++
++
++def _lock_holder_matches_process(holder: dict[str, Any]) -> bool:
++    pid = 0
++    try:
++        pid = int(holder.get("pid") or 0)
++    except Exception:
++        pid = 0
++    if pid <= 0:
++        return False
++    if not _pid_running(pid):
++        return False
++
++    expected_parts: list[str] = []
++    script_name = Path(__file__).name.lower()
++    raw_command = str(holder.get("command") or "").strip()
++    if raw_command:
++        low = raw_command.lower()
++        if script_name in low:
++            expected_parts.append(script_name)
++        mode = str(holder.get("mode") or "").strip().lower()
++        if mode == "watch" and "--watch" in low:
++            expected_parts.append("--watch")
++
++    if not expected_parts:
++        return True
++
++    process_command = _process_command_line(pid).lower()
++    if not process_command:
++        return False
++    return all(part in process_command for part in expected_parts)
++
++
++def _listener_matches_expected_gateway(listener: dict[str, Any], expected_port: int) -> bool:
++    if not isinstance(listener, dict):
++        return False
++    command = str(listener.get("command") or "").strip().lower()
++    command_line = str(listener.get("commandLine") or "").strip().lower()
++    text = f"{command} {command_line}".strip()
++    if not text:
++        return False
++    if "openclaw" not in text or "gateway" not in text:
++        return False
++    if int(expected_port) > 0:
++        if f"--port {int(expected_port)}" not in text:
++            return False
++    return True
++
++
++def _terminate_pid(pid: int) -> _CmdResult:
++    if pid <= 0:
++        return _CmdResult(False, 1, [], "", "invalid_pid")
++
++    if os.name == "nt":
++        cmd = ["taskkill", "/PID", str(int(pid)), "/F", "/T"]
++    else:
++        cmd = ["kill", "-TERM", str(int(pid))]
++
++    try:
++        proc = subprocess.run(
++            cmd,
++            cwd=str(PROJECT_ROOT),
++            capture_output=True,
++            text=True,
++            timeout=15.0,
++            check=False,
++        )
++    except FileNotFoundError as exc:
++        return _CmdResult(False, 127, cmd, "", str(exc))
++    except subprocess.TimeoutExpired as exc:
++        out = exc.stdout if isinstance(exc.stdout, str) else ""
++        err = exc.stderr if isinstance(exc.stderr, str) else ""
++        return _CmdResult(False, 124, cmd, out, err or "timeout")
++    return _CmdResult(int(proc.returncode) == 0, int(proc.returncode), cmd, proc.stdout or "", proc.stderr or "")
++
++
++def _recover_detached_gateway_listener(
++    *,
++    oc_base: list[str],
++    listener: dict[str, Any],
++    expected_port: int,
++) -> dict[str, Any]:
++    info: dict[str, Any] = {
++        "attempted": False,
++        "matched_expected_gateway": False,
++        "listener_pid": None,
++        "actions": [],
++        "warnings": [],
++        "errors": [],
++    }
++    if not isinstance(listener, dict):
++        return info
++
++    listener_pid = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else 0
++    info["listener_pid"] = listener_pid or None
++    if listener_pid <= 0:
++        _append_unique(info["warnings"], "gateway_listener_pid_missing")
++        return info
++
++    if not _listener_matches_expected_gateway(listener, expected_port):
++        _append_unique(info["warnings"], "gateway_listener_identity_unverified")
++        return info
++
++    info["matched_expected_gateway"] = True
++    info["attempted"] = True
++
++    stop_res = _run_openclaw(oc_base=oc_base, args=["gateway", "stop"], timeout_seconds=30.0)
++    if stop_res.ok:
++        _append_unique(info["actions"], "gateway_stop_detached_listener_recovery")
++    else:
++        _append_unique(info["warnings"], f"gateway_stop_detached_listener_failed:rc={stop_res.returncode}")
++
++    if not _pid_running(listener_pid):
++        _append_unique(info["actions"], f"gateway_listener_cleared:{listener_pid}")
++        return info
++
++    kill_res = _terminate_pid(listener_pid)
++    if not kill_res.ok:
++        _append_unique(info["errors"], f"gateway_listener_terminate_failed:{listener_pid}:rc={kill_res.returncode}")
++        return info
++
++    _append_unique(info["actions"], f"gateway_listener_terminated:{listener_pid}")
++    return info
++
++
+ def _state_seconds_since(value: Any) -> Optional[float]:
+     ts = _parse_ts(value)
+     if ts is None:
+@@ -402,7 +565,7 @@ def _acquire_run_lock(
+                 holder_pid = 0
+             holder_age = _state_seconds_since(holder.get("created_at_utc"))
+             stale = False
+-            if holder_pid > 0 and not _pid_running(holder_pid):
++            if holder_pid > 0 and not _lock_holder_matches_process(holder):
+                 stale = True
+             elif holder_pid <= 0 and holder_age is not None and holder_age >= max(60, int(stale_seconds)):
+                 stale = True
+@@ -891,6 +1054,7 @@ def _gateway_health_and_heal(
+     port = gateway_payload.get("port") if isinstance(gateway_payload.get("port"), dict) else {}
+     listeners = port.get("listeners") if isinstance(port.get("listeners"), list) else []
+     listener = listeners[0] if listeners and isinstance(listeners[0], dict) else {}
++    gateway_port = int(gateway_payload.get("gateway", {}).get("port") or 0) if isinstance(gateway_payload.get("gateway"), dict) else 0
+     out["rpc_ok"] = bool(rpc.get("ok"))
+     out["service_status"] = str(runtime.get("status") or "")
+     out["service_state"] = str(runtime.get("state") or "")
+@@ -918,6 +1082,43 @@ def _gateway_health_and_heal(
+     if listener_conflict:
+         _append_unique(out["warnings"], "gateway_detached_listener_conflict")
+         _append_unique(out["manual_actions"], "run: openclaw gateway status --json")
++        if apply and primary_issue and _listener_matches_expected_gateway(listener, gateway_port):
++            detached_recovery = _recover_detached_gateway_listener(
++                oc_base=oc_base,
++                listener=listener,
++                expected_port=gateway_port,
++            )
++            out["detached_listener_recovery"] = detached_recovery
++            for action in detached_recovery.get("actions") or []:
++                _append_unique(out["actions"], str(action))
++            for warning in detached_recovery.get("warnings") or []:
++                _append_unique(out["warnings"], str(warning))
++            for error in detached_recovery.get("errors") or []:
++                _append_unique(out["errors"], str(error))
++            if not detached_recovery.get("errors"):
++                _, gateway_payload_after_detached = _run_openclaw_json(
++                    oc_base=oc_base,
++                    args=["gateway", "status"],
++                    timeout_seconds=20.0,
++                )
++                if isinstance(gateway_payload_after_detached, dict):
++                    gateway_payload = gateway_payload_after_detached
++                    rpc = gateway_payload.get("rpc") if isinstance(gateway_payload.get("rpc"), dict) else {}
++                    service = gateway_payload.get("service") if isinstance(gateway_payload.get("service"), dict) else {}
++                    runtime = service.get("runtime") if isinstance(service.get("runtime"), dict) else {}
++                    port = gateway_payload.get("port") if isinstance(gateway_payload.get("port"), dict) else {}
++                    listeners = port.get("listeners") if isinstance(port.get("listeners"), list) else []
++                    listener = listeners[0] if listeners and isinstance(listeners[0], dict) else {}
++                    out["rpc_ok"] = bool(rpc.get("ok"))
++                    out["service_status"] = str(runtime.get("status") or "")
++                    out["service_state"] = str(runtime.get("state") or "")
++                    out["gateway_port_status"] = str(port.get("status") or "")
++                    out["gateway_listener_pid"] = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else None
++                listener_conflict = bool(
++                    bool(out["rpc_ok"])
++                    and str(out["gateway_port_status"]).strip().lower() == "busy"
++                    and str(out["service_status"]).strip().lower() in {"stopped", "ready"}
++                )
+ 
+     dns_diag = out.get("dns") if isinstance(out.get("dns"), dict) else {}
+     dns_reprobe_ok: Optional[bool] = None
+diff --git a/scripts/project_runtime_status.py b/scripts/project_runtime_status.py
+index c8ac35e..0cac63c 100644
+--- a/scripts/project_runtime_status.py
++++ b/scripts/project_runtime_status.py
+@@ -179,7 +179,11 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
+     checks.append(
+         _run_check(
+             "production_gate",
+-            [py, str(PROJECT_ROOT / "scripts" / "production_audit_gate.py")],
++            [
++                py,
++                str(PROJECT_ROOT / "scripts" / "production_audit_gate.py"),
++                "--unattended-profile",
++            ],
+             timeout_seconds=timeout_seconds,
+         )
+     )
+diff --git a/scripts/run_quality_pipeline.py b/scripts/run_quality_pipeline.py
+index 7d560aa..1c34ae3 100644
+--- a/scripts/run_quality_pipeline.py
++++ b/scripts/run_quality_pipeline.py
+@@ -20,6 +20,10 @@ from scripts.compute_context_quality import DEFAULT_OUTPUT as DEFAULT_CONTEXT_OU
+ from scripts.compute_context_quality import compute_context_quality
+ from scripts.compute_ticker_eligibility import DEFAULT_OUTPUT as DEFAULT_ELIGIBILITY_OUT
+ from scripts.compute_ticker_eligibility import compute_eligibility
++from scripts.apply_ticker_eligibility_gates import (
++    DEFAULT_OUTPUT as DEFAULT_ELIGIBILITY_GATES_OUT,
++    apply_eligibility_gates,
++)
+ from scripts.data_sufficiency_monitor import DEFAULT_AUDIT_DIR, DEFAULT_DB, run_data_sufficiency
+ from scripts.generate_performance_charts import (
+     DEFAULT_METRICS_PATH,
+@@ -62,6 +66,7 @@ def run_quality_pipeline(
+     db_path: Path = DEFAULT_DB,
+     audit_dir: Path = DEFAULT_AUDIT_DIR,
+     eligibility_out: Path = DEFAULT_ELIGIBILITY_OUT,
++    eligibility_gates_out: Path = DEFAULT_ELIGIBILITY_GATES_OUT,
+     context_out: Path = DEFAULT_CONTEXT_OUT,
+     charts_out_dir: Path = DEFAULT_OUT_DIR,
+     metrics_out: Path = DEFAULT_METRICS_PATH,
+@@ -96,6 +101,30 @@ def run_quality_pipeline(
+     warnings.extend(eligibility_warnings)
+     errors.extend(eligibility_errors)
+ 
++    eligibility_gate = apply_eligibility_gates(
++        eligibility_path=eligibility_out,
++        output_path=eligibility_gates_out,
++    )
++    eligibility_gate_warnings = _dedupe_preserve_order(list(eligibility_gate.get("warnings", [])))
++    eligibility_gate_errors = _dedupe_preserve_order(list(eligibility_gate.get("errors", [])))
++    eligibility_gate_error_flag = "eligibility_gate_error" if eligibility_gate_errors else None
++    steps.append(
++        {
++            "name": "apply_ticker_eligibility_gates",
++            "status": _step_status_from_flags(
++                warnings=eligibility_gate_warnings,
++                error=eligibility_gate_error_flag,
++            ),
++            "warnings": eligibility_gate_warnings,
++            "errors": eligibility_gate_errors,
++            "lab_only_tickers": list(eligibility_gate.get("lab_only_tickers", [])),
++            "gate_written": bool(eligibility_gate.get("gate_written", False)),
++            "output": str(eligibility_gates_out),
++        }
++    )
++    warnings.extend(eligibility_gate_warnings)
++    errors.extend(eligibility_gate_errors)
++
+     context = compute_context_quality(db_path=db_path)
+     append_threshold_hash_change_warning(context_out, context)
+     _write_json(context_out, context)
+@@ -195,6 +224,7 @@ def run_quality_pipeline(
+         "steps": steps,
+         "artifacts": {
+             "eligibility": str(eligibility_out),
++            "eligibility_gates": str(eligibility_gates_out),
+             "context_quality": str(context_out),
+             "charts_out_dir": str(charts_out_dir),
+             "metrics_summary": str(metrics_out),
+@@ -211,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
+     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+     parser.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR)
+     parser.add_argument("--eligibility-out", type=Path, default=DEFAULT_ELIGIBILITY_OUT)
++    parser.add_argument("--eligibility-gates-out", type=Path, default=DEFAULT_ELIGIBILITY_GATES_OUT)
+     parser.add_argument("--context-out", type=Path, default=DEFAULT_CONTEXT_OUT)
+     parser.add_argument("--charts-out-dir", type=Path, default=DEFAULT_OUT_DIR)
+     parser.add_argument("--metrics-out", type=Path, default=DEFAULT_METRICS_PATH)
+@@ -222,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
+         db_path=args.db,
+         audit_dir=args.audit_dir,
+         eligibility_out=args.eligibility_out,
++        eligibility_gates_out=args.eligibility_gates_out,
+         context_out=args.context_out,
+         charts_out_dir=args.charts_out_dir,
+         metrics_out=args.metrics_out,
+diff --git a/tests/scripts/test_apply_ticker_eligibility_gates.py b/tests/scripts/test_apply_ticker_eligibility_gates.py
+new file mode 100644
+index 0000000..347569a
+--- /dev/null
++++ b/tests/scripts/test_apply_ticker_eligibility_gates.py
+@@ -0,0 +1,86 @@
++"""
++Tests for scripts/apply_ticker_eligibility_gates.py
++"""
++from __future__ import annotations
++
++import json
++
++
++def test_apply_eligibility_gates_writes_expected_lists(tmp_path):
++    from scripts.apply_ticker_eligibility_gates import apply_eligibility_gates
++
++    eligibility_path = tmp_path / "eligibility.json"
++    output_path = tmp_path / "gates.json"
++    eligibility_path.write_text(
++        json.dumps(
++            {
++                "tickers": {
++                    "AAPL": {"status": "HEALTHY"},
++                    "TSLA": {"status": "LAB_ONLY"},
++                    "NVDA": {"status": "WEAK"},
++                }
++            }
++        ),
++        encoding="utf-8",
++    )
++
++    result = apply_eligibility_gates(
++        eligibility_path=eligibility_path,
++        output_path=output_path,
++    )
++
++    assert result["status"] == "PASS"
++    assert result["healthy_tickers"] == ["AAPL"]
++    assert result["weak_tickers"] == ["NVDA"]
++    assert result["lab_only_tickers"] == ["TSLA"]
++    assert result["gate_written"] is True
++    assert output_path.exists()
++    payload = json.loads(output_path.read_text(encoding="utf-8"))
++    assert payload["summary"] == {"HEALTHY": 1, "WEAK": 1, "LAB_ONLY": 1}
++
++
++def test_apply_eligibility_gates_missing_input_is_warn_and_empty(tmp_path):
++    from scripts.apply_ticker_eligibility_gates import apply_eligibility_gates
++
++    output_path = tmp_path / "gates.json"
++    result = apply_eligibility_gates(
++        eligibility_path=tmp_path / "missing.json",
++        output_path=output_path,
++    )
++
++    assert result["status"] == "WARN"
++    assert "eligibility_missing" in result["warnings"]
++    assert result["healthy_tickers"] == []
++    assert result["weak_tickers"] == []
++    assert result["lab_only_tickers"] == []
++    assert output_path.exists()
++
++
++def test_cli_json_output(tmp_path, capsys):
++    from scripts.apply_ticker_eligibility_gates import main
++
++    eligibility_path = tmp_path / "eligibility.json"
++    output_path = tmp_path / "gates.json"
++    eligibility_path.write_text(
++        json.dumps(
++            {
++                "tickers": {
++                    "MSFT": {"status": "LAB_ONLY"},
++                }
++            }
++        ),
++        encoding="utf-8",
++    )
++    rc = main(
++        [
++            "--eligibility",
++            str(eligibility_path),
++            "--output",
++            str(output_path),
++            "--json",
++        ]
++    )
++    assert rc == 0
++    payload = json.loads(capsys.readouterr().out)
++    assert payload["status"] == "PASS"
++    assert payload["lab_only_tickers"] == ["MSFT"]
+diff --git a/tests/scripts/test_dashboard_db_bridge.py b/tests/scripts/test_dashboard_db_bridge.py
+index 2c88147..b6ef726 100644
+--- a/tests/scripts/test_dashboard_db_bridge.py
++++ b/tests/scripts/test_dashboard_db_bridge.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import datetime
+ import pytest
+ import sqlite3
+ 
+@@ -41,9 +42,10 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
+             "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+             ("AAPL", "BUY", 10, 100.0, "2026-01-01", "2026-01-01T00:00:01Z", None, None, 10.0, "RID"),
+         )
++        recent_date = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+         conn.execute(
+             "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
+-            ("AAPL", "2026-01-02", 10, 101.0),
++            ("AAPL", recent_date, 10, 101.0),
+         )
+         conn.execute(
+             "INSERT INTO data_quality_snapshots(ticker,quality_score,missing_pct,coverage,outlier_frac,source,created_at) VALUES (?,?,?,?,?,?,?)",
+@@ -225,6 +227,40 @@ def test_robustness_marks_stale_when_sidecar_age_exceeds_policy(tmp_path, monkey
+     assert robustness["freshness_reason"] == "STALE_SIDECAR"
+ 
+ 
++def test_robustness_optional_forecast_summary_stale_is_warn_only(tmp_path, monkeypatch) -> None:
++    elig = tmp_path / "elig.json"
++    ctx = tmp_path / "ctx.json"
++    perf = tmp_path / "metrics.json"
++    forecast = tmp_path / "forecast_summary.json"
++
++    elig.write_text(
++        '{"generated_utc":"2099-01-01T00:00:00Z","summary":{"HEALTHY":1,"WEAK":0,"LAB_ONLY":0},"tickers":{},"warnings":[]}',
++        encoding="utf-8",
++    )
++    ctx.write_text(
++        '{"generated_utc":"2099-01-01T00:00:00Z","n_total_trades":4,"n_trades_no_confidence":0,"partial_data":false,"regime_quality":{"A":{}}, "confidence_bin_quality":{"0.60-0.65":{}}}',
++        encoding="utf-8",
++    )
++    perf.write_text(
++        '{"generated_utc":"2099-01-01T00:00:00Z","status":"PASS","warnings":[],"sufficiency":{"status":"SUFFICIENT"},"chart_paths":{}}',
++        encoding="utf-8",
++    )
++    forecast.write_text(
++        '{"generated_utc":"2020-01-01T00:00:00Z","telemetry_contract":{"schema_version":3}}',
++        encoding="utf-8",
++    )
++
++    monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
++    monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
++    monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
++    monkeypatch.setattr(mod, "DEFAULT_FORECAST_SUMMARY_PATH", forecast)
++    monkeypatch.setenv("PMX_SIDECAR_MAX_AGE_MINUTES", "120")
++
++    robustness = mod._robustness_payload()
++    assert robustness["status"] == "WARN"
++    assert "stale_sidecar:forecast_summary" in robustness["warnings"]
++
++
+ def test_live_denominator_payload_merges_watcher_sidecar(tmp_path, monkeypatch) -> None:
+     watcher = tmp_path / "live_denominator_latest.json"
+     watcher.write_text(
+@@ -328,3 +364,136 @@ def test_connect_rw_blocks_dangerous_pragma_after_setup(tmp_path) -> None:
+             conn.execute("PRAGMA journal_mode=DELETE")
+     finally:
+         conn.close()
++
++
++# ---------------------------------------------------------------------------
++# Agent-B dashboard truthfulness contract tests
++# ---------------------------------------------------------------------------
++
++def _make_minimal_db(db_path, *, with_exit_reason: bool = False) -> None:
++    conn = sqlite3.connect(db_path)
++    conn.execute("CREATE TABLE ohlcv_data(date TEXT, ticker TEXT, close REAL)")
++    conn.execute(
++        "CREATE TABLE trading_signals(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT,"
++        " confidence REAL, expected_return REAL, source TEXT, signal_timestamp TEXT, created_at TEXT)"
++    )
++    exit_col = ", exit_reason TEXT" if with_exit_reason else ""
++    conn.execute(
++        f"CREATE TABLE trade_executions(id INTEGER PRIMARY KEY, ticker TEXT, action TEXT,"
++        f" shares REAL, price REAL, trade_date TEXT, created_at TEXT, realized_pnl REAL,"
++        f" realized_pnl_pct REAL, mid_slippage_bps REAL, run_id TEXT, is_diagnostic INTEGER"
++        f" DEFAULT 0, is_synthetic INTEGER DEFAULT 0{exit_col})"
++    )
++    conn.execute(
++        "CREATE TABLE portfolio_positions(id INTEGER PRIMARY KEY, ticker TEXT,"
++        " position_date TEXT, shares REAL, average_cost REAL)"
++    )
++    conn.execute(
++        "CREATE TABLE data_quality_snapshots(id INTEGER PRIMARY KEY, ticker TEXT,"
++        " quality_score REAL, missing_pct REAL, coverage REAL, outlier_frac REAL, source TEXT, created_at TEXT)"
++    )
++    conn.commit()
++    conn.close()
++
++
++def test_positions_stale_uses_filtered_execution_fallback(tmp_path, monkeypatch) -> None:
++    """When portfolio_positions.position_date is older than max_age_days, the bridge
++    must fall back to trade_executions and set positions_stale=True in the payload."""
++    db_path = tmp_path / "stale_test.db"
++    _make_minimal_db(db_path)
++    conn = sqlite3.connect(db_path)
++    stale_date = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
++    conn.execute(
++        "INSERT INTO portfolio_positions(ticker,position_date,shares,average_cost) VALUES (?,?,?,?)",
++        ("MSFT", stale_date, 5, 300.0),
++    )
++    # Open BUY the fallback will see
++    conn.execute(
++        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
++        " realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic)"
++        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
++        ("MSFT", "BUY", 3, 300.0, stale_date, stale_date + "T00:00:00Z",
++         None, None, 0.0, "RID", 0, 0),
++    )
++    conn.commit()
++    conn.close()
++
++    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
++    conn.row_factory = sqlite3.Row
++    monkeypatch.setenv("PMX_POSITIONS_MAX_AGE_DAYS", "14")
++    try:
++        payload = mod.build_dashboard_payload(
++            conn=conn, tickers=["MSFT"], lookback_days=10,
++            max_signals=5, max_trades=5, db_path=db_path,
++        )
++    finally:
++        conn.close()
++
++    assert payload["positions_stale"] is True
++    assert payload["positions_source"] in {"trade_executions_fallback_stale", "trade_executions_fallback"}
++    assert any("stale" in c.lower() for c in payload["checks"])
++
++
++def test_performance_unknown_when_metrics_missing(tmp_path) -> None:
++    """When performance_metrics table has no rows (and PnLIntegrityEnforcer is
++    unavailable), the bridge must emit None values and performance_unknown=True
++    rather than zeroes that are indistinguishable from a real zero-PnL session."""
++    db_path = tmp_path / "no_perf.db"
++    _make_minimal_db(db_path)
++    conn = sqlite3.connect(db_path)
++    conn.execute(
++        "CREATE TABLE performance_metrics(id INTEGER PRIMARY KEY,"
++        " total_return REAL, total_return_pct REAL, win_rate REAL,"
++        " profit_factor REAL, num_trades INTEGER, created_at TEXT)"
++    )
++    conn.commit()
++    conn.close()
++
++    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
++    conn.row_factory = sqlite3.Row
++    try:
++        payload = mod.build_dashboard_payload(
++            conn=conn, tickers=["AAPL"], lookback_days=10,
++            max_signals=5, max_trades=5, db_path=db_path,
++        )
++    finally:
++        conn.close()
++
++    assert payload["performance_unknown"] is True
++    assert payload["pnl"]["absolute"] is None
++    assert payload["win_rate"] is None
++    assert payload["trade_count"] is None
++
++
++def test_trade_events_include_exit_reason_when_available(tmp_path) -> None:
++    """Trade events payload must include exit_reason from trade_executions when the
++    column exists, rather than always emitting None."""
++    db_path = tmp_path / "exit_reason_test.db"
++    _make_minimal_db(db_path, with_exit_reason=True)
++    conn = sqlite3.connect(db_path)
++    conn.execute(
++        "INSERT INTO trade_executions(ticker,action,shares,price,trade_date,created_at,"
++        " realized_pnl,realized_pnl_pct,mid_slippage_bps,run_id,is_diagnostic,is_synthetic,exit_reason)"
++        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
++        ("NVDA", "SELL", 2, 150.0, "2026-03-01", "2026-03-01T10:00:00Z",
++         30.0, 0.01, 5.0, "RID", 0, 0, "stop_loss"),
++    )
++    conn.commit()
++    conn.close()
++
++    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
++    conn.row_factory = sqlite3.Row
++    try:
++        payload = mod.build_dashboard_payload(
++            conn=conn, tickers=["NVDA"], lookback_days=30,
++            max_signals=5, max_trades=10, latest_run_only=False, db_path=db_path,
++        )
++    finally:
++        conn.close()
++
++    events = payload["trade_events"]
++    assert events, "Expected at least one trade event"
++    exit_reasons = [e.get("exit_reason") for e in events]
++    assert "stop_loss" in exit_reasons, (
++        f"exit_reason 'stop_loss' not found in trade events. Got: {exit_reasons}"
++    )
+diff --git a/tests/scripts/test_exit_quality_audit.py b/tests/scripts/test_exit_quality_audit.py
+index 82289cc..43f8475 100644
+--- a/tests/scripts/test_exit_quality_audit.py
++++ b/tests/scripts/test_exit_quality_audit.py
+@@ -174,6 +174,31 @@ class TestLoadProductionTrades:
+         df = load_production_trades(db)
+         assert df["correct_dir_neg_pnl"].iloc[0] == 1
+ 
++    def test_atr_proxy_fallback_uses_entry_price(self, tmp_path):
++        """When bar_high/bar_low are NULL, atr_proxy falls back to 1.5% of entry_price."""
++        db = _build_db(tmp_path)
++        _insert_trade(db, entry_price=200.0, bar_high=None, bar_low=None, realized_pnl=10.0)
++        df = load_production_trades(db)
++        # fallback: 200.0 * 0.015 = 3.0
++        assert abs(df["atr_proxy"].iloc[0] - 3.0) < 0.001
++
++    def test_handles_all_null_atr_inputs_without_dtype_error(self, tmp_path):
++        """NULL bar_high/bar_low with a loss trade: fallback fires and r_multiple stays finite."""
++        db = _build_db(tmp_path)
++        _insert_trade(
++            db,
++            realized_pnl=-5.0,
++            entry_price=100.0,
++            exit_price=99.0,
++            bar_high=None,
++            bar_low=None,
++        )
++        df = load_production_trades(db)
++        assert len(df) == 1
++        # fallback atr_proxy = 100 * 0.015 = 1.5 → r_multiple = -5 / (1.5 * 1.5) ≈ -2.22
++        assert np.isfinite(float(df["atr_proxy"].iloc[0]))
++        assert np.isfinite(float(df["r_multiple"].iloc[0]))
++
+     def test_tail_n_limits_rows(self, tmp_path):
+         db = _build_db(tmp_path)
+         for i in range(5):
+diff --git a/tests/scripts/test_openclaw_maintenance.py b/tests/scripts/test_openclaw_maintenance.py
+index 2de69f9..5610284 100644
+--- a/tests/scripts/test_openclaw_maintenance.py
++++ b/tests/scripts/test_openclaw_maintenance.py
+@@ -381,6 +381,216 @@ def test_gateway_health_skips_restart_when_cooldown_active(monkeypatch) -> None:
+     assert not any(cmd == ["gateway", "restart"] for cmd in calls)
+ 
+ 
++def test_gateway_health_recovers_detached_listener_conflict(monkeypatch) -> None:
++    calls: list[list[str]] = []
++    payload = _handshake_timeout_channels_payload()
++    healthy_payload = _healthy_channels_payload()
++    gateway_status_calls = {"value": 0}
++
++    def fake_run_openclaw_json(*, oc_base, args, timeout_seconds=20.0):
++        del oc_base, timeout_seconds
++        if args == ["gateway", "status"]:
++            gateway_status_calls["value"] += 1
++            if gateway_status_calls["value"] == 1:
++                gateway_payload = {
++                    "rpc": {"ok": True},
++                    "service": {"runtime": {"status": "stopped", "state": "Ready"}},
++                    "gateway": {"port": 18789},
++                    "port": {
++                        "status": "busy",
++                        "listeners": [
++                            {
++                                "pid": 12345,
++                                "command": "node.exe",
++                                "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Users\\Bestman\\AppData\\Roaming\\npm\\node_modules\\openclaw\\dist\\index.js gateway --port 18789",
++                            }
++                        ],
++                    },
++                }
++            else:
++                gateway_payload = {
++                    "rpc": {"ok": False},
++                    "service": {"runtime": {"status": "stopped", "state": "Ready"}},
++                    "gateway": {"port": 18789},
++                    "port": {"status": "free", "listeners": []},
++                }
++            return om._CmdResult(True, 0, ["openclaw", "gateway", "status"], "", ""), gateway_payload
++        if args == ["channels", "status", "--probe"]:
++            return om._CmdResult(True, 0, ["openclaw", "channels", "status", "--probe"], "", ""), healthy_payload
++        raise AssertionError(f"Unexpected json call args: {args}")
++
++    def fake_run_openclaw(*, oc_base, args, timeout_seconds=20.0):
++        del oc_base, timeout_seconds
++        calls.append(list(args))
++        if args in (["gateway", "stop"], ["gateway", "restart"]):
++            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
++        if args[:3] == ["--no-color", "channels", "logs"]:
++            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
++        raise AssertionError(f"Unexpected call args: {args}")
++
++    monkeypatch.setattr(om, "_run_openclaw_json", fake_run_openclaw_json)
++    monkeypatch.setattr(om, "_run_openclaw", fake_run_openclaw)
++    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 12345)
++    monkeypatch.setattr(om, "_terminate_pid", lambda pid: om._CmdResult(True, 0, ["taskkill", "/PID", str(pid)], "", ""))
++    monkeypatch.setattr(om, "_resolve_dns", lambda hostname: {"hostname": hostname, "ok": True, "addresses": ["127.0.0.1"], "error": ""})
++
++    out = om._gateway_health_and_heal(
++        oc_base=["openclaw"],
++        channels_payload=payload,
++        primary_channel="whatsapp",
++        apply=True,
++        restart_on_rpc_failure=True,
++        recheck_delay_seconds=0.0,
++        attempt_primary_reenable=False,
++        primary_restart_attempts=1,
++    )
++
++    assert "gateway_stop_detached_listener_recovery" in out["actions"]
++    assert "gateway_listener_terminated:12345" in out["actions"]
++    assert "gateway_restart_primary_channel_recovery" in out["actions"]
++    assert out["primary_channel_issue_final"] is None
++    assert any(cmd == ["gateway", "stop"] for cmd in calls)
++    assert any(cmd == ["gateway", "restart"] for cmd in calls)
++
++
++def test_gateway_health_does_not_kill_unverified_listener(monkeypatch) -> None:
++    calls: list[list[str]] = []
++    payload = _handshake_timeout_channels_payload()
++
++    def fake_run_openclaw_json(*, oc_base, args, timeout_seconds=20.0):
++        del oc_base, timeout_seconds
++        if args == ["gateway", "status"]:
++            gateway_payload = {
++                "rpc": {"ok": True},
++                "service": {"runtime": {"status": "stopped", "state": "Ready"}},
++                "gateway": {"port": 18789},
++                "port": {
++                    "status": "busy",
++                    "listeners": [
++                        {
++                            "pid": 22222,
++                            "command": "python.exe",
++                            "commandLine": "python -m http.server 18789",
++                        }
++                    ],
++                },
++            }
++            return om._CmdResult(True, 0, ["openclaw", "gateway", "status"], "", ""), gateway_payload
++        raise AssertionError(f"Unexpected json call args: {args}")
++
++    def fake_run_openclaw(*, oc_base, args, timeout_seconds=20.0):
++        del oc_base, timeout_seconds
++        calls.append(list(args))
++        if args[:3] == ["--no-color", "channels", "logs"]:
++            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
++        raise AssertionError(f"Unexpected call args: {args}")
++
++    monkeypatch.setattr(om, "_run_openclaw_json", fake_run_openclaw_json)
++    monkeypatch.setattr(om, "_run_openclaw", fake_run_openclaw)
++    monkeypatch.setattr(om, "_resolve_dns", lambda hostname: {"hostname": hostname, "ok": True, "addresses": ["127.0.0.1"], "error": ""})
++
++    out = om._gateway_health_and_heal(
++        oc_base=["openclaw"],
++        channels_payload=payload,
++        primary_channel="whatsapp",
++        apply=True,
++        restart_on_rpc_failure=True,
++        recheck_delay_seconds=0.0,
++        attempt_primary_reenable=False,
++        primary_restart_attempts=1,
++    )
++
++    assert "gateway_detached_listener_conflict" in out["warnings"]
++    assert "skip_restart_due_to_listener_conflict" in out["warnings"]
++    assert out["primary_channel_issue_final"] == "whatsapp_handshake_timeout"
++    assert not any(cmd == ["gateway", "stop"] for cmd in calls)
++    assert not any(cmd == ["gateway", "restart"] for cmd in calls)
++
++
++def test_lock_holder_matches_process_rejects_pid_reuse(monkeypatch) -> None:
++    holder = {
++        "pid": 17116,
++        "mode": "watch",
++        "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
++    }
++
++    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 17116)
++    monkeypatch.setattr(
++        om,
++        "_process_command_line",
++        lambda pid: "C:\\WINDOWS\\system32\\svchost.exe -k LocalService -p -s NPSMSvc" if pid == 17116 else "",
++    )
++
++    assert om._lock_holder_matches_process(holder) is False
++
++
++def test_acquire_run_lock_reclaims_stale_lock_when_pid_reused(monkeypatch, tmp_path) -> None:
++    lock_path = tmp_path / "openclaw_maintenance.lock.json"
++    lock_path.write_text(
++        json.dumps(
++            {
++                "pid": 17116,
++                "mode": "watch",
++                "created_at_utc": om._utc_now_iso(),
++                "token": "old-token",
++                "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
++            }
++        ),
++        encoding="utf-8",
++    )
++
++    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 17116)
++    monkeypatch.setattr(
++        om,
++        "_process_command_line",
++        lambda pid: "C:\\WINDOWS\\system32\\svchost.exe -k LocalService -p -s NPSMSvc" if pid == 17116 else "",
++    )
++
++    attempt = om._acquire_run_lock(
++        lock_path=lock_path,
++        mode="run",
++        wait_seconds=0.0,
++        stale_seconds=60,
++    )
++
++    assert attempt.acquired is True
++    assert attempt.lock is not None
++    assert attempt.reason == "acquired"
++
++
++def test_acquire_run_lock_preserves_live_matching_watch_holder(monkeypatch, tmp_path) -> None:
++    lock_path = tmp_path / "openclaw_maintenance.lock.json"
++    lock_path.write_text(
++        json.dumps(
++            {
++                "pid": 22222,
++                "mode": "watch",
++                "created_at_utc": om._utc_now_iso(),
++                "token": "watch-token",
++                "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
++            }
++        ),
++        encoding="utf-8",
++    )
++
++    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 22222)
++    monkeypatch.setattr(
++        om,
++        "_process_command_line",
++        lambda pid: "python C:/repo/scripts/openclaw_maintenance.py --watch --apply" if pid == 22222 else "",
++    )
++
++    attempt = om._acquire_run_lock(
++        lock_path=lock_path,
++        mode="run",
++        wait_seconds=0.0,
++        stale_seconds=60,
++    )
++
++    assert attempt.acquired is False
++    assert attempt.reason == "held"
++
++
+ def test_cleanup_stale_session_locks_handles_sessions_glob_error(monkeypatch, tmp_path) -> None:
+     agents_root = tmp_path / ".openclaw" / "agents"
+     agents_root.mkdir(parents=True)
+diff --git a/tests/scripts/test_project_runtime_status.py b/tests/scripts/test_project_runtime_status.py
+index af4b131..d4c0955 100644
+--- a/tests/scripts/test_project_runtime_status.py
++++ b/tests/scripts/test_project_runtime_status.py
+@@ -65,3 +65,49 @@ def test_exec_env_check_passes_with_valid_values(monkeypatch, tmp_path) -> None:
+     check = mod._openclaw_exec_environment_check()
+     assert check["ok"] is True
+     assert check["signals"] == ["exec_env_valid"]
++
++
++def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monkeypatch, tmp_path) -> None:
++    project_root = tmp_path / "repo"
++    data_dir = project_root / "data"
++    data_dir.mkdir(parents=True, exist_ok=True)
++    (data_dir / "portfolio_maximizer.db").write_text("", encoding="utf-8")
++
++    captured: list[tuple[str, list[str]]] = []
++
++    def fake_run_check(name, cmd, timeout_seconds, **kwargs):
++        del timeout_seconds, kwargs
++        captured.append((str(name), list(cmd)))
++        return {
++            "name": str(name),
++            "ok": True,
++            "returncode": 0,
++            "duration_seconds": 0.0,
++            "command": " ".join(cmd),
++            "stdout": "",
++            "stderr": "",
++        }
++
++    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
++    monkeypatch.setattr(mod, "_run_check", fake_run_check)
++    monkeypatch.setattr(
++        mod,
++        "_openclaw_exec_environment_check",
++        lambda: {
++            "name": "openclaw_exec_env",
++            "ok": True,
++            "returncode": 0,
++            "duration_seconds": 0.0,
++            "command": "validate",
++            "stdout": "ok",
++            "stderr": "",
++            "signals": ["exec_env_valid"],
++        },
++    )
++
++    payload = mod.collect_runtime_status(timeout_seconds=1.0)
++    assert payload["status"] == "ok"
++
++    by_name = {name: cmd for name, cmd in captured}
++    prod_cmd = by_name["production_gate"]
++    assert "--unattended-profile" in prod_cmd
+diff --git a/tests/scripts/test_run_quality_pipeline.py b/tests/scripts/test_run_quality_pipeline.py
+index 44dbb39..ded6e2c 100644
+--- a/tests/scripts/test_run_quality_pipeline.py
++++ b/tests/scripts/test_run_quality_pipeline.py
+@@ -44,7 +44,7 @@ def test_all_steps_pass(tmp_path):
+     assert "started_at" in result
+     assert "finished_at" in result
+     assert "duration_seconds" in result
+-    assert len(result["steps"]) == 4
++    assert len(result["steps"]) == 5
+ 
+ 
+ def test_warn_when_partial_data(tmp_path):

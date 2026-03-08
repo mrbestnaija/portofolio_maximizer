@@ -24,6 +24,46 @@ When a user message arrives via WhatsApp/Telegram/Discord:
 3. **Execute**: Call the tools. Read the output.
 4. **Synthesize**: Give a concise answer based on ACTUAL tool output, not generic knowledge.
 
+## Integration Gate Rule (Non-Negotiable)
+
+**No agent-produced code may enter master without explicit approval and integration by the
+human + Claude Code pair.**
+
+```
+Agent proposes change (code, config, doc)
+        ↓
+Agent commits to a personal branch or patch file
+        ↓
+Human reviews the diff via Claude Code
+        ↓
+Claude Code integrates what passes review; rejects or defers the rest
+        ↓
+Merged to master only after targeted tests pass
+```
+
+Agents do NOT self-merge. Agents do NOT commit to master directly.
+If a commit appears on master from an agent without the review step, it will be reverted.
+
+See `Documentation/AGENT_COORDINATION_PROTOCOL_2026-03-08.md` for:
+- Task delegation priority ladder (P0–P3) and delegation rule
+- Agent A / B / C domain boundaries and out-of-scope lists
+- Shared file ownership table
+- Integration checklist (6-point, required before any merge)
+- Current verified system state
+
+**Delegation summary (enforced by the protocol)**:
+
+| Agent | Primary focus | Receives delegations of |
+|---|---|---|
+| **A** | Model accuracy, signal quality, gate wiring, PnL-impacting logic | Nothing — A delegates out |
+| **B** | Infrastructure, reporting, audit compatibility, pipeline orchestration | P2 tasks from A (pandas fixes, reporting fields, pipeline steps) |
+| **C** | Experiment planning, readiness tracking, measurement reporting | P3 tasks from A (docs, status tables, acceptance test stubs) |
+
+Agent A must not use its compute on P2/P3 work. When A identifies a lower-priority task,
+it raises it to B or C with a one-sentence spec and moves on.
+
+---
+
 ## Multi-Agent Collaboration Protocol (Mandatory)
 
 When multiple developer-agents or humans are working in the same workspace:
@@ -110,91 +150,22 @@ Model improvement cron command: `exec` -> `.\\simpleTrader_env\\Scripts\\python.
 
 ---
 
-## Measurement Layers
+## Measurement + Contracts (Condensed)
 
-Run one command to see the full model health story:
-
-```bash
-python scripts/check_model_improvement.py          # all 4 layers
-python scripts/check_model_improvement.py --layer 1  # forecast quality only
-python scripts/check_model_improvement.py --json     # machine-readable output
-python scripts/check_model_improvement.py --save-baseline logs/baseline_before.json
-python scripts/check_model_improvement.py --baseline logs/baseline_before.json
-```
-
-| Layer | Script(s) | Key Metric | Alert Threshold | Frequency |
-|-------|-----------|------------|-----------------|-----------|
-| 1 Forecast Quality | `scripts/ensemble_health_audit.py` | lift_fraction_global, samossa_da_zero_pct | WARN lift < 5% or DA-zero > 40% | Nightly (Step 2.9 of overnight_refresh) |
-| 2 Gate Status | `scripts/run_all_gates.py --json` | overall_passed | FAIL if False -- no reinterpretation | Manual or cron; surface-only |
-| 3 Trade Quality | `integrity/pnl_integrity_enforcer.py` + `scripts/exit_quality_audit.py` | win_rate, profit_factor, interpretation | WARN win_rate < 45% or pf < 1.3 | After >= 20 production closed trades |
-| 4 Calibration | `scripts/platt_contract_audit.py` | calibration_active_tier, brier, ECE | FAIL tier = inactive; brier >= 0.25 | After >= 30 Platt outcome pairs |
-
-**SKIP != PASS.** A SKIP layer means "no measurement data" (empty audit dir, DB not found, etc.).
-It provides no health signal. Do not treat SKIP as green.
-
-Layers 1-2 run automatically in `scripts/run_overnight_refresh.py` (Steps 2.8-2.9).
-Layers 3-4 should be run manually or via cron once sufficient trade/calibration data accumulates.
-
----
-
-## Implementation Contract Rules
-
-**Rules enforced by `tests/scripts/test_platt_calibration_contract.py` and `scripts/platt_contract_audit.py`.**
-
-These exist because two categories of silent failure were observed:
-
-### Rule P-1: Never claim a calibration method without test coverage
-
-If you change the classifier used in `_calibrate_confidence()`:
-1. Update `PHASE_7.14_GATE_RECALIBRATION.md` to name the new method exactly
-2. Update `test_platt_calibration_contract.py::TestClassifierIdentity` to match
-3. Update `platt_contract_audit.py::EXPECTED_CLASSIFIER` constant
-4. DO NOT leave docs claiming the old method -- mismatches are caught as CI failures
-
-**Current contract**: `_calibrate_confidence()` uses `sklearn.linear_model.LogisticRegression`
-(classic Platt scaling). NOT isotonic. NOT CalibratedClassifierCV. Any change must update all three targets above.
-
-### Rule P-2: Bootstrap steps must verify output, not just exit code
-
-If a bootstrap step exits 0 but produced zero useful output (e.g., 0 closed trades,
-0 matched pairs), the pipeline MUST fail loudly. Silent success on zero output is a
-first-class bug -- it conceals broken bootstrap design (wrong cycle count, missing
-`--resume`, same-bar-repeat, etc.).
-
-**Mechanism**: `run_overnight_refresh.py` counts `ts_* is_close=1` trades before and
-after bootstrap. Delta == 0 increments `errors` and logs `[FAIL]`. The
-`test_platt_calibration_contract.py::TestBootstrapOutcomeGuard` tests assert this guard
-exists in code.
-
-### Rule P-3: HOLD signals must not inflate reconciliation starvation metrics
-
-`quant_validation.jsonl` logs ALL signal evaluations including HOLD actions. HOLD
-signals structurally cannot produce `is_close=1` trades and therefore can never reconcile.
-Counting them as "pending" makes starvation metrics look worse than they are.
-
-**Mechanism**: `update_platt_outcomes.py` filters HOLD entries before building the
-`pending` list. The `hold_skipped=N` field in the summary line makes the count explicit.
-
-### Rule P-4: DB-based calibration is primary; JSONL is supplementary
-
-`_calibrate_confidence()` has three tiers: JSONL -> DB-local -> DB-global. The JSONL
-tier is frequently starved (logs HOLDs, unexecuted signals, legacy IDs). The DB tier
-queries actual executed+closed trades directly and is more reliable.
-
-**Do not treat JSONL starvation as a calibration failure.** Check `platt_contract_audit.py`
-output for `calibration_active_tier` to see which tier is actually active.
-
-## Security & Adversarial Diagnostics (Phase 7.20+)
-
-```bash
-python scripts/adversarial_diagnostic_runner.py  # all 21 checks (--json --severity --fix-report)
-```
-
-Exit codes: 0=clean, 1=CRITICAL/HIGH confirmed, 2=error.
-
-**Hardened (7.21-7.23)**: INT-03 uses `production_closed_trades` view; BYP-01 max 1 optional gate skip; BYP-03 `logs/gate_status_latest.json` verified by institutional P4 (<26h); LEAK-01 `_calibrate_confidence()` 70/30 split, fallback to raw if holdout acc<0.50.
-
-**Open (MEDIUM)**: THR-01 (coverage WARN), WIRE-01 (lift hardcoded), POI-01 (AIC unbounded), INT-04 (orphan BUY-only), INT-05 (MEDIUM in CI).
+- Run health stack:
+  - `python scripts/check_model_improvement.py --json`
+  - `python scripts/run_all_gates.py --json`
+  - `python scripts/platt_contract_audit.py --json`
+- **SKIP != PASS**. Never treat missing-data layers as green.
+- Calibration contract (`tests/scripts/test_platt_calibration_contract.py`) is strict:
+  - If `_calibrate_confidence()` classifier changes, update docs + test + audit constant in the same patch.
+  - Bootstrap must prove non-zero useful output; exit code alone is insufficient.
+  - HOLD entries must be excluded from pending-outcome starvation metrics.
+  - DB calibration tier is primary; JSONL starvation alone is not a failure.
+- Adversarial diagnostics:
+  - `python scripts/adversarial_diagnostic_runner.py --json --severity LOW`
+  - Exit codes: `0=clean`, `1=confirmed CRITICAL/HIGH`, `2=runner error`.
+- Full rationale and historical details: `Documentation/PHASE_7.39_PARANOID_REVIEW.md` and `Documentation/CORE_PROJECT_DOCUMENTATION.md`.
 
 ---
 
@@ -218,16 +189,8 @@ Current institutional contracts that must remain true:
 
 ## Ensemble Lift Governance
 
-`disable_ensemble_if_no_lift` in `config/forecaster_monitoring.yml` is currently **false** (fail-open).
-
-**Rationale**: Ensemble is already in `DISABLE_DEFAULT` / research-only posture. Flipping to fail-closed would hard-fail overnight unattended runs before new post-Phase-7.15-F audit windows accumulate enough lift evidence.
-
-**Flip condition** (all three must be true before setting to `true`):
-1. `lift_fraction >= min_lift_fraction` (currently 0.25) across 20+ fresh audit windows
-2. Those windows were generated post-Phase-7.15-F (ensemble domain-normalization fix, commit `234b079`)
-3. Recent-window violation rate is consistently below `max_violation_rate` (0.35)
-
-Current status (2026-02-26): 1.67% lift fraction vs 25% required. Do not flip until post-7.15-F windows are accumulated.
+- Keep `disable_ensemble_if_no_lift=false` until fresh post-fix evidence clears governance conditions in `config/forecaster_monitoring.yml`.
+- Do not flip fail-closed based on stale or insufficient windows.
 
 ---
 

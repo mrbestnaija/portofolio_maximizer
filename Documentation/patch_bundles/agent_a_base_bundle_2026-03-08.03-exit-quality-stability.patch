@@ -1,0 +1,58 @@
+﻿diff --git a/scripts/exit_quality_audit.py b/scripts/exit_quality_audit.py
+index 597052c..9292582 100644
+--- a/scripts/exit_quality_audit.py
++++ b/scripts/exit_quality_audit.py
+@@ -89,11 +89,12 @@ def load_production_trades(db_path: Path, tail_n: int | None = None) -> pd.DataF
+ 
+     # ATR proxy = bar_high - bar_low (single-bar range); fallback to 1.5% of entry
+     has_atr = df["bar_high"].notna() & df["bar_low"].notna() & (df["entry_price"].fillna(0) > 0)
+-    df["atr_proxy"] = np.nan
+-    df.loc[has_atr, "atr_proxy"] = df.loc[has_atr, "bar_high"] - df.loc[has_atr, "bar_low"]
+-    # Fallback: 1.5% of entry_price
+-    no_atr = df["atr_proxy"].isna() & df["entry_price"].notna() & (df["entry_price"] > 0)
+-    df.loc[no_atr, "atr_proxy"] = df.loc[no_atr, "entry_price"] * 0.015
++    has_fallback = ~has_atr & df["entry_price"].notna() & (df["entry_price"] > 0)
++    df["atr_proxy"] = np.where(
++        has_atr,
++        df["bar_high"] - df["bar_low"],
++        np.where(has_fallback, df["entry_price"] * 0.015, np.nan),
++    )
+ 
+     risk_unit = (df["atr_proxy"] * 1.5).replace(0.0, np.nan)
+     df["r_multiple"] = df["realized_pnl"].fillna(0.0) / risk_unit
+diff --git a/tests/scripts/test_exit_quality_audit.py b/tests/scripts/test_exit_quality_audit.py
+index 82289cc..43f8475 100644
+--- a/tests/scripts/test_exit_quality_audit.py
++++ b/tests/scripts/test_exit_quality_audit.py
+@@ -174,6 +174,31 @@ class TestLoadProductionTrades:
+         df = load_production_trades(db)
+         assert df["correct_dir_neg_pnl"].iloc[0] == 1
+ 
++    def test_atr_proxy_fallback_uses_entry_price(self, tmp_path):
++        """When bar_high/bar_low are NULL, atr_proxy falls back to 1.5% of entry_price."""
++        db = _build_db(tmp_path)
++        _insert_trade(db, entry_price=200.0, bar_high=None, bar_low=None, realized_pnl=10.0)
++        df = load_production_trades(db)
++        # fallback: 200.0 * 0.015 = 3.0
++        assert abs(df["atr_proxy"].iloc[0] - 3.0) < 0.001
++
++    def test_handles_all_null_atr_inputs_without_dtype_error(self, tmp_path):
++        """NULL bar_high/bar_low with a loss trade: fallback fires and r_multiple stays finite."""
++        db = _build_db(tmp_path)
++        _insert_trade(
++            db,
++            realized_pnl=-5.0,
++            entry_price=100.0,
++            exit_price=99.0,
++            bar_high=None,
++            bar_low=None,
++        )
++        df = load_production_trades(db)
++        assert len(df) == 1
++        # fallback atr_proxy = 100 * 0.015 = 1.5 → r_multiple = -5 / (1.5 * 1.5) ≈ -2.22
++        assert np.isfinite(float(df["atr_proxy"].iloc[0]))
++        assert np.isfinite(float(df["r_multiple"].iloc[0]))
++
+     def test_tail_n_limits_rows(self, tmp_path):
+         db = _build_db(tmp_path)
+         for i in range(5):

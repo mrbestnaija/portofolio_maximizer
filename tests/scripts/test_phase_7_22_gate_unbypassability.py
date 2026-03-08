@@ -132,14 +132,13 @@ class TestInstitutionalGatePriorVerification:
             "BYP-03 fix: run_gate() must call _phase_p4_prior_gate_verification()"
         )
 
-    def test_p4_returns_warn_when_artifact_missing(self, tmp_path, monkeypatch):
+    def test_p4_returns_fail_when_artifact_missing(self, tmp_path, monkeypatch):
         import scripts.institutional_unattended_gate as ig
         # Point ROOT to tmp_path so artifact won't exist
         monkeypatch.setattr(ig, "ROOT", tmp_path)
         findings = ig._phase_p4_prior_gate_verification()
-        statuses = {f.status for f in findings}
-        assert "WARN" in statuses or "FAIL" in statuses, (
-            "P4 must return WARN or FAIL when gate_status_latest.json is absent"
+        assert any(f.status == "FAIL" for f in findings), (
+            "P4 must FAIL when gate_status_latest.json is absent"
         )
 
     def test_p4_returns_pass_when_artifact_fresh_and_passed(self, tmp_path, monkeypatch):
@@ -176,7 +175,7 @@ class TestInstitutionalGatePriorVerification:
             "P4 must FAIL when gate_status_latest.json shows overall_passed=False"
         )
 
-    def test_p4_returns_warn_when_artifact_stale(self, tmp_path, monkeypatch):
+    def test_p4_returns_fail_when_artifact_stale(self, tmp_path, monkeypatch):
         import scripts.institutional_unattended_gate as ig
         from datetime import datetime, timezone, timedelta
 
@@ -191,8 +190,8 @@ class TestInstitutionalGatePriorVerification:
         monkeypatch.setattr(ig, "ROOT", tmp_path)
 
         findings = ig._phase_p4_prior_gate_verification()
-        assert any(f.status == "WARN" for f in findings), (
-            "P4 must WARN when gate_status_latest.json is >26h old"
+        assert any(f.status == "FAIL" for f in findings), (
+            "P4 must FAIL when gate_status_latest.json is >26h old"
         )
 
     def test_byp03_now_cleared_in_adversarial_runner(self):

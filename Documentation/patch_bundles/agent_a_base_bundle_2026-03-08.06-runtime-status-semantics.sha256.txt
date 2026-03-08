@@ -1,0 +1,2 @@
+5bc51a3d7f5b370e8189aebe276090cdf183e03a4b9455b729bacfc3bdfbfdf3  agent_a_base_bundle_2026-03-08.06-runtime-status-semantics.patch
+bytes=2751

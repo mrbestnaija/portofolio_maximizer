@@ -1,0 +1,5 @@
+﻿scripts/apply_ticker_eligibility_gates.py
+tests/scripts/test_apply_ticker_eligibility_gates.py
+scripts/run_quality_pipeline.py
+tests/scripts/test_run_quality_pipeline.py
+

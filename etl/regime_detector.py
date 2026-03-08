@@ -59,23 +59,30 @@ class RegimeDetector:
 
         # Statistical test for regime change
         _, p_value = stats.ttest_1samp(historical_vol, current_vol)
+        try:
+            p = float(p_value)
+        except (TypeError, ValueError):
+            p = 1.0
+        if not np.isfinite(p):
+            p = 1.0
+        p = float(np.clip(p, 0.0, 1.0))
 
-        if p_value < self.significance_level:
+        if p < self.significance_level:
             if current_vol > float(historical_vol.mean()):
                 regime_type = "high_vol"
-                confidence = 1.0 - float(p_value)
+                confidence = 1.0 - p
             else:
                 regime_type = "low_vol"
-                confidence = 1.0 - float(p_value)
+                confidence = 1.0 - p
         else:
             regime_type = "normal_vol"
-            confidence = float(p_value)
+            confidence = p
 
         state = RegimeState(
             regime_type=regime_type,
             confidence=confidence,
             duration=self._calculate_regime_duration(regime_type),
-            transition_probability=float(p_value),
+            transition_probability=p,
         )
         self._update_history(state)
         return state
@@ -94,23 +101,30 @@ class RegimeDetector:
             return RegimeState("insufficient_data", 0.0, int(arr.size), 0.0)
 
         _, p_value = stats.ttest_1samp(historical_mean, current_mean)
+        try:
+            p = float(p_value)
+        except (TypeError, ValueError):
+            p = 1.0
+        if not np.isfinite(p):
+            p = 1.0
+        p = float(np.clip(p, 0.0, 1.0))
 
-        if p_value < self.significance_level:
+        if p < self.significance_level:
             if current_mean > float(historical_mean.mean()):
                 regime_type = "bull"
-                confidence = 1.0 - float(p_value)
+                confidence = 1.0 - p
             else:
                 regime_type = "bear"
-                confidence = 1.0 - float(p_value)
+                confidence = 1.0 - p
         else:
             regime_type = "sideways"
-            confidence = float(p_value)
+            confidence = p
 
         state = RegimeState(
             regime_type=regime_type,
             confidence=confidence,
             duration=self._calculate_regime_duration(regime_type),
-            transition_probability=float(p_value),
+            transition_probability=p,
         )
         self._update_history(state)
         return state
