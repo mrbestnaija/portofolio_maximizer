@@ -1,5 +1,19 @@
 # Agent C Resume Pack (2026-03-08 AM)
 
+Doc Type: resume_pack
+Authority: temporary Agent C handoff snapshot; not canonical runtime truth
+Owner: Agent C
+Last Verified: 2026-03-08
+Verification Commands:
+- `python scripts/project_runtime_status.py --pretty`
+- `python scripts/capital_readiness_check.py --json`
+- `python -m scripts.dashboard_db_bridge --once --db-path data\\portfolio_maximizer.db --output logs\\dashboard_data_review_tmp.json`
+Artifacts:
+- `Documentation/AGENT_C_READINESS_BLOCKER_MATRIX_2026-03-08.md`
+- `Documentation/GENERATED_RUNTIME_STATUS_SNAPSHOT.md`
+Supersedes: none
+Expires When: superseded by a newer dated Agent C resume pack or retired when handoff is complete
+
 Owner: Agent C  
 Purpose: consolidated, verified handoff package while waiting for the next live
 evidence window
@@ -42,23 +56,17 @@ Results:
 
 ## Live Truth vs Local Code
 
-Fresh one-shot bridge output (`logs/dashboard_data_review_tmp.json`) includes:
+Current served dashboard payload (`visualizations/dashboard_data.json`) includes:
 - `payload_schema_version = 2`
 - `payload_digest`
 - `performance_unknown = false`
 - `positions_stale = true`
 - `positions_source = trade_executions_fallback_stale`
-
-Actively served dashboard payload (`visualizations/dashboard_data.json`) is still missing:
-- `payload_schema_version`
-- `payload_digest`
-- `performance_unknown`
-- `positions_stale`
-- `positions_source`
+- `data_origin = mixed`
 
 Interpretation:
-- bridge code/tests are ahead of the active served artifact
-- this is a runtime drift issue, not a test coverage gap
+- prior runtime drift has been cleared
+- remaining dashboard risk is the meaning of stale fallback-derived fields, not stale schema delivery
 
 ## Current Watcher State
 
@@ -74,13 +82,13 @@ Interpretation:
 
 ## Current Dashboard/Provenance Risk
 
-Fresh one-shot bridge output reports:
-- `data_origin = synthetic`
+Current served payload reports:
+- `data_origin = mixed`
 - `trade_sources = {"synthetic": 156, "yfinance": 89}`
 
 Interpretation:
-- provenance classification is still semantically wrong for mixed-source state
-- ownership remains with Agent B
+- mixed-source provenance labeling is now correct
+- remaining dashboard ownership for Agent B is the truth semantics of stale fallback-derived position/performance fields
 
 ## Current Eligibility-Gate Risk
 

@@ -1,5 +1,21 @@
 # Agent C Readiness Blocker Matrix (2026-03-08)
 
+Doc Type: blocker_matrix
+Authority: temporary Agent C blocker tracker; not a gate-semantics source of truth
+Owner: Agent C
+Last Verified: 2026-03-08
+Verification Commands:
+- `python scripts/project_runtime_status.py --pretty`
+- `python scripts/capital_readiness_check.py --json`
+- `python scripts/check_model_improvement.py --layer 1 --json`
+- `python -m scripts.dashboard_db_bridge --once --db-path data\\portfolio_maximizer.db --output logs\\dashboard_data_review_tmp.json`
+Artifacts:
+- `visualizations/dashboard_data.json`
+- `logs/overnight_denominator/live_denominator_latest.json`
+- `logs/audit_gate/production_gate_latest.json`
+Supersedes: `Documentation/AGENT_C_READINESS_BLOCKER_MATRIX_2026-03-07.md`
+Expires When: superseded by a newer dated blocker matrix or merged into canonical runtime status docs
+
 Purpose: keep Agent C on measurement, sequencing, and evidence only.
 
 This document does not authorize strategy changes, experiment execution, or
@@ -83,28 +99,17 @@ Sources:
 - `python -m scripts.dashboard_db_bridge --once --db-path data\portfolio_maximizer.db --output logs\dashboard_data_review_tmp.json`
 - live `visualizations/dashboard_data.json`
 
-Fresh one-shot bridge output now includes:
+Live served payload now includes:
 - `payload_schema_version = 2`
 - `payload_digest`
 - `performance_unknown = false`
 - `positions_stale = true`
 - `positions_source = trade_executions_fallback_stale`
-
-But the actively served dashboard artifact still omits:
-- `payload_schema_version`
-- `payload_digest`
-- `performance_unknown`
-- `positions_stale`
-- `positions_source`
-
-The served payload also reports:
-- `data_origin = synthetic`
-- while `trade_sources = {"synthetic": 156, "yfinance": 89}`
+- `data_origin = mixed`
 
 Interpretation:
-- checked-in bridge code and tests are ahead of the running producer output
-- dashboard truth is **not resolved** in live runtime
-- provenance is still mislabeled in mixed-source conditions
+- the running bridge now matches the current schema and provenance semantics
+- remaining dashboard concern is not runtime drift; it is the meaning of stale fallback-derived position/performance fields
 
 ### 5. Eligibility Gate Semantics
 
@@ -142,10 +147,11 @@ Interpretation:
 | Runtime health | `degraded` | Trading cycles + gate owners | `production_gate` passes |
 | Production audit gate | FAIL | Trading cycles | clear `GATES_FAIL`, `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL` |
 | Capital readiness | FAIL | Trading cycles + ensemble architecture | R3 clears and R5 no longer definitively negative |
-| Dashboard truth (live runtime) | FAIL | Agent B | served payload matches checked-in schema and truth fields |
-| Provenance classification | FAIL | Agent B | mixed trade/live sources produce `data_origin = mixed` |
+| Dashboard truth (live runtime) | PASS | Agent B | keep served payload aligned with bridge schema and truth fields |
+| Provenance classification | PASS | Agent B | mixed trade/live sources now produce `data_origin = mixed` |
 | Eligibility gate semantics | OPEN | Agent A | explicit policy: WARN-only or fail-closed |
 | Fresh TRADE denominator | `linkage_included=1`, `matched=0` | Trading cycles | `fresh_linkage_included > 1` across multiple cycles and `fresh_production_valid_matched >= 1` |
+| Experiment: EXP-R5-001 | NOT RUN | Agent A + Agent B + Agent C | Phase 1 artifact is emitted but `residual_status=inactive`; Phase 2 fitted residual model, residual metrics in audits, and experiment-specific effective audits are still required |
 | Experiment execution | blocked | Agent C protocol | all preconditions above satisfied |
 
 ## Agent C Operating Rules

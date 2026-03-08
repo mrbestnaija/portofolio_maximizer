@@ -1,22 +1,34 @@
 # Agent B Dashboard Runtime Truth Handoff (2026-03-08)
 
-Owner: Agent B  
-Prepared by: Agent C  
+Doc Type: handoff_note
+Authority: temporary Agent B implementation handoff from Agent C
+Owner: Agent C
+Last Verified: 2026-03-08
+Verification Commands:
+- `python -m scripts.dashboard_db_bridge --once --db-path data\portfolio_maximizer.db --output logs\dashboard_data_review_tmp.json`
+- `python -m pytest tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_live_dashboard_wiring.py -q`
+Artifacts:
+- `visualizations/dashboard_data.json`
+- `logs/dashboard_data_review_tmp.json`
+Supersedes: none
+Expires When: superseded by a newer dashboard handoff note or retired after Agent B merges the remaining truth-path fixes
+
+Owner: Agent B
+Prepared by: Agent C
 Scope: dashboard bridge/runtime truth path only
 
-This handoff is based on verified runtime evidence, not just local tests.
+## Current Scope
 
-## Why This Is Highest ROI
+The original runtime-drift issue is closed:
 
-Current checked-in bridge code and tests are ahead of the actively served
-dashboard payload. That means:
+- the served payload now carries the current schema fields
+- the served payload now reports `data_origin = mixed` when trade sources are mixed
 
-1. users are still seeing stale semantics even though parts of the code are fixed
-2. readiness/reporting conclusions can still be wrong in the live UI
-3. this can be corrected without waiting for new trading evidence
+The remaining Agent B lane is narrower:
 
-This is the highest implementation ROI that does not require strategy changes or
-new market data.
+1. keep served payload parity with one-shot bridge output
+2. preserve `data_origin = mixed` in mixed-source cases
+3. make stale/unknown performance and position semantics unambiguous in both payload and UI
 
 ## Verified Evidence
 
@@ -24,7 +36,6 @@ Commands run:
 
 ```powershell
 python -m scripts.dashboard_db_bridge --once --db-path data\portfolio_maximizer.db --output logs\dashboard_data_review_tmp.json
-python -c "import json; from pathlib import Path; served=json.loads(Path('visualizations/dashboard_data.json').read_text(encoding='utf-8')); fresh=json.loads(Path('logs/dashboard_data_review_tmp.json').read_text(encoding='utf-8')); print({'served_missing_fields':[k for k in ['payload_schema_version','payload_digest','performance_unknown','positions_stale','positions_source'] if k not in served and k not in served.get('meta',{})], 'fresh_truth': {'performance_unknown': fresh.get('performance_unknown'), 'positions_stale': fresh.get('positions_stale'), 'positions_source': fresh.get('positions_source'), 'data_origin': fresh.get('meta',{}).get('data_origin'), 'trade_sources': fresh.get('meta',{}).get('provenance',{}).get('trade_sources')}, 'checks': fresh.get('checks')})"
 python -m pytest tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_live_dashboard_wiring.py -q
 ```
 
@@ -32,22 +43,14 @@ Observed:
 
 ```json
 {
-  "served_missing_fields": [
-    "payload_schema_version",
-    "payload_digest",
-    "performance_unknown",
-    "positions_stale",
-    "positions_source"
-  ],
-  "fresh_truth": {
-    "performance_unknown": false,
-    "positions_stale": true,
-    "positions_source": "trade_executions_fallback_stale",
-    "data_origin": "synthetic",
-    "trade_sources": {
-      "synthetic": 156,
-      "yfinance": 89
-    }
+  "data_origin": "mixed",
+  "payload_schema_version": 2,
+  "performance_unknown": false,
+  "positions_stale": true,
+  "positions_source": "trade_executions_fallback_stale",
+  "trade_sources": {
+    "synthetic": 156,
+    "yfinance": 89
   },
   "checks": [
     "performance_metrics missing; run performance aggregation.",
@@ -56,150 +59,56 @@ Observed:
 }
 ```
 
-Targeted tests:
-- `test_dashboard_db_bridge.py`: pass
-- `test_live_dashboard_wiring.py`: pass
-
 Interpretation:
-- the bridge code path can emit the new truth fields
-- the served artifact is still stale-schema
-- provenance labeling remains semantically wrong for mixed-source state
 
-## Defect 1 - Active Dashboard Producer Drift
+- runtime/schema delivery is now aligned
+- mixed provenance labeling is now correct
+- the remaining issue is reporting semantics for stale and fallback-derived values
+
+## Remaining Issue 1 - Stale/Unknown Truth Semantics
 
 ### Problem
 
-The actively served `visualizations/dashboard_data.json` is missing fields that
-the checked-in bridge now emits:
+The served payload exposes:
 
-- `meta.payload_schema_version`
-- `meta.payload_digest`
-- `performance_unknown`
-- `positions_stale`
-- `positions_source`
+- `positions_stale = true`
+- `positions_source = trade_executions_fallback_stale`
+- `performance_unknown = false`
+- `checks[]` explicitly says performance metrics are missing and positions are stale
 
-This is a live runtime drift issue.
+This can still be misread unless the UI clearly distinguishes:
 
-### Files / Surfaces
-
-- `scripts/dashboard_db_bridge.py`
-- `visualizations/dashboard_data.json`
-- active bridge daemon process
-
-### Likely Root Causes
-
-One of:
-
-1. the running bridge process has not been restarted after code changes
-2. another write path is still producing the older payload shape
-3. merge-with-existing behavior is preserving a stale top-level structure
+1. realized canonical values that are available
+2. advanced analytics or position state that are stale, fallback-derived, or unavailable
 
 ### Acceptance
 
-After Agent B’s fix:
+After Agent B's fix:
 
-```powershell
-python -m scripts.dashboard_db_bridge --once --db-path data\portfolio_maximizer.db --output logs\dashboard_data_review_tmp.json
-```
+- stale position state is visibly marked as stale in the UI
+- fallback-derived position state is labeled by source
+- unavailable advanced performance fields are not presented as fully known/healthy
+- `checks[]` remains surfaced as the operator-facing explanation
 
-and the actively served `visualizations/dashboard_data.json` must both contain:
-
-- `meta.payload_schema_version`
-- `meta.payload_digest`
-- `performance_unknown`
-- `positions_stale`
-- `positions_source`
-
-No schema drift between one-shot and served payload should remain.
-
-## Defect 2 - Mixed Provenance Mislabeling
+## Remaining Issue 2 - Truth-Path Discipline Must Stay Green
 
 ### Problem
 
-The current bridge output reports:
-
-- `data_origin = synthetic`
-- while `trade_sources = {"synthetic": 156, "yfinance": 89}`
-
-That is semantically mixed, not purely synthetic.
-
-The UI then escalates synthetic origin as a blocker, so this is not cosmetic.
-
-### Relevant Logic
-
-Current provenance origin logic appears to consider non-synthetic `ohlcv_sources`
-but not non-synthetic `trade_sources` strongly enough for the mixed case.
+The mixed-provenance fix is now live, but it is important enough to keep under regression protection.
 
 ### Acceptance
 
 When both synthetic and non-synthetic trade sources are present:
 
-- `meta.data_origin` must be `mixed`
+- `meta.data_origin` remains `mixed`
 - the audit console must not label the payload as purely synthetic
-
-Add/keep a regression test for this exact case.
-
-## Defect 3 - Unknown/Stale Truth Must Reach the Served UI
-
-### Problem
-
-Fresh one-shot output shows:
-
-- `positions_stale = true`
-- `positions_source = trade_executions_fallback_stale`
-- `checks[]` includes stale positions and missing `performance_metrics`
-
-But the served payload does not expose those fields.
-
-That means the UI cannot honestly render stale/unknown state in live use.
-
-### Acceptance
-
-The served payload must preserve:
-
-- `positions_stale`
-- `positions_source`
-- `performance_unknown`
-- `checks[]`
-
-The live UI must visibly reflect them after a normal dashboard refresh.
-
-## Defect 4 - Performance Truth Is Still Semantically Weak
-
-### Problem
-
-Fresh one-shot output currently shows:
-
-- `performance_unknown = false`
-- `checks[]` says `performance_metrics missing`
-- performance source is still effectively the PnL integrity fallback
-
-That can be defensible only if the UI and payload clearly distinguish:
-
-- realized PnL metrics available from integrity
-- richer performance analytics unavailable from `performance_metrics`
-
-If not, this remains misleading.
-
-### Acceptance
-
-Agent B should ensure the served payload/UI distinguishes:
-
-1. realized canonical PnL metrics
-2. unavailable advanced performance metrics
-
-If top-level performance is partly derived from integrity and partly unavailable,
-the UI should not collapse that into a clean “all known” state.
+- the served payload and one-shot payload must agree
 
 ## Recommended Implementation Order
 
-1. Fix the active producer drift first
-2. Fix mixed provenance classification second
-3. Verify stale/unknown fields survive into the served artifact
-4. Only then refine UI messaging if needed
-
-This order is important because otherwise UI work may target fields that the
-live producer still fails to emit.
+1. keep served payload parity with one-shot bridge output
+2. preserve `data_origin = mixed` in mixed-source payloads
+3. refine stale/unknown UI semantics without changing gate logic
 
 ## Suggested Verification After Agent B Changes
 
@@ -209,39 +118,22 @@ python -m pytest tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_li
 python scripts/project_runtime_status.py --pretty
 ```
 
-And compare:
+Field parity required between:
 
 - `visualizations/dashboard_data.json`
 - `logs/dashboard_data_review_tmp.json`
 
-Field parity required:
+Minimum required truth fields:
 
 - `meta.payload_schema_version`
 - `meta.payload_digest`
 - `performance_unknown`
 - `positions_stale`
 - `positions_source`
-- corrected `meta.data_origin`
-
-## Limitations / Dependencies
-
-### Temporal
-
-- this work does not depend on the next trading day
-- it can be completed while the live evidence lane is idle
-
-### Spatial
-
-- validation is specific to the current Windows workstation and its running bridge daemon
-
-### Technical
-
-- the active runtime process must be restarted or otherwise reconciled if it is serving stale-schema output
-- do not mix this with gate-threshold or strategy changes
+- `meta.data_origin = mixed`
 
 ## Non-Scope
 
-- no changes to `production_audit_gate.py`
-- no changes to `capital_readiness_check.py`
-- no changes to trading strategy logic
-- no changes to denominator acceptance policy
+- no changes to gate scripts
+- no changes to trading logic
+- no changes to readiness thresholds

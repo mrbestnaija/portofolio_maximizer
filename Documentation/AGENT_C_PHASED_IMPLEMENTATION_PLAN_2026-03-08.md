@@ -1,5 +1,18 @@
 # Agent C Phased Implementation Plan (2026-03-08)
 
+Doc Type: implementation_plan
+Authority: temporary Agent C execution plan within owned scope only
+Owner: Agent C
+Last Verified: 2026-03-08
+Verification Commands:
+- `git status --porcelain`
+- `python scripts/project_runtime_status.py --pretty`
+Artifacts:
+- `Documentation/AGENT_C_READINESS_BLOCKER_MATRIX_2026-03-08.md`
+- `Documentation/AGENT_C_RESUME_PACK_2026-03-08_AM.md`
+Supersedes: none
+Expires When: superseded by a newer Agent C implementation plan or retired when the lane closes
+
 Owner: Agent C  
 Scope: documentation, evidence normalization, handoff packaging, and isolated
 support slices only

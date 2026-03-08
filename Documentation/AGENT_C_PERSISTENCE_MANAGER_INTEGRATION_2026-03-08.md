@@ -1,5 +1,18 @@
 # Agent C Integration Note: Persistence Manager
 
+Doc Type: integration_note
+Authority: temporary integration handoff for the Agent C persistence slice
+Owner: Agent C
+Last Verified: 2026-03-08
+Verification Commands:
+- `python -m pytest tests/scripts/test_windows_persistence_manager.py tests/scripts/test_windows_dashboard_manager.py -q`
+- `scripts\\run_persistence_manager.bat`
+Artifacts:
+- `logs/persistence_manager_status.json`
+- `scripts/windows_persistence_manager.py`
+Supersedes: none
+Expires When: superseded by a newer persistence integration note or merged into canonical operations docs
+
 Date: 2026-03-08  
 Owner: Agent C  
 Scope: reboot-safe persistence/data-integrity supervisor only  

@@ -5,27 +5,32 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
 
 jobs:
-  test:
+  preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Documentation contract audit (blocking)
+        run: python scripts/doc_contract_audit.py --strict
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install system dependencies
         run: |
@@ -81,11 +86,124 @@ jobs:
             echo "Skipping adversarial_integrity_test.py (data/portfolio_maximizer.db missing)."
           fi
 
-      - name: Run tests
+      - name: Upload security preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-preflight
+          path: reports/security/*.json
+
+  fast-pytest:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libblas-dev liblapack-dev libhdf5-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fast feedback test lane
+        run: pytest -v --tb=short -m "not gpu and not slow and not integration"
+
+  full-pytest:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libblas-dev liblapack-dev libhdf5-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Full non-GPU test lane
         run: pytest -v --tb=short -m "not gpu"
+
+  integration-routing:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libblas-dev liblapack-dev libhdf5-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Verify ensemble routing integration (blocking)
         run: pytest -v --tb=short tests/integration/test_ensemble_routing.py
+
+  adversarial-forecaster:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TS_FORECAST_AUDIT_DIR: "0"
+      TS_FORECAST_MONITOR_CONFIG: config/forecaster_monitoring_ci.yml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libblas-dev liblapack-dev libhdf5-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Reset warning log for convergence budget gate
         run: |
@@ -93,9 +211,6 @@ jobs:
           rm -f logs/warnings/warning_events.log
 
       - name: Run adversarial forecaster gate (blocking)
-        env:
-          TS_FORECAST_AUDIT_DIR: "0"
-          TS_FORECAST_MONITOR_CONFIG: config/forecaster_monitoring_ci.yml
         run: |
           python scripts/run_adversarial_forecaster_suite.py \
             --monitor-config config/forecaster_monitoring_ci.yml \
@@ -116,10 +231,30 @@ jobs:
           name: adversarial-forecaster-suite
           path: reports/adversarial_forecaster/*.json
 
-      - name: Upload security preflight artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-preflight
-          path: reports/security/*.json
-
+  ci-summary:
+    if: always()
+    needs:
+      - preflight
+      - fast-pytest
+      - full-pytest
+      - integration-routing
+      - adversarial-forecaster
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish CI summary
+        run: |
+          {
+            echo "## CI lane summary"
+            echo ""
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| preflight | ${{ needs.preflight.result }} |"
+            echo "| fast-pytest | ${{ needs.fast-pytest.result }} |"
+            echo "| full-pytest | ${{ needs.full-pytest.result }} |"
+            echo "| integration-routing | ${{ needs.integration-routing.result }} |"
+            echo "| adversarial-forecaster | ${{ needs.adversarial-forecaster.result }} |"
+            echo ""
+            echo "Fast feedback lane: \`pytest -m \"not gpu and not slow and not integration\"\`"
+            echo ""
+            echo "Full blocking test lane remains: \`pytest -m \"not gpu\"\`"
+          } >> "$GITHUB_STEP_SUMMARY"
