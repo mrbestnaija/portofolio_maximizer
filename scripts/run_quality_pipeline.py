@@ -20,10 +20,6 @@ from scripts.compute_context_quality import DEFAULT_OUTPUT as DEFAULT_CONTEXT_OU
 from scripts.compute_context_quality import compute_context_quality
 from scripts.compute_ticker_eligibility import DEFAULT_OUTPUT as DEFAULT_ELIGIBILITY_OUT
 from scripts.compute_ticker_eligibility import compute_eligibility
-from scripts.apply_ticker_eligibility_gates import (
-    DEFAULT_OUTPUT as DEFAULT_ELIGIBILITY_GATES_OUT,
-    apply_eligibility_gates,
-)
 from scripts.data_sufficiency_monitor import DEFAULT_AUDIT_DIR, DEFAULT_DB, run_data_sufficiency
 from scripts.generate_performance_charts import (
     DEFAULT_METRICS_PATH,
@@ -66,7 +62,6 @@ def run_quality_pipeline(
     db_path: Path = DEFAULT_DB,
     audit_dir: Path = DEFAULT_AUDIT_DIR,
     eligibility_out: Path = DEFAULT_ELIGIBILITY_OUT,
-    eligibility_gates_out: Path = DEFAULT_ELIGIBILITY_GATES_OUT,
     context_out: Path = DEFAULT_CONTEXT_OUT,
     charts_out_dir: Path = DEFAULT_OUT_DIR,
     metrics_out: Path = DEFAULT_METRICS_PATH,
@@ -100,30 +95,6 @@ def run_quality_pipeline(
     )
     warnings.extend(eligibility_warnings)
     errors.extend(eligibility_errors)
-
-    eligibility_gate = apply_eligibility_gates(
-        eligibility_path=eligibility_out,
-        output_path=eligibility_gates_out,
-    )
-    eligibility_gate_warnings = _dedupe_preserve_order(list(eligibility_gate.get("warnings", [])))
-    eligibility_gate_errors = _dedupe_preserve_order(list(eligibility_gate.get("errors", [])))
-    eligibility_gate_error_flag = "eligibility_gate_error" if eligibility_gate_errors else None
-    steps.append(
-        {
-            "name": "apply_ticker_eligibility_gates",
-            "status": _step_status_from_flags(
-                warnings=eligibility_gate_warnings,
-                error=eligibility_gate_error_flag,
-            ),
-            "warnings": eligibility_gate_warnings,
-            "errors": eligibility_gate_errors,
-            "lab_only_tickers": list(eligibility_gate.get("lab_only_tickers", [])),
-            "gate_written": bool(eligibility_gate.get("gate_written", False)),
-            "output": str(eligibility_gates_out),
-        }
-    )
-    warnings.extend(eligibility_gate_warnings)
-    errors.extend(eligibility_gate_errors)
 
     context = compute_context_quality(db_path=db_path)
     append_threshold_hash_change_warning(context_out, context)
@@ -224,7 +195,6 @@ def run_quality_pipeline(
         "steps": steps,
         "artifacts": {
             "eligibility": str(eligibility_out),
-            "eligibility_gates": str(eligibility_gates_out),
             "context_quality": str(context_out),
             "charts_out_dir": str(charts_out_dir),
             "metrics_summary": str(metrics_out),
@@ -241,7 +211,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR)
     parser.add_argument("--eligibility-out", type=Path, default=DEFAULT_ELIGIBILITY_OUT)
-    parser.add_argument("--eligibility-gates-out", type=Path, default=DEFAULT_ELIGIBILITY_GATES_OUT)
     parser.add_argument("--context-out", type=Path, default=DEFAULT_CONTEXT_OUT)
     parser.add_argument("--charts-out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--metrics-out", type=Path, default=DEFAULT_METRICS_PATH)
@@ -253,7 +222,6 @@ def main(argv: list[str] | None = None) -> int:
         db_path=args.db,
         audit_dir=args.audit_dir,
         eligibility_out=args.eligibility_out,
-        eligibility_gates_out=args.eligibility_gates_out,
         context_out=args.context_out,
         charts_out_dir=args.charts_out_dir,
         metrics_out=args.metrics_out,

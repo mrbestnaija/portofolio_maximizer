@@ -84,37 +84,26 @@ def load_production_trades(db_path: Path, tail_n: int | None = None) -> pd.DataF
     if tail_n is not None and tail_n > 0:
         df = df.head(tail_n)  # already sorted DESC, head = most recent N
 
-    # Normalize numerics first to avoid dtype instability on sparse/legacy rows.
-    realized_pnl = pd.to_numeric(df["realized_pnl"], errors="coerce")
-    entry_price = pd.to_numeric(df["entry_price"], errors="coerce")
-    exit_price = pd.to_numeric(df["exit_price"], errors="coerce")
-    bar_high = pd.to_numeric(df["bar_high"], errors="coerce")
-    bar_low = pd.to_numeric(df["bar_low"], errors="coerce")
-
     # Derived: is_winner, atr_proxy, r_multiple
-    df["is_winner"] = (realized_pnl.fillna(0.0) > 0).astype(int)
+    df["is_winner"] = (df["realized_pnl"].fillna(0.0) > 0).astype(int)
 
-    # ATR proxy = bar_high - bar_low (single-bar range); fallback to 1.5% of entry.
-    has_atr = bar_high.notna() & bar_low.notna() & (entry_price > 0)
+    # ATR proxy = bar_high - bar_low (single-bar range); fallback to 1.5% of entry
+    has_atr = df["bar_high"].notna() & df["bar_low"].notna() & (df["entry_price"].fillna(0) > 0)
     df["atr_proxy"] = np.nan
-    if bool(has_atr.any()):
-        atr_values = (bar_high - bar_low).where(has_atr)
-        df.loc[has_atr, "atr_proxy"] = atr_values.loc[has_atr].astype(float)
-
+    df.loc[has_atr, "atr_proxy"] = df.loc[has_atr, "bar_high"] - df.loc[has_atr, "bar_low"]
     # Fallback: 1.5% of entry_price
-    no_atr = df["atr_proxy"].isna() & entry_price.notna() & (entry_price > 0)
-    if bool(no_atr.any()):
-        df.loc[no_atr, "atr_proxy"] = (entry_price.loc[no_atr] * 0.015).astype(float)
+    no_atr = df["atr_proxy"].isna() & df["entry_price"].notna() & (df["entry_price"] > 0)
+    df.loc[no_atr, "atr_proxy"] = df.loc[no_atr, "entry_price"] * 0.015
 
     risk_unit = (df["atr_proxy"] * 1.5).replace(0.0, np.nan)
-    df["r_multiple"] = realized_pnl.fillna(0.0) / risk_unit
+    df["r_multiple"] = df["realized_pnl"].fillna(0.0) / risk_unit
 
     # Correct direction but negative PnL:
     # BUY: exit_price > entry_price AND realized_pnl < 0
     # SELL: exit_price < entry_price AND realized_pnl < 0
-    ep = entry_price.fillna(0.0)
-    xp = exit_price.fillna(0.0)
-    pnl = realized_pnl.fillna(0.0)
+    ep = df["entry_price"].fillna(0.0)
+    xp = df["exit_price"].fillna(0.0)
+    pnl = df["realized_pnl"].fillna(0.0)
     buy_right_lost = (df["action"] == "BUY") & (xp > ep) & (pnl < 0)
     sell_right_lost = (df["action"] == "SELL") & (xp < ep) & (pnl < 0)
     df["correct_dir_neg_pnl"] = (buy_right_lost | sell_right_lost).astype(int)

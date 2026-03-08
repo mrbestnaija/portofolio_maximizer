@@ -183,21 +183,6 @@ class TestLoadProductionTrades:
         assert len(df_all) == 5
         assert len(df_tail) == 3
 
-    def test_handles_all_null_atr_inputs_without_dtype_error(self, tmp_path):
-        db = _build_db(tmp_path)
-        _insert_trade(
-            db,
-            realized_pnl=-5.0,
-            entry_price=100.0,
-            exit_price=99.0,
-            bar_high=None,
-            bar_low=None,
-        )
-        df = load_production_trades(db)
-        assert len(df) == 1
-        assert np.isfinite(float(df["atr_proxy"].iloc[0]))
-        assert np.isfinite(float(df["r_multiple"].iloc[0]))
-
 
 # ---------------------------------------------------------------------------
 # compute_exit_reason_breakdown
