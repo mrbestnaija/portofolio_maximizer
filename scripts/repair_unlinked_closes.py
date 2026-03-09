@@ -83,7 +83,8 @@ def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = 
             id, ticker, trade_date, action, shares, price, realized_pnl, bar_timestamp, run_id,
             entry_price, close_size, position_before, position_after, holding_period_days,
             data_source, execution_mode, asset_class, instrument_type, multiplier,
-            commission, mid_price, mid_slippage_bps, effective_confidence
+            commission, mid_price, mid_slippage_bps, effective_confidence,
+            COALESCE(is_synthetic, 0) AS is_synthetic
         FROM trade_executions
         WHERE is_close = 1
           AND entry_trade_id IS NULL
@@ -101,7 +102,8 @@ def find_orphaned_entries(conn: sqlite3.Connection, ticker: str, entry_action: s
     """Find orphaned entries for a ticker/action pair (no close linkage)."""
     return conn.execute(
         """
-        SELECT id, ticker, trade_date, shares, price, bar_timestamp, run_id, position_after
+        SELECT id, ticker, trade_date, shares, price, bar_timestamp, run_id, position_after,
+               execution_mode, COALESCE(is_synthetic, 0) AS is_synthetic
         FROM trade_executions
         WHERE ticker = ?
           AND action = ?
@@ -117,17 +119,55 @@ def find_orphaned_entries(conn: sqlite3.Connection, ticker: str, entry_action: s
     ).fetchall()
 
 
+# Maximum gap (days) between an orphan open and an unlinked close for a match to be valid.
+# Matches spanning more than this threshold are almost certainly from different trade sessions
+# and should not be linked automatically. Resume-originated closes that exceed this gap must
+# be whitelisted explicitly instead.
+_MAX_MATCH_GAP_DAYS = 365
+
+
+def _is_synthetic_row(row: sqlite3.Row) -> bool:
+    """Return True if a row originated from synthetic data."""
+    synth_col = int(row["is_synthetic"]) if row["is_synthetic"] is not None else 0
+    if synth_col:
+        return True
+    exec_mode = str(row["execution_mode"] or "").lower()
+    return "synthetic" in exec_mode
+
+
 def match_fifo(unlinked_close: sqlite3.Row, orphaned_entries: list[sqlite3.Row]) -> int | None:
-    """Match close leg to opposite-side open by proximity + share match within run context."""
-    close_date = str(unlinked_close["trade_date"] or "")
+    """Match close leg to opposite-side open by proximity + share match within run context.
+
+    Hard-reject guards (applied before scoring):
+    1. Entry must predate or equal close date (FIFO: can't close before opening).
+    2. Provenance mismatch: synthetic entries cannot match live closes and vice versa.
+    3. Date gap: reject entries older than _MAX_MATCH_GAP_DAYS before close.
+    """
+    close_date_str = str(unlinked_close["trade_date"] or "")
     close_shares = _safe_float(unlinked_close["shares"])
     close_run = str(unlinked_close["run_id"] or "")
+    close_is_synthetic = _is_synthetic_row(unlinked_close)
+    close_date = _parse_trade_date(close_date_str)
 
     candidates: list[tuple[int, int]] = []
     for entry in orphaned_entries:
-        entry_date = str(entry["trade_date"] or "")
-        if entry_date > close_date:
+        entry_date_str = str(entry["trade_date"] or "")
+        # Guard 1: entry must predate close.
+        if entry_date_str > close_date_str:
             continue
+
+        # Guard 2: provenance must match — never link synthetic to live or vice versa.
+        entry_is_synthetic = _is_synthetic_row(entry)
+        if close_is_synthetic != entry_is_synthetic:
+            continue
+
+        # Guard 3: date gap limit.
+        if close_date is not None:
+            entry_date = _parse_trade_date(entry_date_str)
+            if entry_date is not None:
+                gap_days = (close_date - entry_date).days
+                if gap_days > _MAX_MATCH_GAP_DAYS:
+                    continue
 
         entry_run = str(entry["run_id"] or "")
         try:

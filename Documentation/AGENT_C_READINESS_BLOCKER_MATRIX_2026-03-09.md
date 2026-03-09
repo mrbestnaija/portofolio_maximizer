@@ -29,6 +29,14 @@ readiness claims.
    - This is a pre-existing finding — `DUPLICATE_CLOSE detection requires entry_trade_id (bypassed when NULL)`
    - Not caused by any change in this session
 
+4. **CLOSE_WITHOUT_ENTRY_LINK violation (trade 255): HISTORICAL ONLY — no current code bug**
+   - Trade 255: TSLA BUY `is_close=1`, 2026-03-06, live, `realized_pnl=-$629.77`
+   - The dry-run proposed linking to trade 114 (TSLA synthetic SELL, 2021-06-14) — **incorrect mapping** (different epoch, synthetic vs live, SELL open vs BUY close)
+   - Root cause: the opening SELL leg that created the short position was never persisted to the DB; trade 255 closed a ghost position
+   - Current `entry_trade_id` auto-wiring is correctly implemented (PTE lines 1354, 1364-1366; DB schema line 889; `save_trade_execution` line 2155)
+   - Do NOT apply the dry-run repair — the proposed `UPDATE trade_executions SET entry_trade_id = 114 WHERE id = 255` would create a false link
+   - Correct disposition: whitelist trade 255 in `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS` as a known historical orphan
+
 ## Current State
 
 ### 1. Runtime Health
@@ -147,6 +155,30 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 | EXP-R5-001 canary | **PASS** | Done (2026-03-09) | RC1-RC4 producing valid artifacts with phi_hat, skip_reason=null |
 | EXP-R5-001 Phase 3 re-accumulation | NOT STARTED | Agent B | run 10+ new windows post-redesign; compute realized rmse_ratio + corr |
 | Experiment execution | blocked | Agent C protocol | all preconditions below satisfied |
+
+## Gate-Lifting Order (corrected 2026-03-09)
+
+Verified sequence for production audit gate advancement:
+
+1. **Whitelist trade 255** in `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS` (historical orphan, opening leg lost)
+   — Do NOT apply dry-run repair (trade 114 link is semantically wrong)
+
+2. **Confirm live close path wiring** before any live cycle
+   — PTE entry_trade_id auto-population: verified correct (lines 1354, 1364-1366)
+   — DB save function: verified correct (line 2155, `entry_trade_id INTEGER` column)
+   — No code changes required
+
+3. **Synthetic cycles: plumbing check only** (not gate-lifting)
+   — `Synthetic excl: 38` in integrity output — synthetic rows excluded from `production_closed_trades`
+   — `production_audit_only = true` in gate artifact
+   — Synthetic useful for: linkage plumbing, close-leg wiring, residual canary
+   — Synthetic NOT useful for: clearing `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL`
+
+4. **Live non-synthetic cycle** (market hours, next trading session)
+   — Each live cycle is a data point; re-check gate after each one
+   — Gate needs: `fresh_linkage_included > 1` and `fresh_production_valid_matched >= 1`
+
+5. **Gate re-check after each cycle** (not batched)
 
 ## Agent C Operating Rules
 

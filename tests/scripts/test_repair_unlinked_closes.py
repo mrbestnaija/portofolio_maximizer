@@ -294,6 +294,132 @@ def test_repair_linkage_short_cover_reconstructs_sell_entry(tmp_path: Path) -> N
     assert abs(float(entry["position_after"]) - (-2.0)) < 1e-9
 
 
+def test_match_fifo_rejects_synthetic_to_live_provenance_mismatch(tmp_path: Path) -> None:
+    """A live BUY-close must not be matched to a synthetic SELL-open (provenance guard)."""
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # Synthetic SELL open (orphan)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic
+        ) VALUES (
+            114, 'TSLA', '2021-06-14', 'SELL', 2.0, 600.0, 1200.0,
+            0.0, 600.0, 0.0,
+            'synthetic', 'synthetic', '20210614_000000',
+            NULL, NULL, NULL,
+            NULL, NULL, NULL, 0.0, -2.0,
+            0, '2021-06-14T00:00:00+00:00', NULL, 'US_EQUITY', 'spot',
+            1.0, 0.75, NULL, 1
+        );
+        """
+    )
+    # Live BUY close (the problematic trade 255 scenario)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic
+        ) VALUES (
+            255, 'TSLA', '2026-03-06', 'BUY', 2.0, 396.96, 793.92,
+            0.0, 396.96, 0.0,
+            'yfinance', 'live', '20260309_063607',
+            -629.77, -0.44, 0,
+            710.0, 396.96, 2.0, -2.0, 0.0,
+            1, '2026-03-06T00:00:00+00:00', 'STOP_LOSS', 'US_EQUITY', 'spot',
+            1.0, 0.8, NULL, 0
+        );
+        """
+    )
+    conn.commit()
+
+    orphans = repair.find_orphaned_entries(conn, "TSLA", "SELL")
+    unlinked = repair.find_unlinked_closes(conn)
+    conn.close()
+
+    assert len(orphans) == 1, "Expected one orphan SELL"
+    assert len(unlinked) == 1, "Expected one unlinked close"
+
+    matched = repair.match_fifo(unlinked[0], orphans)
+    # Provenance mismatch (live close vs synthetic open) must be rejected.
+    assert matched is None, (
+        f"match_fifo matched live close (id=255) to synthetic open (id=114) — "
+        "provenance guard failed"
+    )
+
+
+def test_match_fifo_rejects_extreme_date_gap(tmp_path: Path) -> None:
+    """An orphan open more than _MAX_MATCH_GAP_DAYS before close must be rejected."""
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    # Orphan BUY open from 3 years ago
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            data_source, execution_mode, run_id,
+            position_before, position_after, is_close,
+            effective_confidence, is_synthetic
+        ) VALUES (
+            10, 'AAPL', '2020-01-01', 'BUY', 1.0, 300.0, 300.0,
+            'yfinance', 'live', '20200101_000000',
+            0.0, 1.0, 0,
+            0.8, 0
+        );
+        """
+    )
+    # Live SELL close from 2023 (3+ year gap)
+    conn.execute(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic
+        ) VALUES (
+            20, 'AAPL', '2023-06-01', 'SELL', 1.0, 180.0, 180.0,
+            0.0, 180.0, 0.0,
+            'yfinance', 'live', '20230601_000000',
+            -120.0, -0.4, 0,
+            300.0, 180.0, 1.0, 1.0, 0.0,
+            1, '2023-06-01T00:00:00+00:00', 'STOP_LOSS', 'US_EQUITY', 'spot',
+            1.0, 0.7, NULL, 0
+        );
+        """
+    )
+    conn.commit()
+
+    orphans = repair.find_orphaned_entries(conn, "AAPL", "BUY")
+    unlinked = repair.find_unlinked_closes(conn)
+    conn.close()
+
+    matched = repair.match_fifo(unlinked[0], orphans)
+    # Gap of ~1248 days exceeds _MAX_MATCH_GAP_DAYS (365); must be rejected.
+    assert matched is None, (
+        "match_fifo matched close to open from 3+ years ago — date-gap guard failed"
+    )
+
+
 def test_repair_linkage_short_cover_matches_existing_orphan_sell(tmp_path: Path) -> None:
     db_path = tmp_path / "portfolio.db"
     _create_trade_executions_table(db_path)
