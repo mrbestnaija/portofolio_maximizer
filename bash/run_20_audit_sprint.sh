@@ -129,8 +129,10 @@ else
     export INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS
 fi
 
-# Whitelist known resume-originated unlinked closes (IDs 66, 75 from portfolio state).
-export INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS="${INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS:-66,75}"
+# Whitelist known resume-originated unlinked closes.
+# 66,75: legacy resume closes from portfolio_positions (pre-Phase-7.9)
+# 255: TSLA BUY close 2026-03-06, opening SELL never persisted (run 20260309_063607)
+export INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS="${INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS:-66,75,255}"
 
 # Whitelist known stale orphan IDs (pre-Phase-7.13-A2 legacy opens with no close leg).
 # Phase 7.13-B3: IDs 5,6,11,13,61,62,67 pre-date cross-session persistence; permanently whitelisted.

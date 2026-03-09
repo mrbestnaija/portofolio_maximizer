@@ -29,13 +29,15 @@ readiness claims.
    - This is a pre-existing finding — `DUPLICATE_CLOSE detection requires entry_trade_id (bypassed when NULL)`
    - Not caused by any change in this session
 
-4. **CLOSE_WITHOUT_ENTRY_LINK violation (trade 255): HISTORICAL ONLY — no current code bug**
-   - Trade 255: TSLA BUY `is_close=1`, 2026-03-06, live, `realized_pnl=-$629.77`
-   - The dry-run proposed linking to trade 114 (TSLA synthetic SELL, 2021-06-14) — **incorrect mapping** (different epoch, synthetic vs live, SELL open vs BUY close)
-   - Root cause: the opening SELL leg that created the short position was never persisted to the DB; trade 255 closed a ghost position
-   - Current `entry_trade_id` auto-wiring is correctly implemented (PTE lines 1354, 1364-1366; DB schema line 889; `save_trade_execution` line 2155)
-   - Do NOT apply the dry-run repair — the proposed `UPDATE trade_executions SET entry_trade_id = 114 WHERE id = 255` would create a false link
-   - Correct disposition: whitelist trade 255 in `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS` as a known historical orphan
+4. **CLOSE_WITHOUT_ENTRY_LINK violation (trade 255): RESUME-ORIGINATED ORPHAN — whitelisted**
+   - Trade 255: TSLA BUY `is_close=1`, 2026-03-06, live, `run_id=20260309_063607`, `realized_pnl=-$629.77`
+   - **Created today (2026-03-09 06:36)** — run just before canary; NOT a historical artifact
+   - The dry-run proposed linking to trade 114 (TSLA synthetic SELL, 2021-06-14) — **incorrect mapping** (different epoch, synthetic vs live, multi-year gap)
+   - Root cause: a previous session opened a TSLA short, wrote it to `portfolio_positions`, but the opening SELL leg was NEVER written to `trade_executions`. The 2026-03-09 run resumed, found TSLA=-2 in `portfolio_positions`, closed it as trade 255, logged "no entry_trade_id found" warning. No live TSLA SELL open exists in `trade_executions` between id=90 (2026-02-13) and id=255.
+   - Current `entry_trade_id` auto-wiring is correctly implemented (PTE lines 1354, 1364-1366; DB schema line 889) — this is an **opening-leg persistence failure**, not a close-path bug
+   - Do NOT apply the dry-run repair — the proposed link (id=114) is semantically invalid
+   - **Whitelisted in `.env`, `bash/run_20_audit_sprint.sh`, `bash/production_cron.sh`** (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75,255)
+   - `pnl_integrity_enforcer --db data/portfolio_maximizer.db` now reports **ALL PASSED** (verified 2026-03-09)
 
 ## Current State
 
@@ -169,8 +171,8 @@ Verified sequence for production audit gate advancement:
    — No code changes required
 
 3. **Synthetic cycles: plumbing check only** (not gate-lifting)
-   — `Synthetic excl: 38` in integrity output — synthetic rows excluded from `production_closed_trades`
-   — `production_audit_only = true` in gate artifact
+   — Synthetic rows excluded from `production_closed_trades` view (DB-level filter: `is_synthetic=0`)
+   — Gate artifact: no `production_audit_only` field (validator correction 2026-03-09); audit_dir is flat `logs/forecast_audits`
    — Synthetic useful for: linkage plumbing, close-leg wiring, residual canary
    — Synthetic NOT useful for: clearing `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL`
 
