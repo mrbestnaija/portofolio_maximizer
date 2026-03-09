@@ -181,10 +181,14 @@ class PaperTradingEngine:
         self._lob_config: Optional[LOBConfig] = None
         self._lob_enabled: Optional[bool] = None
 
+        # Determine execution mode for synthetic-position filtering on resume
+        self._execution_mode: str = os.getenv("EXECUTION_MODE", "live").lower()
+
         # Initialize portfolio (with optional resume from DB)
         loaded = False
         if resume_from_db:
-            state = self.db_manager.load_portfolio_state()
+            _skip_syn = self._execution_mode != "synthetic"
+            state = self.db_manager.load_portfolio_state(skip_synthetic=_skip_syn)
             if state is not None:
                 self.initial_capital = state["initial_capital"]
                 self.portfolio = Portfolio(
@@ -1094,6 +1098,7 @@ class PaperTradingEngine:
 
     def save_state(self) -> None:
         """Persist current portfolio state to database for cross-session continuity."""
+        is_syn = 1 if getattr(self, "_execution_mode", "live") == "synthetic" else 0
         self.db_manager.save_portfolio_state(
             cash=self.portfolio.cash,
             initial_capital=self.initial_capital,
@@ -1106,6 +1111,7 @@ class PaperTradingEngine:
             holding_bars=self.portfolio.holding_bars,
             entry_bar_timestamps=self.portfolio.entry_bar_timestamps,
             last_bar_timestamps=self.portfolio.last_bar_timestamps,
+            is_synthetic=is_syn,
         )
 
     def _evaluate_exit_reason(

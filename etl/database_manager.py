@@ -817,7 +817,7 @@ class DatabaseManager:
                 UNIQUE(ticker)
             )
         """)
-        # Migration: ensure portfolio_state has bar-aware fields (SQLite only).
+        # Migration: ensure portfolio_state has bar-aware fields and is_synthetic (SQLite only).
         self.cursor.execute("PRAGMA table_info(portfolio_state)")
         ps_cols = {row["name"] for row in self.cursor.fetchall()}
         if "holding_bars" not in ps_cols:
@@ -826,6 +826,8 @@ class DatabaseManager:
             self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN entry_bar_timestamp TEXT")
         if "last_bar_timestamp" not in ps_cols:
             self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN last_bar_timestamp TEXT")
+        if "is_synthetic" not in ps_cols:
+            self.cursor.execute("ALTER TABLE portfolio_state ADD COLUMN is_synthetic INTEGER DEFAULT 0")
 
         # Portfolio cash state (single-row table for cash balance)
         self.cursor.execute("""
@@ -3205,6 +3207,7 @@ class DatabaseManager:
         holding_bars: Optional[dict] = None,
         entry_bar_timestamps: Optional[dict] = None,
         last_bar_timestamps: Optional[dict] = None,
+        is_synthetic: int = 0,
     ) -> None:
         """Persist current portfolio state for cross-session continuity.
 
@@ -3237,8 +3240,9 @@ class DatabaseManager:
                     INSERT INTO portfolio_state
                     (ticker, shares, entry_price, entry_timestamp,
                      stop_loss, target_price, max_holding_days,
-                     holding_bars, entry_bar_timestamp, last_bar_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     holding_bars, entry_bar_timestamp, last_bar_timestamp,
+                     is_synthetic)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticker,
@@ -3251,6 +3255,7 @@ class DatabaseManager:
                         holding_bars.get(ticker, 0),
                         ebt_str,
                         lbt_str,
+                        int(is_synthetic),
                     ),
                 )
 
@@ -3271,8 +3276,13 @@ class DatabaseManager:
         except Exception as exc:
             logger.error("Failed to save portfolio state: %s", sanitize_error(exc))
 
-    def load_portfolio_state(self):
+    def load_portfolio_state(self, skip_synthetic: bool = False):
         """Load persisted portfolio state for session resumption.
+
+        Args:
+            skip_synthetic: If True, exclude positions with is_synthetic=1.
+                Use when resuming a live-mode run to prevent synthetic
+                positions from contaminating live execution.
 
         Returns:
             Dict with keys: cash, initial_capital, positions, entry_prices,
@@ -3287,13 +3297,38 @@ class DatabaseManager:
             if cash_row is None:
                 return None
 
-            self.cursor.execute(
-                "SELECT ticker, shares, entry_price, entry_timestamp, "
-                "stop_loss, target_price, max_holding_days, "
-                "holding_bars, entry_bar_timestamp, last_bar_timestamp "
-                "FROM portfolio_state"
-            )
+            if skip_synthetic:
+                self.cursor.execute(
+                    "SELECT ticker, shares, entry_price, entry_timestamp, "
+                    "stop_loss, target_price, max_holding_days, "
+                    "holding_bars, entry_bar_timestamp, last_bar_timestamp, "
+                    "COALESCE(is_synthetic, 0) AS is_synthetic "
+                    "FROM portfolio_state "
+                    "WHERE COALESCE(is_synthetic, 0) = 0"
+                )
+            else:
+                self.cursor.execute(
+                    "SELECT ticker, shares, entry_price, entry_timestamp, "
+                    "stop_loss, target_price, max_holding_days, "
+                    "holding_bars, entry_bar_timestamp, last_bar_timestamp "
+                    "FROM portfolio_state"
+                )
             rows = self.cursor.fetchall()
+
+            if skip_synthetic:
+                # Check if any rows were excluded — if so, log a warning
+                self.cursor.execute(
+                    "SELECT COUNT(*) FROM portfolio_state WHERE COALESCE(is_synthetic, 0) = 1"
+                )
+                skipped = self.cursor.fetchone()
+                skipped_count = skipped[0] if skipped else 0
+                if skipped_count > 0:
+                    logger.warning(
+                        "load_portfolio_state: skipped %d synthetic position(s) "
+                        "from portfolio_state (skip_synthetic=True). "
+                        "These are from prior synthetic runs and must not be resumed in live mode.",
+                        skipped_count,
+                    )
 
             positions = {}
             entry_prices = {}

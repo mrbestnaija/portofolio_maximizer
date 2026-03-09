@@ -866,6 +866,53 @@ class TestSequentialRunIntegrity:
         loaded = DatabaseManager(db_path=tmp_db).load_portfolio_state()
         assert loaded["holding_bars"]["AAPL"] == 4
 
+    def test_skip_synthetic_filters_synthetic_positions(self, tmp_db):
+        """skip_synthetic=True must exclude is_synthetic=1 positions from resume."""
+        from etl.database_manager import DatabaseManager
+        ts_now = datetime.now(timezone.utc)
+        dm = DatabaseManager(db_path=tmp_db)
+        _apply_portfolio_state_migration(tmp_db)
+        dm.save_portfolio_state(
+            cash=20000.0,
+            initial_capital=25000.0,
+            positions={"TSLA": -2, "AAPL": 4},
+            entry_prices={"TSLA": 82.13, "AAPL": 262.67},
+            entry_timestamps={"TSLA": ts_now, "AAPL": ts_now},
+            stop_losses={},
+            target_prices={},
+            max_holding_days={},
+            is_synthetic=1,  # entire save is synthetic (e.g. synthetic run)
+        )
+        # Live-mode resume: synthetic positions must be excluded
+        loaded = dm.load_portfolio_state(skip_synthetic=True)
+        dm.close()
+        assert loaded is not None
+        assert "TSLA" not in loaded["positions"], "synthetic TSLA must be skipped on live resume"
+        assert "AAPL" not in loaded["positions"], "synthetic AAPL must be skipped on live resume"
+
+    def test_skip_synthetic_keeps_live_positions(self, tmp_db):
+        """skip_synthetic=True must keep is_synthetic=0 positions."""
+        from etl.database_manager import DatabaseManager
+        ts_now = datetime.now(timezone.utc)
+        dm = DatabaseManager(db_path=tmp_db)
+        _apply_portfolio_state_migration(tmp_db)
+        dm.save_portfolio_state(
+            cash=20000.0,
+            initial_capital=25000.0,
+            positions={"AAPL": 4, "NVDA": 2},
+            entry_prices={"AAPL": 262.67, "NVDA": 177.92},
+            entry_timestamps={"AAPL": ts_now, "NVDA": ts_now},
+            stop_losses={},
+            target_prices={},
+            max_holding_days={},
+            is_synthetic=0,  # live run
+        )
+        loaded = dm.load_portfolio_state(skip_synthetic=True)
+        dm.close()
+        assert loaded is not None
+        assert loaded["positions"].get("AAPL") == 4
+        assert loaded["positions"].get("NVDA") == 2
+
 
 # ===================================================================
 # PART 7: TIMESTAMP HYGIENE

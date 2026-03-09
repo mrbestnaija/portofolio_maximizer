@@ -29,15 +29,20 @@ readiness claims.
    - This is a pre-existing finding — `DUPLICATE_CLOSE detection requires entry_trade_id (bypassed when NULL)`
    - Not caused by any change in this session
 
-4. **CLOSE_WITHOUT_ENTRY_LINK violation (trade 255): RESUME-ORIGINATED ORPHAN — whitelisted**
+4. **CLOSE_WITHOUT_ENTRY_LINK violation (trade 255): ROOT CAUSE CONFIRMED — whitelist justified**
    - Trade 255: TSLA BUY `is_close=1`, 2026-03-06, live, `run_id=20260309_063607`, `realized_pnl=-$629.77`
-   - **Created today (2026-03-09 06:36)** — run just before canary; NOT a historical artifact
-   - The dry-run proposed linking to trade 114 (TSLA synthetic SELL, 2021-06-14) — **incorrect mapping** (different epoch, synthetic vs live, multi-year gap)
-   - Root cause: a previous session opened a TSLA short, wrote it to `portfolio_positions`, but the opening SELL leg was NEVER written to `trade_executions`. The 2026-03-09 run resumed, found TSLA=-2 in `portfolio_positions`, closed it as trade 255, logged "no entry_trade_id found" warning. No live TSLA SELL open exists in `trade_executions` between id=90 (2026-02-13) and id=255.
-   - Current `entry_trade_id` auto-wiring is correctly implemented (PTE lines 1354, 1364-1366; DB schema line 889) — this is an **opening-leg persistence failure**, not a close-path bug
-   - Do NOT apply the dry-run repair — the proposed link (id=114) is semantically invalid
+   - **Created 2026-03-09 06:36** — run just before canary; NOT a historical artifact
+   - The dry-run proposed linking to trade 114 (TSLA synthetic SELL, 2021-06-14) — **rejected** (different epoch, synthetic vs live, multi-year gap)
+   - **Root cause (confirmed 2026-03-09 via DB trace)**:
+     - Trade 247 (`id=247`, `is_synthetic=1`, `execution_mode=synthetic`, `run_id=20260304_045850`) is the true opener: TSLA SELL, 2026-03-04, `price=82.13343940353356`, `position_after=-2.0`
+     - Trade 255 `entry_price=82.13343940353356` — **exact price match to trade 247**; PTE populated `entry_price` from `portfolio_state` which held the synthetic position
+     - **Mechanism**: `portfolio_state` table has no `is_synthetic` column. The synthetic run (`20260304_045850`) wrote TSLA=-2 to `portfolio_state`. The next live run (`20260309_063607`) with `--resume` read TSLA=-2 as a live position and closed it as live trade 255.
+     - **This is a `portfolio_state` mode-contamination bug, not an entry_trade_id wiring bug**. The close-path wiring is correct — trade 255 has no live opener because the opener was synthetic.
+   - Whitelist is **justified**: opener exists (id=247) but is `is_synthetic=1`; linking live close to synthetic open is semantically wrong; opener is irrecoverable for legitimate live attribution.
+   - Do NOT apply the dry-run repair (id=114 or id=247 — both synthetic, both wrong)
+   - **35 other synthetic orphan SELL opens** exist in `trade_executions` with no close leg (same contamination class — see Section 9)
    - **Whitelisted in `.env`, `bash/run_20_audit_sprint.sh`, `bash/production_cron.sh`** (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75,255)
-   - `pnl_integrity_enforcer --db data/portfolio_maximizer.db` now reports **ALL PASSED** (verified 2026-03-09)
+   - `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75,255 pnl_integrity_enforcer` reports **ALL PASSED** (verified 2026-03-09)
 
 ## Current State
 
@@ -136,6 +141,33 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 
 **Next step for EXP-R5-001**: Phase 3 re-accumulation. Run 10+ additional pipeline windows with different `--end` dates to get fresh realized metrics under the redesigned model. Compute `rmse_ratio` and `corr(ε,ε_hat)` via `scripts/residual_experiment_phase3_backfill.py` when realized prices are available.
 
+### 9. portfolio_state Synthetic Contamination Bug (NEW — 2026-03-09)
+
+**Bug identified** during trade 255 root-cause trace.
+
+**Schema**: `portfolio_state` has no `is_synthetic` column. Columns: `id, ticker, shares, entry_price, entry_timestamp, stop_loss, target_price, max_holding_days, holding_bars, entry_bar_timestamp, last_bar_timestamp, updated_at`.
+
+**Mechanism**:
+1. Synthetic run writes a short position to `portfolio_state` (e.g., TSLA=-2, entry_price=$82.13)
+2. Synthetic run ends without closing the position
+3. Next live run with `--resume` reads `portfolio_state` → sees TSLA=-2 → treats it as a live position
+4. Live run closes it as a live BUY (no matching live SELL opener in `trade_executions`)
+5. Result: live close (is_synthetic=0) with no live opener → CLOSE_WITHOUT_ENTRY_LINK violation
+
+**Scope**: 35 synthetic SELL opens with no close leg currently in `trade_executions` — each represents a potential future contamination if any of those tickers are still in `portfolio_state` when a live `--resume` run happens.
+
+**Current `portfolio_state`** (2026-03-09 post-run):
+- AAPL: 4 shares (live, from run 20260309_063607)
+- NVDA: 2 shares (live, from run 20260309_063607)
+- These appear to be legitimate live positions, not synthetic contamination.
+
+**Required fix** (not yet implemented):
+- Add `is_synthetic INTEGER DEFAULT 0` to `portfolio_state` schema
+- PTE writes `is_synthetic` when saving positions
+- On `--resume` in live mode: skip positions where `is_synthetic=1`, log a warning
+
+**Risk without fix**: Any future synthetic run that does not close all positions will contaminate the next live `--resume` run. This has already happened once (trade 255). The fix is low-risk and should be added before the next controlled live cycle.
+
 ### 8. CI State
 
 - Targeted residual suite (`tests/forcester_ts/test_residual_ensemble.py`): PASS (1733 total at RC1-RC4 commit)
@@ -156,19 +188,28 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 | Repo-wide fast lane | 1 pre-existing FAIL (INT-02) | Shared | INT-02 duplicate-close detection needs entry_trade_id fix |
 | EXP-R5-001 canary | **PASS** | Done (2026-03-09) | RC1-RC4 producing valid artifacts with phi_hat, skip_reason=null |
 | EXP-R5-001 Phase 3 re-accumulation | NOT STARTED | Agent B | run 10+ new windows post-redesign; compute realized rmse_ratio + corr |
+| portfolio_state synthetic contamination | OPEN BUG | Agent A | add `is_synthetic` column; skip synthetic positions on live --resume |
 | Experiment execution | blocked | Agent C protocol | all preconditions below satisfied |
 
 ## Gate-Lifting Order (corrected 2026-03-09)
 
 Verified sequence for production audit gate advancement:
 
-1. **Whitelist trade 255** in `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS` (historical orphan, opening leg lost)
-   — Do NOT apply dry-run repair (trade 114 link is semantically wrong)
+1. **Whitelist trade 255** in `INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS` — DONE
+   — Root cause confirmed: synthetic opener id=247 (`is_synthetic=1`, run 20260304_045850) contaminated `portfolio_state`; live resume read it and produced a live close with no live opener
+   — Opener is irrecoverable for live attribution; whitelist is semantically justified
+   — Do NOT apply any repair (id=114 or id=247 — both synthetic, both wrong)
 
-2. **Confirm live close path wiring** before any live cycle
-   — PTE entry_trade_id auto-population: verified correct (lines 1354, 1364-1366)
-   — DB save function: verified correct (line 2155, `entry_trade_id INTEGER` column)
-   — No code changes required
+2. **Fix `portfolio_state` synthetic contamination bug before next live `--resume` cycle**
+   — Add `is_synthetic INTEGER DEFAULT 0` to `portfolio_state`
+   — PTE writes `is_synthetic` when saving state
+   — On `--resume` in live mode: skip synthetic positions with WARNING log
+   — Without this fix, next synthetic run ending with open positions will repeat trade 255
+
+3. **Confirm live close path wiring** — VERIFIED
+   — PTE entry_trade_id auto-population: correct (lines 1354, 1364-1366)
+   — DB save function: correct (line 2155, `entry_trade_id INTEGER` column)
+   — No code changes required for the close path itself
 
 3. **Synthetic cycles: plumbing check only** (not gate-lifting)
    — Synthetic rows excluded from `production_closed_trades` view (DB-level filter: `is_synthetic=0`)
