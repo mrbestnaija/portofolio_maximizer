@@ -2,13 +2,26 @@
 
 ## Current experiment status (2026-03-09)
 
-**REDESIGN COMPLETE** — RC1–RC4 applied (commit d7ebacd).  Experiment is in re-accumulation.
+**POST-REDESIGN CANARY COMPLETE** — RC1–RC4 applied (commit d7ebacd). Canary run completed 2026-03-09 07:56 UTC.
 - Audits before 2026-03-09 reflect the OLD AR(1) (no demeaning, no phi gate) — treat as historical.
 - Audits from 2026-03-09 onwards reflect the corrected AR(1).
 - Do NOT use pre-redesign audits to evaluate M2/M3 thresholds for the new cycle.
 - `phi_hat` and `skip_reason` fields are now present in all new audit artifacts.
   - `residual_status="active"` AND `skip_reason=null` AND `phi_hat >= 0.15` → correction applied.
   - `residual_status="inactive"` with `skip_reason` set → gate fired (expected for weak autocorrelation).
+
+### Canary snapshot (audit: forecast_audit_20260309_065611.json)
+
+| Field | Value | Expected |
+|---|---|---|
+| `phi_hat` | 0.99 | > 0.15 |
+| `skip_reason` | null | null on success |
+| `intercept_hat` | 0.233 | near-zero (was +1.10 with DC bias) |
+| `oos_n_used` | 52 | proportional (RC3) |
+| `n_train_residuals` | 52 | > 20 |
+| Phi gate fires | no | expected (strong autocorrelation) |
+
+Canary verdict: **PASS**. Next step: Phase 3 re-accumulation (10+ new windows, different `--end` dates).
 
 ## Canonical summary sidecar path
 
