@@ -50,12 +50,14 @@ def apply_eligibility_gates(
     errors: list[str] = []
     eligibility, load_error = _load_eligibility(Path(eligibility_path))
     if load_error:
-        warnings.append(load_error)
+        # Fail-closed: missing or corrupt evidence is a hard FAIL, not a warning.
+        # Downstream automation must not proceed without verified eligibility data.
+        errors.append(load_error)
         tickers: dict[str, Any] = {}
     else:
         tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
         if not isinstance(tickers, dict):
-            warnings.append("eligibility_tickers_invalid")
+            errors.append("eligibility_tickers_invalid")
             tickers = {}
 
     healthy_tickers: list[str] = []
@@ -78,7 +80,8 @@ def apply_eligibility_gates(
     payload: dict[str, Any] = {
         "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "eligibility_path": str(eligibility_path),
-        "status": "ERROR" if errors else ("WARN" if warnings else "PASS"),
+        "status": "FAIL" if errors else ("WARN" if warnings else "PASS"),
+        "reason": "missing_eligibility_evidence" if errors else None,
         "gate_written": True,
         "healthy_tickers": healthy_tickers,
         "weak_tickers": weak_tickers,
@@ -121,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result["warnings"]:
             print(f"  warnings: {', '.join(result['warnings'])}")
-    return 0 if result["status"] in {"PASS", "WARN"} else 1
+    return 0 if result["status"] in {"PASS", "WARN"} else 1  # FAIL → non-zero
 
 
 if __name__ == "__main__":
