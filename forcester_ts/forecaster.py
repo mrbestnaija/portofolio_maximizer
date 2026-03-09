@@ -1506,19 +1506,25 @@ class TimeSeriesForecaster:
 
             model = ResidualModel()
             model.fit_on_oos_residuals(oos_residuals, source="oos")
-            # RC4: gate may have fired inside fit_on_oos_residuals (phi too small).
+            # RC4-RC7: one or more gates may have fired inside fit_on_oos_residuals.
             if not model.is_fitted:
                 logger.info(
-                    "[EXP-R5-001] ResidualModel gate fired: %s — _residual_model stays None",
+                    "[EXP-R5-001] ResidualModel skipped: reason=%s  "
+                    "phi=%.4f intercept=%.4f",
                     model._skip_reason,
+                    model._phi,
+                    model._intercept,
                 )
                 return
             self._residual_model = model
             self._residual_model_oos_n = oos_n
+            _lrm = model._intercept / max(1.0 - abs(model._phi), 1e-9)
             logger.info(
-                "[EXP-R5-001] ResidualModel fitted: phi=%.4f intercept=%.4f n_train=%d oos_n=%d",
+                "[EXP-R5-001] ResidualModel applied: phi=%.4f intercept=%.4f "
+                "lrm=%.3f n_train=%d oos_n=%d",
                 model._phi,
                 model._intercept,
+                _lrm,
                 model._n_train,
                 oos_n,
             )

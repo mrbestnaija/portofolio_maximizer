@@ -330,7 +330,18 @@ class ResidualModel:
 
     MODEL_ID = "resid_mssa_rl_v1"
     _PHI_CLAMP = 0.99  # Keep AR(1) stationary regardless of data
-    _MIN_PHI = 0.15    # RC4: skip correction when autocorrelation is too weak
+    _MIN_PHI = 0.15    # RC4: skip when autocorrelation is too weak (|phi| < threshold)
+    # RC5: near-unit-root ceiling.  phi >= 0.90 means the AR(1) decays so slowly
+    # that multi-step corrections converge toward the long-run mean over the full
+    # horizon — indistinguishable from a constant-drift injection.
+    _MAX_PHI_APPLICATION = 0.90
+    # RC6: bias-dominated long-run mean.
+    # LRM = intercept / (1 - |phi|).  If |LRM| > _MAX_LRM_STD_RATIO * residual_std
+    # the model learned a constant offset, not autocorrelation structure.
+    _MAX_LRM_STD_RATIO = 2.0
+    # RC7: minimum 1-step directional accuracy on the training fold.
+    # AR(1) that can't predict direction of its OWN training data should not be applied.
+    _MIN_TRAIN_DA = 0.45
 
     def __init__(self) -> None:
         self.is_fitted: bool = False
@@ -374,7 +385,8 @@ class ResidualModel:
         # to the OOS proxy anchor; applying that bias to the full anchor would
         # inject anti-signal.  Subtracting the mean lets AR(1) capture genuine
         # lag-1 structure only.
-        arr = arr - arr.mean()
+        _raw_mean = float(arr.mean()) if len(arr) > 0 else 0.0
+        arr = arr - _raw_mean
         self._n_train = len(arr)
 
         if len(arr) < 3:
@@ -392,9 +404,11 @@ class ResidualModel:
                 np.clip(coeffs[1], -self._PHI_CLAMP, self._PHI_CLAMP)
             )
 
+        # Residual std of the demeaned array — used in gates RC5/RC6.
+        _resid_std = float(np.std(arr)) if len(arr) > 0 else 0.0
+
         # RC4: skip correction when autocorrelation is too weak.
-        # |phi| < _MIN_PHI means the AR(1) is essentially white noise — applying
-        # it would add noise without correcting anything systematic.
+        # |phi| < _MIN_PHI means the AR(1) is essentially white noise.
         if abs(self._phi) < self._MIN_PHI:
             self.is_fitted = False
             self._skip_reason = (
@@ -402,6 +416,52 @@ class ResidualModel:
                 "autocorrelation too weak to apply correction"
             )
             return self
+
+        # RC5: near-unit-root ceiling.
+        # phi >= _MAX_PHI_APPLICATION: 30-step forecast still ≥74% of seed value;
+        # correction behaves as drift, not mean-reversion.  Dominant symptom:
+        # intercept/(1-phi) >> residual_std (the LRM gate below also fires).
+        if abs(self._phi) >= self._MAX_PHI_APPLICATION:
+            self.is_fitted = False
+            self._skip_reason = (
+                f"high_phi_near_unit_root ({self._phi:.4f} >= {self._MAX_PHI_APPLICATION}): "
+                "multi-step correction converges to long-run mean over forecast horizon"
+            )
+            return self
+
+        # RC6: bias-dominated long-run mean.
+        # The raw (pre-demeaning) mean represents the DC offset that RC1 removes
+        # from the OOS residual series.  If that DC offset is large relative to the
+        # actual signal variance (demeaned std), the OOS residuals are dominated by
+        # anchor bias, not genuine autocorrelation structure.  Even though RC1 prevents
+        # reinjecting this bias in predictions, a large DC offset signals poor OOS
+        # residual quality and the AR(1) model should be skipped.
+        if _resid_std > 0:
+            _lrm = abs(_raw_mean) / max(1.0 - abs(self._phi), 1e-9)
+            if _lrm > self._MAX_LRM_STD_RATIO * _resid_std:
+                self.is_fitted = False
+                self._skip_reason = (
+                    f"bias_dominated_long_run_mean "
+                    f"(|LRM|={_lrm:.3f} > {self._MAX_LRM_STD_RATIO}x "
+                    f"residual_std={_resid_std:.3f}): "
+                    "OOS residuals dominated by DC offset (anchor bias)"
+                )
+                return self
+
+        # RC7: train directional usefulness.
+        # 1-step AR(1) predictions on the training fold: if sign accuracy < _MIN_TRAIN_DA
+        # the model is systematically predicting the wrong direction on its own data.
+        if len(arr) >= 4:
+            _eps_pred_train = self._phi * arr[:-1] + self._intercept
+            _train_da = float(np.mean(np.sign(_eps_pred_train) == np.sign(arr[1:])))
+            if _train_da < self._MIN_TRAIN_DA:
+                self.is_fitted = False
+                self._skip_reason = (
+                    f"poor_train_directional_usefulness "
+                    f"(train_da={_train_da:.3f} < {self._MIN_TRAIN_DA}): "
+                    "AR(1) predicts wrong direction on its own training residuals"
+                )
+                return self
 
         self._last_residual = float(arr[-1]) if len(arr) > 0 else 0.0
         self._skip_reason = None

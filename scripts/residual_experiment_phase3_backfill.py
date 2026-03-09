@@ -188,11 +188,14 @@ def main(dry_run: bool = False) -> int:
     # Load realized price series once
     try:
         realized_series = _load_all_realized_series()
-        log.info("Realized price series: %d rows, %s to %s, Close=%.2f-%.2f",
-                 len(realized_series),
-                 realized_series.index[0].date(),
-                 realized_series.index[-1].date(),
-                 realized_series.min(), realized_series.max())
+        if len(realized_series) > 0:
+            log.info("Realized price series: %d rows, %s to %s, Close=%.2f-%.2f",
+                     len(realized_series),
+                     realized_series.index[0].date(),
+                     realized_series.index[-1].date(),
+                     realized_series.min(), realized_series.max())
+        else:
+            log.info("Realized price series: 0 rows (empty — all windows will SKIP_PENDING_REALIZED)")
     except RuntimeError as exc:
         log.error("Cannot load realized prices: %s", exc)
         return 1
@@ -206,6 +209,7 @@ def main(dry_run: bool = False) -> int:
 
     success = 0
     failed = 0
+    skipped_no_realized = 0
     already_done = 0
 
     for fp, (audit_path, d) in sorted(unique.items(), key=lambda x: x[1][1].get("dataset", {}).get("end", "")):
@@ -227,9 +231,14 @@ def main(dry_run: bool = False) -> int:
 
         try:
             realized = load_realized_prices(realized_series, dataset_end, forecast_horizon)
-        except ValueError as exc:
-            log.warning("  SKIP: %s", exc)
-            failed += 1
+        except (ValueError, KeyError, IndexError) as exc:
+            # No realized prices yet for this window — expected for recent end dates.
+            # Recorded as SKIP_PENDING_REALIZED, not failure.
+            log.info(
+                "  SKIP_PENDING_REALIZED: fp=%s end=%s — %s",
+                fp, dataset_end[:10], exc,
+            )
+            skipped_no_realized += 1
             continue
 
         try:
@@ -237,16 +246,28 @@ def main(dry_run: bool = False) -> int:
             patch_audit_file(audit_path, metrics, dry_run=dry_run)
             success += 1
         except Exception as exc:
-            log.error("  ERROR computing/patching: %s", exc)
+            log.error("  ERROR computing/patching: fp=%s end=%s — %s", fp, dataset_end[:10], exc)
             failed += 1
 
-    log.info("=== Summary: %d patched, %d already done, %d failed ===",
-             success, already_done, failed)
+    log.info(
+        "=== Summary: %d patched, %d already_phase3, "
+        "%d skip_pending_realized, %d true_failures ===",
+        success, already_done, skipped_no_realized, failed,
+    )
+    if skipped_no_realized > 0:
+        log.info(
+            "  %d window(s) have no realized prices yet (end date beyond checkpoint). "
+            "Re-run after fetching data past those dates.",
+            skipped_no_realized,
+        )
 
     if not dry_run and success > 0:
         log.info("Run quality pipeline to refresh summary:")
         log.info("  python scripts/run_quality_pipeline.py --audit-dir logs/forecast_audits --enable-residual-experiment")
 
+    # Exit 0 when the only non-success outcomes are SKIP_PENDING_REALIZED.
+    # True failures (unexpected exceptions in compute_phase3_metrics or patch_audit_file)
+    # are the only reason to exit non-zero.
     return 0 if failed == 0 else 1
 
 
