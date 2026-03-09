@@ -51,6 +51,24 @@ from .metrics import compute_regression_metrics
 logger = logging.getLogger(__name__)
 
 
+def _series_to_plain_list(s: "Optional[pd.Series]") -> "Optional[list[float]]":
+    """Convert a pd.Series to a plain list[float] for JSON-safe artifact emission.
+
+    Agent B's _parse_optional_float_list() requires a plain list; the
+    instrumentation's _make_json_safe() converts Series to {"index":…,"values":…}
+    which the parser rejects.  This helper is called before record_artifact().
+
+    Returns None when input is None or conversion fails — never returns [].
+    """
+    if s is None:
+        return None
+    try:
+        result = [float(v) for v in s if pd.notna(v)]
+        return result if result else None
+    except Exception:
+        return None
+
+
 @dataclass
 class TimeSeriesForecasterConfig:
     sarimax_enabled: bool = False  # Off by default; slow SARIMAX grid search
@@ -73,6 +91,12 @@ class TimeSeriesForecasterConfig:
     order_learning_config: Dict[str, Any] = field(default_factory=dict)
     order_learning_db_path: str = ""  # path to portfolio_maximizer.db
     monte_carlo_config: Dict[str, Any] = field(default_factory=dict)
+
+    # EXP-R5-001: Residual ensemble research experiment (Agent A).
+    # OFF by default — enabling this flag does NOT change any gate, default
+    # model, or live strategy.  It only adds the `residual_experiment` artifact
+    # to forecast() results for audit/research pipelines.
+    residual_experiment_enabled: bool = False
 
 
 class TimeSeriesForecaster:
@@ -179,6 +203,11 @@ class TimeSeriesForecaster:
         self._model_errors: Dict[str, str] = {}
         self._model_events: list[Dict[str, Any]] = []
         self._regime_result: Optional[Dict[str, Any]] = None
+
+        # EXP-R5-001: residual model placeholder — Phase 2 will wire a fitted
+        # ResidualModel here.  None = experiment runs with no residual correction.
+        self._residual_model: Optional[Any] = None
+        self._residual_model_oos_n: Optional[int] = None  # RC3 observability
         self._series_diagnostics: Dict[str, Any] = {}
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
@@ -1023,6 +1052,12 @@ class TimeSeriesForecaster:
                 self._mssa = None
                 self._handle_model_failure("mssa_rl", "fit", exc)
 
+        # EXP-R5-001: auto-fit the residual model on OOS anchor residuals.
+        # Only runs when enabled AND the anchor fitted successfully.
+        # Any failure leaves _residual_model=None → inactive artifact at forecast time.
+        if self.config.residual_experiment_enabled and self._mssa is not None:
+            self._fit_residual_model(price_series)
+
         if self.config.garch_enabled:
             if returns_series is None:
                 returns_series = price_series.pct_change().dropna()
@@ -1312,6 +1347,14 @@ class TimeSeriesForecaster:
         results["detected_regime"] = results["regime"] if results["regime"] != "STATIC" else None
         self._instrumentation.set_dataset_metadata(detected_regime=results["detected_regime"])
 
+        # EXP-R5-001: residual experiment artifact (research-only, no gate impact).
+        # Record in instrumentation so it appears under artifacts.residual_experiment
+        # in the audit JSON — that is where Agent B's extractor reads it from.
+        results["residual_experiment"] = self._build_residual_experiment_artifact(results)
+        self._instrumentation.record_artifact(
+            "residual_experiment", results["residual_experiment"]
+        )
+
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)
         results["model_events"] = list(self._model_events)
@@ -1321,6 +1364,171 @@ class TimeSeriesForecaster:
             audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
             self.save_audit_report(audit_path)
         return results
+
+    # ------------------------------------------------------------------
+    # EXP-R5-001 — Research experiment artifact builder (Agent A, Phase 1)
+    # ------------------------------------------------------------------
+
+    def _build_residual_experiment_artifact(
+        self, results: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build the EXP-R5-001 residual experiment artifact.
+
+        Phase 2 contract
+        ----------------
+        - When ``config.residual_experiment_enabled`` is False: returns the
+          canonical inactive schema immediately — zero impact on everything else.
+        - When enabled but ``_residual_model`` is None: returns inactive schema
+          with reason ``"residual_model_not_fitted"``.
+        - When enabled and model fitted: produces a real residual forecast,
+          returns active schema with ``y_hat_anchor`` and
+          ``y_hat_residual_ensemble`` as plain ``list[float]`` (JSON-safe for
+          Agent B's extractor which requires a plain list, not a pd.Series).
+        - Metric fields (rmse_*, da_*, corr_anchor_residual) are always None;
+          they require realized prices and are populated by Agent B (Phase 3).
+        - This method never modifies ``results``, never changes default model
+          selection, and never touches gate logic.
+        """
+        from .residual_ensemble import build_residual_ensemble, inactive_artifact
+
+        if not self.config.residual_experiment_enabled:
+            return inactive_artifact(reason="experiment disabled (residual_experiment_enabled=False)")
+
+        anchor_payload = results.get("mssa_rl_forecast")
+        anchor_series = self._extract_series(anchor_payload)
+        if anchor_series is None:
+            return inactive_artifact(reason="mssa_rl anchor forecast unavailable")
+
+        if self._residual_model is None:
+            return inactive_artifact(reason="residual_model_not_fitted (Phase 2 pending)")
+
+        try:
+            # Pass the anchor's DatetimeIndex so the residual series aligns
+            # perfectly — build_residual_ensemble finds full index overlap.
+            residual_forecast: Optional[pd.Series] = self._residual_model.predict(
+                horizon=len(anchor_series),
+                last_residual=None,
+                index=anchor_series.index,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[EXP-R5-001] ResidualModel.predict() failed: %s — falling back to inactive",
+                exc,
+            )
+            return inactive_artifact(reason=f"residual_model.predict() failed: {exc}")
+
+        artifact = build_residual_ensemble(anchor_series, residual_forecast)
+
+        # RC1/RC4 observability — wire model internals into the artifact so
+        # Agent B (Phase 3 audit) can inspect phi, intercept, and gate decisions.
+        artifact["phi_hat"] = self._residual_model._phi
+        artifact["intercept_hat"] = self._residual_model._intercept
+        artifact["n_train_residuals"] = self._residual_model._n_train
+        artifact["oos_n_used"] = self._residual_model_oos_n
+        artifact["skip_reason"] = None  # model passed all gates or we wouldn't be here
+
+        # Convert pd.Series → plain list[float].
+        # _make_json_safe (instrumentation) serialises Series as
+        # {"index":[…], "values":[…]}, which Agent B's _parse_optional_float_list
+        # rejects (it requires a plain list).  Convert here, before recording.
+        artifact["y_hat_anchor"] = _series_to_plain_list(artifact.get("y_hat_anchor"))
+        artifact["y_hat_residual_ensemble"] = _series_to_plain_list(
+            artifact.get("y_hat_residual_ensemble")
+        )
+
+        logger.debug(
+            "[EXP-R5-001] artifact built: status=%s n_corrected=%d",
+            artifact.get("residual_status"),
+            artifact.get("n_corrected", 0),
+        )
+        return artifact
+
+    def _fit_residual_model(self, price_series: pd.Series) -> None:
+        """Fit ResidualModel on OOS anchor residuals (EXP-R5-001, Phase 2).
+
+        OOS 4-step protocol:
+        1. Split: train_part = price_series[:-oos_n], val_part = price_series[-oos_n:]
+        2. Fit a temporary MSSARLForecaster on train_part (never replaces self._mssa).
+        3. Generate oos_n-step forecast from the temporary anchor.
+        4. residuals = val_part.values - oos_forecast.values (positional alignment).
+        5. Fit ResidualModel on those residuals.
+
+        On any failure (data too short, mssa fit error, etc.) self._residual_model
+        stays None — the artifact falls back to inactive at forecast time.
+        No gates or live strategy are affected.
+        """
+        from .residual_ensemble import ResidualModel, compute_oos_residuals
+
+        # RC3: proportional OOS slice — scales with available data.
+        # Use 25% of series for OOS validation; enforce minimum 20 points so
+        # AR(1) OLS has at least 19 regression pairs for 2 parameters (12 df).
+        # The hard-cap of max(horizon, 20) = 20-30 was too small: OLS on
+        # ~20 residual-of-residuals points was dominated by a few large errors.
+        cleaned = price_series.dropna()
+        oos_n = len(cleaned) // 4
+        if oos_n < 20:
+            logger.info(
+                "[EXP-R5-001] Insufficient data for OOS residual fit "
+                "(oos_n=%d < 20 from len=%d); _residual_model stays None",
+                oos_n,
+                len(cleaned),
+            )
+            return
+        # Need train_part >= 3×oos_n: anchor model requires substantial history.
+        if len(cleaned) - oos_n < 3 * oos_n:
+            logger.info(
+                "[EXP-R5-001] Insufficient training data "
+                "(train_part=%d < 3*oos_n=%d); _residual_model stays None",
+                len(cleaned) - oos_n,
+                3 * oos_n,
+            )
+            return
+
+        train_part = cleaned.iloc[:-oos_n]
+        val_part = cleaned.iloc[-oos_n:]
+
+        try:
+            mssa_config = MSSARLConfig(**self.config.mssa_rl_kwargs)
+            tmp_mssa = MSSARLForecaster(config=mssa_config)
+            tmp_mssa.fit(train_part)
+            mssa_output = tmp_mssa.forecast(steps=oos_n)
+            oos_fc = self._extract_series(mssa_output)
+            if oos_fc is None or len(oos_fc) != oos_n:
+                logger.warning(
+                    "[EXP-R5-001] OOS anchor forecast invalid (len=%s); skipping",
+                    None if oos_fc is None else len(oos_fc),
+                )
+                return
+
+            # Align positionally: mssa forecasts future dates, val_part has training dates.
+            anchor_oos = pd.Series(oos_fc.values, index=val_part.index, name="anchor_oos")
+            oos_residuals = compute_oos_residuals(anchor_oos, val_part, source="oos")
+
+            model = ResidualModel()
+            model.fit_on_oos_residuals(oos_residuals, source="oos")
+            # RC4: gate may have fired inside fit_on_oos_residuals (phi too small).
+            if not model.is_fitted:
+                logger.info(
+                    "[EXP-R5-001] ResidualModel gate fired: %s — _residual_model stays None",
+                    model._skip_reason,
+                )
+                return
+            self._residual_model = model
+            self._residual_model_oos_n = oos_n
+            logger.info(
+                "[EXP-R5-001] ResidualModel fitted: phi=%.4f intercept=%.4f n_train=%d oos_n=%d",
+                model._phi,
+                model._intercept,
+                model._n_train,
+                oos_n,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[EXP-R5-001] _fit_residual_model() failed: %s — _residual_model stays None",
+                exc,
+                exc_info=True,
+            )
+            self._residual_model = None
 
     def _build_forecast_index(self, horizon: int) -> pd.Index:
         if horizon <= 0:
@@ -1676,6 +1884,10 @@ class TimeSeriesForecaster:
             "mssa_rl": self._extract_series(results.get("mssa_rl_forecast"), "upper_ci"),
         }
 
+        # Diversity gate: measure max pairwise forecast correlation before blending.
+        # Computed here so the actual forecast vectors are available.
+        diversity_gate = self._ensemble_diversity_gate(forecasts, weights)
+
         blended = coordinator.blend_forecasts(forecasts, lowers, uppers)
         if not blended:
             return None
@@ -1704,11 +1916,14 @@ class TimeSeriesForecaster:
         }
         preselection_gate = self._preselection_default_gate()
         metadata["preselection_gate"] = preselection_gate
-        metadata["allow_as_default"] = bool(preselection_gate.get("allow_as_default", True))
+        metadata["diversity_gate"] = diversity_gate
+        preselection_ok = bool(preselection_gate.get("allow_as_default", True))
+        diversity_ok = bool(diversity_gate.get("allow_as_default", True))
+        metadata["allow_as_default"] = preselection_ok and diversity_ok
         if metadata["allow_as_default"]:
             metadata.setdefault("ensemble_status", "KEEP")
             metadata.setdefault("ensemble_decision_reason", "preselection gate passed")
-        else:
+        elif not preselection_ok:
             reason = str(preselection_gate.get("reason", "recent RMSE ratio gate"))
             metadata["ensemble_status"] = "DISABLE_DEFAULT"
             metadata["ensemble_decision_reason"] = f"preselection gate: {reason}"
@@ -1724,6 +1939,20 @@ class TimeSeriesForecaster:
                 recent_rmse_ratio=preselection_gate.get("recent_rmse_ratio"),
                 threshold=preselection_gate.get("threshold"),
                 effective_audits=preselection_gate.get("effective_n"),
+            )
+        else:
+            # diversity gate blocked
+            reason = str(diversity_gate.get("reason", "high forecast correlation"))
+            metadata["ensemble_status"] = "HIGH_CORRELATION"
+            metadata["ensemble_decision_reason"] = f"diversity gate: {reason}"
+            if primary_model:
+                metadata["default_model"] = primary_model
+            self._record_model_event(
+                "ensemble",
+                "diversity_gate_blocked",
+                reason=reason,
+                max_correlation=diversity_gate.get("max_correlation"),
+                threshold=diversity_gate.get("threshold"),
             )
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
 
@@ -1881,6 +2110,78 @@ class TimeSeriesForecaster:
             "lift_fraction": lift_fraction,
             "ratios": ratios,
         }
+
+    def _ensemble_diversity_gate(
+        self,
+        forecasts: Dict[str, Optional[Any]],
+        weights: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """Block ensemble blending when active model forecast vectors are too correlated.
+
+        Computes max pairwise Pearson correlation across models that carry meaningful
+        weight (> 0.001).  When correlation exceeds the configured threshold the
+        blended output adds no diversity benefit over the best single model.
+
+        Returns dict with keys:
+            allow_as_default  -- False when correlation is too high
+            max_correlation   -- float or None
+            max_pair          -- (model_a, model_b) or None
+            threshold         -- configured threshold
+            reason            -- human-readable verdict
+        """
+        cfg = self._rmse_monitor_cfg or {}
+        threshold = float(cfg.get("diversity_max_correlation_threshold", 0.95))
+
+        active: Dict[str, np.ndarray] = {}
+        for m, f in forecasts.items():
+            if weights.get(m, 0.0) <= 0.001:
+                continue
+            if f is None:
+                continue
+            try:
+                arr = np.asarray(f.values if hasattr(f, "values") else f, dtype=float)
+            except Exception:
+                continue
+            if len(arr) >= 2 and np.isfinite(arr).any():
+                active[m] = arr
+
+        base = {"threshold": threshold, "max_correlation": None, "max_pair": None}
+        if len(active) < 2:
+            base["allow_as_default"] = True
+            base["reason"] = "fewer than 2 active model forecasts — diversity check skipped"
+            return base
+
+        models = list(active)
+        max_corr = 0.0
+        max_pair: Optional[tuple] = None
+        for i in range(len(models)):
+            for j in range(i + 1, len(models)):
+                m1, m2 = models[i], models[j]
+                s1, s2 = active[m1], active[m2]
+                n = min(len(s1), len(s2))
+                if n < 2:
+                    continue
+                try:
+                    c = float(np.corrcoef(s1[:n], s2[:n])[0, 1])
+                    if np.isfinite(c) and abs(c) > max_corr:
+                        max_corr = abs(c)
+                        max_pair = (m1, m2)
+                except Exception:
+                    continue
+
+        base["max_correlation"] = round(max_corr, 4)
+        base["max_pair"] = list(max_pair) if max_pair else None
+        if max_corr > threshold:
+            base["allow_as_default"] = False
+            pair_str = f"{max_pair[0]}/{max_pair[1]}" if max_pair else "?"
+            base["reason"] = (
+                f"forecast correlation {max_corr:.3f} > {threshold:.3f} ({pair_str})"
+                " — blending adds no diversity benefit"
+            )
+        else:
+            base["allow_as_default"] = True
+            base["reason"] = f"forecast diversity sufficient (max_corr={max_corr:.3f})"
+        return base
 
     def _preselection_default_gate(self) -> Dict[str, Any]:
         """
