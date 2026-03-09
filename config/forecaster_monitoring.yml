@@ -116,6 +116,14 @@ forecaster_monitoring:
     strict_preselection_max_rmse_ratio: 1.0
     strict_preselection_recent_window: 10
     strict_preselection_min_effective_audits: 5
+
+    # Diversity gate (forecast-time): block ensemble when active model forecast
+    # vectors are too correlated (Pearson correlation > threshold).  When models
+    # produce nearly identical forecasts, blending adds no diversity benefit and
+    # always yields RMSE between worst and best single model.
+    # Threshold 0.95: only blocks when models are almost perfectly correlated.
+    # Raise to 0.99 to be more permissive; lower to 0.85 to be more aggressive.
+    diversity_max_correlation_threshold: 0.95
   per_ticker:
     AAPL:
       min_profit_factor: 1.15

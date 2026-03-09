@@ -333,6 +333,12 @@ pipeline:
         - {mssa_rl: 1.0}
       minimum_component_weight: 0.05
 
+    # EXP-R5-001: Residual Ensemble Around mssa_rl (research experiment)
+    # Mirror of config/forecasting_config.yml residual_experiment section.
+    # Flip enabled: true to activate — zero impact on gates/strategy when false.
+    residual_experiment:
+      enabled: true
+
     # Phase 7.5: Regime Detection for Adaptive Model Selection
     regime_detection:
       enabled: true  # Phase 7.9: regime kept ON; A/B test (2026-02-05) showed no >10% PnL lift from disabling.

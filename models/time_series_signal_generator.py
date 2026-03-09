@@ -339,6 +339,10 @@ class TimeSeriesSignalGenerator:
         garch_cfg = _cfg_section("garch")
         samossa_cfg = _cfg_section("samossa")
         mssa_cfg = _cfg_section("mssa_rl")
+        # EXP-R5-001: read from forecasting_config.yml residual_experiment section.
+        # Default False — flip residual_experiment.enabled: true in config to activate.
+        residual_exp_cfg = _cfg_section("residual_experiment")
+        residual_experiment_enabled = bool(residual_exp_cfg.get("enabled", False))
 
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
         regime_detection_enabled = bool(regime_cfg.get("enabled", False))
@@ -384,6 +388,7 @@ class TimeSeriesSignalGenerator:
                 regime_detection_kwargs=regime_detection_kwargs,
                 order_learning_config=order_learning_cfg,
                 monte_carlo_config=monte_carlo_cfg,
+                residual_experiment_enabled=residual_experiment_enabled,
             )
 
         if samossa_cfg.get("enabled", True):
@@ -411,6 +416,7 @@ class TimeSeriesSignalGenerator:
             regime_detection_kwargs=regime_detection_kwargs,
             order_learning_config=order_learning_cfg,
             monte_carlo_config=monte_carlo_cfg,
+            residual_experiment_enabled=residual_experiment_enabled,
         )
 
     def _load_execution_cost_model(self) -> Dict[str, Any]:

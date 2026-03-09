@@ -91,6 +91,71 @@ def test_duplicate_close_check_flags_overclosed_entries(tmp_path):
     assert violations[0].affected_ids == [1]
 
 
+def test_duplicate_close_path2_detects_unlinked_cluster(tmp_path, monkeypatch):
+    """INT-02 structural fix: 2 unlinked closes for same ticker/date trigger Path 2."""
+    import os
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+    db_path = tmp_path / "unlinked_cluster.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            # Two live unlinked closes on the same AAPL date — structural duplicate
+            (10, "AAPL", "2026-03-09", "SELL", 1.0, 150.0, None, -10.0, None, None, 150.0, None, "TIME_EXIT", "live", 1, None, 0, 0, 0.0),
+            (11, "AAPL", "2026-03-09", "SELL", 1.0, 150.0, None, -10.0, None, None, 150.0, None, "TIME_EXIT", "live", 1, None, 0, 0, 0.0),
+        ],
+    )
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_duplicate_close_for_same_entry()
+
+    names = {v.check_name for v in violations}
+    assert "DUPLICATE_CLOSE_NULL_LINKED" in names, (
+        "Path 2 must detect 2+ unlinked closes for same ticker/date"
+    )
+
+
+def test_duplicate_close_path2_single_unlinked_no_violation(tmp_path, monkeypatch):
+    """A single unlinked close does not trigger Path 2 (need 2+ per ticker/date)."""
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+    db_path = tmp_path / "single_unlinked.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (10, "AAPL", "2026-03-09", "SELL", 1.0, 150.0, None, -10.0, None, None, 150.0, None, "TIME_EXIT", "live", 1, None, 0, 0, 0.0),
+        ],
+    )
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_duplicate_close_for_same_entry()
+
+    names = {v.check_name for v in violations}
+    assert "DUPLICATE_CLOSE_NULL_LINKED" not in names, (
+        "Single unlinked close must not trigger Path 2"
+    )
+
+
+def test_duplicate_close_path2_whitelist_excludes_ids(tmp_path, monkeypatch):
+    """Whitelisted IDs are excluded from Path 2 detection."""
+    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "10")
+    db_path = tmp_path / "wl_path2.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (10, "AAPL", "2026-03-09", "SELL", 1.0, 150.0, None, -10.0, None, None, 150.0, None, "TIME_EXIT", "live", 1, None, 0, 0, 0.0),
+            (11, "AAPL", "2026-03-09", "SELL", 1.0, 150.0, None, -10.0, None, None, 150.0, None, "TIME_EXIT", "live", 1, None, 0, 0, 0.0),
+        ],
+    )
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_duplicate_close_for_same_entry()
+
+    # After whitelisting id=10, only id=11 remains — 1 close, no cluster
+    names = {v.check_name for v in violations}
+    assert "DUPLICATE_CLOSE_NULL_LINKED" not in names, (
+        "Whitelisting one ID drops below the 2+ threshold; no Path 2 violation"
+    )
+
+
 def test_backfill_entry_links_supports_partial_close_inventory(tmp_path):
     db_path = tmp_path / "backfill_partial.db"
     _create_trade_db(db_path)
@@ -205,3 +270,46 @@ def test_orphan_whitelist_ids_249_250_251_253_are_not_flagged(tmp_path):
         f"IDs 249,250,251,253 must be in known_historical whitelist and not trigger ORPHANED_POSITION. "
         f"Got: {orphan_violations}"
     )
+
+
+def test_unlinked_close_whitelist_filters_close_without_entry_link(tmp_path, monkeypatch):
+    db_path = tmp_path / "unlinked_close_whitelist.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (
+                255,
+                "TSLA",
+                "2026-03-06",
+                "BUY",
+                2.0,
+                396.96,
+                2.0,
+                -629.77,
+                -0.794,
+                82.13,
+                396.96,
+                1.0,
+                "STOP_LOSS",
+                "live",
+                1,
+                None,
+                0,
+                0,
+                0.0,
+            ),
+        ],
+    )
+
+    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75")
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_closing_without_entry_link()
+    assert len(violations) == 1
+    assert violations[0].check_name == "CLOSE_WITHOUT_ENTRY_LINK"
+    assert violations[0].affected_ids == [255]
+
+    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75,255")
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_closing_without_entry_link()
+    assert violations == []

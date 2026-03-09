@@ -1844,9 +1844,10 @@ def execute_pipeline(
                     mssa_rl_cfg = forecasting_cfg.get('mssa_rl', {})
                     ensemble_cfg = forecasting_cfg.get('ensemble', {})
                     rolling_cv_cfg = forecasting_cfg.get('rolling_cv', {})
-                    regime_detection_cfg = forecasting_cfg.get('regime_detection', {})  # Phase 7.5
-                    order_learning_cfg = forecasting_cfg.get('order_learning', {})      # Phase 7.16
-                    monte_carlo_cfg = forecasting_cfg.get('monte_carlo', {})            # Phase 7.16
+                    regime_detection_cfg = forecasting_cfg.get('regime_detection', {})    # Phase 7.5
+                    order_learning_cfg = forecasting_cfg.get('order_learning', {})        # Phase 7.16
+                    monte_carlo_cfg = forecasting_cfg.get('monte_carlo', {})              # Phase 7.16
+                    residual_experiment_cfg = forecasting_cfg.get('residual_experiment', {})  # EXP-R5-001            # Phase 7.16
 
                     # Phase 7.3 DEBUG: Check what's in ensemble_cfg
                     logger.info(
@@ -1895,6 +1896,10 @@ def execute_pipeline(
                             # Phase 7.16: Auto-learning pipeline
                             order_learning_config=order_learning_cfg,
                             monte_carlo_config=monte_carlo_cfg,
+                            # EXP-R5-001: residual ensemble experiment (off by default)
+                            residual_experiment_enabled=bool(
+                                residual_experiment_cfg.get('enabled', False)
+                            ),
                         )
 
                     for ticker in ticker_list:

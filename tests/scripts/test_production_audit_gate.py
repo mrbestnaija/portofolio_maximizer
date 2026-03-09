@@ -84,6 +84,7 @@ def test_run_reconcile_step_apply_fails_when_unlinked_remains_even_if_command_ex
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
 
     db_path = tmp_path / "portfolio.db"
     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=None)
@@ -117,6 +118,7 @@ def test_run_reconcile_step_apply_passes_when_verified_zero_unlinked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
 
     db_path = tmp_path / "portfolio.db"
     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=12345)
@@ -149,6 +151,7 @@ def test_run_reconcile_step_dry_run_fails_when_unlinked_detected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import scripts.production_audit_gate as mod
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
 
     db_path = tmp_path / "portfolio.db"
     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=None)

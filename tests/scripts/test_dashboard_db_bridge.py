@@ -552,3 +552,78 @@ def test_provenance_origin_is_mixed_when_trade_sources_are_mixed(tmp_path) -> No
     )
     assert "synthetic" in provenance["trade_sources"]
     assert "yfinance" in provenance["trade_sources"]
+
+
+def test_advanced_metrics_unknown_when_performance_metrics_table_empty(tmp_path) -> None:
+    """Regression for Defect 4: when PnLIntegrityEnforcer returns realized PnL but the
+    performance_metrics table is empty, the payload must surface advanced_metrics_unknown=True
+    so the UI does not collapse 'partial performance state' into 'all known'.
+
+    Ensures performance_unknown=False (realized PnL IS available) while
+    advanced_metrics_unknown=True (aggregate analytics are NOT available).
+    """
+    import unittest.mock as mock
+
+    db_path = tmp_path / "partial_perf.db"
+    _make_minimal_db(db_path)
+    conn = sqlite3.connect(db_path)
+    # Add performance_metrics table but leave it empty (no aggregation has run)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS performance_metrics("
+        "id INTEGER PRIMARY KEY, total_return REAL, total_return_pct REAL,"
+        " win_rate REAL, profit_factor REAL, num_trades INTEGER, created_at TEXT)"
+    )
+    conn.commit()
+    conn.close()
+
+    # Simulate PnLIntegrityEnforcer returning valid canonical metrics so the
+    # integrity path succeeds (performance_unknown=False) while performance_metrics
+    # table stays empty (advanced_metrics_unknown=True should be set).
+    fake_metrics = mock.MagicMock()
+    fake_metrics.total_realized_pnl = 500.0
+    fake_metrics.win_rate = 0.6
+    fake_metrics.profit_factor = 1.8
+    fake_metrics.total_round_trips = 10
+    fake_metrics.avg_win = 75.0
+    fake_metrics.avg_loss = -30.0
+    fake_metrics.largest_win = 200.0
+    fake_metrics.largest_loss = -80.0
+    fake_metrics.diagnostic_trades_excluded = 0
+    fake_metrics.synthetic_trades_excluded = 0
+    fake_metrics.opening_legs_with_pnl = 0
+
+    fake_enforcer = mock.MagicMock()
+    fake_enforcer.__enter__ = mock.Mock(return_value=fake_enforcer)
+    fake_enforcer.__exit__ = mock.Mock(return_value=False)
+    fake_enforcer.get_canonical_metrics.return_value = fake_metrics
+
+    with mock.patch.object(mod, "_canonical_metrics_pnl_integrity", return_value={
+        "pnl_abs": 500.0, "pnl_pct": 0.0, "win_rate": 0.6,
+        "profit_factor": 1.8, "trade_count": 10,
+        "sharpe": 0.0, "sortino": 0.0, "max_drawdown": 0.0,
+        "avg_win": 75.0, "avg_loss": -30.0,
+        "largest_win": 200.0, "largest_loss": -80.0,
+        "diagnostic_excluded": 0, "synthetic_excluded": 0, "double_count_violations": 0,
+    }):
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            payload = mod.build_dashboard_payload(
+                conn=conn, tickers=["AAPL"], lookback_days=10,
+                max_signals=5, max_trades=5, db_path=db_path,
+            )
+        finally:
+            conn.close()
+
+    # Realized PnL is known (from integrity enforcer)
+    assert payload["performance_unknown"] is False, (
+        "performance_unknown should be False when canonical PnL is available"
+    )
+    # But advanced analytics (Sharpe, drawdown, etc.) are NOT available
+    assert payload["advanced_metrics_unknown"] is True, (
+        "advanced_metrics_unknown should be True when performance_metrics table is empty "
+        "even though canonical PnL metrics exist"
+    )
+    # Realized PnL data should still be present
+    assert payload["pnl"]["absolute"] == 500.0
+    assert payload["win_rate"] == 0.6

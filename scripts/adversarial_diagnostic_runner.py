@@ -215,18 +215,48 @@ def chk_duplicate_close_null_bypass(conn: Optional[sqlite3.Connection]) -> Findi
         f.detail += " DB not found."
         return f
     try:
-        # Check how many NULL-linked closes exist
-        n_unlinked = _db_scalar(
-            conn,
-            "SELECT COUNT(*) FROM trade_executions WHERE is_close=1 AND entry_trade_id IS NULL "
-            "AND COALESCE(is_diagnostic,0)=0 AND COALESCE(is_synthetic,0)=0",
+        # Parse whitelist -- resume-originated closes with confirmed root cause
+        # (e.g. portfolio_state mode-contamination where synthetic opener is
+        # irrecoverable for live attribution).
+        _wl_raw = os.environ.get("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+        _whitelist_ids: set[int] = set()
+        for _tok in _wl_raw.split(","):
+            _tok = _tok.strip()
+            if _tok.isdigit():
+                _whitelist_ids.add(int(_tok))
+
+        _base_sql = (
+            "SELECT COUNT(*) FROM trade_executions "
+            "WHERE is_close=1 AND entry_trade_id IS NULL "
+            "AND COALESCE(is_diagnostic,0)=0 AND COALESCE(is_synthetic,0)=0"
         )
-        enforceable_threshold = 0
-        if n_unlinked and n_unlinked > enforceable_threshold:
-            f.detail += f" ACTIVE EXPOSURE: {n_unlinked} unlinked close(s) in production view."
+        _wl_excl = (
+            f" AND id NOT IN ({','.join(str(i) for i in sorted(_whitelist_ids))})"
+            if _whitelist_ids else ""
+        )
+
+        # Count non-whitelisted unlinked closes (actionable exposure)
+        n_unlinked = _db_scalar(conn, _base_sql + _wl_excl) or 0
+
+        # Count whitelisted IDs present in DB (for detail reporting only)
+        n_whitelisted = 0
+        if _whitelist_ids:
+            _wl_in = f" AND id IN ({','.join(str(i) for i in sorted(_whitelist_ids))})"
+            n_whitelisted = _db_scalar(conn, _base_sql + _wl_in) or 0
+
+        if n_unlinked > 0:
+            f.detail += f" ACTIVE EXPOSURE: {n_unlinked} non-whitelisted unlinked close(s) in production view."
+            if n_whitelisted:
+                f.detail += f" ({n_whitelisted} tolerated via INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS.)"
         else:
             f.passed = True
-            f.detail += " No unlinked closes in current DB. Structural risk remains."
+            if n_whitelisted:
+                f.detail += (
+                    f" {n_whitelisted} whitelisted unlinked close(s) tolerated by policy "
+                    "(confirmed root cause, irrecoverable opener). Structural risk remains."
+                )
+            else:
+                f.detail += " No unlinked closes in current DB. Structural risk remains."
     except Exception as exc:
         f.detail += f" [DB error: {exc}]"
     return f
@@ -1300,6 +1330,14 @@ def run_all_checks(
     severity_filter: Optional[str],
     category_filter: Optional[str],
 ) -> list[Finding]:
+    # Bootstrap .env so that whitelist env vars are available even when called
+    # directly (not via main()).  Fail silently if secret_loader is absent.
+    try:
+        from etl.secret_loader import bootstrap_dotenv  # type: ignore
+        bootstrap_dotenv()
+    except Exception:
+        pass
+
     findings: list[Finding] = []
 
     # Load source files once

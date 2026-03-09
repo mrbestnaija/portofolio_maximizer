@@ -830,6 +830,15 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
         if canonical:
             canonical["performance_unknown"] = False
             canonical["performance_source"] = "pnl_integrity_enforcer"
+            # Defect 4: distinguish realized PnL (available) from advanced
+            # analytics (performance_metrics table). When the latter is empty,
+            # mark advanced_metrics_unknown=True so the UI doesn't collapse
+            # the partial state into "all known".
+            try:
+                perf_rows = _safe_fetchone(conn, "SELECT COUNT(*) AS c FROM performance_metrics") or {"c": 0}
+                canonical["advanced_metrics_unknown"] = int(perf_rows["c"] or 0) == 0
+            except Exception:
+                canonical["advanced_metrics_unknown"] = True
             return canonical
     except Exception:
         pass  # Fall back to performance_metrics table
@@ -1143,6 +1152,7 @@ def build_dashboard_payload(
         "win_rate": _opt_float(perf.get("win_rate")),
         "trade_count": _opt_int(perf.get("trade_count")),
         "performance_unknown": bool(perf.get("performance_unknown", False)),
+        "advanced_metrics_unknown": bool(perf.get("advanced_metrics_unknown", False)),
         "performance": perf,
         "positions": positions,
         "positions_stale": positions_stale,

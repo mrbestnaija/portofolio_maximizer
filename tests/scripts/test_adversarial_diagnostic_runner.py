@@ -210,6 +210,41 @@ class TestDuplicateCloseNullBypass:
         con.close()
         assert result.passed is True
 
+    def test_cleared_when_unlinked_close_is_whitelisted(self, tmp_path, monkeypatch):
+        """INT-02 must not fire when the only unlinked close is in the whitelist.
+
+        This is the trade 255 scenario: synthetic-opener contamination produced
+        a live unlinked close with a confirmed root cause; whitelist is justified.
+        """
+        db = _make_trade_db(tmp_path, [
+            (255, "TSLA", "SELL", 1, 0, 0, None, -629.77),  # whitelisted unlinked close
+        ])
+        monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "255")
+        con = _connect(db)
+        result = chk_duplicate_close_null_bypass(con)
+        con.close()
+        assert result.passed is True, (
+            "Whitelisted unlinked close must not confirm INT-02"
+        )
+        assert "whitelisted" in result.detail.lower(), (
+            "Detail must mention the whitelisted count"
+        )
+
+    def test_confirmed_when_non_whitelisted_unlinked_close_present(self, tmp_path, monkeypatch):
+        """Whitelist only exempts the named IDs; other unlinked closes still confirm."""
+        db = _make_trade_db(tmp_path, [
+            (255, "TSLA", "SELL", 1, 0, 0, None, -629.77),  # whitelisted
+            (300, "AAPL", "SELL", 1, 0, 0, None,  100.00),  # not whitelisted
+        ])
+        monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "255")
+        con = _connect(db)
+        result = chk_duplicate_close_null_bypass(con)
+        con.close()
+        assert result.passed is False, (
+            "Non-whitelisted unlinked close must still confirm INT-02"
+        )
+        assert "1 non-whitelisted" in result.detail
+
 
 class TestProofRawTable:
     """INT-03 — CRITICAL: validate_profitability_proof.py reads raw table."""

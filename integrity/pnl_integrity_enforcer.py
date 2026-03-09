@@ -721,10 +721,18 @@ class PnLIntegrityEnforcer:
     def _check_duplicate_close_for_same_entry(self) -> List[IntegrityViolation]:
         """HIGH: Detect over-closed entries (duplicate close quantity).
 
-        Legitimate partial exits may produce multiple closing legs for a single
-        opening leg. The integrity violation is when *multiple* linked close
-        legs over-consume the opening leg quantity.
+        Path 1 (linked): multiple linked close legs over-consume a single
+        opening leg via entry_trade_id JOIN.
+
+        Path 2 (unlinked, INT-02 structural fix): 2+ unlinked closes
+        (entry_trade_id IS NULL) for the same ticker+trade_date in the
+        production view.  Whitelisted IDs (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS)
+        are excluded so that confirmed-root-cause historical anomalies do not
+        re-fire.
         """
+        violations: List[IntegrityViolation] = []
+
+        # --- Path 1: linked over-close detection ---
         rows = self.conn.execute(
             "SELECT "
             "  o.id AS open_id, "
@@ -742,20 +750,62 @@ class PnLIntegrityEnforcer:
             "       > COALESCE(o.shares, 0.0) + 0.02"
         ).fetchall()
 
-        if not rows:
-            return []
+        if rows:
+            affected = [r["open_id"] for r in rows]
+            violations.append(IntegrityViolation(
+                check_name="DUPLICATE_CLOSE_FOR_ENTRY",
+                severity="HIGH",
+                description=(
+                    f"{len(rows)} opening legs are over-closed (linked close_size "
+                    "sum exceeds opening shares). This causes PnL duplication."
+                ),
+                affected_ids=affected,
+                count=len(rows),
+            ))
 
-        affected = [r["open_id"] for r in rows]
-        return [IntegrityViolation(
-            check_name="DUPLICATE_CLOSE_FOR_ENTRY",
-            severity="HIGH",
-            description=(
-                f"{len(rows)} opening legs are over-closed (linked close_size "
-                "sum exceeds opening shares). This causes PnL duplication."
-            ),
-            affected_ids=affected,
-            count=len(rows),
-        )]
+        # --- Path 2: unlinked duplicate closes per ticker/date (INT-02 structural fix) ---
+        _wl_raw = os.getenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+        _wl_ids: set[int] = set()
+        for _tok in _wl_raw.split(","):
+            _tok = _tok.strip()
+            if _tok.isdigit():
+                _wl_ids.add(int(_tok))
+        _wl_excl = (
+            f"AND id NOT IN ({','.join(str(i) for i in sorted(_wl_ids))})"
+            if _wl_ids else ""
+        )
+        rows2 = self.conn.execute(
+            "SELECT ticker, trade_date, GROUP_CONCAT(id) AS ids, COUNT(*) AS n "
+            "FROM trade_executions "
+            "WHERE is_close = 1 "
+            "  AND entry_trade_id IS NULL "
+            "  AND COALESCE(is_diagnostic, 0) = 0 "
+            "  AND COALESCE(is_synthetic, 0) = 0 "
+            f"  {_wl_excl} "
+            "GROUP BY ticker, trade_date "
+            "HAVING COUNT(*) > 1"
+        ).fetchall()
+
+        if rows2:
+            all_affected: List[int] = []
+            for r in rows2:
+                for _id_str in str(r["ids"]).split(","):
+                    _id_str = _id_str.strip()
+                    if _id_str.isdigit():
+                        all_affected.append(int(_id_str))
+            violations.append(IntegrityViolation(
+                check_name="DUPLICATE_CLOSE_NULL_LINKED",
+                severity="HIGH",
+                description=(
+                    f"{len(rows2)} ticker/date combination(s) have 2+ unlinked closes "
+                    "(entry_trade_id IS NULL). Cannot detect over-closing without "
+                    "entry_trade_id; potential PnL double-counting."
+                ),
+                affected_ids=all_affected,
+                count=len(rows2),
+            ))
+
+        return violations
 
     # ------------------------------------------------------------------
     # Repair operations
@@ -993,71 +1043,85 @@ class PnLIntegrityEnforcer:
 def main():
     """CLI entrypoint for integrity reporting and repair."""
     import argparse
+    _wl_key = "INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS"
+    _had_wl = _wl_key in os.environ
+    _prev_wl = os.environ.get(_wl_key)
+    try:
+        from etl.secret_loader import bootstrap_dotenv
+        bootstrap_dotenv()
+    except Exception:
+        # Best-effort parity with other gate entrypoints.
+        pass
+    try:
+        ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        DEFAULT_DB = os.path.join(ROOT, "data", "portfolio_maximizer.db")
 
-    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DEFAULT_DB = os.path.join(ROOT, "data", "portfolio_maximizer.db")
+        parser = argparse.ArgumentParser(
+            description="PnL Integrity Enforcer -- audit and repair trade_executions"
+        )
+        parser.add_argument(
+            "--db", default=DEFAULT_DB, help="Path to SQLite database"
+        )
+        parser.add_argument(
+            "--fix-opening-pnl",
+            action="store_true",
+            help="NULL out realized_pnl on opening legs (is_close=0)",
+        )
+        parser.add_argument(
+            "--fix-diagnostic-flags",
+            action="store_true",
+            help="Set is_diagnostic=1 for diagnostic-mode trades",
+        )
+        parser.add_argument(
+            "--fix-entry-links",
+            action="store_true",
+            help="Backfill entry_trade_id on closing legs",
+        )
+        parser.add_argument(
+            "--fix-all",
+            action="store_true",
+            help="Run all repair operations",
+        )
+        parser.add_argument(
+            "--apply",
+            action="store_true",
+            help="Actually apply changes (default is dry-run)",
+        )
+        args = parser.parse_args()
 
-    parser = argparse.ArgumentParser(
-        description="PnL Integrity Enforcer -- audit and repair trade_executions"
-    )
-    parser.add_argument(
-        "--db", default=DEFAULT_DB, help="Path to SQLite database"
-    )
-    parser.add_argument(
-        "--fix-opening-pnl",
-        action="store_true",
-        help="NULL out realized_pnl on opening legs (is_close=0)",
-    )
-    parser.add_argument(
-        "--fix-diagnostic-flags",
-        action="store_true",
-        help="Set is_diagnostic=1 for diagnostic-mode trades",
-    )
-    parser.add_argument(
-        "--fix-entry-links",
-        action="store_true",
-        help="Backfill entry_trade_id on closing legs",
-    )
-    parser.add_argument(
-        "--fix-all",
-        action="store_true",
-        help="Run all repair operations",
-    )
-    parser.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually apply changes (default is dry-run)",
-    )
-    args = parser.parse_args()
+        dry_run = not args.apply
 
-    dry_run = not args.apply
+        with PnLIntegrityEnforcer(args.db, allow_schema_changes=True) as enforcer:
+            # Ensure schema columns exist
+            added = enforcer.ensure_integrity_columns()
+            if added:
+                print(f"[SCHEMA] Added columns: {', '.join(added)}")
 
-    with PnLIntegrityEnforcer(args.db, allow_schema_changes=True) as enforcer:
-        # Ensure schema columns exist
-        added = enforcer.ensure_integrity_columns()
-        if added:
-            print(f"[SCHEMA] Added columns: {', '.join(added)}")
+            # Run repairs if requested
+            if args.fix_all or args.fix_opening_pnl:
+                n = enforcer.fix_opening_legs_pnl(dry_run=dry_run)
+                print(f"[FIX] Opening legs PnL: {n} rows {'would be' if dry_run else ''} affected")
 
-        # Run repairs if requested
-        if args.fix_all or args.fix_opening_pnl:
-            n = enforcer.fix_opening_legs_pnl(dry_run=dry_run)
-            print(f"[FIX] Opening legs PnL: {n} rows {'would be' if dry_run else ''} affected")
+            if args.fix_all or args.fix_diagnostic_flags:
+                n = enforcer.backfill_diagnostic_flag(dry_run=dry_run)
+                print(f"[FIX] Diagnostic flags: {n} rows {'would be' if dry_run else ''} affected")
 
-        if args.fix_all or args.fix_diagnostic_flags:
-            n = enforcer.backfill_diagnostic_flag(dry_run=dry_run)
-            print(f"[FIX] Diagnostic flags: {n} rows {'would be' if dry_run else ''} affected")
+            if args.fix_all or args.fix_entry_links:
+                n = enforcer.backfill_entry_trade_ids(dry_run=dry_run)
+                print(f"[FIX] Entry links: {n} rows {'would be' if dry_run else ''} affected")
 
-        if args.fix_all or args.fix_entry_links:
-            n = enforcer.backfill_entry_trade_ids(dry_run=dry_run)
-            print(f"[FIX] Entry links: {n} rows {'would be' if dry_run else ''} affected")
+            if dry_run and (args.fix_all or args.fix_opening_pnl or args.fix_diagnostic_flags or args.fix_entry_links):
+                print()
+                print("[DRY RUN] No changes made. Re-run with --apply to execute.")
 
-        if dry_run and (args.fix_all or args.fix_opening_pnl or args.fix_diagnostic_flags or args.fix_entry_links):
+            # Always print report
             print()
-            print("[DRY RUN] No changes made. Re-run with --apply to execute.")
-
-        # Always print report
-        print()
-        enforcer.print_report()
+            enforcer.print_report()
+    finally:
+        if _had_wl:
+            os.environ[_wl_key] = _prev_wl if _prev_wl is not None else ""
+        else:
+            os.environ.pop(_wl_key, None)
 
 
 if __name__ == "__main__":

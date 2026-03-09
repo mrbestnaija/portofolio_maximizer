@@ -33,70 +33,84 @@ except ImportError:
 
 def main():
     import argparse
-
-    DEFAULT_DB = str(_DEFAULT_DB_PATH)
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default=DEFAULT_DB, help="Path to SQLite database")
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Also fail on MEDIUM severity violations",
-    )
-    args = parser.parse_args()
-
-    if not os.path.exists(args.db):
-        print(f"[SKIP] Database not found: {args.db}")
-        print("[SKIP] CI gate skipped (no DB to check).")
-        sys.exit(0)
-
+    _wl_key = "INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS"
+    _had_wl = _wl_key in os.environ
+    _prev_wl = os.environ.get(_wl_key)
     try:
-        with PnLIntegrityEnforcer(args.db) as enforcer:
-            violations = enforcer.run_full_integrity_audit()
-            metrics = enforcer.get_canonical_metrics()
-    except Exception as exc:
-        print(f"[ERROR] Failed to run integrity audit: {exc}")
-        sys.exit(2)
+        from etl.secret_loader import bootstrap_dotenv
+        bootstrap_dotenv()
+    except Exception:
+        # Best-effort: keep gate runnable in minimal environments.
+        pass
+    try:
+        DEFAULT_DB = str(_DEFAULT_DB_PATH)
 
-    # Report
-    print("=== PnL Integrity CI Gate ===")
-    print(f"  Round-trips:    {metrics.total_round_trips}")
-    print(f"  Total PnL:      ${metrics.total_realized_pnl:+,.2f}")
-    print(f"  Win rate:        {metrics.win_rate:.1%}")
-    print(f"  Double-count:    {metrics.opening_legs_with_pnl} (must be 0)")
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--db", default=DEFAULT_DB, help="Path to SQLite database")
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            help="Also fail on MEDIUM severity violations",
+        )
+        args = parser.parse_args()
 
-    if not violations:
-        print("\n[PASS] All integrity checks passed.")
-        sys.exit(0)
+        if not os.path.exists(args.db):
+            print(f"[SKIP] Database not found: {args.db}")
+            print("[SKIP] CI gate skipped (no DB to check).")
+            sys.exit(0)
 
-    # INT-05 fix: MEDIUM violations are always counted; they become blocking when the
-    # count exceeds max_medium_violations (default 10) or when --strict is set.
-    max_medium_violations = 0 if args.strict else 10
-    medium_violations = [v for v in violations if v.severity == "MEDIUM"]
+        try:
+            with PnLIntegrityEnforcer(args.db) as enforcer:
+                violations = enforcer.run_full_integrity_audit()
+                metrics = enforcer.get_canonical_metrics()
+        except Exception as exc:
+            print(f"[ERROR] Failed to run integrity audit: {exc}")
+            sys.exit(2)
 
-    # Build blocking set: CRITICAL and HIGH always block; MEDIUM blocks when threshold exceeded.
-    blocking_levels = frozenset({"CRITICAL", "HIGH"})
-    if args.strict or len(medium_violations) > max_medium_violations:
-        blocking_levels = frozenset({"CRITICAL", "HIGH", "MEDIUM"})
+        # Report
+        print("=== PnL Integrity CI Gate ===")
+        print(f"  Round-trips:    {metrics.total_round_trips}")
+        print(f"  Total PnL:      ${metrics.total_realized_pnl:+,.2f}")
+        print(f"  Win rate:        {metrics.win_rate:.1%}")
+        print(f"  Double-count:    {metrics.opening_legs_with_pnl} (must be 0)")
 
-    blocking = [v for v in violations if v.severity in blocking_levels]
-    warnings = [v for v in violations if v.severity not in blocking_levels]
+        if not violations:
+            print("\n[PASS] All integrity checks passed.")
+            sys.exit(0)
 
-    for v in violations:
-        status = "FAIL" if v.severity in blocking_levels else "WARN"
-        print(f"\n  [{status}] [{v.severity}] {v.check_name}")
-        print(f"         {v.description}")
+        # INT-05 fix: MEDIUM violations are always counted; they become blocking when the
+        # count exceeds max_medium_violations (default 10) or when --strict is set.
+        max_medium_violations = 0 if args.strict else 10
+        medium_violations = [v for v in violations if v.severity == "MEDIUM"]
 
-    if medium_violations and len(medium_violations) <= max_medium_violations and not args.strict:
-        print(f"\n  [NOTE] {len(medium_violations)} MEDIUM violation(s) below threshold "
-              f"({max_medium_violations} max); non-blocking. Use --strict to enforce.")
+        # Build blocking set: CRITICAL and HIGH always block; MEDIUM blocks when threshold exceeded.
+        blocking_levels = frozenset({"CRITICAL", "HIGH"})
+        if args.strict or len(medium_violations) > max_medium_violations:
+            blocking_levels = frozenset({"CRITICAL", "HIGH", "MEDIUM"})
 
-    if blocking:
-        print(f"\n[FAIL] {len(blocking)} blocking violation(s) found.")
-        sys.exit(1)
-    else:
-        print(f"\n[PASS] {len(warnings)} non-blocking warning(s).")
-        sys.exit(0)
+        blocking = [v for v in violations if v.severity in blocking_levels]
+        warnings = [v for v in violations if v.severity not in blocking_levels]
+
+        for v in violations:
+            status = "FAIL" if v.severity in blocking_levels else "WARN"
+            print(f"\n  [{status}] [{v.severity}] {v.check_name}")
+            print(f"         {v.description}")
+
+        if medium_violations and len(medium_violations) <= max_medium_violations and not args.strict:
+            print(f"\n  [NOTE] {len(medium_violations)} MEDIUM violation(s) below threshold "
+                  f"({max_medium_violations} max); non-blocking. Use --strict to enforce.")
+
+        if blocking:
+            print(f"\n[FAIL] {len(blocking)} blocking violation(s) found.")
+            sys.exit(1)
+        else:
+            print(f"\n[PASS] {len(warnings)} non-blocking warning(s).")
+            sys.exit(0)
+    finally:
+        if _had_wl:
+            os.environ[_wl_key] = _prev_wl if _prev_wl is not None else ""
+        else:
+            os.environ.pop(_wl_key, None)
 
 
 if __name__ == "__main__":

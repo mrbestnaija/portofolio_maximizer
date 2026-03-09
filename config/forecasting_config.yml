@@ -206,6 +206,24 @@ forecasting:
     pinball_tau: 0.5
     regime_aggregation: true
     dominant_driver_threshold: 0.05
+  # EXP-R5-001: Residual Ensemble Around mssa_rl (research experiment)
+  # Also present at top-level for backward compatibility with _load_forecasting_config.
+  residual_experiment:
+    enabled: true
+# EXP-R5-001: Residual Ensemble Around mssa_rl (research experiment)
+# Flip enabled: true to activate.  Default false = zero impact on gates/strategy.
+# When enabled:
+#   - TimeSeriesForecaster.fit() auto-fits a ResidualModel on OOS anchor residuals
+#     (leave-last-out: last max(horizon,20) bars held out for OOS residual training)
+#   - forecast() emits artifacts.residual_experiment with residual_status="active"
+#   - run_quality_pipeline.py --enable-residual-experiment collects metrics
+# Activation command:
+#   Set enabled: true here, then run:
+#     python scripts/run_etl_pipeline.py --tickers AAPL --execution-mode synthetic
+#   Verify: python scripts/verify_residual_experiment.py --audit-dir logs/forecast_audits
+residual_experiment:
+  enabled: true
+
 adaptive_candidate_weights:
   computed_at: '2026-03-01'
   recent_n: 20

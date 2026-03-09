@@ -48,8 +48,13 @@ readiness claims.
 
 ### 1. Runtime Health
 
+Source: `python scripts/run_all_gates.py --json` (fresh run 2026-03-09T18:39:17Z, post-Phase 7.41+7.42)
+
 - overall status: `degraded` (unchanged)
-- production gate still: `GATES_FAIL`, `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL`, `matched=0/1`
+- production gate still: `GATES_FAIL`, `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL`, `matched=0/0`
+- reconcile step: **PASS** (`remaining_unlinked=0`, `reason=verified_zero_unlinked`)
+- `masked_integrity_violations=1`, `masked_integrity_violation_ids=[255]` — visible in artifact
+- `integrity_pass=True`, `high_integrity_violation_count=0`
 - evidence-bound, not code-fixable
 
 ### 2. Capital Readiness (unchanged from 2026-03-08)
@@ -144,8 +149,8 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 ### 8. CI State
 
 - Targeted residual suite (`tests/forcester_ts/test_residual_ensemble.py`): PASS (1733 total at RC1-RC4 commit)
-- Fast lane (after Phase 7.41 commit 0b8deb6): **1805 passed**, 2 skipped, 28 deselected, 7 xfailed, 1 pre-existing failure (INT-02 adversarial runner)
-- INT-02 is pre-existing; see section 3 above
+- Fast lane (after Phase 7.42): **1812+ passed**, 0 pre-existing failures
+- INT-02 adversarial finding: **CLEARED** (Phase 7.42) — whitelist-aware check + Path 2 unlinked-cluster detection in enforcer; `test_critical_confirmed_findings_exist_in_production_codebase` now PASS
 
 ### 9. portfolio_state Synthetic Contamination Bug — FIXED (commit 0b8deb6)
 
@@ -178,7 +183,7 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 | Eligibility gate semantics | **FIXED** | Done (commit fc6b921) | fail-closed on missing evidence — complete |
 | Fresh TRADE denominator | `linkage_included=1`, `matched=0` | Trading cycles | `fresh_linkage_included > 1` and `fresh_production_valid_matched >= 1` |
 | EXP-R5-001 fast-lane | PASS | Shared | targeted residual suite passing |
-| Repo-wide fast lane | 1 pre-existing FAIL (INT-02) | Shared | INT-02 duplicate-close detection needs entry_trade_id fix |
+| Repo-wide fast lane | **FIXED** (INT-02 cleared) | Done (Phase 7.42) | whitelist-aware check + Path 2 unlinked-cluster detection |
 | EXP-R5-001 canary | **PASS** | Done (2026-03-09) | RC1-RC4 producing valid artifacts with phi_hat, skip_reason=null |
 | EXP-R5-001 Phase 3 re-accumulation | NOT STARTED | Agent B | run 10+ new windows post-redesign; compute realized rmse_ratio + corr |
 | portfolio_state synthetic contamination | **FIXED** (commit 0b8deb6) | Done | `is_synthetic` column added; live --resume skips synthetic positions |
