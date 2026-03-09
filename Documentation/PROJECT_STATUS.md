@@ -277,3 +277,303 @@ Report artifact: `reports/mvs_paper_window_20251226_183023.md`
 3. Implement Workstream B telemetry from `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md` (cross-sectional fallback counters + seasonal availability rate).
 4. Restore OpenClaw WhatsApp listener readiness for reliable gate notifications.
 5. Continue recent-window MVS accumulation (`>=30` realized trades, positive PnL, WR/PF thresholds) on paper/live-like runs.
+
+```markdown
+## EXP-R5-001 — Residual Ensemble Around `mssa_rl` (Research Experiment)
+
+Goal  
+Design and evaluate a **residual ensemble anchored on `mssa_rl`** to test whether targeted error correction can improve the R5 lift gate (on paper/audit only), without changing live strategy behavior.
+
+Scope Restrictions (IMPORTANT)
+
+- Research-only experiment; **no direct impact on live trading or readiness**.
+- No changes to:
+  - live strategy logic
+  - gate semantics
+  - readiness thresholds
+  - `config/*.yml`
+- All code remains on **branches/patch files** until manually approved and integrated by human + Claude Code.
+- The comparison is strictly:
+
+  - baseline: `mssa_rl`  
+  - candidate: `mssa_rl` + residual correction (EXP-R5-001)
+
+---
+
+# Agent A — Residual Architecture & Contracts (P0 / P1)
+
+### A1 — Residual Ensemble Design Note
+
+- [ ] Write a short design note for EXP-R5-001 (checked in under `Documentation/`), covering:
+
+  **Anchor model**
+
+  - `mssa_rl` → produces \(\hat{y}_{\text{anchor}, t}\).
+
+  **Residual target**
+
+  - \(\epsilon_t = y_t - \hat{y}_{\text{anchor}, t}\).
+
+  **Residual model**
+
+  - Predicts \(\hat{\epsilon}_t\) using:
+    - existing feature set, and
+    - optional regime tags (future extension, not required for EXP-R5-001).
+
+  **Final forecast (research-only)**
+
+  - \(\hat{y}_{\text{resid\_ens}, t} = \hat{y}_{\text{anchor}, t} + \hat{\epsilon}_t\).
+
+  **Residual training rule (CRITICAL — no leakage)**
+
+  - Residual model must be trained on **out-of-sample anchor predictions only**:
+    1. Train anchor model on its training window.
+    2. Generate *out-of-sample* anchor forecasts on validation/test windows.
+    3. Compute residuals \(\epsilon_t\) using those OOS forecasts.
+    4. Train residual model to predict \(\epsilon_t\) only on data where the anchor forecast is truly OOS.
+  - No training of the residual model on in-sample anchor predictions.
+
+  **Experiment promotion contract (for later decision only, not enforced by A)**
+
+  - Minimum evidence:
+    - \(N_{\text{effective\_audits}} \ge 20\) (horizon-consistent with R5).
+  - Lift requirement:
+    - \(\text{RMSE}(\text{resid\_ens}) / \text{RMSE}(\text{mssa\_rl}) \le 0.98\).
+  - Diversity requirement:
+    - \(\text{corr}(\hat{y}_{\text{anchor}}, \hat{y}_{\text{resid\_ens}}) \le 0.90\),
+    - correlation computed over the **same audit window** used for RMSE.
+
+---
+
+### A2 — Forecast Layer Hook (Branch Only)
+
+- [ ] Add a **non-invasive residual hook** inside `forcester_ts/` (A domain only).
+
+  Requirements:
+
+  - Residual model may observe (for backtests/audits only):
+    - anchor forecast \(\hat{y}_{\text{anchor}}\),
+    - realized truth \(y_t\),
+    - feature inputs.
+  - Residual corrections must remain **optional**:
+    - If no residual model is configured, system behavior is exactly equal to current `master`.
+
+- [ ] Implement a helper, e.g. `_build_residual_ensemble(...)`:
+
+  Inputs
+
+  - `anchor_forecast`
+  - `residual_forecast` (can be `None`)
+
+  Outputs
+
+  - `combined_forecast` (anchor + residual when residual present)
+  - `diversity_metadata` (e.g., per-window correlation, flags)
+
+  Important constraints
+
+  - No default model flip.
+  - No change to ensemble/gate decision logic.
+  - Only produces additional metadata for audits/experiments.
+
+- [ ] Keep all changes in an Agent A branch/patch; **no edits** to:
+  - `config/*.yml`
+  - `scripts/run_all_gates.py`
+  - `scripts/capital_readiness_check.py`
+
+---
+
+### A3 — Forecast-Layer Unit Tests
+
+- [ ] Add tests in `tests/forcester_ts/` (fast-lane compatible):
+
+  - Residual = 0:
+    - When `residual_forecast` is identically zero, residual ensemble output equals `mssa_rl` forecast bit-for-bit.
+  - Synthetic bias correction:
+    - On a toy dataset where `mssa_rl` has a known additive bias, a residual model trained on that bias reduces RMSE vs `mssa_rl` alone.
+  - Diversity metrics:
+    - Correlation between `mssa_rl` and residual ensemble forecasts is strictly lower than the correlation between `mssa_rl` and a naive average of highly correlated models (current R5 setup).
+  - Residual absent:
+    - When residual model is disabled/unconfigured, all forecast paths behave identically to `master` (no regression).
+
+---
+
+# Agent B — Audit & Pipeline Exposure (P2)
+
+### B1 — Audit Reporting Fields (Reporting-Only)
+
+- [ ] Extend audit outputs (B domain scripts only, e.g. `exit_quality_audit.py`, `ensemble_health_audit.py`) with **optional** fields:
+
+  - `y_hat_anchor`
+  - `y_hat_residual_ensemble`
+  - `rmse_anchor`
+  - `rmse_residual_ensemble`
+  - `rmse_ratio` (residual_ensemble / anchor)
+  - `da_anchor`
+  - `da_residual_ensemble`
+  - `corr_anchor_residual` (Pearson correlation over the audit window)
+
+  Rules:
+
+  - If residual ensemble is not present/active:
+    - These fields must be `null` / omitted, **never** forced to `0.0`.
+  - Preserve the **“Unknown ≠ PASS”** principle:
+    - Missing metrics must not be misrepresented as successful ones.
+
+---
+
+### B2 — Pipeline Experiment Flag
+
+- [ ] Modify `scripts/run_quality_pipeline.py` (or equivalent B-owned orchestration) to add an optional flag:
+
+  - `--enable-residual-experiment`
+
+  Behavior:
+
+  - Flag **OFF** (default):
+    - Pipeline behavior is **identical to `master`**; no residual forecasts computed; no extra fields.
+  - Flag **ON**:
+    - Residual ensemble forecasts are computed (assuming Agent A hook is available).
+    - Residual metrics are written into audit outputs and any configured research tables.
+
+  Constraints:
+
+  - No gate semantics changed.
+  - No production readiness script behavior changed.
+  - This flag is for research/paper runs only.
+
+---
+
+### B3 — Compatibility & Schema Tests
+
+- [ ] Add/update tests to ensure:
+
+  - Audit schema remains backward compatible:
+    - Existing consumers continue to work when residual fields are absent.
+  - Residual metrics appear **only** when the experiment is enabled (flag ON).
+  - CSV + JSON outputs remain valid; new fields are present and well-typed when expected.
+  - No new pandas/numpy warnings or errors (e.g. chained assignment, dtype coercions).
+
+- [ ] Keep changes in a dedicated Agent B branch/patch.
+
+---
+
+# Agent C — Experiment Brief & Measurement Plan (P3)
+
+### C1 — Experiment Brief (Documentation Only)
+
+- [ ] Create or update an entry in:
+
+  - `Documentation/AGENT_C_EXPERIMENT_BRIEFS_*.md`
+
+  For experiment:
+
+  - `EXP-R5-001 — Residual Ensemble Around mssa_rl`
+
+  Include:
+
+  - **Objective**
+    - Evaluate whether residual correction around `mssa_rl` produces measurable R5 lift on paper/audit-only runs.
+  - **Inputs**
+    - Anchor model ID: `mssa_rl`.
+    - Residual model ID: as defined by Agent A once available.
+    - Dataset & forecast horizon: align with existing R5 audit windows.
+  - **Metrics collected**
+    - RMSE and Directional Accuracy (anchor vs residual ensemble).
+    - RMSE ratio (resid_ens / anchor).
+    - Anchor–Residual correlation (same window as RMSE).
+    - R5 CI inputs (lift estimate, N windows).
+  - **Explicit note**
+    - This experiment does **not** change readiness claims, gate statuses, or live trading configuration.
+
+---
+
+### C2 — Blocker Matrix Entry
+
+- [ ] Update:
+
+  - `AGENT_C_READINESS_BLOCKER_MATRIX_*.md`
+
+  Add row for:
+
+  - `Experiment: EXP-R5-001`
+
+  With:
+
+  - `Status`: NOT RUN / IN PROGRESS / EVALUATED.
+  - `Blockers` (examples):
+    - Residual model not wired (Agent A work incomplete).
+    - Residual metrics not exposed in audits (Agent B work incomplete).
+    - Insufficient effective audits for contract (N_effective_audits < 20).
+  - Reminder:
+    - This experiment cannot bypass real-data blockers:
+      - PnL integrity,
+      - linkage evidence,
+      - audit hygiene.
+
+---
+
+### C3 — Measurement Runbook (Plan Only, No Execution)
+
+- [ ] Define a runbook for **future** execution once A/B branches are integrated (C does not run it):
+
+  Example sequence:
+
+  1. Run:
+
+     ```bash
+     python scripts/run_quality_pipeline.py --enable-residual-experiment ...
+     ```
+
+  2. Then:
+
+     ```bash
+     python scripts/run_all_gates.py --json
+     ```
+
+     - Gate outputs are recorded for **system state only**, not used to promote EXP-R5-001 automatically.
+
+  3. Agent C will, once runs occur (by human/Claude), collect:
+
+     - `RMSE(residual_ensemble)` vs `RMSE(mssa_rl)`.
+     - RMSE ratio.
+     - DA comparison.
+     - `corr_anchor_residual`.
+     - Any updated R5 statistics derived from audits.
+
+  4. Results are logged into:
+
+     - The EXP-R5-001 experiment brief.
+     - The readiness blocker matrix.
+
+---
+
+# Integration & Approval (Human + Claude Code Only)
+
+Before **any** EXP-R5-001 code merges to `master`:
+
+- [ ] Review Agent A branch:
+      - Residual plumbing only; default behavior unchanged.
+      - No gate or `config/*.yml` changes.
+- [ ] Review Agent B branch:
+      - Reporting-only schema additions; experiment flag correctly gated.
+      - No gate semantics or readiness scripts modified.
+- [ ] Review Agent C docs:
+      - Language conservative; no implicit readiness claims.
+      - Experiment clearly labeled as research-only.
+
+---
+
+# Integration Checklist (Required Before Merge)
+
+Run, on the integration branch:
+
+- [ ] `python scripts/run_all_gates.py --json`
+- [ ] `python -m integrity.pnl_integrity_enforcer`
+- [ ] Targeted tests for every touched module.
+- [ ] `pytest` fast lane (`tests/`), no new failures.
+- [ ] Verify gate state has not regressed vs baseline snapshot.
+- [ ] Document:
+      - What parts of EXP-R5-001 were integrated.
+      - What remains deferred and why.
+```

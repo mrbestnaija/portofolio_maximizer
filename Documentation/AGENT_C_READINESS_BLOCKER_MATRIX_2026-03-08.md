@@ -9,10 +9,13 @@ Verification Commands:
 - `python scripts/capital_readiness_check.py --json`
 - `python scripts/check_model_improvement.py --layer 1 --json`
 - `python -m scripts.dashboard_db_bridge --once --db-path data\\portfolio_maximizer.db --output logs\\dashboard_data_review_tmp.json`
+- `python -m pytest tests/forcester_ts/test_residual_ensemble.py tests/scripts/test_run_quality_pipeline.py -q`
+- `python -m pytest -m "not gpu and not slow" --tb=short -q`
 Artifacts:
 - `visualizations/dashboard_data.json`
 - `logs/overnight_denominator/live_denominator_latest.json`
 - `logs/audit_gate/production_gate_latest.json`
+- `visualizations/performance/residual_experiment_summary.json`
 Supersedes: `Documentation/AGENT_C_READINESS_BLOCKER_MATRIX_2026-03-07.md`
 Expires When: superseded by a newer dated blocker matrix or merged into canonical runtime status docs
 
@@ -30,6 +33,9 @@ Commands run on 2026-03-08 in the current session:
 - `python scripts/check_model_improvement.py --layer 1 --json`
 - `python -m scripts.dashboard_db_bridge --once --db-path data\portfolio_maximizer.db --output logs\dashboard_data_review_tmp.json`
 - `python -m pytest tests/scripts/test_dashboard_db_bridge.py tests/scripts/test_live_dashboard_wiring.py tests/scripts/test_check_model_improvement.py -q`
+- `python -m pytest tests/forcester_ts/test_residual_ensemble.py tests/scripts/test_run_quality_pipeline.py -q`
+- `python -m pytest -m "not gpu and not slow" --tb=short -q`
+- `python scripts/run_quality_pipeline.py --json --enable-residual-experiment`
 
 ## Current State
 
@@ -140,6 +146,89 @@ Interpretation:
 - no readiness claim is justified
 - next live evidence window is the next trading day, Monday, **2026-03-09**
 
+### 7. EXP-R5-001 Residual Experiment State
+
+Source:
+- `Get-Content visualizations/performance/residual_experiment_summary.json`
+- `python scripts/verify_residual_experiment.py --audit-dir logs/forecast_audits --json`
+- `python scripts/residual_experiment_truth.py --audit-dir logs/forecast_audits --json`
+- `python -m pytest tests/forcester_ts/test_residual_ensemble.py tests/scripts/test_run_quality_pipeline.py -q`
+
+Current experiment artifact state:
+- `status = PASS`
+- `reason_code = RESIDUAL_EXPERIMENT_AVAILABLE`
+- `n_not_fitted_windows = 1`
+- `n_windows_with_residual_metrics = 11`
+- `n_windows_with_realized_residual_metrics = 11`
+- `n_windows_structural_only_metrics = 0`
+- `m2_review_ready = true`
+- `rmse_anchor_mean = 6.548374`
+- `rmse_residual_ensemble_mean = 9.211566`
+- `rmse_ratio_mean = 1.689169`
+- `da_anchor_mean = 0.536364`
+- `da_residual_ensemble_mean = 0.548485`
+- `corr_anchor_residual_mean = -0.257054`
+- `early_abort_signal = false`
+- `early_abort_consecutive_rmse_above_threshold = 4`
+- config remains:
+  - `residual_experiment.enabled = true`
+- verifier currently reports:
+  - default latest-window mode is not authoritative for whole-run status
+- truth snapshot currently reports:
+  - `ok = true`
+  - `summary_status = PASS`
+  - `summary_reason_code = RESIDUAL_EXPERIMENT_AVAILABLE`
+  - `audits.n_active = 23`
+  - `audits.n_inactive = 45`
+  - `contradictions = []`
+- warnings include:
+  - `residual_experiment_parse_errors`
+  - `residual_experiment_not_fitted`
+Interpretation:
+- M1 activation is complete.
+- M2 realized measurement is complete.
+- M3 evaluation is complete.
+- Formal verdict is `REDESIGN_REQUIRED`:
+  - average RMSE is materially worse (`rmse_ratio_mean = 1.689169`)
+  - DA improves only slightly (`+0.012121`)
+  - `corr_anchor_residual_mean = -0.257054`
+  - `7/11` windows are worse than anchor on RMSE
+  - `8/11` windows have negative realized `corr(ε, ε_hat)`
+  - short folds (`len <= 210`) are the worst cohort with mean `rmse_ratio = 2.139716`
+- Agent C treats this candidate as failed and blocks further accumulation without redesign.
+- Agent A redesign ordering is now tracked as:
+  - `RC1 -> RC4 -> RC3 -> RC2`
+- Ordering rationale:
+  - RC1 removes the bias-dominated DC component before AR(1) fit
+  - RC4 then rejects weak/no-signal fits
+  - RC3 only helps after RC1; increasing the OOS window first would give AR(1) more of the same wrong bias signal
+  - RC2 remains the deepest issue and is only partially fixable inside the current file-scope constraints
+- Required redesign observability:
+  - persist `phi_hat`, `intercept_hat`, `n_train_residuals`, `oos_n_used`, `correction_skipped`, and `skip_reason` in the residual artifact
+- Active semantic risk that remains open until redesign lands:
+  - `quality_pipeline_common.py` still allows the old Phase 2 proxy fallback for `corr_anchor_residual`
+  - Agent C therefore treats Phase 3 realized correlation as the only valid redesign signal
+- Redesign code status:
+  - Agent A commits `d7ebacd` and `27cc45d` are now present locally
+  - code-level RC1-RC4 changes exist in workspace
+  - this does not change experiment status by itself
+  - Agent C requires a fresh post-redesign truth snapshot before changing the experiment row below
+
+### 8. CI State For EXP-R5-001 Tracking
+
+Source:
+- `python -m pytest tests/forcester_ts/test_residual_ensemble.py tests/scripts/test_run_quality_pipeline.py -q`
+- `python -m pytest -m "not gpu and not slow" --tb=short -q`
+
+Current result:
+- targeted residual and quality-pipeline suites: `PASS`
+- repo-wide fast lane: `PASS`
+
+Interpretation:
+- the earlier residual/quality-pipeline import blocker is cleared
+- the broader fast lane is green in the current workspace:
+  - `1790 passed, 3 skipped, 28 deselected, 7 xfailed`
+
 ## Blocker Matrix
 
 | Surface | Current result | Blocking owner | Unblock condition |
@@ -151,7 +240,9 @@ Interpretation:
 | Provenance classification | PASS | Agent B | mixed trade/live sources now produce `data_origin = mixed` |
 | Eligibility gate semantics | OPEN | Agent A | explicit policy: WARN-only or fail-closed |
 | Fresh TRADE denominator | `linkage_included=1`, `matched=0` | Trading cycles | `fresh_linkage_included > 1` across multiple cycles and `fresh_production_valid_matched >= 1` |
-| Experiment: EXP-R5-001 | NOT RUN | Agent A + Agent B + Agent C | Phase 1 artifact is emitted but `residual_status=inactive`; Phase 2 fitted residual model, residual metrics in audits, and experiment-specific effective audits are still required |
+| EXP-R5-001 fast-lane import blocker | PASS | Agent B | targeted residual/quality-pipeline suites pass; the old import blocker is cleared |
+| Repo-wide fast lane | PASS | Shared | current workspace fast lane is green: `1790 passed, 3 skipped, 28 deselected, 7 xfailed` |
+| Experiment: EXP-R5-001 | FAILED | Agent A + Agent B + Agent C | M1/M2/M3 are complete; the formal M3 verdict is `REDESIGN_REQUIRED` at 11 realized windows with `rmse_ratio_mean=1.689169`, `corr_anchor_residual_mean=-0.257054`, and a strong short-fold failure pattern; redesign ordering is `RC1 -> RC4 -> RC3 -> RC2`, the RC1-RC4 code pass is now present locally, and the next unblock is a fresh post-redesign truth snapshot rather than more accumulation on the old cohort |
 | Experiment execution | blocked | Agent C protocol | all preconditions above satisfied |
 
 ## Agent C Operating Rules
@@ -174,4 +265,4 @@ of the following are true:
 5. `capital_readiness_check.py` clears R3
 6. live dashboard/runtime truth blockers are explicitly resolved
 
-None of items 1-6 are currently satisfied end-to-end.
+Items 1-5 are not yet satisfied end-to-end. Item 6 is currently resolved.

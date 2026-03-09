@@ -22,6 +22,7 @@ from scripts.ensemble_health_audit import (
     extract_window_metrics,
     generate_markdown_report,
     load_audit_windows,
+    load_audit_windows_with_stats,
     main,
     update_config_adaptive_weights,
 )
@@ -44,44 +45,59 @@ def _make_audit(
     garch_smape: float = 0.02,
     samossa_smape: float = 0.03,
     mssa_rl_smape: float = 0.025,
+    residual_experiment: dict | None = None,
+    residual_ensemble_rmse: float | None = None,
+    residual_ensemble_da: float | None = None,
 ) -> dict:
     runs = []
     if regime:
         runs.append({"model": "regime", "metadata": {"regime": regime}})
+    evaluation_metrics = {
+        "garch": {
+            "rmse": garch_rmse,
+            "smape": garch_smape,
+            "directional_accuracy": garch_da,
+            "n_observations": 30,
+        },
+        "samossa": {
+            "rmse": samossa_rmse,
+            "smape": samossa_smape,
+            "directional_accuracy": samossa_da,
+            "n_observations": 30,
+        },
+        "mssa_rl": {
+            "rmse": mssa_rl_rmse,
+            "smape": mssa_rl_smape,
+            "directional_accuracy": mssa_rl_da,
+            "n_observations": 30,
+        },
+        "ensemble": {
+            "rmse": ensemble_rmse,
+            "smape": 0.022,
+            "directional_accuracy": ensemble_da,
+            "n_observations": 30,
+        },
+    }
+    if residual_ensemble_rmse is not None or residual_ensemble_da is not None:
+        evaluation_metrics["residual_ensemble"] = {
+            "rmse": residual_ensemble_rmse,
+            "directional_accuracy": residual_ensemble_da,
+            "n_observations": 30,
+        }
+
+    artifacts = {
+        "evaluation_metrics": evaluation_metrics,
+        "ensemble_weights": {"garch": 0.4, "samossa": 0.4, "mssa_rl": 0.2},
+    }
+    if residual_experiment is not None:
+        artifacts["residual_experiment"] = residual_experiment
+
     return {
         "_path": f"forecast_audit_{start.replace('-','')}_{end.replace('-','')}.json",
         "_mtime": 1.0,
         "dataset": {"start": start, "end": end, "length": length, "ticker": "AAPL"},
         "summary": {"forecast_horizon": horizon},
-        "artifacts": {
-            "evaluation_metrics": {
-                "garch": {
-                    "rmse": garch_rmse,
-                    "smape": garch_smape,
-                    "directional_accuracy": garch_da,
-                    "n_observations": 30,
-                },
-                "samossa": {
-                    "rmse": samossa_rmse,
-                    "smape": samossa_smape,
-                    "directional_accuracy": samossa_da,
-                    "n_observations": 30,
-                },
-                "mssa_rl": {
-                    "rmse": mssa_rl_rmse,
-                    "smape": mssa_rl_smape,
-                    "directional_accuracy": mssa_rl_da,
-                    "n_observations": 30,
-                },
-                "ensemble": {
-                    "rmse": ensemble_rmse,
-                    "smape": 0.022,
-                    "directional_accuracy": ensemble_da,
-                    "n_observations": 30,
-                },
-            },
-            "ensemble_weights": {"garch": 0.4, "samossa": 0.4, "mssa_rl": 0.2},
-        },
+        "artifacts": artifacts,
         "runs": runs,
     }
 
@@ -150,6 +166,33 @@ class TestExtractWindowMetrics:
         audit = _make_audit(regime=None)
         w = extract_window_metrics(audit)
         assert w["regime"] is None
+
+    def test_residual_metrics_are_null_when_absent(self):
+        audit = _make_audit()
+        w = extract_window_metrics(audit)
+        residual = w["residual_experiment"]
+        assert residual["rmse_anchor"] is None
+        assert residual["rmse_residual_ensemble"] is None
+        assert residual["rmse_ratio"] is None
+        assert residual["corr_anchor_residual"] is None
+
+    def test_residual_metrics_extract_and_compute_ratio(self):
+        audit = _make_audit(
+            residual_experiment={
+                "y_hat_anchor": [1.0, 2.0, 3.0],
+                "y_hat_residual_ensemble": [1.1, 2.1, 3.1],
+                "rmse_anchor": 2.0,
+                "rmse_residual_ensemble": 1.8,
+                "da_anchor": 0.51,
+                "da_residual_ensemble": 0.57,
+            }
+        )
+        w = extract_window_metrics(audit)
+        residual = w["residual_experiment"]
+        assert residual["rmse_ratio"] == pytest.approx(0.9, rel=1e-9, abs=1e-9)
+        assert residual["corr_anchor_residual"] is None
+        assert residual["da_anchor"] == pytest.approx(0.51, rel=1e-9, abs=1e-9)
+        assert residual["da_residual_ensemble"] == pytest.approx(0.57, rel=1e-9, abs=1e-9)
 
 
 class TestPerModelSummary:
@@ -289,6 +332,15 @@ class TestLoadAuditWindows:
         windows = load_audit_windows(tmp_path, dedupe=False)
         assert len(windows) == 2
 
+    def test_load_with_stats_aggregates_parse_errors(self, tmp_path):
+        _write_audit_file(tmp_path, "forecast_audit_20260101_000000.json", start="2025-01-01", end="2025-06-01")
+        (tmp_path / "forecast_audit_bad_20260101.json").write_text("{not-json", encoding="utf-8")
+        windows, stats = load_audit_windows_with_stats(tmp_path, dedupe=True)
+        assert len(windows) == 1
+        assert stats["parse_error_count"] == 1
+        assert stats["audit_files_scanned"] == 2
+        assert stats["parse_error_samples"] == ["forecast_audit_bad_20260101.json"]
+
 
 class TestMarkdownReport:
     def _make_windows_and_summary(self):
@@ -321,6 +373,13 @@ class TestMarkdownReport:
         shapley = {m: 0.0 for m in MODELS}
         report = generate_markdown_report(windows, summary, shapley, candidates, params, 0)
         assert "SAMOSSA DA=0 anomaly" in report
+
+    def test_residual_section_is_present_even_when_unavailable(self):
+        windows, summary = self._make_windows_and_summary()
+        candidates, params = compute_adaptive_weights(windows)
+        report = generate_markdown_report(windows, summary, {m: 0.0 for m in MODELS}, candidates, params, 0)
+        assert "EXP-R5-001 Residual Metrics (Optional)" in report
+        assert "Residual experiment metrics unavailable" in report
 
 
 class TestUpdateConfig:

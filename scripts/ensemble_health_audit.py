@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
 import logging
 import math
@@ -28,6 +27,13 @@ from typing import Any
 
 import numpy as np
 import yaml
+
+from scripts.quality_pipeline_common import (
+    _audit_window_fingerprint,
+    extract_residual_experiment_fields,
+    load_forecast_audit_windows,
+    residual_experiment_metrics_present,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENSEMBLE_HEALTH_DIR = REPO_ROOT / "logs" / "ensemble_health"
@@ -42,54 +48,23 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Window fingerprint (identical to dedupe_audit_windows.py)
-# ---------------------------------------------------------------------------
-
 def _window_fingerprint(audit: dict) -> str:
-    ds = audit.get("dataset", {})
-    summary = audit.get("summary", {})
-    return hashlib.sha1(
-        json.dumps(
-            {
-                "ticker": ds.get("ticker"),
-                "start": ds.get("start"),
-                "end": ds.get("end"),
-                "length": ds.get("length"),
-                "horizon": summary.get("forecast_horizon") or ds.get("forecast_horizon"),
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    """Compatibility shim for layer-1 consumers importing legacy symbol."""
+    return _audit_window_fingerprint(audit)
 
 
 # ---------------------------------------------------------------------------
 # Load
 # ---------------------------------------------------------------------------
 
+def load_audit_windows_with_stats(audit_dir: Path, dedupe: bool = True) -> tuple[list[dict], dict[str, Any]]:
+    """Load audit windows plus compact parse/dedupe diagnostics."""
+    return load_forecast_audit_windows(Path(audit_dir), dedupe=dedupe)
+
+
 def load_audit_windows(audit_dir: Path, dedupe: bool = True) -> list[dict]:
-    """Load all forecast_audit_*.json files, optionally deduplicating by window fingerprint."""
-    audit_dir = Path(audit_dir)
-    files = sorted(audit_dir.glob("forecast_audit_*.json"))
-    raw: list[dict] = []
-    for f in files:
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            data["_path"] = f.name
-            data["_mtime"] = f.stat().st_mtime
-            raw.append(data)
-        except Exception as exc:
-            log.warning("Skipping malformed JSON %s: %s", f.name, exc)
-
-    if not dedupe:
-        return raw
-
-    # Deduplicate: keep newest per fingerprint (later mtime overwrites earlier)
-    seen: dict[str, dict] = {}
-    for audit in sorted(raw, key=lambda a: (a.get("_mtime", 0), a.get("_path", ""))):
-        fp = _window_fingerprint(audit)
-        seen[fp] = audit
-    return list(seen.values())
+    windows, _ = load_audit_windows_with_stats(audit_dir, dedupe=dedupe)
+    return windows
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +133,12 @@ def extract_window_metrics(audit: dict) -> dict | None:
     best_rmse = model_metrics[best_model]["rmse"]
     rmse_ratio = ensemble_rmse / best_rmse if best_rmse > 0 else float("nan")
 
+    residual_experiment = extract_residual_experiment_fields(
+        audit,
+        anchor_model="mssa_rl",
+        residual_model="residual_ensemble",
+    )
+
     return {
         "window_id": window_id,
         "ticker": ds.get("ticker"),
@@ -174,6 +155,7 @@ def extract_window_metrics(audit: dict) -> dict | None:
         "ensemble_weights": {k: float(v) for k, v in (ensemble_weights or {}).items()},
         "best_single_model": best_model,
         "rmse_ratio": rmse_ratio,
+        "residual_experiment": residual_experiment,
     }
 
 
@@ -657,6 +639,53 @@ def generate_markdown_report(
         lines.append(f"- **{m}**: RMSE={p_str}, DA={d_str}")
     lines.append("")
 
+    residual_rows = [
+        w.get("residual_experiment", {})
+        for w in windows
+        if residual_experiment_metrics_present(w.get("residual_experiment", {}))
+    ]
+    lines += [
+        "## EXP-R5-001 Residual Metrics (Optional)",
+        "",
+    ]
+    if not residual_rows:
+        lines.append("- Residual experiment metrics unavailable in current audit windows.")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _mean(key: str) -> float | None:
+        vals = [float(r[key]) for r in residual_rows if isinstance(r.get(key), (int, float))]
+        if not vals:
+            return None
+        return float(np.mean(vals))
+
+    rmse_anchor_mean = _mean("rmse_anchor")
+    rmse_residual_mean = _mean("rmse_residual_ensemble")
+    rmse_ratio_mean = _mean("rmse_ratio")
+    da_anchor_mean = _mean("da_anchor")
+    da_residual_mean = _mean("da_residual_ensemble")
+    corr_mean = _mean("corr_anchor_residual")
+    lines.append(f"- Windows with residual metrics: {len(residual_rows)}/{len(windows)}")
+    lines.append(f"- RMSE(anchor): {rmse_anchor_mean:.4f}" if rmse_anchor_mean is not None else "- RMSE(anchor): N/A")
+    lines.append(
+        f"- RMSE(residual_ensemble): {rmse_residual_mean:.4f}"
+        if rmse_residual_mean is not None
+        else "- RMSE(residual_ensemble): N/A"
+    )
+    lines.append(f"- RMSE ratio (residual/anchor): {rmse_ratio_mean:.4f}" if rmse_ratio_mean is not None else "- RMSE ratio (residual/anchor): N/A")
+    lines.append(f"- DA(anchor): {da_anchor_mean:.3f}" if da_anchor_mean is not None else "- DA(anchor): N/A")
+    lines.append(
+        f"- DA(residual_ensemble): {da_residual_mean:.3f}"
+        if da_residual_mean is not None
+        else "- DA(residual_ensemble): N/A"
+    )
+    lines.append(
+        f"- Corr(anchor,residual): {corr_mean:.3f}"
+        if corr_mean is not None
+        else "- Corr(anchor,residual): N/A"
+    )
+    lines.append("")
+
     return "\n".join(lines)
 
 
@@ -742,14 +771,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Count duplicates before dedup for report
-    all_raw = load_audit_windows(audit_dir, dedupe=False)
-    all_deduped = load_audit_windows(audit_dir, dedupe=True)
-    duplicate_count = len(all_raw) - len(all_deduped)
+    all_raw, raw_stats = load_audit_windows_with_stats(audit_dir, dedupe=False)
+    all_deduped, dedup_stats = load_audit_windows_with_stats(audit_dir, dedupe=True)
+    duplicate_count = int(dedup_stats.get("duplicates_removed", max(0, len(all_raw) - len(all_deduped))))
     log.info(
         "Loaded %d audit files (%d duplicates removed by fingerprint)",
         len(all_raw),
         duplicate_count,
     )
+    parse_errors = int(raw_stats.get("parse_error_count", 0))
+    if parse_errors > 0:
+        samples = list(raw_stats.get("parse_error_samples", []))
+        sample_suffix = f" Samples: {', '.join(samples)}" if samples else ""
+        log.warning("Skipped %d malformed audit files.%s", parse_errors, sample_suffix)
 
     windows: list[dict] = []
     for audit in all_deduped:

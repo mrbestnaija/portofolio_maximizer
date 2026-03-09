@@ -29,6 +29,28 @@ Create a clean handoff and monitoring path for the currently verified blockers:
 3. eligibility fail-open semantics
 4. thin fresh linkage denominator
 5. reboot-safe persistence slice packaging
+6. `EXP-R5-001` activation governance without premature R5 reinterpretation
+
+## EXP-R5-001 Operating Rule
+
+Do not collapse these into one milestone:
+
+1. `M1 Activation`
+- at least one forecast artifact shows:
+  - `artifacts.residual_experiment.residual_status = "active"`
+  - `y_hat_residual_ensemble != y_hat_anchor`
+
+2. `M2 Measurement`
+- summary artifact shows:
+  - `n_windows_with_residual_metrics > 0`
+
+3. `M3 Evaluation`
+- enough experiment-specific windows exist to judge whether the candidate is:
+  - failing
+  - inconclusive
+  - potentially worth later R5 reconsideration
+
+Agent C tracks all three separately. `M1` is not `M2`, and `M2` is not `M3`.
 
 ## Phase 0 - Scope Lock
 
@@ -77,6 +99,10 @@ Acceptance:
 - blocker matrix no longer claims dashboard truth is resolved if the served
   payload still lags the checked-in schema
 - blocker matrix uses the correct next trading date
+- `EXP-R5-001` notes distinguish:
+  - Phase 2 code present
+  - active artifact absent
+  - measured windows absent
 
 Dependencies:
 - local DB and logs must exist
@@ -101,6 +127,21 @@ Actions:
   - exact file references
   - verified command evidence
   - acceptance condition
+
+For `EXP-R5-001`, the package must explicitly say:
+- Agent A should validate the existing auto-fit path first:
+  - `TimeSeriesForecaster.fit() -> _fit_residual_model(price_series)`
+- Agent A should not add a new training CLI first unless the current auto-fit
+  path cannot produce `M1 Activation`
+- Agent B owns measurement surfacing:
+  - `reason_code`
+  - `n_not_fitted_windows`
+  - `n_windows_with_residual_metrics`
+  - residual metrics once present
+- Agent C owns only:
+  - status transitions
+  - blocker updates
+  - result logging
 
 Acceptance:
 - each blocker is assigned to one owner only
@@ -158,11 +199,23 @@ Actions:
   - fresh `TRADE` exclusions
   - `fresh_linkage_included`
   - fresh production-valid `matched`
+- for `EXP-R5-001`, monitor only:
+  - `visualizations/performance/residual_experiment_summary.json`
+  - `status`
+  - `reason_code`
+  - `n_not_fitted_windows`
+  - `n_windows_with_residual_metrics`
+  - `rmse_ratio_mean`
+  - `corr_anchor_residual_mean`
 
 Acceptance:
 - drift is explicitly marked as either:
   - resolved in live runtime, or
   - still live despite local code/tests
+- `EXP-R5-001` state is explicitly marked as one of:
+  - `NOT RUN`
+  - `IN PROGRESS`
+  - `EVALUATED`
 
 Dependencies:
 - active dashboard bridge process
@@ -187,6 +240,26 @@ Acceptance:
 - mixed provenance is labeled correctly
 - eligibility behavior matches the chosen policy
 - Agent C blocker matrix can be reduced without caveats
+- `EXP-R5-001` can transition from `NOT RUN` only if:
+  - `M1 Activation` is satisfied
+  - summary no longer says `RESIDUAL_EXPERIMENT_NOT_FITTED`
+
+## EXP-R5-001 Early-Stop Governance
+
+Agent C does not stop experiments; Agent C records whether early-stop review is
+triggered.
+
+Review-only trigger after the first `5` experiment-specific windows:
+- if `rmse_ratio > 1.0` on all or nearly all measured windows, record this in
+  the brief and blocker matrix
+
+Stronger redesign trigger only after at least `10` measured windows:
+- if `rmse_ratio > 1.0` persists
+- and diversity remains unhelpful (`corr_anchor_residual` extremely high with no
+  RMSE improvement)
+
+Do not treat `corr_anchor_residual > 0.95` alone as enough evidence to stop.
+Highly correlated residual corrections can still remove anchor bias.
 
 Dependencies:
 - Agent A/B fixes merged into the active runtime branch
@@ -227,6 +300,8 @@ Limitations:
 - audit summary artifact: `logs/forecast_audits_cache/latest_summary.json`
 - served dashboard artifact: `visualizations/dashboard_data.json`
 - fresh bridge render comparison artifact: `logs/dashboard_data_review_tmp.json`
+- residual experiment summary:
+  - `visualizations/performance/residual_experiment_summary.json`
 
 ## Exit Condition For Agent C
 
