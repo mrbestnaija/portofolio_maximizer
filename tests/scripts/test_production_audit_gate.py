@@ -486,3 +486,70 @@ def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> N
         "Legacy trades must not be counted as close_before_entry violations"
     )
     assert result["query_error"] is None
+
+
+def test_count_masked_unlinked_closes_returns_zero_when_whitelist_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """masked count must be 0 when no whitelist env var is set."""
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE trade_executions "
+        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
+        "INSERT INTO trade_executions VALUES (255, 1, NULL);"
+    )
+    conn.close()
+
+    count, ids = mod._count_masked_unlinked_closes(db)
+    assert count == 0
+    assert ids == []
+
+
+def test_count_masked_unlinked_closes_counts_matching_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """masked count must reflect whitelisted IDs actually in DB as unlinked closes."""
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75,255")
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE trade_executions "
+        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
+        # id=255: unlinked live close (whitelisted)
+        "INSERT INTO trade_executions VALUES (255, 1, NULL);"
+        # id=66: whitelisted but has an entry_trade_id (linked — not counted)
+        "INSERT INTO trade_executions VALUES (66, 1, 50);"
+        # id=999: unlinked but NOT in whitelist
+        "INSERT INTO trade_executions VALUES (999, 1, NULL);"
+    )
+    conn.close()
+
+    count, ids = mod._count_masked_unlinked_closes(db)
+    assert count == 1, "only id=255 is both whitelisted AND unlinked"
+    assert ids == [255]
+
+
+def test_count_masked_unlinked_closes_absent_from_db_returns_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """masked count must be 0 when whitelisted IDs are not in DB at all."""
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75,255")
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE trade_executions "
+        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
+    )
+    conn.close()
+
+    count, ids = mod._count_masked_unlinked_closes(db)
+    assert count == 0
+    assert ids == []

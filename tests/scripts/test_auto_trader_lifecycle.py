@@ -913,6 +913,49 @@ class TestSequentialRunIntegrity:
         assert loaded["positions"].get("AAPL") == 4
         assert loaded["positions"].get("NVDA") == 2
 
+    def test_live_resume_with_synthetic_state_emits_no_orphan_close(self, tmp_db):
+        """End-to-end: PTE live --resume with synthetic portfolio_state must not produce
+        an unlinked close from synthetic inventory (the trade 255 scenario)."""
+        import os
+        from etl.database_manager import DatabaseManager
+        from execution.paper_trading_engine import PaperTradingEngine
+        from datetime import datetime, timezone
+
+        ts_now = datetime.now(timezone.utc)
+
+        # Step 1: Synthetic run saves TSLA=-2 to portfolio_state
+        dm = DatabaseManager(db_path=tmp_db)
+        _apply_portfolio_state_migration(tmp_db)
+        dm.save_portfolio_state(
+            cash=20000.0,
+            initial_capital=25000.0,
+            positions={"TSLA": -2},
+            entry_prices={"TSLA": 82.13},
+            entry_timestamps={"TSLA": ts_now},
+            stop_losses={},
+            target_prices={},
+            max_holding_days={},
+            is_synthetic=1,
+        )
+        dm.close()
+
+        # Step 2: Live-mode PTE resumes — must NOT see TSLA=-2 from synthetic state
+        os.environ["EXECUTION_MODE"] = "live"
+        try:
+            engine = PaperTradingEngine(
+                initial_capital=25000.0,
+                db_path=tmp_db,
+                resume_from_db=True,
+            )
+        finally:
+            os.environ.pop("EXECUTION_MODE", None)
+
+        # Synthetic TSLA position must be absent from resumed portfolio
+        assert engine.portfolio.positions.get("TSLA", 0) == 0, (
+            "live --resume must not inherit synthetic TSLA position; "
+            "this replicates the trade 255 contamination scenario"
+        )
+
 
 # ===================================================================
 # PART 7: TIMESTAMP HYGIENE

@@ -74,6 +74,39 @@ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _count_masked_unlinked_closes(db_path: Path) -> Tuple[int, List[int]]:
+    """Count whitelisted IDs that are actually present as unlinked closes in the DB.
+
+    This provides fail-open visibility: if the whitelist suppresses violations,
+    operators can see exactly how many are masked vs genuinely resolved.
+    Returns (masked_count, masked_ids_found_in_db).
+    """
+    _whitelist_raw = os.environ.get("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+    _whitelist_ids: set[int] = set()
+    for _tok in _whitelist_raw.split(","):
+        _tok = _tok.strip()
+        if _tok.isdigit():
+            _whitelist_ids.add(int(_tok))
+
+    if not _whitelist_ids or not db_path.exists():
+        return 0, []
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in _whitelist_ids)
+        rows = conn.execute(
+            f"SELECT id FROM trade_executions "
+            f"WHERE is_close = 1 AND entry_trade_id IS NULL AND id IN ({placeholders})",
+            tuple(sorted(_whitelist_ids)),
+        ).fetchall()
+        conn.close()
+        found = [int(r["id"]) for r in rows]
+        return len(found), found
+    except Exception:
+        return 0, []
+
+
 def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None) -> Tuple[Optional[int], List[int], Optional[str]]:
     """
     Verify unlinked-close backlog directly from DB.
@@ -1000,6 +1033,8 @@ def main() -> int:
     integrity_query_error = integrity_metrics.get("query_error")
     integrity_pass = high_integrity_violation_count == 0 and not integrity_query_error
 
+    masked_violation_count, masked_violation_ids = _count_masked_unlinked_closes(db_path)
+
     gates_pass = bool(gate_pass)
     phase3_ready = bool(gates_pass and linkage_pass and evidence_hygiene_pass and integrity_pass)
     phase3_fail_reasons: List[str] = []
@@ -1102,6 +1137,8 @@ def main() -> int:
             "close_before_entry_count": close_before_entry_count,
             "closed_missing_exit_reason_count": missing_exit_reason_count,
             "integrity_query_error": integrity_query_error,
+            "masked_integrity_violations": masked_violation_count,
+            "masked_integrity_violation_ids": masked_violation_ids,
         },
     }
     payload["telemetry_contract"] = normalize_telemetry_payload(
