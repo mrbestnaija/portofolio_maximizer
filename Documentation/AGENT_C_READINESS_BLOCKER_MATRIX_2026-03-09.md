@@ -141,38 +141,31 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 
 **Next step for EXP-R5-001**: Phase 3 re-accumulation. Run 10+ additional pipeline windows with different `--end` dates to get fresh realized metrics under the redesigned model. Compute `rmse_ratio` and `corr(ε,ε_hat)` via `scripts/residual_experiment_phase3_backfill.py` when realized prices are available.
 
-### 9. portfolio_state Synthetic Contamination Bug (NEW — 2026-03-09)
-
-**Bug identified** during trade 255 root-cause trace.
-
-**Schema**: `portfolio_state` has no `is_synthetic` column. Columns: `id, ticker, shares, entry_price, entry_timestamp, stop_loss, target_price, max_holding_days, holding_bars, entry_bar_timestamp, last_bar_timestamp, updated_at`.
-
-**Mechanism**:
-1. Synthetic run writes a short position to `portfolio_state` (e.g., TSLA=-2, entry_price=$82.13)
-2. Synthetic run ends without closing the position
-3. Next live run with `--resume` reads `portfolio_state` → sees TSLA=-2 → treats it as a live position
-4. Live run closes it as a live BUY (no matching live SELL opener in `trade_executions`)
-5. Result: live close (is_synthetic=0) with no live opener → CLOSE_WITHOUT_ENTRY_LINK violation
-
-**Scope**: 35 synthetic SELL opens with no close leg currently in `trade_executions` — each represents a potential future contamination if any of those tickers are still in `portfolio_state` when a live `--resume` run happens.
-
-**Current `portfolio_state`** (2026-03-09 post-run):
-- AAPL: 4 shares (live, from run 20260309_063607)
-- NVDA: 2 shares (live, from run 20260309_063607)
-- These appear to be legitimate live positions, not synthetic contamination.
-
-**Required fix** (not yet implemented):
-- Add `is_synthetic INTEGER DEFAULT 0` to `portfolio_state` schema
-- PTE writes `is_synthetic` when saving positions
-- On `--resume` in live mode: skip positions where `is_synthetic=1`, log a warning
-
-**Risk without fix**: Any future synthetic run that does not close all positions will contaminate the next live `--resume` run. This has already happened once (trade 255). The fix is low-risk and should be added before the next controlled live cycle.
-
 ### 8. CI State
 
 - Targeted residual suite (`tests/forcester_ts/test_residual_ensemble.py`): PASS (1733 total at RC1-RC4 commit)
-- Fast lane: 1060 passed (not-slow mark), 1 pre-existing failure (INT-02 adversarial runner)
-- INT-02 is pre-existing; see section above
+- Fast lane (after Phase 7.41 commit 0b8deb6): **1805 passed**, 2 skipped, 28 deselected, 7 xfailed, 1 pre-existing failure (INT-02 adversarial runner)
+- INT-02 is pre-existing; see section 3 above
+
+### 9. portfolio_state Synthetic Contamination Bug — FIXED (commit 0b8deb6)
+
+**Bug identified and fixed** during trade 255 root-cause trace.
+
+**Root cause of trade 255** (confirmed 2026-03-09 via DB trace):
+- `portfolio_state` had no `is_synthetic` column
+- Synthetic run `20260304_045850` wrote TSLA=-2 to `portfolio_state`; `is_synthetic` was not tracked
+- Live `--resume` run `20260309_063607` read TSLA=-2 as a live position and closed it as live trade 255
+- Entry price match: trade 247 (synthetic SELL, `is_synthetic=1`, price=$82.13343940353356) == trade 255 `entry_price`
+
+**Fix applied** (commit 0b8deb6):
+- `portfolio_state` now has `is_synthetic INTEGER DEFAULT 0` (migration adds column to existing DBs)
+- `save_portfolio_state(is_synthetic=0)`: synthetic runs pass `is_synthetic=1`; live runs pass `0`
+- `load_portfolio_state(skip_synthetic=True)`: filters `is_synthetic=1` rows with WARNING log
+- PTE reads `EXECUTION_MODE` env var at init; passes `skip_synthetic=True` on non-synthetic resume
+- Production DB already migrated: AAPL=4, NVDA=2 (both `is_synthetic=0`, legitimate live positions)
+- 2 new anti-regression tests in `test_auto_trader_lifecycle.py` (skip/keep behavior)
+
+**Scope**: 35 synthetic SELL opens with no close leg in `trade_executions` — these cannot contaminate future live resumes anymore with the fix applied.
 
 ## Blocker Matrix
 
@@ -188,7 +181,7 @@ Canary verdict: **PASS** — RC1–RC4 producing valid observability fields, no 
 | Repo-wide fast lane | 1 pre-existing FAIL (INT-02) | Shared | INT-02 duplicate-close detection needs entry_trade_id fix |
 | EXP-R5-001 canary | **PASS** | Done (2026-03-09) | RC1-RC4 producing valid artifacts with phi_hat, skip_reason=null |
 | EXP-R5-001 Phase 3 re-accumulation | NOT STARTED | Agent B | run 10+ new windows post-redesign; compute realized rmse_ratio + corr |
-| portfolio_state synthetic contamination | OPEN BUG | Agent A | add `is_synthetic` column; skip synthetic positions on live --resume |
+| portfolio_state synthetic contamination | **FIXED** (commit 0b8deb6) | Done | `is_synthetic` column added; live --resume skips synthetic positions |
 | Experiment execution | blocked | Agent C protocol | all preconditions below satisfied |
 
 ## Gate-Lifting Order (corrected 2026-03-09)
@@ -211,17 +204,17 @@ Verified sequence for production audit gate advancement:
    — DB save function: correct (line 2155, `entry_trade_id INTEGER` column)
    — No code changes required for the close path itself
 
-3. **Synthetic cycles: plumbing check only** (not gate-lifting)
+4. **Synthetic cycles: plumbing check only** (not gate-lifting)
    — Synthetic rows excluded from `production_closed_trades` view (DB-level filter: `is_synthetic=0`)
    — Gate artifact: no `production_audit_only` field (validator correction 2026-03-09); audit_dir is flat `logs/forecast_audits`
    — Synthetic useful for: linkage plumbing, close-leg wiring, residual canary
    — Synthetic NOT useful for: clearing `THIN_LINKAGE`, `EVIDENCE_HYGIENE_FAIL`
 
-4. **Live non-synthetic cycle** (market hours, next trading session)
+5. **Live non-synthetic cycle** (market hours, next trading session)
    — Each live cycle is a data point; re-check gate after each one
    — Gate needs: `fresh_linkage_included > 1` and `fresh_production_valid_matched >= 1`
 
-5. **Gate re-check after each cycle** (not batched)
+6. **Gate re-check after each cycle** (not batched)
 
 ## Agent C Operating Rules
 
