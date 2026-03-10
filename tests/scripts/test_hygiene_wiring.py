@@ -234,31 +234,87 @@ class TestTickerBackfill:
 # ---------------------------------------------------------------------------
 
 class TestEtlAuditDirRouting:
-    """run_etl_pipeline._build_model_config must set audit_log_dir=research."""
+    """Forecaster construction must succeed when ensemble_kwargs contains audit_log_dir.
 
-    def test_ensemble_kwargs_has_research_audit_dir(self) -> None:
-        """The ETL ensemble_kwargs must contain audit_log_dir pointing to research/."""
-        # Import run_etl_pipeline and check the build config
-        # We just inspect that audit_log_dir is in ensemble_kwargs when built
-        # by parsing a minimal version of the _build_model_config closure.
-        # This test validates the change we made to run_etl_pipeline.py line ~1889.
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "run_etl_pipeline_inspect",
-                str(Path(__file__).parent.parent.parent / "scripts" / "run_etl_pipeline.py"),
-            )
-            # Rather than importing the whole module (which has side effects),
-            # check the source text for the audit_log_dir wiring.
-            src = (
-                Path(__file__).parent.parent.parent / "scripts" / "run_etl_pipeline.py"
-            ).read_text(encoding="utf-8")
-            assert "audit_log_dir" in src, "ETL pipeline must wire audit_log_dir"
-            assert "forecast_audits/research" in src, (
-                "ETL pipeline must route to logs/forecast_audits/research"
-            )
-        except Exception as exc:
-            pytest.fail(f"ETL pipeline audit_log_dir check failed: {exc}")
+    This is a BEHAVIORAL test, not a source-text check.  The contract:
+      - EnsembleConfig construction must not raise TypeError for unknown keys
+      - audit_log_dir must be consumed by the forecaster for _audit_dir routing
+      - The routing must not contaminate EnsembleConfig fields
+    """
+
+    def test_forecaster_construction_succeeds_with_audit_log_dir_in_ensemble_kwargs(
+        self, tmp_path: Path
+    ) -> None:
+        """TimeSeriesForecaster must not raise when ensemble_kwargs has audit_log_dir.
+
+        Previously, audit_log_dir was passed through ensemble_kwargs into
+        EnsembleConfig(**kwargs), causing TypeError because EnsembleConfig does
+        not declare that field.  This test fails if the boundary is broken.
+        """
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+        research_dir = tmp_path / "research"
+        research_dir.mkdir()
+
+        cfg = TimeSeriesForecasterConfig(
+            ensemble_kwargs={
+                "audit_log_dir": str(research_dir),
+                # Include a real EnsembleConfig field to confirm valid keys still pass through
+                "diversity_tolerance": 0.25,
+            }
+        )
+        # Must not raise TypeError: unexpected keyword argument 'audit_log_dir'
+        forecaster = TimeSeriesForecaster(config=cfg)
+        # audit_log_dir must be consumed as the routing dir, not passed to EnsembleConfig
+        assert forecaster._audit_dir == research_dir, (
+            f"Expected _audit_dir={research_dir}, got {forecaster._audit_dir}"
+        )
+        # EnsembleConfig must be constructed with only valid fields
+        assert forecaster._ensemble_config is not None
+        assert forecaster._ensemble_config.diversity_tolerance == 0.25
+
+    def test_forecaster_construction_succeeds_without_audit_log_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """Forecaster must still construct correctly when audit_log_dir is absent."""
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+        cfg = TimeSeriesForecasterConfig(
+            ensemble_kwargs={"diversity_tolerance": 0.30}
+        )
+        forecaster = TimeSeriesForecaster(config=cfg)
+        assert forecaster._ensemble_config is not None
+        assert forecaster._ensemble_config.diversity_tolerance == 0.30
+
+    def test_unknown_ensemble_kwargs_keys_stripped_not_propagated(
+        self, tmp_path: Path
+    ) -> None:
+        """Any unrecognised key in ensemble_kwargs must not reach EnsembleConfig.
+
+        This is the adversarial regression: if a new routing key is added to
+        ensemble_kwargs and EnsembleConfig is not updated, construction must still
+        succeed (graceful strip), not raise TypeError.
+        """
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+        cfg = TimeSeriesForecasterConfig(
+            ensemble_kwargs={
+                "audit_log_dir": "logs/forecast_audits/research",
+                "totally_unknown_routing_key": "should_be_stripped",
+                "another_future_key": 42,
+                "diversity_tolerance": 0.20,
+            }
+        )
+        # Must not raise, even with multiple unknown keys
+        forecaster = TimeSeriesForecaster(config=cfg)
+        assert forecaster._ensemble_config is not None
+        assert forecaster._ensemble_config.diversity_tolerance == 0.20
+        # Unknown keys must not appear on EnsembleConfig
+        assert not hasattr(forecaster._ensemble_config, "totally_unknown_routing_key")
+        assert not hasattr(forecaster._ensemble_config, "another_future_key")
 
 
 # ---------------------------------------------------------------------------

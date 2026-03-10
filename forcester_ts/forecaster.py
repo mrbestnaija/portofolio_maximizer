@@ -143,8 +143,19 @@ class TimeSeriesForecaster:
                 len(self.config.ensemble_kwargs.get('candidate_weights', [])),
             )
 
+        # Strip forecaster-routing keys (e.g. audit_log_dir) that are not
+        # EnsembleConfig dataclass fields.  Callers may embed routing hints
+        # inside ensemble_kwargs for convenience; the EnsembleConfig boundary
+        # must not receive unknown kwargs or a TypeError silently kills the
+        # whole forecaster while the pipeline reports success with 0 forecasts.
+        import dataclasses as _dc
+        _ensemble_valid_fields = {f.name for f in _dc.fields(EnsembleConfig)}
+        _ensemble_kw = {
+            k: v for k, v in self.config.ensemble_kwargs.items()
+            if k in _ensemble_valid_fields
+        }
         self._ensemble_config = (
-            EnsembleConfig(**self.config.ensemble_kwargs)
+            EnsembleConfig(**_ensemble_kw)
             if self.config.ensemble_enabled
             else EnsembleConfig(enabled=False)
         )

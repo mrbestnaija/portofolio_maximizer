@@ -2216,6 +2216,18 @@ def execute_pipeline(
                     if successful_forecasts < len(ticker_list):
                         missing = [t for t in ticker_list if t not in forecasts or 'error' in forecasts[t]]
                         logger.warning("  WARN Forecasting skipped for: %s", ", ".join(missing))
+                    if successful_forecasts == 0 and len(ticker_list) > 0:
+                        # All forecasts failed — pipeline stage is DEGRADED, not healthy.
+                        # Common cause: EnsembleConfig boundary violation (unknown kwargs).
+                        # Errors are stored in forecasts[ticker]['error'] for diagnosis.
+                        _errors = {t: forecasts[t].get('error', 'unknown') for t in ticker_list if t in forecasts}
+                        logger.error(
+                            "DEGRADED_FORECAST: 0/%d forecasts succeeded. "
+                            "Signal generation and downstream gates will see no evidence. "
+                            "First error: %s",
+                            len(ticker_list),
+                            next(iter(_errors.values()), "no error recorded"),
+                        )
 
                     try:
                         _generate_visual_dashboards(pipeline_cfg, db_manager, ticker_list)
