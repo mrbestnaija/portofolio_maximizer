@@ -105,6 +105,19 @@ def _make_minimal_forecaster(*, residual_experiment_enabled: bool = False) -> Ti
     )
 
 
+def _make_valid_mock_residual_model(residual_values) -> mock.MagicMock:
+    """Mock residual model that clears predicted-path gates in artifact builder."""
+    m = mock.MagicMock()
+    m.predict.return_value = _series(residual_values)
+    m._phi = 0.42
+    m._intercept = 0.01
+    m._n_train = 50
+    m._anchor_rmse_proxy = 5.0
+    m._skip_reason = None
+    m._reason_code = "OK"
+    return m
+
+
 # ---------------------------------------------------------------------------
 # U1-U5: standalone build_residual_ensemble()
 # ---------------------------------------------------------------------------
@@ -333,15 +346,17 @@ class TestForecasterIntegration:
         anchor_vals = np.linspace(100.0, 105.0, 5)
         fake_anchor = _series(anchor_vals)
         # Mock residual model — predict() must accept keyword args matching Phase 2 API.
-        mock_model = mock.MagicMock()
-        mock_model.predict.return_value = _series(np.ones(5))
-        f._residual_model = mock_model
+        f._residual_model = _make_valid_mock_residual_model([0.5, -0.4, 0.3, -0.2, 0.1])
+        f._residual_model_oos_n = 25
 
         fake_payload = {"forecast": fake_anchor, "lower_ci": None, "upper_ci": None}
         artifact = f._build_residual_experiment_artifact({"mssa_rl_forecast": fake_payload})
 
         assert artifact["residual_status"] == "active"
         assert artifact["residual_active"] is True
+        assert artifact["residual_signal_valid"] is True
+        assert artifact["correction_applied"] is True
+        assert artifact["reason_code"] == "OK"
         assert artifact["n_corrected"] == 5
         assert _CANONICAL_FIELDS.issubset(artifact.keys())
         # y_hat_* must be plain lists — not pd.Series — for JSON serialization.
@@ -351,18 +366,16 @@ class TestForecasterIntegration:
         assert isinstance(artifact["y_hat_anchor"], list), (
             "y_hat_anchor must be a plain list, not a pd.Series"
         )
-        # Combined = anchor + 1 everywhere
+        # Combined = anchor + residual path.
         np.testing.assert_allclose(
             artifact["y_hat_residual_ensemble"],
-            (anchor_vals + 1.0).tolist(),
+            (anchor_vals + np.array([0.5, -0.4, 0.3, -0.2, 0.1])).tolist(),
         )
 
     def test_i3_metric_fields_still_none_in_active_phase1(self):
         """Even when active, Phase 1 never populates audit-time metric fields."""
         f = _make_minimal_forecaster(residual_experiment_enabled=True)
-        mock_model = mock.MagicMock()
-        mock_model.predict.return_value = _series([0.5, 0.5, 0.5])
-        f._residual_model = mock_model
+        f._residual_model = _make_valid_mock_residual_model([0.5, -0.4, 0.3])
 
         fake_payload = {"forecast": _series([100.0, 101.0, 102.0]),
                         "lower_ci": None, "upper_ci": None}
@@ -373,6 +386,34 @@ class TestForecasterIntegration:
             assert artifact[field] is None, (
                 f"Phase 1 must not populate {field} — it requires realized prices"
             )
+
+    def test_i3_predicted_constant_path_skips_with_reason_code(self):
+        f = _make_minimal_forecaster(residual_experiment_enabled=True)
+        f._residual_model = _make_valid_mock_residual_model([1.0, 1.0, 1.0, 1.0, 1.0])
+        fake_payload = {
+            "forecast": _series([100.0, 101.0, 102.0, 103.0, 104.0]),
+            "lower_ci": None,
+            "upper_ci": None,
+        }
+        artifact = f._build_residual_experiment_artifact({"mssa_rl_forecast": fake_payload})
+        assert artifact["residual_status"] == "inactive"
+        assert artifact["correction_applied"] is False
+        assert artifact["reason_code"] == "PREDICTED_RESIDUAL_TOO_CONSTANT"
+
+    def test_i3_predicted_mean_too_large_skips_with_reason_code(self):
+        f = _make_minimal_forecaster(residual_experiment_enabled=True)
+        model = _make_valid_mock_residual_model([25.0, 10.0, 20.0, 15.0, 30.0])
+        model._anchor_rmse_proxy = 5.0
+        f._residual_model = model
+        fake_payload = {
+            "forecast": _series([100.0, 101.0, 102.0, 103.0, 104.0]),
+            "lower_ci": None,
+            "upper_ci": None,
+        }
+        artifact = f._build_residual_experiment_artifact({"mssa_rl_forecast": fake_payload})
+        assert artifact["residual_status"] == "inactive"
+        assert artifact["correction_applied"] is False
+        assert artifact["reason_code"] == "PREDICTED_MEAN_TOO_LARGE"
 
     def test_i4_experiment_enabled_does_not_change_default_forecast(self):
         """Enabling the experiment must not alter mean_forecast or default_model."""
@@ -472,9 +513,7 @@ class TestSchemaContract:
         """When active, y_hat_anchor and y_hat_residual_ensemble must be list, not Series."""
         f = _make_minimal_forecaster(residual_experiment_enabled=True)
         anchor_vals = np.linspace(100.0, 105.0, 5)
-        mock_model = mock.MagicMock()
-        mock_model.predict.return_value = _series(np.ones(5))
-        f._residual_model = mock_model
+        f._residual_model = _make_valid_mock_residual_model([0.5, -0.4, 0.3, -0.2, 0.1])
         fake_payload = {"forecast": _series(anchor_vals), "lower_ci": None, "upper_ci": None}
         art = f._build_residual_experiment_artifact({"mssa_rl_forecast": fake_payload})
         assert isinstance(art["y_hat_anchor"], list)
@@ -540,7 +579,7 @@ class TestResidualModelPhase2:
 
     def test_r5_ar1_structure_captured_when_phi_strong(self):
         """RC1 + RC4: AR(1) zero-mean residuals with phi=0.5 → gate passes, phi estimated."""
-        oos_residuals = _ar1_residuals(phi=0.5, n=50, seed=42)
+        oos_residuals = _ar1_residuals(phi=0.3, n=60, seed=42, noise_std=0.2)
         m = ResidualModel()
         m.fit_on_oos_residuals(oos_residuals)
         # With 50 zero-mean AR(1) points the OLS estimate should clear the 0.15 gate.
@@ -554,10 +593,26 @@ class TestResidualModelPhase2:
         anchor = _series(np.linspace(100.0, 110.0, 30))
         m = ResidualModel()
         # Use AR(1) data so RC4 gate passes and predict() can be called.
-        m.fit_on_oos_residuals(_ar1_residuals(phi=0.5, n=30, seed=1))
+        m.fit_on_oos_residuals(_ar1_residuals(phi=0.3, n=100, seed=1, noise_std=0.2))
         assert m.is_fitted is True, f"RC4 gate fired unexpectedly: {m._skip_reason}"
         pred = m.predict(horizon=30, index=anchor.index)
         pd.testing.assert_index_equal(pred.index, anchor.index)
+
+    def test_r6_local_usefulness_gate_sets_reason_code(self):
+        """Final local usefulness gate blocks correction when validation worsens RMSE."""
+        oos_residuals = _ar1_residuals(phi=0.3, n=160, seed=42, noise_std=0.2)
+        m = ResidualModel()
+
+        with mock.patch.object(
+            ResidualModel,
+            "_rollout_ar1",
+            side_effect=lambda phi, intercept, seed, horizon: np.full(horizon, 100.0),
+        ):
+            m.fit_on_oos_residuals(oos_residuals)
+
+        assert m.is_fitted is False
+        assert m._reason_code == "LOCAL_USEFULNESS_FAIL"
+        assert m._skip_reason is not None
 
     def test_r7_phi_clamped_to_stationary(self):
         """Even on explosive data, phi stays within (-0.99, 0.99)."""
@@ -694,6 +749,8 @@ class TestRC1RC4Redesign:
         mock_model._phi = 0.42
         mock_model._intercept = 0.01
         mock_model._n_train = 50
+        mock_model._anchor_rmse_proxy = 5.0
+        mock_model._skip_reason = None
         mock_model.predict.return_value = _series(np.zeros(5))
         f._residual_model = mock_model
         f._residual_model_oos_n = 25
@@ -708,6 +765,9 @@ class TestRC1RC4Redesign:
         assert art["n_train_residuals"] == 50
         assert art["oos_n_used"] == 25
         assert art["skip_reason"] is None
+        assert art["residual_signal_valid"] is True
+        assert art["correction_applied"] is True
+        assert art["reason_code"] == "OK"
 
 
 # ---------------------------------------------------------------------------
@@ -732,9 +792,7 @@ class TestInstrumentationWire:
         """y_hat_* stored in instrumentation must be plain lists (not Series)."""
         f = _make_minimal_forecaster(residual_experiment_enabled=True)
         anchor_vals = np.linspace(100.0, 105.0, 5)
-        mock_model = mock.MagicMock()
-        mock_model.predict.return_value = _series(np.ones(5))
-        f._residual_model = mock_model
+        f._residual_model = _make_valid_mock_residual_model([0.5, -0.4, 0.3, -0.2, 0.1])
         fake_payload = {"forecast": _series(anchor_vals), "lower_ci": None, "upper_ci": None}
         artifact = f._build_residual_experiment_artifact({"mssa_rl_forecast": fake_payload})
         f._instrumentation.record_artifact("residual_experiment", artifact)
@@ -1101,9 +1159,10 @@ class TestRC5RC6RC7Gates:
         """Large intercept / (1 - phi) relative to residual std triggers RC6."""
         # phi=0.50, intercept=10.0 → LRM = 10 / 0.5 = 20.0
         # residual_std ≈ 0.05 (tiny noise) → ratio = 20 / 0.05 = 400 >> 2.0
-        oos = self._biased_ar1(phi=0.50, intercept=10.0, n=80, seed=5)
+        oos = _ar1_residuals(phi=0.50, n=80, seed=5, noise_std=0.05)
         m = ResidualModel()
-        m.fit_on_oos_residuals(oos)
+        with mock.patch.object(ResidualModel, "_fit_ar1", return_value=(10.0, 0.5)):
+            m.fit_on_oos_residuals(oos)
         assert m.is_fitted is False
         assert m._skip_reason is not None
         assert "bias_dominated_long_run_mean" in m._skip_reason

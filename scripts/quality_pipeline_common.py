@@ -401,6 +401,13 @@ def extract_residual_experiment_diagnostics(
     fields["residual_status"] = _parse_optional_str(residual_block, "residual_status", errors)
     fields["residual_active"] = _parse_optional_bool(residual_block, "residual_active", errors)
     fields["reason"] = _parse_optional_str(residual_block, "reason", errors)
+    fields["residual_signal_valid"] = _parse_optional_bool(
+        residual_block, "residual_signal_valid", errors
+    )
+    fields["correction_applied"] = _parse_optional_bool(
+        residual_block, "correction_applied", errors
+    )
+    fields["reason_code"] = _parse_optional_str(residual_block, "reason_code", errors)
 
     fields["y_hat_anchor"] = _parse_optional_float_list(residual_block, "y_hat_anchor", errors)
     fields["y_hat_residual_ensemble"] = _parse_optional_float_list(

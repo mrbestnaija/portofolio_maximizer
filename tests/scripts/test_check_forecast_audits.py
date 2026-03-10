@@ -1298,6 +1298,161 @@ def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: p
     assert excinfo.value.code != 0
 
 
+def test_check_forecast_audits_failure_writes_latest_summary_with_generated_utc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2024-01-01",
+        end="2024-02-01",
+        length=220,
+        horizon=30,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 5.0},
+            "samossa": {"rmse": 5.0},
+            "ensemble": {"rmse": 8.0},
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
+
+    summary_path = tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "FAIL"
+    assert summary["exit_code"] == 1
+    assert isinstance(summary.get("generated_utc"), str) and summary["generated_utc"]
+    assert summary["audit_dir"] == str(audit_dir)
+    assert summary["max_files"] == 50
+    assert summary["scope"]["include_research"] is False
+
+
+def test_check_forecast_audits_failure_summary_preserves_outcome_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    ts_signal_id = "ts_AAPL_20240101T000000Z_dead_0001"
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2023-11-01",
+        end="2024-01-01",
+        length=220,
+        horizon=30,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 5.0},
+            "samossa": {"rmse": 5.0},
+            "ensemble": {"rmse": 8.0},
+        },
+        ticker="AAPL",
+        signal_context={
+            "context_type": "TRADE",
+            "ts_signal_id": ts_signal_id,
+            "run_id": "20240101_000000",
+            "entry_ts": "2024-01-01T00:00:00+00:00",
+            "forecast_horizon": 30,
+        },
+    )
+
+    db_path = tmp_path / "portfolio_maximizer.db"
+    _write_closed_trades_db(
+        db_path,
+        [
+            {
+                "ts_signal_id": ts_signal_id,
+                "is_close": 1,
+                "is_diagnostic": 0,
+                "is_synthetic": 0,
+            }
+        ],
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--db",
+            str(db_path),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
+
+    summary_path = tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "FAIL"
+    assert len(summary["dataset_windows"]) == 1
+    assert summary["dataset_windows"][0]["outcome_status"] == "MATCHED"
+    assert bool(summary["dataset_windows"][0]["counts_toward_linkage_denominator"]) is True
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 1
+
+
 def test_check_forecast_audits_no_lift_soft_mode_sets_disable_default_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

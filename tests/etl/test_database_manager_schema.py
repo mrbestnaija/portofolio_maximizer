@@ -383,3 +383,63 @@ def test_performance_summary_filters_by_run_id(tmp_path: Path):
         assert overall["total_trades"] == 3
     finally:
         manager.close()
+
+
+def test_reject_live_close_without_entry_trade_id(tmp_path: Path):
+    db_path = tmp_path / "live_close_guard.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        close_id = manager.save_trade_execution(
+            ticker="AAPL",
+            trade_date="2026-03-09",
+            action="SELL",
+            shares=1,
+            price=100.0,
+            total_value=100.0,
+            execution_mode="live",
+            is_close=True,
+            entry_trade_id=None,
+            is_synthetic=0,
+        )
+        assert close_id == -1
+        row = manager.conn.execute("SELECT COUNT(*) AS n FROM trade_executions").fetchone()
+        assert int(row["n"]) == 0
+    finally:
+        manager.close()
+
+
+def test_reject_live_close_with_cross_provenance_entry(tmp_path: Path):
+    db_path = tmp_path / "live_close_provenance_guard.db"
+    manager = DatabaseManager(str(db_path))
+    try:
+        open_id = manager.save_trade_execution(
+            ticker="TSLA",
+            trade_date="2026-03-09",
+            action="SELL",
+            shares=1,
+            price=100.0,
+            total_value=100.0,
+            execution_mode="synthetic",
+            is_close=False,
+            is_synthetic=1,
+        )
+        assert open_id > 0
+
+        close_id = manager.save_trade_execution(
+            ticker="TSLA",
+            trade_date="2026-03-10",
+            action="BUY",
+            shares=1,
+            price=101.0,
+            total_value=101.0,
+            execution_mode="live",
+            is_close=True,
+            entry_trade_id=open_id,
+            is_synthetic=0,
+        )
+        assert close_id == -1
+
+        row = manager.conn.execute("SELECT COUNT(*) AS n FROM trade_executions").fetchone()
+        assert int(row["n"]) == 1
+    finally:
+        manager.close()

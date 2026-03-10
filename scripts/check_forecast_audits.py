@@ -240,6 +240,347 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
         raise last_error
 
 
+def _write_summary_with_guard(path: Path, payload: Dict[str, Any]) -> None:
+    required = (
+        "audit_dir",
+        "audit_roots",
+        "generated_utc",
+        "source_script",
+        "schema_version",
+        "max_files",
+        "scope",
+    )
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError("summary_missing_required_fields:" + ",".join(missing))
+    _write_json_atomic(path, payload)
+
+
+def _build_failure_dataset_snapshot(
+    *,
+    audit_roots: List[Path],
+    max_files: int,
+    db_path: Optional[Path],
+    min_forecast_horizon: Optional[int],
+    generated_utc: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool, Optional[str]]:
+    files = _collect_audit_files(audit_roots=audit_roots, max_files=max_files)
+
+    def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
+        dataset = audit.get("dataset") or {}
+        ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
+        return (
+            ticker,
+            dataset.get("start"),
+            dataset.get("end"),
+            dataset.get("length"),
+            dataset.get("forecast_horizon"),
+        )
+
+    parseable_count = 0
+    parse_error_count = 0
+    dedup_map: Dict[Tuple[Any, ...], Tuple[Path, Dict[str, Any]]] = {}
+    horizon_filtered_count = 0
+
+    for path in files:
+        audit, _ = _load_audit_with_error(path)
+        if not audit:
+            parse_error_count += 1
+            continue
+        parseable_count += 1
+        if min_forecast_horizon is not None:
+            horizon = _parse_non_negative_int((audit.get("dataset") or {}).get("forecast_horizon"))
+            if horizon is None or horizon < min_forecast_horizon:
+                horizon_filtered_count += 1
+                continue
+        key = _outcome_dedupe_key_from_audit(audit)
+        if key not in dedup_map:
+            dedup_map[key] = (path, audit)
+
+    outcomes_loaded = False
+    outcome_join_error: Optional[str] = None
+    closed_trade_counts: Dict[str, int] = {}
+    if db_path is not None:
+        outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(db_path)
+
+    now = now_utc()
+    dataset_entries: List[Dict[str, Any]] = []
+
+    outcome_windows_eligible = 0
+    outcome_windows_matched = 0
+    outcome_windows_missing = 0
+    outcome_windows_ambiguous = 0
+    outcome_windows_not_due = 0
+    outcome_windows_not_yet_eligible = 0
+    outcome_windows_invalid_context = 0
+    outcome_windows_outcomes_not_loaded = 0
+    outcome_windows_no_signal_id = 0
+    outcome_windows_non_trade_context = 0
+    outcome_windows_missing_execution_metadata = 0
+
+    def _legacy_to_status(outcome_status: str) -> str:
+        mapping = {
+            "MATCHED": "PASS",
+            "OUTCOME_MISSING": "FAIL",
+            "NOT_DUE": "INCONCLUSIVE_ALLOWED",
+            "INVALID_CONTEXT": "INVALID_CONTEXT",
+            "NON_TRADE_CONTEXT": "WARN",
+            "OUTCOMES_NOT_LOADED": "WARN",
+        }
+        return mapping.get(outcome_status, "WARN")
+
+    for path, audit in dedup_map.values():
+        ds = (audit or {}).get("dataset") or {}
+        signal_context = (audit or {}).get("signal_context") or {}
+        if not isinstance(signal_context, dict):
+            signal_context = {}
+
+        context_type = str(signal_context.get("context_type") or "").strip().upper() or "TRADE"
+        raw_ts_signal_id = signal_context.get("ts_signal_id")
+        ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
+        ts_signal_id = ts_signal_id or None
+
+        expected_close, expected_close_source = compute_expected_close(signal_context, ds)
+        meta = _extract_window_metadata(audit or {})
+
+        entry: Dict[str, Any] = {
+            "file": path.name,
+            "start": ds.get("start"),
+            "end": ds.get("end"),
+            "length": ds.get("length"),
+            "forecast_horizon": ds.get("forecast_horizon"),
+            "ticker": meta.get("ticker"),
+            "detected_regime": meta.get("detected_regime"),
+            "end_day": meta.get("end_day"),
+            "context_type": context_type,
+            "ts_signal_id": ts_signal_id,
+            "run_id": signal_context.get("run_id"),
+            "entry_ts": signal_context.get("entry_ts"),
+            "signal_context_missing": bool(signal_context.get("signal_context_missing")),
+            "dataset_forecast_horizon": ds.get("forecast_horizon"),
+            "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+            "expected_close_ts": expected_close.isoformat() if expected_close else None,
+            "expected_close_source": expected_close_source,
+            "outcome_status": None,
+            "outcome_reason": None,
+        }
+
+        ticker = str(entry.get("ticker") or "").strip().upper()
+        run_id = str(entry.get("run_id") or "").strip()
+        entry_ts_raw = str(entry.get("entry_ts") or "").strip()
+        signal_horizon = _parse_non_negative_int(entry.get("signal_forecast_horizon"))
+        dataset_horizon = _parse_non_negative_int(entry.get("dataset_forecast_horizon"))
+        expected_close_ts = _parse_utc_datetime(entry.get("expected_close_ts"))
+        entry_ts = _parse_utc_datetime(entry.get("entry_ts"))
+
+        if context_type != "TRADE":
+            entry["outcome_status"] = "NON_TRADE_CONTEXT"
+            entry["outcome_reason"] = "NON_TRADE_CONTEXT"
+            outcome_windows_non_trade_context += 1
+        elif not ticker:
+            entry["outcome_status"] = "NON_TRADE_CONTEXT"
+            entry["outcome_reason"] = "MISSING_TICKER"
+            outcome_windows_non_trade_context += 1
+        elif not run_id or not entry_ts_raw:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "MISSING_EXECUTION_METADATA"
+            outcome_windows_missing_execution_metadata += 1
+            outcome_windows_invalid_context += 1
+        elif not ts_signal_id:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "MISSING_SIGNAL_ID"
+            outcome_windows_no_signal_id += 1
+            outcome_windows_invalid_context += 1
+        elif (
+            signal_horizon is not None
+            and dataset_horizon is not None
+            and signal_horizon != dataset_horizon
+        ):
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "HORIZON_MISMATCH"
+            outcome_windows_invalid_context += 1
+        elif expected_close_ts is None:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "EXPECTED_CLOSE_UNAVAILABLE"
+            outcome_windows_invalid_context += 1
+        elif entry_ts is not None and expected_close_ts < entry_ts:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "CAUSALITY_VIOLATION"
+            outcome_windows_invalid_context += 1
+        elif (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now:
+            entry["outcome_status"] = "NOT_DUE"
+            entry["outcome_reason"] = "OUTCOME_WINDOW_OPEN"
+            outcome_windows_not_due += 1
+            outcome_windows_not_yet_eligible += 1
+        elif not outcomes_loaded:
+            entry["outcome_status"] = "OUTCOMES_NOT_LOADED"
+            entry["outcome_reason"] = "OUTCOME_JOIN_UNAVAILABLE"
+            outcome_windows_outcomes_not_loaded += 1
+        else:
+            match_count = int(closed_trade_counts.get(ts_signal_id, 0))
+            entry["outcome_match_count"] = match_count
+            if match_count == 1:
+                entry["outcome_status"] = "MATCHED"
+                entry["outcome_reason"] = "ONE_TO_ONE_MATCH"
+                outcome_windows_eligible += 1
+                outcome_windows_matched += 1
+            elif match_count == 0:
+                entry["outcome_status"] = "OUTCOME_MISSING"
+                entry["outcome_reason"] = "DUE_BUT_MISSING_CLOSE"
+                outcome_windows_eligible += 1
+                outcome_windows_missing += 1
+            else:
+                entry["outcome_status"] = "INVALID_CONTEXT"
+                entry["outcome_reason"] = "AMBIGUOUS_MATCH"
+                outcome_windows_ambiguous += 1
+                outcome_windows_invalid_context += 1
+
+        outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
+        outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
+        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+        counts_toward_readiness = (
+            context_type == "TRADE"
+            and outcome_status not in {"INVALID_CONTEXT", "NON_TRADE_CONTEXT", "OUTCOMES_NOT_LOADED"}
+        )
+        severity = "LOW"
+        blocking = False
+        if outcome_status == "INVALID_CONTEXT":
+            severity = "HIGH"
+            blocking = True
+        elif outcome_status in {"OUTCOME_MISSING", "OUTCOMES_NOT_LOADED"}:
+            severity = "MEDIUM"
+        entry.update(
+            normalize_telemetry_payload(
+                {
+                    "status": _legacy_to_status(outcome_status),
+                    "reason_code": outcome_reason,
+                    "context_type": context_type,
+                    "severity": severity,
+                    "blocking": blocking,
+                    "counts_toward_readiness_denominator": counts_toward_readiness,
+                    "counts_toward_linkage_denominator": counts_toward_linkage,
+                    "generated_utc": generated_utc,
+                    "source_script": "scripts/check_forecast_audits.py",
+                },
+                source_script="scripts/check_forecast_audits.py",
+                generated_utc=generated_utc,
+            )
+        )
+        dataset_entries.append(entry)
+
+    readiness_denominator_included = sum(
+        1 for entry in dataset_entries if bool(entry.get("counts_toward_readiness_denominator"))
+    )
+    linkage_denominator_included = sum(
+        1 for entry in dataset_entries if bool(entry.get("counts_toward_linkage_denominator"))
+    )
+    readiness_excluded_non_trade = sum(
+        1
+        for entry in dataset_entries
+        if str(entry.get("outcome_status") or "").strip().upper() == "NON_TRADE_CONTEXT"
+    )
+    readiness_excluded_invalid = sum(
+        1
+        for entry in dataset_entries
+        if str(entry.get("outcome_status") or "").strip().upper() == "INVALID_CONTEXT"
+    )
+
+    window_counts = {
+        "n_raw_windows": len(files),
+        "n_parseable_windows": parseable_count,
+        "n_deduped_windows": len(dedup_map),
+        "n_outcome_deduped_windows": len(dedup_map),
+        "n_rmse_windows_processed": 0,
+        "n_rmse_windows_usable": 0,
+        "n_outcome_windows_eligible": outcome_windows_eligible,
+        "n_outcome_windows_matched": outcome_windows_matched,
+        "n_outcome_windows_missing": outcome_windows_missing,
+        "n_outcome_windows_ambiguous": outcome_windows_ambiguous,
+        "n_outcome_windows_not_due": outcome_windows_not_due,
+        "n_outcome_windows_not_yet_eligible": outcome_windows_not_yet_eligible,
+        "n_outcome_windows_invalid_context": outcome_windows_invalid_context,
+        "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
+        "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
+        "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
+        "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
+        "n_readiness_denominator_included": readiness_denominator_included,
+        "n_linkage_denominator_included": linkage_denominator_included,
+        "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+        "n_readiness_excluded_invalid_context": readiness_excluded_invalid,
+        "n_horizon_filtered_windows": horizon_filtered_count,
+    }
+
+    return dataset_entries, window_counts, outcomes_loaded, outcome_join_error
+
+
+def _emit_failure_summary_and_exit(
+    *,
+    message: str,
+    audit_dir: Path,
+    audit_roots: List[Path],
+    include_research: bool,
+    max_files: int,
+    db_path: Optional[Path] = None,
+    min_forecast_horizon: Optional[int] = None,
+    exit_code: int = 1,
+) -> None:
+    generated_utc = telemetry_now_utc()
+    cache_dir = Path("logs/forecast_audits_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "latest_summary.json"
+    dataset_entries, window_counts, outcomes_loaded, outcome_join_error = _build_failure_dataset_snapshot(
+        audit_roots=audit_roots,
+        max_files=int(max_files),
+        db_path=db_path,
+        min_forecast_horizon=min_forecast_horizon,
+        generated_utc=generated_utc,
+    )
+    summary: Dict[str, Any] = {
+        "audit_dir": str(audit_dir),
+        "audit_roots": [str(root) for root in audit_roots],
+        "generated_utc": generated_utc,
+        "source_script": "scripts/check_forecast_audits.py",
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "status": "PASS" if int(exit_code) == 0 else "FAIL",
+        "exit_code": int(exit_code),
+        "exit_reason": str(message).strip() or "UNSPECIFIED_FAILURE",
+        "max_files": int(max_files),
+        "scope": {
+            "include_research": bool(include_research),
+            "production_audit_only": not bool(include_research),
+        },
+        "window_counts": window_counts,
+        "dataset_windows": dataset_entries,
+        "telemetry_contract": normalize_telemetry_payload(
+            {
+                "schema_version": TELEMETRY_SCHEMA_VERSION,
+                "rmse_inputs_present": False,
+                "outcomes_loaded": outcomes_loaded,
+                "execution_log_loaded": False,
+                "outcome_join_attempted": db_path is not None,
+                "status": "FAIL",
+                "reason_code": "FAILURE_SUMMARY_EXIT",
+                "context_type": "TRADE",
+                "severity": "MEDIUM",
+                "blocking": True,
+                "counts_toward_readiness_denominator": False,
+                "counts_toward_linkage_denominator": False,
+                "generated_utc": generated_utc,
+                "source_script": "scripts/check_forecast_audits.py",
+                "outcome_join_error": outcome_join_error,
+            },
+            source_script="scripts/check_forecast_audits.py",
+            generated_utc=generated_utc,
+        ),
+        "cache_status": {"write_ok": True, "errors": []},
+    }
+    try:
+        _write_summary_with_guard(cache_path, summary)
+    except Exception as exc:
+        print(f"[WARN] forecast_audits_cache_write_failed target=latest_summary error={exc}")
+    raise SystemExit(int(exit_code))
+
+
 def _resolve_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
     roots: List[Path] = []
     seen: set[Path] = set()
@@ -608,11 +949,21 @@ def main() -> None:
         # logs/forecast_audits without production/research partitioning.
         audit_dir = DEFAULT_AUDIT_ROOT
     db_path = Path(args.db) if args.db else None
+    min_forecast_horizon: Optional[int] = None
     audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
     files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
     if not files:
         roots_text = ", ".join(str(root) for root in audit_roots)
-        raise SystemExit(f"No forecast_audit_*.json files found in: {roots_text}")
+        _emit_failure_summary_and_exit(
+            message=f"No forecast_audit_*.json files found in: {roots_text}",
+            audit_dir=audit_dir,
+            audit_roots=audit_roots,
+            include_research=bool(args.include_research),
+            max_files=int(args.max_files),
+            db_path=db_path,
+            min_forecast_horizon=min_forecast_horizon,
+            exit_code=1,
+        )
 
     monitoring_cfg = _load_monitoring_thresholds(
         Path(args.config_path) if args.config_path else None
@@ -857,16 +1208,35 @@ def main() -> None:
                 + int(manifest_stats.get("invalid_records", 0))
             )
             if not bool(manifest_stats.get("manifest_exists", False)):
-                raise SystemExit(
-                    f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}"
+                _emit_failure_summary_and_exit(
+                    message=(
+                        "Manifest integrity mode=fail but manifest file is missing: "
+                        f"{manifest_path}"
+                    ),
+                    audit_dir=audit_dir,
+                    audit_roots=audit_roots,
+                    include_research=bool(args.include_research),
+                    max_files=int(args.max_files),
+                    db_path=db_path,
+                    min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
             if unverified > 0:
-                raise SystemExit(
-                    "Manifest integrity failed: "
-                    f"missing={manifest_stats.get('missing', 0)} "
-                    f"mismatch={manifest_stats.get('mismatch', 0)} "
-                    f"hash_failed={manifest_stats.get('hash_failed', 0)} "
-                    f"invalid_records={manifest_stats.get('invalid_records', 0)}"
+                _emit_failure_summary_and_exit(
+                    message=(
+                        "Manifest integrity failed: "
+                        f"missing={manifest_stats.get('missing', 0)} "
+                        f"mismatch={manifest_stats.get('mismatch', 0)} "
+                        f"hash_failed={manifest_stats.get('hash_failed', 0)} "
+                        f"invalid_records={manifest_stats.get('invalid_records', 0)}"
+                    ),
+                    audit_dir=audit_dir,
+                    audit_roots=audit_roots,
+                    include_research=bool(args.include_research),
+                    max_files=int(args.max_files),
+                    db_path=db_path,
+                    min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
 
     violation_count = sum(1 for r in results if r.violation)
@@ -974,10 +1344,19 @@ def main() -> None:
         and max_missing_ensemble_rate >= 0
     ):
         if ensemble_missing_rate > max_missing_ensemble_rate:
-            raise SystemExit(
-                "Missing ensemble metric rate "
-                f"{ensemble_missing_rate:.2%} exceeds max "
-                f"{max_missing_ensemble_rate:.2%}"
+            _emit_failure_summary_and_exit(
+                message=(
+                    "Missing ensemble metric rate "
+                    f"{ensemble_missing_rate:.2%} exceeds max "
+                    f"{max_missing_ensemble_rate:.2%}"
+                ),
+                audit_dir=audit_dir,
+                audit_roots=audit_roots,
+                include_research=bool(args.include_research),
+                max_files=int(args.max_files),
+                db_path=db_path,
+                min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
             )
     if pct:
         print(
@@ -1005,10 +1384,19 @@ def main() -> None:
             )
         else:
             if recent_violation_rate > recent_window_max_violation_rate:
-                raise SystemExit(
-                    f"Recent-window violation rate {recent_violation_rate:.2%} exceeds "
-                    f"max-violation-rate {recent_window_max_violation_rate:.2%} "
-                    f"(window={recent_window_audits})"
+                _emit_failure_summary_and_exit(
+                    message=(
+                        f"Recent-window violation rate {recent_violation_rate:.2%} exceeds "
+                        f"max-violation-rate {recent_window_max_violation_rate:.2%} "
+                        f"(window={recent_window_audits})"
+                    ),
+                    audit_dir=audit_dir,
+                    audit_roots=audit_roots,
+                    include_research=bool(args.include_research),
+                    max_files=int(args.max_files),
+                    db_path=db_path,
+                    min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
             if (
                 recent_window_max_p90_rmse_ratio is not None
@@ -1016,10 +1404,19 @@ def main() -> None:
                 and recent_pct.get(0.9) is not None
                 and float(recent_pct.get(0.9)) > float(recent_window_max_p90_rmse_ratio)
             ):
-                raise SystemExit(
-                    f"Recent-window p90 RMSE ratio {float(recent_pct.get(0.9)):.3f} exceeds "
-                    f"{float(recent_window_max_p90_rmse_ratio):.3f} "
-                    f"(window={recent_window_audits})"
+                _emit_failure_summary_and_exit(
+                    message=(
+                        f"Recent-window p90 RMSE ratio {float(recent_pct.get(0.9)):.3f} exceeds "
+                        f"{float(recent_window_max_p90_rmse_ratio):.3f} "
+                        f"(window={recent_window_audits})"
+                    ),
+                    audit_dir=audit_dir,
+                    audit_roots=audit_roots,
+                    include_research=bool(args.include_research),
+                    max_files=int(args.max_files),
+                    db_path=db_path,
+                    min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
 
     warmup_required = max(min_effective_audits, holding_period, 0)
@@ -1031,19 +1428,37 @@ def main() -> None:
         if args.require_effective_audits is not None:
             explicit_required = int(args.require_effective_audits)
         if explicit_required is not None and effective_n < explicit_required:
-            raise SystemExit(
-                f"Insufficient effective audits for RMSE gating: effective_audits={effective_n} "
-                f"< required_audits={explicit_required}"
+            _emit_failure_summary_and_exit(
+                message=(
+                    "Insufficient effective audits for RMSE gating: "
+                    f"effective_audits={effective_n} < required_audits={explicit_required}"
+                ),
+                audit_dir=audit_dir,
+                audit_roots=audit_roots,
+                include_research=bool(args.include_research),
+                max_files=int(args.max_files),
+                db_path=db_path,
+                min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
             )
         if (
             fail_on_violation_during_holding_period
             and effective_n > 0
             and violation_rate > max_violation_rate
         ):
-            raise SystemExit(
-                f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
-                f"max-violation-rate {max_violation_rate:.2%} during holding period "
-                f"(effective_audits={effective_n} < required_audits={warmup_required})"
+            _emit_failure_summary_and_exit(
+                message=(
+                    f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
+                    f"max-violation-rate {max_violation_rate:.2%} during holding period "
+                    f"(effective_audits={effective_n} < required_audits={warmup_required})"
+                ),
+                audit_dir=audit_dir,
+                audit_roots=audit_roots,
+                include_research=bool(args.include_research),
+                max_files=int(args.max_files),
+                db_path=db_path,
+                min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
             )
         print(
             f"\nRMSE gate inconclusive: effective_audits={effective_n} "
@@ -1106,9 +1521,18 @@ def main() -> None:
                 decision = DEFAULT_DECISION_DISABLE
                 decision_reason = "insufficient lift vs baseline"
                 if disable_if_no_lift:
-                    raise SystemExit(
-                        "Ensemble shows insufficient lift over baseline during holding period; "
-                        "disable ensemble as default source of truth (reward-to-effort)."
+                    _emit_failure_summary_and_exit(
+                        message=(
+                            "Ensemble shows insufficient lift over baseline during holding period; "
+                            "disable ensemble as default source of truth (reward-to-effort)."
+                        ),
+                        audit_dir=audit_dir,
+                        audit_roots=audit_roots,
+                        include_research=bool(args.include_research),
+                        max_files=int(args.max_files),
+                        db_path=db_path,
+                        min_forecast_horizon=min_forecast_horizon,
+                        exit_code=1,
                     )
                 print(
                     "No-lift hard fail disabled by config; keeping ensemble in "
@@ -1122,9 +1546,18 @@ def main() -> None:
             decision_reason = (
                 f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
             )
-            raise SystemExit(
-                f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
-                f"max-violation-rate {max_violation_rate:.2%}"
+            _emit_failure_summary_and_exit(
+                message=(
+                    f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
+                    f"max-violation-rate {max_violation_rate:.2%}"
+                ),
+                audit_dir=audit_dir,
+                audit_roots=audit_roots,
+                include_research=bool(args.include_research),
+                max_files=int(args.max_files),
+                db_path=db_path,
+                min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
             )
 
         if promotion_margin > 0 and effective_n > 0 and decision == DEFAULT_DECISION_KEEP:
@@ -1386,9 +1819,18 @@ def main() -> None:
         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
         and (not outcomes_loaded or not outcome_join_attempted)
     ):
-        raise SystemExit(
-            "Telemetry contract violation: outcome window counts > 0 without "
-            "outcomes_loaded=true and outcome_join_attempted=true."
+        _emit_failure_summary_and_exit(
+            message=(
+                "Telemetry contract violation: outcome window counts > 0 without "
+                "outcomes_loaded=true and outcome_join_attempted=true."
+            ),
+            audit_dir=audit_dir,
+            audit_roots=audit_roots,
+            include_research=bool(args.include_research),
+            max_files=int(args.max_files),
+            db_path=db_path,
+            min_forecast_horizon=min_forecast_horizon,
+            exit_code=1,
         )
 
     if outcome_join_attempted and outcome_join_error:
@@ -1453,6 +1895,7 @@ def main() -> None:
         "generated_utc": generated_utc,
         "source_script": "scripts/check_forecast_audits.py",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "max_files": int(args.max_files),
         "effective_audits": effective_n,
         "effective_outcome_audits": outcome_windows_matched,
         "total_unique_audits": len(results),
@@ -1561,7 +2004,7 @@ def main() -> None:
         print(f"[WARN] forecast_audits_cache_write_failed target=ratio_distribution error={exc}")
     summary["cache_status"] = cache_status
     try:
-        _write_json_atomic(cache_path, summary)
+        _write_summary_with_guard(cache_path, summary)
     except Exception as exc:
         print(f"[WARN] forecast_audits_cache_write_failed target=latest_summary error={exc}")
 

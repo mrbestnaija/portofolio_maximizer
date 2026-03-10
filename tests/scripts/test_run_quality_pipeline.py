@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for scripts/run_quality_pipeline.py
 """
 from __future__ import annotations
@@ -31,10 +31,15 @@ def _seed_ohlcv(db_path: Path, ticker: str, rows: list[tuple[str, float]]) -> No
         conn.close()
 
 
+def _create_db_file(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_bytes(b"")
+
+
 def test_all_steps_pass(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
 
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
@@ -72,7 +77,7 @@ def test_all_steps_pass(tmp_path):
 def test_warn_when_partial_data(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
 
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
@@ -127,7 +132,7 @@ def test_error_when_chart_stage_reports_missing_artifacts(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
 
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
@@ -189,7 +194,7 @@ def test_residual_experiment_flag_off_keeps_default_step_count(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
 
     with patch(
         "scripts.run_quality_pipeline.compute_eligibility",
@@ -223,7 +228,7 @@ def test_residual_experiment_flag_on_writes_summary(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -295,7 +300,7 @@ def test_residual_experiment_flag_on_without_metrics_warns_skip(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -353,7 +358,7 @@ def test_residual_experiment_fallback_metrics_without_active_markers_is_not_coun
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -411,7 +416,7 @@ def test_residual_experiment_flag_on_not_fitted_is_skip_not_error(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -492,7 +497,7 @@ def test_residual_experiment_flag_on_uses_agent_a_fixture(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -547,7 +552,7 @@ def test_residual_experiment_malformed_payload_is_error(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -604,7 +609,7 @@ def test_residual_experiment_structural_only_window_is_reported_explicitly(tmp_p
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -676,7 +681,7 @@ def test_residual_experiment_observability_fields_are_preserved(tmp_path):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     (audit_dir / "forecast_audit_20260101_000000.json").write_text(
@@ -701,6 +706,9 @@ def test_residual_experiment_observability_fields_are_preserved(tmp_path):
                         "n_train_residuals": 120,
                         "oos_n_used": 30,
                         "skip_reason": None,
+                        "residual_signal_valid": True,
+                        "correction_applied": True,
+                        "reason_code": "OK",
                     }
                 }
             }
@@ -739,6 +747,9 @@ def test_residual_experiment_observability_fields_are_preserved(tmp_path):
     assert summary["windows"][0]["n_train_residuals"] == 120
     assert summary["windows"][0]["oos_n_used"] == 30
     assert summary["windows"][0]["skip_reason"] is None
+    assert summary["windows"][0]["residual_signal_valid"] is True
+    assert summary["windows"][0]["correction_applied"] is True
+    assert summary["windows"][0]["reason_code"] == "OK"
 
 
 def test_residual_experiment_backfills_realized_metrics_from_ohlcv(tmp_path):
@@ -942,7 +953,7 @@ def _run_residual_pipeline(tmp_path, audit_payloads):
     from scripts.run_quality_pipeline import run_quality_pipeline
 
     db = tmp_path / "db.db"
-    db.write_bytes(b"")
+    _create_db_file(db)
     audit_dir = tmp_path / "audits"
     audit_dir.mkdir(parents=True, exist_ok=True)
     for filename, payload in audit_payloads.items():
@@ -1000,7 +1011,7 @@ def test_early_abort_triggered_at_five_consecutive(tmp_path):
 
 def test_early_abort_resets_on_good_window(tmp_path):
     """A good window (rmse_ratio <= 1.02) in the middle resets the streak."""
-    # 3 bad, 1 good, 3 bad — max streak = 3, no abort
+    # 3 bad, 1 good, 3 bad â€” max streak = 3, no abort
     audits = {
         "forecast_audit_20260101_000000.json": _make_phase3_audit(1.05, seed=1),
         "forecast_audit_20260102_000000.json": _make_phase3_audit(1.05, seed=2),
@@ -1028,4 +1039,5 @@ def test_early_abort_not_triggered_when_rmse_ratio_null(tmp_path):
     summary = _run_residual_pipeline(tmp_path, audits)
     assert summary["early_abort_signal"] is False
     assert summary["early_abort_consecutive_rmse_above_threshold"] == 0
+
 

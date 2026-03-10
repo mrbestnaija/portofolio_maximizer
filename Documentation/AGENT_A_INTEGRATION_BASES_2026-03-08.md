@@ -216,3 +216,38 @@ Dependencies / constraints:
 - Dashboard JS parse sanity uses local `node` in verification command.
 - P4 fail-closed behavior assumes `run_all_gates.py` remains the canonical writer for `gate_status_latest.json`.
 - No strategy mechanics, thresholds, or DB schema changed.
+
+## 8) Agent A Offline Continuation (2026-03-09, Agent B executed)
+
+Scope executed while Agent A was offline:
+- `scripts/check_forecast_audits.py`
+- `scripts/production_audit_gate.py`
+- `tests/scripts/test_check_forecast_audits.py`
+- `tests/scripts/test_production_audit_gate.py`
+
+What changed:
+- Added failure-path summary persistence in `check_forecast_audits.py`:
+  - Every non-zero gate exit now writes `logs/forecast_audits_cache/latest_summary.json` with:
+    - `generated_utc`
+    - `status=FAIL`
+    - `exit_code`, `exit_reason`
+    - invocation scope (`audit_dir`, `audit_roots`, `max_files`, `scope`)
+- Added write-time summary guard:
+  - summary write now enforces required fields before persisting cache artifact.
+- Added binding-safe handling in `production_audit_gate.py`:
+  - on failed lift subprocess, retain provenance fields (`generated_utc`, scope, window_counts, etc.) instead of dropping summary to `{}`.
+  - preserves freshness/binding evaluation without reusing stale decision metrics.
+
+Resulting gate behavior (verified 2026-03-09):
+- `artifact_binding`: `PASS`
+- `ARTIFACT_STALE_OR_UNBOUND`: cleared
+- `EVIDENCE_HYGIENE_FAIL`: cleared
+- Remaining production readiness blockers: `GATES_FAIL`, `THIN_LINKAGE` (lift/profitability evidence lane)
+
+Verification evidence:
+- `python -m pytest tests/scripts/test_check_forecast_audits.py tests/scripts/test_production_audit_gate.py -q`
+  - `43 passed`
+- `python scripts/run_all_gates.py --json`
+  - production gate now reports `Artifact bind: PASS`
+- `python -m pytest -m "not gpu and not slow" --tb=short -q`
+  - `1836 passed, 8 skipped, 28 deselected, 7 xfailed`

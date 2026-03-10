@@ -535,6 +535,202 @@ def _safe_ratio(num: int, den: int) -> float:
     return float(num) / float(den)
 
 
+def _parse_timestamp_utc(raw: Any) -> Optional[datetime]:
+    """Best-effort ISO/SQLite timestamp parser returning timezone-aware UTC."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        # Handle trailing Z for strict UTC ISO strings.
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        # SQLite defaults (YYYY-MM-DD HH:MM:SS) without timezone.
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except Exception:
+                parsed = None
+        if parsed is None:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_latest_live_cycle_binding(db_path: Path) -> Dict[str, Any]:
+    """Load latest live-cycle provenance from trade_executions (best-effort)."""
+    result: Dict[str, Any] = {
+        "available": False,
+        "latest_live_cycle_ts_utc": None,
+        "latest_live_run_id": None,
+        "latest_live_trade_id": None,
+        "query_error": None,
+    }
+    if not db_path.exists():
+        result["query_error"] = f"db_not_found:{db_path}"
+        return result
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+
+        cols = {
+            str(row["name"]).strip()
+            for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()
+            if row and row["name"] is not None
+        }
+        if not cols:
+            result["query_error"] = "trade_executions_missing_or_unreadable"
+            return result
+
+        ts_candidates = [c for c in ("created_at", "bar_timestamp", "trade_date") if c in cols]
+        if not ts_candidates:
+            result["query_error"] = "trade_executions_missing_time_columns"
+            return result
+        ts_expr = "COALESCE(" + ", ".join(ts_candidates) + ")"
+
+        run_expr = "run_id" if "run_id" in cols else "NULL"
+        id_expr = "id" if "id" in cols else "NULL"
+
+        where = []
+        params: List[Any] = []
+        if "execution_mode" in cols:
+            where.append("LOWER(COALESCE(execution_mode, '')) = 'live'")
+        if "is_synthetic" in cols:
+            where.append("COALESCE(is_synthetic, 0) = 0")
+        if "is_diagnostic" in cols:
+            where.append("COALESCE(is_diagnostic, 0) = 0")
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        row = conn.execute(
+            f"""
+            SELECT
+                {id_expr} AS trade_id,
+                {run_expr} AS run_id,
+                {ts_expr} AS cycle_ts
+            FROM trade_executions
+            {where_sql}
+            ORDER BY cycle_ts DESC, trade_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if not row:
+            result["query_error"] = "no_live_cycles_found"
+            return result
+
+        parsed_ts = _parse_timestamp_utc(row["cycle_ts"])
+        result["available"] = True
+        result["latest_live_cycle_ts_utc"] = parsed_ts.isoformat() if parsed_ts else None
+        result["latest_live_run_id"] = str(row["run_id"]).strip() if row["run_id"] is not None else None
+        if result["latest_live_run_id"] == "":
+            result["latest_live_run_id"] = None
+        result["latest_live_trade_id"] = _safe_int(row["trade_id"], 0) if row["trade_id"] is not None else None
+        return result
+    except Exception as exc:
+        result["query_error"] = str(exc)
+        return result
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _build_linkage_waterfall(window_counts: Dict[str, Any], *, production_audit_only: bool) -> Dict[str, Any]:
+    """Build denominator waterfall counts for readiness diagnostics."""
+    raw_candidates = _safe_int(
+        window_counts.get("n_outcome_deduped_windows"),
+        _safe_int(window_counts.get("n_deduped_windows"), 0),
+    )
+    non_trade = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
+    invalid_context = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    linked = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
+    matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
+    readiness_included = _safe_int(window_counts.get("n_readiness_denominator_included"), 0)
+
+    production_only_count = max(0, raw_candidates - non_trade) if production_audit_only else raw_candidates
+    hygiene_pass_count = max(0, readiness_included)
+
+    return {
+        "raw_candidates": raw_candidates,
+        "production_only": production_only_count,
+        "linked": linked,
+        "hygiene_pass": hygiene_pass_count,
+        "matched": matched,
+        "excluded_non_trade_context": non_trade,
+        "excluded_invalid_context": invalid_context,
+        "matched_over_linked": _safe_ratio(matched, linked),
+        "linked_over_production_only": _safe_ratio(linked, production_only_count),
+        "hygiene_over_production_only": _safe_ratio(hygiene_pass_count, production_only_count),
+    }
+
+
+def _evaluate_artifact_binding(
+    *,
+    lift_summary: Dict[str, Any],
+    live_cycle_binding: Dict[str, Any],
+    repo_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate freshness + run/commit binding for production evidence."""
+    summary_generated_raw = (
+        lift_summary.get("generated_utc")
+        if isinstance(lift_summary, dict)
+        else None
+    )
+    summary_generated_ts = _parse_timestamp_utc(summary_generated_raw)
+    latest_live_raw = live_cycle_binding.get("latest_live_cycle_ts_utc")
+    latest_live_ts = _parse_timestamp_utc(latest_live_raw)
+    latest_live_run_id = (
+        str(live_cycle_binding.get("latest_live_run_id")).strip()
+        if live_cycle_binding.get("latest_live_run_id") is not None
+        else None
+    )
+    if latest_live_run_id == "":
+        latest_live_run_id = None
+
+    repo_head = (
+        str(repo_state.get("head")).strip()
+        if isinstance(repo_state, dict) and repo_state.get("head") is not None
+        else None
+    )
+    if repo_head == "":
+        repo_head = None
+
+    freshness_pass = False
+    reasons: List[str] = []
+    if latest_live_ts is None:
+        reasons.append("NO_LIVE_CYCLE_TIMESTAMP")
+    if summary_generated_ts is None:
+        reasons.append("MISSING_SUMMARY_GENERATED_TS")
+    if latest_live_ts is not None and summary_generated_ts is not None:
+        if summary_generated_ts >= latest_live_ts:
+            freshness_pass = True
+        else:
+            reasons.append("SUMMARY_STALE_BEFORE_LIVE_CYCLE")
+    if not latest_live_run_id:
+        reasons.append("MISSING_LIVE_RUN_ID")
+    if not repo_head:
+        reasons.append("MISSING_REPO_COMMIT_HASH")
+
+    binding_pass = bool(freshness_pass and latest_live_run_id and repo_head)
+    return {
+        "pass": binding_pass,
+        "reason_codes": reasons,
+        "summary_generated_utc": summary_generated_ts.isoformat() if summary_generated_ts else None,
+        "latest_live_cycle_ts_utc": latest_live_ts.isoformat() if latest_live_ts else None,
+        "latest_live_run_id": latest_live_run_id,
+        "repo_head": repo_head,
+        "freshness_pass": bool(freshness_pass),
+        "run_id_present": bool(latest_live_run_id),
+        "commit_hash_present": bool(repo_head),
+    }
+
+
 def _compute_lifecycle_integrity(
     db_path: Path,
 ) -> Dict[str, Any]:
@@ -678,16 +874,76 @@ def _summary_matches_invocation(
     *,
     audit_dir: Path,
     max_files: int,
+    include_research: bool,
 ) -> bool:
     if not _summary_matches_audit_dir(summary, audit_dir):
         return False
     raw_max_files = summary.get("max_files")
-    if raw_max_files is None:
+    if raw_max_files is not None:
+        try:
+            if int(raw_max_files) != int(max_files):
+                return False
+        except Exception:
+            return False
+
+    scope = summary.get("scope", {})
+    if isinstance(scope, dict):
+        raw_include_research = scope.get("include_research")
+        if raw_include_research is not None and bool(raw_include_research) != bool(include_research):
+            return False
+
+    return True
+
+
+def _fail_on_unknown_args(unknown: List[str]) -> None:
+    if not unknown:
+        return
+    msg = "Unknown args are not allowed (fail-closed to prevent wiring drift): " + " ".join(unknown)
+    print(f"[FAIL] {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _safe_bool(raw: Any, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
         return True
-    try:
-        return int(raw_max_files) == int(max_files)
-    except Exception:
+    if text in {"0", "false", "no", "n", "off"}:
         return False
+    return default
+
+
+def _summary_scope_flag(summary: Dict[str, Any], name: str) -> Optional[bool]:
+    scope = summary.get("scope", {})
+    if not isinstance(scope, dict):
+        return None
+    raw = scope.get(name)
+    if raw is None:
+        return None
+    return _safe_bool(raw)
+
+
+def _binding_safe_lift_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Retain only provenance/binding fields when lift command fails."""
+    if not isinstance(summary, dict):
+        return {}
+    keep = {
+        "audit_dir",
+        "audit_roots",
+        "generated_utc",
+        "source_script",
+        "schema_version",
+        "max_files",
+        "scope",
+        "window_counts",
+        "status",
+        "exit_code",
+        "exit_reason",
+    }
+    return {k: summary.get(k) for k in keep if k in summary}
 
 
 def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
@@ -863,8 +1119,7 @@ def main() -> int:
         help="OpenClaw command timeout in seconds (default: 20).",
     )
     args, unknown = parser.parse_known_args()
-    if unknown:
-        print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
+    _fail_on_unknown_args(unknown)
     python_bin = str(Path(args.python_bin))
     db_path = _resolve_path(repo_root, args.db)
     proof_requirements_path = _resolve_path(repo_root, args.proof_requirements)
@@ -916,18 +1171,32 @@ def main() -> int:
     lift_output_metrics = _extract_lift_output_metrics(lift_output)
 
     lift_summary = _safe_load_json(summary_cache_path) or {}
-    if lift_summary and not _summary_matches_invocation(
-        lift_summary,
-        audit_dir=audit_dir,
-        max_files=int(args.max_files),
-    ):
-        lift_summary = {}
+    summary_invocation_match = True
+    summary_mismatch_details: Dict[str, Any] = {}
+    if lift_summary:
+        summary_invocation_match = _summary_matches_invocation(
+            lift_summary,
+            audit_dir=audit_dir,
+            max_files=int(args.max_files),
+            include_research=bool(args.include_research),
+        )
+        if not summary_invocation_match:
+            summary_mismatch_details = {
+                "audit_dir": str(lift_summary.get("audit_dir")),
+                "max_files": lift_summary.get("max_files"),
+                "scope_include_research": _summary_scope_flag(lift_summary, "include_research"),
+                "expected_audit_dir": str(audit_dir),
+                "expected_max_files": int(args.max_files),
+                "expected_include_research": bool(args.include_research),
+            }
+            lift_summary = {}
 
     lift_status = "PASS"
     if lift_proc.returncode != 0:
         lift_status = "FAIL"
-        # Do not attach stale cached decision metadata when the active lift run failed.
-        lift_summary = {}
+        # Keep only binding/provenance fields for freshness checks on failed runs.
+        # Decision metrics still come from active subprocess output parsing.
+        lift_summary = _binding_safe_lift_summary(lift_summary)
     elif lift_inconclusive:
         lift_status = "INCONCLUSIVE"
 
@@ -990,7 +1259,16 @@ def main() -> int:
     if reconcile_result.get("requested"):
         reconcile_pass = str(reconcile_result.get("status") or "FAIL").upper() == "PASS"
 
-    gate_pass = lift_pass and proof_pass and reconcile_pass
+    repo_state = _collect_git_state(repo_root)
+    live_cycle_binding = _load_latest_live_cycle_binding(db_path)
+    artifact_binding = _evaluate_artifact_binding(
+        lift_summary=lift_summary,
+        live_cycle_binding=live_cycle_binding,
+        repo_state=repo_state,
+    )
+    artifact_binding_pass = bool(artifact_binding.get("pass", False))
+
+    gate_pass = lift_pass and proof_pass and reconcile_pass and artifact_binding_pass
     gate_status = "PASS" if gate_pass else "FAIL"
     if lift_inconclusive:
         gate_semantics_status = (
@@ -1023,6 +1301,10 @@ def main() -> int:
     evidence_hygiene_pass = (
         production_audit_only and non_trade_count == 0 and invalid_context_count == 0
     )
+    linkage_waterfall = _build_linkage_waterfall(
+        window_counts,
+        production_audit_only=production_audit_only,
+    )
 
     integrity_metrics = _compute_lifecycle_integrity(db_path)
     close_before_entry_count = _safe_int(integrity_metrics.get("close_before_entry_count"), 0)
@@ -1046,6 +1328,10 @@ def main() -> int:
         phase3_fail_reasons.append("EVIDENCE_HYGIENE_FAIL")
     if not integrity_pass:
         phase3_fail_reasons.append("HIGH_INTEGRITY_VIOLATION")
+    if not summary_invocation_match:
+        phase3_fail_reasons.append("SUMMARY_INVOCATION_MISMATCH")
+    if not artifact_binding_pass:
+        phase3_fail_reasons.append("ARTIFACT_STALE_OR_UNBOUND")
     phase3_reason = "READY" if phase3_ready else ",".join(phase3_fail_reasons)
 
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1063,7 +1349,7 @@ def main() -> int:
         "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
         "phase3_ready": bool(phase3_ready),
         "phase3_reason": phase3_reason,
-        "repo_state": _collect_git_state(repo_root),
+        "repo_state": repo_state,
         "inputs": {
             "db": str(db_path),
             "proof_requirements": str(proof_requirements_path),
@@ -1075,8 +1361,12 @@ def main() -> int:
             "include_research": bool(args.include_research),
             "require_profitable": bool(args.require_profitable),
             "unattended_profile": bool(args.unattended_profile),
-            "unknown_args_ignored": unknown,
+            "unknown_args_ignored": [],
         },
+        "summary_invocation_match": bool(summary_invocation_match),
+        "summary_invocation_mismatch": summary_mismatch_details,
+        "artifact_binding": artifact_binding,
+        "live_cycle_binding": live_cycle_binding,
         "reconciliation": reconcile_result,
         "lift_gate": {
             "status": lift_status,
@@ -1127,11 +1417,13 @@ def main() -> int:
             "linkage_pass": bool(linkage_pass),
             "evidence_hygiene_pass": bool(evidence_hygiene_pass),
             "integrity_pass": bool(integrity_pass),
+            "artifact_binding_pass": bool(artifact_binding_pass),
             "outcome_matched": outcome_matched,
             "outcome_eligible": outcome_eligible,
             "matched_over_eligible": matched_over_eligible,
             "non_trade_context_count": non_trade_count,
             "invalid_context_count": invalid_context_count,
+            "linkage_waterfall": linkage_waterfall,
             "production_audit_only": production_audit_only,
             "high_integrity_violation_count": high_integrity_violation_count,
             "close_before_entry_count": close_before_entry_count,
@@ -1192,6 +1484,19 @@ def main() -> int:
         f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "
         f"integrity_high={high_integrity_violation_count})"
     )
+    print(
+        "Artifact bind  : "
+        f"{'PASS' if artifact_binding_pass else 'FAIL'} "
+        f"(summary_ts={artifact_binding.get('summary_generated_utc')}, "
+        f"live_ts={artifact_binding.get('latest_live_cycle_ts_utc')}, "
+        f"run_id={artifact_binding.get('latest_live_run_id')}, "
+        f"commit={artifact_binding.get('repo_head')})"
+    )
+    if not artifact_binding_pass:
+        print(
+            "Artifact reason: "
+            f"{','.join(artifact_binding.get('reason_codes') or []) or 'UNKNOWN'}"
+        )
     if reconcile_result.get("requested"):
         print(
             "Reconcile step : "

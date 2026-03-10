@@ -31,6 +31,21 @@ AUDIT_DIR = pathlib.Path("logs/forecast_audits")
 CHECKPOINT_DIR = pathlib.Path("data/checkpoints")
 TESTING_DIR = pathlib.Path("data/testing")
 
+# Reason codes that indicate a residual correction was intentionally blocked by
+# model-safety gates (not a runtime failure).
+SKIPPED_BAD_SIGNAL_REASON_CODES = {
+    "PHI_TOO_SMALL",
+    "PHI_TOO_PERSISTENT",
+    "TOO_FEW_OOS_POINTS",
+    "NO_ANCHOR_RMSE_PROXY",
+    "LONG_RUN_MEAN_TOO_LARGE",
+    "POOR_TRAIN_DIRECTIONAL_USEFULNESS",
+    "LOCAL_USEFULNESS_FAIL",
+    "PREDICTED_RESIDUAL_TOO_CONSTANT",
+    "PREDICTED_MEAN_TOO_LARGE",
+    "ANCHOR_MISMATCH",
+}
+
 
 # ---------------------------------------------------------------------------
 # Realized-price loading
@@ -141,14 +156,42 @@ def _fingerprint(ds: dict) -> str:
     return hashlib.sha1(s.encode()).hexdigest()[:8]
 
 
+def _is_skipped_bad_signal(residual_block: dict) -> bool:
+    """Return True when the window was skipped by residual-signal safety gates."""
+    reason_code = str(residual_block.get("reason_code") or "").upper()
+    if reason_code in SKIPPED_BAD_SIGNAL_REASON_CODES:
+        return True
+    # Keep backward compatibility for artifacts that only emit free-text reason.
+    skip_reason = str(residual_block.get("skip_reason") or "").lower()
+    return any(
+        token in skip_reason
+        for token in (
+            "phi_too_small",
+            "high_phi_near_unit_root",
+            "bias_dominated_long_run_mean",
+            "poor_train_directional_usefulness",
+            "local_usefulness_fail",
+            "predicted residual too constant",
+            "predicted residual mean too large",
+            "anchor_mismatch",
+        )
+    )
+
+
 def collect_unique_active_audits() -> Dict[str, Tuple[pathlib.Path, dict]]:
-    """Dedup active audits by fingerprint; keep most recent file per fingerprint."""
+    """Dedup residual audits by fingerprint; keep most recent file per fingerprint."""
     best: Dict[str, Tuple[pathlib.Path, dict]] = {}
     for f in sorted(AUDIT_DIR.glob("forecast_audit_*.json")):
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             re = d.get("artifacts", {}).get("residual_experiment", {})
-            if re.get("residual_status") != "active" or not re.get("y_hat_anchor"):
+            if not isinstance(re, dict):
+                continue
+            status = str(re.get("residual_status") or "")
+            if status == "active":
+                if not re.get("y_hat_anchor"):
+                    continue
+            elif not _is_skipped_bad_signal(re):
                 continue
             ds = d.get("dataset", {})
             fp = _fingerprint(ds)
@@ -169,13 +212,19 @@ def patch_audit_file(
     re = d.setdefault("artifacts", {}).setdefault("residual_experiment", {})
     re.update(metrics)
     if dry_run:
-        log.info("[DRY-RUN] Would patch %s  rmse_ratio=%.4f", audit_path.name, metrics.get("rmse_ratio") or 0)
+        log.info(
+            "[DRY-RUN] PATCHED_PHASE3 %s  rmse_ratio=%.4f",
+            audit_path.name,
+            metrics.get("rmse_ratio") or 0,
+        )
         return
     audit_path.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    log.info("Patched  %s  rmse_ratio=%.4f  corr=%.3f",
-             audit_path.name,
-             metrics.get("rmse_ratio") or 0,
-             metrics.get("corr_anchor_residual") or 0)
+    log.info(
+        "PATCHED_PHASE3 %s  rmse_ratio=%.4f  corr=%.3f",
+        audit_path.name,
+        metrics.get("rmse_ratio") or 0,
+        metrics.get("corr_anchor_residual") or 0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +244,7 @@ def main(dry_run: bool = False) -> int:
                      realized_series.index[-1].date(),
                      realized_series.min(), realized_series.max())
         else:
-            log.info("Realized price series: 0 rows (empty — all windows will SKIP_PENDING_REALIZED)")
+            log.info("Realized price series: 0 rows (empty - all windows will SKIP_PENDING_REALIZED)")
     except RuntimeError as exc:
         log.error("Cannot load realized prices: %s", exc)
         return 1
@@ -210,6 +259,7 @@ def main(dry_run: bool = False) -> int:
     success = 0
     failed = 0
     skipped_no_realized = 0
+    skipped_bad_signal = 0
     already_done = 0
 
     for fp, (audit_path, d) in sorted(unique.items(), key=lambda x: x[1][1].get("dataset", {}).get("end", "")):
@@ -220,9 +270,23 @@ def main(dry_run: bool = False) -> int:
         y_hat_anchor = re.get("y_hat_anchor", [])
         y_hat_ens = re.get("y_hat_residual_ensemble", [])
 
+        if _is_skipped_bad_signal(re):
+            reason_code = str(re.get("reason_code") or "UNKNOWN")
+            log.info(
+                "  SKIPPED_BAD_SIGNAL: fp=%s end=%s reason_code=%s",
+                fp, dataset_end[:10], reason_code,
+            )
+            skipped_bad_signal += 1
+            continue
+
+        if re.get("residual_status") != "active" or not y_hat_anchor:
+            # Non-active windows that are not bad-signal skips are out of scope
+            # for Phase 3 metric patching.
+            continue
+
         # Skip if already Phase 3
         if re.get("phase") == 3 and re.get("rmse_anchor") is not None:
-            log.info("Already Phase 3: fp=%s  %s", fp, audit_path.name)
+            log.info("ALREADY_PHASE3: fp=%s  %s", fp, audit_path.name)
             already_done += 1
             continue
 
@@ -232,10 +296,10 @@ def main(dry_run: bool = False) -> int:
         try:
             realized = load_realized_prices(realized_series, dataset_end, forecast_horizon)
         except (ValueError, KeyError, IndexError) as exc:
-            # No realized prices yet for this window — expected for recent end dates.
+            # No realized prices yet for this window - expected for recent end dates.
             # Recorded as SKIP_PENDING_REALIZED, not failure.
             log.info(
-                "  SKIP_PENDING_REALIZED: fp=%s end=%s — %s",
+                "  SKIP_PENDING_REALIZED: fp=%s end=%s - %s",
                 fp, dataset_end[:10], exc,
             )
             skipped_no_realized += 1
@@ -246,13 +310,13 @@ def main(dry_run: bool = False) -> int:
             patch_audit_file(audit_path, metrics, dry_run=dry_run)
             success += 1
         except Exception as exc:
-            log.error("  ERROR computing/patching: fp=%s end=%s — %s", fp, dataset_end[:10], exc)
+            log.error("  FAIL: fp=%s end=%s - %s", fp, dataset_end[:10], exc)
             failed += 1
 
     log.info(
         "=== Summary: %d patched, %d already_phase3, "
-        "%d skip_pending_realized, %d true_failures ===",
-        success, already_done, skipped_no_realized, failed,
+        "%d skip_pending_realized, %d skipped_bad_signal, %d true_failures ===",
+        success, already_done, skipped_no_realized, skipped_bad_signal, failed,
     )
     if skipped_no_realized > 0:
         log.info(

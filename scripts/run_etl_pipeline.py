@@ -1886,7 +1886,8 @@ def execute_pipeline(
                                 k: v for k, v in mssa_rl_cfg.items() if k != 'enabled'
                             },
                             ensemble_kwargs={
-                                k: v for k, v in ensemble_cfg.items() if k != 'enabled'
+                                "audit_log_dir": "logs/forecast_audits/research",
+                                **{k: v for k, v in ensemble_cfg.items() if k != 'enabled'},
                             },
                             # Phase 7.5: Regime detection for adaptive model selection
                             regime_detection_enabled=regime_detection_cfg.get('enabled', False),

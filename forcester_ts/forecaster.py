@@ -1,4 +1,4 @@
-"""
+﻿"""
 Unified time-series forecaster orchestrating SARIMAX, GARCH, SAMOSSA,
 and the new MSSA-RL variant in parallel.
 """
@@ -55,10 +55,10 @@ def _series_to_plain_list(s: "Optional[pd.Series]") -> "Optional[list[float]]":
     """Convert a pd.Series to a plain list[float] for JSON-safe artifact emission.
 
     Agent B's _parse_optional_float_list() requires a plain list; the
-    instrumentation's _make_json_safe() converts Series to {"index":…,"values":…}
+    instrumentation's _make_json_safe() converts Series to {"index":â€¦,"values":â€¦}
     which the parser rejects.  This helper is called before record_artifact().
 
-    Returns None when input is None or conversion fails — never returns [].
+    Returns None when input is None or conversion fails â€” never returns [].
     """
     if s is None:
         return None
@@ -93,7 +93,7 @@ class TimeSeriesForecasterConfig:
     monte_carlo_config: Dict[str, Any] = field(default_factory=dict)
 
     # EXP-R5-001: Residual ensemble research experiment (Agent A).
-    # OFF by default — enabling this flag does NOT change any gate, default
+    # OFF by default â€” enabling this flag does NOT change any gate, default
     # model, or live strategy.  It only adds the `residual_experiment` artifact
     # to forecast() results for audit/research pipelines.
     residual_experiment_enabled: bool = False
@@ -204,10 +204,12 @@ class TimeSeriesForecaster:
         self._model_events: list[Dict[str, Any]] = []
         self._regime_result: Optional[Dict[str, Any]] = None
 
-        # EXP-R5-001: residual model placeholder — Phase 2 will wire a fitted
+        # EXP-R5-001: residual model placeholder â€” Phase 2 will wire a fitted
         # ResidualModel here.  None = experiment runs with no residual correction.
         self._residual_model: Optional[Any] = None
         self._residual_model_oos_n: Optional[int] = None  # RC3 observability
+        self._residual_model_reason_code: Optional[str] = None
+        self._residual_model_skip_reason: Optional[str] = None
         self._series_diagnostics: Dict[str, Any] = {}
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
@@ -222,7 +224,10 @@ class TimeSeriesForecaster:
         else:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         if audit_dir is None:
-            self._audit_dir = Path("logs/forecast_audits")
+            # Default to production subdir; gate reads from production/ when it exists.
+            # ETL/research callers should set TS_FORECAST_AUDIT_DIR=logs/forecast_audits/research.
+            prod_dir = Path("logs/forecast_audits/production")
+            self._audit_dir = prod_dir if prod_dir.exists() else Path("logs/forecast_audits")
         else:
             audit_text = str(audit_dir).strip()
             if audit_text.lower() in {"", "0", "off", "none", "false"}:
@@ -260,7 +265,7 @@ class TimeSeriesForecaster:
         Core features (always present):
           ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"]
 
-        Macro features (Signal Quality A — merged when macro_context is provided):
+        Macro features (Signal Quality A â€” merged when macro_context is provided):
           ["vix_level", "yield_spread_10y_2y", "sector_momentum_5d"]
 
         Macro columns absent from macro_context are silently omitted.
@@ -1054,7 +1059,7 @@ class TimeSeriesForecaster:
 
         # EXP-R5-001: auto-fit the residual model on OOS anchor residuals.
         # Only runs when enabled AND the anchor fitted successfully.
-        # Any failure leaves _residual_model=None → inactive artifact at forecast time.
+        # Any failure leaves _residual_model=None â†’ inactive artifact at forecast time.
         if self.config.residual_experiment_enabled and self._mssa is not None:
             self._fit_residual_model(price_series)
 
@@ -1349,7 +1354,7 @@ class TimeSeriesForecaster:
 
         # EXP-R5-001: residual experiment artifact (research-only, no gate impact).
         # Record in instrumentation so it appears under artifacts.residual_experiment
-        # in the audit JSON — that is where Agent B's extractor reads it from.
+        # in the audit JSON â€” that is where Agent B's extractor reads it from.
         results["residual_experiment"] = self._build_residual_experiment_artifact(results)
         self._instrumentation.record_artifact(
             "residual_experiment", results["residual_experiment"]
@@ -1366,7 +1371,7 @@ class TimeSeriesForecaster:
         return results
 
     # ------------------------------------------------------------------
-    # EXP-R5-001 — Research experiment artifact builder (Agent A, Phase 1)
+    # EXP-R5-001 â€” Research experiment artifact builder (Agent A, Phase 1)
     # ------------------------------------------------------------------
 
     def _build_residual_experiment_artifact(
@@ -1377,7 +1382,7 @@ class TimeSeriesForecaster:
         Phase 2 contract
         ----------------
         - When ``config.residual_experiment_enabled`` is False: returns the
-          canonical inactive schema immediately — zero impact on everything else.
+          canonical inactive schema immediately â€” zero impact on everything else.
         - When enabled but ``_residual_model`` is None: returns inactive schema
           with reason ``"residual_model_not_fitted"``.
         - When enabled and model fitted: produces a real residual forecast,
@@ -1391,55 +1396,118 @@ class TimeSeriesForecaster:
         """
         from .residual_ensemble import build_residual_ensemble, inactive_artifact
 
+        def _attach_observability(art: Dict[str, Any]) -> Dict[str, Any]:
+            model = self._residual_model
+            art["phi_hat"] = getattr(model, "_phi", None) if model is not None else None
+            art["intercept_hat"] = getattr(model, "_intercept", None) if model is not None else None
+            art["n_train_residuals"] = getattr(model, "_n_train", None) if model is not None else None
+            art["oos_n_used"] = self._residual_model_oos_n
+            art["skip_reason"] = getattr(model, "_skip_reason", None) if model is not None else None
+            return art
+
         if not self.config.residual_experiment_enabled:
-            return inactive_artifact(reason="experiment disabled (residual_experiment_enabled=False)")
+            return inactive_artifact(
+                reason="experiment disabled (residual_experiment_enabled=False)",
+                reason_code="EXPERIMENT_DISABLED",
+            )
 
         anchor_payload = results.get("mssa_rl_forecast")
         anchor_series = self._extract_series(anchor_payload)
         if anchor_series is None:
-            return inactive_artifact(reason="mssa_rl anchor forecast unavailable")
+            return inactive_artifact(
+                reason="mssa_rl anchor forecast unavailable",
+                reason_code="ANCHOR_UNAVAILABLE",
+            )
 
         if self._residual_model is None:
-            return inactive_artifact(reason="residual_model_not_fitted (Phase 2 pending)")
+            return inactive_artifact(
+                reason=self._residual_model_skip_reason
+                or "residual_model_not_fitted (Phase 2 pending)",
+                reason_code=self._residual_model_reason_code
+                or "RESIDUAL_MODEL_NOT_FITTED",
+            )
 
         try:
-            # Pass the anchor's DatetimeIndex so the residual series aligns
-            # perfectly — build_residual_ensemble finds full index overlap.
             residual_forecast: Optional[pd.Series] = self._residual_model.predict(
                 horizon=len(anchor_series),
                 last_residual=None,
                 index=anchor_series.index,
             )
         except Exception as exc:
-            logger.warning(
-                "[EXP-R5-001] ResidualModel.predict() failed: %s — falling back to inactive",
-                exc,
+            logger.warning("[EXP-R5-001] ResidualModel.predict() failed: %s", exc)
+            art = inactive_artifact(
+                reason=f"residual_model.predict() failed: {exc}",
+                reason_code="RESIDUAL_MODEL_PREDICT_FAILED",
             )
-            return inactive_artifact(reason=f"residual_model.predict() failed: {exc}")
+            return _attach_observability(art)
+
+        # 1.2 - predicted residual path safety gates before applying correction.
+        pred_vals = residual_forecast.dropna().values.astype(float)
+        pred_mean = float(np.mean(pred_vals)) if len(pred_vals) > 0 else 0.0
+        pred_std = float(np.std(pred_vals)) if len(pred_vals) > 0 else 0.0
+        anchor_rmse_proxy = getattr(self._residual_model, "_anchor_rmse_proxy", None)
+        pred_gate_code: Optional[str] = None
+        pred_gate_reason: Optional[str] = None
+
+        if abs(pred_mean) > 1e-9:
+            cv = pred_std / abs(pred_mean)
+            if cv < 0.10:
+                pred_gate_code = "PREDICTED_RESIDUAL_TOO_CONSTANT"
+                pred_gate_reason = (
+                    f"predicted residual too constant (std/abs(mean)={cv:.4f} < 0.10)"
+                )
+
+        if (
+            pred_gate_code is None
+            and isinstance(anchor_rmse_proxy, (int, float))
+            and np.isfinite(anchor_rmse_proxy)
+            and float(anchor_rmse_proxy) > 0.0
+            and abs(pred_mean) > 2.0 * float(anchor_rmse_proxy)
+        ):
+            pred_gate_code = "PREDICTED_MEAN_TOO_LARGE"
+            pred_gate_reason = (
+                f"predicted residual mean too large "
+                f"(|mean|={abs(pred_mean):.4f} > 2*anchor_rmse_proxy={2.0*float(anchor_rmse_proxy):.4f})"
+            )
+
+        if pred_gate_code is not None:
+            art = inactive_artifact(
+                reason=pred_gate_reason or pred_gate_code,
+                reason_code=pred_gate_code,
+            )
+            art = _attach_observability(art)
+            logger.info(
+                "[EXP-R5-001][DECISION] status=SKIPPED reason_code=%s "
+                "phi=%.4f intercept=%.4f n_train=%s oos_n=%s pred_mean=%.4f pred_std=%.4f",
+                pred_gate_code,
+                getattr(self._residual_model, "_phi", 0.0),
+                getattr(self._residual_model, "_intercept", 0.0),
+                getattr(self._residual_model, "_n_train", None),
+                self._residual_model_oos_n,
+                pred_mean,
+                pred_std,
+            )
+            return art
 
         artifact = build_residual_ensemble(anchor_series, residual_forecast)
+        artifact = _attach_observability(artifact)
 
-        # RC1/RC4 observability — wire model internals into the artifact so
-        # Agent B (Phase 3 audit) can inspect phi, intercept, and gate decisions.
-        artifact["phi_hat"] = self._residual_model._phi
-        artifact["intercept_hat"] = self._residual_model._intercept
-        artifact["n_train_residuals"] = self._residual_model._n_train
-        artifact["oos_n_used"] = self._residual_model_oos_n
-        artifact["skip_reason"] = None  # model passed all gates or we wouldn't be here
-
-        # Convert pd.Series → plain list[float].
-        # _make_json_safe (instrumentation) serialises Series as
-        # {"index":[…], "values":[…]}, which Agent B's _parse_optional_float_list
-        # rejects (it requires a plain list).  Convert here, before recording.
+        # Convert pd.Series to plain list[float] for JSON-safe audit consumption.
         artifact["y_hat_anchor"] = _series_to_plain_list(artifact.get("y_hat_anchor"))
         artifact["y_hat_residual_ensemble"] = _series_to_plain_list(
             artifact.get("y_hat_residual_ensemble")
         )
 
-        logger.debug(
-            "[EXP-R5-001] artifact built: status=%s n_corrected=%d",
-            artifact.get("residual_status"),
-            artifact.get("n_corrected", 0),
+        logger.info(
+            "[EXP-R5-001][DECISION] status=APPLIED reason_code=%s "
+            "phi=%.4f intercept=%.4f n_train=%s oos_n=%s pred_mean=%.4f pred_std=%.4f",
+            artifact.get("reason_code", "OK"),
+            getattr(self._residual_model, "_phi", 0.0),
+            getattr(self._residual_model, "_intercept", 0.0),
+            getattr(self._residual_model, "_n_train", None),
+            self._residual_model_oos_n,
+            pred_mean,
+            pred_std,
         )
         return artifact
 
@@ -1454,12 +1522,38 @@ class TimeSeriesForecaster:
         5. Fit ResidualModel on those residuals.
 
         On any failure (data too short, mssa fit error, etc.) self._residual_model
-        stays None — the artifact falls back to inactive at forecast time.
+        stays None â€” the artifact falls back to inactive at forecast time.
         No gates or live strategy are affected.
         """
         from .residual_ensemble import ResidualModel, compute_oos_residuals
 
-        # RC3: proportional OOS slice — scales with available data.
+        # Reset model state first to avoid stale carry-over when a new fit fails.
+        self._residual_model = None
+        self._residual_model_oos_n = None
+        self._residual_model_reason_code = None
+        self._residual_model_skip_reason = None
+
+        def _log_fit_decision(
+            status: str,
+            reason_code: str,
+            detail: str,
+            *,
+            model: Optional[Any] = None,
+            oos_used: Optional[int] = None,
+        ) -> None:
+            logger.info(
+                "[EXP-R5-001][FIT_DECISION] status=%s reason_code=%s detail=%s "
+                "phi=%s intercept=%s n_train=%s oos_n=%s",
+                status,
+                reason_code,
+                detail,
+                getattr(model, "_phi", None) if model is not None else None,
+                getattr(model, "_intercept", None) if model is not None else None,
+                getattr(model, "_n_train", None) if model is not None else None,
+                oos_used,
+            )
+
+        # RC3: proportional OOS slice â€” scales with available data.
         # Use 25% of series for OOS validation; enforce minimum 20 points so
         # AR(1) OLS has at least 19 regression pairs for 2 parameters (12 df).
         # The hard-cap of max(horizon, 20) = 20-30 was too small: OLS on
@@ -1467,20 +1561,28 @@ class TimeSeriesForecaster:
         cleaned = price_series.dropna()
         oos_n = len(cleaned) // 4
         if oos_n < 20:
-            logger.info(
-                "[EXP-R5-001] Insufficient data for OOS residual fit "
-                "(oos_n=%d < 20 from len=%d); _residual_model stays None",
-                oos_n,
-                len(cleaned),
+            self._residual_model_reason_code = "TOO_FEW_OOS_POINTS"
+            self._residual_model_skip_reason = (
+                f"oos_n={oos_n} < 20 from len={len(cleaned)}"
+            )
+            _log_fit_decision(
+                "SKIPPED",
+                self._residual_model_reason_code,
+                self._residual_model_skip_reason,
+                oos_used=oos_n,
             )
             return
-        # Need train_part >= 3×oos_n: anchor model requires substantial history.
+        # Need train_part >= 3Ã—oos_n: anchor model requires substantial history.
         if len(cleaned) - oos_n < 3 * oos_n:
-            logger.info(
-                "[EXP-R5-001] Insufficient training data "
-                "(train_part=%d < 3*oos_n=%d); _residual_model stays None",
-                len(cleaned) - oos_n,
-                3 * oos_n,
+            self._residual_model_reason_code = "TOO_FEW_TRAINING_POINTS"
+            self._residual_model_skip_reason = (
+                f"train_part={len(cleaned) - oos_n} < 3*oos_n={3 * oos_n}"
+            )
+            _log_fit_decision(
+                "SKIPPED",
+                self._residual_model_reason_code,
+                self._residual_model_skip_reason,
+                oos_used=oos_n,
             )
             return
 
@@ -1494,9 +1596,15 @@ class TimeSeriesForecaster:
             mssa_output = tmp_mssa.forecast(steps=oos_n)
             oos_fc = self._extract_series(mssa_output)
             if oos_fc is None or len(oos_fc) != oos_n:
-                logger.warning(
-                    "[EXP-R5-001] OOS anchor forecast invalid (len=%s); skipping",
-                    None if oos_fc is None else len(oos_fc),
+                self._residual_model_reason_code = "OOS_FORECAST_INVALID"
+                self._residual_model_skip_reason = (
+                    f"oos forecast length invalid: {None if oos_fc is None else len(oos_fc)}"
+                )
+                _log_fit_decision(
+                    "SKIPPED",
+                    self._residual_model_reason_code,
+                    self._residual_model_skip_reason,
+                    oos_used=oos_n,
                 )
                 return
 
@@ -1506,35 +1614,46 @@ class TimeSeriesForecaster:
 
             model = ResidualModel()
             model.fit_on_oos_residuals(oos_residuals, source="oos")
-            # RC4-RC7: one or more gates may have fired inside fit_on_oos_residuals.
+            # One or more model gates may have fired inside fit_on_oos_residuals().
             if not model.is_fitted:
-                logger.info(
-                    "[EXP-R5-001] ResidualModel skipped: reason=%s  "
-                    "phi=%.4f intercept=%.4f",
-                    model._skip_reason,
-                    model._phi,
-                    model._intercept,
+                self._residual_model_reason_code = (
+                    model._reason_code or "RESIDUAL_MODEL_NOT_FITTED"
+                )
+                self._residual_model_skip_reason = model._skip_reason or "model_not_fitted"
+                _log_fit_decision(
+                    "SKIPPED",
+                    self._residual_model_reason_code,
+                    self._residual_model_skip_reason,
+                    model=model,
+                    oos_used=oos_n,
                 )
                 return
+
             self._residual_model = model
             self._residual_model_oos_n = oos_n
-            _lrm = model._intercept / max(1.0 - abs(model._phi), 1e-9)
-            logger.info(
-                "[EXP-R5-001] ResidualModel applied: phi=%.4f intercept=%.4f "
-                "lrm=%.3f n_train=%d oos_n=%d",
-                model._phi,
-                model._intercept,
-                _lrm,
-                model._n_train,
-                oos_n,
+            self._residual_model_reason_code = model._reason_code or "OK"
+            self._residual_model_skip_reason = None
+            _log_fit_decision(
+                "ELIGIBLE",
+                self._residual_model_reason_code,
+                "residual model passed fit-time gates",
+                model=model,
+                oos_used=oos_n,
             )
         except Exception as exc:
+            self._residual_model_reason_code = "RESIDUAL_MODEL_FIT_EXCEPTION"
+            self._residual_model_skip_reason = str(exc)
+            _log_fit_decision(
+                "SKIPPED",
+                self._residual_model_reason_code,
+                self._residual_model_skip_reason,
+                oos_used=oos_n,
+            )
             logger.warning(
-                "[EXP-R5-001] _fit_residual_model() failed: %s — _residual_model stays None",
+                "[EXP-R5-001] _fit_residual_model() failed: %s",
                 exc,
                 exc_info=True,
             )
-            self._residual_model = None
 
     def _build_forecast_index(self, horizon: int) -> pd.Index:
         if horizon <= 0:
@@ -2154,7 +2273,7 @@ class TimeSeriesForecaster:
         base = {"threshold": threshold, "max_correlation": None, "max_pair": None}
         if len(active) < 2:
             base["allow_as_default"] = True
-            base["reason"] = "fewer than 2 active model forecasts — diversity check skipped"
+            base["reason"] = "fewer than 2 active model forecasts â€” diversity check skipped"
             return base
 
         models = list(active)
@@ -2182,7 +2301,7 @@ class TimeSeriesForecaster:
             pair_str = f"{max_pair[0]}/{max_pair[1]}" if max_pair else "?"
             base["reason"] = (
                 f"forecast correlation {max_corr:.3f} > {threshold:.3f} ({pair_str})"
-                " — blending adds no diversity benefit"
+                " â€” blending adds no diversity benefit"
             )
         else:
             base["allow_as_default"] = True
@@ -2385,3 +2504,4 @@ class TimeSeriesForecaster:
                 "required_audits": required,
             },
         )
+

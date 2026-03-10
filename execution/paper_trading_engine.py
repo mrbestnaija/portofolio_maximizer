@@ -1366,13 +1366,30 @@ class PaperTradingEngine:
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
             )
 
+            if not isinstance(trade_id, int) or trade_id <= 0:
+                logger.error(
+                    "Trade execution persistence rejected for %s %s (mode=%s, is_close=%s).",
+                    trade.ticker,
+                    trade.action,
+                    trade.execution_mode,
+                    is_close_ref,
+                )
+                raise RuntimeError(
+                    f"trade_persistence_rejected:{trade.ticker}:{trade.action}:{trade.execution_mode}"
+                )
+
             # Store entry_trade_id when opening position (for future close linkage)
-            if not is_close_ref and trade_id:
+            if not is_close_ref and trade_id > 0:
                 self.portfolio.entry_trade_ids[trade.ticker] = trade_id
                 logger.debug("Stored entry_trade_id=%d for %s position", trade_id, trade.ticker)
 
             # Clean up entry_trade_id when position fully closed
-            if is_close_ref and position_after == 0 and trade.ticker in self.portfolio.entry_trade_ids:
+            if (
+                is_close_ref
+                and trade_id > 0
+                and position_after == 0
+                and trade.ticker in self.portfolio.entry_trade_ids
+            ):
                 del self.portfolio.entry_trade_ids[trade.ticker]
                 logger.debug("Removed entry_trade_id for %s (position fully closed)", trade.ticker)
 
@@ -1380,6 +1397,8 @@ class PaperTradingEngine:
             return realized_pnl if realized_pct is not None else None, realized_pct
         except Exception as exc:
             logger.error("Failed to store trade: %s", exc)
+            if isinstance(exc, RuntimeError) and str(exc).startswith("trade_persistence_rejected:"):
+                raise
             return None, None
 
     def _calculate_performance_impact(self,

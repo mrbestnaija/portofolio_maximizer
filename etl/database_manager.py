@@ -97,6 +97,20 @@ def _normalise_risk_level(level: Any) -> str:
     return 'high'
 
 
+def _execution_provenance_class(
+    execution_mode: Optional[str],
+    data_source: Optional[str],
+    is_synthetic: int,
+) -> str:
+    """Classify trade provenance into synthetic/live buckets."""
+    mode = str(execution_mode or "").strip().lower()
+    source = str(data_source or "").strip().lower()
+    synth_flag = int(is_synthetic) if is_synthetic is not None else 0
+    if synth_flag == 1 or mode == "synthetic" or "synthetic" in source:
+        return "synthetic"
+    return "live"
+
+
 class DatabaseManager:
     """
     Manage persistent storage for portfolio data and LLM outputs.
@@ -2167,6 +2181,63 @@ class DatabaseManager:
                 trade_date = trade_date.date()
             if isinstance(trade_date, date):
                 trade_date = trade_date.isoformat()
+
+            execution_mode_norm = str(execution_mode or "").strip().lower()
+            is_close_flag = bool(is_close) if is_close is not None else False
+            close_provenance = _execution_provenance_class(
+                execution_mode=execution_mode,
+                data_source=data_source,
+                is_synthetic=int(is_synthetic) if is_synthetic is not None else 0,
+            )
+
+            # Production integrity guard:
+            # In live mode, close legs must carry a valid opener linkage and must
+            # not cross provenance boundaries (synthetic<->live).
+            if execution_mode_norm == "live" and is_close_flag:
+                if entry_trade_id is None or int(entry_trade_id) <= 0:
+                    logger.error(
+                        "Rejecting live close write for %s: missing entry_trade_id",
+                        ticker,
+                    )
+                    return -1
+                self.cursor.execute(
+                    """
+                    SELECT id, COALESCE(is_close, 0) AS is_close,
+                           execution_mode, data_source, COALESCE(is_synthetic, 0) AS is_synthetic
+                    FROM trade_executions
+                    WHERE id = ?
+                    """,
+                    (int(entry_trade_id),),
+                )
+                entry_row = self.cursor.fetchone()
+                if entry_row is None:
+                    logger.error(
+                        "Rejecting live close write for %s: entry_trade_id=%s not found",
+                        ticker,
+                        entry_trade_id,
+                    )
+                    return -1
+                if int(entry_row["is_close"] or 0) == 1:
+                    logger.error(
+                        "Rejecting live close write for %s: entry_trade_id=%s points to a close leg",
+                        ticker,
+                        entry_trade_id,
+                    )
+                    return -1
+                entry_provenance = _execution_provenance_class(
+                    execution_mode=entry_row["execution_mode"],
+                    data_source=entry_row["data_source"],
+                    is_synthetic=int(entry_row["is_synthetic"] or 0),
+                )
+                if entry_provenance != close_provenance:
+                    logger.error(
+                        "Rejecting live close write for %s: provenance mismatch close=%s entry=%s (entry_trade_id=%s)",
+                        ticker,
+                        close_provenance,
+                        entry_provenance,
+                        entry_trade_id,
+                    )
+                    return -1
 
             with self.conn:
                 columns = [

@@ -1167,6 +1167,42 @@ def _persist_forecast_snapshots(
             logger.debug("Failed to persist %s forecast snapshot for %s", model_type, ticker, exc_info=True)
 
 
+def build_trade_signal_context(
+    execution_report: Dict[str, Any],
+    ticker: str,
+    run_id: Optional[str],
+    signal_horizon: Optional[int],
+) -> Dict[str, Any]:
+    """Build the canonical signal_context dict for a trade-linked forecast audit.
+
+    Extracts ts_signal_id, entry_ts from the execution_report and packages them
+    with context_type="TRADE" so the production audit gate can classify the audit
+    correctly.  ``signal_horizon`` is the fallback; use the dataset's
+    forecast_horizon when available (prevents HORIZON_MISMATCH gate failures).
+
+    Exported for unit testing; used exclusively by
+    ``_attach_signal_context_to_forecast_audit``.
+    """
+    tsid_source = execution_report.get("ts_signal_id")
+    if not tsid_source and isinstance(execution_report.get("signal_id"), str):
+        tsid_source = execution_report.get("signal_id")
+    incoming_tsid = str(tsid_source or "").strip()
+    incoming_entry_ts = (
+        execution_report.get("signal_timestamp")
+        or execution_report.get("bar_timestamp")
+        or execution_report.get("timestamp")
+    )
+    return {
+        "context_type": "TRADE",
+        "ts_signal_id": incoming_tsid or None,
+        "ticker": ticker,
+        "run_id": run_id,
+        "entry_ts": incoming_entry_ts,
+        "forecast_horizon": signal_horizon,
+        "signal_context_missing": not bool(incoming_tsid),
+    }
+
+
 def _attach_signal_context_to_forecast_audit(
     *,
     forecast_bundle: Dict[str, Any],
@@ -1183,23 +1219,12 @@ def _attach_signal_context_to_forecast_audit(
     if not isinstance(forecast_bundle, dict) or not isinstance(execution_report, dict):
         return
 
-    tsid_source = execution_report.get("ts_signal_id")
-    if not tsid_source and isinstance(execution_report.get("signal_id"), str):
-        tsid_source = execution_report.get("signal_id")
-    incoming_tsid = str(tsid_source or "").strip()
-    incoming_entry_ts = (
-        execution_report.get("signal_timestamp")
-        or execution_report.get("bar_timestamp")
-        or execution_report.get("timestamp")
+    canonical_context = build_trade_signal_context(
+        execution_report=execution_report,
+        ticker=ticker,
+        run_id=run_id,
+        signal_horizon=forecast_bundle.get("horizon"),
     )
-    canonical_context = {
-        "ts_signal_id": incoming_tsid or None,
-        "ticker": ticker,
-        "run_id": run_id,
-        "entry_ts": incoming_entry_ts,
-        "forecast_horizon": forecast_bundle.get("horizon"),
-        "signal_context_missing": not bool(incoming_tsid),
-    }
     target_ticker = str(ticker or "").strip().upper()
 
     audit_dir = ROOT_PATH / "logs" / "forecast_audits"
@@ -1255,23 +1280,35 @@ def _attach_signal_context_to_forecast_audit(
         if not isinstance(signal_context, dict):
             signal_context = {}
         existing_tsid = str(signal_context.get("ts_signal_id") or "").strip()
+        incoming_tsid = canonical_context.get("ts_signal_id") or ""
         if existing_tsid and incoming_tsid and existing_tsid != incoming_tsid:
             continue
 
         merged = dict(signal_context)
         # Never clobber a valid existing linkage with missing incoming metadata.
+        merged["context_type"] = "TRADE"  # Always explicit: this path fires on trade execution
         merged["ts_signal_id"] = incoming_tsid or (existing_tsid or None)
         merged["ticker"] = canonical_context.get("ticker") or merged.get("ticker")
         merged["run_id"] = canonical_context.get("run_id") or merged.get("run_id")
         merged["entry_ts"] = canonical_context.get("entry_ts") or merged.get("entry_ts")
 
-        incoming_horizon = canonical_context.get("forecast_horizon")
+        # Use dataset's forecast_horizon from the audit file to avoid HORIZON_MISMATCH.
+        # The dataset horizon is the authoritative source; signal horizon (from forecast_bundle)
+        # may differ due to intraday vs daily configuration mismatches.
+        dataset_horizon = payload.get("dataset", {}).get("forecast_horizon") if isinstance(payload.get("dataset"), dict) else None
+        incoming_horizon = dataset_horizon or canonical_context.get("forecast_horizon")
         merged["forecast_horizon"] = (
             incoming_horizon if incoming_horizon is not None else merged.get("forecast_horizon")
         )
 
         merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
         payload["signal_context"] = merged
+
+        # Backfill ticker into dataset section when missing (prevents MISSING_TICKER gate failures).
+        ticker_val = merged.get("ticker")
+        if ticker_val and isinstance(payload.get("dataset"), dict):
+            if not payload["dataset"].get("ticker") and not payload["dataset"].get("symbol"):
+                payload["dataset"]["ticker"] = str(ticker_val).upper()
 
         tmp_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
         try:

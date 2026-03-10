@@ -44,20 +44,119 @@ def test_extract_lift_output_metrics_decision_and_lift_fraction() -> None:
     assert metrics["decision_reason"] == "lift demonstrated during holding period"
 
 
+def test_build_linkage_waterfall_counts() -> None:
+    import scripts.production_audit_gate as mod
+
+    waterfall = mod._build_linkage_waterfall(
+        {
+            "n_outcome_deduped_windows": 20,
+            "n_outcome_windows_non_trade_context": 3,
+            "n_outcome_windows_invalid_context": 2,
+            "n_outcome_windows_eligible": 10,
+            "n_outcome_windows_matched": 7,
+            "n_readiness_denominator_included": 12,
+        },
+        production_audit_only=True,
+    )
+    assert waterfall["raw_candidates"] == 20
+    assert waterfall["production_only"] == 17
+    assert waterfall["linked"] == 10
+    assert waterfall["hygiene_pass"] == 12
+    assert waterfall["matched"] == 7
+    assert waterfall["matched_over_linked"] == pytest.approx(0.7)
+
+
+def test_evaluate_artifact_binding_passes_when_fresh_and_bound() -> None:
+    import scripts.production_audit_gate as mod
+
+    binding = mod._evaluate_artifact_binding(
+        lift_summary={"generated_utc": "2026-03-09T19:35:00+00:00"},
+        live_cycle_binding={
+            "latest_live_cycle_ts_utc": "2026-03-09T19:30:00+00:00",
+            "latest_live_run_id": "20260309_193000",
+        },
+        repo_state={"head": "abc123"},
+    )
+    assert binding["pass"] is True
+    assert binding["freshness_pass"] is True
+    assert binding["run_id_present"] is True
+    assert binding["commit_hash_present"] is True
+    assert binding["reason_codes"] == []
+
+
+def test_evaluate_artifact_binding_fails_when_stale() -> None:
+    import scripts.production_audit_gate as mod
+
+    binding = mod._evaluate_artifact_binding(
+        lift_summary={"generated_utc": "2026-03-09T19:20:00+00:00"},
+        live_cycle_binding={
+            "latest_live_cycle_ts_utc": "2026-03-09T19:30:00+00:00",
+            "latest_live_run_id": "20260309_193000",
+        },
+        repo_state={"head": "abc123"},
+    )
+    assert binding["pass"] is False
+    assert "SUMMARY_STALE_BEFORE_LIVE_CYCLE" in binding["reason_codes"]
+
+
 def test_summary_matches_invocation_max_files_match() -> None:
     import scripts.production_audit_gate as mod
 
     audit_dir = Path.cwd() / "logs" / "forecast_audits"
-    summary = {"audit_dir": str(audit_dir), "max_files": 500}
-    assert mod._summary_matches_invocation(summary, audit_dir=audit_dir, max_files=500)
+    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": False}}
+    assert mod._summary_matches_invocation(
+        summary,
+        audit_dir=audit_dir,
+        max_files=500,
+        include_research=False,
+    )
 
 
 def test_summary_matches_invocation_max_files_mismatch() -> None:
     import scripts.production_audit_gate as mod
 
     audit_dir = Path.cwd() / "logs" / "forecast_audits"
-    summary = {"audit_dir": str(audit_dir), "max_files": 500}
-    assert not mod._summary_matches_invocation(summary, audit_dir=audit_dir, max_files=50)
+    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": False}}
+    assert not mod._summary_matches_invocation(
+        summary,
+        audit_dir=audit_dir,
+        max_files=50,
+        include_research=False,
+    )
+
+
+def test_summary_matches_invocation_include_research_mismatch() -> None:
+    import scripts.production_audit_gate as mod
+
+    audit_dir = Path.cwd() / "logs" / "forecast_audits"
+    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": True}}
+    assert not mod._summary_matches_invocation(
+        summary,
+        audit_dir=audit_dir,
+        max_files=500,
+        include_research=False,
+    )
+
+
+def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
+    import scripts.production_audit_gate as mod
+
+    raw = {
+        "generated_utc": "2026-03-09T20:46:01+00:00",
+        "audit_dir": str(Path.cwd() / "logs" / "forecast_audits"),
+        "max_files": 500,
+        "scope": {"include_research": False},
+        "decision": "KEEP",
+        "effective_audits": 35,
+        "window_counts": {"n_outcome_windows_eligible": 10},
+    }
+    safe = mod._binding_safe_lift_summary(raw)
+    assert safe["generated_utc"] == raw["generated_utc"]
+    assert safe["audit_dir"] == raw["audit_dir"]
+    assert safe["max_files"] == 500
+    assert "window_counts" in safe
+    assert "decision" not in safe
+    assert "effective_audits" not in safe
 
 
 def _seed_trade_exec_table(db_path: Path, *, close_id: int, entry_trade_id: int | None) -> None:
@@ -274,6 +373,15 @@ def test_main_fails_gate_when_reconcile_status_is_fail(
 
     out = capsys.readouterr().out
     assert "Reconcile step : FAIL" in out
+
+
+def test_main_fails_closed_on_unknown_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.production_audit_gate as mod
+
+    monkeypatch.setattr(sys, "argv", ["production_audit_gate.py", "--unknown-flag"])
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 2
 
 
 def test_unattended_profile_requires_profitable_proof(

@@ -337,3 +337,32 @@ def test_confidence_calibrated_saved_to_db():
     assert abs(row[0] - 0.62) < 1e-6
 
     db.close()
+
+
+def test_execute_signal_fails_closed_when_trade_persistence_rejected(monkeypatch):
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.95))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    def _reject(*args, **kwargs):
+        return -1
+
+    monkeypatch.setattr(db, "save_trade_execution", _reject)
+    result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.8},
+        make_market_data(100.0),
+    )
+
+    assert result.status == "FAILED"
+    assert "trade_persistence_rejected" in (result.reason or "")
+    assert len(engine.trades) == 0
+    assert engine.portfolio.cash == 10_000.0
+    assert engine.portfolio.positions.get("AAPL", 0) == 0
+
+    db.close()
