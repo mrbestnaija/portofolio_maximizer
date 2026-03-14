@@ -282,6 +282,45 @@ PY
       "${PYTHON_BIN}" scripts/openclaw_maintenance.py "${maint_args[@]}"
     ;;
 
+  openclaw_ops_sweep)
+    # Local-only OpenClaw ops sweep: classify service/readiness issues, apply
+    # safe recovery to gateway/dashboard/watcher, and notify only on changes.
+    OPS_PRIMARY_CHANNEL="${CRON_OPENCLAW_OPS_PRIMARY_CHANNEL:-${OPENCLAW_CHANNEL:-whatsapp}}"
+    OPS_GATE_ARTIFACT="${CRON_OPENCLAW_OPS_GATE_ARTIFACT:-logs/gate_status_latest.json}"
+    OPS_DB_PATH="${CRON_OPENCLAW_OPS_DB_PATH:-data/portfolio_maximizer.db}"
+    OPS_DASHBOARD_PORT="${CRON_OPENCLAW_OPS_DASHBOARD_PORT:-8000}"
+    OPS_TIMEOUT_SECONDS="${CRON_OPENCLAW_OPS_TIMEOUT_SECONDS:-30}"
+    OPS_WATCHER_JSON="${CRON_OPENCLAW_OPS_WATCHER_JSON:-logs/overnight_denominator/live_denominator_latest.json}"
+    OPS_VERDICT_PATH="${CRON_OPENCLAW_OPS_VERDICT_PATH:-logs/automation/openclaw_ops_control_plane_latest.json}"
+    OPS_STATE_PATH="${CRON_OPENCLAW_OPS_STATE_PATH:-logs/automation/openclaw_ops_control_plane_state.json}"
+    OPS_COOLDOWN_SECONDS="${CRON_OPENCLAW_OPS_COOLDOWN_SECONDS:-900}"
+
+    ops_args=(
+      "sweep"
+      "--apply-safe-recovery"
+      "--notify-on-change"
+      "--primary-channel" "${OPS_PRIMARY_CHANNEL}"
+      "--gate-artifact" "${OPS_GATE_ARTIFACT}"
+      "--db-path" "${OPS_DB_PATH}"
+      "--dashboard-port" "${OPS_DASHBOARD_PORT}"
+      "--timeout-seconds" "${OPS_TIMEOUT_SECONDS}"
+      "--watcher-json" "${OPS_WATCHER_JSON}"
+      "--cooldown-seconds" "${OPS_COOLDOWN_SECONDS}"
+      "--verdict-path" "${OPS_VERDICT_PATH}"
+      "--state-path" "${OPS_STATE_PATH}"
+      "--json"
+    )
+    if [[ -n "${CRON_OPENCLAW_OPS_TARGETS:-}" ]]; then
+      ops_args+=("--notify-targets" "${CRON_OPENCLAW_OPS_TARGETS}")
+    fi
+    if [[ -n "${CRON_OPENCLAW_OPS_TO:-}" ]]; then
+      ops_args+=("--notify-to" "${CRON_OPENCLAW_OPS_TO}")
+    fi
+
+    run_with_logging "openclaw_ops_sweep: safe service recovery + anomaly-only notify" \
+      "${PYTHON_BIN}" scripts/openclaw_ops_control_plane.py "${ops_args[@]}"
+    ;;
+
   self_improvement_review_forward)
     # Forward pending self-improvement proposals to human reviewers via OpenClaw.
     REVIEW_MAX_ITEMS="${CRON_REVIEW_MAX_ITEMS:-8}"
