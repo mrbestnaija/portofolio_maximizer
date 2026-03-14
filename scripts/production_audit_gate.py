@@ -23,6 +23,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+ROOT_PATH = Path(__file__).resolve().parent.parent
+if str(ROOT_PATH) not in sys.path:
+    sys.path.insert(0, str(ROOT_PATH))
+
 try:
     from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
 except Exception:  # pragma: no cover - script execution path fallback
@@ -32,6 +36,8 @@ try:
     from scripts.telemetry_adapter import normalize_telemetry_payload
 except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload
+
+from utils.evidence_io import write_promoted_json_artifact
 
 
 # Phase 7.13-C1: central path constants
@@ -63,6 +69,22 @@ def _safe_load_json(path: Path) -> Optional[Dict[str, Any]]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _validate_output_artifact(payload: Dict[str, Any]) -> tuple[bool, str]:
+    if not isinstance(payload, dict):
+        return False, "payload_not_dict"
+    required = [
+        "timestamp_utc",
+        "phase3_ready",
+        "phase3_reason",
+        "readiness",
+        "production_profitability_gate",
+    ]
+    missing = [key for key in required if key not in payload]
+    if missing:
+        return False, f"missing:{','.join(missing)}"
+    return True, "ok"
 
 
 def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -479,6 +501,49 @@ def _load_regression_monitoring_config(path: Path) -> Dict[str, Any]:
         return rmse if isinstance(rmse, dict) else {}
     except Exception:
         return {}
+
+
+def _collect_thresholds(
+    *,
+    monitor_config: Path,
+    proof_requirements: Dict[str, Any],
+    lift_inconclusive_allowed: bool,
+    proof_profitable_required: bool,
+    require_holding_period: bool,
+    warmup_policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    rmse_cfg = _load_regression_monitoring_config(monitor_config)
+    stat_req = (proof_requirements.get("statistical_significance") or {}) if isinstance(proof_requirements, dict) else {}
+    perf_req = (proof_requirements.get("performance") or {}) if isinstance(proof_requirements, dict) else {}
+    audit_req = (proof_requirements.get("audit_trail") or {}) if isinstance(proof_requirements, dict) else {}
+
+    return {
+        "lift": {
+            "min_lift_fraction": rmse_cfg.get("min_lift_fraction"),
+            "max_violation_rate": rmse_cfg.get("max_violation_rate"),
+            "recent_window_max_violation_rate": rmse_cfg.get("recent_window_max_violation_rate"),
+            "max_missing_ensemble_rate": rmse_cfg.get("max_missing_ensemble_rate"),
+            "holding_period_audits": rmse_cfg.get("holding_period_audits"),
+            "promotion_margin": rmse_cfg.get("promotion_margin"),
+            "max_warmup_days": rmse_cfg.get("max_warmup_days", DEFAULT_MAX_WARMUP_DAYS),
+            "require_holding_period": bool(require_holding_period),
+        },
+        "proof": {
+            "min_closed_trades": stat_req.get("min_closed_trades"),
+            "min_trading_days": stat_req.get("min_trading_days"),
+            "max_win_rate": stat_req.get("max_win_rate"),
+            "min_win_rate": stat_req.get("min_win_rate"),
+            "min_profit_factor": perf_req.get("min_profit_factor"),
+            "max_drawdown": perf_req.get("max_drawdown"),
+            "min_sharpe_ratio": perf_req.get("min_sharpe_ratio"),
+            "require_entry_exit_matching": audit_req.get("require_entry_exit_matching"),
+        },
+        "semantics": {
+            "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
+            "proof_profitable_required": bool(proof_profitable_required),
+            "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
+        },
+    }
 
 
 def _first_audit_ts_utc(audit_dir: Path) -> Optional[datetime]:
@@ -1305,6 +1370,18 @@ def main() -> int:
         window_counts,
         production_audit_only=production_audit_only,
     )
+    accepted_records = _safe_int(window_counts.get("n_accepted_records"), 0)
+    accepted_noneligible_records = _safe_int(
+        window_counts.get("n_accepted_noneligible_records"),
+        max(0, linkage_waterfall.get("raw_candidates", 0) - linkage_waterfall.get("linked", 0)),
+    )
+    eligible_records = _safe_int(window_counts.get("n_eligible_records"), outcome_eligible)
+    quarantined_records = _safe_int(window_counts.get("n_quarantined_records"), 0)
+    duplicate_conflicts = _safe_int(window_counts.get("n_duplicate_conflicts"), 0)
+    contract_version_count = _safe_int(window_counts.get("n_contract_versions"), 0)
+    cohort_fingerprint_count = _safe_int(window_counts.get("n_cohort_fingerprints"), 0)
+    contract_version_drift = contract_version_count > 1
+    cohort_fingerprint_drift = cohort_fingerprint_count > 1
 
     integrity_metrics = _compute_lifecycle_integrity(db_path)
     close_before_entry_count = _safe_int(integrity_metrics.get("close_before_entry_count"), 0)
@@ -1318,7 +1395,16 @@ def main() -> int:
     masked_violation_count, masked_violation_ids = _count_masked_unlinked_closes(db_path)
 
     gates_pass = bool(gate_pass)
-    phase3_ready = bool(gates_pass and linkage_pass and evidence_hygiene_pass and integrity_pass)
+    phase3_ready = bool(
+        gates_pass
+        and linkage_pass
+        and evidence_hygiene_pass
+        and integrity_pass
+        and duplicate_conflicts == 0
+        and quarantined_records == 0
+        and not contract_version_drift
+        and not cohort_fingerprint_drift
+    )
     phase3_fail_reasons: List[str] = []
     if not gates_pass:
         phase3_fail_reasons.append("GATES_FAIL")
@@ -1328,11 +1414,28 @@ def main() -> int:
         phase3_fail_reasons.append("EVIDENCE_HYGIENE_FAIL")
     if not integrity_pass:
         phase3_fail_reasons.append("HIGH_INTEGRITY_VIOLATION")
+    if duplicate_conflicts > 0:
+        phase3_fail_reasons.append("DUPLICATE_CONFLICT")
+    if quarantined_records > 0:
+        phase3_fail_reasons.append("QUARANTINED_RECORDS")
+    if contract_version_drift:
+        phase3_fail_reasons.append("CONTRACT_VERSION_DRIFT")
+    if cohort_fingerprint_drift:
+        phase3_fail_reasons.append("COHORT_FINGERPRINT_DRIFT")
     if not summary_invocation_match:
         phase3_fail_reasons.append("SUMMARY_INVOCATION_MISMATCH")
     if not artifact_binding_pass:
         phase3_fail_reasons.append("ARTIFACT_STALE_OR_UNBOUND")
     phase3_reason = "READY" if phase3_ready else ",".join(phase3_fail_reasons)
+
+    thresholds = _collect_thresholds(
+        monitor_config=monitor_config,
+        proof_requirements=proof_requirements,
+        lift_inconclusive_allowed=lift_inconclusive_allowed,
+        proof_profitable_required=proof_profitable_required,
+        require_holding_period=bool(args.require_holding_period),
+        warmup_policy=warmup_policy,
+    )
 
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1432,6 +1535,35 @@ def main() -> int:
             "masked_integrity_violations": masked_violation_count,
             "masked_integrity_violation_ids": masked_violation_ids,
         },
+        "readiness_v2": {
+            "overall_ready": bool(phase3_ready),
+            "evidence_chain_ready": bool(
+                linkage_pass
+                and evidence_hygiene_pass
+                and duplicate_conflicts == 0
+                and quarantined_records == 0
+                and not contract_version_drift
+                and not cohort_fingerprint_drift
+            ),
+            "economic_ready": bool(gates_pass),
+            "operational_ready": bool(integrity_pass and artifact_binding_pass and summary_invocation_match),
+            "reason_code": phase3_reason,
+            "accepted_records": accepted_records,
+            "accepted_noneligible_records": accepted_noneligible_records,
+            "eligible_records": eligible_records,
+            "eligible_opens": 0,
+            "eligible_closes": outcome_eligible,
+            "linked_closes": linkage_waterfall.get("linked"),
+            "matched_closes": outcome_matched,
+            "orphan_closes": close_before_entry_count,
+            "quarantined_records": quarantined_records,
+            "duplicate_conflicts": duplicate_conflicts,
+            "contract_version_drift": bool(contract_version_drift),
+            "cohort_fingerprint_drift": bool(cohort_fingerprint_drift),
+            "production_audit_only": production_audit_only,
+            "linkage_waterfall": linkage_waterfall,
+        },
+        "thresholds": thresholds,
     }
     payload["telemetry_contract"] = normalize_telemetry_payload(
         {
@@ -1449,9 +1581,13 @@ def main() -> int:
         generated_utc=timestamp_utc,
     )
 
-    artifact_text = json.dumps(payload, indent=2)
-    output_path.write_text(artifact_text, encoding="utf-8")
-    stamped_output.write_text(artifact_text, encoding="utf-8")
+    write_promoted_json_artifact(
+        stamped_path=stamped_output,
+        latest_path=output_path,
+        payload=payload,
+        validate_fn=_validate_output_artifact,
+        quarantine_dir=output_path.parent / "quarantine",
+    )
 
     print("=== Production Audit Gate ===")
     print(f"Timestamp (UTC): {timestamp_utc}")
@@ -1471,6 +1607,17 @@ def main() -> int:
         f"inconclusive_allowed={int(lift_inconclusive_allowed)} "
         f"profitable_required={int(proof_profitable_required)} "
         f"warmup_expired={int(bool(warmup_policy.get('warmup_expired', True)))}"
+    )
+    lift_thr = thresholds.get("lift", {})
+    proof_thr = thresholds.get("proof", {})
+    print(
+        "Thresholds    : "
+        f"lift_min={lift_thr.get('min_lift_fraction')} "
+        f"max_violation={lift_thr.get('max_violation_rate')} "
+        f"missing_rate={lift_thr.get('max_missing_ensemble_rate')} | "
+        f"proof_pf>={proof_thr.get('min_profit_factor')} "
+        f"min_trades={proof_thr.get('min_closed_trades')} "
+        f"min_days={proof_thr.get('min_trading_days')}"
     )
     print(
         "Proof runway   : "

@@ -405,9 +405,10 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     output = capsys.readouterr().out
     assert "RMSE coverage  : raw=2 parseable=2 deduped=2 processed=2 usable=2" in output
     assert (
-        "Outcome join   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0 "
-        "missing=0 ambiguous=0 not_due=0 invalid_context=0 not_yet_eligible=0 "
-        "no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
+        "Outcome join   : outcomes_loaded=0 join_attempted=0 accepted=2 accepted_noneligible=0 "
+        "eligible=2 quarantined=0 due_eligible=0 matched=0 missing=0 ambiguous=0 "
+        "not_due=0 invalid_context=0 not_yet_eligible=0 duplicate_conflicts=0 "
+        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
     ) in output
     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
 
@@ -429,6 +430,11 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     assert summary["window_counts"]["n_outcome_windows_no_signal_id"] == 0
     assert summary["window_counts"]["n_outcome_windows_non_trade_context"] == 0
     assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
+    assert summary["window_counts"]["n_accepted_records"] == 2
+    assert summary["window_counts"]["n_accepted_noneligible_records"] == 0
+    assert summary["window_counts"]["n_eligible_records"] == 2
+    assert summary["window_counts"]["n_quarantined_records"] == 0
+    assert summary["window_counts"]["n_duplicate_conflicts"] == 0
     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
     assert summary["telemetry_contract"]["schema_version"] == 3

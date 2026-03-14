@@ -1,0 +1,14 @@
+﻿execution/paper_trading_engine.py
+forcester_ts/instrumentation.py
+scripts/check_forecast_audits.py
+scripts/run_auto_trader.py
+tests/scripts/test_check_forecast_audits.py
+scripts/clean_cohort_manager.py
+tests/scripts/test_clean_cohort_manager.py
+scripts/replay_trade_evidence_chain.py
+tests/scripts/test_replay_trade_evidence_chain.py
+tests/utils/test_evidence_io.py
+utils/evidence_io.py
+Documentation/MOMENTUM_SAFE_EVIDENCE_COORDINATION.md
+Documentation/CLEAN_COHORT_OPERATIONS_2026-03-14.md
+Documentation/EVIDENCE_CORE_INTEGRATION_HANDOFF_2026-03-14.md

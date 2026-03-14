@@ -18,6 +18,8 @@ import time
 import numpy as np
 import pandas as pd
 
+from utils.evidence_io import atomic_write_json
+
 
 @dataclass
 class ModelRunStats:
@@ -139,10 +141,11 @@ class ModelInstrumentation:
             "summary": summary,
         }
 
+    def export_json_safe(self) -> Dict[str, Any]:
+        return _make_json_safe(self.export())
+
     def dump_json(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(_make_json_safe(self.export()), handle, indent=2)
+        atomic_write_json(path, self.export_json_safe())
 
 
 def _safe_value(value: Any) -> Optional[float]:

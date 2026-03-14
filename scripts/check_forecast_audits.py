@@ -240,6 +240,61 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
         raise last_error
 
 
+def _derive_semantic_admission(
+    entry: Dict[str, Any],
+    *,
+    include_research: bool,
+) -> Dict[str, Any]:
+    semantic = entry.get("semantic_admission")
+    semantic = semantic if isinstance(semantic, dict) else {}
+    context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
+    manifest_status = str(entry.get("manifest_verification_status") or "").strip().lower()
+    duplicate_conflict = bool(entry.get("duplicate_conflict")) or bool(semantic.get("duplicate_conflict"))
+    quarantined = bool(entry.get("quarantined")) or bool(semantic.get("quarantined"))
+    production_labeled = bool(
+        semantic.get("production_labeled")
+        if "production_labeled" in semantic
+        else (not include_research or str(entry.get("cohort_id") or "").strip().lower() == "production")
+    )
+    accepted_for_audit_history = bool(semantic.get("accepted_for_audit_history", True))
+
+    reason_codes: list[str] = []
+    if not production_labeled:
+        reason_codes.append("NOT_PRODUCTION_LABELED")
+    if context_type != "TRADE":
+        reason_codes.append("NON_TRADE_CONTEXT")
+    if manifest_status and manifest_status != "verified":
+        reason_codes.append(f"MANIFEST_{manifest_status.upper()}")
+    if duplicate_conflict:
+        reason_codes.append("DUPLICATE_CONFLICT")
+    if quarantined:
+        reason_codes.append("QUARANTINED")
+
+    explicit_admissible = semantic.get("admissible_for_readiness")
+    if explicit_admissible is None:
+        admissible_for_readiness = accepted_for_audit_history and len(reason_codes) == 0
+    else:
+        admissible_for_readiness = bool(explicit_admissible) and len(reason_codes) == 0
+
+    if quarantined or duplicate_conflict:
+        gate_bucket = "QUARANTINED"
+    elif admissible_for_readiness:
+        gate_bucket = "ELIGIBLE"
+    else:
+        gate_bucket = "ACCEPTED_NONELIGIBLE"
+
+    return {
+        "accepted_for_audit_history": accepted_for_audit_history,
+        "admissible_for_readiness": admissible_for_readiness,
+        "gate_eligible": admissible_for_readiness,
+        "gate_bucket": gate_bucket,
+        "admission_reason_code": "READY" if admissible_for_readiness else ",".join(reason_codes) or "NON_ELIGIBLE",
+        "duplicate_conflict": duplicate_conflict,
+        "quarantined": quarantined,
+        "production_labeled": production_labeled,
+    }
+
+
 def _write_summary_with_guard(path: Path, payload: Dict[str, Any]) -> None:
     required = (
         "audit_dir",
@@ -1614,6 +1669,9 @@ def main() -> None:
         signal_context = (audit or {}).get("signal_context") or {}
         if not isinstance(signal_context, dict):
             signal_context = {}
+        semantic_admission = (audit or {}).get("semantic_admission") or {}
+        if not isinstance(semantic_admission, dict):
+            semantic_admission = {}
         raw_ts_signal_id = signal_context.get("ts_signal_id")
         ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
         ts_signal_id = ts_signal_id or None
@@ -1623,8 +1681,17 @@ def main() -> None:
         if not context_type:
             context_type = "TRADE"
         meta = _extract_window_metadata(audit or {})
+        manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
+        audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
+        event_type = str(
+            (audit or {}).get("event_type")
+            or signal_context.get("event_type")
+            or "FORECAST_AUDIT"
+        ).strip().upper()
         entry = {
             "file": f.name,
+            "audit_id": audit_id,
+            "event_type": event_type,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
@@ -1641,6 +1708,12 @@ def main() -> None:
             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
             "expected_close_ts": expected_close.isoformat() if expected_close else None,
             "expected_close_source": expected_close_source,
+            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
+            "cohort_id": (audit or {}).get("cohort_id"),
+            "cohort_identity": (audit or {}).get("cohort_identity"),
+            "manifest_verification_status": manifest_status,
+            "semantic_admission": semantic_admission,
+            "payload_sha256": _sha256_file(f),
             "outcome_status": None,
             "outcome_reason": None,
         }
@@ -1657,6 +1730,20 @@ def main() -> None:
             ):
                 rmse_usable_entries.append(entry)
         dataset_entries.append(entry)
+
+    audit_fingerprints: Dict[str, Optional[str]] = {}
+    duplicate_conflict_ids: set[str] = set()
+    for entry in dataset_entries:
+        audit_id = str(entry.get("audit_id") or "").strip()
+        if not audit_id:
+            continue
+        payload_sha = str(entry.get("payload_sha256") or "").strip() or None
+        prior_sha = audit_fingerprints.get(audit_id)
+        if prior_sha is None:
+            audit_fingerprints[audit_id] = payload_sha
+            continue
+        if payload_sha != prior_sha:
+            duplicate_conflict_ids.add(audit_id)
 
     if db_path is not None:
         outcome_join_attempted = True
@@ -1770,15 +1857,25 @@ def main() -> None:
     for entry in dataset_entries:
         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
         outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
+        if str(entry.get("audit_id") or "").strip() in duplicate_conflict_ids:
+            entry["duplicate_conflict"] = True
+        admission = _derive_semantic_admission(
+            entry,
+            include_research=bool(args.include_research),
+        )
+        entry.update(admission)
         context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
-        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
-        counts_toward_readiness = (
+        counts_toward_linkage = bool(entry.get("gate_eligible")) and outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+        counts_toward_readiness = bool(entry.get("gate_eligible")) and (
             context_type == "TRADE"
             and outcome_status not in {"INVALID_CONTEXT", "NON_TRADE_CONTEXT", "OUTCOMES_NOT_LOADED"}
         )
         severity = "LOW"
         blocking = False
-        if outcome_status == "INVALID_CONTEXT":
+        if bool(entry.get("duplicate_conflict")) or bool(entry.get("quarantined")):
+            severity = "HIGH"
+            blocking = True
+        elif outcome_status == "INVALID_CONTEXT":
             severity = "HIGH"
             blocking = True
         elif outcome_status == "OUTCOME_MISSING":
@@ -1814,6 +1911,28 @@ def main() -> None:
     readiness_excluded_invalid = sum(
         1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "INVALID_CONTEXT"
     )
+    accepted_records = sum(1 for entry in dataset_entries if bool(entry.get("accepted_for_audit_history")))
+    accepted_noneligible_records = sum(
+        1 for entry in dataset_entries if str(entry.get("gate_bucket") or "") == "ACCEPTED_NONELIGIBLE"
+    )
+    eligible_records = sum(1 for entry in dataset_entries if bool(entry.get("gate_eligible")))
+    quarantined_records = sum(
+        1 for entry in dataset_entries if str(entry.get("gate_bucket") or "") == "QUARANTINED"
+    )
+    duplicate_conflicts = sum(1 for entry in dataset_entries if bool(entry.get("duplicate_conflict")))
+    cohort_fingerprints = {
+        str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
+        for entry in dataset_entries
+        if isinstance(entry.get("cohort_identity"), dict)
+        and str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
+    }
+    contract_versions = {
+        str(entry.get("evidence_contract_version")).strip()
+        for entry in dataset_entries
+        if entry.get("evidence_contract_version") is not None
+    }
+    contract_version_drift = len(contract_versions) > 1
+    cohort_fingerprint_drift = len(cohort_fingerprints) > 1
 
     if (
         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
@@ -1839,13 +1958,20 @@ def main() -> None:
         "Outcome join   : "
         f"outcomes_loaded={int(outcomes_loaded)} "
         f"join_attempted={int(outcome_join_attempted)} "
-        f"eligible={outcome_windows_eligible} "
+        f"accepted={accepted_records} "
+        f"accepted_noneligible={accepted_noneligible_records} "
+        f"eligible={eligible_records} "
+        f"quarantined={quarantined_records} "
+        f"due_eligible={outcome_windows_eligible} "
         f"matched={outcome_windows_matched} "
         f"missing={outcome_windows_missing} "
         f"ambiguous={outcome_windows_ambiguous} "
         f"not_due={outcome_windows_not_due} "
         f"invalid_context={outcome_windows_invalid_context} "
         f"not_yet_eligible={outcome_windows_not_yet_eligible} "
+        f"duplicate_conflicts={duplicate_conflicts} "
+        f"contract_drift={int(contract_version_drift)} "
+        f"cohort_drift={int(cohort_fingerprint_drift)} "
         f"no_signal_id={outcome_windows_no_signal_id} "
         f"non_trade_context={outcome_windows_non_trade_context} "
         f"missing_exec_meta={outcome_windows_missing_execution_metadata}"
@@ -1930,6 +2056,13 @@ def main() -> None:
             "db_path": str(db_path) if db_path is not None else None,
             "error": outcome_join_error,
             "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
+            "accepted_records": accepted_records,
+            "accepted_noneligible_records": accepted_noneligible_records,
+            "eligible_records": eligible_records,
+            "quarantined_records": quarantined_records,
+            "duplicate_conflicts": duplicate_conflicts,
+            "contract_version_drift": contract_version_drift,
+            "cohort_fingerprint_drift": cohort_fingerprint_drift,
             "readiness_denominator_included": readiness_denominator_included,
             "linkage_denominator_included": linkage_denominator_included,
             "readiness_excluded_non_trade_context": readiness_excluded_non_trade,
@@ -1980,6 +2113,13 @@ def main() -> None:
             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
             "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
+            "n_accepted_records": accepted_records,
+            "n_accepted_noneligible_records": accepted_noneligible_records,
+            "n_eligible_records": eligible_records,
+            "n_quarantined_records": quarantined_records,
+            "n_duplicate_conflicts": duplicate_conflicts,
+            "n_contract_versions": len(contract_versions),
+            "n_cohort_fingerprints": len(cohort_fingerprints),
             "n_readiness_denominator_included": readiness_denominator_included,
             "n_linkage_denominator_included": linkage_denominator_included,
             "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,

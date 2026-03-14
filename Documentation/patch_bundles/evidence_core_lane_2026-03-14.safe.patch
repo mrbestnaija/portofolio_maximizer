@@ -1,0 +1,1964 @@
+﻿diff --git a/execution/paper_trading_engine.py b/execution/paper_trading_engine.py
+index 926c75a..950e356 100644
+--- a/execution/paper_trading_engine.py
++++ b/execution/paper_trading_engine.py
+@@ -65,6 +65,8 @@ class Trade:
+     bar_timestamp: Optional[datetime] = None
+     is_paper_trade: bool = True
+     trade_id: Optional[str] = None
++    db_trade_id: Optional[int] = None
++    entry_trade_id: Optional[int] = None
+     slippage: float = 0.0
+     signal_id: Optional[int] = None  # FK to llm_signals.id (LLM-originated trades)
+     ts_signal_id: Optional[str] = None  # Phase 7.13-A2: globally unique TS signal ID
+@@ -1322,6 +1324,8 @@ class PaperTradingEngine:
+                         trade.ticker
+                     )
+ 
++                trade.entry_trade_id = entry_trade_id_ref
++
+             trade_id = self.db_manager.save_trade_execution(
+                 ticker=trade.ticker,
+                 trade_date=trade.timestamp.date(),
+@@ -1377,10 +1381,12 @@ class PaperTradingEngine:
+                 raise RuntimeError(
+                     f"trade_persistence_rejected:{trade.ticker}:{trade.action}:{trade.execution_mode}"
+                 )
++            trade.db_trade_id = trade_id
+ 
+             # Store entry_trade_id when opening position (for future close linkage)
+             if not is_close_ref and trade_id > 0:
+                 self.portfolio.entry_trade_ids[trade.ticker] = trade_id
++                trade.entry_trade_id = trade_id
+                 logger.debug("Stored entry_trade_id=%d for %s position", trade_id, trade.ticker)
+ 
+             # Clean up entry_trade_id when position fully closed
+diff --git a/forcester_ts/instrumentation.py b/forcester_ts/instrumentation.py
+index cffc7e9..a8600ab 100644
+--- a/forcester_ts/instrumentation.py
++++ b/forcester_ts/instrumentation.py
+@@ -15,9 +15,11 @@ from typing import Any, Dict, List, Optional, Sequence
+ import json
+ import time
+ 
+-import numpy as np
+-import pandas as pd
+-
++import numpy as np
++import pandas as pd
++
++from utils.evidence_io import atomic_write_json
++
+ 
+ @dataclass
+ class ModelRunStats:
+@@ -117,9 +119,9 @@ class ModelInstrumentation:
+                 )
+             )
+ 
+-    def export(self) -> Dict[str, Any]:
+-        summary: Dict[str, Dict[str, Any]] = {}
+-        for run in self._runs:
++    def export(self) -> Dict[str, Any]:
++        summary: Dict[str, Dict[str, Any]] = {}
++        for run in self._runs:
+             entry = summary.setdefault(
+                 run.model, {"count": 0, "duration_ms": 0.0, "phases": {}}
+             )
+@@ -129,20 +131,21 @@ class ModelInstrumentation:
+             phase_bucket["count"] += 1
+             phase_bucket["duration_ms"] += run.duration_ms
+ 
+-        return {
+-            "dataset": dict(self._dataset_meta),
+-            "dataset_snapshots": list(self._dataset_snapshots),
++        return {
++            "dataset": dict(self._dataset_meta),
++            "dataset_snapshots": list(self._dataset_snapshots),
+             "runs": [run.to_dict() for run in self._runs],
+             "artifacts": dict(self._artifacts),
+             "model_benchmarks": list(self._model_benchmarks),
+             "benchmark_summary": _summarize_benchmarks(self._model_benchmarks),
+-            "summary": summary,
+-        }
+-
++            "summary": summary,
++        }
++
++    def export_json_safe(self) -> Dict[str, Any]:
++        return _make_json_safe(self.export())
++
+     def dump_json(self, path: Path) -> None:
+-        path.parent.mkdir(parents=True, exist_ok=True)
+-        with path.open("w", encoding="utf-8") as handle:
+-            json.dump(_make_json_safe(self.export()), handle, indent=2)
++        atomic_write_json(path, self.export_json_safe())
+ 
+ 
+ def _safe_value(value: Any) -> Optional[float]:
+diff --git a/scripts/check_forecast_audits.py b/scripts/check_forecast_audits.py
+index 4190678..75c27d5 100644
+--- a/scripts/check_forecast_audits.py
++++ b/scripts/check_forecast_audits.py
+@@ -240,6 +240,61 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+         raise last_error
+ 
+ 
++def _derive_semantic_admission(
++    entry: Dict[str, Any],
++    *,
++    include_research: bool,
++) -> Dict[str, Any]:
++    semantic = entry.get("semantic_admission")
++    semantic = semantic if isinstance(semantic, dict) else {}
++    context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
++    manifest_status = str(entry.get("manifest_verification_status") or "").strip().lower()
++    duplicate_conflict = bool(entry.get("duplicate_conflict")) or bool(semantic.get("duplicate_conflict"))
++    quarantined = bool(entry.get("quarantined")) or bool(semantic.get("quarantined"))
++    production_labeled = bool(
++        semantic.get("production_labeled")
++        if "production_labeled" in semantic
++        else (not include_research or str(entry.get("cohort_id") or "").strip().lower() == "production")
++    )
++    accepted_for_audit_history = bool(semantic.get("accepted_for_audit_history", True))
++
++    reason_codes: list[str] = []
++    if not production_labeled:
++        reason_codes.append("NOT_PRODUCTION_LABELED")
++    if context_type != "TRADE":
++        reason_codes.append("NON_TRADE_CONTEXT")
++    if manifest_status and manifest_status != "verified":
++        reason_codes.append(f"MANIFEST_{manifest_status.upper()}")
++    if duplicate_conflict:
++        reason_codes.append("DUPLICATE_CONFLICT")
++    if quarantined:
++        reason_codes.append("QUARANTINED")
++
++    explicit_admissible = semantic.get("admissible_for_readiness")
++    if explicit_admissible is None:
++        admissible_for_readiness = accepted_for_audit_history and len(reason_codes) == 0
++    else:
++        admissible_for_readiness = bool(explicit_admissible) and len(reason_codes) == 0
++
++    if quarantined or duplicate_conflict:
++        gate_bucket = "QUARANTINED"
++    elif admissible_for_readiness:
++        gate_bucket = "ELIGIBLE"
++    else:
++        gate_bucket = "ACCEPTED_NONELIGIBLE"
++
++    return {
++        "accepted_for_audit_history": accepted_for_audit_history,
++        "admissible_for_readiness": admissible_for_readiness,
++        "gate_eligible": admissible_for_readiness,
++        "gate_bucket": gate_bucket,
++        "admission_reason_code": "READY" if admissible_for_readiness else ",".join(reason_codes) or "NON_ELIGIBLE",
++        "duplicate_conflict": duplicate_conflict,
++        "quarantined": quarantined,
++        "production_labeled": production_labeled,
++    }
++
++
+ def _write_summary_with_guard(path: Path, payload: Dict[str, Any]) -> None:
+     required = (
+         "audit_dir",
+@@ -1614,6 +1669,9 @@ def main() -> None:
+         signal_context = (audit or {}).get("signal_context") or {}
+         if not isinstance(signal_context, dict):
+             signal_context = {}
++        semantic_admission = (audit or {}).get("semantic_admission") or {}
++        if not isinstance(semantic_admission, dict):
++            semantic_admission = {}
+         raw_ts_signal_id = signal_context.get("ts_signal_id")
+         ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
+         ts_signal_id = ts_signal_id or None
+@@ -1623,8 +1681,17 @@ def main() -> None:
+         if not context_type:
+             context_type = "TRADE"
+         meta = _extract_window_metadata(audit or {})
++        manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
++        audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
++        event_type = str(
++            (audit or {}).get("event_type")
++            or signal_context.get("event_type")
++            or "FORECAST_AUDIT"
++        ).strip().upper()
+         entry = {
+             "file": f.name,
++            "audit_id": audit_id,
++            "event_type": event_type,
+             "start": ds.get("start"),
+             "end": ds.get("end"),
+             "length": ds.get("length"),
+@@ -1641,6 +1708,12 @@ def main() -> None:
+             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+             "expected_close_ts": expected_close.isoformat() if expected_close else None,
+             "expected_close_source": expected_close_source,
++            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
++            "cohort_id": (audit or {}).get("cohort_id"),
++            "cohort_identity": (audit or {}).get("cohort_identity"),
++            "manifest_verification_status": manifest_status,
++            "semantic_admission": semantic_admission,
++            "payload_sha256": _sha256_file(f),
+             "outcome_status": None,
+             "outcome_reason": None,
+         }
+@@ -1658,6 +1731,20 @@ def main() -> None:
+                 rmse_usable_entries.append(entry)
+         dataset_entries.append(entry)
+ 
++    audit_fingerprints: Dict[str, Optional[str]] = {}
++    duplicate_conflict_ids: set[str] = set()
++    for entry in dataset_entries:
++        audit_id = str(entry.get("audit_id") or "").strip()
++        if not audit_id:
++            continue
++        payload_sha = str(entry.get("payload_sha256") or "").strip() or None
++        prior_sha = audit_fingerprints.get(audit_id)
++        if prior_sha is None:
++            audit_fingerprints[audit_id] = payload_sha
++            continue
++        if payload_sha != prior_sha:
++            duplicate_conflict_ids.add(audit_id)
++
+     if db_path is not None:
+         outcome_join_attempted = True
+         closed_trade_counts: Dict[str, int] = {}
+@@ -1770,15 +1857,25 @@ def main() -> None:
+     for entry in dataset_entries:
+         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
+         outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
++        if str(entry.get("audit_id") or "").strip() in duplicate_conflict_ids:
++            entry["duplicate_conflict"] = True
++        admission = _derive_semantic_admission(
++            entry,
++            include_research=bool(args.include_research),
++        )
++        entry.update(admission)
+         context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
+-        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+-        counts_toward_readiness = (
++        counts_toward_linkage = bool(entry.get("gate_eligible")) and outcome_status in {"MATCHED", "OUTCOME_MISSING"}
++        counts_toward_readiness = bool(entry.get("gate_eligible")) and (
+             context_type == "TRADE"
+             and outcome_status not in {"INVALID_CONTEXT", "NON_TRADE_CONTEXT", "OUTCOMES_NOT_LOADED"}
+         )
+         severity = "LOW"
+         blocking = False
+-        if outcome_status == "INVALID_CONTEXT":
++        if bool(entry.get("duplicate_conflict")) or bool(entry.get("quarantined")):
++            severity = "HIGH"
++            blocking = True
++        elif outcome_status == "INVALID_CONTEXT":
+             severity = "HIGH"
+             blocking = True
+         elif outcome_status == "OUTCOME_MISSING":
+@@ -1814,6 +1911,28 @@ def main() -> None:
+     readiness_excluded_invalid = sum(
+         1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "INVALID_CONTEXT"
+     )
++    accepted_records = sum(1 for entry in dataset_entries if bool(entry.get("accepted_for_audit_history")))
++    accepted_noneligible_records = sum(
++        1 for entry in dataset_entries if str(entry.get("gate_bucket") or "") == "ACCEPTED_NONELIGIBLE"
++    )
++    eligible_records = sum(1 for entry in dataset_entries if bool(entry.get("gate_eligible")))
++    quarantined_records = sum(
++        1 for entry in dataset_entries if str(entry.get("gate_bucket") or "") == "QUARANTINED"
++    )
++    duplicate_conflicts = sum(1 for entry in dataset_entries if bool(entry.get("duplicate_conflict")))
++    cohort_fingerprints = {
++        str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
++        for entry in dataset_entries
++        if isinstance(entry.get("cohort_identity"), dict)
++        and str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
++    }
++    contract_versions = {
++        str(entry.get("evidence_contract_version")).strip()
++        for entry in dataset_entries
++        if entry.get("evidence_contract_version") is not None
++    }
++    contract_version_drift = len(contract_versions) > 1
++    cohort_fingerprint_drift = len(cohort_fingerprints) > 1
+ 
+     if (
+         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
+@@ -1839,13 +1958,20 @@ def main() -> None:
+         "Outcome join   : "
+         f"outcomes_loaded={int(outcomes_loaded)} "
+         f"join_attempted={int(outcome_join_attempted)} "
+-        f"eligible={outcome_windows_eligible} "
++        f"accepted={accepted_records} "
++        f"accepted_noneligible={accepted_noneligible_records} "
++        f"eligible={eligible_records} "
++        f"quarantined={quarantined_records} "
++        f"due_eligible={outcome_windows_eligible} "
+         f"matched={outcome_windows_matched} "
+         f"missing={outcome_windows_missing} "
+         f"ambiguous={outcome_windows_ambiguous} "
+         f"not_due={outcome_windows_not_due} "
+         f"invalid_context={outcome_windows_invalid_context} "
+         f"not_yet_eligible={outcome_windows_not_yet_eligible} "
++        f"duplicate_conflicts={duplicate_conflicts} "
++        f"contract_drift={int(contract_version_drift)} "
++        f"cohort_drift={int(cohort_fingerprint_drift)} "
+         f"no_signal_id={outcome_windows_no_signal_id} "
+         f"non_trade_context={outcome_windows_non_trade_context} "
+         f"missing_exec_meta={outcome_windows_missing_execution_metadata}"
+@@ -1930,6 +2056,13 @@ def main() -> None:
+             "db_path": str(db_path) if db_path is not None else None,
+             "error": outcome_join_error,
+             "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
++            "accepted_records": accepted_records,
++            "accepted_noneligible_records": accepted_noneligible_records,
++            "eligible_records": eligible_records,
++            "quarantined_records": quarantined_records,
++            "duplicate_conflicts": duplicate_conflicts,
++            "contract_version_drift": contract_version_drift,
++            "cohort_fingerprint_drift": cohort_fingerprint_drift,
+             "readiness_denominator_included": readiness_denominator_included,
+             "linkage_denominator_included": linkage_denominator_included,
+             "readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+@@ -1980,6 +2113,13 @@ def main() -> None:
+             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
+             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
+             "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
++            "n_accepted_records": accepted_records,
++            "n_accepted_noneligible_records": accepted_noneligible_records,
++            "n_eligible_records": eligible_records,
++            "n_quarantined_records": quarantined_records,
++            "n_duplicate_conflicts": duplicate_conflicts,
++            "n_contract_versions": len(contract_versions),
++            "n_cohort_fingerprints": len(cohort_fingerprints),
+             "n_readiness_denominator_included": readiness_denominator_included,
+             "n_linkage_denominator_included": linkage_denominator_included,
+             "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+diff --git a/scripts/run_auto_trader.py b/scripts/run_auto_trader.py
+index 690abfc..71a7da1 100644
+--- a/scripts/run_auto_trader.py
++++ b/scripts/run_auto_trader.py
+@@ -11,6 +11,7 @@ execution into a single continuously running workflow.
+ from __future__ import annotations
+ 
+ import atexit
++import hashlib
+ import inspect
+ import logging
+ import os
+@@ -54,6 +55,7 @@ from etl.data_universe import resolve_ticker_universe
+ from risk.barbell_policy import BarbellConfig
+ from risk.barbell_promotion_gate import load_promotion_evidence
+ from risk.barbell_sizing import apply_barbell_confidence
++from utils.evidence_io import atomic_write_json, build_manifest_entry, upsert_jsonl_record
+ 
+ try:  # Optional Ollama dependency
+     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
+@@ -111,6 +113,118 @@ def _env_flag(name: str) -> Optional[bool]:
+     return None
+ 
+ 
++def _stable_fingerprint(payload: Dict[str, Any]) -> str:
++    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
++    return hashlib.sha256(text.encode("utf-8")).hexdigest()
++
++
++def _fingerprint_files(paths: List[Path]) -> Optional[str]:
++    pieces: list[str] = []
++    for path in paths:
++        if not path.exists() or not path.is_file():
++            continue
++        try:
++            pieces.append(str(path.relative_to(ROOT_PATH)))
++        except Exception:
++            pieces.append(str(path))
++        pieces.append(hashlib.sha256(path.read_bytes()).hexdigest())
++    if not pieces:
++        return None
++    return hashlib.sha256("|".join(pieces).encode("utf-8")).hexdigest()
++
++
++def _determine_evidence_routing_mode(audit_path: Path) -> str:
++    explicit_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
++    if explicit_audit_dir:
++        return "explicit_env"
++    parent_name = audit_path.parent.name.strip().lower()
++    if parent_name == "research":
++        return "explicit_research"
++    if parent_name == "production":
++        return "default_production"
++    return "ambiguous_root"
++
++
++def _build_cohort_identity(audit_path: Path) -> Dict[str, Any]:
++    production_labeled = audit_path.parent.name.strip().lower() == "production"
++    cohort_id = (
++        str(os.environ.get("PMX_EVIDENCE_COHORT_ID") or "").strip()
++        or ("production" if production_labeled else audit_path.parent.name)
++        or "default"
++    )
++    identity = {
++        "cohort_id": cohort_id,
++        "build_fingerprint": str(
++            os.environ.get("PMX_BUILD_FINGERPRINT")
++            or os.environ.get("GIT_COMMIT")
++            or ""
++        ).strip()
++        or None,
++        "contract_version": 2,
++        "routing_mode": _determine_evidence_routing_mode(audit_path),
++        "strategy_config_fingerprint": _fingerprint_files(
++            [
++                ROOT_PATH / "config" / "forecasting_config.yml",
++                ROOT_PATH / "config" / "signal_routing_config.yml",
++            ]
++        ),
++    }
++    identity["contract_fingerprint"] = _stable_fingerprint(identity)
++    return identity
++
++
++def _build_semantic_admission(
++    *,
++    audit_path: Path,
++    signal_context: Dict[str, Any],
++    audit_id: str,
++    cohort_identity: Dict[str, Any],
++) -> Dict[str, Any]:
++    context_type = str(signal_context.get("context_type") or "").strip().upper()
++    ts_signal_id = str(signal_context.get("ts_signal_id") or "").strip()
++    run_id = str(signal_context.get("run_id") or "").strip()
++    entry_ts = str(signal_context.get("entry_ts") or "").strip()
++    forecast_horizon = signal_context.get("forecast_horizon")
++    ticker = str(signal_context.get("ticker") or "").strip().upper()
++    routing_mode = str(cohort_identity.get("routing_mode") or "")
++    production_labeled = audit_path.parent.name.strip().lower() == "production"
++
++    reason_codes: list[str] = []
++    if context_type != "TRADE":
++        reason_codes.append("NON_TRADE_CONTEXT")
++    if not audit_id:
++        reason_codes.append("MISSING_AUDIT_ID")
++    if not ticker:
++        reason_codes.append("MISSING_TICKER")
++    if not run_id:
++        reason_codes.append("MISSING_RUN_ID")
++    if not entry_ts:
++        reason_codes.append("MISSING_ENTRY_TS")
++    if not ts_signal_id:
++        reason_codes.append("MISSING_SIGNAL_ID")
++    if forecast_horizon in (None, ""):
++        reason_codes.append("MISSING_FORECAST_HORIZON")
++    if routing_mode == "ambiguous_root":
++        reason_codes.append("ROUTING_AMBIGUOUS")
++    if not production_labeled:
++        reason_codes.append("NOT_PRODUCTION_LABELED")
++
++    admissible = len(reason_codes) == 0
++    bucket = "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
++    return {
++        "accepted_for_audit_history": True,
++        "admissible_for_readiness": admissible,
++        "gate_eligible": admissible,
++        "gate_bucket": bucket,
++        "reason_code": "READY" if admissible else ",".join(reason_codes),
++        "production_labeled": production_labeled,
++        "not_quarantined": True,
++        "superseded": False,
++        "duplicate_conflict": False,
++        "manifest_registered": None,
++    }
++
++
+ def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
+     """Return the last observed bar timestamp for a ticker frame (UTC-normalized)."""
+     if frame is None or frame.empty:
+@@ -1194,6 +1308,7 @@ def build_trade_signal_context(
+     )
+     return {
+         "context_type": "TRADE",
++        "event_type": "TRADE_FORECAST_AUDIT",
+         "ts_signal_id": incoming_tsid or None,
+         "ticker": ticker,
+         "run_id": run_id,
+@@ -1310,17 +1425,64 @@ def _attach_signal_context_to_forecast_audit(
+             if not payload["dataset"].get("ticker") and not payload["dataset"].get("symbol"):
+                 payload["dataset"]["ticker"] = str(ticker_val).upper()
+ 
+-        tmp_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
++        audit_id = str(payload.get("audit_id") or audit_path.stem).strip() or audit_path.stem
++        cohort_identity = _build_cohort_identity(audit_path)
++        lineage_v2 = payload.get("lineage_v2")
++        if not isinstance(lineage_v2, dict):
++            lineage_v2 = {}
++        lineage_v2.update(
++            {
++                "run_id": merged.get("run_id"),
++                "forecast_id": forecast_bundle.get("forecast_id"),
++                "signal_id": execution_report.get("signal_id"),
++                "order_id": execution_report.get("order_id"),
++                "position_id": execution_report.get("position_id"),
++                "entry_trade_id": execution_report.get("entry_trade_id"),
++                "close_trade_id": execution_report.get("close_trade_id"),
++                "audit_id": audit_id,
++                "context_type": merged.get("context_type"),
++                "ts_signal_id": merged.get("ts_signal_id"),
++                "event_type": merged.get("event_type"),
++            }
++        )
++        payload["audit_id"] = audit_id
++        payload["evidence_contract_version"] = 2
++        payload["cohort_id"] = cohort_identity.get("cohort_id")
++        payload["event_type"] = "TRADE_FORECAST_AUDIT"
++        payload["cohort_identity"] = cohort_identity
++        payload["lineage_v2"] = lineage_v2
++        payload["semantic_admission"] = _build_semantic_admission(
++            audit_path=audit_path,
++            signal_context=merged,
++            audit_id=audit_id,
++            cohort_identity=cohort_identity,
++        )
++
+         try:
+-            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+-            os.replace(tmp_path, audit_path)
++            atomic_write_json(audit_path, payload)
++            manifest_entry = build_manifest_entry(
++                audit_path,
++                source="scripts.run_auto_trader._attach_signal_context_to_forecast_audit",
++                extra={
++                    "audit_id": audit_id,
++                    "cohort_id": payload.get("cohort_id"),
++                    "evidence_contract_version": 2,
++                    "event_type": payload.get("event_type"),
++                    "gate_bucket": (
++                        (payload.get("semantic_admission") or {}).get("gate_bucket")
++                        if isinstance(payload.get("semantic_admission"), dict)
++                        else None
++                    ),
++                },
++            )
++            if manifest_entry:
++                upsert_jsonl_record(
++                    audit_path.parent / "forecast_audit_manifest.jsonl",
++                    manifest_entry,
++                    key_field="file",
++                )
+         except Exception:
+             logger.debug("Failed to patch signal_context into %s", audit_path, exc_info=True)
+-            try:
+-                if tmp_path.exists():
+-                    tmp_path.unlink()
+-            except OSError:
+-                pass
+ 
+ 
+ def _backfill_forecast_regression_metrics(
+@@ -1562,6 +1724,14 @@ def _execute_signal(
+     )
+ 
+     mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
++    db_trade_id = getattr(result.trade, "db_trade_id", None) if result.trade else None
++    entry_trade_id = getattr(result.trade, "entry_trade_id", None) if result.trade else None
++    is_close_trade = bool(
++        result.trade
++        and entry_trade_id is not None
++        and db_trade_id is not None
++        and int(entry_trade_id) != int(db_trade_id)
++    )
+     if result.status != "EXECUTED":
+         return {
+             "ticker": ticker,
+@@ -1570,6 +1740,10 @@ def _execute_signal(
+             "executed": False,
+             "signal_id": primary_payload.get("signal_id"),
+             "ts_signal_id": primary_payload.get("ts_signal_id"),
++            "order_id": None,
++            "position_id": None,
++            "entry_trade_id": None,
++            "close_trade_id": None,
+             "action": primary_payload.get("action"),
+             "signal_source": primary.get("source", "TIME_SERIES"),
+             "signal_confidence": primary.get("confidence"),
+@@ -1600,6 +1774,10 @@ def _execute_signal(
+         "executed": True,
+         "signal_id": primary_payload.get("signal_id"),
+         "ts_signal_id": primary_payload.get("ts_signal_id"),
++        "order_id": result.trade.trade_id if result.trade else None,
++        "position_id": entry_trade_id or db_trade_id,
++        "entry_trade_id": entry_trade_id,
++        "close_trade_id": db_trade_id if is_close_trade else None,
+         "shares": result.trade.shares if result.trade else 0,
+         "action": result.trade.action if result.trade else primary.get("action", "HOLD"),
+         "entry_price": entry_price,
+diff --git a/tests/scripts/test_check_forecast_audits.py b/tests/scripts/test_check_forecast_audits.py
+index bf2993c..c662af7 100644
+--- a/tests/scripts/test_check_forecast_audits.py
++++ b/tests/scripts/test_check_forecast_audits.py
+@@ -405,9 +405,10 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
+     output = capsys.readouterr().out
+     assert "RMSE coverage  : raw=2 parseable=2 deduped=2 processed=2 usable=2" in output
+     assert (
+-        "Outcome join   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0 "
+-        "missing=0 ambiguous=0 not_due=0 invalid_context=0 not_yet_eligible=0 "
+-        "no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
++        "Outcome join   : outcomes_loaded=0 join_attempted=0 accepted=2 accepted_noneligible=0 "
++        "eligible=2 quarantined=0 due_eligible=0 matched=0 missing=0 ambiguous=0 "
++        "not_due=0 invalid_context=0 not_yet_eligible=0 duplicate_conflicts=0 "
++        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
+     ) in output
+     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
+ 
+@@ -429,6 +430,11 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
+     assert summary["window_counts"]["n_outcome_windows_no_signal_id"] == 0
+     assert summary["window_counts"]["n_outcome_windows_non_trade_context"] == 0
+     assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
++    assert summary["window_counts"]["n_accepted_records"] == 2
++    assert summary["window_counts"]["n_accepted_noneligible_records"] == 0
++    assert summary["window_counts"]["n_eligible_records"] == 2
++    assert summary["window_counts"]["n_quarantined_records"] == 0
++    assert summary["window_counts"]["n_duplicate_conflicts"] == 0
+     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
+     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
+     assert summary["telemetry_contract"]["schema_version"] == 3
+diff --git a/scripts/clean_cohort_manager.py b/scripts/clean_cohort_manager.py
+new file mode 100644
+index 0000000..09e182d
+--- /dev/null
++++ b/scripts/clean_cohort_manager.py
+@@ -0,0 +1,315 @@
++#!/usr/bin/env python3
++"""
++Freeze and operate a clean evidence cohort without mutating legacy production evidence.
++
++This helper is intentionally narrow:
++- freeze an immutable cohort identity
++- emit a PowerShell activation script for the cohort
++- run a cohort-scoped proof loop with explicit audit/output paths
++"""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import subprocess
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Dict, Optional
++
++ROOT_PATH = Path(__file__).resolve().parent.parent
++if str(ROOT_PATH) not in sys.path:
++    sys.path.insert(0, str(ROOT_PATH))
++
++from utils.evidence_io import atomic_write_json, load_json_file
++
++
++CONTRACT_VERSION = 2
++DEFAULT_COHORT_ROOT = ROOT_PATH / "logs" / "forecast_audits" / "cohorts"
++DEFAULT_REPLAY_ROOT = ROOT_PATH / "logs" / "evidence_replay"
++
++
++def _stable_fingerprint(payload: Dict[str, Any]) -> str:
++    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
++    return hashlib.sha256(text.encode("utf-8")).hexdigest()
++
++
++def _fingerprint_files(paths: list[Path]) -> Optional[str]:
++    pieces: list[str] = []
++    for path in paths:
++        if not path.exists() or not path.is_file():
++            continue
++        try:
++            rel = path.relative_to(ROOT_PATH)
++        except ValueError:
++            rel = path
++        pieces.append(str(rel))
++        pieces.append(hashlib.sha256(path.read_bytes()).hexdigest())
++    if not pieces:
++        return None
++    return hashlib.sha256("|".join(pieces).encode("utf-8")).hexdigest()
++
++
++def _default_build_fingerprint() -> str:
++    for name in ("PMX_BUILD_FINGERPRINT", "GIT_COMMIT"):
++        candidate = str(os.environ.get(name) or "").strip()
++        if candidate:
++            return candidate
++    return "workspace_uncommitted"
++
++
++def _cohort_paths(cohort_id: str, cohort_root: Path) -> Dict[str, Path]:
++    root = cohort_root / cohort_id
++    return {
++        "root": root,
++        "production_dir": root / "production",
++        "research_dir": root / "research",
++        "identity_path": root / "cohort_identity.json",
++        "activation_path": root / "activate_clean_cohort.ps1",
++        "proof_output_path": root / "proof_loop_latest.json",
++        "gate_output_path": root / "production_gate_latest.json",
++    }
++
++
++def build_cohort_identity(
++    *,
++    cohort_id: str,
++    build_fingerprint: Optional[str] = None,
++    routing_mode: str = "explicit_env",
++    contract_version: int = CONTRACT_VERSION,
++    config_paths: Optional[list[Path]] = None,
++) -> Dict[str, Any]:
++    if config_paths is None:
++        config_paths = [
++            ROOT_PATH / "config" / "forecasting_config.yml",
++            ROOT_PATH / "config" / "signal_routing_config.yml",
++        ]
++    identity = {
++        "cohort_id": cohort_id,
++        "build_fingerprint": str(build_fingerprint or _default_build_fingerprint()).strip(),
++        "contract_version": int(contract_version),
++        "routing_mode": routing_mode,
++        "strategy_config_fingerprint": _fingerprint_files(config_paths),
++    }
++    identity["contract_fingerprint"] = _stable_fingerprint(identity)
++    return identity
++
++
++def freeze_clean_cohort(
++    *,
++    cohort_id: str,
++    cohort_root: Path = DEFAULT_COHORT_ROOT,
++    build_fingerprint: Optional[str] = None,
++    force: bool = False,
++) -> Dict[str, Any]:
++    paths = _cohort_paths(cohort_id, cohort_root)
++    identity = build_cohort_identity(cohort_id=cohort_id, build_fingerprint=build_fingerprint)
++
++    existing = load_json_file(paths["identity_path"]) if paths["identity_path"].exists() else None
++    if isinstance(existing, dict):
++        existing_identity = existing.get("cohort_identity")
++        if isinstance(existing_identity, dict):
++            if build_fingerprint is None and not force:
++                identity = existing_identity
++            elif existing_identity.get("contract_fingerprint") != identity.get("contract_fingerprint"):
++                if not force:
++                    raise ValueError(
++                        "existing cohort fingerprint differs; refusing to mutate frozen cohort identity"
++                    )
++            else:
++                identity = existing_identity
++
++    for key in ("root", "production_dir", "research_dir"):
++        paths[key].mkdir(parents=True, exist_ok=True)
++
++    payload = {
++        "generated_utc": datetime.now(timezone.utc).isoformat(),
++        "cohort_identity": identity,
++        "paths": {
++            "root": str(paths["root"]),
++            "production_dir": str(paths["production_dir"]),
++            "research_dir": str(paths["research_dir"]),
++        },
++        "env": {
++            "PMX_EVIDENCE_COHORT_ID": cohort_id,
++            "PMX_BUILD_FINGERPRINT": identity.get("build_fingerprint"),
++            "TS_FORECAST_AUDIT_DIR": str(paths["production_dir"]),
++        },
++    }
++    atomic_write_json(paths["identity_path"], payload)
++
++    activation_script = "\n".join(
++        [
++            f"$env:PMX_EVIDENCE_COHORT_ID='{cohort_id}'",
++            f"$env:PMX_BUILD_FINGERPRINT='{identity.get('build_fingerprint')}'",
++            f"$env:TS_FORECAST_AUDIT_DIR='{paths['production_dir']}'",
++            "",
++        ]
++    )
++    paths["activation_path"].write_text(activation_script, encoding="utf-8")
++    return payload
++
++
++def _run_command(
++    cmd: list[str],
++    *,
++    env: Dict[str, str],
++    cwd: Path = ROOT_PATH,
++) -> Dict[str, Any]:
++    proc = subprocess.run(
++        cmd,
++        cwd=str(cwd),
++        env=env,
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    return {
++        "cmd": cmd,
++        "exit_code": int(proc.returncode),
++        "passed": int(proc.returncode) == 0,
++        "stdout": proc.stdout or "",
++        "stderr": proc.stderr or "",
++    }
++
++
++def run_clean_cohort_proof_loop(
++    *,
++    cohort_id: str,
++    cohort_root: Path = DEFAULT_COHORT_ROOT,
++    replay_root: Path = DEFAULT_REPLAY_ROOT,
++    include_global_gates: bool = False,
++    build_fingerprint: Optional[str] = None,
++) -> Dict[str, Any]:
++    frozen = freeze_clean_cohort(
++        cohort_id=cohort_id,
++        cohort_root=cohort_root,
++        build_fingerprint=build_fingerprint,
++    )
++    paths = _cohort_paths(cohort_id, cohort_root)
++    identity = frozen["cohort_identity"]
++
++    env = os.environ.copy()
++    env.update(
++        {
++            "PMX_EVIDENCE_COHORT_ID": cohort_id,
++            "PMX_BUILD_FINGERPRINT": str(identity.get("build_fingerprint") or ""),
++            "TS_FORECAST_AUDIT_DIR": str(paths["production_dir"]),
++        }
++    )
++
++    replay_dir = replay_root / cohort_id
++    replay_dir.mkdir(parents=True, exist_ok=True)
++
++    python = sys.executable
++    results: Dict[str, Dict[str, Any]] = {}
++    results["replay_trade_evidence_chain"] = _run_command(
++        [
++            python,
++            "scripts/replay_trade_evidence_chain.py",
++            "--scenario",
++            "happy_path",
++            "--output-dir",
++            str(replay_dir),
++            "--json",
++        ],
++        env=env,
++    )
++    results["pnl_integrity_enforcer"] = _run_command(
++        [python, "-m", "integrity.pnl_integrity_enforcer"],
++        env=env,
++    )
++    results["production_audit_gate_clean_cohort"] = _run_command(
++        [
++            python,
++            "scripts/production_audit_gate.py",
++            "--audit-dir",
++            str(paths["production_dir"]),
++            "--output",
++            str(paths["gate_output_path"]),
++            "--unattended-profile",
++        ],
++        env=env,
++    )
++    if include_global_gates:
++        results["run_all_gates_global"] = _run_command(
++            [python, "scripts/run_all_gates.py", "--json"],
++            env=env,
++        )
++
++    overall_passed = all(bool(result.get("passed")) for result in results.values())
++    summary = {
++        "generated_utc": datetime.now(timezone.utc).isoformat(),
++        "cohort_identity": identity,
++        "paths": {
++            "cohort_root": str(paths["root"]),
++            "production_dir": str(paths["production_dir"]),
++            "production_gate_output": str(paths["gate_output_path"]),
++            "proof_output": str(paths["proof_output_path"]),
++            "replay_dir": str(replay_dir),
++        },
++        "include_global_gates": bool(include_global_gates),
++        "overall_passed": overall_passed,
++        "steps": results,
++    }
++    atomic_write_json(paths["proof_output_path"], summary)
++    return summary
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    subparsers = parser.add_subparsers(dest="command", required=True)
++
++    freeze_parser = subparsers.add_parser("freeze", help="Freeze a clean cohort identity.")
++    freeze_parser.add_argument("--cohort-id", required=True)
++    freeze_parser.add_argument("--cohort-root", default=str(DEFAULT_COHORT_ROOT))
++    freeze_parser.add_argument("--build-fingerprint", default=None)
++    freeze_parser.add_argument("--force", action="store_true")
++    freeze_parser.add_argument("--json", action="store_true", dest="emit_json")
++
++    proof_parser = subparsers.add_parser("proof-loop", help="Run the clean cohort proof loop.")
++    proof_parser.add_argument("--cohort-id", required=True)
++    proof_parser.add_argument("--cohort-root", default=str(DEFAULT_COHORT_ROOT))
++    proof_parser.add_argument("--replay-root", default=str(DEFAULT_REPLAY_ROOT))
++    proof_parser.add_argument("--include-global-gates", action="store_true")
++    proof_parser.add_argument("--build-fingerprint", default=None)
++    proof_parser.add_argument("--json", action="store_true", dest="emit_json")
++
++    args = parser.parse_args()
++
++    if args.command == "freeze":
++        payload = freeze_clean_cohort(
++            cohort_id=args.cohort_id,
++            cohort_root=Path(args.cohort_root),
++            build_fingerprint=args.build_fingerprint,
++            force=bool(args.force),
++        )
++        if args.emit_json:
++            print(json.dumps(payload, indent=2))
++        else:
++            print(f"Frozen cohort   : {args.cohort_id}")
++            print(f"Identity path   : {payload['paths']['root']}")
++            print(f"Production dir  : {payload['paths']['production_dir']}")
++        return 0
++
++    summary = run_clean_cohort_proof_loop(
++        cohort_id=args.cohort_id,
++        cohort_root=Path(args.cohort_root),
++        replay_root=Path(args.replay_root),
++        include_global_gates=bool(args.include_global_gates),
++        build_fingerprint=args.build_fingerprint,
++    )
++    if args.emit_json:
++        print(json.dumps(summary, indent=2))
++    else:
++        print(f"Clean cohort    : {args.cohort_id}")
++        print(f"Overall passed  : {int(bool(summary['overall_passed']))}")
++        print(f"Proof output    : {summary['paths']['proof_output']}")
++    return 0 if bool(summary["overall_passed"]) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/scripts/test_clean_cohort_manager.py b/tests/scripts/test_clean_cohort_manager.py
+new file mode 100644
+index 0000000..d0af8ff
+--- /dev/null
++++ b/tests/scripts/test_clean_cohort_manager.py
+@@ -0,0 +1,113 @@
++from __future__ import annotations
++
++import json
++import subprocess
++from pathlib import Path
++
++from scripts import clean_cohort_manager
++
++
++def test_freeze_clean_cohort_writes_identity_and_activation_script(tmp_path: Path) -> None:
++    payload = clean_cohort_manager.freeze_clean_cohort(
++        cohort_id="2026Q1_cleanroom",
++        cohort_root=tmp_path,
++        build_fingerprint="commit_abc123",
++    )
++
++    cohort_root = tmp_path / "2026Q1_cleanroom"
++    identity_path = cohort_root / "cohort_identity.json"
++    activation_path = cohort_root / "activate_clean_cohort.ps1"
++
++    assert identity_path.exists()
++    assert activation_path.exists()
++    assert payload["cohort_identity"]["cohort_id"] == "2026Q1_cleanroom"
++    assert payload["cohort_identity"]["build_fingerprint"] == "commit_abc123"
++    assert payload["cohort_identity"]["routing_mode"] == "explicit_env"
++    assert "TS_FORECAST_AUDIT_DIR" in activation_path.read_text(encoding="utf-8")
++
++
++def test_freeze_clean_cohort_rejects_fingerprint_drift_without_force(tmp_path: Path) -> None:
++    clean_cohort_manager.freeze_clean_cohort(
++        cohort_id="2026Q1_cleanroom",
++        cohort_root=tmp_path,
++        build_fingerprint="commit_abc123",
++    )
++
++    try:
++        clean_cohort_manager.freeze_clean_cohort(
++            cohort_id="2026Q1_cleanroom",
++            cohort_root=tmp_path,
++            build_fingerprint="commit_def456",
++        )
++    except ValueError as exc:
++        assert "fingerprint differs" in str(exc)
++    else:
++        raise AssertionError("expected fingerprint drift to be rejected")
++
++
++def test_run_clean_cohort_proof_loop_uses_cohort_specific_paths(
++    tmp_path: Path,
++    monkeypatch,
++) -> None:
++    calls: list[dict[str, object]] = []
++
++    def _fake_run(cmd, cwd, env, capture_output, text, check):  # noqa: ANN001
++        calls.append(
++            {
++                "cmd": list(cmd),
++                "cwd": cwd,
++                "env": {
++                    "PMX_EVIDENCE_COHORT_ID": env.get("PMX_EVIDENCE_COHORT_ID"),
++                    "PMX_BUILD_FINGERPRINT": env.get("PMX_BUILD_FINGERPRINT"),
++                    "TS_FORECAST_AUDIT_DIR": env.get("TS_FORECAST_AUDIT_DIR"),
++                },
++            }
++        )
++        stdout = "{}"
++        if "replay_trade_evidence_chain.py" in cmd[1]:
++            stdout = json.dumps({"status": "PASS"})
++        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
++
++    monkeypatch.setattr(clean_cohort_manager.subprocess, "run", _fake_run)
++
++    summary = clean_cohort_manager.run_clean_cohort_proof_loop(
++        cohort_id="2026Q1_cleanroom",
++        cohort_root=tmp_path / "cohorts",
++        replay_root=tmp_path / "replay",
++        include_global_gates=True,
++    )
++
++    production_dir = tmp_path / "cohorts" / "2026Q1_cleanroom" / "production"
++    gate_output = tmp_path / "cohorts" / "2026Q1_cleanroom" / "production_gate_latest.json"
++    proof_output = tmp_path / "cohorts" / "2026Q1_cleanroom" / "proof_loop_latest.json"
++
++    assert summary["overall_passed"] is True
++    assert proof_output.exists()
++    assert any(
++        call["env"]["TS_FORECAST_AUDIT_DIR"] == str(production_dir)  # type: ignore[index]
++        for call in calls
++    )
++    gate_calls = [call for call in calls if "production_audit_gate.py" in str(call["cmd"])]  # type: ignore[index]
++    assert gate_calls
++    gate_cmd = gate_calls[0]["cmd"]  # type: ignore[index]
++    assert "--audit-dir" in gate_cmd
++    assert str(production_dir) in gate_cmd
++    assert "--output" in gate_cmd
++    assert str(gate_output) in gate_cmd
++    assert any("run_all_gates.py" in str(call["cmd"]) for call in calls)  # type: ignore[index]
++
++
++def test_freeze_clean_cohort_reuses_existing_identity_when_build_not_provided(tmp_path: Path) -> None:
++    first = clean_cohort_manager.freeze_clean_cohort(
++        cohort_id="2026Q1_cleanroom",
++        cohort_root=tmp_path,
++        build_fingerprint="commit_abc123",
++    )
++
++    second = clean_cohort_manager.freeze_clean_cohort(
++        cohort_id="2026Q1_cleanroom",
++        cohort_root=tmp_path,
++    )
++
++    assert second["cohort_identity"]["contract_fingerprint"] == first["cohort_identity"]["contract_fingerprint"]
++    assert second["cohort_identity"]["build_fingerprint"] == "commit_abc123"
+diff --git a/scripts/replay_trade_evidence_chain.py b/scripts/replay_trade_evidence_chain.py
+new file mode 100644
+index 0000000..d3624d1
+--- /dev/null
++++ b/scripts/replay_trade_evidence_chain.py
+@@ -0,0 +1,254 @@
++#!/usr/bin/env python3
++"""
++Deterministic replay harness for the momentum-safe evidence contract.
++
++This script exercises the stamped -> validate -> manifest -> latest sequence
++without requiring live trading. It is intentionally narrow: it verifies the
++evidence lifecycle contract and a small set of injected failure modes.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import sys
++from copy import deepcopy
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Dict
++
++ROOT_PATH = Path(__file__).resolve().parent.parent
++if str(ROOT_PATH) not in sys.path:
++    sys.path.insert(0, str(ROOT_PATH))
++
++from utils.evidence_io import atomic_write_json, build_manifest_entry, quarantine_file, upsert_jsonl_record
++
++
++SCENARIOS = {
++    "happy_path",
++    "missing_entry_link",
++    "invalid_context",
++    "missing_metadata",
++    "duplicate_conflict",
++    "misrouted_production",
++    "manifest_registration_failure",
++    "interrupted_promotion",
++}
++
++
++def _base_payload(*, audit_id: str) -> Dict[str, Any]:
++    return {
++        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
++        "evidence_contract_version": 2,
++        "audit_id": audit_id,
++        "cohort_id": "replay_shadow_v2",
++        "event_type": "TRADE_FORECAST_AUDIT",
++        "signal_context": {
++            "context_type": "TRADE",
++            "event_type": "TRADE_FORECAST_AUDIT",
++            "ts_signal_id": "ts_AAPL_20260314_000001",
++            "ticker": "AAPL",
++            "run_id": "replay_20260314",
++            "entry_ts": "2026-03-14T09:30:00+00:00",
++            "forecast_horizon": 5,
++        },
++        "lineage_v2": {
++            "run_id": "replay_20260314",
++            "forecast_id": None,
++            "signal_id": "ts_AAPL_20260314_000001",
++            "order_id": "order_replay_001",
++            "position_id": "position_replay_001",
++            "entry_trade_id": 101,
++            "close_trade_id": None,
++            "audit_id": audit_id,
++            "context_type": "TRADE",
++            "event_type": "TRADE_FORECAST_AUDIT",
++            "ts_signal_id": "ts_AAPL_20260314_000001",
++        },
++        "semantic_admission": {
++            "accepted_for_audit_history": True,
++            "admissible_for_readiness": True,
++            "gate_eligible": True,
++            "gate_bucket": "ELIGIBLE",
++            "reason_code": "READY",
++            "production_labeled": True,
++            "not_quarantined": True,
++            "superseded": False,
++            "duplicate_conflict": False,
++            "manifest_registered": None,
++        },
++    }
++
++
++def _prepare_payload(scenario: str) -> Dict[str, Any]:
++    payload = _base_payload(audit_id=f"replay_{scenario}")
++    if scenario == "missing_entry_link":
++        payload["event_type"] = "TRADE_CLOSE"
++        payload["lineage_v2"]["event_type"] = "TRADE_CLOSE"
++        payload["lineage_v2"]["entry_trade_id"] = None
++        payload["lineage_v2"]["close_trade_id"] = 202
++        payload["semantic_admission"].update(
++            {
++                "admissible_for_readiness": False,
++                "gate_eligible": False,
++                "gate_bucket": "ACCEPTED_NONELIGIBLE",
++                "reason_code": "MISSING_ENTRY_TRADE_ID",
++            }
++        )
++    elif scenario == "invalid_context":
++        payload["signal_context"]["context_type"] = "FORECAST_ONLY"
++        payload["semantic_admission"].update(
++            {
++                "admissible_for_readiness": False,
++                "gate_eligible": False,
++                "gate_bucket": "ACCEPTED_NONELIGIBLE",
++                "reason_code": "NON_TRADE_CONTEXT",
++            }
++        )
++    elif scenario == "missing_metadata":
++        payload["signal_context"]["run_id"] = None
++        payload["lineage_v2"]["run_id"] = None
++        payload["semantic_admission"].update(
++            {
++                "admissible_for_readiness": False,
++                "gate_eligible": False,
++                "gate_bucket": "ACCEPTED_NONELIGIBLE",
++                "reason_code": "MISSING_RUN_ID",
++            }
++        )
++    elif scenario == "misrouted_production":
++        payload["semantic_admission"].update(
++            {
++                "admissible_for_readiness": False,
++                "gate_eligible": False,
++                "gate_bucket": "ACCEPTED_NONELIGIBLE",
++                "production_labeled": False,
++                "reason_code": "ROUTING_AMBIGUOUS",
++            }
++        )
++    return payload
++
++
++def _validate_payload(payload: Dict[str, Any]) -> tuple[bool, str]:
++    semantic = payload.get("semantic_admission") if isinstance(payload.get("semantic_admission"), dict) else {}
++    if str(payload.get("event_type") or "").upper() == "TRADE_CLOSE" and not payload.get("lineage_v2", {}).get("entry_trade_id"):
++        return False, "MISSING_ENTRY_TRADE_ID"
++    if not bool(semantic.get("gate_eligible")):
++        return False, str(semantic.get("reason_code") or "GATE_INELIGIBLE")
++    return True, "READY"
++
++
++def run_replay(*, output_dir: Path, scenario: str) -> Dict[str, Any]:
++    output_dir.mkdir(parents=True, exist_ok=True)
++    stamped_dir = output_dir / "stamped"
++    quarantine_dir = output_dir / "quarantine"
++    manifest_path = output_dir / "forecast_audit_manifest.jsonl"
++    latest_path = output_dir / "latest.json"
++    payload = _prepare_payload(scenario)
++    stamped_path = stamped_dir / f"{payload['audit_id']}.json"
++
++    def _write_and_register(candidate_payload: Dict[str, Any], candidate_path: Path) -> tuple[bool, str]:
++        atomic_write_json(candidate_path, candidate_payload)
++        valid, reason = _validate_payload(candidate_payload)
++        if not valid:
++            quarantine_file(
++                candidate_path,
++                quarantine_dir=quarantine_dir,
++                reason=reason,
++                metadata={"scenario": scenario},
++            )
++            return False, reason
++        if scenario == "manifest_registration_failure":
++            quarantine_file(
++                candidate_path,
++                quarantine_dir=quarantine_dir,
++                reason="MANIFEST_REGISTRATION_FAILED",
++                metadata={"scenario": scenario},
++            )
++            return False, "MANIFEST_REGISTRATION_FAILED"
++        entry = build_manifest_entry(
++            candidate_path,
++            source="scripts.replay_trade_evidence_chain",
++            extra={
++                "audit_id": candidate_payload.get("audit_id"),
++                "event_type": candidate_payload.get("event_type"),
++                "cohort_id": candidate_payload.get("cohort_id"),
++            },
++        )
++        if not entry:
++            quarantine_file(
++                candidate_path,
++                quarantine_dir=quarantine_dir,
++                reason="HASH_UNAVAILABLE",
++                metadata={"scenario": scenario},
++            )
++            return False, "HASH_UNAVAILABLE"
++        upsert_jsonl_record(manifest_path, entry, key_field="file")
++        return True, "READY"
++
++    ok, reason = _write_and_register(payload, stamped_path)
++    if not ok:
++        return {
++            "scenario": scenario,
++            "status": "FAIL",
++            "reason_code": reason,
++            "latest_exists": latest_path.exists(),
++            "quarantine_count": len(list(quarantine_dir.glob("*.json"))),
++        }
++
++    if scenario == "interrupted_promotion":
++        return {
++            "scenario": scenario,
++            "status": "FAIL",
++            "reason_code": "INTERRUPTED_BEFORE_LATEST_PROMOTION",
++            "latest_exists": latest_path.exists(),
++            "quarantine_count": len(list(quarantine_dir.glob("*.json"))),
++        }
++
++    if scenario == "duplicate_conflict":
++        conflict_payload = deepcopy(payload)
++        conflict_payload["signal_context"]["ts_signal_id"] = "ts_AAPL_20260314_conflict"
++        conflict_payload["lineage_v2"]["ts_signal_id"] = "ts_AAPL_20260314_conflict"
++        conflict_payload["semantic_admission"]["duplicate_conflict"] = True
++        conflict_payload["semantic_admission"]["gate_eligible"] = False
++        conflict_payload["semantic_admission"]["admissible_for_readiness"] = False
++        conflict_payload["semantic_admission"]["gate_bucket"] = "QUARANTINED"
++        conflict_payload["semantic_admission"]["reason_code"] = "DUPLICATE_CONFLICT"
++        conflict_path = stamped_dir / f"{payload['audit_id']}_conflict.json"
++        ok, reason = _write_and_register(conflict_payload, conflict_path)
++        if ok:
++            return {
++                "scenario": scenario,
++                "status": "FAIL",
++                "reason_code": "EXPECTED_DUPLICATE_CONFLICT",
++                "latest_exists": latest_path.exists(),
++                "quarantine_count": len(list(quarantine_dir.glob("*.json"))),
++            }
++
++    atomic_write_json(latest_path, payload)
++    return {
++        "scenario": scenario,
++        "status": "PASS",
++        "reason_code": "READY",
++        "latest_exists": latest_path.exists(),
++        "quarantine_count": len(list(quarantine_dir.glob("*.json"))),
++    }
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--scenario", default="happy_path", choices=sorted(SCENARIOS))
++    parser.add_argument("--output-dir", type=Path, default=Path("logs") / "evidence_replay")
++    parser.add_argument("--json", action="store_true")
++    args = parser.parse_args()
++
++    summary = run_replay(output_dir=args.output_dir, scenario=args.scenario)
++    if args.json:
++        print(json.dumps(summary, indent=2))
++    else:
++        print(f"scenario={summary['scenario']} status={summary['status']} reason={summary['reason_code']}")
++    return 0 if summary["status"] == "PASS" else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/scripts/test_replay_trade_evidence_chain.py b/tests/scripts/test_replay_trade_evidence_chain.py
+new file mode 100644
+index 0000000..7785cc6
+--- /dev/null
++++ b/tests/scripts/test_replay_trade_evidence_chain.py
+@@ -0,0 +1,37 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import scripts.replay_trade_evidence_chain as mod
++
++
++def test_replay_trade_evidence_chain_happy_path_promotes_latest(tmp_path: Path) -> None:
++    summary = mod.run_replay(output_dir=tmp_path, scenario="happy_path")
++
++    assert summary["status"] == "PASS"
++    assert summary["reason_code"] == "READY"
++    latest = tmp_path / "latest.json"
++    manifest = tmp_path / "forecast_audit_manifest.jsonl"
++    assert latest.exists()
++    assert manifest.exists()
++    payload = json.loads(latest.read_text(encoding="utf-8"))
++    assert payload["semantic_admission"]["gate_eligible"] is True
++
++
++def test_replay_trade_evidence_chain_duplicate_conflict_quarantines_conflict(tmp_path: Path) -> None:
++    summary = mod.run_replay(output_dir=tmp_path, scenario="duplicate_conflict")
++
++    assert summary["status"] == "PASS"
++    quarantine_meta = list((tmp_path / "quarantine").glob("*.meta.json"))
++    assert quarantine_meta, "duplicate conflict should quarantine the conflicting artifact"
++    latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
++    assert latest["semantic_admission"]["reason_code"] == "READY"
++
++
++def test_replay_trade_evidence_chain_manifest_failure_never_promotes_latest(tmp_path: Path) -> None:
++    summary = mod.run_replay(output_dir=tmp_path, scenario="manifest_registration_failure")
++
++    assert summary["status"] == "FAIL"
++    assert summary["reason_code"] == "MANIFEST_REGISTRATION_FAILED"
++    assert not (tmp_path / "latest.json").exists()
+diff --git a/tests/utils/test_evidence_io.py b/tests/utils/test_evidence_io.py
+new file mode 100644
+index 0000000..05251b7
+--- /dev/null
++++ b/tests/utils/test_evidence_io.py
+@@ -0,0 +1,47 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from utils.evidence_io import build_manifest_entry, upsert_jsonl_record, write_promoted_json_artifact
++
++
++def test_write_promoted_json_artifact_quarantines_invalid_payload(tmp_path: Path) -> None:
++    stamped = tmp_path / "runs" / "artifact_20260314.json"
++    latest = tmp_path / "artifact_latest.json"
++
++    result = write_promoted_json_artifact(
++        stamped_path=stamped,
++        latest_path=latest,
++        payload={"status": "BAD"},
++        validate_fn=lambda payload: (False, "semantic_invalid"),
++        quarantine_dir=tmp_path / "quarantine",
++    )
++
++    assert result["ok"] is False
++    assert not stamped.exists()
++    assert not latest.exists()
++    quarantine_meta = Path(result["quarantine"]["meta_path"])
++    assert quarantine_meta.exists()
++    meta = json.loads(quarantine_meta.read_text(encoding="utf-8"))
++    assert meta["reason"] == "semantic_invalid"
++
++
++def test_upsert_jsonl_record_is_idempotent_for_same_file_and_hash(tmp_path: Path) -> None:
++    artifact = tmp_path / "audit.json"
++    artifact.write_text(json.dumps({"hello": "world"}), encoding="utf-8")
++    manifest = tmp_path / "forecast_audit_manifest.jsonl"
++    entry = build_manifest_entry(
++        artifact,
++        source="test",
++        extra={"audit_id": "audit_1", "event_type": "FORECAST_AUDIT"},
++    )
++    assert entry is not None
++
++    first = upsert_jsonl_record(manifest, entry, key_field="file")
++    second = upsert_jsonl_record(manifest, entry, key_field="file")
++
++    assert first["updated"] is True
++    assert second["updated"] is False
++    lines = manifest.read_text(encoding="utf-8").splitlines()
++    assert len(lines) == 1
+diff --git a/utils/evidence_io.py b/utils/evidence_io.py
+new file mode 100644
+index 0000000..d80e8e8
+--- /dev/null
++++ b/utils/evidence_io.py
+@@ -0,0 +1,224 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Callable, Dict, Iterable, Optional
++
++
++ValidationResult = Callable[[dict[str, Any]], bool | tuple[bool, str]]
++
++
++def sha256_file(path: Path) -> Optional[str]:
++    try:
++        digest = hashlib.sha256()
++        with path.open("rb") as handle:
++            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
++                digest.update(chunk)
++        return digest.hexdigest()
++    except Exception:
++        return None
++
++
++def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp_name = tempfile.mkstemp(
++        dir=str(path.parent),
++        prefix=f".{path.stem}_",
++        suffix=".tmp",
++    )
++    tmp_path = Path(tmp_name)
++    try:
++        with os.fdopen(fd, "w", encoding=encoding) as handle:
++            handle.write(text)
++            handle.flush()
++            try:
++                os.fsync(handle.fileno())
++            except OSError:
++                pass
++        os.replace(tmp_path, path)
++        return path
++    except Exception:
++        try:
++            tmp_path.unlink()
++        except OSError:
++            pass
++        raise
++
++
++def atomic_write_json(
++    path: Path,
++    payload: Any,
++    *,
++    indent: int = 2,
++    sort_keys: bool = False,
++    encoding: str = "utf-8",
++    default: Optional[Callable[[Any], Any]] = None,
++) -> Path:
++    text = json.dumps(payload, indent=indent, sort_keys=sort_keys, default=default)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp_name = tempfile.mkstemp(
++        dir=str(path.parent),
++        prefix=f".{path.stem}_",
++        suffix=".tmp",
++    )
++    tmp_path = Path(tmp_name)
++    try:
++        with os.fdopen(fd, "w", encoding=encoding) as handle:
++            handle.write(text)
++            handle.flush()
++            try:
++                os.fsync(handle.fileno())
++            except OSError:
++                pass
++        with tmp_path.open("r", encoding=encoding) as handle:
++            json.load(handle)
++        os.replace(tmp_path, path)
++        return path
++    except Exception:
++        try:
++            tmp_path.unlink()
++        except OSError:
++            pass
++        raise
++
++
++def atomic_write_jsonl(path: Path, records: Iterable[dict[str, Any]], *, encoding: str = "utf-8") -> Path:
++    lines = [json.dumps(record, separators=(",", ":")) for record in records]
++    payload = "\n".join(lines)
++    if payload:
++        payload += "\n"
++    return atomic_write_text(path, payload, encoding=encoding)
++
++
++def load_json_file(path: Path, *, encoding: str = "utf-8") -> dict[str, Any]:
++    try:
++        payload = json.loads(path.read_text(encoding=encoding))
++    except Exception:
++        return {}
++    return payload if isinstance(payload, dict) else {}
++
++
++def build_manifest_entry(
++    artifact_path: Path,
++    *,
++    source: str,
++    extra: Optional[dict[str, Any]] = None,
++) -> Optional[dict[str, Any]]:
++    digest = sha256_file(artifact_path)
++    if not digest:
++        return None
++    try:
++        size_bytes = int(artifact_path.stat().st_size)
++    except Exception:
++        size_bytes = None
++    payload: dict[str, Any] = {
++        "file": artifact_path.name,
++        "sha256": digest,
++        "bytes": size_bytes,
++        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
++        "source": source,
++    }
++    if extra:
++        payload.update({k: v for k, v in extra.items() if v is not None})
++    return payload
++
++
++def upsert_jsonl_record(
++    path: Path,
++    record: dict[str, Any],
++    *,
++    key_field: str = "file",
++    encoding: str = "utf-8",
++) -> dict[str, Any]:
++    existing: list[dict[str, Any]] = []
++    record_key = record.get(key_field)
++    if path.exists():
++        for raw_line in path.read_text(encoding=encoding, errors="replace").splitlines():
++            raw_line = raw_line.strip()
++            if not raw_line:
++                continue
++            try:
++                parsed = json.loads(raw_line)
++            except json.JSONDecodeError:
++                continue
++            if not isinstance(parsed, dict):
++                continue
++            if record_key is not None and parsed.get(key_field) == record_key:
++                if parsed.get("sha256") == record.get("sha256"):
++                    return {"updated": False, "record": parsed}
++                continue
++            existing.append(parsed)
++    existing.append(record)
++    atomic_write_jsonl(path, existing, encoding=encoding)
++    return {"updated": True, "record": record}
++
++
++def quarantine_file(
++    path: Path,
++    *,
++    quarantine_dir: Path,
++    reason: str,
++    metadata: Optional[dict[str, Any]] = None,
++) -> dict[str, Any]:
++    quarantine_dir.mkdir(parents=True, exist_ok=True)
++    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
++    target = quarantine_dir / f"{path.stem}_{stamp}{path.suffix}"
++    os.replace(path, target)
++    sidecar = target.with_suffix(target.suffix + ".meta.json")
++    meta_payload = {
++        "reason": reason,
++        "original_path": str(path),
++        "quarantined_path": str(target),
++        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
++    }
++    if metadata:
++        meta_payload["metadata"] = metadata
++    atomic_write_json(sidecar, meta_payload)
++    return {"path": str(target), "meta_path": str(sidecar), "reason": reason}
++
++
++def write_promoted_json_artifact(
++    *,
++    stamped_path: Path,
++    latest_path: Optional[Path],
++    payload: dict[str, Any],
++    validate_fn: Optional[ValidationResult] = None,
++    quarantine_dir: Optional[Path] = None,
++) -> dict[str, Any]:
++    atomic_write_json(stamped_path, payload)
++    parsed = load_json_file(stamped_path)
++    validation_reason = "ok"
++    valid = bool(parsed)
++    if validate_fn is not None:
++        validation = validate_fn(parsed)
++        if isinstance(validation, tuple):
++            valid, validation_reason = bool(validation[0]), str(validation[1] or "invalid")
++        else:
++            valid = bool(validation)
++            validation_reason = "ok" if valid else "invalid"
++    if not valid:
++        result: dict[str, Any] = {
++            "ok": False,
++            "stamped_path": str(stamped_path),
++            "validation_reason": validation_reason,
++        }
++        if quarantine_dir is not None and stamped_path.exists():
++            result["quarantine"] = quarantine_file(
++                stamped_path,
++                quarantine_dir=quarantine_dir,
++                reason=validation_reason,
++                metadata={"latest_path": str(latest_path) if latest_path else None},
++            )
++        return result
++    if latest_path is not None:
++        atomic_write_json(latest_path, parsed)
++    return {
++        "ok": True,
++        "stamped_path": str(stamped_path),
++        "latest_path": str(latest_path) if latest_path is not None else None,
++        "validation_reason": validation_reason,
++    }
+diff --git a/Documentation/MOMENTUM_SAFE_EVIDENCE_COORDINATION.md b/Documentation/MOMENTUM_SAFE_EVIDENCE_COORDINATION.md
+new file mode 100644
+index 0000000..328aa42
+--- /dev/null
++++ b/Documentation/MOMENTUM_SAFE_EVIDENCE_COORDINATION.md
+@@ -0,0 +1,110 @@
++# Momentum-Safe Evidence Coordination
++
++This document complements [AGENT_COORDINATION_PROTOCOL_2026-03-08.md](./AGENT_COORDINATION_PROTOCOL_2026-03-08.md)
++for the evidence-recovery lane. Its purpose is to let multiple agents work side-by-side
++without silently corrupting readiness evidence.
++
++## Merge Order
++
++Apply changes in this order, one concern per patch:
++
++1. Shared evidence IO helpers
++2. Audit routing and stamped-write fixes
++3. Shadow `v2` lineage and semantic admission metadata
++4. Audit summarizer / gate-readable counters
++5. Replay and fault-injection coverage
++6. Cohort promotion rules
++
++Do not mix strategy changes with evidence-contract changes in the same patch.
++
++## Cohort Identity
++
++A clean cohort is identified by the immutable tuple:
++
++- `cohort_id`
++- `build_fingerprint`
++- `contract_version`
++- `routing_mode`
++- `strategy_config_fingerprint`
++
++The tuple is serialized into a `contract_fingerprint`. A cohort is promotion-eligible
++only if the fingerprint is stable across the qualifying window.
++
++## Semantic Admission Contract
++
++A production artifact may exist in audit history without being readiness-eligible.
++
++Buckets:
++
++- `ELIGIBLE`: preserved and may count toward readiness
++- `ACCEPTED_NONELIGIBLE`: preserved for audit history only
++- `QUARANTINED`: preserved outside the canonical path and excluded from readiness
++
++Write success does not imply gate eligibility. Gate consumers must treat storage and
++readiness as separate decisions.
++
++An artifact is admissible for readiness only if it is:
++
++- schema-valid
++- manifest-registered
++- production-labeled
++- `context_type == TRADE`
++- causally complete for its stage
++- not quarantined
++- not superseded by a duplicate conflict
++
++Minimum counters to publish for each cohort window:
++
++- `accepted_records`
++- `accepted_noneligible_records`
++- `eligible_records`
++- `eligible_opens`
++- `eligible_closes`
++- `linked_closes`
++- `matched_closes`
++- `orphan_closes`
++- `quarantined_records`
++- `duplicate_conflicts`
++
++## Duplicate and Supersession Policy
++
++- Identical duplicate payload for the same logical file: safe no-op
++- Same logical ID with different payload: quarantine the conflicting artifact and raise an integrity signal
++- Later correction event: append a correction artifact; do not rewrite historical canonical evidence
++
++## Routing and Fail-Closed Behavior
++
++- Production-intended writes must route deterministically to the production cohort.
++- If routing cannot be determined unambiguously, the artifact may still be preserved for
++  audit history, but it must be emitted as `ACCEPTED_NONELIGIBLE` at most.
++- Mixed destination or mixed-context production writes are a hard readiness failure.
++- No ambiguous or fallback root-path write may produce a gate-eligible production artifact.
++
++## Retroactive Repair Rule
++
++Historical repair artifacts may improve explainability, but they must not retroactively
++improve readiness counts for a closed cohort unless the repair path was already part of
++the approved evidence contract for that cohort.
++
++## Promotion Thresholds
++
++Promotion from shadow `v2` to canonical readiness requires all of the following across
++5 consecutive business-day runs for the same cohort fingerprint:
++
++- `quarantined_records == 0`
++- `duplicate_conflicts == 0`
++- `orphan_closes == 0`
++- `linked_closes / eligible_closes >= 0.95`
++- `matched_closes / eligible_closes >= 0.90`
++- no mixed-context admissions
++- no partial-write incident promoted to canonical artifacts
++- no contract-version drift
++- no cohort-fingerprint drift
++
++## Coordination Notes
++
++- Preserve historical evidence; never rewrite old production artifacts in place.
++- Use stamped artifacts as the source of truth; `latest` files are conveniences only.
++- Prefer targeted patches over broad refactors while multiple agents are active.
++- If a touched file is owned by another lane, update this document and defer integration
++  rather than forcing a cross-lane rewrite.
+diff --git a/Documentation/CLEAN_COHORT_OPERATIONS_2026-03-14.md b/Documentation/CLEAN_COHORT_OPERATIONS_2026-03-14.md
+new file mode 100644
+index 0000000..a223af1
+--- /dev/null
++++ b/Documentation/CLEAN_COHORT_OPERATIONS_2026-03-14.md
+@@ -0,0 +1,106 @@
++# Clean Cohort Operations (2026-03-14)
++
++This note defines how to start and operate a clean evidence cohort without mixing
++legacy production evidence into new readiness decisions.
++
++References:
++- [AGENT_COORDINATION_PROTOCOL_2026-03-08.md](./AGENT_COORDINATION_PROTOCOL_2026-03-08.md)
++- [MOMENTUM_SAFE_EVIDENCE_COORDINATION.md](./MOMENTUM_SAFE_EVIDENCE_COORDINATION.md)
++
++## Goal
++
++Preserve historical production evidence while creating a fresh cohort window whose
++identity, routing, and proof artifacts are immutable and separately reviewable.
++
++## Cohort Shape
++
++Each cohort lives under:
++
++`logs/forecast_audits/cohorts/<cohort_id>/`
++
++With these key paths:
++
++- `production/` — canonical production-trade evidence for the cohort
++- `research/` — optional research-only evidence for the cohort
++- `cohort_identity.json` — frozen identity tuple and env contract
++- `activate_clean_cohort.ps1` — PowerShell env activation snippet
++- `production_gate_latest.json` — cohort-scoped production gate output
++- `proof_loop_latest.json` — cohort-scoped proof-loop summary
++
++## Freeze Procedure
++
++Freeze the cohort before collecting new live paper evidence:
++
++```powershell
++python scripts/clean_cohort_manager.py freeze --cohort-id 2026Q1_cleanroom --json
++```
++
++This writes:
++
++- immutable `cohort_id`
++- `build_fingerprint`
++- `contract_version`
++- `routing_mode`
++- `strategy_config_fingerprint`
++- derived `contract_fingerprint`
++
++If the same `cohort_id` is frozen again with a different fingerprint, the helper fails
++closed unless `--force` is explicitly used.
++
++## Activation
++
++Use the generated activation script to bind the live paper run to the cohort:
++
++```powershell
++. .\logs\forecast_audits\cohorts\2026Q1_cleanroom\activate_clean_cohort.ps1
++```
++
++This sets:
++
++- `PMX_EVIDENCE_COHORT_ID`
++- `PMX_BUILD_FINGERPRINT`
++- `TS_FORECAST_AUDIT_DIR`
++
++## Daily Proof Loop
++
++Run the cohort-scoped proof loop:
++
++```powershell
++python scripts/clean_cohort_manager.py proof-loop --cohort-id 2026Q1_cleanroom --json
++```
++
++This runs:
++
++- `scripts/replay_trade_evidence_chain.py` against a cohort replay directory
++- `integrity.pnl_integrity_enforcer`
++- `scripts/production_audit_gate.py --audit-dir <cohort production dir> --output <cohort gate artifact>`
++
++Optional:
++
++```powershell
++python scripts/clean_cohort_manager.py proof-loop --cohort-id 2026Q1_cleanroom --include-global-gates --json
++```
++
++Use `--include-global-gates` only when you want a repo-global snapshot in the same run.
++The authoritative clean-cohort readiness result remains the cohort-scoped production gate,
++not the shared global gate artifact.
++
++## Promotion Rule
++
++Do not promote the clean cohort to canonical readiness unless all of the following hold
++for 5 consecutive business-day runs under a stable `contract_fingerprint`:
++
++- `quarantined_records == 0`
++- `duplicate_conflicts == 0`
++- `orphan_closes == 0`
++- `linked_closes / eligible_closes >= 0.95`
++- `matched_closes / eligible_closes >= 0.90`
++- no mixed-context admissions
++- no partial-write promotion incidents
++- no contract-version drift
++- no cohort-fingerprint drift
++
++## Integration Note
++
++This workflow is intentionally additive. It avoids edits to the protected global gate
++orchestration while the evidence-core lane is still under review.
+diff --git a/Documentation/EVIDENCE_CORE_INTEGRATION_HANDOFF_2026-03-14.md b/Documentation/EVIDENCE_CORE_INTEGRATION_HANDOFF_2026-03-14.md
+new file mode 100644
+index 0000000..2b106e6
+--- /dev/null
++++ b/Documentation/EVIDENCE_CORE_INTEGRATION_HANDOFF_2026-03-14.md
+@@ -0,0 +1,83 @@
++# Evidence Core Integration Handoff (2026-03-14)
++
++Doc Type: `integration_note`
++
++This handoff scopes the evidence-core lane for Claude Code + human review. It exists
++because the workspace contains parallel agent changes and the repo protocol forbids
++bundling unrelated dirty files into a single integration.
++
++References:
++- [AGENT_COORDINATION_PROTOCOL_2026-03-08.md](./AGENT_COORDINATION_PROTOCOL_2026-03-08.md)
++- [MOMENTUM_SAFE_EVIDENCE_COORDINATION.md](./MOMENTUM_SAFE_EVIDENCE_COORDINATION.md)
++- [CLEAN_COHORT_OPERATIONS_2026-03-14.md](./CLEAN_COHORT_OPERATIONS_2026-03-14.md)
++
++Patch bundle artifacts:
++
++- `Documentation/patch_bundles/evidence_core_lane_2026-03-14.safe.patch`
++- `Documentation/patch_bundles/evidence_core_lane_2026-03-14.safe.files.txt`
++- `Documentation/patch_bundles/evidence_core_lane_2026-03-14.safe.sha256.txt`
++
++## Review Scope
++
++Safe additive files in this lane:
++
++- `utils/evidence_io.py`
++- `scripts/replay_trade_evidence_chain.py`
++- `scripts/clean_cohort_manager.py`
++- `Documentation/MOMENTUM_SAFE_EVIDENCE_COORDINATION.md`
++- `Documentation/CLEAN_COHORT_OPERATIONS_2026-03-14.md`
++- `tests/utils/test_evidence_io.py`
++- `tests/scripts/test_replay_trade_evidence_chain.py`
++- `tests/scripts/test_clean_cohort_manager.py`
++
++Tracked files changed in this lane and verified locally:
++
++- `execution/paper_trading_engine.py`
++- `forcester_ts/instrumentation.py`
++- `scripts/check_forecast_audits.py`
++- `scripts/run_auto_trader.py`
++- `tests/scripts/test_check_forecast_audits.py`
++
++Shared files requiring Claude diff review because parallel modifications already existed:
++
++- `forcester_ts/forecaster.py`
++- `scripts/production_audit_gate.py`
++- `tests/scripts/test_production_audit_gate.py`
++
++## What To Defer
++
++Do not bundle these unrelated workspace changes into the evidence-core review:
++
++- `integrity/pnl_integrity_enforcer.py`
++- `scripts/run_all_gates.py`
++- `scripts/llm_multi_model_orchestrator.py`
++- `visualizations/live_dashboard.html`
++- `bash/production_cron.sh`
++- untracked operational and visualization artifacts outside this lane
++
++## Verified Evidence
++
++Targeted suites:
++
++- `python -m pytest tests/scripts/test_hygiene_wiring.py tests/scripts/test_production_audit_gate.py tests/scripts/test_check_forecast_audits.py tests/scripts/test_replay_trade_evidence_chain.py tests/utils/test_evidence_io.py -q`
++- `python -m pytest tests/forcester_ts/test_forecaster_snapshot_integration.py tests/scripts/test_auto_trader_lifecycle.py tests/scripts/test_run_auto_trader_config_guard.py -q`
++- `python -m pytest tests/scripts/test_production_audit_gate.py tests/scripts/test_replay_trade_evidence_chain.py tests/scripts/test_run_all_gates.py -q`
++- `python -m pytest tests/scripts/test_clean_cohort_manager.py -q`
++- `python -m pytest -m "not gpu and not slow" --tb=short -q`
++- `python -m integrity.pnl_integrity_enforcer`
++- `python scripts/replay_trade_evidence_chain.py --scenario happy_path --json`
++
++Global gate snapshot:
++
++- `python scripts/run_all_gates.py --json`
++
++Current global result is still red for live-evidence reasons (`GATES_FAIL`, `THIN_LINKAGE`,
++`EVIDENCE_HYGIENE_FAIL`). That is a production-readiness truth, not an implementation crash.
++
++## Integration Order
++
++1. Safe additive files
++2. Tracked non-conflicting files
++3. Shared reviewed hunks in `forecaster.py`
++4. Shared reviewed hunks in `production_audit_gate.py`
++5. Clean cohort freeze + proof loop

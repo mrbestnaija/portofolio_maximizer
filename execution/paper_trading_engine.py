@@ -65,6 +65,8 @@ class Trade:
     bar_timestamp: Optional[datetime] = None
     is_paper_trade: bool = True
     trade_id: Optional[str] = None
+    db_trade_id: Optional[int] = None
+    entry_trade_id: Optional[int] = None
     slippage: float = 0.0
     signal_id: Optional[int] = None  # FK to llm_signals.id (LLM-originated trades)
     ts_signal_id: Optional[str] = None  # Phase 7.13-A2: globally unique TS signal ID
@@ -1322,6 +1324,8 @@ class PaperTradingEngine:
                         trade.ticker
                     )
 
+                trade.entry_trade_id = entry_trade_id_ref
+
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
                 trade_date=trade.timestamp.date(),
@@ -1377,10 +1381,12 @@ class PaperTradingEngine:
                 raise RuntimeError(
                     f"trade_persistence_rejected:{trade.ticker}:{trade.action}:{trade.execution_mode}"
                 )
+            trade.db_trade_id = trade_id
 
             # Store entry_trade_id when opening position (for future close linkage)
             if not is_close_ref and trade_id > 0:
                 self.portfolio.entry_trade_ids[trade.ticker] = trade_id
+                trade.entry_trade_id = trade_id
                 logger.debug("Stored entry_trade_id=%d for %s position", trade_id, trade.ticker)
 
             # Clean up entry_trade_id when position fully closed

@@ -44,6 +44,25 @@ def test_extract_lift_output_metrics_decision_and_lift_fraction() -> None:
     assert metrics["decision_reason"] == "lift demonstrated during holding period"
 
 
+def test_collect_thresholds_uses_configs() -> None:
+    import scripts.production_audit_gate as mod
+
+    proof_req = mod._load_profitability_requirements(Path("config/profitability_proof_requirements.yml"))
+    thresholds = mod._collect_thresholds(
+        monitor_config=Path("config/forecaster_monitoring.yml"),
+        proof_requirements=proof_req,
+        lift_inconclusive_allowed=True,
+        proof_profitable_required=True,
+        require_holding_period=True,
+        warmup_policy={"warmup_expired": False, "max_warmup_days": 30},
+    )
+
+    assert thresholds["proof"]["min_closed_trades"] == 30
+    assert thresholds["proof"]["min_profit_factor"] == pytest.approx(1.1)
+    assert thresholds["lift"]["min_lift_fraction"] == pytest.approx(0.25)
+    assert thresholds["semantics"]["proof_profitable_required"] is True
+
+
 def test_build_linkage_waterfall_counts() -> None:
     import scripts.production_audit_gate as mod
 

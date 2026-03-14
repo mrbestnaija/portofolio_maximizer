@@ -10,7 +10,6 @@ import hashlib
 import logging
 import os
 import warnings
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +46,7 @@ from .mssa_rl import MSSARLConfig, MSSARLForecaster
 from .samossa import SAMOSSAForecaster
 from .sarimax import SARIMAXForecaster
 from .metrics import compute_regression_metrics
+from utils.evidence_io import atomic_write_json, build_manifest_entry, upsert_jsonl_record
 
 logger = logging.getLogger(__name__)
 
@@ -235,8 +235,8 @@ class TimeSeriesForecaster:
         else:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         if audit_dir is None:
-            # Default to production subdir; gate reads from production/ when it exists.
-            # ETL/research callers should set TS_FORECAST_AUDIT_DIR=logs/forecast_audits/research.
+            # Production evidence must route deterministically when the production subdir
+            # already exists; only explicit research routing should bypass it.
             prod_dir = Path("logs/forecast_audits/production")
             self._audit_dir = prod_dir if prod_dir.exists() else Path("logs/forecast_audits")
         else:
@@ -1777,19 +1777,45 @@ class TimeSeriesForecaster:
 
     def save_audit_report(self, output_path: Path) -> None:
         """Persist the instrumentation report to disk for interpretable-AI auditing."""
-        self._instrumentation.dump_json(output_path)
+        payload = self._instrumentation.export_json_safe()
+        cohort_id = (
+            os.environ.get("PMX_EVIDENCE_COHORT_ID")
+            or ("production" if output_path.parent.name.lower() == "production" else output_path.parent.name)
+            or "default"
+        )
+        payload.update(
+            {
+                "evidence_contract_version": 2,
+                "audit_id": output_path.stem,
+                "cohort_id": cohort_id,
+                "event_type": "FORECAST_AUDIT",
+                "semantic_admission": {
+                    "accepted_for_audit_history": True,
+                    "admissible_for_readiness": False,
+                    "gate_eligible": False,
+                    "gate_bucket": "ACCEPTED_NONELIGIBLE",
+                    "reason_code": "AWAITING_TRADE_SIGNAL_CONTEXT",
+                    "production_labeled": output_path.parent.name.lower() == "production",
+                    "manifest_registered": False,
+                    "not_quarantined": True,
+                    "superseded": False,
+                    "duplicate_conflict": False,
+                },
+                "lineage_v2": {
+                    "run_id": None,
+                    "forecast_id": None,
+                    "signal_id": None,
+                    "order_id": None,
+                    "position_id": None,
+                    "entry_trade_id": None,
+                    "close_trade_id": None,
+                    "audit_id": output_path.stem,
+                    "context_type": None,
+                },
+            }
+        )
+        atomic_write_json(output_path, payload)
         self._append_audit_manifest_entry(output_path)
-
-    @staticmethod
-    def _sha256_file(path: Path) -> Optional[str]:
-        try:
-            digest = hashlib.sha256()
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            return digest.hexdigest()
-        except Exception:
-            return None
 
     def _append_audit_manifest_entry(self, audit_path: Path) -> None:
         """
@@ -1798,49 +1824,24 @@ class TimeSeriesForecaster:
         This does not replace filesystem controls, but it allows the gate to
         detect silent audit tampering or partial writes before using evidence.
         """
-        digest = self._sha256_file(audit_path)
-        if not digest:
+        entry = build_manifest_entry(
+            audit_path,
+            source="TimeSeriesForecaster.save_audit_report",
+            extra={
+                "audit_id": audit_path.stem,
+                "evidence_contract_version": 2,
+                "cohort_id": audit_path.parent.name,
+                "event_type": "FORECAST_AUDIT",
+            },
+        )
+        if not entry:
             logger.warning("Unable to hash forecast audit artifact: %s", audit_path)
             return
-        try:
-            size_bytes = int(audit_path.stat().st_size)
-        except Exception:
-            size_bytes = None
 
         manifest_path = audit_path.parent / "forecast_audit_manifest.jsonl"
-        entry = {
-            "file": audit_path.name,
-            "sha256": digest,
-            "bytes": size_bytes,
-            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
-            "source": "TimeSeriesForecaster.save_audit_report",
-        }
         try:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            # Load existing entries, filtering out invalid JSON, non-dict records, and stale entries
-            # for the same filename so the manifest stays clean and idempotent.
-            existing: list[dict] = []
-            if manifest_path.exists():
-                for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
-                    raw_line = raw_line.strip()
-                    if not raw_line:
-                        continue
-                    try:
-                        rec = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    if rec.get("file") == audit_path.name:
-                        continue  # Drop stale entry for the same file
-                    existing.append(rec)
-            existing.append(entry)
-            tmp_path = manifest_path.with_suffix(f".{audit_path.stem}.tmp")
-            tmp_path.write_text(
-                "\n".join(json.dumps(r, separators=(",", ":")) for r in existing) + "\n",
-                encoding="utf-8",
-            )
-            tmp_path.replace(manifest_path)
+            upsert_jsonl_record(manifest_path, entry, key_field="file")
         except Exception as exc:
             logger.warning(
                 "Failed to append forecast audit manifest entry for %s: %s",
@@ -2515,4 +2516,3 @@ class TimeSeriesForecaster:
                 "required_audits": required,
             },
         )
-
