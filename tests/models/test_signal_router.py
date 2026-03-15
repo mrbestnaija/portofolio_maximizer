@@ -195,6 +195,10 @@ class TestSignalRouter:
         assert bundle.primary_signal is not None
         assert bundle.primary_signal['source'] == 'LLM'
         assert bundle.primary_signal['is_fallback'] is True
+        assert bundle.metadata["llm_primary_takeover"] is True
+        assert bundle.metadata["primary_source"] == "LLM"
+        assert bundle.metadata["fallback_trigger"] == "TS_UNAVAILABLE"
+        assert router.routing_stats["llm_primary_takeovers"] == 1
 
     def test_route_llm_fallback_low_confidence(self, ts_signal_generator, mock_llm_generator, sample_forecast_bundle):
         """Test LLM fallback when Time Series confidence too low"""
@@ -225,6 +229,29 @@ class TestSignalRouter:
         if bundle.primary_signal and bundle.primary_signal.get('action') == 'HOLD':
             assert bundle.fallback_signal is not None
             assert bundle.fallback_signal['source'] == 'LLM'
+            assert bundle.metadata["fallback_trigger"] == "TS_HOLD"
+            assert router.routing_stats["ts_hold_fallbacks"] == 1
+
+    def test_route_llm_fallback_low_quality_tracks_takeover_reason(
+        self, mock_llm_generator, sample_forecast_bundle
+    ):
+        router = SignalRouter(
+            config={'time_series_primary': False, 'llm_fallback': True},
+            llm_generator=mock_llm_generator,
+        )
+
+        bundle = router.route_signal(
+            ticker='AAPL',
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            market_data=None,
+            quality={"quality_score": 0.4},
+        )
+
+        assert bundle.primary_signal is not None
+        assert bundle.primary_signal["source"] == "LLM"
+        assert bundle.metadata["fallback_trigger"] == "LOW_QUALITY"
+        assert router.routing_stats["ts_low_quality_fallbacks"] == 1
 
     def test_route_redundancy_mode(self, ts_signal_generator, mock_llm_generator, sample_forecast_bundle):
         """Test redundancy mode (both TS and LLM)"""
@@ -305,6 +332,7 @@ class TestSignalRouter:
         assert 'stats' in stats
         assert 'time_series_signals' in stats['stats']
         assert stats['stats']['time_series_signals'] >= 1
+        assert stats['stats']['llm_primary_takeovers'] == 0
 
     def test_reset_stats(self, ts_signal_generator, sample_forecast_bundle):
         """Test resetting routing statistics"""

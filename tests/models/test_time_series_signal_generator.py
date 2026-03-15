@@ -889,6 +889,63 @@ class TestTimeSeriesSignalGenerator:
         assert quant_profile["forecast_edge"]["rmse_ratio_vs_baseline"] == pytest.approx(0.9)
         assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
 
+    def test_quant_validation_forecast_edge_mode_best_single_matches_lowest_rmse_model(
+        self,
+        monkeypatch,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+        ts_routing_config,
+    ):
+        cfg = copy.deepcopy(quant_validation_config)
+        cfg["validation_mode"] = "forecast_edge"
+        cfg["forecast_edge_cv"] = {
+            "min_train_size": 10,
+            "horizon": 5,
+            "step_size": 5,
+            "max_folds": 1,
+            "baseline_model": "BEST_SINGLE",
+        }
+        cfg["success_criteria"]["max_rmse_ratio_vs_baseline"] = 1.10
+
+        import models.time_series_signal_generator as tsg_mod
+
+        def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
+            return {
+                "aggregate_metrics": {
+                    "ensemble": {"rmse": 0.72, "directional_accuracy": 0.60},
+                    "samossa": {"rmse": 1.0, "directional_accuracy": 0.55},
+                    "garch": {"rmse": 0.8, "directional_accuracy": 0.52},
+                    "mssa_rl": {"rmse": 0.9, "directional_accuracy": 0.57},
+                },
+                "fold_count": 1,
+                "horizon": 5,
+            }
+
+        monkeypatch.setattr(tsg_mod.RollingWindowValidator, "run", fake_run)
+
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=cfg,
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+
+        quant_profile = signal.provenance.get("quant_validation")
+        assert quant_profile is not None
+        assert quant_profile["forecast_edge"]["baseline_model_requested"] == "best_single"
+        assert quant_profile["forecast_edge"]["baseline_model"] == "garch"
+        assert quant_profile["forecast_edge"]["baseline"]["rmse"] == pytest.approx(0.8)
+        assert quant_profile["forecast_edge"]["rmse_ratio_vs_baseline"] == pytest.approx(0.9)
+        assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
+
     def test_quant_validation_failure_updates_reasoning(self,
                                                         sample_forecast_bundle,
                                                         sample_market_data,

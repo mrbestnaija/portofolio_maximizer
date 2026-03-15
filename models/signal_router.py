@@ -126,6 +126,9 @@ class SignalRouter:
         self.routing_stats = {
             'time_series_signals': 0,
             'llm_fallback_signals': 0,
+            'llm_primary_takeovers': 0,
+            'ts_hold_fallbacks': 0,
+            'ts_low_quality_fallbacks': 0,
             'redundancy_signals': 0,
             'failed_routes': 0
         }
@@ -173,6 +176,9 @@ class SignalRouter:
         primary_signal = None
         fallback_signal = None
         quality_score = (quality or {}).get("quality_score")
+        fallback_reason_hold = False
+        fallback_reason_low_quality = False
+        llm_primary_takeover = False
 
         # If this ticker has been marked as TS-disabled in
         # config/forecaster_monitoring.yml, treat Time Series as unavailable
@@ -219,6 +225,8 @@ class SignalRouter:
         if (not primary_signal or primary_signal.get('action') == 'HOLD' or quality_too_low) and \
            self.feature_flags['llm_fallback'] and self.llm_generator:
             try:
+                fallback_reason_hold = bool(primary_signal and primary_signal.get('action') == 'HOLD')
+                fallback_reason_low_quality = bool(quality_too_low)
                 # Generate LLM signal if not provided
                 if not llm_signal:
                     llm_start = time.perf_counter()
@@ -246,6 +254,10 @@ class SignalRouter:
 
                     all_signals.append(fallback_signal)
                     self.routing_stats['llm_fallback_signals'] += 1
+                    if fallback_reason_hold:
+                        self.routing_stats['ts_hold_fallbacks'] += 1
+                    if fallback_reason_low_quality:
+                        self.routing_stats['ts_low_quality_fallbacks'] += 1
 
                     logger.debug(f"LLM fallback signal generated for {ticker}: {fallback_signal.get('action')}")
 
@@ -283,6 +295,9 @@ class SignalRouter:
             primary_signal = fallback_signal
             primary_signal['is_primary'] = True
             primary_signal['is_fallback'] = True
+            primary_signal['primary_takeover'] = True
+            llm_primary_takeover = True
+            self.routing_stats['llm_primary_takeovers'] += 1
             logger.info(f"Using LLM fallback as primary signal for {ticker}")
 
         # STEP 5: Create signal bundle
@@ -295,6 +310,14 @@ class SignalRouter:
                 'routing_mode': self._get_routing_mode(),
                 'feature_flags': self.feature_flags.copy(),
                 'stats': self.routing_stats.copy(),
+                'primary_source': (primary_signal or {}).get('source'),
+                'llm_primary_takeover': llm_primary_takeover,
+                'fallback_trigger': (
+                    'LOW_QUALITY' if fallback_reason_low_quality else
+                    'TS_HOLD' if fallback_reason_hold else
+                    'TS_UNAVAILABLE' if llm_primary_takeover else
+                    None
+                ),
                 'timestamp': datetime.now().isoformat()
             },
             routing_timestamp=datetime.now()
@@ -432,7 +455,12 @@ class SignalRouter:
             'feature_flags': self.feature_flags.copy(),
             'routing_contract_warnings': list(self.routing_contract_warnings),
             'routing_mode': self._get_routing_mode(),
-            'total_signals': sum(self.routing_stats.values())
+            'total_signals': (
+                self.routing_stats.get('time_series_signals', 0)
+                + self.routing_stats.get('llm_fallback_signals', 0)
+                + self.routing_stats.get('redundancy_signals', 0)
+                + self.routing_stats.get('failed_routes', 0)
+            ),
         }
 
     def reset_stats(self):
@@ -440,6 +468,9 @@ class SignalRouter:
         self.routing_stats = {
             'time_series_signals': 0,
             'llm_fallback_signals': 0,
+            'llm_primary_takeovers': 0,
+            'ts_hold_fallbacks': 0,
+            'ts_low_quality_fallbacks': 0,
             'redundancy_signals': 0,
             'failed_routes': 0
         }

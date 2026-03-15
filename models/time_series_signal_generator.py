@@ -259,9 +259,8 @@ class TimeSeriesSignalGenerator:
         self._forecasting_config = self._load_forecasting_config()
 
         # Cache for expensive forecast-edge validation runs (rolling CV).
-        # Keyed by (ticker, last_bar_ts, horizon) so repeated calls on the same
-        # bar (or across near-identical windows) stay fast.
-        self._forecast_edge_cache: Dict[Tuple[str, str, int], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
+        # Include requested baseline so baseline-policy changes never reuse stale math.
+        self._forecast_edge_cache: Dict[Tuple[str, str, int, str], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
 
         logger.info(
             "Time Series Signal Generator initialized "
@@ -353,9 +352,11 @@ class TimeSeriesSignalGenerator:
         mssa_kwargs = {k: v for k, v in mssa_cfg.items() if k != "enabled"}
 
         if fast_intraday_cv:
-            sarimax_enabled = baseline_key == "sarimax"
-            samossa_enabled = baseline_key == "samossa"
-            mssa_enabled = baseline_key == "mssa_rl"
+            resolve_best_single = baseline_key == "best_single"
+            sarimax_enabled = resolve_best_single or baseline_key == "sarimax"
+            samossa_enabled = resolve_best_single or baseline_key == "samossa"
+            mssa_enabled = resolve_best_single or baseline_key == "mssa_rl"
+            garch_enabled = resolve_best_single or baseline_key == "garch"
 
             if sarimax_enabled:
                 sarimax_kwargs.update(_pmx_intraday_sarimax_kwargs(interval_hint))
@@ -371,16 +372,18 @@ class TimeSeriesSignalGenerator:
                     mssa_kwargs["use_gpu"] = bool(_pmx_env_flag("MSSA_RL_USE_GPU") or False)
             else:
                 mssa_kwargs = {}
+            if not garch_enabled:
+                garch_kwargs = {}
 
             return TimeSeriesForecasterConfig(
                 forecast_horizon=horizon,
                 sarimax_enabled=sarimax_enabled,
                 samossa_enabled=samossa_enabled,
                 mssa_rl_enabled=mssa_enabled,
-                garch_enabled=False,
+                garch_enabled=garch_enabled,
                 ensemble_enabled=True,
                 sarimax_kwargs=sarimax_kwargs,
-                garch_kwargs={},
+                garch_kwargs=garch_kwargs,
                 samossa_kwargs=samossa_kwargs,
                 mssa_rl_kwargs=mssa_kwargs,
                 ensemble_kwargs=ensemble_kwargs,
@@ -1870,7 +1873,7 @@ class TimeSeriesSignalGenerator:
         baseline_model = str(
             criteria_cfg.get("baseline_model")
             or cv_cfg.get("baseline_model")
-            or "samossa"
+            or "BEST_SINGLE"
         ).lower()
 
         symbol = str(getattr(signal, "ticker", "") or "").upper()
@@ -1879,17 +1882,20 @@ class TimeSeriesSignalGenerator:
             last_ts = pd.to_datetime(price_series.index[-1]).isoformat()
         except Exception:
             last_ts = str(price_series.index[-1]) if len(price_series.index) else ""
-        cache_key = (symbol, last_ts, horizon)
+        baseline_key_requested = str(baseline_model or "best_single").strip().lower().replace("-", "_")
+        if baseline_key_requested not in {"best_single", "sarimax", "samossa", "mssa_rl", "garch"}:
+            baseline_key_requested = "best_single"
+
+        cache_key = (symbol, last_ts, horizon, baseline_key_requested)
         cached = self._forecast_edge_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
-        if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
-            baseline_key = "samossa"
+        baseline_key = baseline_key_requested
 
         edge_payload: Dict[str, Any] = {
             "mode": "forecast_edge",
+            "baseline_model_requested": baseline_key_requested,
             "baseline_model": baseline_key,
             "horizon": horizon,
         }
@@ -1937,7 +1943,33 @@ class TimeSeriesSignalGenerator:
             aggregate = report.get("aggregate_metrics") or {}
             fold_count = int(report.get("fold_count") or 0)
             ens = aggregate.get("ensemble") or {}
-            base = aggregate.get(baseline_key) or {}
+
+            resolved_baseline_key = baseline_key_requested
+            base: Dict[str, Any] = {}
+            if baseline_key_requested == "best_single":
+                best_name = None
+                best_rmse = None
+                for candidate_name in ("garch", "mssa_rl", "samossa", "sarimax"):
+                    candidate = aggregate.get(candidate_name)
+                    if not isinstance(candidate, dict):
+                        continue
+                    candidate_rmse = candidate.get("rmse")
+                    try:
+                        rmse_value = float(candidate_rmse)
+                    except (TypeError, ValueError):
+                        continue
+                    if rmse_value <= 0:
+                        continue
+                    if best_rmse is None or rmse_value < best_rmse:
+                        best_name = candidate_name
+                        best_rmse = rmse_value
+                if best_name:
+                    resolved_baseline_key = best_name
+                    base = aggregate.get(best_name) or {}
+            else:
+                base = aggregate.get(baseline_key_requested) or {}
+
+            edge_payload["baseline_model"] = resolved_baseline_key
             edge_payload.update(
                 {
                     "fold_count": fold_count,

@@ -22,6 +22,7 @@ def _write_audit(
     ticker: str | None = None,
     regime: str | None = None,
     signal_context: dict | None = None,
+    semantic_admission: dict | None = None,
 ) -> None:
     payload = {
         "dataset": {
@@ -39,6 +40,8 @@ def _write_audit(
     }
     if signal_context is not None:
         payload["signal_context"] = signal_context
+    if semantic_admission is not None:
+        payload["semantic_admission"] = semantic_admission
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -408,7 +411,7 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
         "Outcome join   : outcomes_loaded=0 join_attempted=0 accepted=2 accepted_noneligible=0 "
         "eligible=2 quarantined=0 due_eligible=0 matched=0 missing=0 ambiguous=0 "
         "not_due=0 invalid_context=0 not_yet_eligible=0 duplicate_conflicts=0 "
-        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
+        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=2"
     ) in output
     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
 
@@ -435,8 +438,10 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     assert summary["window_counts"]["n_eligible_records"] == 2
     assert summary["window_counts"]["n_quarantined_records"] == 0
     assert summary["window_counts"]["n_duplicate_conflicts"] == 0
+    assert summary["window_counts"]["n_admission_missing_execution_metadata_records"] == 2
     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
+    assert summary["admission_summary"]["missing_execution_metadata_records"] == 2
     assert summary["telemetry_contract"]["schema_version"] == 3
     assert summary["telemetry_contract"]["outcomes_loaded"] is False
     assert "cache_status" in summary
@@ -949,7 +954,101 @@ def test_outcome_join_marks_future_window_as_not_due_not_missing(
     summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
     assert summary["window_counts"]["n_outcome_windows_not_due"] == 1
     assert summary["window_counts"]["n_outcome_windows_missing"] == 0
+    assert summary["window_counts"]["n_readiness_denominator_included"] == 0
+    assert summary["window_counts"]["n_readiness_excluded_not_due"] == 1
     assert summary["dataset_windows"][0]["outcome_status"] == "NOT_DUE"
+
+
+def test_check_forecast_audits_preserves_producer_admission_fields_in_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_admission_contract.json",
+        start="2024-01-01",
+        end="2024-01-31",
+        length=180,
+        horizon=5,
+        ticker="AAPL",
+        regime="LOW_VOL",
+        signal_context={
+            "context_type": "TRADE",
+            "event_type": "TRADE_FORECAST_AUDIT",
+            "ts_signal_id": "ts_missing_meta",
+            "ticker": "AAPL",
+            "run_id": None,
+            "entry_ts": None,
+            "forecast_horizon": 5,
+            "signal_context_missing": False,
+        },
+        semantic_admission={
+            "admission_contract_version": 1,
+            "accepted_for_audit_history": True,
+            "admissible_for_readiness": False,
+            "gate_eligible": False,
+            "gate_bucket": "ACCEPTED_NONELIGIBLE",
+            "reason_code": "MISSING_RUN_ID,MISSING_ENTRY_TS",
+            "reason_codes": ["MISSING_RUN_ID", "MISSING_ENTRY_TS"],
+            "production_labeled": True,
+            "duplicate_conflict": False,
+            "quarantined": False,
+            "not_quarantined": True,
+            "missing_execution_metadata": True,
+            "missing_execution_metadata_fields": ["run_id", "entry_ts"],
+        },
+        weights={"sarimax": 1.0},
+        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit):
+        mod.main()
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    entry = summary["dataset_windows"][0]
+    assert entry["semantic_admission_source"] == "producer"
+    assert entry["semantic_admission_preserved"] is True
+    assert entry["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+    assert entry["admission_reason_code"] == "MISSING_RUN_ID,MISSING_ENTRY_TS"
+    assert entry["admission_reason_codes"] == ["MISSING_RUN_ID", "MISSING_ENTRY_TS"]
+    assert entry["missing_execution_metadata"] is True
+    assert entry["missing_execution_metadata_fields"] == ["run_id", "entry_ts"]
+    assert summary["admission_summary"]["accepted_noneligible_records"] == 1
+    assert summary["admission_summary"]["missing_execution_metadata_records"] == 1
+    assert summary["admission_summary"]["source_counts"]["producer"] == 1
 
 
 def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:
@@ -1457,6 +1556,73 @@ def test_check_forecast_audits_failure_summary_preserves_outcome_windows(
     assert summary["dataset_windows"][0]["outcome_status"] == "MATCHED"
     assert bool(summary["dataset_windows"][0]["counts_toward_linkage_denominator"]) is True
     assert summary["window_counts"]["n_outcome_windows_matched"] == 1
+
+
+def test_check_forecast_audits_failure_summary_retains_rmse_and_lift_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_0.json",
+        start="2024-01-01",
+        end="2024-02-01",
+        length=220,
+        horizon=30,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 5.0},
+            "samossa": {"rmse": 5.0},
+            "ensemble": {"rmse": 8.0},
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code != 0
+
+    summary = json.loads(
+        (tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["effective_audits"] == 1
+    assert summary["violation_count"] == 1
+    assert summary["violation_rate"] == pytest.approx(1.0)
+    assert summary["lift_fraction"] == pytest.approx(0.0)
+    assert summary["window_counts"]["n_rmse_windows_processed"] == 1
+    assert summary["window_counts"]["n_rmse_windows_usable"] == 1
 
 
 def test_check_forecast_audits_no_lift_soft_mode_sets_disable_default_decision(

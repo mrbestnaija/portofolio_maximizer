@@ -31,6 +31,9 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
     routing_stats = {
         "time_series_signals": 2,
         "llm_fallback_signals": 1,
+        "llm_primary_takeovers": 1,
+        "ts_hold_fallbacks": 1,
+        "ts_low_quality_fallbacks": 0,
     }
 
     equity_points = [
@@ -101,5 +104,8 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
     # Routing, latency, and health blocks should be present and structurally intact.
     assert payload["routing"]["ts_signals"] == routing_stats["time_series_signals"]
     assert payload["routing"]["llm_signals"] == routing_stats["llm_fallback_signals"]
+    assert payload["routing"]["llm_primary_takeovers"] == routing_stats["llm_primary_takeovers"]
+    assert payload["routing"]["ts_hold_fallbacks"] == routing_stats["ts_hold_fallbacks"]
+    assert payload["routing"]["ts_low_quality_fallbacks"] == routing_stats["ts_low_quality_fallbacks"]
     assert "forecaster_health" in payload and payload["forecaster_health"]
     assert "quant_validation_health" in payload and payload["quant_validation_health"]

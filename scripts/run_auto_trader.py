@@ -173,6 +173,41 @@ def _build_cohort_identity(audit_path: Path) -> Dict[str, Any]:
     return identity
 
 
+def _compute_expected_close_ts(entry_ts_raw: Any, forecast_horizon_raw: Any) -> Optional[str]:
+    try:
+        horizon = int(forecast_horizon_raw)
+    except (TypeError, ValueError):
+        return None
+    if horizon < 0:
+        return None
+    entry_ts = pd.to_datetime(entry_ts_raw, utc=True, errors="coerce")
+    if entry_ts is pd.NaT:
+        return None
+    return (entry_ts + pd.Timedelta(days=horizon)).isoformat()
+
+
+def _resolve_best_single_regression_metrics(summary: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+    best_name: Optional[str] = None
+    best_metrics: Dict[str, Any] = {}
+    best_rmse: Optional[float] = None
+    for candidate_name in ("garch", "mssa_rl", "samossa", "sarimax"):
+        candidate = summary.get(candidate_name)
+        if not isinstance(candidate, dict):
+            continue
+        candidate_rmse = candidate.get("rmse")
+        try:
+            rmse_value = float(candidate_rmse)
+        except (TypeError, ValueError):
+            continue
+        if rmse_value <= 0:
+            continue
+        if best_rmse is None or rmse_value < best_rmse:
+            best_name = candidate_name
+            best_rmse = rmse_value
+            best_metrics = candidate
+    return best_name, best_metrics
+
+
 def _build_semantic_admission(
     *,
     audit_path: Path,
@@ -184,10 +219,13 @@ def _build_semantic_admission(
     ts_signal_id = str(signal_context.get("ts_signal_id") or "").strip()
     run_id = str(signal_context.get("run_id") or "").strip()
     entry_ts = str(signal_context.get("entry_ts") or "").strip()
+    expected_close_ts = str(signal_context.get("expected_close_ts") or "").strip()
     forecast_horizon = signal_context.get("forecast_horizon")
     ticker = str(signal_context.get("ticker") or "").strip().upper()
+    event_type = str(signal_context.get("event_type") or "").strip().upper()
     routing_mode = str(cohort_identity.get("routing_mode") or "")
     production_labeled = audit_path.parent.name.strip().lower() == "production"
+    missing_execution_metadata_fields: list[str] = []
 
     reason_codes: list[str] = []
     if context_type != "TRADE":
@@ -198,12 +236,18 @@ def _build_semantic_admission(
         reason_codes.append("MISSING_TICKER")
     if not run_id:
         reason_codes.append("MISSING_RUN_ID")
+        missing_execution_metadata_fields.append("run_id")
     if not entry_ts:
         reason_codes.append("MISSING_ENTRY_TS")
+        missing_execution_metadata_fields.append("entry_ts")
+    if not expected_close_ts:
+        reason_codes.append("MISSING_EXPECTED_CLOSE_TS")
     if not ts_signal_id:
         reason_codes.append("MISSING_SIGNAL_ID")
     if forecast_horizon in (None, ""):
         reason_codes.append("MISSING_FORECAST_HORIZON")
+    if not event_type:
+        reason_codes.append("MISSING_EVENT_TYPE")
     if routing_mode == "ambiguous_root":
         reason_codes.append("ROUTING_AMBIGUOUS")
     if not production_labeled:
@@ -212,15 +256,20 @@ def _build_semantic_admission(
     admissible = len(reason_codes) == 0
     bucket = "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
     return {
+        "admission_contract_version": 1,
         "accepted_for_audit_history": True,
         "admissible_for_readiness": admissible,
         "gate_eligible": admissible,
         "gate_bucket": bucket,
         "reason_code": "READY" if admissible else ",".join(reason_codes),
+        "reason_codes": [] if admissible else list(reason_codes),
         "production_labeled": production_labeled,
         "not_quarantined": True,
+        "quarantined": False,
         "superseded": False,
         "duplicate_conflict": False,
+        "missing_execution_metadata": bool(missing_execution_metadata_fields),
+        "missing_execution_metadata_fields": missing_execution_metadata_fields,
         "manifest_registered": None,
     }
 
@@ -1306,6 +1355,7 @@ def build_trade_signal_context(
         or execution_report.get("bar_timestamp")
         or execution_report.get("timestamp")
     )
+    expected_close_ts = _compute_expected_close_ts(incoming_entry_ts, signal_horizon)
     return {
         "context_type": "TRADE",
         "event_type": "TRADE_FORECAST_AUDIT",
@@ -1313,6 +1363,7 @@ def build_trade_signal_context(
         "ticker": ticker,
         "run_id": run_id,
         "entry_ts": incoming_entry_ts,
+        "expected_close_ts": expected_close_ts,
         "forecast_horizon": signal_horizon,
         "signal_context_missing": not bool(incoming_tsid),
     }
@@ -1415,6 +1466,12 @@ def _attach_signal_context_to_forecast_audit(
         merged["forecast_horizon"] = (
             incoming_horizon if incoming_horizon is not None else merged.get("forecast_horizon")
         )
+        merged["event_type"] = canonical_context.get("event_type") or merged.get("event_type")
+        merged["expected_close_ts"] = (
+            _compute_expected_close_ts(merged.get("entry_ts"), merged.get("forecast_horizon"))
+            or canonical_context.get("expected_close_ts")
+            or merged.get("expected_close_ts")
+        )
 
         merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
         payload["signal_context"] = merged
@@ -1443,6 +1500,7 @@ def _attach_signal_context_to_forecast_audit(
                 "context_type": merged.get("context_type"),
                 "ts_signal_id": merged.get("ts_signal_id"),
                 "event_type": merged.get("event_type"),
+                "expected_close_ts": merged.get("expected_close_ts"),
             }
         )
         payload["audit_id"] = audit_id
@@ -1903,6 +1961,9 @@ def _emit_dashboard_json(
             "ts_signals": routing_stats.get("time_series_signals", 0),
             "llm_signals": routing_stats.get("llm_fallback_signals", 0),
             "fallback_used": routing_stats.get("llm_fallback_signals", 0),
+            "llm_primary_takeovers": routing_stats.get("llm_primary_takeovers", 0),
+            "ts_hold_fallbacks": routing_stats.get("ts_hold_fallbacks", 0),
+            "ts_low_quality_fallbacks": routing_stats.get("ts_low_quality_fallbacks", 0),
         },
         "quality": quality_summary or {},
         "equity": equity_points,
@@ -2878,17 +2939,13 @@ def main(
                     start_date=start_date.isoformat(),
                     end_date=end_date.isoformat(),
                 )
-                reg_baseline = trading_engine.db_manager.get_forecast_regression_summary(
-                    model_type="SAMOSSA"
-                )
             except Exception:  # pragma: no cover - dashboard is advisory
                 reg_window = {}
-                reg_baseline = {}
 
             ens_win = (reg_window.get("ensemble") or {}) if reg_window else {}
-            samossa_base = (reg_baseline.get("samossa") or {}) if reg_baseline else {}
+            baseline_name, baseline_metrics = _resolve_best_single_regression_metrics(reg_window or {})
             ensemble_rmse = ens_win.get("rmse")
-            baseline_rmse = samossa_base.get("rmse")
+            baseline_rmse = baseline_metrics.get("rmse") if isinstance(baseline_metrics, dict) else None
             rmse_ratio = None
             rmse_ok = None
             if (
@@ -2913,6 +2970,7 @@ def main(
                     "win_rate": float(win_rate) if isinstance(win_rate, (int, float)) else None,
                     "rmse": {
                         "ensemble": ensemble_rmse,
+                        "baseline_model": baseline_name,
                         "baseline": baseline_rmse,
                         "ratio": rmse_ratio,
                     },

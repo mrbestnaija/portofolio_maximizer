@@ -8,6 +8,60 @@ import sys
 import pytest
 
 
+def _make_lift_summary(audit_dir: Path, **overrides) -> dict:
+    base = {
+        "generated_utc": "2026-03-15T12:00:00+00:00",
+        "audit_dir": str(audit_dir),
+        "max_files": 500,
+        "scope": {"include_research": False, "production_audit_only": False},
+        "effective_audits": 20,
+        "violation_rate": 0.0,
+        "max_violation_rate": 0.35,
+        "lift_fraction": 0.30,
+        "min_lift_fraction": 0.25,
+        "decision": "KEEP",
+        "decision_reason": "lift demonstrated during holding period",
+        "admission_summary": {
+            "accepted_records": 12,
+            "accepted_noneligible_records": 0,
+            "eligible_records": 12,
+            "quarantined_records": 0,
+            "duplicate_conflicts": 0,
+            "missing_execution_metadata_records": 0,
+            "bucket_counts": {
+                "ELIGIBLE": 12,
+                "ACCEPTED_NONELIGIBLE": 0,
+                "QUARANTINED": 0,
+            },
+            "source_counts": {
+                "producer": 12,
+                "legacy_derived": 0,
+            },
+        },
+        "window_counts": {
+            "n_outcome_windows_eligible": 12,
+            "n_outcome_windows_matched": 10,
+            "n_outcome_windows_invalid_context": 0,
+            "n_outcome_windows_non_trade_context": 0,
+            "n_accepted_records": 12,
+            "n_accepted_noneligible_records": 0,
+            "n_eligible_records": 12,
+            "n_quarantined_records": 0,
+            "n_duplicate_conflicts": 0,
+            "n_contract_versions": 1,
+            "n_cohort_fingerprints": 1,
+            "n_readiness_denominator_included": 12,
+        },
+    }
+    if "window_counts" in overrides and isinstance(overrides["window_counts"], dict):
+        merged_counts = dict(base["window_counts"])
+        merged_counts.update(overrides["window_counts"])
+        overrides = dict(overrides)
+        overrides["window_counts"] = merged_counts
+    base.update(overrides)
+    return base
+
+
 def test_extract_lift_output_metrics_inconclusive() -> None:
     import scripts.production_audit_gate as mod
 
@@ -178,6 +232,198 @@ def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
     assert "effective_audits" not in safe
 
 
+def test_main_prefers_structured_summary_over_stdout_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "Effective audits with RMSE: 99",
+                        "Violation rate: 99.00% (max allowed 35.00%)",
+                        "Ensemble lift fraction: 99.00% (required >= 25.00%)",
+                        "Decision: KEEP (stdout should not be trusted)",
+                    ]
+                ),
+                stderr="",
+            )
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 100.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    original_safe_load_json = mod._safe_load_json
+
+    def _fake_safe_load_json(path: Path):  # noqa: ANN001
+        if Path(path).name == "latest_summary.json":
+            return _make_lift_summary(
+                audit_dir,
+                effective_audits=20,
+                violation_rate=0.0,
+                lift_fraction=0.30,
+            )
+        return original_safe_load_json(path)
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _db_path: {
+            "close_before_entry_count": 0,
+            "closed_missing_exit_reason_count": 0,
+            "query_error": None,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+    payload = original_safe_load_json(output_json)
+    assert payload["lift_gate"]["effective_audits"] == 20
+    assert payload["lift_gate"]["lift_fraction"] == pytest.approx(0.30)
+
+
+def test_main_preserves_admission_summary_from_structured_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 100.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    original_safe_load_json = mod._safe_load_json
+
+    def _fake_safe_load_json(path: Path):  # noqa: ANN001
+        if Path(path).name == "latest_summary.json":
+            return _make_lift_summary(
+                audit_dir,
+                admission_summary={
+                    "accepted_records": 9,
+                    "accepted_noneligible_records": 3,
+                    "eligible_records": 6,
+                    "quarantined_records": 1,
+                    "duplicate_conflicts": 2,
+                    "missing_execution_metadata_records": 4,
+                    "bucket_counts": {
+                        "ELIGIBLE": 6,
+                        "ACCEPTED_NONELIGIBLE": 3,
+                        "QUARANTINED": 1,
+                    },
+                    "source_counts": {
+                        "producer": 9,
+                        "legacy_derived": 0,
+                    },
+                },
+            )
+        return original_safe_load_json(path)
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _db_path: {
+            "close_before_entry_count": 0,
+            "closed_missing_exit_reason_count": 0,
+            "query_error": None,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+    payload = original_safe_load_json(output_json)
+    assert payload["readiness"]["admission_summary"]["missing_execution_metadata_records"] == 4
+    assert payload["readiness_v2"]["admission_summary"]["bucket_counts"]["QUARANTINED"] == 1
+    assert payload["readiness_v2"]["accepted_records"] == 9
+    assert payload["readiness_v2"]["duplicate_conflicts"] == 2
+
+
 def _seed_trade_exec_table(db_path: Path, *, close_id: int, entry_trade_id: int | None) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
@@ -340,6 +586,14 @@ def test_main_fails_gate_when_reconcile_status_is_fail(
         raise AssertionError(f"Unexpected command: {joined}")
 
     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    original_safe_load_json = mod._safe_load_json
+    monkeypatch.setattr(
+        mod,
+        "_safe_load_json",
+        lambda path: _make_lift_summary(audit_dir)
+        if Path(path).name == "latest_summary.json"
+        else original_safe_load_json(path),
+    )
     monkeypatch.setattr(
         mod,
         "_run_reconcile_step",
@@ -445,6 +699,14 @@ def test_unattended_profile_requires_profitable_proof(
         raise AssertionError(f"Unexpected command: {joined}")
 
     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    original_safe_load_json = mod._safe_load_json
+    monkeypatch.setattr(
+        mod,
+        "_safe_load_json",
+        lambda path: _make_lift_summary(audit_dir, effective_audits=21)
+        if Path(path).name == "latest_summary.json"
+        else original_safe_load_json(path),
+    )
     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
     monkeypatch.setattr(
         mod,
@@ -531,6 +793,19 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
         raise AssertionError(f"Unexpected command: {joined}")
 
     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    original_safe_load_json = mod._safe_load_json
+    monkeypatch.setattr(
+        mod,
+        "_safe_load_json",
+        lambda path: _make_lift_summary(
+            audit_dir,
+            effective_audits=7,
+            decision="INCONCLUSIVE",
+            decision_reason="effective_audits=7 < required_audits=20",
+        )
+        if Path(path).name == "latest_summary.json"
+        else original_safe_load_json(path),
+    )
     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
     monkeypatch.setattr(
         mod,

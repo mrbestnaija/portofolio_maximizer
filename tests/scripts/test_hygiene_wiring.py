@@ -27,7 +27,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scripts.run_auto_trader import _attach_signal_context_to_forecast_audit  # noqa: E402
+from scripts.run_auto_trader import (  # noqa: E402
+    _attach_signal_context_to_forecast_audit,
+    _build_cohort_identity,
+    _build_semantic_admission,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +104,7 @@ class TestContextTypeTradeWiring:
         assert sc.get("context_type") == "TRADE", (
             f"Expected context_type='TRADE', got {sc.get('context_type')!r}"
         )
+        assert sc.get("expected_close_ts") == "2026-01-31T00:00:00+00:00"
 
     def test_context_type_trade_overwrites_existing_forecast_only(self, tmp_path: Path) -> None:
         """Reverted Agent B code may have written FORECAST_ONLY — must be overwritten."""
@@ -173,6 +178,7 @@ class TestHorizonMismatchPrevention:
         result = json.loads(audit_file.read_text())
         sc = result.get("signal_context", {})
         assert sc.get("forecast_horizon") == 6
+        assert sc.get("expected_close_ts") == "2026-01-07T00:00:00+00:00"
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +233,64 @@ class TestTickerBackfill:
         result = json.loads(audit_file.read_text())
         # Existing dataset ticker should be preserved (no clobber)
         assert result["dataset"].get("ticker") == "AAPL"
+
+
+class TestSemanticAdmission:
+    def test_missing_expected_close_ts_is_not_gate_eligible(self, tmp_path: Path) -> None:
+        audit_file = tmp_path / "production" / "forecast_audit_20260309_000000_semantic.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(_make_audit_payload()), encoding="utf-8")
+
+        cohort_identity = _build_cohort_identity(audit_file)
+        admission = _build_semantic_admission(
+            audit_path=audit_file,
+            signal_context={
+                "context_type": "TRADE",
+                "event_type": "TRADE_FORECAST_AUDIT",
+                "ts_signal_id": "ts_AAPL_20260101_0001",
+                "ticker": "AAPL",
+                "run_id": "20260101_000000",
+                "entry_ts": "2026-01-01T00:00:00+00:00",
+                "forecast_horizon": 30,
+            },
+            audit_id="audit_1",
+            cohort_identity=cohort_identity,
+        )
+
+        assert admission["gate_eligible"] is False
+        assert admission["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+        assert "MISSING_EXPECTED_CLOSE_TS" in admission["reason_code"]
+        assert "MISSING_EXPECTED_CLOSE_TS" in admission["reason_codes"]
+        assert admission["quarantined"] is False
+        assert admission["missing_execution_metadata"] is False
+
+    def test_missing_execution_metadata_is_written_by_producer(self, tmp_path: Path) -> None:
+        audit_file = tmp_path / "production" / "forecast_audit_20260309_000001_semantic.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(_make_audit_payload()), encoding="utf-8")
+
+        cohort_identity = _build_cohort_identity(audit_file)
+        admission = _build_semantic_admission(
+            audit_path=audit_file,
+            signal_context={
+                "context_type": "TRADE",
+                "event_type": "TRADE_FORECAST_AUDIT",
+                "ts_signal_id": "ts_AAPL_20260101_0002",
+                "ticker": "AAPL",
+                "run_id": "",
+                "entry_ts": "",
+                "expected_close_ts": "2026-01-31T00:00:00+00:00",
+                "forecast_horizon": 30,
+            },
+            audit_id="audit_2",
+            cohort_identity=cohort_identity,
+        )
+
+        assert admission["gate_eligible"] is False
+        assert admission["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+        assert admission["missing_execution_metadata"] is True
+        assert admission["missing_execution_metadata_fields"] == ["run_id", "entry_ts"]
+        assert admission["reason_codes"][:2] == ["MISSING_RUN_ID", "MISSING_ENTRY_TS"]
 
 
 # ---------------------------------------------------------------------------

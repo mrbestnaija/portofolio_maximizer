@@ -1062,6 +1062,23 @@ def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
     return metrics
 
 
+def _missing_summary_metric_keys(summary: Dict[str, Any]) -> List[str]:
+    required_top_level = (
+        "effective_audits",
+        "violation_rate",
+        "max_violation_rate",
+        "lift_fraction",
+        "min_lift_fraction",
+        "decision",
+        "decision_reason",
+        "window_counts",
+    )
+    missing = [key for key in required_top_level if key not in summary]
+    if "window_counts" not in missing and not isinstance(summary.get("window_counts"), dict):
+        missing.append("window_counts")
+    return missing
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
@@ -1232,8 +1249,6 @@ def main() -> int:
 
     lift_proc = _run_command(lift_cmd, cwd=repo_root)
     lift_output = f"{lift_proc.stdout or ''}\n{lift_proc.stderr or ''}".strip()
-    lift_inconclusive = "RMSE gate inconclusive" in lift_output
-    lift_output_metrics = _extract_lift_output_metrics(lift_output)
 
     lift_summary = _safe_load_json(summary_cache_path) or {}
     summary_invocation_match = True
@@ -1256,46 +1271,53 @@ def main() -> int:
             }
             lift_summary = {}
 
+    summary_metrics_error: Optional[str] = None
+    missing_summary_metric_keys: List[str] = []
+    if not lift_summary:
+        summary_metrics_error = "SUMMARY_MISSING"
+        if not summary_invocation_match:
+            summary_metrics_error = "SUMMARY_INVOCATION_MISMATCH"
+    else:
+        missing_summary_metric_keys = _missing_summary_metric_keys(lift_summary)
+        if missing_summary_metric_keys:
+            summary_metrics_error = "SUMMARY_METRICS_MISSING"
+
+    lift_decision = lift_summary.get("decision")
+    lift_decision_reason = lift_summary.get("decision_reason")
+    lift_inconclusive = str(lift_decision or "").strip().upper() == "INCONCLUSIVE"
+
     lift_status = "PASS"
-    if lift_proc.returncode != 0:
+    if summary_metrics_error:
         lift_status = "FAIL"
-        # Keep only binding/provenance fields for freshness checks on failed runs.
-        # Decision metrics still come from active subprocess output parsing.
-        lift_summary = _binding_safe_lift_summary(lift_summary)
+    elif lift_proc.returncode != 0:
+        lift_status = "FAIL"
     elif lift_inconclusive:
         lift_status = "INCONCLUSIVE"
 
-    lift_pass = lift_proc.returncode == 0 and (
+    lift_pass = summary_metrics_error is None and lift_proc.returncode == 0 and (
         lift_inconclusive_allowed or not lift_inconclusive
     )
 
-    lift_decision = lift_output_metrics.get("decision") or lift_summary.get("decision")
-    lift_decision_reason = lift_output_metrics.get("decision_reason") or lift_summary.get(
-        "decision_reason"
-    )
-    if lift_inconclusive:
+    if summary_metrics_error == "SUMMARY_INVOCATION_MISMATCH":
+        lift_decision = None
+        lift_decision_reason = "SUMMARY_INVOCATION_MISMATCH"
+    elif summary_metrics_error == "SUMMARY_METRICS_MISSING":
+        lift_decision = None
+        lift_decision_reason = (
+            "SUMMARY_METRICS_MISSING:" + ",".join(missing_summary_metric_keys)
+        )
+    elif summary_metrics_error == "SUMMARY_MISSING":
+        lift_decision = None
+        lift_decision_reason = "SUMMARY_MISSING"
+    elif lift_inconclusive:
         lift_decision = None
         lift_decision_reason = "insufficient effective audits for RMSE gate"
 
-    lift_effective_audits = lift_output_metrics.get("effective_audits")
-    if lift_effective_audits is None:
-        lift_effective_audits = lift_summary.get("effective_audits")
-
-    lift_violation_rate = lift_output_metrics.get("violation_rate")
-    if lift_violation_rate is None:
-        lift_violation_rate = lift_summary.get("violation_rate")
-
-    lift_max_violation_rate = lift_output_metrics.get("max_violation_rate")
-    if lift_max_violation_rate is None:
-        lift_max_violation_rate = lift_summary.get("max_violation_rate")
-
-    lift_fraction = lift_output_metrics.get("lift_fraction")
-    if lift_fraction is None:
-        lift_fraction = lift_summary.get("lift_fraction")
-
-    min_lift_fraction = lift_output_metrics.get("min_lift_fraction")
-    if min_lift_fraction is None:
-        min_lift_fraction = lift_summary.get("min_lift_fraction")
+    lift_effective_audits = lift_summary.get("effective_audits")
+    lift_violation_rate = lift_summary.get("violation_rate")
+    lift_max_violation_rate = lift_summary.get("max_violation_rate")
+    lift_fraction = lift_summary.get("lift_fraction")
+    min_lift_fraction = lift_summary.get("min_lift_fraction")
 
     proof_cmd = [
         python_bin,
@@ -1370,14 +1392,35 @@ def main() -> int:
         window_counts,
         production_audit_only=production_audit_only,
     )
-    accepted_records = _safe_int(window_counts.get("n_accepted_records"), 0)
-    accepted_noneligible_records = _safe_int(
-        window_counts.get("n_accepted_noneligible_records"),
-        max(0, linkage_waterfall.get("raw_candidates", 0) - linkage_waterfall.get("linked", 0)),
+    admission_summary = lift_summary.get("admission_summary")
+    admission_summary = admission_summary if isinstance(admission_summary, dict) else {}
+    accepted_records = _safe_int(
+        admission_summary.get("accepted_records"),
+        _safe_int(window_counts.get("n_accepted_records"), 0),
     )
-    eligible_records = _safe_int(window_counts.get("n_eligible_records"), outcome_eligible)
-    quarantined_records = _safe_int(window_counts.get("n_quarantined_records"), 0)
-    duplicate_conflicts = _safe_int(window_counts.get("n_duplicate_conflicts"), 0)
+    accepted_noneligible_records = _safe_int(
+        admission_summary.get("accepted_noneligible_records"),
+        _safe_int(
+            window_counts.get("n_accepted_noneligible_records"),
+            max(0, linkage_waterfall.get("raw_candidates", 0) - linkage_waterfall.get("linked", 0)),
+        ),
+    )
+    eligible_records = _safe_int(
+        admission_summary.get("eligible_records"),
+        _safe_int(window_counts.get("n_eligible_records"), outcome_eligible),
+    )
+    quarantined_records = _safe_int(
+        admission_summary.get("quarantined_records"),
+        _safe_int(window_counts.get("n_quarantined_records"), 0),
+    )
+    duplicate_conflicts = _safe_int(
+        admission_summary.get("duplicate_conflicts"),
+        _safe_int(window_counts.get("n_duplicate_conflicts"), 0),
+    )
+    admission_missing_execution_metadata_records = _safe_int(
+        admission_summary.get("missing_execution_metadata_records"),
+        _safe_int(window_counts.get("n_admission_missing_execution_metadata_records"), 0),
+    )
     contract_version_count = _safe_int(window_counts.get("n_contract_versions"), 0)
     cohort_fingerprint_count = _safe_int(window_counts.get("n_cohort_fingerprints"), 0)
     contract_version_drift = contract_version_count > 1
@@ -1422,7 +1465,9 @@ def main() -> int:
         phase3_fail_reasons.append("CONTRACT_VERSION_DRIFT")
     if cohort_fingerprint_drift:
         phase3_fail_reasons.append("COHORT_FINGERPRINT_DRIFT")
-    if not summary_invocation_match:
+    if summary_metrics_error:
+        phase3_fail_reasons.append(summary_metrics_error)
+    if not summary_invocation_match and summary_metrics_error != "SUMMARY_INVOCATION_MISMATCH":
         phase3_fail_reasons.append("SUMMARY_INVOCATION_MISMATCH")
     if not artifact_binding_pass:
         phase3_fail_reasons.append("ARTIFACT_STALE_OR_UNBOUND")
@@ -1477,6 +1522,8 @@ def main() -> int:
             "exit_code": int(lift_proc.returncode),
             "inconclusive": lift_inconclusive,
             "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
+            "summary_metrics_error": summary_metrics_error,
+            "missing_summary_metric_keys": missing_summary_metric_keys,
             "decision": lift_decision,
             "decision_reason": lift_decision_reason,
             "effective_audits": lift_effective_audits,
@@ -1534,6 +1581,7 @@ def main() -> int:
             "integrity_query_error": integrity_query_error,
             "masked_integrity_violations": masked_violation_count,
             "masked_integrity_violation_ids": masked_violation_ids,
+            "admission_summary": admission_summary,
         },
         "readiness_v2": {
             "overall_ready": bool(phase3_ready),
@@ -1558,10 +1606,12 @@ def main() -> int:
             "orphan_closes": close_before_entry_count,
             "quarantined_records": quarantined_records,
             "duplicate_conflicts": duplicate_conflicts,
+            "missing_execution_metadata_records": admission_missing_execution_metadata_records,
             "contract_version_drift": bool(contract_version_drift),
             "cohort_fingerprint_drift": bool(cohort_fingerprint_drift),
             "production_audit_only": production_audit_only,
             "linkage_waterfall": linkage_waterfall,
+            "admission_summary": admission_summary,
         },
         "thresholds": thresholds,
     }

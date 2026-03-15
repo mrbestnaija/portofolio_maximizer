@@ -66,15 +66,20 @@ def _base_payload(*, audit_id: str) -> Dict[str, Any]:
             "ts_signal_id": "ts_AAPL_20260314_000001",
         },
         "semantic_admission": {
+            "admission_contract_version": 1,
             "accepted_for_audit_history": True,
             "admissible_for_readiness": True,
             "gate_eligible": True,
             "gate_bucket": "ELIGIBLE",
             "reason_code": "READY",
+            "reason_codes": [],
             "production_labeled": True,
             "not_quarantined": True,
+            "quarantined": False,
             "superseded": False,
             "duplicate_conflict": False,
+            "missing_execution_metadata": False,
+            "missing_execution_metadata_fields": [],
             "manifest_registered": None,
         },
     }
@@ -93,6 +98,7 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
                 "gate_eligible": False,
                 "gate_bucket": "ACCEPTED_NONELIGIBLE",
                 "reason_code": "MISSING_ENTRY_TRADE_ID",
+                "reason_codes": ["MISSING_ENTRY_TRADE_ID"],
             }
         )
     elif scenario == "invalid_context":
@@ -103,6 +109,7 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
                 "gate_eligible": False,
                 "gate_bucket": "ACCEPTED_NONELIGIBLE",
                 "reason_code": "NON_TRADE_CONTEXT",
+                "reason_codes": ["NON_TRADE_CONTEXT"],
             }
         )
     elif scenario == "missing_metadata":
@@ -114,6 +121,9 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
                 "gate_eligible": False,
                 "gate_bucket": "ACCEPTED_NONELIGIBLE",
                 "reason_code": "MISSING_RUN_ID",
+                "reason_codes": ["MISSING_RUN_ID"],
+                "missing_execution_metadata": True,
+                "missing_execution_metadata_fields": ["run_id"],
             }
         )
     elif scenario == "misrouted_production":
@@ -124,6 +134,7 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
                 "gate_bucket": "ACCEPTED_NONELIGIBLE",
                 "production_labeled": False,
                 "reason_code": "ROUTING_AMBIGUOUS",
+                "reason_codes": ["ROUTING_AMBIGUOUS"],
             }
         )
     return payload
@@ -214,6 +225,9 @@ def run_replay(*, output_dir: Path, scenario: str) -> Dict[str, Any]:
         conflict_payload["semantic_admission"]["admissible_for_readiness"] = False
         conflict_payload["semantic_admission"]["gate_bucket"] = "QUARANTINED"
         conflict_payload["semantic_admission"]["reason_code"] = "DUPLICATE_CONFLICT"
+        conflict_payload["semantic_admission"]["reason_codes"] = ["DUPLICATE_CONFLICT"]
+        conflict_payload["semantic_admission"]["quarantined"] = True
+        conflict_payload["semantic_admission"]["not_quarantined"] = False
         conflict_path = stamped_dir / f"{payload['audit_id']}_conflict.json"
         ok, reason = _write_and_register(conflict_payload, conflict_path)
         if ok:
