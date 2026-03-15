@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCALHOST_BIND = "127.0.0.1"
+DEFAULT_LIVE_WATCHER_TICKERS = ["AAPL", "AMZN", "GOOG", "GS", "JPM", "META", "MSFT", "NVDA", "TSLA", "V"]
 
 
 def _utc_now() -> str:
@@ -103,10 +104,13 @@ class EnsureResult:
     url: str
     bridge_pid: Optional[int]
     server_pid: Optional[int]
+    watcher_pid: Optional[int]
     started_bridge: bool
     started_server: bool
+    started_watcher: bool
     bridge_running: bool
     server_running: bool
+    watcher_running: bool
     warnings: list[str]
 
 
@@ -140,40 +144,54 @@ def _ensure_dashboard_stack(
     db_path: Path,
     persist_snapshot: bool,
     require_bridge: bool,
+    ensure_live_watcher: bool,
+    watcher_tickers: str,
+    watcher_cycles: int,
+    watcher_sleep_seconds: int,
 ) -> EnsureResult:
     logs_dir = root / "logs"
     bridge_pidfile = logs_dir / "dashboard_bridge.pid"
     server_pidfile = logs_dir / f"dashboard_http_{port}.pid"
+    watcher_pidfile = logs_dir / "live_denominator.pid"
 
     bridge_script = root / "scripts" / "dashboard_db_bridge.py"
+    watcher_script = root / "scripts" / "run_live_denominator_overnight.py"
     dashboard_html = root / "visualizations" / "live_dashboard.html"
     url = f"http://{LOCALHOST_BIND}:{port}/visualizations/live_dashboard.html"
 
     warnings: list[str] = []
     started_bridge = False
     started_server = False
+    started_watcher = False
 
     if not dashboard_html.exists():
         warnings.append(f"dashboard HTML missing: {dashboard_html}")
     if not bridge_script.exists():
         warnings.append(f"dashboard bridge missing: {bridge_script}")
+    if ensure_live_watcher and not watcher_script.exists():
+        warnings.append(f"live watcher missing: {watcher_script}")
 
     bridge_pid = _read_pidfile(bridge_pidfile)
     if bridge_pid is None and bridge_script.exists():
         if not db_path.exists():
             warnings.append(f"bridge skipped; DB missing: {db_path}")
         else:
-            bridge_cmd = [
+            bridge_cmd_base = [
                 python_bin,
-                str(bridge_script),
+                "-m",
+                "scripts.dashboard_db_bridge",
                 "--interval-seconds",
                 "5",
                 "--db-path",
                 str(db_path),
             ]
+            bridge_cmd = list(bridge_cmd_base)
             if persist_snapshot:
                 bridge_cmd.append("--persist-snapshot")
             new_pid = _start_detached(bridge_cmd, cwd=root)
+            if new_pid is None and persist_snapshot:
+                warnings.append("dashboard bridge persist snapshot unavailable; retrying without audit snapshot persistence")
+                new_pid = _start_detached(bridge_cmd_base, cwd=root)
             if new_pid is not None:
                 _write_pidfile(bridge_pidfile, new_pid)
                 bridge_pid = new_pid
@@ -204,20 +222,51 @@ def _ensure_dashboard_stack(
     bridge_running = bool(bridge_pid and _pid_alive(bridge_pid))
     server_running = bool(server_pid and _pid_alive(server_pid))
 
+    watcher_pid = _read_pidfile(watcher_pidfile)
+    if ensure_live_watcher and watcher_pid is None and watcher_script.exists():
+        watcher_cmd = [
+            python_bin,
+            str(watcher_script),
+            "--tickers",
+            watcher_tickers,
+            "--cycles",
+            str(int(watcher_cycles)),
+            "--sleep-seconds",
+            str(int(watcher_sleep_seconds)),
+            "--resume",
+            "--stop-on-progress",
+            "--db",
+            str(db_path),
+        ]
+        new_pid = _start_detached(watcher_cmd, cwd=root)
+        if new_pid is not None:
+            _write_pidfile(watcher_pidfile, new_pid)
+            watcher_pid = new_pid
+            started_watcher = True
+        else:
+            warnings.append("failed to start live denominator watcher")
+
+    watcher_running = bool(watcher_pid and _pid_alive(watcher_pid))
+
     if server_running and not _port_open(LOCALHOST_BIND, port):
         warnings.append(f"HTTP server process exists but localhost:{port} is not reachable yet")
 
     if require_bridge and not bridge_running:
         warnings.append("bridge is required but not running")
+    if ensure_live_watcher and not watcher_running:
+        warnings.append("live denominator watcher is required but not running")
 
     return EnsureResult(
         url=url,
         bridge_pid=bridge_pid,
         server_pid=server_pid,
+        watcher_pid=watcher_pid,
         started_bridge=started_bridge,
         started_server=started_server,
+        started_watcher=started_watcher,
         bridge_running=bridge_running,
         server_running=server_running,
+        watcher_running=watcher_running,
         warnings=warnings,
     )
 
@@ -247,6 +296,10 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
         db_path=db_path,
         persist_snapshot=bool(args.persist_snapshot),
         require_bridge=bool(args.require_bridge),
+        ensure_live_watcher=bool(args.ensure_live_watcher),
+        watcher_tickers=str(args.watcher_tickers),
+        watcher_cycles=int(args.watcher_cycles),
+        watcher_sleep_seconds=int(args.watcher_sleep_seconds),
     )
 
     if bool(args.open_browser):
@@ -278,6 +331,13 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
             "started_now": result.started_server,
             "port": port,
         },
+        "live_watcher": {
+            "pid": result.watcher_pid,
+            "running": result.watcher_running,
+            "started_now": result.started_watcher,
+            "tickers": [t.strip().upper() for t in str(args.watcher_tickers).split(",") if t.strip()],
+            "sleep_seconds": int(args.watcher_sleep_seconds),
+        },
         "warnings": result.warnings,
     }
 
@@ -287,7 +347,8 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
     print(f"[DASHBOARD] URL: {result.url}")
     print(
         f"[DASHBOARD] bridge_pid={result.bridge_pid} running={result.bridge_running} | "
-        f"server_pid={result.server_pid} running={result.server_running}"
+        f"server_pid={result.server_pid} running={result.server_running} | "
+        f"watcher_pid={result.watcher_pid} running={result.watcher_running}"
     )
     for warning in result.warnings:
         print(f"[DASHBOARD][WARN] {warning}")
@@ -297,6 +358,8 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
         if not result.server_running:
             hard_fail = True
         if bool(args.require_bridge) and not result.bridge_running:
+            hard_fail = True
+        if bool(args.ensure_live_watcher) and not result.watcher_running:
             hard_fail = True
     return 1 if hard_fail else 0
 
@@ -313,6 +376,11 @@ def main() -> int:
     p_ensure.add_argument("--persist-snapshot", dest="persist_snapshot", action="store_true", default=True, help="Enable dashboard snapshot persistence.")
     p_ensure.add_argument("--no-persist-snapshot", dest="persist_snapshot", action="store_false", help="Disable dashboard snapshot persistence.")
     p_ensure.add_argument("--require-bridge", action="store_true", help="Fail in strict mode when bridge is not running.")
+    p_ensure.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=True, help="Ensure the live denominator watcher is running (default: on).")
+    p_ensure.add_argument("--no-live-watcher", dest="ensure_live_watcher", action="store_false", help="Do not manage the live denominator watcher.")
+    p_ensure.add_argument("--watcher-tickers", default=",".join(DEFAULT_LIVE_WATCHER_TICKERS), help="Comma-separated live watcher ticker universe.")
+    p_ensure.add_argument("--watcher-cycles", type=int, default=30, help="Watcher cycles to schedule before exit.")
+    p_ensure.add_argument("--watcher-sleep-seconds", type=int, default=86400, help="Watcher cadence in seconds (default: 86400).")
     p_ensure.add_argument("--open-browser", action="store_true", help="Auto-open dashboard URL in default browser.")
     p_ensure.add_argument("--status-json", default="", help="Optional status JSON output path.")
     p_ensure.add_argument("--caller", default="", help="Calling entrypoint label.")
@@ -328,4 +396,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
