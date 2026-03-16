@@ -193,7 +193,11 @@ def check_ts_closes_in_db(db_path: Path) -> Finding:
     where proof-mode max_holding never fires when bar date doesn't advance.
     """
     if not db_path.exists():
-        return Finding("ts_closes_in_db", "FAIL", f"DB not found: {db_path}")
+        return Finding(
+            "ts_closes_in_db",
+            "WARN",
+            f"DB not found (CI/fresh environment — no bootstrap data): {db_path}",
+        )
 
     try:
         conn = sqlite3.connect(str(db_path), timeout=3.0)
@@ -310,6 +314,13 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
             "WARN",
             f"[TIER_3_PARTIAL] DB has {db_pairs} pairs, JSONL has {jsonl_pairs}. "
             f"Both below {PLATT_MIN_PAIRS} threshold -- calibrator may use raw confidence.",
+        )
+    if not db_path.exists() and not jsonl_path.exists():
+        return Finding(
+            "calibration_active_tier",
+            "WARN",
+            "[NONE] No active tier — CI/fresh environment: neither DB nor JSONL file present. "
+            "Run bootstrap cycles locally to seed calibration data.",
         )
     return Finding(
         "calibration_active_tier",
