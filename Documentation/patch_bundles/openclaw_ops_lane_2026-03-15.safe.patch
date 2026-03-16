@@ -1,0 +1,3107 @@
+﻿From e7a25be956484c079eb17e1484f507764d7b0dea Mon Sep 17 00:00:00 2001
+From: mrbestnaija <ezekwu77@gmail.com>
+Date: Sat, 14 Mar 2026 21:03:31 +0100
+Subject: [PATCH] Add OpenClaw ops control plane and harden readiness CLI
+
+
+diff --git a/bash/production_cron.sh b/bash/production_cron.sh
+index ca4f1a5..0f90920 100644
+--- a/bash/production_cron.sh
++++ b/bash/production_cron.sh
+@@ -282,6 +282,45 @@ PY
+       "${PYTHON_BIN}" scripts/openclaw_maintenance.py "${maint_args[@]}"
+     ;;
+ 
++  openclaw_ops_sweep)
++    # Local-only OpenClaw ops sweep: classify service/readiness issues, apply
++    # safe recovery to gateway/dashboard/watcher, and notify only on changes.
++    OPS_PRIMARY_CHANNEL="${CRON_OPENCLAW_OPS_PRIMARY_CHANNEL:-${OPENCLAW_CHANNEL:-whatsapp}}"
++    OPS_GATE_ARTIFACT="${CRON_OPENCLAW_OPS_GATE_ARTIFACT:-logs/gate_status_latest.json}"
++    OPS_DB_PATH="${CRON_OPENCLAW_OPS_DB_PATH:-data/portfolio_maximizer.db}"
++    OPS_DASHBOARD_PORT="${CRON_OPENCLAW_OPS_DASHBOARD_PORT:-8000}"
++    OPS_TIMEOUT_SECONDS="${CRON_OPENCLAW_OPS_TIMEOUT_SECONDS:-30}"
++    OPS_WATCHER_JSON="${CRON_OPENCLAW_OPS_WATCHER_JSON:-logs/overnight_denominator/live_denominator_latest.json}"
++    OPS_VERDICT_PATH="${CRON_OPENCLAW_OPS_VERDICT_PATH:-logs/automation/openclaw_ops_control_plane_latest.json}"
++    OPS_STATE_PATH="${CRON_OPENCLAW_OPS_STATE_PATH:-logs/automation/openclaw_ops_control_plane_state.json}"
++    OPS_COOLDOWN_SECONDS="${CRON_OPENCLAW_OPS_COOLDOWN_SECONDS:-900}"
++
++    ops_args=(
++      "sweep"
++      "--apply-safe-recovery"
++      "--notify-on-change"
++      "--primary-channel" "${OPS_PRIMARY_CHANNEL}"
++      "--gate-artifact" "${OPS_GATE_ARTIFACT}"
++      "--db-path" "${OPS_DB_PATH}"
++      "--dashboard-port" "${OPS_DASHBOARD_PORT}"
++      "--timeout-seconds" "${OPS_TIMEOUT_SECONDS}"
++      "--watcher-json" "${OPS_WATCHER_JSON}"
++      "--cooldown-seconds" "${OPS_COOLDOWN_SECONDS}"
++      "--verdict-path" "${OPS_VERDICT_PATH}"
++      "--state-path" "${OPS_STATE_PATH}"
++      "--json"
++    )
++    if [[ -n "${CRON_OPENCLAW_OPS_TARGETS:-}" ]]; then
++      ops_args+=("--notify-targets" "${CRON_OPENCLAW_OPS_TARGETS}")
++    fi
++    if [[ -n "${CRON_OPENCLAW_OPS_TO:-}" ]]; then
++      ops_args+=("--notify-to" "${CRON_OPENCLAW_OPS_TO}")
++    fi
++
++    run_with_logging "openclaw_ops_sweep: safe service recovery + anomaly-only notify" \
++      "${PYTHON_BIN}" scripts/openclaw_ops_control_plane.py "${ops_args[@]}"
++    ;;
++
+   self_improvement_review_forward)
+     # Forward pending self-improvement proposals to human reviewers via OpenClaw.
+     REVIEW_MAX_ITEMS="${CRON_REVIEW_MAX_ITEMS:-8}"
+diff --git a/scripts/openclaw_ops_control_plane.py b/scripts/openclaw_ops_control_plane.py
+new file mode 100644
+index 0000000..a406a2a
+--- /dev/null
++++ b/scripts/openclaw_ops_control_plane.py
+@@ -0,0 +1,1438 @@
++#!/usr/bin/env python3
++"""
++Local-only OpenClaw ops control plane for safe production recovery.
++
++This sidecar keeps service recovery narrow on purpose. It is allowed to:
++- inspect OpenClaw, runtime, dashboard, and watcher health
++- restart/recover the gateway, dashboard bridge/server, or live watcher
++- persist one authoritative machine-readable ops verdict
++- send concise anomaly/recovery notifications through OpenClaw
++
++It is not allowed to:
++- mutate strategy/risk/config settings
++- perform reconciliation or data repair
++- change repo files from chat-driven requests
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import hashlib
++import io
++import json
++import os
++import subprocess
++import sys
++import time
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Optional
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++try:
++    from etl.secret_loader import bootstrap_dotenv
++
++    bootstrap_dotenv()
++except Exception:
++    pass
++
++from scripts import openclaw_production_readiness as readiness_mod
++from scripts import project_runtime_status as runtime_mod
++from scripts import windows_dashboard_manager as dashboard_mod
++from scripts import windows_persistence_manager as persistence_mod
++from utils.openclaw_cli import resolve_openclaw_targets, send_message_multi
++
++
++ALLOWED_RECOVERY_TARGETS = ("gateway", "dashboard", "watcher")
++ISSUE_CLASSES = (
++    "recoverable_service_failure",
++    "human_security_action_required",
++    "human_governance_action_required",
++    "human_economic_action_required",
++)
++DEFAULT_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "gate_status_latest.json"
++DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "portfolio_maximizer.db"
++DEFAULT_VERDICT_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_ops_control_plane_latest.json"
++DEFAULT_STATE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_ops_control_plane_state.json"
++DEFAULT_MAINTENANCE_REPORT_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
++DEFAULT_MAINTENANCE_STATE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_state.json"
++DEFAULT_WATCHER_JSON = PROJECT_ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
++DEFAULT_NOTIFY_COOLDOWN_SECONDS = 900
++FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
++
++
++def _utc_now() -> datetime:
++    return datetime.now(timezone.utc)
++
++
++def _utc_now_iso() -> str:
++    return _utc_now().isoformat()
++
++
++def _parse_ts(value: Any) -> Optional[datetime]:
++    raw = str(value or "").strip()
++    if not raw:
++        return None
++    try:
++        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
++    except Exception:
++        return None
++
++
++def _iso_from_ts(ts: float) -> str:
++    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
++
++
++def _env_enabled(name: str, *, default: bool) -> bool:
++    raw = str(os.getenv(name, "")).strip().lower()
++    if not raw:
++        return bool(default)
++    return raw not in FALSEY_ENV_VALUES
++
++
++def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
++    try:
++        value = int(os.getenv(name, str(default)))
++    except Exception:
++        value = int(default)
++    return max(int(minimum), int(value))
++
++
++def _safe_read_json(path: Path) -> dict[str, Any]:
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except Exception:
++        return {}
++    return payload if isinstance(payload, dict) else {}
++
++
++def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
++
++
++def _fingerprint_payload(payload: Any) -> str:
++    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
++    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
++
++
++def _run_command(cmd: list[str], *, timeout_seconds: float) -> dict[str, Any]:
++    try:
++        proc = subprocess.run(
++            cmd,
++            cwd=str(PROJECT_ROOT),
++            capture_output=True,
++            text=True,
++            timeout=max(5.0, float(timeout_seconds)),
++            check=False,
++        )
++        return {
++            "ok": int(proc.returncode) == 0,
++            "returncode": int(proc.returncode),
++            "command": list(cmd),
++            "stdout_tail": [str(line) for line in (proc.stdout or "").splitlines()[-12:]],
++            "stderr_tail": [str(line) for line in (proc.stderr or "").splitlines()[-12:]],
++        }
++    except subprocess.TimeoutExpired as exc:
++        return {
++            "ok": False,
++            "returncode": 124,
++            "command": list(cmd),
++            "stdout_tail": [str(line) for line in ((exc.stdout or "") if isinstance(exc.stdout, str) else "").splitlines()[-12:]],
++            "stderr_tail": [str(line) for line in ((((exc.stderr or "") if isinstance(exc.stderr, str) else "") or "timeout")).splitlines()[-12:]],
++        }
++    except FileNotFoundError as exc:
++        return {
++            "ok": False,
++            "returncode": 127,
++            "command": list(cmd),
++            "stdout_tail": [],
++            "stderr_tail": [str(exc)],
++        }
++
++
++def _tail_lines(text: str, *, limit: int = 20) -> list[str]:
++    lines = [str(line) for line in str(text or "").splitlines() if str(line).strip()]
++    if len(lines) <= limit:
++        return lines
++    return lines[-limit:]
++
++
++def _call_quietly(fn, /, *args, **kwargs) -> tuple[Any, list[str], list[str]]:
++    stdout_buf = io.StringIO()
++    stderr_buf = io.StringIO()
++    with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
++        result = fn(*args, **kwargs)
++    return result, _tail_lines(stdout_buf.getvalue()), _tail_lines(stderr_buf.getvalue())
++
++
++def _read_pidfile_non_mutating(path: Path) -> Optional[int]:
++    if not path.exists():
++        return None
++    try:
++        return int(path.read_text(encoding="utf-8").strip())
++    except Exception:
++        return None
++
++
++def _coalesce_bool(*values: Any) -> Optional[bool]:
++    for value in values:
++        if isinstance(value, bool):
++            return value
++    return None
++
++
++def _coalesce_text(*values: Any) -> str:
++    for value in values:
++        text = str(value or "").strip()
++        if text:
++            return text
++    return ""
++
++
++def _issue(
++    issue_class: str,
++    *,
++    code: str,
++    detail: str,
++    component: str,
++    severity: str = "error",
++    target: str = "",
++) -> dict[str, Any]:
++    return {
++        "class": issue_class,
++        "code": str(code or "").strip() or "unknown",
++        "detail": str(detail or "").strip() or "unspecified",
++        "component": str(component or "").strip() or "unknown",
++        "severity": str(severity or "").strip() or "error",
++        "target": str(target or "").strip(),
++    }
++
++
++def _dedupe_issues(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
++    out: list[dict[str, Any]] = []
++    seen: set[tuple[str, str, str, str, str]] = set()
++    for row in rows:
++        key = (
++            str(row.get("class") or "").strip(),
++            str(row.get("code") or "").strip(),
++            str(row.get("detail") or "").strip(),
++            str(row.get("component") or "").strip(),
++            str(row.get("target") or "").strip(),
++        )
++        if key in seen:
++            continue
++        seen.add(key)
++        out.append(
++            {
++                "class": key[0],
++                "code": key[1],
++                "detail": key[2],
++                "component": key[3],
++                "severity": str(row.get("severity") or "error"),
++                "target": key[4],
++            }
++        )
++    return out
++
++
++def _group_issues(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
++    grouped = {name: [] for name in ISSUE_CLASSES}
++    for row in _dedupe_issues(rows):
++        label = str(row.get("class") or "").strip()
++        if label not in grouped:
++            continue
++        grouped[label].append(row)
++    return grouped
++
++
++def _flatten_issue_classes(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
++    out: list[dict[str, Any]] = []
++    for label in ISSUE_CLASSES:
++        rows = grouped.get(label) if isinstance(grouped.get(label), list) else []
++        out.extend([row for row in rows if isinstance(row, dict)])
++    return out
++
++
++def _normalize_requested_targets(raw: Any) -> list[str]:
++    parts: list[str] = []
++    if isinstance(raw, (list, tuple, set)):
++        values = raw
++    else:
++        values = [raw]
++    for value in values:
++        for token in str(value or "").replace(";", ",").split(","):
++            text = token.strip().lower()
++            if text:
++                parts.append(text)
++    deduped: list[str] = []
++    for item in parts:
++        if item not in deduped:
++            deduped.append(item)
++    invalid = [item for item in deduped if item not in ALLOWED_RECOVERY_TARGETS]
++    if invalid:
++        raise ValueError(f"unsupported recovery targets: {', '.join(invalid)}")
++    return deduped
++
++
++def extract_ops_intent_request(text: str) -> dict[str, Any]:
++    normalized = " ".join(str(text or "").strip().lower().split())
++    if not normalized:
++        return {
++            "recognized": False,
++            "command": "status",
++            "targets": [],
++            "include_runtime": False,
++            "detail": "empty_request",
++        }
++
++    if "heal gateway" in normalized or "restart gateway" in normalized:
++        return {"recognized": True, "command": "recover", "targets": ["gateway"], "include_runtime": False, "detail": "heal_gateway"}
++    if "heal dashboard" in normalized or "restart dashboard" in normalized:
++        return {"recognized": True, "command": "recover", "targets": ["dashboard"], "include_runtime": False, "detail": "heal_dashboard"}
++    if "heal watcher" in normalized or "restart watcher" in normalized or "heal denominator" in normalized:
++        return {"recognized": True, "command": "recover", "targets": ["watcher"], "include_runtime": False, "detail": "heal_watcher"}
++    if "show runtime" in normalized:
++        return {"recognized": True, "command": "status", "targets": [], "include_runtime": True, "detail": "show_runtime"}
++    if "show readiness" in normalized:
++        return {"recognized": True, "command": "status", "targets": [], "include_runtime": False, "detail": "show_readiness"}
++    if "what is broken" in normalized or "what broke" in normalized or "top blockers" in normalized:
++        return {"recognized": True, "command": "status", "targets": [], "include_runtime": False, "detail": "what_is_broken"}
++
++    return {
++        "recognized": False,
++        "command": "status",
++        "targets": [],
++        "include_runtime": False,
++        "detail": "unsupported_ops_intent",
++    }
++
++
++def _find_runtime_check(payload: Optional[dict[str, Any]], name: str) -> dict[str, Any]:
++    checks = payload.get("checks") if isinstance(payload, dict) and isinstance(payload.get("checks"), list) else []
++    for row in checks:
++        if isinstance(row, dict) and str(row.get("name") or "").strip() == name:
++            return row
++    return {}
++
++
++def _collect_dashboard_components(
++    *,
++    root: Path,
++    port: int,
++    watcher_json_path: Path,
++) -> dict[str, Any]:
++    logs_dir = root / "logs"
++    bridge_pid = _read_pidfile_non_mutating(logs_dir / "dashboard_bridge.pid")
++    server_pid = _read_pidfile_non_mutating(logs_dir / f"dashboard_http_{port}.pid")
++    watcher_pid = _read_pidfile_non_mutating(logs_dir / "live_denominator.pid")
++
++    bridge_running = bool(bridge_pid and dashboard_mod._pid_alive(bridge_pid))
++    server_running = bool(server_pid and dashboard_mod._pid_alive(server_pid))
++    watcher_running = bool(watcher_pid and dashboard_mod._pid_alive(watcher_pid))
++    port_open = bool(server_running and dashboard_mod._port_open(dashboard_mod.LOCALHOST_BIND, int(port)))
++
++    watcher_payload = _safe_read_json(watcher_json_path)
++    watcher_summary = (
++        persistence_mod._extract_watcher_status(watcher_payload)
++        if watcher_payload
++        else {
++            "run_id": "",
++            "started_utc": None,
++            "cycles_configured": 0,
++            "cycles_completed": 0,
++            "weekdays_only": True,
++            "fresh_trade_rows": 0,
++            "fresh_trade_context_rows_raw": 0,
++            "fresh_trade_exclusions": {},
++            "fresh_trade_diagnostics": {},
++            "fresh_linkage_included": 0,
++            "fresh_production_valid_matched": 0,
++            "progress_triggered": False,
++            "latest_cycle_completed_utc": None,
++        }
++    )
++    startup_registration = persistence_mod._query_startup_registration()
++
++    dashboard_component = {
++        "healthy": bool(bridge_running and server_running and port_open),
++        "bridge_pid": bridge_pid,
++        "bridge_running": bridge_running,
++        "server_pid": server_pid,
++        "server_running": server_running,
++        "port": int(port),
++        "port_open": port_open,
++        "url": f"http://{dashboard_mod.LOCALHOST_BIND}:{int(port)}/visualizations/live_dashboard.html",
++    }
++    watcher_component = {
++        "healthy": watcher_running,
++        "pid": watcher_pid,
++        "running": watcher_running,
++        **watcher_summary,
++    }
++    return {
++        "dashboard": dashboard_component,
++        "watcher": watcher_component,
++        "startup_registration": startup_registration,
++    }
++
++
++def _collect_primary_channel_components(
++    *,
++    readiness_payload: dict[str, Any],
++    maintenance_report_path: Path,
++    maintenance_state_path: Path,
++    primary_channel: str,
++) -> dict[str, Any]:
++    maintenance_report = _safe_read_json(maintenance_report_path)
++    maintenance_state = _safe_read_json(maintenance_state_path)
++
++    regression = readiness_payload.get("openclaw_regression") if isinstance(readiness_payload.get("openclaw_regression"), dict) else {}
++    regression_status = str(regression.get("status") or "").upper()
++    regression_checks = regression.get("checks") if isinstance(regression.get("checks"), dict) else {}
++    primary_check = regression_checks.get("primary_channel") if isinstance(regression_checks.get("primary_channel"), dict) else {}
++    primary_reason = str(primary_check.get("reason") or "")
++
++    steps = maintenance_report.get("steps") if isinstance(maintenance_report.get("steps"), dict) else {}
++    fast_supervisor = steps.get("fast_supervisor") if isinstance(steps.get("fast_supervisor"), dict) else {}
++    fast_snapshot = fast_supervisor.get("snapshot") if isinstance(fast_supervisor.get("snapshot"), dict) else {}
++    gateway_health = steps.get("gateway_health") if isinstance(steps.get("gateway_health"), dict) else {}
++
++    configured = _coalesce_bool(fast_snapshot.get("configured"), regression_status == "PASS")
++    linked = _coalesce_bool(
++        fast_snapshot.get("linked"),
++        False if primary_reason == "whatsapp_not_linked" else (True if regression_status == "PASS" and primary_channel == "whatsapp" else None),
++    )
++    running = _coalesce_bool(
++        fast_snapshot.get("running"),
++        False if primary_reason in {"channel_not_running", "enabled_account_not_running"} else (True if regression_status == "PASS" else None),
++    )
++    connected = _coalesce_bool(
++        fast_snapshot.get("connected"),
++        False if primary_reason == "channel_not_connected" else (True if regression_status == "PASS" else None),
++    )
++    relink_required = bool(linked is False or fast_snapshot.get("disconnect_logged_out"))
++    primary_issue = _coalesce_text(
++        gateway_health.get("primary_channel_issue_final"),
++        gateway_health.get("primary_channel_issue_after_restart"),
++        gateway_health.get("primary_channel_issue"),
++        fast_supervisor.get("primary_issue"),
++        primary_reason,
++    )
++
++    gateway_rpc_ok = gateway_health.get("rpc_ok")
++    if not isinstance(gateway_rpc_ok, bool):
++        gateway_rpc_ok = None
++
++    gateway_component = {
++        "healthy": bool(
++            (gateway_rpc_ok is True or gateway_rpc_ok is None)
++            and linked is not False
++            and running is not False
++            and connected is not False
++            and regression_status in {"PASS", "SKIP"}
++        ),
++        "status": "healthy" if regression_status in {"PASS", "SKIP"} and gateway_rpc_ok is not False else "degraded",
++        "rpc_ok": gateway_rpc_ok,
++        "service_status": str(gateway_health.get("service_status") or ""),
++        "service_state": str(gateway_health.get("service_state") or ""),
++        "listener_pid": gateway_health.get("gateway_listener_pid"),
++        "primary_issue": primary_issue,
++        "actions": list(gateway_health.get("actions") or []),
++        "manual_actions": list(gateway_health.get("manual_actions") or []),
++        "last_gateway_restart_at": maintenance_state.get("last_gateway_restart_at"),
++        "report_status": str(maintenance_report.get("status") or ""),
++    }
++    primary_channel_component = {
++        "channel": primary_channel,
++        "healthy": bool(linked is not False and running is not False and connected is not False and not relink_required),
++        "configured": configured,
++        "linked": linked,
++        "running": running,
++        "connected": connected,
++        "relink_required": relink_required,
++        "issue_reason": primary_issue,
++    }
++    maintenance_component = {
++        "report_path": str(maintenance_report_path),
++        "state_path": str(maintenance_state_path),
++        "report_exists": maintenance_report_path.exists(),
++        "state_exists": maintenance_state_path.exists(),
++        "status": str(maintenance_report.get("status") or ""),
++        "timestamp_utc": maintenance_report.get("timestamp_utc"),
++        "watch_cycle": maintenance_report.get("watch_cycle"),
++        "last_fast_supervisor_restart_at": maintenance_state.get("last_fast_supervisor_restart_at"),
++        "last_gateway_restart_at": maintenance_state.get("last_gateway_restart_at"),
++    }
++    return {
++        "gateway": gateway_component,
++        "primary_channel": primary_channel_component,
++        "maintenance": maintenance_component,
++    }
++
++
++def collect_ops_snapshot(
++    *,
++    gate_artifact_path: Path,
++    db_path: Path,
++    primary_channel: str,
++    dashboard_port: int,
++    include_runtime: bool,
++    timeout_seconds: float,
++    maintenance_report_path: Path,
++    maintenance_state_path: Path,
++    watcher_json_path: Path,
++) -> dict[str, Any]:
++    readiness_payload, readiness_stdout, readiness_stderr = _call_quietly(
++        readiness_mod.collect_openclaw_production_readiness,
++        gate_artifact_path=gate_artifact_path,
++        fresh_runtime=False,
++        timeout_seconds=float(timeout_seconds),
++    )
++    if include_runtime:
++        runtime_payload, runtime_stdout, runtime_stderr = _call_quietly(
++            runtime_mod.collect_runtime_status,
++            timeout_seconds=max(5.0, float(timeout_seconds)),
++        )
++    else:
++        runtime_payload, runtime_stdout, runtime_stderr = None, [], []
++    dashboard_components = _collect_dashboard_components(
++        root=PROJECT_ROOT,
++        port=int(dashboard_port),
++        watcher_json_path=watcher_json_path,
++    )
++    primary_components = _collect_primary_channel_components(
++        readiness_payload=readiness_payload,
++        maintenance_report_path=maintenance_report_path,
++        maintenance_state_path=maintenance_state_path,
++        primary_channel=primary_channel,
++    )
++    gate_artifact = readiness_payload.get("gate_artifact") if isinstance(readiness_payload.get("gate_artifact"), dict) else {}
++    runtime_exec_env = _find_runtime_check(runtime_payload, "openclaw_exec_env") if runtime_payload else {}
++
++    components = {
++        **primary_components,
++        **dashboard_components,
++        "runtime": {
++            "included": bool(runtime_payload),
++            "status": str(runtime_payload.get("status") or "") if isinstance(runtime_payload, dict) else "",
++            "failed_checks": list(runtime_payload.get("failed_checks") or []) if isinstance(runtime_payload, dict) else [],
++            "check_count": int(runtime_payload.get("check_count") or 0) if isinstance(runtime_payload, dict) else 0,
++            "openclaw_exec_env_ok": bool(runtime_exec_env.get("ok")) if runtime_exec_env else bool(
++                (readiness_payload.get("openclaw_exec_env") or {}).get("ok")
++            ),
++        },
++        "readiness": {
++            "readiness_status": str(readiness_payload.get("readiness_status") or ""),
++            "ready_now": bool(readiness_payload.get("ready_now")),
++            "blocker_count": int(((readiness_payload.get("summary") or {}) if isinstance(readiness_payload.get("summary"), dict) else {}).get("blocker_count") or 0),
++            "warning_count": int(((readiness_payload.get("summary") or {}) if isinstance(readiness_payload.get("summary"), dict) else {}).get("warning_count") or 0),
++            "overall_passed": gate_artifact.get("overall_passed"),
++            "phase3_ready": gate_artifact.get("phase3_ready"),
++            "phase3_reason": str(gate_artifact.get("phase3_reason") or ""),
++            "skipped_gate_labels": list(gate_artifact.get("skipped_gate_labels") or []),
++        },
++    }
++    return {
++        "timestamp_utc": _utc_now_iso(),
++        "components": components,
++        "readiness_payload": readiness_payload,
++        "runtime_payload": runtime_payload,
++        "captured_output": {
++            "readiness_stdout_tail": readiness_stdout,
++            "readiness_stderr_tail": readiness_stderr,
++            "runtime_stdout_tail": runtime_stdout,
++            "runtime_stderr_tail": runtime_stderr,
++        },
++    }
++
++
++def _map_readiness_issue(row: dict[str, Any], *, severity: str) -> Optional[dict[str, Any]]:
++    source = str(row.get("source") or "").strip()
++    code = str(row.get("code") or "").strip()
++    detail = str(row.get("detail") or "").strip() or "unspecified"
++
++    if not source and not code and not detail:
++        return None
++    if source == "capital_readiness":
++        return _issue(
++            "human_economic_action_required",
++            code=code or "capital_readiness_issue",
++            detail=detail,
++            component="capital_readiness",
++            severity=severity,
++        )
++    if source in {"security", "openclaw_exec_env", "openclaw_models"}:
++        return _issue(
++            "human_security_action_required",
++            code=code or "security_issue",
++            detail=detail,
++            component=source or "security",
++            severity=severity,
++        )
++    if source == "openclaw_regression":
++        if "whatsapp_not_linked" in detail or "logged_out" in detail or "relink" in detail:
++            return _issue(
++                "human_security_action_required",
++                code=code or "primary_channel_relink_required",
++                detail=detail,
++                component="gateway",
++                severity=severity,
++            )
++        return _issue(
++            "recoverable_service_failure",
++            code=code or "gateway_recovery_required",
++            detail=detail,
++            component="gateway",
++            severity=severity,
++            target="gateway",
++        )
++    if source == "runtime_status":
++        if "openclaw_exec_env" in detail.lower():
++            return _issue(
++                "human_security_action_required",
++                code=code or "runtime_exec_env_issue",
++                detail=detail,
++                component="runtime",
++                severity=severity,
++            )
++        return _issue(
++            "human_governance_action_required",
++            code=code or "runtime_status_issue",
++            detail=detail,
++            component="runtime",
++            severity=severity,
++        )
++    return _issue(
++        "human_governance_action_required",
++        code=code or "governance_issue",
++        detail=detail,
++        component=source or "readiness",
++        severity=severity,
++    )
++
++
++def classify_ops_issues(snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
++    components = snapshot.get("components") if isinstance(snapshot.get("components"), dict) else {}
++    readiness = components.get("readiness") if isinstance(components.get("readiness"), dict) else {}
++    gateway = components.get("gateway") if isinstance(components.get("gateway"), dict) else {}
++    primary_channel = components.get("primary_channel") if isinstance(components.get("primary_channel"), dict) else {}
++    dashboard = components.get("dashboard") if isinstance(components.get("dashboard"), dict) else {}
++    watcher = components.get("watcher") if isinstance(components.get("watcher"), dict) else {}
++    runtime_component = components.get("runtime") if isinstance(components.get("runtime"), dict) else {}
++    readiness_payload = snapshot.get("readiness_payload") if isinstance(snapshot.get("readiness_payload"), dict) else {}
++
++    rows: list[dict[str, Any]] = []
++
++    if bool(primary_channel.get("relink_required")):
++        rows.append(
++            _issue(
++                "human_security_action_required",
++                code="primary_channel_relink_required",
++                detail=_coalesce_text(primary_channel.get("issue_reason"), "Primary WhatsApp channel requires relink."),
++                component="primary_channel",
++            )
++        )
++    elif gateway.get("rpc_ok") is False:
++        rows.append(
++            _issue(
++                "recoverable_service_failure",
++                code="gateway_rpc_unhealthy",
++                detail=_coalesce_text(gateway.get("primary_issue"), "Gateway RPC is unhealthy."),
++                component="gateway",
++                target="gateway",
++            )
++        )
++    elif primary_channel.get("linked") is True and primary_channel.get("running") is False:
++        rows.append(
++            _issue(
++                "recoverable_service_failure",
++                code="primary_channel_not_running",
++                detail=_coalesce_text(primary_channel.get("issue_reason"), "Primary channel is not running."),
++                component="primary_channel",
++                target="gateway",
++            )
++        )
++    elif primary_channel.get("linked") is True and primary_channel.get("connected") is False:
++        rows.append(
++            _issue(
++                "recoverable_service_failure",
++                code="primary_channel_not_connected",
++                detail=_coalesce_text(primary_channel.get("issue_reason"), "Primary channel is not connected."),
++                component="primary_channel",
++                target="gateway",
++            )
++        )
++
++    if dashboard and not bool(dashboard.get("healthy")):
++        rows.append(
++            _issue(
++                "recoverable_service_failure",
++                code="dashboard_stack_not_running",
++                detail="Dashboard bridge or local HTTP server is not healthy.",
++                component="dashboard",
++                target="dashboard",
++            )
++        )
++    if watcher and not bool(watcher.get("healthy")):
++        rows.append(
++            _issue(
++                "recoverable_service_failure",
++                code="watcher_not_running",
++                detail="Live denominator watcher is not running.",
++                component="watcher",
++                target="watcher",
++            )
++        )
++
++    if readiness.get("overall_passed") is False:
++        skipped = readiness.get("skipped_gate_labels") if isinstance(readiness.get("skipped_gate_labels"), list) else []
++        detail = "overall_passed=false"
++        if readiness.get("phase3_ready") is True:
++            detail = "overall_passed=false even though phase3_ready=true"
++        if skipped:
++            detail = f"{detail}; skipped_gate_labels={', '.join(str(x) for x in skipped)}"
++        rows.append(
++            _issue(
++                "human_governance_action_required",
++                code="overall_passed_false",
++                detail=detail,
++                component="readiness",
++            )
++        )
++
++    if readiness.get("ready_now") is False and readiness.get("readiness_status") == "WARN":
++        rows.append(
++            _issue(
++                "human_governance_action_required",
++                code="readiness_warn",
++                detail="Production readiness is not PASS.",
++                component="readiness",
++                severity="warning",
++            )
++        )
++
++    blockers = readiness_payload.get("blockers") if isinstance(readiness_payload.get("blockers"), list) else []
++    warnings = readiness_payload.get("warnings") if isinstance(readiness_payload.get("warnings"), list) else []
++    for row in blockers:
++        if isinstance(row, dict):
++            mapped = _map_readiness_issue(row, severity="error")
++            if mapped:
++                rows.append(mapped)
++    for row in warnings:
++        if isinstance(row, dict):
++            mapped = _map_readiness_issue(row, severity="warning")
++            if mapped:
++                rows.append(mapped)
++
++    if runtime_component.get("included") and not bool(runtime_component.get("openclaw_exec_env_ok")):
++        rows.append(
++            _issue(
++                "human_security_action_required",
++                code="runtime_exec_env_invalid",
++                detail="Runtime snapshot reports an invalid OpenClaw exec environment.",
++                component="runtime",
++            )
++        )
++
++    return _group_issues(rows)
++
++
++def _service_issue_targets(issue_classes: dict[str, list[dict[str, Any]]]) -> list[str]:
++    rows = issue_classes.get("recoverable_service_failure") if isinstance(issue_classes.get("recoverable_service_failure"), list) else []
++    targets: list[str] = []
++    for row in rows:
++        if not isinstance(row, dict):
++            continue
++        target = str(row.get("target") or "").strip().lower()
++        if target and target in ALLOWED_RECOVERY_TARGETS and target not in targets:
++            targets.append(target)
++    return targets
++
++
++def _recover_gateway(
++    *,
++    primary_channel: str,
++    timeout_seconds: float,
++    maintenance_report_path: Path,
++) -> dict[str, Any]:
++    started_at = _utc_now_iso()
++    cmd = [
++        sys.executable,
++        str(PROJECT_ROOT / "scripts" / "openclaw_maintenance.py"),
++        "--apply",
++        "--strict",
++        "--primary-channel",
++        str(primary_channel),
++        "--restart-gateway-on-rpc-failure",
++        "--report-file",
++        str(maintenance_report_path),
++    ]
++    result = _run_command(cmd, timeout_seconds=max(20.0, float(timeout_seconds)))
++    return {
++        "target": "gateway",
++        "ok": bool(result.get("ok")),
++        "started_at_utc": started_at,
++        "finished_at_utc": _utc_now_iso(),
++        "summary": "Attempted gateway maintenance recovery.",
++        **result,
++    }
++
++
++def _recover_dashboard_like(
++    *,
++    ensure_live_watcher: bool,
++    dashboard_port: int,
++    db_path: Path,
++    watcher_tickers: str,
++    watcher_cycles: int,
++    watcher_sleep_seconds: int,
++) -> dict[str, Any]:
++    label = "watcher" if ensure_live_watcher else "dashboard"
++    started_at = _utc_now_iso()
++    result = dashboard_mod._ensure_dashboard_stack(
++        root=PROJECT_ROOT,
++        python_bin=sys.executable,
++        port=int(dashboard_port),
++        db_path=db_path,
++        persist_snapshot=True,
++        require_bridge=True,
++        ensure_live_watcher=bool(ensure_live_watcher),
++        watcher_tickers=str(watcher_tickers),
++        watcher_cycles=int(watcher_cycles),
++        watcher_sleep_seconds=int(watcher_sleep_seconds),
++    )
++    ok = bool(result.bridge_running and result.server_running and (result.watcher_running or not ensure_live_watcher))
++    return {
++        "target": label,
++        "ok": ok,
++        "started_at_utc": started_at,
++        "finished_at_utc": _utc_now_iso(),
++        "summary": "Attempted watcher recovery." if ensure_live_watcher else "Attempted dashboard recovery.",
++        "command": ["python", "scripts/windows_dashboard_manager.py", "ensure"],
++        "returncode": 0 if ok else 1,
++        "stdout_tail": [],
++        "stderr_tail": list(result.warnings),
++        "started_bridge": bool(result.started_bridge),
++        "started_server": bool(result.started_server),
++        "started_watcher": bool(result.started_watcher),
++    }
++
++
++def _run_recovery_targets(
++    *,
++    targets: list[str],
++    primary_channel: str,
++    timeout_seconds: float,
++    maintenance_report_path: Path,
++    dashboard_port: int,
++    db_path: Path,
++    watcher_tickers: str,
++    watcher_cycles: int,
++    watcher_sleep_seconds: int,
++) -> list[dict[str, Any]]:
++    actions: list[dict[str, Any]] = []
++    for target in targets:
++        if target == "gateway":
++            actions.append(
++                _recover_gateway(
++                    primary_channel=primary_channel,
++                    timeout_seconds=timeout_seconds,
++                    maintenance_report_path=maintenance_report_path,
++                )
++            )
++        elif target == "dashboard":
++            actions.append(
++                _recover_dashboard_like(
++                    ensure_live_watcher=False,
++                    dashboard_port=dashboard_port,
++                    db_path=db_path,
++                    watcher_tickers=watcher_tickers,
++                    watcher_cycles=watcher_cycles,
++                    watcher_sleep_seconds=watcher_sleep_seconds,
++                )
++            )
++        elif target == "watcher":
++            actions.append(
++                _recover_dashboard_like(
++                    ensure_live_watcher=True,
++                    dashboard_port=dashboard_port,
++                    db_path=db_path,
++                    watcher_tickers=watcher_tickers,
++                    watcher_cycles=watcher_cycles,
++                    watcher_sleep_seconds=watcher_sleep_seconds,
++                )
++            )
++    return actions
++
++
++def _completed_actions_from_targets(
++    *,
++    initial_issue_classes: dict[str, list[dict[str, Any]]],
++    final_issue_classes: dict[str, list[dict[str, Any]]],
++    attempted_actions: list[dict[str, Any]],
++) -> list[dict[str, Any]]:
++    initial_targets = set(_service_issue_targets(initial_issue_classes))
++    final_targets = set(_service_issue_targets(final_issue_classes))
++    out: list[dict[str, Any]] = []
++    for row in attempted_actions:
++        if not isinstance(row, dict):
++            continue
++        target = str(row.get("target") or "").strip().lower()
++        if bool(row.get("ok")) and target in initial_targets and target not in final_targets:
++            out.append(row)
++    return out
++
++
++def build_operator_summary(
++    *,
++    initial_issue_classes: dict[str, list[dict[str, Any]]],
++    final_issue_classes: dict[str, list[dict[str, Any]]],
++    attempted_actions: list[dict[str, Any]],
++    completed_actions: list[dict[str, Any]],
++    components: dict[str, Any],
++    overall_status: dict[str, Any],
++) -> dict[str, Any]:
++    initial_rows = _flatten_issue_classes(initial_issue_classes)
++    final_rows = _flatten_issue_classes(final_issue_classes)
++    human_required = [
++        row
++        for row in final_rows
++        if str(row.get("class") or "") != "recoverable_service_failure"
++    ]
++    service_healthy = str(overall_status.get("service_health") or "") == "healthy"
++    production_ready = str(overall_status.get("production_status") or "") == "ready"
++
++    if service_healthy and production_ready:
++        headline = "Services healthy and production ready."
++    elif service_healthy:
++        headline = "Services healthy; production is still blocked."
++    else:
++        headline = "Service degradation detected; production is not ready."
++
++    what_broke = [str(row.get("detail") or "") for row in initial_rows[:5] if str(row.get("detail") or "").strip()]
++    auto_recovered = [str(row.get("summary") or "") for row in completed_actions[:5] if str(row.get("summary") or "").strip()]
++    human_lines = [str(row.get("detail") or "") for row in human_required[:5] if str(row.get("detail") or "").strip()]
++
++    message_lines = [
++        f"OpenClaw ops: {headline}",
++        f"What broke: {', '.join(what_broke) if what_broke else 'none'}",
++        f"Auto-recovered: {', '.join(auto_recovered) if auto_recovered else 'none'}",
++        f"Needs human action: {', '.join(human_lines) if human_lines else 'none'}",
++        f"Service health={overall_status.get('service_health')} production_status={overall_status.get('production_status')}",
++    ]
++    if attempted_actions and not completed_actions:
++        message_lines.append("Recovery attempted, but at least one service issue remains unresolved.")
++
++    return {
++        "headline": headline,
++        "what_broke": what_broke,
++        "auto_recovered": auto_recovered,
++        "human_action_required": human_lines,
++        "message": "\n".join(message_lines),
++        "service_healthy": service_healthy,
++        "production_ready": production_ready,
++        "dashboard_url": ((components.get("dashboard") or {}) if isinstance(components.get("dashboard"), dict) else {}).get("url"),
++    }
++
++
++def _build_overall_status(
++    *,
++    issue_classes: dict[str, list[dict[str, Any]]],
++    components: dict[str, Any],
++) -> dict[str, Any]:
++    service_issues = issue_classes.get("recoverable_service_failure") if isinstance(issue_classes.get("recoverable_service_failure"), list) else []
++    human_rows = [
++        row
++        for label in ISSUE_CLASSES
++        if label != "recoverable_service_failure"
++        for row in (issue_classes.get(label) if isinstance(issue_classes.get(label), list) else [])
++        if isinstance(row, dict)
++    ]
++    readiness = components.get("readiness") if isinstance(components.get("readiness"), dict) else {}
++
++    service_health = "healthy" if not service_issues else "degraded"
++    production_ready = bool(
++        readiness.get("ready_now")
++        and readiness.get("overall_passed") is not False
++        and not human_rows
++    )
++    production_status = "ready" if production_ready else "blocked"
++    status = "FAIL" if service_health == "degraded" else ("PASS" if production_ready else "WARN")
++    return {
++        "status": status,
++        "service_health": service_health,
++        "production_status": production_status,
++        "service_issue_count": len(service_issues),
++        "human_action_count": len(human_rows),
++    }
++
++
++def _read_notification_state(path: Path) -> dict[str, Any]:
++    state = _safe_read_json(path)
++    if not state:
++        return {"version": 1}
++    return state
++
++
++def _build_cooldowns(
++    *,
++    state: dict[str, Any],
++    cooldown_seconds: int,
++    maintenance_component: dict[str, Any],
++) -> dict[str, Any]:
++    return {
++        "notification": {
++            "cooldown_seconds": int(cooldown_seconds),
++            "last_notified_at_utc": state.get("last_notified_at_utc"),
++            "next_notify_at_utc": state.get("next_notify_at_utc"),
++            "last_notification_reason": state.get("last_notification_reason"),
++        },
++        "maintenance": {
++            "last_fast_supervisor_restart_at": maintenance_component.get("last_fast_supervisor_restart_at"),
++            "last_gateway_restart_at": maintenance_component.get("last_gateway_restart_at"),
++        },
++    }
++
++
++def _decide_notification(
++    *,
++    final_issue_classes: dict[str, list[dict[str, Any]]],
++    operator_summary: dict[str, Any],
++    state: dict[str, Any],
++    cooldown_seconds: int,
++) -> dict[str, Any]:
++    now = time.time()
++    final_rows = _flatten_issue_classes(final_issue_classes)
++    unresolved = [row for row in final_rows if isinstance(row, dict)]
++    status_key = "issue" if unresolved else "clear"
++    signature_source = [{"class": row.get("class"), "code": row.get("code"), "target": row.get("target")} for row in unresolved]
++    signature = _fingerprint_payload(signature_source or ["clear"])
++
++    previous_status = str(state.get("last_status") or "")
++    previous_signature = str(state.get("last_issue_signature") or "")
++    next_notify_at = _parse_ts(state.get("next_notify_at_utc"))
++    due = next_notify_at is None or _utc_now() >= next_notify_at
++
++    if status_key == "clear":
++        should_notify = previous_status == "issue"
++        reason = "recovered" if should_notify else "routine_success"
++    elif previous_status != "issue" or previous_signature != signature:
++        should_notify = True
++        reason = "anomaly"
++    elif due:
++        should_notify = True
++        reason = "repeat_unresolved"
++    else:
++        should_notify = False
++        reason = "cooldown_active"
++
++    if should_notify:
++        next_allowed = datetime.fromtimestamp(now + int(cooldown_seconds), tz=timezone.utc)
++    elif reason == "cooldown_active" and next_notify_at is not None:
++        next_allowed = next_notify_at
++    else:
++        next_allowed = _utc_now()
++    return {
++        "should_notify": should_notify,
++        "reason": reason,
++        "status_key": status_key,
++        "issue_signature": signature,
++        "message": str(operator_summary.get("message") or "").strip(),
++        "next_notify_at_utc": next_allowed.isoformat(),
++    }
++
++
++def _send_notification(
++    *,
++    decision: dict[str, Any],
++    notify_targets: str,
++    notify_to: str,
++    primary_channel: str,
++    timeout_seconds: float,
++) -> dict[str, Any]:
++    if not bool(decision.get("should_notify")):
++        return {
++            "attempted": False,
++            "sent": False,
++            "reason": decision.get("reason"),
++            "results": [],
++        }
++
++    targets = resolve_openclaw_targets(
++        env_targets=notify_targets,
++        env_to=notify_to,
++        cfg_to=None,
++        default_channel=primary_channel,
++    )
++    if not targets:
++        return {
++            "attempted": False,
++            "sent": False,
++            "reason": "no_notify_targets",
++            "results": [],
++        }
++
++    results = send_message_multi(
++        targets=targets,
++        message=str(decision.get("message") or ""),
++        command=str(os.getenv("OPENCLAW_COMMAND", "openclaw")),
++        cwd=PROJECT_ROOT,
++        timeout_seconds=max(10.0, float(timeout_seconds)),
++        silent=True,
++    )
++    result_rows = [
++        {
++            "ok": bool(row.ok),
++            "returncode": int(row.returncode),
++            "command": list(row.command),
++            "stdout": row.stdout[-300:] if isinstance(row.stdout, str) else "",
++            "stderr": row.stderr[-300:] if isinstance(row.stderr, str) else "",
++        }
++        for row in results
++    ]
++    sent = bool(results) and all(bool(row.ok) for row in results)
++    return {
++        "attempted": True,
++        "sent": sent,
++        "reason": decision.get("reason"),
++        "results": result_rows,
++    }
++
++
++def _update_notification_state(
++    *,
++    path: Path,
++    previous_state: dict[str, Any],
++    decision: dict[str, Any],
++    send_result: dict[str, Any],
++) -> dict[str, Any]:
++    state = dict(previous_state)
++    state["version"] = 1
++    state["updated_at_utc"] = _utc_now_iso()
++    state["last_status"] = decision.get("status_key")
++    state["last_issue_signature"] = decision.get("issue_signature")
++    state["next_notify_at_utc"] = decision.get("next_notify_at_utc")
++    state["last_notification_reason"] = decision.get("reason")
++    if bool(send_result.get("attempted")):
++        state["last_notification_attempt_at_utc"] = _utc_now_iso()
++    if bool(send_result.get("sent")):
++        state["last_notified_at_utc"] = _utc_now_iso()
++    _safe_write_json(path, state)
++    return state
++
++
++def build_ops_verdict(
++    *,
++    command_name: str,
++    snapshot: dict[str, Any],
++    initial_issue_classes: dict[str, list[dict[str, Any]]],
++    final_issue_classes: dict[str, list[dict[str, Any]]],
++    attempted_actions: list[dict[str, Any]],
++    completed_actions: list[dict[str, Any]],
++    cooldowns: dict[str, Any],
++    operator_summary: dict[str, Any],
++    notification: dict[str, Any],
++) -> dict[str, Any]:
++    components = snapshot.get("components") if isinstance(snapshot.get("components"), dict) else {}
++    overall_status = _build_overall_status(issue_classes=final_issue_classes, components=components)
++    human_required = [
++        row
++        for row in _flatten_issue_classes(final_issue_classes)
++        if str(row.get("class") or "") != "recoverable_service_failure"
++    ]
++    return {
++        "status": "PASS",
++        "action": f"openclaw_ops_{command_name}",
++        "timestamp_utc": _utc_now_iso(),
++        "overall_status": overall_status,
++        "issue_classes": final_issue_classes,
++        "initial_issue_classes": initial_issue_classes,
++        "components": components,
++        "attempted_actions": attempted_actions,
++        "completed_actions": completed_actions,
++        "human_required": human_required,
++        "cooldowns": cooldowns,
++        "operator_summary": operator_summary,
++        "notification": notification,
++        "source_snapshots": {
++            "readiness": snapshot.get("readiness_payload"),
++            "runtime": snapshot.get("runtime_payload"),
++            "captured_output": snapshot.get("captured_output"),
++        },
++    }
++
++
++def _persist_verdict(path: Path, verdict: dict[str, Any]) -> None:
++    _safe_write_json(path, verdict)
++
++
++def run_ops_command(
++    *,
++    command_name: str,
++    primary_channel: str,
++    gate_artifact_path: Path,
++    db_path: Path,
++    dashboard_port: int,
++    include_runtime: bool,
++    timeout_seconds: float,
++    apply_safe_recovery: bool,
++    explicit_targets: list[str],
++    maintenance_report_path: Path,
++    maintenance_state_path: Path,
++    watcher_json_path: Path,
++    watcher_tickers: str,
++    watcher_cycles: int,
++    watcher_sleep_seconds: int,
++    notify_on_change: bool,
++    notify_targets: str,
++    notify_to: str,
++    cooldown_seconds: int,
++    verdict_path: Path,
++    state_path: Path,
++) -> dict[str, Any]:
++    initial_snapshot = collect_ops_snapshot(
++        gate_artifact_path=gate_artifact_path,
++        db_path=db_path,
++        primary_channel=primary_channel,
++        dashboard_port=dashboard_port,
++        include_runtime=include_runtime,
++        timeout_seconds=timeout_seconds,
++        maintenance_report_path=maintenance_report_path,
++        maintenance_state_path=maintenance_state_path,
++        watcher_json_path=watcher_json_path,
++    )
++    initial_issue_classes = classify_ops_issues(initial_snapshot)
++
++    attempted_actions: list[dict[str, Any]] = []
++    if explicit_targets:
++        requested_targets = explicit_targets
++    elif apply_safe_recovery:
++        requested_targets = _service_issue_targets(initial_issue_classes)
++    else:
++        requested_targets = []
++
++    if requested_targets:
++        attempted_actions = _run_recovery_targets(
++            targets=requested_targets,
++            primary_channel=primary_channel,
++            timeout_seconds=timeout_seconds,
++            maintenance_report_path=maintenance_report_path,
++            dashboard_port=dashboard_port,
++            db_path=db_path,
++            watcher_tickers=watcher_tickers,
++            watcher_cycles=watcher_cycles,
++            watcher_sleep_seconds=watcher_sleep_seconds,
++        )
++
++    final_snapshot = collect_ops_snapshot(
++        gate_artifact_path=gate_artifact_path,
++        db_path=db_path,
++        primary_channel=primary_channel,
++        dashboard_port=dashboard_port,
++        include_runtime=include_runtime,
++        timeout_seconds=timeout_seconds,
++        maintenance_report_path=maintenance_report_path,
++        maintenance_state_path=maintenance_state_path,
++        watcher_json_path=watcher_json_path,
++    )
++    final_issue_classes = classify_ops_issues(final_snapshot)
++    completed_actions = _completed_actions_from_targets(
++        initial_issue_classes=initial_issue_classes,
++        final_issue_classes=final_issue_classes,
++        attempted_actions=attempted_actions,
++    )
++    overall_status = _build_overall_status(
++        issue_classes=final_issue_classes,
++        components=final_snapshot.get("components") if isinstance(final_snapshot.get("components"), dict) else {},
++    )
++    operator_summary = build_operator_summary(
++        initial_issue_classes=initial_issue_classes,
++        final_issue_classes=final_issue_classes,
++        attempted_actions=attempted_actions,
++        completed_actions=completed_actions,
++        components=final_snapshot.get("components") if isinstance(final_snapshot.get("components"), dict) else {},
++        overall_status=overall_status,
++    )
++
++    previous_state = _read_notification_state(state_path)
++    maintenance_component = ((final_snapshot.get("components") or {}) if isinstance(final_snapshot.get("components"), dict) else {}).get("maintenance")
++    maintenance_component = maintenance_component if isinstance(maintenance_component, dict) else {}
++    cooldowns = _build_cooldowns(
++        state=previous_state,
++        cooldown_seconds=int(cooldown_seconds),
++        maintenance_component=maintenance_component,
++    )
++    notification_decision = _decide_notification(
++        final_issue_classes=final_issue_classes,
++        operator_summary=operator_summary,
++        state=previous_state,
++        cooldown_seconds=int(cooldown_seconds),
++    )
++    send_result = (
++        _send_notification(
++            decision=notification_decision,
++            notify_targets=notify_targets,
++            notify_to=notify_to,
++            primary_channel=primary_channel,
++            timeout_seconds=timeout_seconds,
++        )
++        if notify_on_change
++        else {"attempted": False, "sent": False, "reason": "notifications_disabled", "results": []}
++    )
++    updated_state = _update_notification_state(
++        path=state_path,
++        previous_state=previous_state,
++        decision=notification_decision,
++        send_result=send_result,
++    )
++    cooldowns = _build_cooldowns(
++        state=updated_state,
++        cooldown_seconds=int(cooldown_seconds),
++        maintenance_component=maintenance_component,
++    )
++
++    verdict = build_ops_verdict(
++        command_name=command_name,
++        snapshot=final_snapshot,
++        initial_issue_classes=initial_issue_classes,
++        final_issue_classes=final_issue_classes,
++        attempted_actions=attempted_actions,
++        completed_actions=completed_actions,
++        cooldowns=cooldowns,
++        operator_summary=operator_summary,
++        notification=send_result,
++    )
++    _persist_verdict(verdict_path, verdict)
++    return verdict
++
++
++def _print_human_summary(verdict: dict[str, Any]) -> None:
++    overall = verdict.get("overall_status") if isinstance(verdict.get("overall_status"), dict) else {}
++    summary = verdict.get("operator_summary") if isinstance(verdict.get("operator_summary"), dict) else {}
++    print(
++        f"[openclaw_ops_control_plane] status={overall.get('status')} "
++        f"service_health={overall.get('service_health')} "
++        f"production_status={overall.get('production_status')}"
++    )
++    text = str(summary.get("message") or "").strip()
++    if text:
++        print(text)
++
++
++def _build_parser() -> argparse.ArgumentParser:
++    common = argparse.ArgumentParser(add_help=False)
++    common.add_argument("--primary-channel", default=str(os.getenv("OPENCLAW_CHANNEL", "whatsapp")).strip().lower() or "whatsapp")
++    common.add_argument("--gate-artifact", default=str(DEFAULT_GATE_ARTIFACT))
++    common.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
++    common.add_argument("--dashboard-port", type=int, default=8000)
++    common.add_argument("--timeout-seconds", type=float, default=30.0)
++    common.add_argument("--maintenance-report", default=str(DEFAULT_MAINTENANCE_REPORT_PATH))
++    common.add_argument("--maintenance-state", default=str(DEFAULT_MAINTENANCE_STATE_PATH))
++    common.add_argument("--watcher-json", default=str(DEFAULT_WATCHER_JSON))
++    common.add_argument("--watcher-tickers", default=",".join(dashboard_mod.DEFAULT_LIVE_WATCHER_TICKERS))
++    common.add_argument("--watcher-cycles", type=int, default=30)
++    common.add_argument("--watcher-sleep-seconds", type=int, default=86400)
++    common.add_argument("--notify-targets", default=str(os.getenv("OPENCLAW_TARGETS", "")))
++    common.add_argument("--notify-to", default=str(os.getenv("OPENCLAW_TO", "")))
++    common.add_argument("--cooldown-seconds", type=int, default=_env_int("OPENCLAW_OPS_NOTIFY_COOLDOWN_SECONDS", DEFAULT_NOTIFY_COOLDOWN_SECONDS, minimum=60))
++    common.add_argument("--verdict-path", default=str(DEFAULT_VERDICT_PATH))
++    common.add_argument("--state-path", default=str(DEFAULT_STATE_PATH))
++    common.add_argument("--json", action="store_true")
++
++    parser = argparse.ArgumentParser(description=__doc__)
++
++    subparsers = parser.add_subparsers(dest="cmd", required=True)
++
++    status = subparsers.add_parser("status", parents=[common], help="Collect current health without mutations.")
++    status.add_argument("--include-runtime", action="store_true", help="Include a fresh runtime snapshot.")
++    status.add_argument("--notify-on-change", action="store_true", help="Send anomaly/recovery notifications when state changed.")
++
++    sweep = subparsers.add_parser("sweep", parents=[common], help="Collect health, classify issues, and optionally apply safe recovery.")
++    sweep.add_argument("--include-runtime", action="store_true", default=True, help="Include a fresh runtime snapshot.")
++    sweep.add_argument("--apply-safe-recovery", action="store_true", help="Auto-recover only approved service targets.")
++    sweep.add_argument("--notify-on-change", action="store_true", help="Send anomaly/recovery notifications when state changed.")
++
++    recover = subparsers.add_parser("recover", parents=[common], help="Recover approved service targets only.")
++    recover.add_argument("--targets", required=True, help="Comma-separated recovery targets: gateway,dashboard,watcher")
++    recover.add_argument("--include-runtime", action="store_true", help="Include a fresh runtime snapshot.")
++    recover.add_argument("--notify-on-change", action="store_true", help="Send anomaly/recovery notifications when state changed.")
++
++    intent = subparsers.add_parser("intent", parents=[common], help="Route a narrow WhatsApp-style ops request.")
++    intent.add_argument("text", help="Ops-only request such as 'heal gateway' or 'show readiness'.")
++    intent.add_argument("--notify-on-change", action="store_true", help="Send anomaly/recovery notifications when state changed.")
++
++    return parser
++
++
++def main(argv: Optional[list[str]] = None) -> int:
++    parser = _build_parser()
++    args = parser.parse_args(argv)
++
++    command_name = str(args.cmd)
++    include_runtime = bool(getattr(args, "include_runtime", False))
++    apply_safe_recovery = bool(getattr(args, "apply_safe_recovery", False))
++    explicit_targets: list[str] = []
++
++    if command_name == "recover":
++        explicit_targets = _normalize_requested_targets(getattr(args, "targets", ""))
++    elif command_name == "intent":
++        intent_request = extract_ops_intent_request(getattr(args, "text", ""))
++        command_name = str(intent_request.get("command") or "status")
++        include_runtime = bool(intent_request.get("include_runtime"))
++        explicit_targets = _normalize_requested_targets(intent_request.get("targets", []))
++        apply_safe_recovery = command_name == "recover"
++
++    try:
++        verdict = run_ops_command(
++            command_name=command_name,
++            primary_channel=str(args.primary_channel),
++            gate_artifact_path=Path(str(args.gate_artifact)).expanduser().resolve(),
++            db_path=Path(str(args.db_path)).expanduser().resolve(),
++            dashboard_port=int(args.dashboard_port),
++            include_runtime=include_runtime,
++            timeout_seconds=float(args.timeout_seconds),
++            apply_safe_recovery=apply_safe_recovery,
++            explicit_targets=explicit_targets,
++            maintenance_report_path=Path(str(args.maintenance_report)).expanduser().resolve(),
++            maintenance_state_path=Path(str(args.maintenance_state)).expanduser().resolve(),
++            watcher_json_path=Path(str(args.watcher_json)).expanduser().resolve(),
++            watcher_tickers=str(args.watcher_tickers),
++            watcher_cycles=int(args.watcher_cycles),
++            watcher_sleep_seconds=int(args.watcher_sleep_seconds),
++            notify_on_change=bool(getattr(args, "notify_on_change", False)),
++            notify_targets=str(args.notify_targets or ""),
++            notify_to=str(args.notify_to or ""),
++            cooldown_seconds=int(args.cooldown_seconds),
++            verdict_path=Path(str(args.verdict_path)).expanduser().resolve(),
++            state_path=Path(str(args.state_path)).expanduser().resolve(),
++        )
++    except Exception as exc:
++        failure = {
++            "status": "FAIL",
++            "action": "openclaw_ops_control_plane",
++            "timestamp_utc": _utc_now_iso(),
++            "error": str(exc),
++        }
++        if bool(args.json):
++            print(json.dumps(failure, indent=2))
++        else:
++            print(f"[openclaw_ops_control_plane] FAIL - {exc}", file=sys.stderr)
++        return 2
++
++    if bool(args.json):
++        print(json.dumps(verdict, indent=2))
++    else:
++        _print_human_summary(verdict)
++
++    overall = verdict.get("overall_status") if isinstance(verdict.get("overall_status"), dict) else {}
++    return 1 if str(overall.get("status") or "") == "FAIL" else 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv[1:]))
+diff --git a/scripts/openclaw_production_readiness.py b/scripts/openclaw_production_readiness.py
+new file mode 100644
+index 0000000..eb80ffe
+--- /dev/null
++++ b/scripts/openclaw_production_readiness.py
+@@ -0,0 +1,1240 @@
++﻿#!/usr/bin/env python3
++"""
++Local-only OpenClaw production-readiness snapshot for Portfolio Maximizer.
++
++This script answers one operational question in a tool-friendly way:
++"What is blocking a safe, production-ready OpenClaw + PMX setup right now?"
++
++It combines:
++- PMX capital-readiness verdicts
++- OpenClaw exec-environment validity
++- OpenClaw gateway/channel regression health
++- Local-model availability and local-only enforcement
++- Security posture for unattended agent turns
++
++The output is intentionally JSON-stable so the OpenClaw bridge can consume it
++without scraping human-readable logs.
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import io
++import json
++import os
++import subprocess
++import sys
++import time
++import urllib.error
++import urllib.request
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any, Optional
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++try:
++    from etl.secret_loader import bootstrap_dotenv
++
++    bootstrap_dotenv()
++except Exception:
++    pass
++
++from scripts import capital_readiness_check as capital_mod
++from scripts import openclaw_regression_gate as regression_mod
++from scripts import project_runtime_status as runtime_mod
++
++
++FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
++DEFAULT_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
++DEFAULT_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "gate_status_latest.json"
++DEFAULT_PRODUCTION_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
++DEFAULT_OPENCLAW_JSON_RELATIVE = Path(".openclaw") / "openclaw.json"
++
++
++def _default_openclaw_json_path() -> Path:
++    return Path.home() / DEFAULT_OPENCLAW_JSON_RELATIVE
++
++
++def _utc_now_iso() -> str:
++    return datetime.now(timezone.utc).isoformat()
++
++
++def _parse_ts(value: Any) -> Optional[datetime]:
++    raw = str(value or "").strip()
++    if not raw:
++        return None
++    try:
++        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
++    except Exception:
++        return None
++
++
++def _tail_lines(text: str, *, limit: int = 24) -> list[str]:
++    lines = [str(line) for line in str(text or "").splitlines() if str(line).strip()]
++    if len(lines) <= limit:
++        return lines
++    return lines[-limit:]
++
++
++def _call_quietly(fn, /, *args, **kwargs) -> tuple[Any, list[str], list[str]]:
++    stdout_buf = io.StringIO()
++    stderr_buf = io.StringIO()
++    with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
++        result = fn(*args, **kwargs)
++    return result, _tail_lines(stdout_buf.getvalue()), _tail_lines(stderr_buf.getvalue())
++
++
++def _env_enabled(name: str, *, default: bool) -> bool:
++    raw = str(os.getenv(name, "")).strip().lower()
++    if not raw:
++        return bool(default)
++    return raw not in FALSEY_ENV_VALUES
++
++
++def _approval_token_value() -> str:
++    token = str(os.getenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")).strip()
++    return token or DEFAULT_APPROVAL_TOKEN
++
++
++def _issue(*, source: str, code: str, detail: str) -> dict[str, str]:
++    return {
++        "source": str(source or "").strip() or "unknown",
++        "code": str(code or "").strip() or "unknown",
++        "detail": str(detail or "").strip() or "unspecified",
++    }
++
++
++def _dedupe_issues(rows: list[dict[str, str]]) -> list[dict[str, str]]:
++    out: list[dict[str, str]] = []
++    seen: set[tuple[str, str, str]] = set()
++    for row in rows:
++        key = (
++            str(row.get("source") or "").strip(),
++            str(row.get("code") or "").strip(),
++            str(row.get("detail") or "").strip(),
++        )
++        if key in seen:
++            continue
++        seen.add(key)
++        out.append(
++            {
++                "source": key[0] or "unknown",
++                "code": key[1] or "unknown",
++                "detail": key[2] or "unspecified",
++            }
++        )
++    return out
++
++
++def _read_json_file(path: Path) -> dict[str, Any]:
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except Exception:
++        return {}
++    return payload if isinstance(payload, dict) else {}
++
++
++def _artifact_age_hours(path: Path) -> Optional[float]:
++    if not path.exists():
++        return None
++    try:
++        return round((time.time() - path.stat().st_mtime) / 3600.0, 2)
++    except Exception:
++        return None
++
++
++def _artifact_mtime_utc(path: Path) -> Optional[str]:
++    if not path.exists():
++        return None
++    try:
++        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
++    except Exception:
++        return None
++
++
++def _tool_capable_model_name(name: str) -> bool:
++    low = str(name or "").strip().lower()
++    return "qwen3" in low or "qwen2.5" in low
++
++
++def _tool_capable_model_ref(ref: str) -> bool:
++    low = str(ref or "").strip().lower()
++    if not low.startswith("ollama/"):
++        return False
++    return _tool_capable_model_name(low)
++
++
++def _normalize_ollama_base_url(base_url: str) -> str:
++    raw = str(base_url or "").strip() or "http://127.0.0.1:11434/v1"
++    text = raw.rstrip("/")
++    if text.lower().endswith("/v1"):
++        return text[: -len("/v1")]
++    return text
++
++
++def _discover_ollama_models(base_url: str, timeout_seconds: float = 2.0) -> list[str]:
++    api_base = _normalize_ollama_base_url(base_url)
++    url = f"{api_base}/api/tags"
++    try:
++        req = urllib.request.Request(url, headers={"Accept": "application/json"})
++        with urllib.request.urlopen(req, timeout=max(0.5, float(timeout_seconds))) as resp:
++            raw = resp.read().decode("utf-8", errors="replace")
++        payload = json.loads(raw)
++    except (OSError, urllib.error.URLError, ValueError):
++        return []
++
++    models = payload.get("models") if isinstance(payload, dict) else None
++    out: list[str] = []
++    if isinstance(models, list):
++        for row in models:
++            if not isinstance(row, dict):
++                continue
++            name = str(row.get("name") or "").strip()
++            if name:
++                out.append(name)
++    return out
++
++
++def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
++    snapshot: dict[str, Any] = {
++        "path": str(path),
++        "exists": path.exists(),
++        "timestamp_utc": None,
++        "overall_passed": None,
++        "phase3_ready": None,
++        "phase3_reason": "",
++        "age_hours": None,
++        "mtime_utc": _artifact_mtime_utc(path),
++        "status_stage": "",
++        "skipped_optional_gates": None,
++        "max_skipped_optional_gates": None,
++        "skipped_gate_labels": [],
++    }
++    if not path.exists():
++        return snapshot
++
++    payload = _read_json_file(path)
++    if not payload:
++        snapshot["parse_error"] = True
++        return snapshot
++
++    snapshot["age_hours"] = _artifact_age_hours(path)
++    snapshot["timestamp_utc"] = payload.get("timestamp_utc")
++    snapshot["overall_passed"] = payload.get("overall_passed")
++    snapshot["phase3_ready"] = payload.get("phase3_ready")
++    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
++    snapshot["status_stage"] = str(payload.get("status_stage") or "")
++    snapshot["skipped_optional_gates"] = payload.get("skipped_optional_gates")
++    snapshot["max_skipped_optional_gates"] = payload.get("max_skipped_optional_gates")
++    skipped = payload.get("skipped_gate_labels")
++    if isinstance(skipped, list):
++        snapshot["skipped_gate_labels"] = [str(x) for x in skipped if str(x).strip()]
++    return snapshot
++
++
++def _production_gate_snapshot(path: Path) -> dict[str, Any]:
++    snapshot: dict[str, Any] = {
++        "path": str(path),
++        "exists": path.exists(),
++        "phase3_ready": None,
++        "phase3_reason": "",
++        "warmup_expired": None,
++        "gate_semantics_status": "",
++        "pass_semantics_version": None,
++        "age_hours": None,
++        "mtime_utc": _artifact_mtime_utc(path),
++        "timestamp_utc": None,
++        "parse_error": False,
++    }
++    if not path.exists():
++        return snapshot
++
++    payload = _read_json_file(path)
++    if not payload:
++        snapshot["parse_error"] = True
++        return snapshot
++
++    gate_block = (
++        payload.get("production_profitability_gate")
++        if isinstance(payload.get("production_profitability_gate"), dict)
++        else {}
++    )
++    snapshot["age_hours"] = _artifact_age_hours(path)
++    snapshot["timestamp_utc"] = payload.get("timestamp_utc")
++    snapshot["phase3_ready"] = payload.get("phase3_ready")
++    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
++    snapshot["warmup_expired"] = payload.get("warmup_expired")
++    snapshot["gate_semantics_status"] = str(gate_block.get("gate_semantics_status") or "")
++    snapshot["pass_semantics_version"] = payload.get("pass_semantics_version")
++    return snapshot
++
++
++def _refresh_production_gate_artifact(
++    *,
++    artifact_path: Path,
++    timeout_seconds: float,
++) -> tuple[dict[str, Any], list[dict[str, str]]]:
++    blockers: list[dict[str, str]] = []
++    artifact_path.parent.mkdir(parents=True, exist_ok=True)
++    before_mtime = artifact_path.stat().st_mtime if artifact_path.exists() else None
++    cmd = [
++        sys.executable,
++        str(PROJECT_ROOT / "scripts" / "production_audit_gate.py"),
++        "--unattended-profile",
++        "--output-json",
++        str(artifact_path),
++    ]
++    try:
++        proc = subprocess.run(
++            cmd,
++            cwd=str(PROJECT_ROOT),
++            capture_output=True,
++            text=True,
++            timeout=max(10.0, float(timeout_seconds)),
++            check=False,
++        )
++    except subprocess.TimeoutExpired as exc:
++        blockers.append(
++            _issue(
++                source="gate_truth",
++                code="production_gate_refresh_timeout",
++                detail=f"Timed out refreshing production gate artifact after {float(timeout_seconds):.1f}s.",
++            )
++        )
++        return {
++            "attempted": True,
++            "ok": False,
++            "returncode": 124,
++            "command": cmd,
++            "stdout_tail": _tail_lines(exc.stdout if isinstance(exc.stdout, str) else ""),
++            "stderr_tail": _tail_lines((exc.stderr if isinstance(exc.stderr, str) else "") or "timeout"),
++        }, blockers
++    except FileNotFoundError as exc:
++        blockers.append(
++            _issue(
++                source="gate_truth",
++                code="production_gate_refresh_missing",
++                detail=f"Unable to launch production_audit_gate.py: {exc}",
++            )
++        )
++        return {
++            "attempted": True,
++            "ok": False,
++            "returncode": 127,
++            "command": cmd,
++            "stdout_tail": [],
++            "stderr_tail": [str(exc)],
++        }, blockers
++
++    snapshot = _production_gate_snapshot(artifact_path)
++    refreshed_after_run = (
++        artifact_path.exists()
++        and not bool(snapshot.get("parse_error"))
++        and (
++            before_mtime is None
++            or artifact_path.stat().st_mtime >= float(before_mtime)
++        )
++    )
++    ok = refreshed_after_run and int(proc.returncode) in {0, 1}
++    if not ok:
++        blockers.append(
++            _issue(
++                source="gate_truth",
++                code="production_gate_refresh_failed",
++                detail="Refreshing production_gate_latest.json failed or did not produce a parseable artifact.",
++            )
++        )
++    return {
++        "attempted": True,
++        "ok": ok,
++        "returncode": int(proc.returncode),
++        "command": cmd,
++        "stdout_tail": _tail_lines(proc.stdout or ""),
++        "stderr_tail": _tail_lines(proc.stderr or ""),
++        "artifact_refreshed": refreshed_after_run,
++    }, blockers
++
++
++def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
++    snapshot: dict[str, Any] = {
++        "config_path": str(config_path),
++        "config_present": config_path.exists(),
++        "local_only_effective": _env_enabled("OPENCLAW_LOCAL_ONLY", default=True),
++        "remote_providers": [],
++        "primary_model": "",
++        "fallback_models": [],
++        "allowlist_models": [],
++        "image_primary": "",
++        "ollama_base_url": "",
++        "ollama_reachable": False,
++        "discovered_models": [],
++        "tool_model_configured": False,
++        "tool_model_available": False,
++    }
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++
++    if not config_path.exists():
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_config_missing",
++                detail=f"OpenClaw config missing: {config_path}",
++            )
++        )
++        return snapshot, blockers, warnings
++
++    payload = _read_json_file(config_path)
++    if not payload:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_config_unreadable",
++                detail=f"OpenClaw config unreadable: {config_path}",
++            )
++        )
++        return snapshot, blockers, warnings
++
++    providers = payload.get("models", {}).get("providers", {})
++    providers = providers if isinstance(providers, dict) else {}
++    defaults = payload.get("agents", {}).get("defaults", {})
++    defaults = defaults if isinstance(defaults, dict) else {}
++    model_defaults = defaults.get("model", {})
++    model_defaults = model_defaults if isinstance(model_defaults, dict) else {}
++    image_defaults = defaults.get("imageModel", {})
++    image_defaults = image_defaults if isinstance(image_defaults, dict) else {}
++
++    primary_model = str(model_defaults.get("primary") or "").strip()
++    fallbacks_raw = model_defaults.get("fallbacks")
++    fallback_models = [str(x) for x in fallbacks_raw if str(x).strip()] if isinstance(fallbacks_raw, list) else []
++
++    allowlist_raw = defaults.get("models")
++    allowlist_models: list[str] = []
++    if isinstance(allowlist_raw, dict):
++        allowlist_models = [str(k) for k in allowlist_raw.keys() if str(k).strip()]
++    elif isinstance(allowlist_raw, list):
++        allowlist_models = [str(x) for x in allowlist_raw if str(x).strip()]
++
++    image_primary = str(image_defaults.get("primary") or "").strip()
++    remote_providers = sorted([str(k) for k in providers.keys() if str(k).strip() and str(k).strip() != "ollama"])
++    remote_fallbacks = [row for row in fallback_models if not row.startswith("ollama/")]
++    remote_allowlist = [row for row in allowlist_models if not row.startswith("ollama/")]
++
++    ollama_provider = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else {}
++    ollama_base_url = (
++        str(os.getenv("OPENCLAW_OLLAMA_BASE_URL") or "").strip()
++        or str(os.getenv("OLLAMA_HOST") or "").strip()
++        or str(ollama_provider.get("baseUrl") or "").strip()
++        or "http://127.0.0.1:11434/v1"
++    )
++    discovered_models = _discover_ollama_models(ollama_base_url)
++
++    tool_model_configured = any(
++        _tool_capable_model_ref(ref)
++        for ref in [primary_model, *fallback_models, *allowlist_models]
++    )
++    tool_model_available = any(_tool_capable_model_name(name) for name in discovered_models)
++
++    snapshot.update(
++        {
++            "remote_providers": remote_providers,
++            "primary_model": primary_model,
++            "fallback_models": fallback_models,
++            "allowlist_models": allowlist_models,
++            "image_primary": image_primary,
++            "ollama_base_url": ollama_base_url,
++            "ollama_reachable": bool(discovered_models),
++            "discovered_models": discovered_models[:12],
++            "tool_model_configured": tool_model_configured,
++            "tool_model_available": tool_model_available,
++        }
++    )
++
++    if not snapshot["local_only_effective"]:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_local_only_disabled",
++                detail="OPENCLAW_LOCAL_ONLY is disabled; remote/cloud model exposure is allowed.",
++            )
++        )
++    if remote_providers:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_remote_providers",
++                detail=f"Remote providers configured: {', '.join(remote_providers)}",
++            )
++        )
++    if not primary_model:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_primary_missing",
++                detail="agents.defaults.model.primary is not configured.",
++            )
++        )
++    elif not primary_model.startswith("ollama/"):
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_primary_remote",
++                detail=f"Primary model is not local-only: {primary_model}",
++            )
++        )
++    if remote_fallbacks:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_remote_fallbacks",
++                detail=f"Remote fallback chain detected: {', '.join(remote_fallbacks)}",
++            )
++        )
++    if remote_allowlist:
++        warnings.append(
++            _issue(
++                source="openclaw_models",
++                code="openclaw_remote_allowlist",
++                detail=f"Remote models remain allowlisted: {', '.join(remote_allowlist[:6])}",
++            )
++        )
++    if not tool_model_configured:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="tool_model_not_configured",
++                detail="No local tool-capable qwen model is configured for OpenClaw agent turns.",
++            )
++        )
++    if not discovered_models:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="ollama_unreachable",
++                detail=f"Ollama is unreachable or returned no models at {ollama_base_url}.",
++            )
++        )
++    elif not tool_model_available:
++        blockers.append(
++            _issue(
++                source="openclaw_models",
++                code="tool_model_not_available",
++                detail="Ollama is up, but no local qwen tool-capable model is currently available.",
++            )
++        )
++    if image_primary and not image_primary.startswith("ollama/"):
++        warnings.append(
++            _issue(
++                source="openclaw_models",
++                code="remote_image_model",
++                detail=f"imageModel.primary uses a remote model: {image_primary}",
++            )
++        )
++
++    return snapshot, blockers, warnings
++
++
++def _security_posture() -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
++    approval_token = _approval_token_value()
++    autonomy_guard_enabled = _env_enabled("OPENCLAW_AUTONOMY_GUARD_ENABLED", default=True)
++    approval_required = _env_enabled("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", default=True)
++    injection_block_enabled = _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=True)
++    policy_prefix_enabled = _env_enabled("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", default=True)
++    runtime_pip_enabled = _env_enabled("PMX_ALLOW_RUNTIME_PIP_INSTALL", default=False)
++    non_default_approval_token_configured = bool(
++        approval_token and approval_token != DEFAULT_APPROVAL_TOKEN
++    )
++
++    snapshot = {
++        "autonomy_guard_enabled": autonomy_guard_enabled,
++        "approval_token_required": approval_required,
++        "prompt_injection_block_enabled": injection_block_enabled,
++        "policy_prefix_enabled": policy_prefix_enabled,
++        "runtime_pip_install_enabled": runtime_pip_enabled,
++        "non_default_approval_token_configured": non_default_approval_token_configured,
++    }
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++
++    if not autonomy_guard_enabled:
++        blockers.append(
++            _issue(
++                source="security",
++                code="autonomy_guard_disabled",
++                detail="OPENCLAW_AUTONOMY_GUARD_ENABLED is disabled.",
++            )
++        )
++    if not approval_required:
++        blockers.append(
++            _issue(
++                source="security",
++                code="approval_token_not_required",
++                detail="OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled.",
++            )
++        )
++    if not injection_block_enabled:
++        blockers.append(
++            _issue(
++                source="security",
++                code="prompt_injection_block_disabled",
++                detail="OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS is disabled.",
++            )
++        )
++    if runtime_pip_enabled:
++        blockers.append(
++            _issue(
++                source="security",
++                code="runtime_pip_install_enabled",
++                detail="PMX_ALLOW_RUNTIME_PIP_INSTALL is enabled, which weakens unattended production hardening.",
++            )
++        )
++    if approval_required and not non_default_approval_token_configured:
++        blockers.append(
++            _issue(
++                source="security",
++                code="weak_approval_token",
++                detail="OPENCLAW_AUTONOMY_APPROVAL_TOKEN is unset or still using the default token.",
++            )
++        )
++    if not policy_prefix_enabled:
++        warnings.append(
++            _issue(
++                source="security",
++                code="policy_prefix_disabled",
++                detail="OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled.",
++            )
++        )
++
++    return snapshot, blockers, warnings
++
++
++def _openclaw_exec_env_posture() -> tuple[dict[str, Any], list[dict[str, str]]]:
++    check = runtime_mod._openclaw_exec_environment_check()
++    blockers: list[dict[str, str]] = []
++    if not bool(check.get("ok")):
++        signals = check.get("signals") if isinstance(check.get("signals"), list) else []
++        signal_text = ",".join(str(x) for x in signals if str(x).strip()) or "unknown"
++        detail = str(check.get("stderr") or "").strip() or f"signals={signal_text}"
++        blockers.append(
++            _issue(
++                source="openclaw_exec_env",
++                code="openclaw_exec_env_invalid",
++                detail=f"{detail} ({signal_text})",
++            )
++        )
++    return check, blockers
++
++
++def _openclaw_regression_posture(timeout_seconds: float) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++    ok, report = regression_mod.run_regression_gate(
++        openclaw_command=str(os.getenv("OPENCLAW_COMMAND", "openclaw")),
++        python_bin=sys.executable,
++        primary_channel=str(os.getenv("OPENCLAW_CHANNEL", "whatsapp")).strip().lower() or "whatsapp",
++        timeout_seconds=max(5.0, float(timeout_seconds)),
++        allow_missing_openclaw=True,
++    )
++    status = str(report.get("status") or "FAIL").upper()
++    if status == "FAIL":
++        errors = report.get("errors") if isinstance(report.get("errors"), list) else []
++        detail = "; ".join(str(x) for x in errors[:4]) or "OpenClaw regression gate failed."
++        blockers.append(
++            _issue(
++                source="openclaw_regression",
++                code="openclaw_regression_failed",
++                detail=detail,
++            )
++        )
++    elif status == "SKIP":
++        warnings.append(
++            _issue(
++                source="openclaw_regression",
++                code="openclaw_cli_missing",
++                detail="OpenClaw CLI is unavailable, so channel regression health was skipped.",
++            )
++        )
++    elif not ok:
++        blockers.append(
++            _issue(
++                source="openclaw_regression",
++                code="openclaw_regression_failed",
++                detail="OpenClaw regression gate returned a non-success status.",
++            )
++        )
++    return report, blockers, warnings
++
++
++def _capital_readiness_snapshot() -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++    try:
++        result, captured_stdout, captured_stderr = _call_quietly(capital_mod.run_capital_readiness)
++    except Exception as exc:
++        blockers.append(
++            _issue(
++                source="capital_readiness",
++                code="capital_readiness_error",
++                detail=f"Capital readiness execution failed: {exc}",
++            )
++        )
++        return {
++            "ready": False,
++            "verdict": "FAIL",
++            "reasons": [],
++            "warnings": [],
++            "metrics": {},
++        }, blockers, warnings
++
++    reasons = result.get("reasons") if isinstance(result.get("reasons"), list) else []
++    advisory = result.get("warnings") if isinstance(result.get("warnings"), list) else []
++    verdict = str(result.get("verdict") or "FAIL")
++    result["captured_output"] = {
++        "stdout_tail": captured_stdout,
++        "stderr_tail": captured_stderr,
++    }
++    if not bool(result.get("ready")):
++        blockers.append(
++            _issue(
++                source="capital_readiness",
++                code="capital_readiness_failed",
++                detail="; ".join(str(x) for x in reasons[:3]) or f"Capital readiness verdict={verdict}",
++            )
++        )
++    for row in advisory[:3]:
++        warnings.append(
++            _issue(
++                source="capital_readiness",
++                code="capital_readiness_warning",
++                detail=str(row),
++            )
++        )
++    return result, blockers, warnings
++
++
++def _gate_truth_posture(
++    *,
++    gate_artifact_path: Path,
++    production_gate_artifact_path: Path,
++    refresh_production_gate: bool,
++    timeout_seconds: float,
++) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++    refresh_result: Optional[dict[str, Any]] = None
++
++    if refresh_production_gate:
++        refresh_result, refresh_blockers = _refresh_production_gate_artifact(
++            artifact_path=production_gate_artifact_path,
++            timeout_seconds=max(20.0, float(timeout_seconds)),
++        )
++        blockers.extend(refresh_blockers)
++
++    gate_artifact = _gate_artifact_snapshot(gate_artifact_path)
++    production_gate = _production_gate_snapshot(production_gate_artifact_path)
++
++    gate_time = _parse_ts(gate_artifact.get("timestamp_utc")) or _parse_ts(gate_artifact.get("mtime_utc"))
++    production_time = _parse_ts(production_gate.get("timestamp_utc")) or _parse_ts(production_gate.get("mtime_utc"))
++    freshest_phase3_source = "gate_status_latest"
++    effective_phase3_ready = gate_artifact.get("phase3_ready")
++    effective_phase3_reason = gate_artifact.get("phase3_reason")
++
++    if production_time and (gate_time is None or production_time >= gate_time):
++        freshest_phase3_source = "production_gate_latest"
++        effective_phase3_ready = production_gate.get("phase3_ready")
++        effective_phase3_reason = production_gate.get("phase3_reason")
++
++    skipped_optional = gate_artifact.get("skipped_optional_gates")
++    max_skipped = gate_artifact.get("max_skipped_optional_gates")
++    if isinstance(skipped_optional, int) and isinstance(max_skipped, int) and skipped_optional > max_skipped:
++        blockers.append(
++            _issue(
++                source="gate_truth",
++                code="gate_skip_policy_failed",
++                detail=(
++                    f"gate_status_latest.json reports skipped_optional_gates={skipped_optional} "
++                    f"> max_skipped_optional_gates={max_skipped}; overall_passed is fail-closed by policy."
++                ),
++            )
++        )
++
++    if gate_time and production_time and production_time > gate_time:
++        if gate_artifact.get("phase3_ready") != production_gate.get("phase3_ready"):
++            blockers.append(
++                _issue(
++                    source="gate_truth",
++                    code="stale_gate_artifact_phase3_drift",
++                    detail=(
++                        "gate_status_latest.json is older than production_gate_latest.json and they disagree on "
++                        f"phase3_ready ({gate_artifact.get('phase3_ready')} vs {production_gate.get('phase3_ready')})."
++                    ),
++                )
++            )
++        elif str(gate_artifact.get("phase3_reason") or "").strip() != str(production_gate.get("phase3_reason") or "").strip():
++            warnings.append(
++                _issue(
++                    source="gate_truth",
++                    code="stale_gate_artifact_phase3_reason_drift",
++                    detail=(
++                        "gate_status_latest.json is older than production_gate_latest.json and phase3_reason differs "
++                        f"({gate_artifact.get('phase3_reason')} vs {production_gate.get('phase3_reason')})."
++                    ),
++                )
++            )
++        else:
++            warnings.append(
++                _issue(
++                    source="gate_truth",
++                    code="gate_artifact_older_than_production_gate",
++                    detail="gate_status_latest.json is older than production_gate_latest.json; refresh canonical gates before trusting readiness.",
++                )
++            )
++
++    snapshot = {
++        "gate_artifact": gate_artifact,
++        "production_gate_artifact": production_gate,
++        "refresh_result": refresh_result,
++        "freshest_phase3_source": freshest_phase3_source,
++        "effective_phase3_ready": effective_phase3_ready,
++        "effective_phase3_reason": effective_phase3_reason,
++        "drift_detected": bool(blockers or warnings),
++    }
++    return snapshot, blockers, warnings
++
++
++def _fresh_runtime_snapshot(timeout_seconds: float) -> tuple[Optional[dict[str, Any]], list[dict[str, str]]]:
++    blockers: list[dict[str, str]] = []
++    try:
++        payload, captured_stdout, captured_stderr = _call_quietly(
++            runtime_mod.collect_runtime_status,
++            timeout_seconds=max(5.0, float(timeout_seconds)),
++        )
++    except Exception as exc:
++        blockers.append(
++            _issue(
++                source="runtime_status",
++                code="runtime_status_error",
++                detail=f"Runtime snapshot failed: {exc}",
++            )
++        )
++        return None, blockers
++
++    if isinstance(payload, dict):
++        payload["captured_output"] = {
++            "stdout_tail": captured_stdout,
++            "stderr_tail": captured_stderr,
++        }
++
++    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
++    for check in checks:
++        if not isinstance(check, dict):
++            continue
++        name = str(check.get("name") or "").strip()
++        if not name or bool(check.get("ok")):
++            continue
++        if name == "openclaw_exec_env":
++            continue
++        detail = str(check.get("stderr") or "").strip() or str(check.get("stdout") or "").strip() or "check failed"
++        blockers.append(
++            _issue(
++                source="runtime_status",
++                code=f"runtime_check_failed:{name}",
++                detail=f"{name}: {detail[:220]}",
++            )
++        )
++    return payload, blockers
++
++
++def _build_human_action_guides(
++    *,
++    blockers: list[dict[str, str]],
++    gate_truth: dict[str, Any],
++) -> list[dict[str, Any]]:
++    codes = {str(row.get("code") or "").strip() for row in blockers if isinstance(row, dict)}
++    guides: list[dict[str, Any]] = []
++
++    def add(guide: dict[str, Any]) -> None:
++        guide_id = str(guide.get("id") or "").strip()
++        if not guide_id:
++            return
++        if any(str(row.get("id") or "").strip() == guide_id for row in guides):
++            return
++        guides.append(guide)
++
++    if "weak_approval_token" in codes:
++        add(
++            {
++                "id": "approval_token",
++                "title": "Set a non-default approval token",
++                "owner": "human",
++                "can_auto_fix": False,
++                "why_blocked": "Unattended OpenClaw turns are still using the default approval token.",
++                "steps": [
++                    "Choose a strong random token and store it outside the repo.",
++                    "Set OPENCLAW_AUTONOMY_APPROVAL_TOKEN in the shell or service environment that launches OpenClaw.",
++                    "Rerun the readiness snapshot to verify the blocker clears.",
++                ],
++                "commands": [
++                    "$env:OPENCLAW_AUTONOMY_APPROVAL_TOKEN='<strong-random-token>'",
++                    "python scripts/openclaw_production_readiness.py --json",
++                    "python scripts/openclaw_ops_control_plane.py status --json",
++                ],
++                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_token",
++            }
++        )
++
++    if codes & {"gate_skip_policy_failed", "stale_gate_artifact_phase3_drift"}:
++        add(
++            {
++                "id": "canonical_gate_truth",
++                "title": "Refresh canonical gate truth without skip flags",
++                "owner": "human",
++                "can_auto_fix": False,
++                "why_blocked": "The current gate artifact is stale or came from a degraded run that skipped too many optional gates.",
++                "steps": [
++                    "Coordinate with the parallel refactor lane before rerunning shared gates.",
++                    "Run the canonical gate stack with no skip flags so gate_status_latest.json reflects a full evidence pass.",
++                    "Compare the refreshed gate artifact with production_gate_latest.json and rerun readiness.",
++                ],
++                "commands": [
++                    "python scripts/run_all_gates.py --json",
++                    "python scripts/openclaw_production_readiness.py --json",
++                ],
++                "notes": [
++                    "Do not use --skip-forecast-gate, --skip-profitability-gate, or --skip-institutional-gate for final evidence.",
++                    f"Freshest phase3 source right now: {gate_truth.get('freshest_phase3_source')}",
++                ],
++                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide canonical_gate_truth",
++            }
++        )
++
++    if "capital_readiness_failed" in codes:
++        add(
++            {
++                "id": "capital_readiness",
++                "title": "Triage economics and evidence depth",
++                "owner": "human",
++                "can_auto_fix": False,
++                "why_blocked": "Trade quality and lift evidence are failing hard readiness rules.",
++                "steps": [
++                    "Review the latest capital-readiness verdict and identify which rules are failing.",
++                    "Confirm whether the current gate artifact is fresh enough to trust before making strategy changes.",
++                    "Only after evidence is current, investigate strategy quality, lift, and sample size.",
++                ],
++                "commands": [
++                    "python scripts/capital_readiness_check.py --json",
++                    "python scripts/openclaw_production_readiness.py --refresh-production-gate --json",
++                ],
++                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide capital_readiness",
++            }
++        )
++
++    return guides
++
++
++def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[dict[str, str]]) -> list[str]:
++    rows = [*blockers, *warnings]
++    recs: list[str] = []
++
++    def add(msg: str) -> None:
++        text = str(msg or "").strip()
++        if text and text not in recs:
++            recs.append(text)
++
++    codes = {str(row.get("code") or "") for row in rows}
++
++    if "openclaw_exec_env_invalid" in codes:
++        add("Run `python scripts/enforce_openclaw_exec_environment.py` and then `python scripts/project_runtime_status.py --pretty`.")
++    if codes & {
++        "openclaw_local_only_disabled",
++        "openclaw_remote_providers",
++        "openclaw_primary_remote",
++        "openclaw_remote_fallbacks",
++        "tool_model_not_configured",
++        "tool_model_not_available",
++        "ollama_unreachable",
++    }:
++        add("Keep OpenClaw local-only and re-apply the model chain with `python scripts/openclaw_models.py apply`; ensure `qwen3:8b` is available in Ollama.")
++    if codes & {
++        "autonomy_guard_disabled",
++        "approval_token_not_required",
++        "prompt_injection_block_disabled",
++        "weak_approval_token",
++        "runtime_pip_install_enabled",
++    }:
++        add(
++            "Harden unattended execution: set `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`, "
++            "`OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`, "
++            "`OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`, "
++            "use a non-default `OPENCLAW_AUTONOMY_APPROVAL_TOKEN`, and keep `PMX_ALLOW_RUNTIME_PIP_INSTALL=0`."
++        )
++        add("Show the exact human steps with `python scripts/openclaw_production_readiness.py --action-guide approval_token`.")
++    if codes & {"openclaw_regression_failed", "openclaw_cli_missing"}:
++        add("Validate messaging health with `python scripts/openclaw_regression_gate.py --json` and repair channels via `python scripts/openclaw_maintenance.py --strict`.")
++    if codes & {"gate_skip_policy_failed", "stale_gate_artifact_phase3_drift"}:
++        add("Refresh canonical gate truth without skip flags; see `python scripts/openclaw_production_readiness.py --action-guide canonical_gate_truth`.")
++    if codes & {"capital_readiness_failed", "runtime_check_failed:production_gate"}:
++        add("Do not promote to production yet; use `python scripts/run_all_gates.py --json` and `python scripts/capital_readiness_check.py --json` to confirm current blockers and evidence gaps.")
++        add("For a focused human triage checklist, run `python scripts/openclaw_production_readiness.py --action-guide capital_readiness`.")
++    if codes & {"runtime_status_error", "capital_readiness_error"}:
++        add("Fix the failing local diagnostics before trusting readiness claims; this snapshot is only as good as the underlying checks.")
++
++    return recs[:6]
++
++
++def collect_openclaw_production_readiness(
++    *,
++    config_path: Optional[Path] = None,
++    gate_artifact_path: Path = DEFAULT_GATE_ARTIFACT,
++    production_gate_artifact_path: Path = DEFAULT_PRODUCTION_GATE_ARTIFACT,
++    fresh_runtime: bool = False,
++    refresh_production_gate: bool = False,
++    timeout_seconds: float = 20.0,
++) -> dict[str, Any]:
++    blockers: list[dict[str, str]] = []
++    warnings: list[dict[str, str]] = []
++
++    effective_config_path = config_path or _default_openclaw_json_path()
++
++    gate_truth, gate_truth_blockers, gate_truth_warnings = _gate_truth_posture(
++        gate_artifact_path=gate_artifact_path,
++        production_gate_artifact_path=production_gate_artifact_path,
++        refresh_production_gate=bool(refresh_production_gate),
++        timeout_seconds=float(timeout_seconds),
++    )
++    gate_artifact = gate_truth.get("gate_artifact") if isinstance(gate_truth.get("gate_artifact"), dict) else _gate_artifact_snapshot(gate_artifact_path)
++    blockers.extend(gate_truth_blockers)
++    warnings.extend(gate_truth_warnings)
++
++    model_posture, model_blockers, model_warnings = _openclaw_model_posture(effective_config_path)
++    blockers.extend(model_blockers)
++    warnings.extend(model_warnings)
++
++    security_posture, security_blockers, security_warnings = _security_posture()
++    blockers.extend(security_blockers)
++    warnings.extend(security_warnings)
++
++    exec_env_check, exec_env_blockers = _openclaw_exec_env_posture()
++    blockers.extend(exec_env_blockers)
++
++    regression_report, regression_blockers, regression_warnings = _openclaw_regression_posture(
++        timeout_seconds=min(20.0, max(5.0, float(timeout_seconds)))
++    )
++    blockers.extend(regression_blockers)
++    warnings.extend(regression_warnings)
++
++    capital_readiness, capital_blockers, capital_warnings = _capital_readiness_snapshot()
++    blockers.extend(capital_blockers)
++    warnings.extend(capital_warnings)
++
++    runtime_snapshot: Optional[dict[str, Any]] = None
++    if fresh_runtime:
++        runtime_snapshot, runtime_blockers = _fresh_runtime_snapshot(timeout_seconds=max(5.0, float(timeout_seconds)))
++        blockers.extend(runtime_blockers)
++
++    blockers = _dedupe_issues(blockers)
++    warnings = _dedupe_issues(warnings)
++    human_action_guides = _build_human_action_guides(blockers=blockers, gate_truth=gate_truth)
++    recommendations = _recommendations_for_issues(blockers, warnings)
++
++    readiness_status = "FAIL" if blockers else ("WARN" if warnings else "PASS")
++    ready_now = readiness_status == "PASS"
++
++    return {
++        "status": "PASS",
++        "action": "assess_production_readiness",
++        "timestamp_utc": _utc_now_iso(),
++        "readiness_status": readiness_status,
++        "ready_now": ready_now,
++        "summary": {
++            "blocker_count": len(blockers),
++            "warning_count": len(warnings),
++            "fresh_runtime": bool(fresh_runtime),
++            "human_action_count": len(human_action_guides),
++        },
++        "blockers": blockers,
++        "warnings": warnings,
++        "recommendations": recommendations,
++        "human_action_guides": human_action_guides,
++        "gate_artifact": gate_artifact,
++        "production_gate_artifact": gate_truth.get("production_gate_artifact"),
++        "gate_truth": gate_truth,
++        "capital_readiness": capital_readiness,
++        "openclaw_exec_env": exec_env_check,
++        "openclaw_regression": regression_report,
++        "security_posture": security_posture,
++        "model_posture": model_posture,
++        "runtime_snapshot": runtime_snapshot,
++    }
++
++
++def _print_human_summary(payload: dict[str, Any]) -> None:
++    readiness_status = str(payload.get("readiness_status") or "UNKNOWN")
++    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
++    blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
++    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
++    recommendations = payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else []
++    gate_truth = payload.get("gate_truth") if isinstance(payload.get("gate_truth"), dict) else {}
++    action_guides = payload.get("human_action_guides") if isinstance(payload.get("human_action_guides"), list) else []
++
++    print(
++        f"[openclaw_production_readiness] readiness={readiness_status} "
++        f"blockers={summary.get('blocker_count', len(blockers))} "
++        f"warnings={summary.get('warning_count', len(warnings))}"
++    )
++    if gate_truth:
++        print(
++            "[openclaw_production_readiness] gate_truth "
++            f"effective_phase3_ready={gate_truth.get('effective_phase3_ready')} "
++            f"source={gate_truth.get('freshest_phase3_source')} "
++            f"drift_detected={gate_truth.get('drift_detected')}"
++        )
++    for row in blockers[:6]:
++        if not isinstance(row, dict):
++            continue
++        print(
++            f"[openclaw_production_readiness] blocker "
++            f"{row.get('source', 'unknown')}:{row.get('code', 'unknown')} - {row.get('detail', '')}"
++        )
++    for row in warnings[:4]:
++        if not isinstance(row, dict):
++            continue
++        print(
++            f"[openclaw_production_readiness] warning "
++            f"{row.get('source', 'unknown')}:{row.get('code', 'unknown')} - {row.get('detail', '')}"
++        )
++    for rec in recommendations[:4]:
++        print(f"[openclaw_production_readiness] next: {rec}")
++    for guide in action_guides[:3]:
++        if not isinstance(guide, dict):
++            continue
++        hint = str(guide.get("cli_hint") or "").strip()
++        if hint:
++            print(f"[openclaw_production_readiness] human_action: {hint}")
++
++
++def _print_action_guides(payload: dict[str, Any], *, requested_guide: str) -> None:
++    guides = payload.get("human_action_guides") if isinstance(payload.get("human_action_guides"), list) else []
++    if requested_guide and requested_guide != "all":
++        guides = [row for row in guides if isinstance(row, dict) and str(row.get("id") or "").strip() == requested_guide]
++
++    if not guides:
++        print("[openclaw_production_readiness] No matching human-action guides for the current blockers.")
++        return
++
++    print("[openclaw_production_readiness] Human Action Guide")
++    for guide in guides:
++        if not isinstance(guide, dict):
++            continue
++        print(f"[openclaw_production_readiness] guide {guide.get('id')} - {guide.get('title')}")
++        print(f"  why: {guide.get('why_blocked')}")
++        for step in guide.get("steps", [])[:4]:
++            print(f"  step: {step}")
++        for cmd in guide.get("commands", [])[:4]:
++            print(f"  cmd : {cmd}")
++
++
++def main(argv: Optional[list[str]] = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument(
++        "--config",
++        default=str(_default_openclaw_json_path()),
++        help="Path to openclaw.json (default: ~/.openclaw/openclaw.json).",
++    )
++    parser.add_argument(
++        "--gate-artifact",
++        default=str(DEFAULT_GATE_ARTIFACT),
++        help="Path to logs/gate_status_latest.json.",
++    )
++    parser.add_argument(
++        "--production-gate-artifact",
++        default=str(DEFAULT_PRODUCTION_GATE_ARTIFACT),
++        help="Path to logs/audit_gate/production_gate_latest.json.",
++    )
++    parser.add_argument(
++        "--fresh-runtime",
++        action="store_true",
++        help="Run a fresh runtime snapshot in addition to artifact-based readiness checks.",
++    )
++    parser.add_argument(
++        "--refresh-production-gate",
++        action="store_true",
++        help="Refresh production_gate_latest.json before evaluating readiness.",
++    )
++    parser.add_argument(
++        "--timeout-seconds",
++        type=float,
++        default=20.0,
++        help="Timeout budget for OpenClaw regression and fresh runtime checks.",
++    )
++    parser.add_argument(
++        "--action-guide",
++        default="",
++        help="Show a human-action guide for unresolved blockers: approval_token, canonical_gate_truth, capital_readiness, or all.",
++    )
++    parser.add_argument(
++        "--json",
++        action="store_true",
++        help="Emit machine-readable JSON.",
++    )
++    args = parser.parse_args(argv)
++
++    try:
++        payload = collect_openclaw_production_readiness(
++            config_path=Path(str(args.config)),
++            gate_artifact_path=Path(str(args.gate_artifact)),
++            production_gate_artifact_path=Path(str(args.production_gate_artifact)),
++            fresh_runtime=bool(args.fresh_runtime),
++            refresh_production_gate=bool(args.refresh_production_gate),
++            timeout_seconds=float(args.timeout_seconds),
++        )
++    except Exception as exc:
++        failure = {
++            "status": "FAIL",
++            "action": "assess_production_readiness",
++            "error": str(exc),
++            "timestamp_utc": _utc_now_iso(),
++        }
++        if bool(args.json):
++            print(json.dumps(failure, indent=2))
++        else:
++            print(f"[openclaw_production_readiness] FAIL - {exc}", file=sys.stderr)
++        return 2
++
++    requested_guide = str(args.action_guide or "").strip().lower()
++    if requested_guide:
++        guides = payload.get("human_action_guides") if isinstance(payload.get("human_action_guides"), list) else []
++        if requested_guide != "all":
++            guides = [
++                row
++                for row in guides
++                if isinstance(row, dict) and str(row.get("id") or "").strip() == requested_guide
++            ]
++        guide_payload = {
++            "status": "PASS",
++            "action": "production_readiness_action_guide",
++            "timestamp_utc": _utc_now_iso(),
++            "requested_guide": requested_guide,
++            "readiness_status": payload.get("readiness_status"),
++            "guides": guides,
++        }
++        if bool(args.json):
++            print(json.dumps(guide_payload, indent=2))
++        else:
++            _print_action_guides(payload, requested_guide=requested_guide)
++        return 0
++
++    if bool(args.json):
++        print(json.dumps(payload, indent=2))
++    else:
++        _print_human_summary(payload)
++    return 0 if bool(payload.get("ready_now")) else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/scripts/test_openclaw_ops_control_plane.py b/tests/scripts/test_openclaw_ops_control_plane.py
+new file mode 100644
+index 0000000..6c15dac
+--- /dev/null
++++ b/tests/scripts/test_openclaw_ops_control_plane.py
+@@ -0,0 +1,228 @@
++from __future__ import annotations
++
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import pytest
++
++from scripts import openclaw_ops_control_plane as ops
++
++
++def _base_snapshot() -> dict:
++    return {
++        "components": {
++            "gateway": {
++                "healthy": True,
++                "rpc_ok": True,
++                "primary_issue": "",
++            },
++            "primary_channel": {
++                "healthy": True,
++                "linked": True,
++                "running": True,
++                "connected": True,
++                "relink_required": False,
++                "issue_reason": "",
++            },
++            "dashboard": {
++                "healthy": True,
++                "url": "http://127.0.0.1:8000/visualizations/live_dashboard.html",
++            },
++            "watcher": {
++                "healthy": True,
++                "running": True,
++            },
++            "runtime": {
++                "included": False,
++                "openclaw_exec_env_ok": True,
++            },
++            "readiness": {
++                "readiness_status": "FAIL",
++                "ready_now": False,
++                "overall_passed": False,
++                "phase3_ready": True,
++                "phase3_reason": "phase3 looks good",
++                "skipped_gate_labels": ["run_all_gates"],
++            },
++            "maintenance": {
++                "last_fast_supervisor_restart_at": "2026-03-14T16:00:00+00:00",
++                "last_gateway_restart_at": "2026-03-14T16:05:00+00:00",
++            },
++        },
++        "readiness_payload": {
++            "blockers": [
++                {
++                    "source": "security",
++                    "code": "weak_approval_token",
++                    "detail": "OPENCLAW_AUTONOMY_APPROVAL_TOKEN is unset or still using the default token.",
++                },
++                {
++                    "source": "capital_readiness",
++                    "code": "capital_readiness_failed",
++                    "detail": "win rate too low; profit factor too low; lift negative",
++                },
++            ],
++            "warnings": [],
++        },
++        "runtime_payload": None,
++    }
++
++
++def test_extract_ops_intent_request_maps_supported_commands() -> None:
++    assert ops.extract_ops_intent_request("what is broken")["command"] == "status"
++    assert ops.extract_ops_intent_request("show runtime")["include_runtime"] is True
++    heal_gateway = ops.extract_ops_intent_request("heal gateway")
++    assert heal_gateway["command"] == "recover"
++    assert heal_gateway["targets"] == ["gateway"]
++    heal_dashboard = ops.extract_ops_intent_request("heal dashboard")
++    assert heal_dashboard["targets"] == ["dashboard"]
++    heal_watcher = ops.extract_ops_intent_request("heal watcher")
++    assert heal_watcher["targets"] == ["watcher"]
++
++
++def test_normalize_requested_targets_rejects_invalid_target() -> None:
++    with pytest.raises(ValueError, match="unsupported recovery targets"):
++        ops._normalize_requested_targets("gateway,trades")
++
++
++def test_classify_ops_issues_separates_governance_security_and_economics() -> None:
++    snapshot = _base_snapshot()
++
++    grouped = ops.classify_ops_issues(snapshot)
++
++    governance = grouped["human_governance_action_required"]
++    security = grouped["human_security_action_required"]
++    economics = grouped["human_economic_action_required"]
++
++    assert any(row["code"] == "overall_passed_false" for row in governance)
++    assert any(row["code"] == "weak_approval_token" for row in security)
++    assert any(row["code"] == "capital_readiness_failed" for row in economics)
++
++    overall = ops._build_overall_status(issue_classes=grouped, components=snapshot["components"])
++    assert overall["status"] == "WARN"
++    assert overall["service_health"] == "healthy"
++    assert overall["production_status"] == "blocked"
++
++
++def test_classify_ops_issues_marks_dashboard_and_watcher_as_recoverable() -> None:
++    snapshot = _base_snapshot()
++    snapshot["components"]["dashboard"]["healthy"] = False
++    snapshot["components"]["watcher"]["healthy"] = False
++    snapshot["components"]["watcher"]["running"] = False
++
++    grouped = ops.classify_ops_issues(snapshot)
++    service_rows = grouped["recoverable_service_failure"]
++
++    assert any(row["target"] == "dashboard" for row in service_rows)
++    assert any(row["target"] == "watcher" for row in service_rows)
++
++
++def test_build_operator_summary_distinguishes_service_health_from_production_ready() -> None:
++    snapshot = _base_snapshot()
++    issue_classes = ops.classify_ops_issues(snapshot)
++    overall = ops._build_overall_status(issue_classes=issue_classes, components=snapshot["components"])
++
++    summary = ops.build_operator_summary(
++        initial_issue_classes=issue_classes,
++        final_issue_classes=issue_classes,
++        attempted_actions=[],
++        completed_actions=[],
++        components=snapshot["components"],
++        overall_status=overall,
++    )
++
++    assert summary["headline"] == "Services healthy; production is still blocked."
++    assert "Service health=healthy production_status=blocked" in summary["message"]
++
++
++def test_decide_notification_respects_cooldown_and_recovery_transition() -> None:
++    snapshot = _base_snapshot()
++    grouped = ops.classify_ops_issues(snapshot)
++    summary = {"message": "OpenClaw ops: blocked"}
++    future = datetime.now(timezone.utc) + timedelta(minutes=10)
++    state = {
++        "last_status": "issue",
++        "last_issue_signature": ops._fingerprint_payload(
++            [{"class": row["class"], "code": row["code"], "target": row["target"]} for row in ops._flatten_issue_classes(grouped)]
++        ),
++        "next_notify_at_utc": future.isoformat(),
++    }
++
++    suppressed = ops._decide_notification(
++        final_issue_classes=grouped,
++        operator_summary=summary,
++        state=state,
++        cooldown_seconds=900,
++    )
++    assert suppressed["should_notify"] is False
++    assert suppressed["reason"] == "cooldown_active"
++    assert suppressed["next_notify_at_utc"] == future.isoformat()
++
++    recovered = ops._decide_notification(
++        final_issue_classes={label: [] for label in ops.ISSUE_CLASSES},
++        operator_summary={"message": "OpenClaw ops: recovered"},
++        state={"last_status": "issue", "last_issue_signature": "abc"},
++        cooldown_seconds=900,
++    )
++    assert recovered["should_notify"] is True
++    assert recovered["reason"] == "recovered"
++
++
++def test_run_ops_command_marks_gateway_recovery_completed(tmp_path, monkeypatch) -> None:
++    first = _base_snapshot()
++    first["components"]["gateway"]["healthy"] = False
++    first["components"]["gateway"]["rpc_ok"] = False
++    first["components"]["primary_channel"]["running"] = False
++    second = _base_snapshot()
++
++    snapshots = iter([first, second])
++    monkeypatch.setattr(ops, "collect_ops_snapshot", lambda **kwargs: next(snapshots))
++    monkeypatch.setattr(
++        ops,
++        "_run_recovery_targets",
++        lambda **kwargs: [
++            {
++                "target": "gateway",
++                "ok": True,
++                "summary": "Attempted gateway maintenance recovery.",
++                "returncode": 0,
++                "command": ["python", "scripts/openclaw_maintenance.py"],
++                "stdout_tail": [],
++                "stderr_tail": [],
++            }
++        ],
++    )
++    monkeypatch.setattr(
++        ops,
++        "_send_notification",
++        lambda **kwargs: {"attempted": False, "sent": False, "reason": "notifications_disabled", "results": []},
++    )
++
++    verdict = ops.run_ops_command(
++        command_name="sweep",
++        primary_channel="whatsapp",
++        gate_artifact_path=tmp_path / "gate_status_latest.json",
++        db_path=tmp_path / "portfolio_maximizer.db",
++        dashboard_port=8000,
++        include_runtime=False,
++        timeout_seconds=5.0,
++        apply_safe_recovery=True,
++        explicit_targets=[],
++        maintenance_report_path=tmp_path / "openclaw_maintenance_latest.json",
++        maintenance_state_path=tmp_path / "openclaw_maintenance_state.json",
++        watcher_json_path=tmp_path / "live_denominator_latest.json",
++        watcher_tickers="AAPL,MSFT",
++        watcher_cycles=30,
++        watcher_sleep_seconds=86400,
++        notify_on_change=False,
++        notify_targets="",
++        notify_to="",
++        cooldown_seconds=900,
++        verdict_path=tmp_path / "openclaw_ops_control_plane_latest.json",
++        state_path=tmp_path / "openclaw_ops_control_plane_state.json",
++    )
++
++    assert verdict["completed_actions"][0]["target"] == "gateway"
++    assert verdict["overall_status"]["service_health"] == "healthy"
++    assert verdict["overall_status"]["status"] == "WARN"
++    assert Path(tmp_path / "openclaw_ops_control_plane_latest.json").exists()
+diff --git a/tests/scripts/test_openclaw_production_readiness.py b/tests/scripts/test_openclaw_production_readiness.py
+new file mode 100644
+index 0000000..841d5e6
+--- /dev/null
++++ b/tests/scripts/test_openclaw_production_readiness.py
+@@ -0,0 +1,121 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from scripts import openclaw_production_readiness as mod
++
++
++def test_gate_truth_posture_detects_skip_policy_and_phase3_drift(tmp_path: Path) -> None:
++    gate_artifact = tmp_path / "gate_status_latest.json"
++    gate_artifact.write_text(
++        json.dumps(
++            {
++                "timestamp_utc": "2026-03-14T17:20:45Z",
++                "overall_passed": False,
++                "phase3_ready": True,
++                "phase3_reason": "READY",
++                "skipped_optional_gates": 2,
++                "max_skipped_optional_gates": 1,
++                "skipped_gate_labels": ["check_quant_validation_health", "institutional_unattended_gate"],
++            }
++        ),
++        encoding="utf-8",
++    )
++    production_artifact = tmp_path / "production_gate_latest.json"
++    production_artifact.write_text(
++        json.dumps(
++            {
++                "timestamp_utc": "2026-03-14T17:30:28Z",
++                "pass_semantics_version": 3,
++                "warmup_expired": False,
++                "phase3_ready": False,
++                "phase3_reason": "GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL",
++                "production_profitability_gate": {
++                    "gate_semantics_status": "FAIL",
++                },
++            }
++        ),
++        encoding="utf-8",
++    )
++
++    truth, blockers, warnings = mod._gate_truth_posture(
++        gate_artifact_path=gate_artifact,
++        production_gate_artifact_path=production_artifact,
++        refresh_production_gate=False,
++        timeout_seconds=5.0,
++    )
++
++    codes = {row["code"] for row in blockers}
++    assert "gate_skip_policy_failed" in codes
++    assert "stale_gate_artifact_phase3_drift" in codes
++    assert truth["freshest_phase3_source"] == "production_gate_latest"
++    assert truth["effective_phase3_ready"] is False
++    assert warnings == []
++
++
++def test_collect_openclaw_production_readiness_suppresses_noisy_helper_output(
++    monkeypatch,
++    capsys,
++) -> None:
++    monkeypatch.setattr(mod, "_gate_truth_posture", lambda **kwargs: ({"gate_artifact": {}, "production_gate_artifact": {}, "freshest_phase3_source": "gate_status_latest", "effective_phase3_ready": None, "effective_phase3_reason": "", "drift_detected": False}, [], []))
++    monkeypatch.setattr(mod, "_openclaw_model_posture", lambda path: ({}, [], []))
++    monkeypatch.setattr(mod, "_security_posture", lambda: ({}, [], []))
++    monkeypatch.setattr(mod, "_openclaw_exec_env_posture", lambda: ({"ok": True}, []))
++    monkeypatch.setattr(mod, "_openclaw_regression_posture", lambda timeout_seconds: ({"status": "PASS"}, [], []))
++
++    def _chatty_capital():
++        print("NOISY STDOUT FROM HELPER")
++        print("NOISY STDERR FROM HELPER", file=__import__("sys").stderr)
++        return {
++            "ready": False,
++            "verdict": "FAIL",
++            "reasons": ["R2: gate artifact overall_passed=False"],
++            "warnings": [],
++            "metrics": {},
++        }
++
++    monkeypatch.setattr(mod.capital_mod, "run_capital_readiness", _chatty_capital)
++
++    rc = mod.main(["--json"])
++    assert rc == 1
++
++    out = capsys.readouterr().out
++    payload = json.loads(out)
++    assert payload["action"] == "assess_production_readiness"
++    captured = payload["capital_readiness"]["captured_output"]
++    assert "NOISY STDOUT FROM HELPER" in "\n".join(captured["stdout_tail"])
++    assert "NOISY STDERR FROM HELPER" in "\n".join(captured["stderr_tail"])
++
++
++def test_action_guide_cli_outputs_requested_human_steps(monkeypatch, capsys) -> None:
++    payload = {
++        "readiness_status": "FAIL",
++        "human_action_guides": [
++            {
++                "id": "approval_token",
++                "title": "Set a non-default approval token",
++                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide approval_token",
++                "steps": ["step one"],
++                "commands": ["cmd one"],
++            },
++            {
++                "id": "capital_readiness",
++                "title": "Triage economics and evidence depth",
++                "cli_hint": "python scripts/openclaw_production_readiness.py --action-guide capital_readiness",
++                "steps": ["step two"],
++                "commands": ["cmd two"],
++            },
++        ],
++    }
++    monkeypatch.setattr(mod, "collect_openclaw_production_readiness", lambda **kwargs: payload)
++
++    rc = mod.main(["--action-guide", "approval_token", "--json"])
++    assert rc == 0
++
++    out = capsys.readouterr().out
++    guide_payload = json.loads(out)
++    assert guide_payload["action"] == "production_readiness_action_guide"
++    assert guide_payload["requested_guide"] == "approval_token"
++    assert len(guide_payload["guides"]) == 1
++    assert guide_payload["guides"][0]["id"] == "approval_token"

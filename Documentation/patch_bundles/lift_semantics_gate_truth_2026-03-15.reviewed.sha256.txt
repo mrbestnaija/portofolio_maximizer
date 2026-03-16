@@ -1,0 +1,1 @@
+dfa43b8b44b8dbcc4242799940a952b70e79e54f15fce49561aeef997dc000b7  Documentation/patch_bundles/lift_semantics_gate_truth_2026-03-15.reviewed.patch

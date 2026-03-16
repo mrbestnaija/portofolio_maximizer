@@ -1,0 +1,584 @@
+﻿diff --git a/scripts/start_openclaw_guardian.ps1 b/scripts/start_openclaw_guardian.ps1
+index 45f972d..8928288 100644
+--- a/scripts/start_openclaw_guardian.ps1
++++ b/scripts/start_openclaw_guardian.ps1
+@@ -149,6 +149,9 @@ if (-not $NoApply) {
+ 
+ $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
+ 
++$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")
++& $pythonExe @execEnvArgs
++
+ $proc = Start-Process `
+     -FilePath $pythonExe `
+     -ArgumentList ($args -join " ") `
+diff --git a/scripts/verify_openclaw_config.py b/scripts/verify_openclaw_config.py
+index 12e43b0..e5dcbc8 100644
+--- a/scripts/verify_openclaw_config.py
++++ b/scripts/verify_openclaw_config.py
+@@ -19,24 +19,26 @@ from pathlib import Path
+ PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(PROJECT_ROOT))
+ 
+-OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
+-RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
+-WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
+-FALSEY_VALUES = {"0", "false", "no", "off"}
+-VALID_OLLAMA_APIS = {
+-    "ollama",
+-    "openai-completions",
+-    "openai-responses",
+-    "anthropic-messages",
+-    "google-generative-ai",
+-}
+-
+-
+-def _env_enabled(raw: str | None, *, default: bool) -> bool:
+-    text = str(raw or "").strip().lower()
+-    if not text:
+-        return bool(default)
+-    return text not in FALSEY_VALUES
++OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
++RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
++WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
++FALSEY_VALUES = {"0", "false", "no", "off"}
++VALID_OLLAMA_APIS = {
++    "ollama",
++    "openai-completions",
++    "openai-responses",
++    "anthropic-messages",
++    "google-generative-ai",
++}
++VALID_EXEC_HOSTS: frozenset = frozenset({"sandbox", "gateway", "node"})
++VALID_SANDBOX_MODES_FOR_SANDBOX_HOST: frozenset = frozenset({"non-main", "all"})
++
++
++def _env_enabled(raw: str | None, *, default: bool) -> bool:
++    text = str(raw or "").strip().lower()
++    if not text:
++        return bool(default)
++    return text not in FALSEY_VALUES
+ 
+ 
+ def _load_cfg() -> dict:
+@@ -89,16 +91,16 @@ def main() -> int:
+             ok.append(f"ollama.baseUrl = {ollama['baseUrl']}")
+ 
+         api = ollama.get("api", "")
+-        if api not in VALID_OLLAMA_APIS:
+-            issues.append(f"[ERROR] ollama.api={api!r} not in {VALID_OLLAMA_APIS}")
+-        else:
+-            ok.append(f"ollama.api = {api}")
+-            base_url = str(ollama.get("baseUrl", "")).strip().lower()
+-            if api == "ollama" and base_url.endswith("/v1"):
+-                warnings.append(
+-                    "ollama.api='ollama' with baseUrl ending in '/v1' looks like an OpenAI-compatible endpoint; "
+-                    "prefer baseUrl without '/v1' for native Ollama API mode."
+-                )
++        if api not in VALID_OLLAMA_APIS:
++            issues.append(f"[ERROR] ollama.api={api!r} not in {VALID_OLLAMA_APIS}")
++        else:
++            ok.append(f"ollama.api = {api}")
++            base_url = str(ollama.get("baseUrl", "")).strip().lower()
++            if api == "ollama" and base_url.endswith("/v1"):
++                warnings.append(
++                    "ollama.api='ollama' with baseUrl ending in '/v1' looks like an OpenAI-compatible endpoint; "
++                    "prefer baseUrl without '/v1' for native Ollama API mode."
++                )
+ 
+         models = ollama.get("models", [])
+         if not models:
+@@ -160,36 +162,36 @@ def main() -> int:
+         ok.append("imageModel: not set (no remote dependency)")
+ 
+     # Context management
+-    ctx_tokens = defaults.get("contextTokens", 200000)
+-    bootstrap_max = defaults.get("bootstrapMaxChars", RECOMMENDED_BOOTSTRAP_MAX_CHARS)
+-    ok.append(f"contextTokens = {ctx_tokens}")
+-    ok.append(f"bootstrapMaxChars = {bootstrap_max}")
+-    try:
+-        bootstrap_limit_int = int(bootstrap_max)
+-    except Exception:
+-        bootstrap_limit_int = RECOMMENDED_BOOTSTRAP_MAX_CHARS
+-    if ctx_tokens > 65536:
+-        warnings.append(f"contextTokens ({ctx_tokens}) very high for local models")
+-    if bootstrap_limit_int < RECOMMENDED_BOOTSTRAP_MAX_CHARS:
+-        warnings.append(
+-            "bootstrapMaxChars is below 20000; large workspace bootstrap files may be truncated "
+-            "(can cause malformed tool calls/stuck sessions)."
+-        )
+-    for fname in WORKSPACE_BOOTSTRAP_FILES:
+-        fpath = PROJECT_ROOT / fname
+-        if not fpath.exists():
+-            continue
+-        try:
+-            size = len(fpath.read_text(encoding="utf-8", errors="replace"))
+-        except Exception:
+-            continue
+-        if size > bootstrap_limit_int:
+-            warnings.append(
+-                f"{fname} is {size} chars > bootstrapMaxChars ({bootstrap_limit_int}); "
+-                "OpenClaw will truncate bootstrap context."
+-            )
+-        else:
+-            ok.append(f"{fname} size = {size} chars (within bootstrapMaxChars)")
++    ctx_tokens = defaults.get("contextTokens", 200000)
++    bootstrap_max = defaults.get("bootstrapMaxChars", RECOMMENDED_BOOTSTRAP_MAX_CHARS)
++    ok.append(f"contextTokens = {ctx_tokens}")
++    ok.append(f"bootstrapMaxChars = {bootstrap_max}")
++    try:
++        bootstrap_limit_int = int(bootstrap_max)
++    except Exception:
++        bootstrap_limit_int = RECOMMENDED_BOOTSTRAP_MAX_CHARS
++    if ctx_tokens > 65536:
++        warnings.append(f"contextTokens ({ctx_tokens}) very high for local models")
++    if bootstrap_limit_int < RECOMMENDED_BOOTSTRAP_MAX_CHARS:
++        warnings.append(
++            "bootstrapMaxChars is below 20000; large workspace bootstrap files may be truncated "
++            "(can cause malformed tool calls/stuck sessions)."
++        )
++    for fname in WORKSPACE_BOOTSTRAP_FILES:
++        fpath = PROJECT_ROOT / fname
++        if not fpath.exists():
++            continue
++        try:
++            size = len(fpath.read_text(encoding="utf-8", errors="replace"))
++        except Exception:
++            continue
++        if size > bootstrap_limit_int:
++            warnings.append(
++                f"{fname} is {size} chars > bootstrapMaxChars ({bootstrap_limit_int}); "
++                "OpenClaw will truncate bootstrap context."
++            )
++        else:
++            ok.append(f"{fname} size = {size} chars (within bootstrapMaxChars)")
+ 
+     # Compaction
+     compaction = defaults.get("compaction", {}).get("mode", "default")
+@@ -258,53 +260,53 @@ def main() -> int:
+     else:
+         warnings.append(f".env OPENCLAW_LOCAL_ONLY = {env_local_only} (remote models allowed!)")
+ 
+-    env_model_order = env.get("OPENCLAW_OLLAMA_MODEL_ORDER", "")
+-    if env_model_order:
+-        models_ordered = [m.strip() for m in env_model_order.split(",") if m.strip()]
+-        if models_ordered and "qwen3" not in models_ordered[0]:
+-            issues.append(f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, not qwen3:8b (tool-calling required)")
+-        else:
+-            ok.append(f".env model order: {env_model_order}")
+-
+-    env_autonomy_guard = env.get("OPENCLAW_AUTONOMY_GUARD_ENABLED", "")
+-    if env_autonomy_guard and not _env_enabled(env_autonomy_guard, default=True):
+-        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_GUARD_ENABLED is disabled")
+-    elif env_autonomy_guard:
+-        ok.append(f".env OPENCLAW_AUTONOMY_GUARD_ENABLED = {env_autonomy_guard}")
+-    else:
+-        ok.append(".env OPENCLAW_AUTONOMY_GUARD_ENABLED not set (runtime default: enabled)")
+-
+-    env_autonomy_approval = env.get("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", "")
+-    if env_autonomy_approval and not _env_enabled(env_autonomy_approval, default=True):
+-        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled")
+-    elif env_autonomy_approval:
+-        ok.append(f".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN = {env_autonomy_approval}")
+-    else:
+-        ok.append(".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN not set (runtime default: enabled)")
+-
+-    env_autonomy_prefix = env.get("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", "")
+-    if env_autonomy_prefix and not _env_enabled(env_autonomy_prefix, default=True):
+-        warnings.append("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled")
+-    elif env_autonomy_prefix:
+-        ok.append(f".env OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED = {env_autonomy_prefix}")
+-
+-    env_injection_block = env.get("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", "")
+-    if env_injection_block and _env_enabled(env_injection_block, default=False):
+-        ok.append(f".env OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS = {env_injection_block}")
+-    else:
+-        warnings.append(
+-            "OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS is not enabled "
+-            "(recommended for fully autonomous web-heavy workflows)"
+-        )
+-
+-    env_approval_token = env.get("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")
+-    if env_approval_token:
+-        if len(env_approval_token.strip()) < 8:
+-            warnings.append("OPENCLAW_AUTONOMY_APPROVAL_TOKEN is short; use a non-trivial token")
+-        else:
+-            ok.append(".env OPENCLAW_AUTONOMY_APPROVAL_TOKEN = [set]")
+-
+-    # ===== 9. LLM CONFIG ALIGNMENT =====
++    env_model_order = env.get("OPENCLAW_OLLAMA_MODEL_ORDER", "")
++    if env_model_order:
++        models_ordered = [m.strip() for m in env_model_order.split(",") if m.strip()]
++        if models_ordered and "qwen3" not in models_ordered[0]:
++            issues.append(f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, not qwen3:8b (tool-calling required)")
++        else:
++            ok.append(f".env model order: {env_model_order}")
++
++    env_autonomy_guard = env.get("OPENCLAW_AUTONOMY_GUARD_ENABLED", "")
++    if env_autonomy_guard and not _env_enabled(env_autonomy_guard, default=True):
++        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_GUARD_ENABLED is disabled")
++    elif env_autonomy_guard:
++        ok.append(f".env OPENCLAW_AUTONOMY_GUARD_ENABLED = {env_autonomy_guard}")
++    else:
++        ok.append(".env OPENCLAW_AUTONOMY_GUARD_ENABLED not set (runtime default: enabled)")
++
++    env_autonomy_approval = env.get("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", "")
++    if env_autonomy_approval and not _env_enabled(env_autonomy_approval, default=True):
++        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled")
++    elif env_autonomy_approval:
++        ok.append(f".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN = {env_autonomy_approval}")
++    else:
++        ok.append(".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN not set (runtime default: enabled)")
++
++    env_autonomy_prefix = env.get("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", "")
++    if env_autonomy_prefix and not _env_enabled(env_autonomy_prefix, default=True):
++        warnings.append("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled")
++    elif env_autonomy_prefix:
++        ok.append(f".env OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED = {env_autonomy_prefix}")
++
++    env_injection_block = env.get("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", "")
++    if env_injection_block and _env_enabled(env_injection_block, default=False):
++        ok.append(f".env OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS = {env_injection_block}")
++    else:
++        warnings.append(
++            "OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS is not enabled "
++            "(recommended for fully autonomous web-heavy workflows)"
++        )
++
++    env_approval_token = env.get("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")
++    if env_approval_token:
++        if len(env_approval_token.strip()) < 8:
++            warnings.append("OPENCLAW_AUTONOMY_APPROVAL_TOKEN is short; use a non-trivial token")
++        else:
++            ok.append(".env OPENCLAW_AUTONOMY_APPROVAL_TOKEN = [set]")
++
++    # ===== 9. LLM CONFIG ALIGNMENT =====
+     llm = llm_cfg.get("llm", {})
+     active_model = llm.get("active_model", "")
+     primary_model = llm.get("models", {}).get("primary", {}).get("name", "")
+@@ -404,18 +406,18 @@ def main() -> int:
+     else:
+         ok.append("agentToAgent: disabled (isolated workloads)")
+ 
+-    # Loop detection (optional and version-dependent in OpenClaw builds)
+-    loop_det = tools_cfg.get("loopDetection")
+-    if isinstance(loop_det, dict):
+-        if loop_det.get("enabled", False):
+-            ok.append(
+-                "loopDetection: enabled "
+-                f"(warn={loop_det.get('warningThreshold')}, critical={loop_det.get('criticalThreshold')})"
+-            )
+-        else:
+-            warnings.append("loopDetection is configured but disabled")
+-    else:
+-        ok.append("loopDetection: not configured (optional / may be unsupported by current OpenClaw version)")
++    # Loop detection (optional and version-dependent in OpenClaw builds)
++    loop_det = tools_cfg.get("loopDetection")
++    if isinstance(loop_det, dict):
++        if loop_det.get("enabled", False):
++            ok.append(
++                "loopDetection: enabled "
++                f"(warn={loop_det.get('warningThreshold')}, critical={loop_det.get('criticalThreshold')})"
++            )
++        else:
++            warnings.append("loopDetection is configured but disabled")
++    else:
++        ok.append("loopDetection: not configured (optional / may be unsupported by current OpenClaw version)")
+ 
+     # ===== REPORT =====
+     print("=" * 65)
+diff --git a/scripts/windows_dashboard_manager.py b/scripts/windows_dashboard_manager.py
+index 868564c..0dfc70a 100644
+--- a/scripts/windows_dashboard_manager.py
++++ b/scripts/windows_dashboard_manager.py
+@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ LOCALHOST_BIND = "127.0.0.1"
++DEFAULT_LIVE_WATCHER_TICKERS = ["AAPL", "AMZN", "GOOG", "GS", "JPM", "META", "MSFT", "NVDA", "TSLA", "V"]
+ 
+ 
+ def _utc_now() -> str:
+@@ -103,10 +104,13 @@ class EnsureResult:
+     url: str
+     bridge_pid: Optional[int]
+     server_pid: Optional[int]
++    watcher_pid: Optional[int]
+     started_bridge: bool
+     started_server: bool
++    started_watcher: bool
+     bridge_running: bool
+     server_running: bool
++    watcher_running: bool
+     warnings: list[str]
+ 
+ 
+@@ -140,40 +144,54 @@ def _ensure_dashboard_stack(
+     db_path: Path,
+     persist_snapshot: bool,
+     require_bridge: bool,
++    ensure_live_watcher: bool,
++    watcher_tickers: str,
++    watcher_cycles: int,
++    watcher_sleep_seconds: int,
+ ) -> EnsureResult:
+     logs_dir = root / "logs"
+     bridge_pidfile = logs_dir / "dashboard_bridge.pid"
+     server_pidfile = logs_dir / f"dashboard_http_{port}.pid"
++    watcher_pidfile = logs_dir / "live_denominator.pid"
+ 
+     bridge_script = root / "scripts" / "dashboard_db_bridge.py"
++    watcher_script = root / "scripts" / "run_live_denominator_overnight.py"
+     dashboard_html = root / "visualizations" / "live_dashboard.html"
+     url = f"http://{LOCALHOST_BIND}:{port}/visualizations/live_dashboard.html"
+ 
+     warnings: list[str] = []
+     started_bridge = False
+     started_server = False
++    started_watcher = False
+ 
+     if not dashboard_html.exists():
+         warnings.append(f"dashboard HTML missing: {dashboard_html}")
+     if not bridge_script.exists():
+         warnings.append(f"dashboard bridge missing: {bridge_script}")
++    if ensure_live_watcher and not watcher_script.exists():
++        warnings.append(f"live watcher missing: {watcher_script}")
+ 
+     bridge_pid = _read_pidfile(bridge_pidfile)
+     if bridge_pid is None and bridge_script.exists():
+         if not db_path.exists():
+             warnings.append(f"bridge skipped; DB missing: {db_path}")
+         else:
+-            bridge_cmd = [
++            bridge_cmd_base = [
+                 python_bin,
+-                str(bridge_script),
++                "-m",
++                "scripts.dashboard_db_bridge",
+                 "--interval-seconds",
+                 "5",
+                 "--db-path",
+                 str(db_path),
+             ]
++            bridge_cmd = list(bridge_cmd_base)
+             if persist_snapshot:
+                 bridge_cmd.append("--persist-snapshot")
+             new_pid = _start_detached(bridge_cmd, cwd=root)
++            if new_pid is None and persist_snapshot:
++                warnings.append("dashboard bridge persist snapshot unavailable; retrying without audit snapshot persistence")
++                new_pid = _start_detached(bridge_cmd_base, cwd=root)
+             if new_pid is not None:
+                 _write_pidfile(bridge_pidfile, new_pid)
+                 bridge_pid = new_pid
+@@ -204,20 +222,51 @@ def _ensure_dashboard_stack(
+     bridge_running = bool(bridge_pid and _pid_alive(bridge_pid))
+     server_running = bool(server_pid and _pid_alive(server_pid))
+ 
++    watcher_pid = _read_pidfile(watcher_pidfile)
++    if ensure_live_watcher and watcher_pid is None and watcher_script.exists():
++        watcher_cmd = [
++            python_bin,
++            str(watcher_script),
++            "--tickers",
++            watcher_tickers,
++            "--cycles",
++            str(int(watcher_cycles)),
++            "--sleep-seconds",
++            str(int(watcher_sleep_seconds)),
++            "--resume",
++            "--stop-on-progress",
++            "--db",
++            str(db_path),
++        ]
++        new_pid = _start_detached(watcher_cmd, cwd=root)
++        if new_pid is not None:
++            _write_pidfile(watcher_pidfile, new_pid)
++            watcher_pid = new_pid
++            started_watcher = True
++        else:
++            warnings.append("failed to start live denominator watcher")
++
++    watcher_running = bool(watcher_pid and _pid_alive(watcher_pid))
++
+     if server_running and not _port_open(LOCALHOST_BIND, port):
+         warnings.append(f"HTTP server process exists but localhost:{port} is not reachable yet")
+ 
+     if require_bridge and not bridge_running:
+         warnings.append("bridge is required but not running")
++    if ensure_live_watcher and not watcher_running:
++        warnings.append("live denominator watcher is required but not running")
+ 
+     return EnsureResult(
+         url=url,
+         bridge_pid=bridge_pid,
+         server_pid=server_pid,
++        watcher_pid=watcher_pid,
+         started_bridge=started_bridge,
+         started_server=started_server,
++        started_watcher=started_watcher,
+         bridge_running=bridge_running,
+         server_running=server_running,
++        watcher_running=watcher_running,
+         warnings=warnings,
+     )
+ 
+@@ -247,6 +296,10 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
+         db_path=db_path,
+         persist_snapshot=bool(args.persist_snapshot),
+         require_bridge=bool(args.require_bridge),
++        ensure_live_watcher=bool(args.ensure_live_watcher),
++        watcher_tickers=str(args.watcher_tickers),
++        watcher_cycles=int(args.watcher_cycles),
++        watcher_sleep_seconds=int(args.watcher_sleep_seconds),
+     )
+ 
+     if bool(args.open_browser):
+@@ -278,6 +331,13 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
+             "started_now": result.started_server,
+             "port": port,
+         },
++        "live_watcher": {
++            "pid": result.watcher_pid,
++            "running": result.watcher_running,
++            "started_now": result.started_watcher,
++            "tickers": [t.strip().upper() for t in str(args.watcher_tickers).split(",") if t.strip()],
++            "sleep_seconds": int(args.watcher_sleep_seconds),
++        },
+         "warnings": result.warnings,
+     }
+ 
+@@ -287,7 +347,8 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
+     print(f"[DASHBOARD] URL: {result.url}")
+     print(
+         f"[DASHBOARD] bridge_pid={result.bridge_pid} running={result.bridge_running} | "
+-        f"server_pid={result.server_pid} running={result.server_running}"
++        f"server_pid={result.server_pid} running={result.server_running} | "
++        f"watcher_pid={result.watcher_pid} running={result.watcher_running}"
+     )
+     for warning in result.warnings:
+         print(f"[DASHBOARD][WARN] {warning}")
+@@ -298,6 +359,8 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
+             hard_fail = True
+         if bool(args.require_bridge) and not result.bridge_running:
+             hard_fail = True
++        if bool(args.ensure_live_watcher) and not result.watcher_running:
++            hard_fail = True
+     return 1 if hard_fail else 0
+ 
+ 
+@@ -313,6 +376,11 @@ def main() -> int:
+     p_ensure.add_argument("--persist-snapshot", dest="persist_snapshot", action="store_true", default=True, help="Enable dashboard snapshot persistence.")
+     p_ensure.add_argument("--no-persist-snapshot", dest="persist_snapshot", action="store_false", help="Disable dashboard snapshot persistence.")
+     p_ensure.add_argument("--require-bridge", action="store_true", help="Fail in strict mode when bridge is not running.")
++    p_ensure.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=True, help="Ensure the live denominator watcher is running (default: on).")
++    p_ensure.add_argument("--no-live-watcher", dest="ensure_live_watcher", action="store_false", help="Do not manage the live denominator watcher.")
++    p_ensure.add_argument("--watcher-tickers", default=",".join(DEFAULT_LIVE_WATCHER_TICKERS), help="Comma-separated live watcher ticker universe.")
++    p_ensure.add_argument("--watcher-cycles", type=int, default=30, help="Watcher cycles to schedule before exit.")
++    p_ensure.add_argument("--watcher-sleep-seconds", type=int, default=86400, help="Watcher cadence in seconds (default: 86400).")
+     p_ensure.add_argument("--open-browser", action="store_true", help="Auto-open dashboard URL in default browser.")
+     p_ensure.add_argument("--status-json", default="", help="Optional status JSON output path.")
+     p_ensure.add_argument("--caller", default="", help="Calling entrypoint label.")
+@@ -328,4 +396,3 @@ def main() -> int:
+ 
+ if __name__ == "__main__":
+     raise SystemExit(main())
+-
+diff --git a/tests/scripts/test_windows_dashboard_manager.py b/tests/scripts/test_windows_dashboard_manager.py
+new file mode 100644
+index 0000000..41963bc
+--- /dev/null
++++ b/tests/scripts/test_windows_dashboard_manager.py
+@@ -0,0 +1,93 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++from scripts import windows_dashboard_manager as mod
++
++
++def test_ensure_dashboard_stack_starts_live_watcher(tmp_path, monkeypatch) -> None:
++    root = tmp_path
++    (root / "logs").mkdir(parents=True, exist_ok=True)
++    (root / "visualizations").mkdir(parents=True, exist_ok=True)
++    (root / "scripts").mkdir(parents=True, exist_ok=True)
++    (root / "data").mkdir(parents=True, exist_ok=True)
++    (root / "visualizations" / "live_dashboard.html").write_text("<html></html>", encoding="utf-8")
++    (root / "scripts" / "dashboard_db_bridge.py").write_text("# stub", encoding="utf-8")
++    (root / "scripts" / "run_live_denominator_overnight.py").write_text("# stub", encoding="utf-8")
++    (root / "data" / "portfolio_maximizer.db").write_text("db", encoding="utf-8")
++
++    pids = iter([101, 202, 303])
++
++    started_cmds: list[list[str]] = []
++
++    monkeypatch.setattr(mod, "_read_pidfile", lambda path: None)
++
++    def _fake_start(cmd, cwd):
++        started_cmds.append(list(cmd))
++        return next(pids)
++
++    monkeypatch.setattr(mod, "_start_detached", _fake_start)
++    monkeypatch.setattr(mod, "_pid_alive", lambda pid: True)
++    monkeypatch.setattr(mod, "_port_open", lambda host, port: True)
++
++    result = mod._ensure_dashboard_stack(
++        root=root,
++        python_bin="python",
++        port=8000,
++        db_path=root / "data" / "portfolio_maximizer.db",
++        persist_snapshot=True,
++        require_bridge=True,
++        ensure_live_watcher=True,
++        watcher_tickers="AAPL,MSFT",
++        watcher_cycles=30,
++        watcher_sleep_seconds=86400,
++    )
++
++    assert result.bridge_running is True
++    assert result.server_running is True
++    assert result.watcher_running is True
++    assert result.started_watcher is True
++    assert started_cmds[0][:3] == ["python", "-m", "scripts.dashboard_db_bridge"]
++
++
++def test_ensure_dashboard_stack_retries_bridge_without_persist_snapshot(tmp_path, monkeypatch) -> None:
++    root = tmp_path
++    (root / "logs").mkdir(parents=True, exist_ok=True)
++    (root / "visualizations").mkdir(parents=True, exist_ok=True)
++    (root / "scripts").mkdir(parents=True, exist_ok=True)
++    (root / "data").mkdir(parents=True, exist_ok=True)
++    (root / "visualizations" / "live_dashboard.html").write_text("<html></html>", encoding="utf-8")
++    (root / "scripts" / "dashboard_db_bridge.py").write_text("# stub", encoding="utf-8")
++    (root / "scripts" / "run_live_denominator_overnight.py").write_text("# stub", encoding="utf-8")
++    (root / "data" / "portfolio_maximizer.db").write_text("db", encoding="utf-8")
++
++    started_cmds: list[list[str]] = []
++    start_results = iter([None, 202, 303, 404])
++
++    monkeypatch.setattr(mod, "_read_pidfile", lambda path: None)
++
++    def _fake_start(cmd, cwd):
++        started_cmds.append(list(cmd))
++        return next(start_results)
++
++    monkeypatch.setattr(mod, "_start_detached", _fake_start)
++    monkeypatch.setattr(mod, "_pid_alive", lambda pid: True)
++    monkeypatch.setattr(mod, "_port_open", lambda host, port: True)
++
++    result = mod._ensure_dashboard_stack(
++        root=root,
++        python_bin="python",
++        port=8000,
++        db_path=root / "data" / "portfolio_maximizer.db",
++        persist_snapshot=True,
++        require_bridge=True,
++        ensure_live_watcher=True,
++        watcher_tickers="AAPL,MSFT",
++        watcher_cycles=30,
++        watcher_sleep_seconds=86400,
++    )
++
++    assert result.bridge_running is True
++    assert "--persist-snapshot" in started_cmds[0]
++    assert "--persist-snapshot" not in started_cmds[1]
++    assert any("retrying without audit snapshot persistence" in warning for warning in result.warnings)

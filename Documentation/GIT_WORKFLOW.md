@@ -1,13 +1,11 @@
-# Git Workflow - Remote as Source of Truth
+﻿# Git Workflow - Remote as Source of Truth
 
 **Policy**: Remote repository (versioned, reviewed) is the source of truth
 **Last Updated**: 2026-01-10
 **Status**: ENFORCED
 **Version**: 3.0
 
----
-
-## 📋 Table of Contents
+## ðŸ“‹ Table of Contents
 
 - [Quick Start](#quick-start)
 - [Remote Repository](#remote-repository)
@@ -26,7 +24,7 @@
 
 ---
 
-## 🚀 Quick Start
+## ðŸš€ Quick Start
 
 ### For New Contributors
 
@@ -212,28 +210,36 @@ ssh -T git@github.com
 ## Workflow Principles
 
 ### 1. **Remote Is Canonical**
-- ✅ Remote branch history is the source of truth
-- ✅ Local clones are working copies; sync forward from remote and avoid rewriting remote history
-- ✅ Prefer PRs for reviewable, progressive development and to avoid retrogression
+- âœ… Remote branch history is the source of truth
+- âœ… Local clones are working copies; sync forward from remote and avoid rewriting remote history
+- âœ… Prefer PRs for reviewable, progressive development and to avoid retrogression
 
 ### 2. **Preserve History**
-- ✅ Never rewrite published history on `master`
-- ✅ Use PR merges (merge commit or squash) for canonical history
-- ✅ Create backup branches before major refactors
-- ✅ Document significant changes in commit messages
+- âœ… Never rewrite published history on `master`
+- âœ… Use PR merges (merge commit or squash) for canonical history
+- âœ… Create backup branches before major refactors
+- âœ… Document significant changes in commit messages
 
 ### 3. **Test Before Push**
-- ✅ Run test suite before pushing: `pytest tests/`
-- ✅ Verify code quality: Check linter output
-- ✅ Test critical paths manually if needed
-- ✅ Update documentation for architectural changes
+- âœ… Run test suite before pushing: `pytest tests/`
+- âœ… Verify code quality: Check linter output
+- âœ… Test critical paths manually if needed
+- âœ… Update documentation for architectural changes
 
 ### 4. **Clear Communication**
-- ✅ Use conventional commit messages
-- ✅ Document breaking changes
-- ✅ Update relevant documentation files
-- ✅ Communicate with team about major changes
+- âœ… Use conventional commit messages
+- âœ… Document breaking changes
+- âœ… Update relevant documentation files
+- âœ… Communicate with team about major changes
 
+### 5. **Patch-First Readiness Integration**
+- For readiness recovery lanes with parallel agent work, do not keep creating new remote branches.
+- Use the most complete readiness-focused remote branch as the review baseline, then selectively bring reviewed commits or patch bundles onto one fresh local integration branch from origin/master.
+- Prefer a two-terminal split:
+  - Terminal A: reference branch / diff generation
+  - Terminal B: clean local integration branch / patch application / verification
+- If the local clone does not have a clean merge-base path for a direct branch merge, use file-scoped patch bundles instead of forcing a merge.
+- See Documentation/LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md.
 ---
 
 ## Common Operations
@@ -304,7 +310,7 @@ git push origin master
 ### For Team Members (Direct Access)
 
 - Prefer feature branches + PRs for anything non-trivial.
-- Avoid direct pushes to `master` unless it’s a simple, low-risk change and CI will validate it immediately.
+- Avoid direct pushes to `master` unless itâ€™s a simple, low-risk change and CI will validate it immediately.
 
 ---
 
@@ -446,10 +452,10 @@ Create a pre-push hook (optional):
 
 ### Remote as Source of Truth (Canonical)
 
-- ✅ Remote `origin/master` is the canonical, versioned history.
-- ✅ Local clones are disposable working copies; don’t treat a local machine as authoritative.
-- ✅ Progressive development happens via feature branches + PRs + green CI.
-- ✅ Never “repair” remote history from a local machine via force push on `master`.
+- âœ… Remote `origin/master` is the canonical, versioned history.
+- âœ… Local clones are disposable working copies; donâ€™t treat a local machine as authoritative.
+- âœ… Progressive development happens via feature branches + PRs + green CI.
+- âœ… Never â€œrepairâ€ remote history from a local machine via force push on `master`.
 
 ### Local Backups
 
@@ -517,10 +523,10 @@ git revert HEAD
 
 ### When Force Push is Allowed
 
-✅ **DISALLOWED on `master`** - remote is canonical:
+âœ… **DISALLOWED on `master`** - remote is canonical:
 - Never force push `master`.
 
-✅ **Allowed on feature branches (with care)**:
+âœ… **Allowed on feature branches (with care)**:
 - Before opening a PR (to clean up work-in-progress history).
 - Only when you understand the impact on collaborators.
 
@@ -534,11 +540,11 @@ git push --force-with-lease origin "$(git rev-parse --abbrev-ref HEAD)"
 
 ### Force Push Best Practices
 
-1. ✅ Always use `--force-with-lease`
-2. ✅ Create backup branch/tag before force push
-3. ✅ Communicate with team before force pushing to shared branches
-4. ✅ Verify local changes are correct before force push
-5. ✅ Document reason in commit message if force push was needed
+1. âœ… Always use `--force-with-lease`
+2. âœ… Create backup branch/tag before force push
+3. âœ… Communicate with team before force pushing to shared branches
+4. âœ… Verify local changes are correct before force push
+5. âœ… Document reason in commit message if force push was needed
 
 ---
 
@@ -559,12 +565,12 @@ Configured to ignore:
 ### Files Tracked
 
 Keep in version control:
-- ✅ Source code (`etl/`, `scripts/`, `tests/`, `ai_llm/`)
-- ✅ Configuration templates (`config/*.yml`)
-- ✅ Documentation (`Documentation/`)
-- ✅ Empty directory markers (`.gitkeep` files)
-- ✅ Test fixtures and sample data
-- ✅ Build scripts and automation
+- âœ… Source code (`etl/`, `scripts/`, `tests/`, `ai_llm/`)
+- âœ… Configuration templates (`config/*.yml`)
+- âœ… Documentation (`Documentation/`)
+- âœ… Empty directory markers (`.gitkeep` files)
+- âœ… Test fixtures and sample data
+- âœ… Build scripts and automation
 
 ### Verifying .gitignore
 
@@ -697,7 +703,7 @@ Keep in version control:
 ### Footer Options
 
 ```
-🤖 Generated with co-companion
+ðŸ¤– Generated with co-companion
 
 Authored-By: Bestman Ezekwu Enock
 Email : csgtmalice@protonmail.ch
@@ -806,14 +812,14 @@ git reset --hard origin/master
 
 ## Summary
 
-✅ **Configured**: Remote-first git workflow
-✅ **Policy**: Remote history is canonical
-✅ **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git
-✅ **Settings**: recommend `pull.rebase=true` and `pull.ff=only` on `master`
-✅ **Conflicts**: preserve remote history; apply local changes via feature branches
-✅ **Force Push**: never on `master`; feature branches only with care
-✅ **Testing**: Run tests before push
-✅ **Documentation**: Update docs with architectural changes
+âœ… **Configured**: Remote-first git workflow
+âœ… **Policy**: Remote history is canonical
+âœ… **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git
+âœ… **Settings**: recommend `pull.rebase=true` and `pull.ff=only` on `master`
+âœ… **Conflicts**: preserve remote history; apply local changes via feature branches
+âœ… **Force Push**: never on `master`; feature branches only with care
+âœ… **Testing**: Run tests before push
+âœ… **Documentation**: Update docs with architectural changes
 
 ---
 
@@ -848,3 +854,5 @@ git branch backup/before-refactor-$(Get-Date -Format "yyyyMMdd")
 ---
 
 **End of Document**
+
+

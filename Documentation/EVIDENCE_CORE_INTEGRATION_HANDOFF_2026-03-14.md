@@ -10,6 +10,33 @@ References:
 - [AGENT_COORDINATION_PROTOCOL_2026-03-08.md](./AGENT_COORDINATION_PROTOCOL_2026-03-08.md)
 - [MOMENTUM_SAFE_EVIDENCE_COORDINATION.md](./MOMENTUM_SAFE_EVIDENCE_COORDINATION.md)
 - [CLEAN_COHORT_OPERATIONS_2026-03-14.md](./CLEAN_COHORT_OPERATIONS_2026-03-14.md)
+- [LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md](./LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md)
+
+## Current Integration Posture
+
+This handoff is now consumed through the local-only readiness integration workflow in
+[LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md](./LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md).
+
+Operationally:
+
+- reference baseline: `origin/codex/evidence-core-lane-20260314`
+- merge destination: local branch from `origin/master`
+- intake method: reviewed patch application only
+- remote policy: do not create new readiness branches on `origin`
+
+For gate-lift work specifically, use the two-terminal split defined in
+[LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md](./LOCAL_READINESS_INTEGRATION_WORKFLOW_2026-03-15.md):
+
+- Terminal A: Lift Semantics / Measurement
+- Terminal B: Lift Inputs / Evidence Quality
+
+This split exists because a lift failure can only be trusted after both the measurement
+semantics and the evidence inputs are separately validated.
+
+Interpreter rule for this lane:
+
+- use `.\simpleTrader_env\Scripts\python.exe` or `.\scripts\repo_python.ps1`
+- do not rely on bare `python` for local readiness verification
 
 Patch bundle artifacts:
 
@@ -59,25 +86,33 @@ Do not bundle these unrelated workspace changes into the evidence-core review:
 
 Targeted suites:
 
-- `python -m pytest tests/scripts/test_hygiene_wiring.py tests/scripts/test_production_audit_gate.py tests/scripts/test_check_forecast_audits.py tests/scripts/test_replay_trade_evidence_chain.py tests/utils/test_evidence_io.py -q`
-- `python -m pytest tests/forcester_ts/test_forecaster_snapshot_integration.py tests/scripts/test_auto_trader_lifecycle.py tests/scripts/test_run_auto_trader_config_guard.py -q`
-- `python -m pytest tests/scripts/test_production_audit_gate.py tests/scripts/test_replay_trade_evidence_chain.py tests/scripts/test_run_all_gates.py -q`
-- `python -m pytest tests/scripts/test_clean_cohort_manager.py -q`
-- `python -m pytest -m "not gpu and not slow" --tb=short -q`
-- `python -m integrity.pnl_integrity_enforcer`
-- `python scripts/replay_trade_evidence_chain.py --scenario happy_path --json`
+- `.\scripts\repo_python.ps1 -m pytest tests/scripts/test_hygiene_wiring.py tests/scripts/test_production_audit_gate.py tests/scripts/test_check_forecast_audits.py tests/scripts/test_replay_trade_evidence_chain.py tests/utils/test_evidence_io.py -q`
+- `.\scripts\repo_python.ps1 -m pytest tests/forcester_ts/test_forecaster_snapshot_integration.py tests/scripts/test_auto_trader_lifecycle.py tests/scripts/test_run_auto_trader_config_guard.py -q`
+- `.\scripts\repo_python.ps1 -m pytest tests/scripts/test_production_audit_gate.py tests/scripts/test_replay_trade_evidence_chain.py tests/scripts/test_run_all_gates.py -q`
+- `.\scripts\repo_python.ps1 -m pytest tests/scripts/test_clean_cohort_manager.py -q`
+- `.\scripts\repo_python.ps1 -m pytest -m "not gpu and not slow" --tb=short -q`
+- `.\scripts\repo_python.ps1 -m integrity.pnl_integrity_enforcer`
+- `.\scripts\repo_python.ps1 scripts/replay_trade_evidence_chain.py --scenario happy_path --json`
 
 Global gate snapshot:
 
-- `python scripts/run_all_gates.py --json`
+- `.\scripts\repo_python.ps1 scripts/run_all_gates.py --json`
 
 Current global result is still red for live-evidence reasons (`GATES_FAIL`, `THIN_LINKAGE`,
 `EVIDENCE_HYGIENE_FAIL`). That is a production-readiness truth, not an implementation crash.
 
 ## Integration Order
 
-1. Safe additive files
-2. Tracked non-conflicting files
-3. Shared reviewed hunks in `forecaster.py`
-4. Shared reviewed hunks in `production_audit_gate.py`
-5. Clean cohort freeze + proof loop
+1. Lift semantics / measurement reviewed hunks
+   - `scripts/check_forecast_audits.py`
+   - `scripts/production_audit_gate.py`
+   - `models/time_series_signal_generator.py`
+   - `scripts/check_model_improvement.py`
+2. Lift inputs / evidence-quality reviewed hunks
+   - `scripts/run_auto_trader.py`
+   - `scripts/replay_trade_evidence_chain.py`
+   - related admission and hygiene tests
+3. Safe additive files
+4. Tracked non-conflicting files
+5. Shared reviewed hunks in `forecaster.py`
+6. Clean cohort freeze + proof loop

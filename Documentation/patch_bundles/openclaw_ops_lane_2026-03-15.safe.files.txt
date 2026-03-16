@@ -1,0 +1,5 @@
+bash/production_cron.sh
+scripts/openclaw_ops_control_plane.py
+scripts/openclaw_production_readiness.py
+tests/scripts/test_openclaw_ops_control_plane.py
+tests/scripts/test_openclaw_production_readiness.py
