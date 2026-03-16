@@ -202,6 +202,12 @@ logs/run_audit/*.jsonl
 logs/run_audit/*_summary.txt
 logs/run_audit/MORNING_CHECK_*.md
 logs/security_audit.jsonl
+# Runtime forecast audit manifests contain SHA-256 hashes that trigger the
+# secrets guard discord_hex_token pattern (\b[0-9a-f]{64,}\b). These are
+# runtime artifacts — not credentials — and must not be tracked in git.
+logs/forecast_audits/forecast_audit_manifest.jsonl
+logs/forecast_audits/production/forecast_audit_manifest.jsonl
+logs/forecast_audits/**/*.jsonl
 logs/phase7.7/*.log
 logs/*.pid
 logs/**/*.pid
