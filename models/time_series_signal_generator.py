@@ -257,6 +257,7 @@ class TimeSeriesSignalGenerator:
             else Path("config/forecasting_config.yml")
         )
         self._forecasting_config = self._load_forecasting_config()
+        self._regression_metrics_contract = self._load_regression_metrics_contract()
 
         # Cache for expensive forecast-edge validation runs (rolling CV).
         # Include requested baseline so baseline-policy changes never reuse stale math.
@@ -314,6 +315,90 @@ class TimeSeriesSignalGenerator:
             return payload
 
         return {}
+
+    def _load_regression_metrics_contract(self) -> Dict[str, Any]:
+        """Load the shared lift baseline contract used by audit and gate paths."""
+        path = Path("config/forecaster_monitoring.yml")
+        contract = {
+            "baseline_model": "BEST_SINGLE",
+            "max_rmse_ratio_vs_baseline": 1.10,
+            "lift_threshold_rmse_ratio": 1.0,
+        }
+        if not path.exists():
+            return contract
+
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle) or {}
+        except Exception as exc:
+            logger.warning("Unable to read regression metrics contract %s: %s", path, exc)
+            return contract
+
+        regression_cfg = payload.get("forecaster_monitoring", {}).get("regression_metrics", {})
+        if not isinstance(regression_cfg, dict):
+            return contract
+
+        baseline_model = str(
+            regression_cfg.get("baseline_model", contract["baseline_model"]) or contract["baseline_model"]
+        ).strip().upper()
+        if baseline_model:
+            contract["baseline_model"] = baseline_model
+
+        max_rmse_ratio = self._safe_float(
+            regression_cfg.get("max_rmse_ratio_vs_baseline", contract["max_rmse_ratio_vs_baseline"])
+        )
+        if max_rmse_ratio is not None and max_rmse_ratio > 0:
+            contract["max_rmse_ratio_vs_baseline"] = max_rmse_ratio
+
+        min_lift_rmse_ratio = self._safe_float(regression_cfg.get("min_lift_rmse_ratio", 0.0))
+        if min_lift_rmse_ratio is not None:
+            contract["lift_threshold_rmse_ratio"] = 1.0 - float(min_lift_rmse_ratio)
+
+        return contract
+
+    def _resolve_regression_baseline_metrics(
+        self,
+        regression_metrics: Dict[str, Any],
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str], Optional[str]]:
+        """Resolve the active regression baseline using the same semantics as the audit path."""
+        if not isinstance(regression_metrics, dict) or not regression_metrics:
+            return None, None, None
+
+        requested = str(
+            (self._regression_metrics_contract or {}).get("baseline_model", "BEST_SINGLE") or "BEST_SINGLE"
+        ).strip().upper()
+        if requested not in {"BEST_SINGLE", "SAMOSSA", "SARIMAX", "GARCH", "MSSA_RL"}:
+            requested = "BEST_SINGLE"
+
+        def _metric_payload(name: str) -> Optional[Dict[str, Any]]:
+            payload = regression_metrics.get(name)
+            return payload if isinstance(payload, dict) else None
+
+        def _best_single() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+            best_payload: Optional[Dict[str, Any]] = None
+            best_name: Optional[str] = None
+            best_rmse: Optional[float] = None
+            for candidate_name in ("sarimax", "garch", "samossa", "mssa_rl"):
+                payload = _metric_payload(candidate_name)
+                rmse = self._safe_float((payload or {}).get("rmse"))
+                if payload is None or rmse is None or rmse <= 0:
+                    continue
+                if best_rmse is None or rmse < best_rmse:
+                    best_payload = payload
+                    best_name = candidate_name.upper()
+                    best_rmse = rmse
+            return best_payload, best_name
+
+        if requested == "BEST_SINGLE":
+            baseline_payload, resolved = _best_single()
+            return baseline_payload, resolved, requested
+
+        direct = _metric_payload(requested.lower())
+        if direct is not None:
+            return direct, requested, requested
+
+        baseline_payload, resolved = _best_single()
+        return baseline_payload, resolved, requested
 
     def _build_forecast_edge_forecaster_config(
         self,
@@ -1323,9 +1408,19 @@ class TimeSeriesSignalGenerator:
         regression_metrics = forecast_bundle.get("regression_metrics") or {}
         rmse_ratio = None
         dir_acc = None
+        baseline_model = None
+        baseline_model_requested = None
+        max_rmse_ratio_vs_baseline = self._safe_float(
+            (self._regression_metrics_contract or {}).get("max_rmse_ratio_vs_baseline")
+        ) or 1.10
+        lift_threshold_rmse_ratio = self._safe_float(
+            (self._regression_metrics_contract or {}).get("lift_threshold_rmse_ratio")
+        ) or 1.0
         if isinstance(regression_metrics, dict) and regression_metrics:
             ens = regression_metrics.get("ensemble") or {}
-            base = regression_metrics.get("samossa") or regression_metrics.get("sarimax") or {}
+            base, baseline_model, baseline_model_requested = self._resolve_regression_baseline_metrics(
+                regression_metrics
+            )
             if isinstance(ens, dict):
                 try:
                     dir_acc = float(ens.get("directional_accuracy")) if ens.get("directional_accuracy") is not None else None
@@ -1350,10 +1445,10 @@ class TimeSeriesSignalGenerator:
         score = float(weighted_conf)
         if rmse_ratio is not None:
             # Penalize when worse than baseline; soft reward when better.
-            if rmse_ratio > 1.10:
+            if rmse_ratio > max_rmse_ratio_vs_baseline:
                 reasons.append("rmse_worse_than_baseline")
                 score *= 0.70
-            elif rmse_ratio < 0.95:
+            elif rmse_ratio < lift_threshold_rmse_ratio:
                 score = min(1.0, score + 0.05)
         if dir_acc is not None:
             if dir_acc < 0.50:
@@ -1368,6 +1463,10 @@ class TimeSeriesSignalGenerator:
             "score": self._clamp01(score),
             "reasons": reasons,
             "weighted_model_confidence": float(weighted_conf) if weighted_conf is not None else None,
+            "baseline_model_requested": baseline_model_requested,
+            "baseline_model": baseline_model,
+            "max_rmse_ratio_vs_baseline": max_rmse_ratio_vs_baseline,
+            "lift_threshold_rmse_ratio": lift_threshold_rmse_ratio,
             "rmse_ratio_vs_baseline": rmse_ratio,
             "directional_accuracy": dir_acc,
         }

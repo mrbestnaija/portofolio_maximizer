@@ -438,6 +438,29 @@ class TestTimeSeriesSignalGenerator:
         # Agreeing models should have higher confidence
         assert signal_agreeing.confidence >= signal_disagreeing.confidence
 
+    def test_diagnostics_use_best_single_baseline_contract(self, signal_generator):
+        """Diagnostics should compare against the best single-model RMSE, not a SAMOSSA shortcut."""
+        diagnostics = signal_generator._evaluate_diagnostics_details(
+            {
+                "ensemble_metadata": {
+                    "weights": {"sarimax": 0.5, "samossa": 0.5},
+                    "confidence": {"sarimax": 0.7, "samossa": 0.8},
+                },
+                "regression_metrics": {
+                    "ensemble": {"rmse": 1.20, "directional_accuracy": 0.56},
+                    "sarimax": {"rmse": 1.05, "directional_accuracy": 0.52},
+                    "samossa": {"rmse": 1.10, "directional_accuracy": 0.51},
+                    "garch": {"rmse": 0.90, "directional_accuracy": 0.50},
+                },
+            }
+        )
+
+        assert diagnostics["baseline_model_requested"] == "BEST_SINGLE"
+        assert diagnostics["baseline_model"] == "GARCH"
+        assert diagnostics["rmse_ratio_vs_baseline"] == pytest.approx(1.20 / 0.90)
+        assert diagnostics["max_rmse_ratio_vs_baseline"] == pytest.approx(1.10)
+        assert "rmse_worse_than_baseline" in diagnostics["reasons"]
+
     def test_per_ticker_threshold_override_blocks_trade(self):
         """Per-ticker thresholds should override global routing thresholds."""
         generator = TimeSeriesSignalGenerator(

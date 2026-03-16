@@ -369,3 +369,32 @@ def test_model_confidence_variance_screening_does_not_reward_higher_variance():
     }
     confidence = derive_model_confidence(summaries)
     assert confidence["mssa_rl"] < confidence["samossa"]
+
+
+def test_model_confidence_prefers_scale_free_mssa_variance_ratio():
+    base_summaries = {
+        "samossa": {
+            "regression_metrics": {"tracking_error": 0.1, "n_observations": 100},
+        },
+        "mssa_rl": {
+            "baseline_variance": 3.95,
+            "baseline_variance_ratio": 0.042,
+            "regression_metrics": {"tracking_error": 0.12, "n_observations": 100},
+        },
+    }
+    scaled_summaries = {
+        "samossa": {
+            "regression_metrics": {"tracking_error": 0.1, "n_observations": 100},
+        },
+        "mssa_rl": {
+            "baseline_variance": 3_950_000.0,
+            "baseline_variance_ratio": 0.042,
+            "regression_metrics": {"tracking_error": 0.12, "n_observations": 100},
+        },
+    }
+
+    base_confidence = derive_model_confidence(base_summaries)
+    scaled_confidence = derive_model_confidence(scaled_summaries)
+
+    assert scaled_confidence["mssa_rl"] == pytest.approx(base_confidence["mssa_rl"])
+    assert scaled_confidence["samossa"] == pytest.approx(base_confidence["samossa"])

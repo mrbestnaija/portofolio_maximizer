@@ -208,6 +208,27 @@ class TestMSSARL:
         change_points = [pd.to_datetime(cp) for cp in change_points]
         assert any(abs((cp - dates[120]).days) <= 5 for cp in change_points)
 
+    def test_mssa_rl_diagnostics_export_scale_free_variance_ratio(self, price_series: pd.Series) -> None:
+        base = MSSARLForecaster()
+        base.fit(price_series)
+        base_diag = base.get_diagnostics()
+
+        scaled = MSSARLForecaster()
+        scaled.fit(price_series * 1000.0)
+        scaled_diag = scaled.get_diagnostics()
+
+        assert scaled_diag["baseline_variance"] != pytest.approx(base_diag["baseline_variance"])
+        assert scaled_diag["baseline_variance_ratio"] == pytest.approx(
+            base_diag["baseline_variance_ratio"],
+            rel=1e-6,
+            abs=1e-9,
+        )
+        assert scaled_diag["normalized_baseline_variance"] == pytest.approx(
+            base_diag["normalized_baseline_variance"],
+            rel=1e-6,
+            abs=1e-9,
+        )
+
 
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestForecasterIntegration:
