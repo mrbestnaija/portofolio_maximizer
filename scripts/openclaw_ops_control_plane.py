@@ -45,6 +45,7 @@ from scripts import openclaw_production_readiness as readiness_mod
 from scripts import project_runtime_status as runtime_mod
 from scripts import windows_dashboard_manager as dashboard_mod
 from scripts import windows_persistence_manager as persistence_mod
+from utils.repo_python import resolve_repo_python
 from utils.openclaw_cli import resolve_openclaw_targets, send_message_multi
 
 
@@ -72,6 +73,10 @@ def _utc_now() -> datetime:
 
 def _utc_now_iso() -> str:
     return _utc_now().isoformat()
+
+
+def _repo_python_bin() -> str:
+    return resolve_repo_python(PROJECT_ROOT)
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -513,6 +518,7 @@ def collect_ops_snapshot(
         primary_channel=primary_channel,
     )
     gate_artifact = readiness_payload.get("gate_artifact") if isinstance(readiness_payload.get("gate_artifact"), dict) else {}
+    gate_decomposition = readiness_payload.get("gate_decomposition") if isinstance(readiness_payload.get("gate_decomposition"), dict) else {}
     runtime_exec_env = _find_runtime_check(runtime_payload, "openclaw_exec_env") if runtime_payload else {}
 
     components = {
@@ -536,6 +542,10 @@ def collect_ops_snapshot(
             "phase3_ready": gate_artifact.get("phase3_ready"),
             "phase3_reason": str(gate_artifact.get("phase3_reason") or ""),
             "skipped_gate_labels": list(gate_artifact.get("skipped_gate_labels") or []),
+            "blocker_components": list(gate_decomposition.get("component_status") or []),
+            "reason_breakdown_available": bool(((gate_decomposition.get("reason_breakdown") or {}) if isinstance(gate_decomposition.get("reason_breakdown"), dict) else {}).get("available")),
+            "decomposition_refreshed": bool(((gate_decomposition.get("refresh_result") or {}) if isinstance(gate_decomposition.get("refresh_result"), dict) else {}).get("refreshed")),
+            "decomposition_refresh_reason": str(((gate_decomposition.get("refresh_result") or {}) if isinstance(gate_decomposition.get("refresh_result"), dict) else {}).get("reason") or ""),
         },
     }
     return {
@@ -763,7 +773,7 @@ def _recover_gateway(
 ) -> dict[str, Any]:
     started_at = _utc_now_iso()
     cmd = [
-        sys.executable,
+        _repo_python_bin(),
         str(PROJECT_ROOT / "scripts" / "openclaw_maintenance.py"),
         "--apply",
         "--strict",
@@ -797,7 +807,7 @@ def _recover_dashboard_like(
     started_at = _utc_now_iso()
     result = dashboard_mod._ensure_dashboard_stack(
         root=PROJECT_ROOT,
-        python_bin=sys.executable,
+        python_bin=_repo_python_bin(),
         port=int(dashboard_port),
         db_path=db_path,
         persist_snapshot=True,
@@ -905,6 +915,7 @@ def build_operator_summary(
         for row in final_rows
         if str(row.get("class") or "") != "recoverable_service_failure"
     ]
+    readiness = components.get("readiness") if isinstance(components.get("readiness"), dict) else {}
     service_healthy = str(overall_status.get("service_health") or "") == "healthy"
     production_ready = str(overall_status.get("production_status") or "") == "ready"
 
@@ -918,12 +929,22 @@ def build_operator_summary(
     what_broke = [str(row.get("detail") or "") for row in initial_rows[:5] if str(row.get("detail") or "").strip()]
     auto_recovered = [str(row.get("summary") or "") for row in completed_actions[:5] if str(row.get("summary") or "").strip()]
     human_lines = [str(row.get("detail") or "") for row in human_required[:5] if str(row.get("detail") or "").strip()]
+    blocker_components = []
+    for row in readiness.get("blocker_components") if isinstance(readiness.get("blocker_components"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        if bool(row.get("pass")):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            blocker_components.append(name)
 
     message_lines = [
         f"OpenClaw ops: {headline}",
         f"What broke: {', '.join(what_broke) if what_broke else 'none'}",
         f"Auto-recovered: {', '.join(auto_recovered) if auto_recovered else 'none'}",
         f"Needs human action: {', '.join(human_lines) if human_lines else 'none'}",
+        f"Blocker components: {', '.join(blocker_components) if blocker_components else 'none'}",
         f"Service health={overall_status.get('service_health')} production_status={overall_status.get('production_status')}",
     ]
     if attempted_actions and not completed_actions:
@@ -934,6 +955,7 @@ def build_operator_summary(
         "what_broke": what_broke,
         "auto_recovered": auto_recovered,
         "human_action_required": human_lines,
+        "blocker_components": blocker_components,
         "message": "\n".join(message_lines),
         "service_healthy": service_healthy,
         "production_ready": production_ready,

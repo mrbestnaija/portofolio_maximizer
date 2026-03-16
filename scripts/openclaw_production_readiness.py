@@ -45,19 +45,29 @@ except Exception:
     pass
 
 from scripts import capital_readiness_check as capital_mod
+from scripts import gate_failure_decomposition as decomposition_mod
 from scripts import openclaw_regression_gate as regression_mod
 from scripts import project_runtime_status as runtime_mod
+from utils.repo_python import resolve_repo_python
 
 
 FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
 DEFAULT_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "gate_status_latest.json"
 DEFAULT_PRODUCTION_GATE_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
+DEFAULT_GATE_DECOMPOSITION_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_decomposition_latest.json"
+DEFAULT_GATE_DECOMPOSITION_MARKDOWN = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_decomposition_latest.md"
+DEFAULT_FORECAST_SUMMARY_CACHE = PROJECT_ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_OPENCLAW_JSON_RELATIVE = Path(".openclaw") / "openclaw.json"
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 
 def _default_openclaw_json_path() -> Path:
     return Path.home() / DEFAULT_OPENCLAW_JSON_RELATIVE
+
+
+def _repo_python_bin() -> str:
+    return resolve_repo_python(PROJECT_ROOT)
 
 
 def _utc_now_iso() -> str:
@@ -159,7 +169,7 @@ def _artifact_mtime_utc(path: Path) -> Optional[str]:
 
 def _tool_capable_model_name(name: str) -> bool:
     low = str(name or "").strip().lower()
-    return "qwen3" in low or "qwen2.5" in low
+    return "qwen3" in low or "qwen2.5" in low or ("llama3" in low and "tool" in low)
 
 
 def _tool_capable_model_ref(ref: str) -> bool:
@@ -170,7 +180,7 @@ def _tool_capable_model_ref(ref: str) -> bool:
 
 
 def _normalize_ollama_base_url(base_url: str) -> str:
-    raw = str(base_url or "").strip() or "http://127.0.0.1:11434/v1"
+    raw = str(base_url or "").strip() or DEFAULT_OLLAMA_BASE_URL
     text = raw.rstrip("/")
     if text.lower().endswith("/v1"):
         return text[: -len("/v1")]
@@ -274,6 +284,118 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
     return snapshot
 
 
+def _component_status_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    visualization = report.get("visualization") if isinstance(report.get("visualization"), dict) else {}
+    rows = visualization.get("component_status") if isinstance(visualization.get("component_status"), list) else []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        out.append({"name": name, "pass": bool(row.get("pass"))})
+    return out
+
+
+def _gate_decomposition_snapshot(
+    *,
+    production_gate_artifact_path: Path,
+    decomposition_artifact_path: Path = DEFAULT_GATE_DECOMPOSITION_ARTIFACT,
+    decomposition_markdown_path: Path = DEFAULT_GATE_DECOMPOSITION_MARKDOWN,
+    summary_cache_path: Path = DEFAULT_FORECAST_SUMMARY_CACHE,
+) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
+    blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    snapshot: dict[str, Any] = {
+        "path": str(decomposition_artifact_path),
+        "exists": decomposition_artifact_path.exists(),
+        "markdown_path": str(decomposition_markdown_path),
+        "markdown_exists": decomposition_markdown_path.exists(),
+        "summary_cache_path": str(summary_cache_path),
+        "summary_cache_exists": summary_cache_path.exists(),
+        "refresh_result": None,
+        "generated_utc": None,
+        "source_artifact": "",
+        "source_timestamp_utc": None,
+        "source_artifact_mtime_utc": None,
+        "phase3_ready": None,
+        "phase3_reason": "",
+        "component_status": [],
+        "components": {},
+        "reason_breakdown": {},
+        "table": [],
+    }
+    if not production_gate_artifact_path.exists():
+        warnings.append(
+            _issue(
+                source="gate_reporting",
+                code="gate_decomposition_missing_source_artifact",
+                detail="production_gate_latest.json is missing, so blocker decomposition could not be refreshed.",
+            )
+        )
+        return snapshot, blockers, warnings
+
+    try:
+        (report, refresh_result), captured_stdout, captured_stderr = _call_quietly(
+            decomposition_mod.refresh_decomposition_report,
+            artifact_path=production_gate_artifact_path,
+            output_json_path=decomposition_artifact_path,
+            summary_cache_path=summary_cache_path,
+            output_md_path=decomposition_markdown_path,
+            force=False,
+        )
+    except Exception as exc:
+        warnings.append(
+            _issue(
+                source="gate_reporting",
+                code="gate_decomposition_refresh_failed",
+                detail=f"Unable to refresh blocker decomposition: {exc}",
+            )
+        )
+        return snapshot, blockers, warnings
+
+    report = report if isinstance(report, dict) else {}
+    refresh_result = refresh_result if isinstance(refresh_result, dict) else {}
+    snapshot.update(
+        {
+            "exists": decomposition_artifact_path.exists(),
+            "markdown_exists": decomposition_markdown_path.exists(),
+            "refresh_result": {
+                **refresh_result,
+                "stdout_tail": captured_stdout,
+                "stderr_tail": captured_stderr,
+            },
+            "generated_utc": report.get("generated_utc"),
+            "source_artifact": str(report.get("source_artifact") or ""),
+            "source_timestamp_utc": report.get("source_timestamp_utc"),
+            "source_artifact_mtime_utc": report.get("source_artifact_mtime_utc"),
+            "phase3_ready": report.get("phase3_ready"),
+            "phase3_reason": str(report.get("phase3_reason") or ""),
+            "component_status": _component_status_rows(report),
+            "components": report.get("components") if isinstance(report.get("components"), dict) else {},
+            "reason_breakdown": report.get("reason_breakdown") if isinstance(report.get("reason_breakdown"), dict) else {},
+            "table": report.get("table") if isinstance(report.get("table"), list) else [],
+        }
+    )
+
+    production_snapshot = _production_gate_snapshot(production_gate_artifact_path)
+    production_timestamp = str(production_snapshot.get("timestamp_utc") or "").strip()
+    source_timestamp = str(snapshot.get("source_timestamp_utc") or "").strip()
+    if production_timestamp and source_timestamp and source_timestamp != production_timestamp:
+        warnings.append(
+            _issue(
+                source="gate_reporting",
+                code="gate_decomposition_source_drift",
+                detail=(
+                    "Blocker decomposition source timestamp does not match production_gate_latest.json "
+                    f"({source_timestamp} vs {production_timestamp})."
+                ),
+            )
+        )
+    return snapshot, blockers, warnings
+
+
 def _refresh_production_gate_artifact(
     *,
     artifact_path: Path,
@@ -283,7 +405,7 @@ def _refresh_production_gate_artifact(
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     before_mtime = artifact_path.stat().st_mtime if artifact_path.exists() else None
     cmd = [
-        sys.executable,
+        _repo_python_bin(),
         str(PROJECT_ROOT / "scripts" / "production_audit_gate.py"),
         "--unattended-profile",
         "--output-json",
@@ -370,6 +492,9 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
         "fallback_models": [],
         "allowlist_models": [],
         "image_primary": "",
+        "ollama_provider_api": "",
+        "ollama_native_api": False,
+        "ollama_base_url_looks_legacy": False,
         "ollama_base_url": "",
         "ollama_reachable": False,
         "discovered_models": [],
@@ -426,12 +551,15 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
     remote_allowlist = [row for row in allowlist_models if not row.startswith("ollama/")]
 
     ollama_provider = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else {}
+    ollama_provider_api = str(ollama_provider.get("api") or "").strip().lower()
     ollama_base_url = (
         str(os.getenv("OPENCLAW_OLLAMA_BASE_URL") or "").strip()
         or str(os.getenv("OLLAMA_HOST") or "").strip()
         or str(ollama_provider.get("baseUrl") or "").strip()
-        or "http://127.0.0.1:11434/v1"
+        or DEFAULT_OLLAMA_BASE_URL
     )
+    ollama_native_api = ollama_provider_api == "ollama"
+    ollama_base_url_looks_legacy = ollama_base_url.strip().lower().endswith("/v1")
     discovered_models = _discover_ollama_models(ollama_base_url)
 
     tool_model_configured = any(
@@ -447,6 +575,9 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
             "fallback_models": fallback_models,
             "allowlist_models": allowlist_models,
             "image_primary": image_primary,
+            "ollama_provider_api": ollama_provider_api,
+            "ollama_native_api": ollama_native_api,
+            "ollama_base_url_looks_legacy": ollama_base_url_looks_legacy,
             "ollama_base_url": ollama_base_url,
             "ollama_reachable": bool(discovered_models),
             "discovered_models": discovered_models[:12],
@@ -469,6 +600,28 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
                 source="openclaw_models",
                 code="openclaw_remote_providers",
                 detail=f"Remote providers configured: {', '.join(remote_providers)}",
+            )
+        )
+    if ollama_provider and ollama_provider_api and not ollama_native_api:
+        blockers.append(
+            _issue(
+                source="openclaw_models",
+                code="ollama_provider_not_native",
+                detail=(
+                    "models.providers.ollama.api is configured as "
+                    f"{ollama_provider_api!r}; use native 'ollama' mode for current OpenClaw + Ollama tool-calling."
+                ),
+            )
+        )
+    if ollama_native_api and ollama_base_url_looks_legacy:
+        blockers.append(
+            _issue(
+                source="openclaw_models",
+                code="ollama_base_url_legacy_v1",
+                detail=(
+                    "models.providers.ollama.baseUrl ends with '/v1' while api='ollama'. "
+                    "Use the native Ollama endpoint without '/v1'."
+                ),
             )
         )
     if not primary_model:
@@ -635,7 +788,7 @@ def _openclaw_regression_posture(timeout_seconds: float) -> tuple[dict[str, Any]
     warnings: list[dict[str, str]] = []
     ok, report = regression_mod.run_regression_gate(
         openclaw_command=str(os.getenv("OPENCLAW_COMMAND", "openclaw")),
-        python_bin=sys.executable,
+        python_bin=_repo_python_bin(),
         primary_channel=str(os.getenv("OPENCLAW_CHANNEL", "whatsapp")).strip().lower() or "whatsapp",
         timeout_seconds=max(5.0, float(timeout_seconds)),
         allow_missing_openclaw=True,
@@ -955,11 +1108,17 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         "openclaw_remote_providers",
         "openclaw_primary_remote",
         "openclaw_remote_fallbacks",
+        "ollama_provider_not_native",
+        "ollama_base_url_legacy_v1",
         "tool_model_not_configured",
         "tool_model_not_available",
         "ollama_unreachable",
     }:
-        add("Keep OpenClaw local-only and re-apply the model chain with `python scripts/openclaw_models.py apply`; ensure `qwen3:8b` is available in Ollama.")
+        add(
+            "Keep OpenClaw local-only and re-apply the native Ollama model chain with "
+            "`python scripts/openclaw_models.py apply`; ensure a tool-capable local qwen "
+            "model is available (prefer `qwen3.5:27b`, fallback `qwen3:8b`)."
+        )
     if codes & {
         "autonomy_guard_disabled",
         "approval_token_not_required",
@@ -983,6 +1142,8 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         add("For a focused human triage checklist, run `python scripts/openclaw_production_readiness.py --action-guide capital_readiness`.")
     if codes & {"runtime_status_error", "capital_readiness_error"}:
         add("Fix the failing local diagnostics before trusting readiness claims; this snapshot is only as good as the underlying checks.")
+    if codes & {"gate_decomposition_refresh_failed", "gate_decomposition_source_drift"}:
+        add("Refresh the blocker breakdown with `python scripts/gate_failure_decomposition.py --gate-artifact logs/audit_gate/production_gate_latest.json` before using component-level reporting.")
 
     return recs[:6]
 
@@ -1010,6 +1171,12 @@ def collect_openclaw_production_readiness(
     gate_artifact = gate_truth.get("gate_artifact") if isinstance(gate_truth.get("gate_artifact"), dict) else _gate_artifact_snapshot(gate_artifact_path)
     blockers.extend(gate_truth_blockers)
     warnings.extend(gate_truth_warnings)
+
+    gate_decomposition, gate_decomposition_blockers, gate_decomposition_warnings = _gate_decomposition_snapshot(
+        production_gate_artifact_path=production_gate_artifact_path,
+    )
+    blockers.extend(gate_decomposition_blockers)
+    warnings.extend(gate_decomposition_warnings)
 
     model_posture, model_blockers, model_warnings = _openclaw_model_posture(effective_config_path)
     blockers.extend(model_blockers)
@@ -1063,6 +1230,7 @@ def collect_openclaw_production_readiness(
         "human_action_guides": human_action_guides,
         "gate_artifact": gate_artifact,
         "production_gate_artifact": gate_truth.get("production_gate_artifact"),
+        "gate_decomposition": gate_decomposition,
         "gate_truth": gate_truth,
         "capital_readiness": capital_readiness,
         "openclaw_exec_env": exec_env_check,
@@ -1080,6 +1248,7 @@ def _print_human_summary(payload: dict[str, Any]) -> None:
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     recommendations = payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else []
     gate_truth = payload.get("gate_truth") if isinstance(payload.get("gate_truth"), dict) else {}
+    gate_decomposition = payload.get("gate_decomposition") if isinstance(payload.get("gate_decomposition"), dict) else {}
     action_guides = payload.get("human_action_guides") if isinstance(payload.get("human_action_guides"), list) else []
 
     print(
@@ -1094,6 +1263,18 @@ def _print_human_summary(payload: dict[str, Any]) -> None:
             f"source={gate_truth.get('freshest_phase3_source')} "
             f"drift_detected={gate_truth.get('drift_detected')}"
         )
+    component_rows = gate_decomposition.get("component_status") if isinstance(gate_decomposition.get("component_status"), list) else []
+    if component_rows:
+        parts: list[str] = []
+        for row in component_rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            parts.append(f"{name}={'PASS' if bool(row.get('pass')) else 'FAIL'}")
+        if parts:
+            print(f"[openclaw_production_readiness] gate_decomposition {' '.join(parts)}")
     for row in blockers[:6]:
         if not isinstance(row, dict):
             continue

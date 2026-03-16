@@ -34,6 +34,11 @@ VALID_EXEC_HOSTS: frozenset = frozenset({"sandbox", "gateway", "node"})
 VALID_SANDBOX_MODES_FOR_SANDBOX_HOST: frozenset = frozenset({"non-main", "all"})
 
 
+def _is_tool_capable_qwen_model(name: str) -> bool:
+    low = str(name or "").strip().lower()
+    return "qwen3" in low or "qwen2.5" in low or ("llama3" in low and "tool" in low)
+
+
 def _env_enabled(raw: str | None, *, default: bool) -> bool:
     text = str(raw or "").strip().lower()
     if not text:
@@ -96,6 +101,10 @@ def main() -> int:
         else:
             ok.append(f"ollama.api = {api}")
             base_url = str(ollama.get("baseUrl", "")).strip().lower()
+            if api != "ollama":
+                warnings.append(
+                    f"ollama.api = {api!r}; prefer native 'ollama' mode for current OpenClaw + Ollama tool-calling."
+                )
             if api == "ollama" and base_url.endswith("/v1"):
                 warnings.append(
                     "ollama.api='ollama' with baseUrl ending in '/v1' looks like an OpenAI-compatible endpoint; "
@@ -263,8 +272,11 @@ def main() -> int:
     env_model_order = env.get("OPENCLAW_OLLAMA_MODEL_ORDER", "")
     if env_model_order:
         models_ordered = [m.strip() for m in env_model_order.split(",") if m.strip()]
-        if models_ordered and "qwen3" not in models_ordered[0]:
-            issues.append(f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, not qwen3:8b (tool-calling required)")
+        if models_ordered and not _is_tool_capable_qwen_model(models_ordered[0]):
+            issues.append(
+                f"[ERROR] OPENCLAW_OLLAMA_MODEL_ORDER first model is {models_ordered[0]}, "
+                "not a tool-capable local qwen model"
+            )
         else:
             ok.append(f".env model order: {env_model_order}")
 
@@ -310,12 +322,18 @@ def main() -> int:
     llm = llm_cfg.get("llm", {})
     active_model = llm.get("active_model", "")
     primary_model = llm.get("models", {}).get("primary", {}).get("name", "")
-    if active_model and "qwen3" not in active_model:
-        warnings.append(f"llm_config.yml active_model = {active_model} (should be qwen3:8b)")
+    if active_model and not _is_tool_capable_qwen_model(active_model):
+        warnings.append(
+            f"llm_config.yml active_model = {active_model} "
+            "(should be a tool-capable local qwen model such as qwen3.5:27b or qwen3:8b)"
+        )
     elif active_model:
         ok.append(f"llm_config.yml active_model = {active_model}")
-    if primary_model and "qwen3" not in primary_model:
-        warnings.append(f"llm_config.yml primary model = {primary_model} (should be qwen3:8b)")
+    if primary_model and not _is_tool_capable_qwen_model(primary_model):
+        warnings.append(
+            f"llm_config.yml primary model = {primary_model} "
+            "(should be a tool-capable local qwen model such as qwen3.5:27b or qwen3:8b)"
+        )
     elif primary_model:
         ok.append(f"llm_config.yml primary model = {primary_model}")
 

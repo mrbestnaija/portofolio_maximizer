@@ -18,7 +18,7 @@ Run:
 [CmdletBinding()]
 param(
   [ValidateSet("auto", "local-first", "remote-first", "custom")]
-  [string]$Strategy = "auto",
+  [string]$Strategy = "local-first",
 
   [switch]$InstallOllama,
   [switch]$PullModels,
@@ -127,9 +127,9 @@ function Pull-RecommendedModels([string]$OllamaExePath) {
   }
 
   $models = @(
-    "qwen:14b-chat-q4_K_M",
-    "deepseek-coder:6.7b-instruct-q4_K_M",
-    "codellama:13b-instruct-q4_K_M"
+    "qwen3:8b",
+    "deepseek-r1:8b",
+    "deepseek-r1:32b"
   )
 
   foreach ($m in $models) {
@@ -161,17 +161,10 @@ if (-not $resolvedOllamaHost -or $resolvedOllamaHost.Trim().Length -eq 0) {
   }
 }
 
-# OpenClaw `models.providers.ollama.baseUrl` is typically configured with `/v1`.
+# Current OpenClaw native Ollama provider should use the direct Ollama endpoint,
+# not the OpenAI-compatible `/v1` URL.
 $openclawOllamaBaseUrl = $resolvedOllamaHost.TrimEnd("/")
-if (-not $openclawOllamaBaseUrl.ToLower().EndsWith("/v1")) {
-  $openclawOllamaBaseUrl = $openclawOllamaBaseUrl + "/v1"
-}
-
-# OpenClaw expects baseUrl typically with /v1, but our health check uses native endpoints.
 $ollamaHealthHost = $openclawOllamaBaseUrl
-if ($ollamaHealthHost.ToLower().EndsWith("/v1")) {
-  $ollamaHealthHost = $ollamaHealthHost.Substring(0, $ollamaHealthHost.Length - 3)
-}
 
 # Ensure Python helper sees it (OpenClaw itself will read from config after apply).
 $env:OPENCLAW_OLLAMA_BASE_URL = $openclawOllamaBaseUrl

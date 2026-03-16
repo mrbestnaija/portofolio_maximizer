@@ -153,6 +153,15 @@ OLLAMA_BASE = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 _HEALTH_CHECK_INTERVAL = 60.0  # seconds between health checks
 _health_lock = threading.Lock()
 
+
+def _repo_python_bin() -> str:
+    try:
+        from utils.repo_python import resolve_repo_python
+
+        return resolve_repo_python(PROJECT_ROOT)
+    except Exception:
+        return sys.executable
+
 LLM_CONFIG_PATH = Path(os.getenv("PMX_LLM_CONFIG_PATH", str(PROJECT_ROOT / "config" / "llm_config.yml")))
 _openclaw_templates_raw = (
     os.getenv("PMX_OPENCLAW_PROMPT_TEMPLATES_PATH", "config/openclaw_prompt_templates.yml").strip()
@@ -656,6 +665,41 @@ QUANT_VALIDATION_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
         "search online",
     ),
 )
+PRODUCTION_READINESS_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_PRODUCTION_READINESS_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "production ready",
+        "production readiness",
+        "prod readiness",
+        "ready for production",
+        "ready to deploy",
+        "go live",
+        "go-live",
+        "live readiness",
+        "real-time readiness",
+        "real time readiness",
+        "production blocker",
+        "readiness blocker",
+        "capital readiness",
+        "unattended readiness",
+        "safe to deploy",
+        "deploy readiness",
+    ),
+)
+PRODUCTION_READINESS_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_PRODUCTION_READINESS_FAST_PATH_BLOCKED_TOKENS",
+    (
+        "source code",
+        "inspect source",
+        "read source",
+        "repo status",
+        "github",
+        "web search",
+        "search online",
+        "install ",
+        "pip ",
+    ),
+)
 
 _TOOL_CACHEABLE = {
     "fast_reasoning",
@@ -666,6 +710,7 @@ _TOOL_CACHEABLE = {
     "search_web_tavily",
     "inspect_source_code",
     "check_github_repo_status",
+    "assess_production_readiness",
     "check_system_health",
     "run_sub_agent_batch",
 }
@@ -698,6 +743,7 @@ _TOOL_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "search_web_tavily": ("query",),
     "inspect_source_code": (),
     "check_github_repo_status": (),
+    "assess_production_readiness": (),
     "send_notification": ("channel", "message"),
     "run_sub_agent_batch": ("tasks",),
     "check_system_health": (),
@@ -716,6 +762,9 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     "repo_status": "check_github_repo_status",
     "github_repo_status": "check_github_repo_status",
     "check_repo_status": "check_github_repo_status",
+    "production_readiness": "assess_production_readiness",
+    "readiness_check": "assess_production_readiness",
+    "production_ready_status": "assess_production_readiness",
     "check_quant_health": "check_quant_validation_headroom",
     "quant_validation_health": "check_quant_validation_headroom",
     "quant_health": "check_quant_validation_headroom",
@@ -1304,6 +1353,28 @@ REASONING_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "assess_production_readiness",
+            "description": (
+                "Aggregate local-only PMX and OpenClaw production blockers, security posture, "
+                "and model readiness into one stable JSON snapshot. Use for go-live/readiness questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fresh_runtime": {
+                        "type": "boolean",
+                        "description": "When true, run a fresh runtime snapshot in addition to artifact-based readiness checks.",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Timeout budget for regression/runtime checks.",
+                    },
+                },
+            },
+        },
+    },    {
+        "type": "function",
+        "function": {
             "name": "run_production_audit_gate",
             "description": (
                 "Safely run scripts/production_audit_gate.py without shell chaining. "
@@ -1597,6 +1668,11 @@ def execute_tool_call(
                 _cache_set(cache_key, result, ttl_seconds=20.0)
             return result
 
+        if safe_tool_name == "assess_production_readiness":
+            result = _assess_production_readiness_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=20.0)
+            return result
         if safe_tool_name == "run_production_audit_gate":
             return _run_production_audit_gate_tool(args, budget_seconds=budget_seconds)
 
@@ -2447,6 +2523,46 @@ def _check_github_repo_status_tool(arguments: dict[str, Any], *, budget_seconds:
         payload["raw_output"] = stdout_text[:4000]
     return json.dumps(payload, ensure_ascii=True)
 
+
+def _assess_production_readiness_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    fresh_runtime = _as_bool(args.get("fresh_runtime"), False)
+    timeout_seconds = _bounded_timeout(
+        _as_float(args.get("timeout_seconds"), 45.0 if fresh_runtime else 20.0),
+        budget_seconds,
+    )
+    try:
+        from scripts import openclaw_production_readiness as readiness_mod
+
+        payload = readiness_mod.collect_openclaw_production_readiness(
+            fresh_runtime=fresh_runtime,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "FAIL",
+                "action": "assess_production_readiness",
+                "error": f"Failed to build production-readiness snapshot: {exc}",
+            },
+            indent=2,
+        )
+
+    if not isinstance(payload, dict):
+        payload = {
+            "status": "FAIL",
+            "action": "assess_production_readiness",
+            "error": "readiness snapshot returned a non-dict payload",
+        }
+    else:
+        payload = dict(payload)
+        payload.setdefault("status", "PASS")
+        payload["action"] = "assess_production_readiness"
+        payload["requested"] = {
+            "fresh_runtime": fresh_runtime,
+            "timeout_seconds": timeout_seconds,
+        }
+    return json.dumps(payload, ensure_ascii=True, indent=2)
 
 def _run_production_audit_gate_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
     """Run production gate via structured args (no shell concatenation)."""
@@ -3478,6 +3594,35 @@ def _extract_runtime_fast_path_request(message: str) -> Optional[tuple[str, dict
         args["verify_import"] = verify_import
     return ("install_python_package", args)
 
+
+def _extract_production_readiness_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if _text_contains_any(low, PRODUCTION_READINESS_FAST_PATH_BLOCKED_TOKENS):
+        return None
+    if not _text_contains_any(low, PRODUCTION_READINESS_FAST_PATH_TRIGGER_TOKENS):
+        return None
+
+    fresh_runtime = _text_contains_any(
+        low,
+        (
+            "right now",
+            "real-time",
+            "real time",
+            "live",
+            "current",
+            "fresh",
+            "latest",
+        ),
+    )
+    return (
+        "assess_production_readiness",
+        {
+            "fresh_runtime": fresh_runtime,
+        },
+    )
 
 def _extract_source_fast_path_paths(message: str) -> list[str]:
     text = str(message or "")
@@ -4968,114 +5113,65 @@ def sync_openclaw_config(dry_run: bool = False) -> list[str]:
     """
     Sync the multi-model orchestrator config into OpenClaw.
 
-    Ensures:
-    - All 3 models are registered in models.providers.ollama
-    - qwen3:8b is set as tool-calling model
-    - Agent defaults use the correct primary + fallback chain
-    - The Ollama API mode is set to openai-completions (not native ollama)
-      to prevent 'does not support tools' errors with deepseek-r1
+    Delegate to the canonical OpenClaw model manager so the orchestrator does
+    not drift from the repo's native-Ollama config policy.
 
     Returns list of status messages.
     """
     msgs: list[str] = []
 
     available = discover_models()
-    registered = [m for m in MODEL_REGISTRY if m in available]
     missing = [m for m in MODEL_REGISTRY if m not in available]
+    tool_models = [m for m in available if "qwen3" in m.lower() or "qwen2.5" in m.lower()]
 
     if missing:
         msgs.append(f"Missing models ({len(missing)}): {', '.join(missing)}")
         cmds = [f"ollama pull {m}" for m in missing]
         msgs.append("Run each command separately:\n  " + "\n  ".join(cmds))
 
-    if not registered:
-        msgs.append("[ERROR] No registered models available in Ollama")
+    if not available:
+        msgs.append("[ERROR] No local Ollama models available")
         return msgs
 
-    msgs.append(f"Available models ({len(registered)}): {', '.join(registered)}")
+    msgs.append(f"Available local models ({len(available)}): {', '.join(available)}")
+    if tool_models:
+        msgs.append(f"Tool-capable local models: {', '.join(tool_models)}")
+    else:
+        msgs.append("[WARN] No tool-capable local qwen model detected; OpenClaw agent turns may not function correctly.")
 
+    cmd = [
+        _repo_python_bin(),
+        str(PROJECT_ROOT / "scripts" / "openclaw_models.py"),
+        "apply",
+        "--strategy",
+        "local-first",
+    ]
     if dry_run:
-        msgs.append("[DRY-RUN] Would update OpenClaw config")
-        return msgs
-
-    # Build Ollama provider config with openai-completions API mode
-    # (prevents 'does not support tools' errors for deepseek-r1)
-    ollama_provider = {
-        "baseUrl": f"{OLLAMA_BASE.rstrip('/')}/v1",
-        "api": "openai-completions",
-        "models": [],
-    }
-    for name in registered:
-        spec = MODEL_REGISTRY[name]
-        ollama_provider["models"].append({
-            "id": name,
-            "name": name,
-            "reasoning": "r1" in name.lower() or "r2" in name.lower(),
-            "input": ["text"],
-            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-            "contextWindow": spec.context_window,
-            "maxTokens": spec.max_tokens,
-        })
-
-    # Set via openclaw CLI
-    def _oc_set(path: str, value: Any) -> bool:
-        payload = json.dumps(value, ensure_ascii=True)
-        try:
-            proc = subprocess.run(
-                ["cmd", "/d", "/s", "/c", "openclaw", "--no-color", "config", "set", path, payload, "--json"],
-                capture_output=True, text=True, timeout=20,
-                env={**os.environ, "NODE_NO_WARNINGS": "1"},
-            )
-            return proc.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return False
-
-    # 1. Set Ollama provider
-    if _oc_set("models.providers.ollama", ollama_provider):
-        msgs.append("Set models.providers.ollama (openai-completions mode)")
+        cmd.append("--dry-run")
     else:
-        msgs.append("[ERROR] Failed to set models.providers.ollama")
+        cmd.append("--restart-gateway")
 
-    # 2. Set agent model defaults: primary + fallbacks
-    # CRITICAL: Primary MUST be qwen3:8b (only tool-capable model).
-    # OpenClaw agent chat requires tool-calling; deepseek-r1 does NOT support tools.
-    # deepseek-r1 models are used as reasoning backends called BY qwen3:8b
-    # through the orchestrator -- they must NOT be in the agent fallback chain.
-    primary = "ollama/qwen3:8b" if "qwen3:8b" in registered else f"ollama/{registered[0]}"
-    # Only remote fallback -- deepseek models are NOT tool-capable and must not
-    # be in the agent fallback chain (they cause "does not support tools" errors).
-    fallbacks = ["qwen-portal/coder-model"]
-
-    model_block = {"primary": primary, "fallbacks": fallbacks}
-    if _oc_set("agents.defaults.model", model_block):
-        msgs.append(f"Set agents.defaults.model primary={primary} fallbacks={len(fallbacks)}")
-    else:
-        msgs.append("[ERROR] Failed to set agents.defaults.model")
-
-    # 3. Update model allowlist (agent-accessible models only)
-    # Only include tool-capable models; deepseek stays in the provider
-    # for direct Ollama API calls but is NOT offered to the agent.
-    models_allowlist = {"ollama/qwen3:8b": {}}
-    models_allowlist["qwen-portal/coder-model"] = {"alias": "qwen"}
-    models_allowlist["qwen-portal/vision-model"] = {}
-    if _oc_set("agents.defaults.models", models_allowlist):
-        msgs.append(f"Updated agents.defaults.models allowlist ({len(models_allowlist)} refs)")
-    else:
-        msgs.append("[ERROR] Failed to update model allowlist")
-
-    # 4. Restart gateway
     try:
         proc = subprocess.run(
-            ["cmd", "/d", "/s", "/c", "openclaw", "gateway", "restart"],
-            capture_output=True, text=True, timeout=30,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=90,
             env={**os.environ, "NODE_NO_WARNINGS": "1"},
         )
+        stdout_lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+        stderr_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
         if proc.returncode == 0:
-            msgs.append("Gateway restarted successfully")
+            msgs.append(
+                "Synced OpenClaw config via scripts/openclaw_models.py "
+                f"({'dry-run' if dry_run else 'applied'})."
+            )
+            msgs.extend(stdout_lines[-6:])
         else:
-            msgs.append(f"Gateway restart failed (exit={proc.returncode})")
+            msgs.append(f"[ERROR] openclaw_models.py apply failed (exit={proc.returncode})")
+            msgs.extend((stderr_lines or stdout_lines)[-6:])
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-        msgs.append(f"Gateway restart error: {e}")
+        msgs.append(f"[ERROR] openclaw_models.py apply error: {e}")
 
     return msgs
 

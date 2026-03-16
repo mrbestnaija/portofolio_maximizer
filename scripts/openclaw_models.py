@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 
 def _bootstrap_dotenv() -> None:
@@ -160,9 +161,15 @@ def _parse_csv(text: str) -> list[str]:
     return [p.strip() for p in normalized.split(",") if p and p.strip()]
 
 
+def _tool_capable_model_name(name: str) -> bool:
+    low = (name or "").strip().lower()
+    return "qwen3" in low or "qwen2.5" in low or ("llama3" in low and "tool" in low)
+
+
 def _ollama_api_base_from_configured(base_url: str) -> str:
-    # OpenClaw strips /v1 when talking to native endpoints; do the same here for discovery.
-    u = (base_url or "").strip() or "http://127.0.0.1:11434/v1"
+    # OpenClaw native Ollama provider should use the Ollama endpoint directly
+    # (no OpenAI-compatible /v1 suffix).
+    u = (base_url or "").strip() or DEFAULT_OLLAMA_BASE_URL
     u = u.rstrip("/")
     if u.lower().endswith("/v1"):
         u = u[: -len("/v1")]
@@ -193,8 +200,9 @@ def _discover_ollama_models(base_url: str, timeout_seconds: float = 3.0) -> list
 
 def _default_ollama_model_order() -> list[str]:
     # Keep aligned with config/llm_config.yml defaults.
-    # OpenClaw agent turns require tool-calling support, so keep qwen3 first.
+    # OpenClaw agent turns require tool-calling support, so keep a qwen tool model first.
     return [
+        "qwen3.5:27b",          # preferred local orchestrator when installed
         "qwen3:8b",             # tool-calling / function-calling orchestrator (primary for OpenClaw agent)
         "deepseek-r1:8b",       # fast reasoning (primary)
         "deepseek-r1:32b",      # heavy reasoning (fallback)
@@ -223,8 +231,7 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
 
     tool_candidates: list[str] = []
     for m in models:
-        low = m.lower()
-        if "qwen3" in low or "qwen2.5" in low:
+        if _tool_capable_model_name(m):
             tool_candidates.append(m)
 
     if not tool_candidates:
@@ -237,7 +244,7 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
 def _ollama_model_def(model_id: str) -> dict[str, Any]:
     low = (model_id or "").lower()
     is_reasoning = ("r1" in low) or ("r2" in low) or ("reasoning" in low)
-    is_tool_capable = ("qwen3" in low) or ("qwen2.5" in low) or ("llama3" in low and "tool" in low)
+    is_tool_capable = _tool_capable_model_name(model_id)
     return {
         "id": model_id,
         "name": model_id,
@@ -393,7 +400,8 @@ def _build_fallbacks(
 ) -> list[str]:
     fallbacks: list[str] = []
     for m in local_models_ordered:
-        fallbacks.append(f"ollama/{m}")
+        if _tool_capable_model_name(m):
+            fallbacks.append(f"ollama/{m}")
     if include_remote_qwen:
         fallbacks.append("qwen-portal/coder-model")
     if include_openai:
@@ -455,7 +463,7 @@ def _cmd_status(args) -> int:
     has_ollama_store = _auth_has_provider_key(store_path=store_path, provider="ollama")
 
     # Ollama reachability + model inventory
-    ollama_base = (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434/v1").strip()
+    ollama_base = (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or DEFAULT_OLLAMA_BASE_URL).strip()
     discovered = _discover_ollama_models(ollama_base, timeout_seconds=2.0)
 
     print("[openclaw_models] OpenClaw model status")
@@ -552,7 +560,7 @@ def _cmd_apply(args) -> int:
                 print(f"[openclaw_models] {m}")
 
     # Provider configs
-    ollama_base_url = (args.ollama_base_url or "").strip() or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434/v1").strip()
+    ollama_base_url = (args.ollama_base_url or "").strip() or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or DEFAULT_OLLAMA_BASE_URL).strip()
     ollama_models = _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
     discovered = _discover_ollama_models(ollama_base_url, timeout_seconds=2.0)
     if not ollama_models:
@@ -707,7 +715,7 @@ def _cmd_apply(args) -> int:
         else:
             # Even if Ollama is unreachable, set local model as primary.
             # OpenClaw will retry when Ollama comes back online.
-            primary = f"ollama/{preferred_local[0]}" if preferred_local else "ollama/qwen3:8b"
+            primary = f"ollama/{preferred_local[0]}" if preferred_local else "ollama/qwen3.5:27b"
 
         local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
             m for m in (discovered or ollama_models) if m not in set(preferred_local)
@@ -854,7 +862,7 @@ def main(argv: list[str]) -> int:
     pa.add_argument("--sync-auth", action="store_true", help="Sync OpenAI/Anthropic keys from .env into OpenClaw auth store.")
 
     pa.add_argument("--enable-ollama-provider", action="store_true", default=True, help="Ensure models.providers.ollama is configured.")
-    pa.add_argument("--ollama-base-url", default="", help="Ollama baseUrl (default: OPENCLAW_OLLAMA_BASE_URL / OLLAMA_HOST / http://127.0.0.1:11434/v1).")
+    pa.add_argument("--ollama-base-url", default="", help="Ollama baseUrl (default: OPENCLAW_OLLAMA_BASE_URL / OLLAMA_HOST / http://127.0.0.1:11434).")
     pa.add_argument("--ollama-models", default="", help="Comma-separated Ollama model names to register (default: discover / defaults).")
 
     pa.add_argument("--enable-openai-provider", action="store_true", default=False, help="Configure OpenAI provider (requires OPENAI_API_KEY in .env/auth store).")

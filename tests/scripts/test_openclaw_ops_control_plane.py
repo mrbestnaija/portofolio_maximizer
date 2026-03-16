@@ -226,3 +226,125 @@ def test_run_ops_command_marks_gateway_recovery_completed(tmp_path, monkeypatch)
     assert verdict["overall_status"]["service_health"] == "healthy"
     assert verdict["overall_status"]["status"] == "WARN"
     assert Path(tmp_path / "openclaw_ops_control_plane_latest.json").exists()
+
+
+def test_collect_ops_snapshot_surfaces_gate_decomposition_components(tmp_path, monkeypatch) -> None:
+    readiness_payload = {
+        "readiness_status": "FAIL",
+        "ready_now": False,
+        "summary": {"blocker_count": 2, "warning_count": 0},
+        "gate_artifact": {
+            "overall_passed": False,
+            "phase3_ready": False,
+            "phase3_reason": "GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL",
+            "skipped_gate_labels": [],
+        },
+        "gate_decomposition": {
+            "component_status": [
+                {"name": "PERFORMANCE_BLOCKER", "pass": False},
+                {"name": "LINKAGE_BLOCKER", "pass": False},
+                {"name": "HYGIENE_BLOCKER", "pass": True},
+            ],
+            "reason_breakdown": {"available": True},
+            "refresh_result": {"refreshed": True, "reason": "source_timestamp_mismatch"},
+        },
+        "openclaw_exec_env": {"ok": True},
+        "blockers": [],
+        "warnings": [],
+    }
+
+    def fake_call_quietly(fn, /, *args, **kwargs):
+        if fn is ops.readiness_mod.collect_openclaw_production_readiness:
+            return readiness_payload, [], []
+        return {"status": "ok", "checks": [], "failed_checks": [], "check_count": 0}, [], []
+
+    monkeypatch.setattr(ops, "_call_quietly", fake_call_quietly)
+    monkeypatch.setattr(
+        ops,
+        "_collect_dashboard_components",
+        lambda **kwargs: {"dashboard": {"healthy": True, "url": "http://127.0.0.1:8000"}, "watcher": {"healthy": True, "running": True}},
+    )
+    monkeypatch.setattr(
+        ops,
+        "_collect_primary_channel_components",
+        lambda **kwargs: {
+            "gateway": {"healthy": True, "rpc_ok": True, "primary_issue": ""},
+            "primary_channel": {"healthy": True, "linked": True, "running": True, "connected": True, "relink_required": False, "issue_reason": ""},
+            "maintenance": {},
+        },
+    )
+
+    snapshot = ops.collect_ops_snapshot(
+        gate_artifact_path=tmp_path / "gate_status_latest.json",
+        db_path=tmp_path / "portfolio_maximizer.db",
+        primary_channel="whatsapp",
+        dashboard_port=8000,
+        include_runtime=False,
+        timeout_seconds=5.0,
+        maintenance_report_path=tmp_path / "openclaw_maintenance_latest.json",
+        maintenance_state_path=tmp_path / "openclaw_maintenance_state.json",
+        watcher_json_path=tmp_path / "live_denominator_latest.json",
+    )
+
+    readiness = snapshot["components"]["readiness"]
+    assert readiness["blocker_components"] == [
+        {"name": "PERFORMANCE_BLOCKER", "pass": False},
+        {"name": "LINKAGE_BLOCKER", "pass": False},
+        {"name": "HYGIENE_BLOCKER", "pass": True},
+    ]
+    assert readiness["reason_breakdown_available"] is True
+    assert readiness["decomposition_refreshed"] is True
+    assert readiness["decomposition_refresh_reason"] == "source_timestamp_mismatch"
+
+
+def test_recover_gateway_uses_repo_python(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd: list[str], *, timeout_seconds: float) -> dict[str, object]:
+        captured["cmd"] = list(cmd)
+        captured["timeout_seconds"] = timeout_seconds
+        return {"ok": True, "returncode": 0, "command": list(cmd), "stdout_tail": [], "stderr_tail": []}
+
+    monkeypatch.setattr(ops, "_repo_python_bin", lambda: r"C:\repo\simpleTrader_env\Scripts\python.exe")
+    monkeypatch.setattr(ops, "_run_command", fake_run_command)
+
+    result = ops._recover_gateway(
+        primary_channel="whatsapp",
+        timeout_seconds=30.0,
+        maintenance_report_path=tmp_path / "openclaw_maintenance_latest.json",
+    )
+
+    assert result["ok"] is True
+    assert captured["cmd"][0] == r"C:\repo\simpleTrader_env\Scripts\python.exe"
+
+
+def test_recover_dashboard_like_passes_repo_python(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class Result:
+        bridge_running = True
+        server_running = True
+        watcher_running = True
+        started_bridge = False
+        started_server = False
+        started_watcher = False
+        warnings: list[str] = []
+
+    def fake_ensure_dashboard_stack(**kwargs):
+        captured.update(kwargs)
+        return Result()
+
+    monkeypatch.setattr(ops, "_repo_python_bin", lambda: r"C:\repo\simpleTrader_env\Scripts\python.exe")
+    monkeypatch.setattr(ops.dashboard_mod, "_ensure_dashboard_stack", fake_ensure_dashboard_stack)
+
+    result = ops._recover_dashboard_like(
+        ensure_live_watcher=True,
+        dashboard_port=8000,
+        db_path=tmp_path / "portfolio_maximizer.db",
+        watcher_tickers="AAPL,MSFT",
+        watcher_cycles=30,
+        watcher_sleep_seconds=60,
+    )
+
+    assert result["ok"] is True
+    assert captured["python_bin"] == r"C:\repo\simpleTrader_env\Scripts\python.exe"
