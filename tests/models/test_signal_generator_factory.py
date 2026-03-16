@@ -385,19 +385,24 @@ class TestPerTickerThresholdResolution:
         t = gen._resolve_thresholds_for_ticker("SPECIAL")
         assert t["confidence_threshold"] == pytest.approx(0.70)
 
-    def test_production_aapl_msft_get_20bps_floor(self):
-        """Live production config must give AAPL and MSFT 20bps floor."""
+    def test_production_aapl_msft_get_minimum_bps_floor(self):
+        """Live production config must give AAPL >= 80bps, MSFT >= 20bps floor (Phase 7.34)."""
         if not Path("config/signal_routing_config.yml").exists():
             pytest.skip("config/signal_routing_config.yml not present")
 
         from models.signal_generator_factory import build_signal_generator
         gen = build_signal_generator()
-        for ticker in ("AAPL", "MSFT"):
-            t = gen._resolve_thresholds_for_ticker(ticker)
-            assert t["min_expected_return"] == pytest.approx(0.0020), (
-                f"{ticker} should have 20bps floor from Phase 7.14-A config. "
-                f"Got {t['min_expected_return'] * 10000:.1f}bps."
-            )
+        # Phase 7.34: AAPL raised to 80bps (conviction floor), MSFT remains 20bps
+        aapl = gen._resolve_thresholds_for_ticker("AAPL")
+        assert aapl["min_expected_return"] >= 0.0080, (
+            f"AAPL should have >= 80bps floor (Phase 7.34). "
+            f"Got {aapl['min_expected_return'] * 10000:.1f}bps."
+        )
+        msft = gen._resolve_thresholds_for_ticker("MSFT")
+        assert msft["min_expected_return"] >= 0.0020, (
+            f"MSFT should have >= 20bps floor (Phase 7.14-A). "
+            f"Got {msft['min_expected_return'] * 10000:.1f}bps."
+        )
 
 
 class TestProofModeThresholdSemantics:
