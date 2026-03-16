@@ -387,6 +387,14 @@ OpenClaw send-path storm suppression is also enabled by default in `utils/opencl
 - `OPENCLAW_STORM_RESET_WINDOW_SECONDS` (default: `900`) resets failure streak after quiet time.
 - Storm state persists in `OPENCLAW_PERSISTENT_GUARD_STATE_PATH` so process restarts do not reset suppression.
 
+For model/config sync, use the canonical repo-managed writer:
+
+- `python scripts/openclaw_models.py apply --strategy local-first --restart-gateway`
+
+This keeps OpenClaw on the native Ollama provider (`api=ollama`,
+`baseUrl=http://127.0.0.1:11434`) and avoids reintroducing stale
+`openai-completions` or `/v1` drift during maintenance.
+
 Inbox workflows have their own safe limits:
 
 - `config/inbox_workflows.yml` -> `limits.*`
@@ -394,10 +402,11 @@ Inbox workflows have their own safe limits:
 
 See: `Documentation/INBOX_WORKFLOWS.md`
 
-## Cron Automation (Updated 2026-02-17)
+## Cron Automation (Updated 2026-03-16)
 
-OpenClaw runs an audit-aligned cron set via `agentTurn` mode. The local LLM (qwen3:8b)
-receives the cron message, prefers structured orchestrator tools (not generic exec chaining), and either
+OpenClaw runs an audit-aligned cron set via `agentTurn` mode. The local LLM
+(prefer `qwen3.5:27b`, fallback `qwen3:8b`) receives the cron message,
+prefers structured orchestrator tools (not generic exec chaining), and either
 reports anomalies or responds `NO_REPLY` (suppressing the notification).
 
 ### Read-Only Robustness Jobs (2026-03-03)
@@ -515,17 +524,19 @@ restart frequency:
 These are set as active defaults in `.env.template`. To apply:
 ```bash
 # One-time apply after updating .env:
-python scripts/openclaw_models.py apply --strategy local-first
-# Then restart gateway once to pick up new cooldown state:
-openclaw gateway restart
+python scripts/openclaw_models.py apply --strategy local-first --restart-gateway
+# Validate that native Ollama settings and local model order are still intact:
+python scripts/verify_openclaw_config.py
 ```
 
-**Local LLM as main agent** — enforce qwen3:8b as the only primary model:
+**Local LLM as main agent** - keep a tool-capable local qwen primary only:
 ```bash
 # Ensure OPENCLAW_LOCAL_ONLY=1 and OPENCLAW_MODEL_STRATEGY=local-first are in .env, then:
 python scripts/openclaw_models.py apply --strategy local-first
-# Verify primary is ollama/qwen3:8b with no cloud fallbacks:
-python scripts/openclaw_models.py status
+# Verify the primary is the first installed local qwen model:
+python scripts/openclaw_models.py status --list-ollama-models
+# Verify config drift has not reintroduced openai-completions or /v1:
+python scripts/verify_openclaw_config.py
 ```
 
 Cron path:
@@ -674,14 +685,16 @@ The cron job schema uses:
 - `sessionTarget: "isolated"` for clean execution context
 - Job IDs must be UUIDs
 
-## 3-Model Local LLM Strategy (Updated 2026-02-18)
+## Local-First LLM Strategy (Updated 2026-03-16)
 
-Portfolio Maximizer uses three specialized local models via Ollama, each with a
-distinct role in the inference pipeline:
+Portfolio Maximizer uses a native Ollama OpenClaw primary plus optional local
+reasoning delegates. The OpenClaw agent primary must stay tool-capable and
+local:
 
 | Model | Role | Capabilities | VRAM | Speed |
 |-------|------|-------------|------|-------|
-| **qwen3:8b** | Primary orchestrator | Tool-calling, structured output, workflow control | 5.5GB | 30-40 tok/s |
+| **qwen3.5:27b** | Preferred primary orchestrator | Best local tool-calling, structured output, workflow control | High | Slower |
+| **qwen3:8b** | Compatible primary fallback | Lightweight tool-calling, structured output, workflow control | 5.5GB | 30-40 tok/s |
 | **deepseek-r1:8b** | Fast reasoning delegate | Chain-of-thought, math, code-gen | 5.5GB | 25-35 tok/s |
 | **deepseek-r1:32b** | Heavy reasoning delegate | Deep multi-step analysis, long-context | 20GB | 10-15 tok/s |
 
@@ -689,20 +702,21 @@ distinct role in the inference pipeline:
 
 | Task | Model |
 |------|-------|
-| Interactive OpenClaw tasks, tool/function calls, API orchestration | qwen3:8b |
+| Interactive OpenClaw tasks, tool/function calls, API orchestration | First installed tool-capable local qwen model (`qwen3.5:27b` preferred, `qwen3:8b` fallback) |
 | Fast delegated reasoning (analysis, signal checks, concise audits) | deepseek-r1:8b via `scripts/deepseek_reason.py` |
 | Heavy delegated reasoning (deep audits, long-context decomposition) | deepseek-r1:32b via `scripts/deepseek_reason.py --model deepseek-r1:32b` |
 
 ### How It Works
 
-**qwen3:8b** acts as the orchestrator: it receives requests via OpenClaw
-channels (WhatsApp/Telegram/Discord) and delegates reasoning tasks to
-deepseek-r1 models through `exec` calls to `scripts/deepseek_reason.py`.
+The OpenClaw primary is always the first installed tool-capable local qwen
+model. DeepSeek models remain available to PMX orchestration through
+`scripts/deepseek_reason.py`, but they are intentionally excluded from the
+OpenClaw agent fallback chain.
 
 ```
 User (WhatsApp/Telegram/Discord)
   -> OpenClaw Gateway
-    -> qwen3:8b (orchestrator, tool-calling)
+    -> qwen3.5:27b / qwen3:8b (orchestrator, tool-calling)
       -> deepseek-r1:8b (fast reasoning)
       -> deepseek-r1:32b (heavy reasoning)
     <- structured response
@@ -712,17 +726,28 @@ User (WhatsApp/Telegram/Discord)
 ### Setup
 
 ```bash
-# Pull all 3 models
+# Pull the preferred tool-capable local qwen model first.
+ollama pull qwen3.5:27b
+# Keep qwen3:8b installed as a compatible fallback if 27B is unavailable.
+ollama pull qwen3:8b
+# Optional delegate models for PMX reasoning paths:
 ollama pull deepseek-r1:8b
 ollama pull deepseek-r1:32b
-ollama pull qwen3:8b
 
-# Apply to OpenClaw (local-first strategy with all 3 models)
+# Apply native Ollama local-first config and restart the gateway once.
 python scripts/openclaw_models.py apply --strategy local-first --restart-gateway
 
-# Verify
+# Verify config drift has not reintroduced legacy provider settings.
+python scripts/verify_openclaw_config.py
+
+# Verify the chosen primary and installed model inventory.
 python scripts/openclaw_models.py status --list-ollama-models
 ```
+
+If your installed OpenClaw build exposes native Ollama onboarding, use
+equivalent settings: local mode, loopback gateway bind, port `18789`, and
+`qwen3.5:27b` as the custom model id. In this repo, the canonical maintenance
+path remains `scripts/openclaw_models.py apply --strategy local-first`.
 
 ### Multi-Model Orchestration CLI
 
@@ -733,7 +758,7 @@ python scripts/llm_multi_model_orchestrator.py status
 # Route a task to the best model
 python scripts/llm_multi_model_orchestrator.py route --task "Analyze AAPL regime"
 
-# Run orchestrated query (qwen3 dispatches to deepseek-r1 models)
+# Run orchestrated query (the active local qwen primary dispatches to deepseek-r1 models)
 python scripts/llm_multi_model_orchestrator.py orchestrate --prompt "Summarize gate status and suggest next actions"
 ```
 
@@ -742,8 +767,18 @@ python scripts/llm_multi_model_orchestrator.py orchestrate --prompt "Summarize g
 Set `OPENCLAW_OLLAMA_MODEL_ORDER` in `.env` to override the default priority:
 
 ```
-OPENCLAW_OLLAMA_MODEL_ORDER=qwen3:8b,deepseek-r1:8b,deepseek-r1:32b
+OPENCLAW_OLLAMA_MODEL_ORDER=qwen3.5:27b,qwen3:8b,deepseek-r1:8b,deepseek-r1:32b
 ```
+
+Notes:
+
+- `scripts/verify_openclaw_config.py` now flags legacy `api=openai-completions`
+  drift and native Ollama `baseUrl` values that still include `/v1`.
+- `scripts/llm_multi_model_orchestrator.py` delegates OpenClaw config sync to
+  `scripts/openclaw_models.py`, so there is a single canonical writer.
+- `Documentation/OPENCLAW_OPS_PATCH_BUNDLE_2026-03-15.md` captures the
+  commit-scoped ops-lane integration context used to harden readiness and
+  control-plane behavior.
 
 ## Interactions API Security Modes
 
@@ -895,8 +930,9 @@ Assign cron jobs to specific agents to isolate workloads:
 ### Verification
 
 ```bash
-python scripts/verify_openclaw_config.py   # Validates multi-agent config
-python scripts/openclaw_models.py status    # Model availability
+python scripts/verify_openclaw_config.py              # Validates multi-agent config and native Ollama drift
+python scripts/openclaw_models.py status --list-ollama-models
+python scripts/openclaw_models.py apply --strategy local-first --dry-run
 ```
 
 ---

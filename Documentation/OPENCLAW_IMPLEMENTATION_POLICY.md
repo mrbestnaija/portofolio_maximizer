@@ -59,6 +59,17 @@ code contract, not a guideline.
   survives process restarts.
 - A successful send must clear prior storm state for that target.
 
+8. Local-first Ollama agent configuration is mandatory:
+- `scripts/openclaw_models.py` must write native Ollama provider settings
+  (`api=ollama`) and must not route native Ollama through legacy `/v1`
+  OpenAI-compatible paths.
+- Preferred OpenClaw primary is the first tool-capable local qwen model in
+  `OPENCLAW_OLLAMA_MODEL_ORDER` (`qwen3.5:27b` preferred,
+  `qwen3:8b` compatible fallback).
+- Non-tool delegate models such as `deepseek-r1:*` may remain available to PMX
+  reasoning paths, but must not be inserted into the OpenClaw agent fallback
+  chain.
+
 ## Anti-Regression Evidence
 
 Run at minimum:
@@ -66,6 +77,7 @@ Run at minimum:
 ```bash
 python -m pytest tests/scripts/test_openclaw_implementation_contract.py -q
 python -m pytest tests/scripts/test_enforce_openclaw_exec_environment.py tests/scripts/test_project_runtime_status.py tests/scripts/test_run_openclaw_maintenance_wrapper.py -q
+python -m pytest tests/scripts/test_openclaw_models.py tests/scripts/test_openclaw_production_readiness.py -q
 python -m pytest tests/utils/test_openclaw_cli.py -k storm_guard -q
 ```
 
