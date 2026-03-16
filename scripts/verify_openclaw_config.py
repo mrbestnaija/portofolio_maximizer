@@ -30,6 +30,8 @@ VALID_OLLAMA_APIS = {
     "anthropic-messages",
     "google-generative-ai",
 }
+VALID_EXEC_HOSTS: frozenset = frozenset({"sandbox", "gateway", "node"})
+VALID_SANDBOX_MODES_FOR_SANDBOX_HOST: frozenset = frozenset({"non-main", "all"})
 
 
 def _env_enabled(raw: str | None, *, default: bool) -> bool:

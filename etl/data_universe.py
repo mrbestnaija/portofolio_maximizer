@@ -1,4 +1,4 @@
-"""Data‑source‑aware ticker universe resolution.
+"""Data-source-aware ticker universe resolution.
 
 This module is intentionally thin and reuses existing components:
 
@@ -6,21 +6,23 @@ This module is intentionally thin and reuses existing components:
 - etl.ticker_discovery.TickerUniverseManager
 - etl.ticker_discovery.AlphaVantageTickerLoader
 
-It provides a single helper that callers (ETL, auto‑trader, backtests) can use
-to resolve a concrete ticker list in a configuration‑driven way.
+It provides a single helper that callers (ETL, auto-trader, backtests) can use
+to resolve a concrete ticker list in a configuration-driven way.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Sequence
 
 from etl.frontier_markets import (
     FRONTIER_MARKET_TICKERS_BY_REGION,
     merge_frontier_tickers,
 )
-from etl.ticker_discovery.ticker_universe import TickerUniverseManager
+from etl.ticker_discovery import TickerValidator
 from etl.ticker_discovery.alpha_vantage_loader import AlphaVantageTickerLoader
+from etl.ticker_discovery.ticker_universe import TickerUniverseManager
 
 # Provider-specific ticker exclusions to avoid repeatedly requesting symbols
 # that the upstream source cannot serve (e.g., yfinance has no timezone/data
@@ -49,15 +51,17 @@ def resolve_ticker_universe(
     include_frontier: bool,
     active_source: str,
     use_discovery: bool = True,
+    discovery_config: Mapping[str, Any] | None = None,
+    refresh_discovery: bool = False,
 ) -> ResolvedUniverse:
     """Resolve a concrete ticker universe without duplicating discovery logic.
 
     Behaviour:
-    - If ``base_tickers`` is non‑empty, always return ``merge_frontier_tickers`` as
+    - If ``base_tickers`` is non-empty, always return ``merge_frontier_tickers`` as
       today (explicit + optional frontier overlay).
     - If ``base_tickers`` is empty and ``use_discovery`` is True, attempt to use a
-      provider‑specific universe for supported sources (currently Alpha Vantage).
-    - All provider‑specific listing logic lives in the existing ticker_discovery
+      provider-specific universe for supported sources (currently Alpha Vantage).
+    - All provider-specific listing logic lives in the existing ticker_discovery
       loaders and TickerUniverseManager.
     """
     # 1) Current default path: explicit tickers + optional frontier overlay.
@@ -87,19 +91,41 @@ def resolve_ticker_universe(
     discovered: List[str] = []
     universe_source = "none"
 
-    # 2) Optional provider‑level discovery when caller did not specify tickers.
+    # 2) Optional provider-level discovery when caller did not specify tickers.
     if use_discovery and active_source == "alpha_vantage":
-        loader = AlphaVantageTickerLoader()
-        manager = TickerUniverseManager(loader=loader)
+        cfg = discovery_config or {}
+        fallback_csv = cfg.get("fallback_csv")
+        fallback_path = Path(str(fallback_csv)).expanduser() if fallback_csv else None
+        loader = AlphaVantageTickerLoader(
+            api_key=cfg.get("api_key"),
+            cache_dir=cfg.get("cache_dir"),
+        )
+        manager = TickerUniverseManager(
+            loader=loader,
+            validator=TickerValidator(),
+            universe_path=cfg.get("universe_path"),
+        )
 
-        universe = manager.load_universe()
-        if not universe.tickers:
-            try:
-                universe = manager.refresh_universe()
-            except Exception as exc:  # pragma: no cover - defensive path
-                notes["warning"] = f"alpha_vantage_discovery_failed: {exc}"
+        try:
+            if refresh_discovery or cfg.get("auto_refresh", False):
+                universe = manager.refresh_universe(
+                    force_download=bool(refresh_discovery),
+                    fallback_csv=fallback_path,
+                )
+                if universe.tickers:
+                    notes["info"] = "alpha_vantage_universe_refreshed"
             else:
-                notes["info"] = "alpha_vantage_universe_refreshed"
+                universe = manager.load_universe()
+                if not universe.tickers:
+                    universe = manager.refresh_universe(
+                        force_download=False,
+                        fallback_csv=fallback_path,
+                    )
+                    if universe.tickers:
+                        notes["info"] = "alpha_vantage_universe_refreshed"
+        except Exception as exc:  # pragma: no cover - defensive path
+            notes["warning"] = f"alpha_vantage_discovery_failed: {exc}"
+            universe = manager.load_universe()
 
         discovered = list(universe.tickers)
         universe_source = "alpha_vantage_universe" if discovered else "none"

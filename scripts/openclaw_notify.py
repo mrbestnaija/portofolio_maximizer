@@ -64,6 +64,12 @@ def _redact_text(text: str) -> str:
     return payload
 
 
+def _is_gateway_supervision_conflict_text(text: str) -> bool:
+    """Return True when stderr indicates the gateway is already running under supervision."""
+    t = text or ""
+    return "gateway already running" in t and "If the gateway is supervised" in t
+
+
 def _write_run_log(*, mode: str, to: str, channel: str | None, message_len: int, result) -> None:
     """Best-effort run logging (never blocks the main action)."""
     try:
@@ -488,6 +494,13 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+        if _is_gateway_supervision_conflict_text(result.stderr or ""):
+            print(
+                "[openclaw_notify] Gateway already running under supervision — ignoring restart conflict.",
+                file=sys.stderr,
+            )
+            return 1
+
         print(f"[openclaw_notify] FAILED (exit={result.returncode})", file=sys.stderr)
         stderr_tail = "\n".join((result.stderr or "").splitlines()[-20:])
         stdout_tail = "\n".join((result.stdout or "").splitlines()[-20:])
@@ -512,6 +525,13 @@ def main() -> int:
         return 0
 
     # Keep errors readable (OpenClaw can emit a lot of output).
+    if _is_gateway_supervision_conflict_text(result.stderr or ""):
+        print(
+            "[openclaw_notify] Gateway already running under supervision — ignoring restart conflict.",
+            file=sys.stderr,
+        )
+        return 1
+
     stderr_tail = "\n".join((result.stderr or "").splitlines()[-20:])
     stdout_tail = "\n".join((result.stdout or "").splitlines()[-20:])
     print(f"[openclaw_notify] FAILED (exit={result.returncode})", file=sys.stderr)

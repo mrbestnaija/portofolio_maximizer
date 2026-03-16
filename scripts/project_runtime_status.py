@@ -179,7 +179,11 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0) -> dict[str, Any]:
     checks.append(
         _run_check(
             "production_gate",
-            [py, str(PROJECT_ROOT / "scripts" / "production_audit_gate.py")],
+            [
+                py,
+                str(PROJECT_ROOT / "scripts" / "production_audit_gate.py"),
+                "--unattended-profile",
+            ],
             timeout_seconds=timeout_seconds,
         )
     )

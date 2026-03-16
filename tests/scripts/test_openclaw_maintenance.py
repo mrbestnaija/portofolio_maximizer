@@ -381,6 +381,216 @@ def test_gateway_health_skips_restart_when_cooldown_active(monkeypatch) -> None:
     assert not any(cmd == ["gateway", "restart"] for cmd in calls)
 
 
+def test_gateway_health_recovers_detached_listener_conflict(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _handshake_timeout_channels_payload()
+    healthy_payload = _healthy_channels_payload()
+    gateway_status_calls = {"value": 0}
+
+    def fake_run_openclaw_json(*, oc_base, args, timeout_seconds=20.0):
+        del oc_base, timeout_seconds
+        if args == ["gateway", "status"]:
+            gateway_status_calls["value"] += 1
+            if gateway_status_calls["value"] == 1:
+                gateway_payload = {
+                    "rpc": {"ok": True},
+                    "service": {"runtime": {"status": "stopped", "state": "Ready"}},
+                    "gateway": {"port": 18789},
+                    "port": {
+                        "status": "busy",
+                        "listeners": [
+                            {
+                                "pid": 12345,
+                                "command": "node.exe",
+                                "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Users\\Bestman\\AppData\\Roaming\\npm\\node_modules\\openclaw\\dist\\index.js gateway --port 18789",
+                            }
+                        ],
+                    },
+                }
+            else:
+                gateway_payload = {
+                    "rpc": {"ok": False},
+                    "service": {"runtime": {"status": "stopped", "state": "Ready"}},
+                    "gateway": {"port": 18789},
+                    "port": {"status": "free", "listeners": []},
+                }
+            return om._CmdResult(True, 0, ["openclaw", "gateway", "status"], "", ""), gateway_payload
+        if args == ["channels", "status", "--probe"]:
+            return om._CmdResult(True, 0, ["openclaw", "channels", "status", "--probe"], "", ""), healthy_payload
+        raise AssertionError(f"Unexpected json call args: {args}")
+
+    def fake_run_openclaw(*, oc_base, args, timeout_seconds=20.0):
+        del oc_base, timeout_seconds
+        calls.append(list(args))
+        if args in (["gateway", "stop"], ["gateway", "restart"]):
+            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
+        if args[:3] == ["--no-color", "channels", "logs"]:
+            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
+        raise AssertionError(f"Unexpected call args: {args}")
+
+    monkeypatch.setattr(om, "_run_openclaw_json", fake_run_openclaw_json)
+    monkeypatch.setattr(om, "_run_openclaw", fake_run_openclaw)
+    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 12345)
+    monkeypatch.setattr(om, "_terminate_pid", lambda pid: om._CmdResult(True, 0, ["taskkill", "/PID", str(pid)], "", ""))
+    monkeypatch.setattr(om, "_resolve_dns", lambda hostname: {"hostname": hostname, "ok": True, "addresses": ["127.0.0.1"], "error": ""})
+
+    out = om._gateway_health_and_heal(
+        oc_base=["openclaw"],
+        channels_payload=payload,
+        primary_channel="whatsapp",
+        apply=True,
+        restart_on_rpc_failure=True,
+        recheck_delay_seconds=0.0,
+        attempt_primary_reenable=False,
+        primary_restart_attempts=1,
+    )
+
+    assert "gateway_stop_detached_listener_recovery" in out["actions"]
+    assert "gateway_listener_terminated:12345" in out["actions"]
+    assert "gateway_restart_primary_channel_recovery" in out["actions"]
+    assert out["primary_channel_issue_final"] is None
+    assert any(cmd == ["gateway", "stop"] for cmd in calls)
+    assert any(cmd == ["gateway", "restart"] for cmd in calls)
+
+
+def test_gateway_health_does_not_kill_unverified_listener(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    payload = _handshake_timeout_channels_payload()
+
+    def fake_run_openclaw_json(*, oc_base, args, timeout_seconds=20.0):
+        del oc_base, timeout_seconds
+        if args == ["gateway", "status"]:
+            gateway_payload = {
+                "rpc": {"ok": True},
+                "service": {"runtime": {"status": "stopped", "state": "Ready"}},
+                "gateway": {"port": 18789},
+                "port": {
+                    "status": "busy",
+                    "listeners": [
+                        {
+                            "pid": 22222,
+                            "command": "python.exe",
+                            "commandLine": "python -m http.server 18789",
+                        }
+                    ],
+                },
+            }
+            return om._CmdResult(True, 0, ["openclaw", "gateway", "status"], "", ""), gateway_payload
+        raise AssertionError(f"Unexpected json call args: {args}")
+
+    def fake_run_openclaw(*, oc_base, args, timeout_seconds=20.0):
+        del oc_base, timeout_seconds
+        calls.append(list(args))
+        if args[:3] == ["--no-color", "channels", "logs"]:
+            return om._CmdResult(True, 0, ["openclaw", *args], "", "")
+        raise AssertionError(f"Unexpected call args: {args}")
+
+    monkeypatch.setattr(om, "_run_openclaw_json", fake_run_openclaw_json)
+    monkeypatch.setattr(om, "_run_openclaw", fake_run_openclaw)
+    monkeypatch.setattr(om, "_resolve_dns", lambda hostname: {"hostname": hostname, "ok": True, "addresses": ["127.0.0.1"], "error": ""})
+
+    out = om._gateway_health_and_heal(
+        oc_base=["openclaw"],
+        channels_payload=payload,
+        primary_channel="whatsapp",
+        apply=True,
+        restart_on_rpc_failure=True,
+        recheck_delay_seconds=0.0,
+        attempt_primary_reenable=False,
+        primary_restart_attempts=1,
+    )
+
+    assert "gateway_detached_listener_conflict" in out["warnings"]
+    assert "skip_restart_due_to_listener_conflict" in out["warnings"]
+    assert out["primary_channel_issue_final"] == "whatsapp_handshake_timeout"
+    assert not any(cmd == ["gateway", "stop"] for cmd in calls)
+    assert not any(cmd == ["gateway", "restart"] for cmd in calls)
+
+
+def test_lock_holder_matches_process_rejects_pid_reuse(monkeypatch) -> None:
+    holder = {
+        "pid": 17116,
+        "mode": "watch",
+        "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
+    }
+
+    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 17116)
+    monkeypatch.setattr(
+        om,
+        "_process_command_line",
+        lambda pid: "C:\\WINDOWS\\system32\\svchost.exe -k LocalService -p -s NPSMSvc" if pid == 17116 else "",
+    )
+
+    assert om._lock_holder_matches_process(holder) is False
+
+
+def test_acquire_run_lock_reclaims_stale_lock_when_pid_reused(monkeypatch, tmp_path) -> None:
+    lock_path = tmp_path / "openclaw_maintenance.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 17116,
+                "mode": "watch",
+                "created_at_utc": om._utc_now_iso(),
+                "token": "old-token",
+                "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 17116)
+    monkeypatch.setattr(
+        om,
+        "_process_command_line",
+        lambda pid: "C:\\WINDOWS\\system32\\svchost.exe -k LocalService -p -s NPSMSvc" if pid == 17116 else "",
+    )
+
+    attempt = om._acquire_run_lock(
+        lock_path=lock_path,
+        mode="run",
+        wait_seconds=0.0,
+        stale_seconds=60,
+    )
+
+    assert attempt.acquired is True
+    assert attempt.lock is not None
+    assert attempt.reason == "acquired"
+
+
+def test_acquire_run_lock_preserves_live_matching_watch_holder(monkeypatch, tmp_path) -> None:
+    lock_path = tmp_path / "openclaw_maintenance.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": 22222,
+                "mode": "watch",
+                "created_at_utc": om._utc_now_iso(),
+                "token": "watch-token",
+                "command": "python C:/repo/scripts/openclaw_maintenance.py --watch --apply",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(om, "_pid_running", lambda pid: pid == 22222)
+    monkeypatch.setattr(
+        om,
+        "_process_command_line",
+        lambda pid: "python C:/repo/scripts/openclaw_maintenance.py --watch --apply" if pid == 22222 else "",
+    )
+
+    attempt = om._acquire_run_lock(
+        lock_path=lock_path,
+        mode="run",
+        wait_seconds=0.0,
+        stale_seconds=60,
+    )
+
+    assert attempt.acquired is False
+    assert attempt.reason == "held"
+
+
 def test_cleanup_stale_session_locks_handles_sessions_glob_error(monkeypatch, tmp_path) -> None:
     agents_root = tmp_path / ".openclaw" / "agents"
     agents_root.mkdir(parents=True)

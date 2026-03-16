@@ -256,8 +256,8 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     """BYP-03 fix: verify that run_all_gates.py ran recently and overall_passed=True.
 
     Reads logs/gate_status_latest.json written by run_all_gates.py on each run.
-    Fails if:
-      - The artifact does not exist (gates never ran or old version)
+    Fail-closed if:
+      - The artifact does not exist
       - overall_passed is False in the artifact
       - The artifact timestamp is more than 26 hours old
     """
@@ -267,9 +267,9 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     if not artifact.exists():
         out.append(Finding(
             "P4", "prior_gate_execution",
-            "WARN",
-            "logs/gate_status_latest.json not found. run_all_gates.py may not have run yet. "
-            "Execute: python scripts/run_all_gates.py",
+            "FAIL",
+            "logs/gate_status_latest.json not found. run_all_gates.py has not produced "
+            "a verifiable status artifact for unattended validation.",
         ))
         return out
 
@@ -312,8 +312,8 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     elif not age_ok:
         out.append(Finding(
             "P4", "prior_gate_execution",
-            "WARN",
-            f"run_all_gates.py last success was {age_detail} ago (limit: 26h). "
+            "FAIL",
+            f"run_all_gates.py status artifact is stale ({age_detail}, limit: 26h). "
             "Run gates before next autonomous cycle.",
         ))
     else:
