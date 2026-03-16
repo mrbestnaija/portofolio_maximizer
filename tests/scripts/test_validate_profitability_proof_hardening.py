@@ -261,6 +261,71 @@ class TestValidateProfitabilityProofIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Phase 7.40: import-path collision tests
+# ---------------------------------------------------------------------------
+
+class TestImportPathCollision:
+    """validate_profitability_proof must function without the integrity package."""
+
+    def test_gate_runs_without_guarded_connect(self, tmp_path, monkeypatch):
+        """If integrity.sqlite_guardrails is absent, the gate falls back to sqlite3
+        and still returns a valid result dict — no ImportError propagates."""
+        import builtins
+
+        db = _make_db(tmp_path)
+        _insert(db, [
+            (1, "AAPL", "2026-01-10", "SELL", 80.0, 100.0, 108.0, 1, 0, 0, None, "live"),
+        ])
+
+        real_import = builtins.__import__
+
+        def _block_guarded(name, *args, **kwargs):
+            if "sqlite_guardrails" in name or (
+                name == "integrity" and args and "sqlite_guardrails" in (args[2] or [])
+            ):
+                raise ImportError("integrity.sqlite_guardrails blocked for test")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_guarded)
+        # Should not raise; falls back to sqlite3.connect
+        result = validate_profitability_proof(str(db))
+        assert isinstance(result, dict)
+        assert "is_proof_valid" in result
+        assert "violations" in result
+
+    def test_wiring_error_does_not_count_as_evidence_violation(self, tmp_path, monkeypatch):
+        """An ImportError in the connect path must not add a violation entry.
+        Only evidence issues (missing trades, bad stats) should trigger violations."""
+        import builtins
+
+        db = _make_db(tmp_path)
+        # Insert enough production closed trades to pass statistical thresholds
+        rows = []
+        for i in range(35):
+            rows.append((
+                i + 1, "AAPL", f"2026-01-{(i % 28) + 1:02d}", "SELL",
+                50.0 if i % 2 == 0 else -20.0,
+                100.0, 110.0 if i % 2 == 0 else 98.0,
+                1, 0, 0, None, "live",
+            ))
+        _insert(db, rows)
+
+        real_import = builtins.__import__
+
+        def _block_guarded(name, *args, **kwargs):
+            if "sqlite_guardrails" in name:
+                raise ImportError("blocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_guarded)
+        result = validate_profitability_proof(str(db))
+        # The violations list must not contain any import/wiring error string
+        for v in result["violations"]:
+            assert "import" not in v.lower(), f"Wiring error leaked into violations: {v}"
+            assert "sqlite_guardrails" not in v.lower()
+
+
+# ---------------------------------------------------------------------------
 # Adversarial check: INT-03 must now be CLEARED
 # ---------------------------------------------------------------------------
 

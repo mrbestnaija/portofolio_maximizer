@@ -89,11 +89,12 @@ def load_production_trades(db_path: Path, tail_n: int | None = None) -> pd.DataF
 
     # ATR proxy = bar_high - bar_low (single-bar range); fallback to 1.5% of entry
     has_atr = df["bar_high"].notna() & df["bar_low"].notna() & (df["entry_price"].fillna(0) > 0)
-    df["atr_proxy"] = np.nan
-    df.loc[has_atr, "atr_proxy"] = df.loc[has_atr, "bar_high"] - df.loc[has_atr, "bar_low"]
-    # Fallback: 1.5% of entry_price
-    no_atr = df["atr_proxy"].isna() & df["entry_price"].notna() & (df["entry_price"] > 0)
-    df.loc[no_atr, "atr_proxy"] = df.loc[no_atr, "entry_price"] * 0.015
+    has_fallback = ~has_atr & df["entry_price"].notna() & (df["entry_price"] > 0)
+    df["atr_proxy"] = np.where(
+        has_atr,
+        df["bar_high"] - df["bar_low"],
+        np.where(has_fallback, df["entry_price"] * 0.015, np.nan),
+    )
 
     risk_unit = (df["atr_proxy"] * 1.5).replace(0.0, np.nan)
     df["r_multiple"] = df["realized_pnl"].fillna(0.0) / risk_unit

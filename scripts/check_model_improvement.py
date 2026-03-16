@@ -351,13 +351,22 @@ def run_layer1_forecast_quality(
                 f"coverage_ratio={coverage_ratio:.1%} < 20% "
                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
             )
-        # Phase 7.25: advisory WARN when CI spans zero (informational — does not override FAIL)
-        if not sig["insufficient_data"] and sig["ci_low"] <= 0.0 and n_used >= 20:
-            status = "WARN"
-            reasons.append(
-                f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
-                f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
-            )
+        # Phase 7.25/7.37: spans-zero CI → advisory WARN (only from PASS, requires ci_high >= 0)
+        if not sig["insufficient_data"] and n_used >= 20:
+            if sig["ci_low"] <= 0.0 and sig["ci_high"] >= 0.0:
+                status = "WARN"
+                reasons.append(
+                    f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
+                    f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
+                )
+
+    # Phase 7.37: definitively negative CI → hard FAIL (promotes WARN to FAIL; both bounds < 0)
+    if not sig["insufficient_data"] and n_used >= 20 and sig["ci_high"] < 0.0:
+        status = "FAIL"
+        reasons.append(
+            f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] definitively negative "
+            f"(win_fraction={sig['lift_win_fraction']:.1%}) -- ensemble consistently worse than best single"
+        )
 
     reason_str = " | " + "; ".join(reasons) if reasons else ""
     summary = (

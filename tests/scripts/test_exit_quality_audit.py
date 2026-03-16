@@ -174,6 +174,31 @@ class TestLoadProductionTrades:
         df = load_production_trades(db)
         assert df["correct_dir_neg_pnl"].iloc[0] == 1
 
+    def test_atr_proxy_fallback_uses_entry_price(self, tmp_path):
+        """When bar_high/bar_low are NULL, atr_proxy falls back to 1.5% of entry_price."""
+        db = _build_db(tmp_path)
+        _insert_trade(db, entry_price=200.0, bar_high=None, bar_low=None, realized_pnl=10.0)
+        df = load_production_trades(db)
+        # fallback: 200.0 * 0.015 = 3.0
+        assert abs(df["atr_proxy"].iloc[0] - 3.0) < 0.001
+
+    def test_handles_all_null_atr_inputs_without_dtype_error(self, tmp_path):
+        """NULL bar_high/bar_low with a loss trade: fallback fires and r_multiple stays finite."""
+        db = _build_db(tmp_path)
+        _insert_trade(
+            db,
+            realized_pnl=-5.0,
+            entry_price=100.0,
+            exit_price=99.0,
+            bar_high=None,
+            bar_low=None,
+        )
+        df = load_production_trades(db)
+        assert len(df) == 1
+        # fallback atr_proxy = 100 * 0.015 = 1.5 → r_multiple = -5 / (1.5 * 1.5) ≈ -2.22
+        assert np.isfinite(float(df["atr_proxy"].iloc[0]))
+        assert np.isfinite(float(df["r_multiple"].iloc[0]))
+
     def test_tail_n_limits_rows(self, tmp_path):
         db = _build_db(tmp_path)
         for i in range(5):

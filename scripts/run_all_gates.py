@@ -96,6 +96,59 @@ def _load_json_file(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _build_summary(
+    *,
+    overall_pass: bool,
+    skipped_optional: int,
+    results: list[dict[str, Any]],
+    production_gate_payload: dict[str, Any],
+    stage: str,
+) -> dict[str, Any]:
+    readiness = (
+        production_gate_payload.get("readiness", {})
+        if isinstance(production_gate_payload.get("readiness"), dict)
+        else {}
+    )
+    gate_payload_block = (
+        production_gate_payload.get("production_profitability_gate", {})
+        if isinstance(production_gate_payload.get("production_profitability_gate"), dict)
+        else {}
+    )
+    return {
+        "phase": "institutional_unattended_hardening",
+        "status_stage": stage,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "overall_passed": bool(overall_pass),
+        "skipped_optional_gates": skipped_optional,
+        "max_skipped_optional_gates": MAX_SKIPPED_OPTIONAL_GATES,
+        "gates": results,
+        "pass_semantics_version": production_gate_payload.get("pass_semantics_version"),
+        "lift_inconclusive_allowed": production_gate_payload.get("lift_inconclusive_allowed"),
+        "proof_profitable_required": production_gate_payload.get("proof_profitable_required"),
+        "warmup_expired": production_gate_payload.get("warmup_expired"),
+        "gate_semantics_status": gate_payload_block.get("gate_semantics_status"),
+        "phase3_ready": bool(production_gate_payload.get("phase3_ready", False)),
+        "phase3_reason": production_gate_payload.get("phase3_reason"),
+        "readiness_components": {
+            "gates_pass": readiness.get("gates_pass"),
+            "linkage_pass": readiness.get("linkage_pass"),
+            "evidence_hygiene_pass": readiness.get("evidence_hygiene_pass"),
+            "integrity_pass": readiness.get("integrity_pass"),
+        },
+    }
+
+
+def _write_gate_status_artifact(summary: dict[str, Any]) -> None:
+    try:
+        GATE_STATUS_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+        GATE_STATUS_ARTIFACT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(
+            f"[WARN] Failed to write gate status artifact: {GATE_STATUS_ARTIFACT} ({exc})",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -180,6 +233,23 @@ def main() -> None:
         if not args.emit_json:
             print("[SKIP] production_audit_gate (--skip-profitability-gate)")
 
+    production_gate_ran = any(
+        str(r.get("label")) == "production_audit_gate" and not bool(r.get("skipped"))
+        for r in results
+    )
+    production_gate_payload = _load_json_file(PRODUCTION_GATE_ARTIFACT) if production_gate_ran else {}
+    # Publish a pre-institutional snapshot so institutional P4 validates current run
+    # state instead of stale prior-run artifacts.
+    pre_skipped_optional = sum(1 for r in results if r.get("skipped", False))
+    pre_summary = _build_summary(
+        overall_pass=overall_pass,
+        skipped_optional=pre_skipped_optional,
+        results=results,
+        production_gate_payload=production_gate_payload,
+        stage="pre_institutional",
+    )
+    _write_gate_status_artifact(pre_summary)
+
     # Gate 4: unattended-run hardening contracts
     if not args.skip_institutional_gate:
         r4 = _run([python, "scripts/institutional_unattended_gate.py"], "institutional_unattended_gate")
@@ -204,50 +274,14 @@ def main() -> None:
         if not args.emit_json:
             print(skip_fail_msg)
 
-    production_gate_ran = any(
-        str(r.get("label")) == "production_audit_gate" and not bool(r.get("skipped"))
-        for r in results
+    summary = _build_summary(
+        overall_pass=overall_pass,
+        skipped_optional=skipped_optional,
+        results=results,
+        production_gate_payload=production_gate_payload,
+        stage="final",
     )
-    production_gate_payload = _load_json_file(PRODUCTION_GATE_ARTIFACT) if production_gate_ran else {}
-    readiness = (
-        production_gate_payload.get("readiness", {})
-        if isinstance(production_gate_payload.get("readiness"), dict)
-        else {}
-    )
-    gate_payload_block = (
-        production_gate_payload.get("production_profitability_gate", {})
-        if isinstance(production_gate_payload.get("production_profitability_gate"), dict)
-        else {}
-    )
-
-    summary = {
-        "phase": "institutional_unattended_hardening",
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "overall_passed": bool(overall_pass),
-        "skipped_optional_gates": skipped_optional,
-        "max_skipped_optional_gates": MAX_SKIPPED_OPTIONAL_GATES,
-        "gates": results,
-        "pass_semantics_version": production_gate_payload.get("pass_semantics_version"),
-        "lift_inconclusive_allowed": production_gate_payload.get("lift_inconclusive_allowed"),
-        "proof_profitable_required": production_gate_payload.get("proof_profitable_required"),
-        "warmup_expired": production_gate_payload.get("warmup_expired"),
-        "gate_semantics_status": gate_payload_block.get("gate_semantics_status"),
-        "phase3_ready": bool(production_gate_payload.get("phase3_ready", False)),
-        "phase3_reason": production_gate_payload.get("phase3_reason"),
-        "readiness_components": {
-            "gates_pass": readiness.get("gates_pass"),
-            "linkage_pass": readiness.get("linkage_pass"),
-            "evidence_hygiene_pass": readiness.get("evidence_hygiene_pass"),
-            "integrity_pass": readiness.get("integrity_pass"),
-        },
-    }
-
-    # BYP-03 fix: write a status artifact so downstream tools can verify gates ran recently.
-    try:
-        GATE_STATUS_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-        GATE_STATUS_ARTIFACT.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    except Exception:
-        pass  # Non-fatal: artifact is best-effort
+    _write_gate_status_artifact(summary)
 
     if args.emit_json:
         print(json.dumps(summary, indent=2))

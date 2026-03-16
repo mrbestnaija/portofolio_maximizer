@@ -444,3 +444,45 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
     assert payload["lift_gate"]["inconclusive"] is True
     assert payload["lift_gate"]["pass"] is False
     assert payload["production_profitability_gate"]["gate_semantics_status"] == "INCONCLUSIVE_BLOCKED"
+
+
+def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> None:
+    """Legacy trades (ts_signal_id LIKE 'legacy_%') must not be flagged for
+    close_before_entry — their bar_timestamps are historical forecast bars, not
+    execution clocks, and are unreliable for chronological ordering."""
+    import scripts.production_audit_gate as mod
+
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY, ticker TEXT, trade_date TEXT, action TEXT,
+            realized_pnl REAL, is_close INTEGER DEFAULT 0,
+            is_diagnostic INTEGER DEFAULT 0, is_synthetic INTEGER DEFAULT 0,
+            bar_timestamp TEXT, exit_reason TEXT, entry_trade_id INTEGER,
+            ts_signal_id TEXT
+        );
+        -- Legacy open leg: bar_timestamp from 2025 (historical forecast bar)
+        INSERT INTO trade_executions VALUES
+          (1,'MSFT','2026-02-10','BUY',NULL,0,0,0,
+           '2025-07-25T00:00:00+00:00',NULL,NULL,'legacy_2026-02-10_1');
+        -- Legacy close leg: bar_timestamp from 2025 — EARLIER than open (artifact)
+        INSERT INTO trade_executions VALUES
+          (2,'MSFT','2026-02-10','SELL',72.5,1,0,0,
+           '2025-07-18T00:00:00+00:00','TIME_EXIT',1,'legacy_2026-02-10_2');
+        CREATE VIEW production_closed_trades AS
+          SELECT * FROM trade_executions
+          WHERE is_close=1
+            AND COALESCE(is_diagnostic,0)=0
+            AND COALESCE(is_synthetic,0)=0;
+        """
+    )
+    conn.close()
+
+    result = mod._compute_lifecycle_integrity(db)
+
+    assert result["close_before_entry_count"] == 0, (
+        "Legacy trades must not be counted as close_before_entry violations"
+    )
+    assert result["query_error"] is None
