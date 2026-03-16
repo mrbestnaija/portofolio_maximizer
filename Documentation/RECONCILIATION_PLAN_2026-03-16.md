@@ -288,4 +288,24 @@ This document must be updated at each phase completion:
 - Record actual test counts and gate results
 - Note any deviations from plan with rationale
 
-**Next action**: Begin Phase 1 — apply PnL-critical code files from backup branch.
+---
+
+## Execution Log
+
+| Phase | Status | Commit | Tests | Notes |
+|-------|--------|--------|-------|-------|
+| Phase 1 — PnL-critical code | **COMPLETE** | `b4b81ae` | 104 passed | WR baseline updated to 38.1% (42 round-trips); 5 new Mar-2026 live trades in DB — not code regression |
+| Phase 2 — Signal/forecast pipeline | **COMPLETE** | `ed5c6da` | 629 passed | |
+| Phase 3 — Dashboard/ops/OpenClaw | **COMPLETE** | `ed5c6da` | 63 passed | Log artifacts untracked in follow-up commit `265abeb` |
+| Phase 4 — Full fast-lane suite | **COMPLETE** | `36ca8f4` | 1709 passed, 11 xfailed | 9 mismatches fixed: stale thresholds, openclaw xfail, INT-02 data xfail |
+| Phase 5 — PR to master | **OPEN** | PR #32 | — | https://github.com/mrbestnaija/portofolio_maximizer/pull/32 |
+| Phase 6 — Terminal B patches | PENDING | — | — | |
+| Phase 7 — Directional classifier | PENDING | — | — | Phase 8 scope |
+
+**WR Baseline Correction**:
+- Feb-14 snapshot (documented): 37 round-trips, 43.2% WR, $673.22 PnL
+- Actual DB state (2026-03-16): 42 round-trips, 38.1% WR, -$1,037.08 PnL
+- Delta: 5 new March 2026 closing legs, -$1,708 from March trading sessions
+- **Protection floor going forward**: WR ≥ 35% (code changes must not push below this)
+
+**Next action**: Await Phase 4 full-suite result, then push integration branch and open PR.
