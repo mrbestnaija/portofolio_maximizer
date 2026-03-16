@@ -131,3 +131,35 @@ def test_run_regression_gate_passes_when_probe_and_maintenance_pass(monkeypatch)
     assert ok is True
     assert report["status"] == "PASS"
     assert not report["errors"]
+
+
+def test_run_regression_gate_uses_maintenance_fallback_when_probe_is_not_json(monkeypatch) -> None:
+    probe_stdout = "\n".join(
+        [
+            "Gateway not reachable; showing config-only status.",
+            "- WhatsApp default: enabled, configured, linked",
+        ]
+    )
+
+    def fake_run(cmd: list[str], *, timeout_seconds: float):
+        del timeout_seconds
+        if "channels" in cmd and "status" in cmd:
+            return gate._CmdResult(True, 0, cmd, probe_stdout, "")
+        if "openclaw_maintenance.py" in " ".join(cmd):
+            return gate._CmdResult(True, 0, cmd, "[openclaw_maintenance] status=PASS", "")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+
+    ok, report = gate.run_regression_gate(
+        openclaw_command="openclaw",
+        python_bin="python",
+        primary_channel="whatsapp",
+        timeout_seconds=5.0,
+        allow_missing_openclaw=False,
+    )
+
+    assert ok is True
+    assert report["status"] == "PASS"
+    assert "channels_probe_non_json_fallback" in report["warnings"]
+    assert report["checks"]["primary_channel"]["reason"] == "maintenance_strict_fallback_ok"

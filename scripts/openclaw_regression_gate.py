@@ -109,6 +109,17 @@ def _channel_ready(payload: dict[str, Any], channel: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _run_maintenance_strict(*, python_bin: str, primary_channel: str, timeout_seconds: float) -> _CmdResult:
+    maintenance_cmd = [
+        str(python_bin),
+        str(PROJECT_ROOT / "scripts" / "openclaw_maintenance.py"),
+        "--strict",
+        "--primary-channel",
+        str(primary_channel),
+    ]
+    return _run(maintenance_cmd, timeout_seconds=max(20.0, timeout_seconds * 2.0))
+
+
 def run_regression_gate(
     *,
     openclaw_command: str,
@@ -153,9 +164,27 @@ def run_regression_gate(
     try:
         payload = _parse_json_best_effort(status_res.stdout)
     except Exception:
-        report["errors"].append("channels_probe_invalid_json")
         report["checks"]["channels_probe"]["stdout"] = "\n".join((status_res.stdout or "").splitlines()[-10:])
-        return False, report
+        report["checks"]["primary_channel"] = {"ok": None, "reason": "probe_non_json_fallback"}
+        report["warnings"].append("channels_probe_non_json_fallback")
+        maintenance_res = _run_maintenance_strict(
+            python_bin=python_bin,
+            primary_channel=primary_channel,
+            timeout_seconds=timeout_seconds,
+        )
+        report["checks"]["maintenance_strict"] = {
+            "ok": maintenance_res.ok,
+            "returncode": maintenance_res.returncode,
+            "command": maintenance_res.command,
+        }
+        if not maintenance_res.ok:
+            report["errors"].append("maintenance_strict_failed")
+            report["checks"]["maintenance_strict"]["stderr"] = "\n".join((maintenance_res.stderr or "").splitlines()[-10:])
+            report["checks"]["maintenance_strict"]["stdout"] = "\n".join((maintenance_res.stdout or "").splitlines()[-10:])
+            return False, report
+        report["checks"]["primary_channel"] = {"ok": True, "reason": "maintenance_strict_fallback_ok"}
+        report["status"] = "PASS"
+        return True, report
 
     if not isinstance(payload, dict):
         report["errors"].append("channels_probe_invalid_payload")
@@ -167,14 +196,11 @@ def run_regression_gate(
         report["errors"].append(f"primary_channel_not_ready:{reason}")
         return False, report
 
-    maintenance_cmd = [
-        str(python_bin),
-        str(PROJECT_ROOT / "scripts" / "openclaw_maintenance.py"),
-        "--strict",
-        "--primary-channel",
-        str(primary_channel),
-    ]
-    maintenance_res = _run(maintenance_cmd, timeout_seconds=max(20.0, timeout_seconds * 2.0))
+    maintenance_res = _run_maintenance_strict(
+        python_bin=python_bin,
+        primary_channel=primary_channel,
+        timeout_seconds=timeout_seconds,
+    )
     report["checks"]["maintenance_strict"] = {
         "ok": maintenance_res.ok,
         "returncode": maintenance_res.returncode,

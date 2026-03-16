@@ -929,6 +929,7 @@ def _fetch_channel_logs_tail(
     lines: int = 40,
 ) -> dict[str, Any]:
     line_count = max(10, int(lines))
+    timeout_seconds = _env_float("OPENCLAW_CHANNEL_LOGS_TIMEOUT_SECONDS", 8.0, minimum=3.0)
     res = _run_openclaw(
         oc_base=oc_base,
         args=[
@@ -939,12 +940,23 @@ def _fetch_channel_logs_tail(
             str(channel),
             "--lines",
             str(line_count),
+            "--json",
         ],
-        timeout_seconds=20.0,
+        timeout_seconds=timeout_seconds,
     )
     if not res.ok:
         return {"ok": False, "error": f"channels_logs_failed:rc={res.returncode}"}
-    raw = (res.stdout or "").splitlines()
+    raw: list[str] = []
+    try:
+        payload = _parse_json_best_effort(res.stdout)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        rows = payload.get("lines")
+        if isinstance(rows, list):
+            raw = [str(item) for item in rows]
+    if not raw:
+        raw = (res.stdout or "").splitlines()
     return {"ok": True, "lines": raw[-line_count:]}
 
 
@@ -1060,6 +1072,7 @@ def _gateway_health_and_heal(
     out["service_state"] = str(runtime.get("state") or "")
     out["gateway_port_status"] = str(port.get("status") or "")
     out["gateway_listener_pid"] = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else None
+    initial_rpc_failed = out["rpc_ok"] is False
 
     primary_issue = _detect_primary_channel_issue(channels_payload, primary_channel)
     out["primary_channel_issue"] = primary_issue
@@ -1236,6 +1249,31 @@ def _gateway_health_and_heal(
     elif should_restart and not apply:
         _append_unique(out["warnings"], "dry_run_restart_required")
 
+    if restart_ok and initial_rpc_failed:
+        _, gateway_after_restart = _run_openclaw_json(oc_base=oc_base, args=["gateway", "status"], timeout_seconds=20.0)
+        if isinstance(gateway_after_restart, dict):
+            rpc_after = gateway_after_restart.get("rpc") if isinstance(gateway_after_restart.get("rpc"), dict) else {}
+            service_after = (
+                gateway_after_restart.get("service") if isinstance(gateway_after_restart.get("service"), dict) else {}
+            )
+            runtime_after = service_after.get("runtime") if isinstance(service_after.get("runtime"), dict) else {}
+            port_after = gateway_after_restart.get("port") if isinstance(gateway_after_restart.get("port"), dict) else {}
+            listeners_after = port_after.get("listeners") if isinstance(port_after.get("listeners"), list) else []
+            listener_after = listeners_after[0] if listeners_after and isinstance(listeners_after[0], dict) else {}
+            out["rpc_ok"] = bool(rpc_after.get("ok"))
+            out["service_status"] = str(runtime_after.get("status") or out["service_status"] or "")
+            out["service_state"] = str(runtime_after.get("state") or out["service_state"] or "")
+            out["gateway_port_status"] = str(port_after.get("status") or out["gateway_port_status"] or "")
+            out["gateway_listener_pid"] = (
+                int(listener_after.get("pid")) if str(listener_after.get("pid") or "").isdigit() else None
+            )
+            if bool(out["rpc_ok"]):
+                _append_unique(out["actions"], "gateway_rpc_recovered_after_restart")
+            else:
+                _append_unique(out["warnings"], "gateway_rpc_still_unhealthy_after_restart")
+        else:
+            _append_unique(out["warnings"], "gateway_status_unavailable_after_restart")
+
     if primary_issue and restart_ok and out["primary_channel_status_after_restart"] is None:
         _status_res, channels_after_restart = _recheck_channels_status(
             oc_base=oc_base,
@@ -1383,6 +1421,9 @@ def _gateway_health_and_heal(
                 "run: openclaw channels login --channel whatsapp --account default --verbose"
             )
             _append_unique(out["manual_actions"], "run: openclaw channels logs --channel whatsapp --lines 200")
+    if out["rpc_ok"] is False:
+        _append_unique(out["errors"], "gateway_rpc_unhealthy")
+        _append_unique(out["manual_actions"], "run: openclaw gateway restart")
     return out
 
 
