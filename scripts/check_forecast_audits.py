@@ -260,6 +260,15 @@ def _counts_toward_readiness_denominator(
     )
 
 
+def _lift_threshold_rmse_ratio(min_lift_rmse_ratio: Optional[float]) -> Optional[float]:
+    if min_lift_rmse_ratio is None:
+        return None
+    try:
+        return 1.0 - float(min_lift_rmse_ratio)
+    except (TypeError, ValueError):
+        return None
+
+
 def _merge_summary_fields(summary: Dict[str, Any], summary_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(summary_fields, dict):
         return summary
@@ -795,6 +804,9 @@ def _emit_failure_summary_and_exit(
         "exit_code": int(exit_code),
         "exit_reason": str(message).strip() or "UNSPECIFIED_FAILURE",
         "max_files": int(max_files),
+        "measurement_contract_version": 1,
+        "baseline_model": None,
+        "lift_threshold_rmse_ratio": None,
         "effective_audits": None,
         "effective_outcome_audits": None,
         "total_unique_audits": window_counts.get("n_deduped_windows"),
@@ -1656,6 +1668,9 @@ def main() -> None:
             "p90": pct.get(0.9) if pct else None,
         }
         return {
+            "measurement_contract_version": 1,
+            "baseline_model": baseline_model,
+            "lift_threshold_rmse_ratio": _lift_threshold_rmse_ratio(min_lift_rmse_ratio),
             "effective_audits": effective_n,
             "effective_outcome_audits": None,
             "total_unique_audits": len(results),
@@ -2360,6 +2375,9 @@ def main() -> None:
         "source_script": "scripts/check_forecast_audits.py",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
         "max_files": int(args.max_files),
+        "measurement_contract_version": 1,
+        "baseline_model": baseline_model,
+        "lift_threshold_rmse_ratio": _lift_threshold_rmse_ratio(min_lift_rmse_ratio),
         "effective_audits": effective_n,
         "effective_outcome_audits": outcome_windows_matched,
         "total_unique_audits": len(results),

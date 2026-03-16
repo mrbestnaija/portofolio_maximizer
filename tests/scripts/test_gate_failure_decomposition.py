@@ -192,3 +192,41 @@ def test_gate_failure_decomposition_marks_summary_binding_mismatch(
     assert reason_breakdown["non_trade_context_top_reasons"][0]["reason_code"] == "UNATTRIBUTED_NON_TRADE_CONTEXT"
     assert reason_breakdown["non_trade_context_top_reasons"][0]["count"] == 33
     assert output_md.exists()
+
+
+def test_refresh_decomposition_report_regenerates_stale_latest_report(tmp_path: Path) -> None:
+    artifact = tmp_path / "production_gate_latest.json"
+    _write_gate_artifact(artifact)
+    summary_cache = tmp_path / "latest_summary.json"
+    _write_summary_cache(summary_cache)
+    output = tmp_path / "decomposition.json"
+    output_md = tmp_path / "decomposition.md"
+    output.write_text(
+        json.dumps(
+            {
+                "generated_utc": "2026-03-01T00:00:00+00:00",
+                "source_artifact": str(artifact.resolve()),
+                "source_timestamp_utc": "2026-03-01T00:00:00Z",
+                "phase3_ready": True,
+                "phase3_reason": "STALE",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.gate_failure_decomposition as mod
+
+    report, refresh = mod.refresh_decomposition_report(
+        artifact_path=artifact,
+        output_json_path=output,
+        summary_cache_path=summary_cache,
+        output_md_path=output_md,
+        force=False,
+    )
+
+    assert refresh["ok"] is True
+    assert refresh["refreshed"] is True
+    assert refresh["reason"] == "source_timestamp_mismatch"
+    assert report["source_timestamp_utc"] == "2026-03-09T21:31:07Z"
+    assert report["source_artifact_mtime_utc"]
+    assert output_md.exists()

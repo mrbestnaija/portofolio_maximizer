@@ -17,6 +17,12 @@ except Exception:
     _threshold_map = None
 
 
+DEFAULT_GATE_ARTIFACT = Path("logs") / "audit_gate" / "production_gate_latest.json"
+DEFAULT_OUT_JSON = Path("logs") / "audit_gate" / "production_gate_decomposition_latest.json"
+DEFAULT_OUT_MD = Path("logs") / "audit_gate" / "production_gate_decomposition_latest.md"
+DEFAULT_SUMMARY_CACHE = Path("logs") / "forecast_audits_cache" / "latest_summary.json"
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -50,6 +56,15 @@ def _load_json(path: Path) -> Dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _artifact_mtime_utc(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
 
 
 def _metric(value: Any, threshold: str, passed: bool) -> Dict[str, Any]:
@@ -445,6 +460,7 @@ def _build_decomposition(
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "source_artifact": str(artifact_path.resolve()),
         "source_timestamp_utc": payload.get("timestamp_utc"),
+        "source_artifact_mtime_utc": _artifact_mtime_utc(artifact_path),
         "phase3_ready": _safe_bool(payload.get("phase3_ready"), default=False),
         "phase3_reason": payload.get("phase3_reason"),
         "components": components,
@@ -452,6 +468,96 @@ def _build_decomposition(
         "visualization": visualization,
         "table": table_rows,
     }
+
+
+def _report_is_stale(
+    *,
+    report: Dict[str, Any] | None,
+    artifact_path: Path,
+    gate_payload: Dict[str, Any],
+    output_md_path: Path | None,
+) -> tuple[bool, str]:
+    if not isinstance(report, dict) or not report:
+        return True, "missing_report"
+
+    expected_source = str(artifact_path.resolve())
+    if str(report.get("source_artifact") or "").strip() != expected_source:
+        return True, "source_artifact_mismatch"
+
+    gate_timestamp = str(gate_payload.get("timestamp_utc") or "").strip()
+    report_timestamp = str(report.get("source_timestamp_utc") or "").strip()
+    if gate_timestamp and report_timestamp != gate_timestamp:
+        return True, "source_timestamp_mismatch"
+
+    gate_mtime = _artifact_mtime_utc(artifact_path)
+    report_source_mtime = str(report.get("source_artifact_mtime_utc") or "").strip()
+    if gate_mtime and report_source_mtime and report_source_mtime != gate_mtime:
+        return True, "source_mtime_mismatch"
+
+    generated_at = str(report.get("generated_utc") or "").strip()
+    if not generated_at:
+        return True, "missing_generated_utc"
+
+    if output_md_path is not None and not output_md_path.exists():
+        return True, "missing_markdown"
+
+    return False, "up_to_date"
+
+
+def refresh_decomposition_report(
+    *,
+    artifact_path: Path,
+    output_json_path: Path,
+    summary_cache_path: Path | None = None,
+    output_md_path: Path | None = None,
+    force: bool = False,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    payload = _load_json(artifact_path)
+    if payload is None:
+        raise ValueError(f"unable_to_load_gate_artifact: {artifact_path}")
+
+    existing_report = _load_json(output_json_path) if output_json_path.exists() else None
+    stale, reason = _report_is_stale(
+        report=existing_report,
+        artifact_path=artifact_path,
+        gate_payload=payload,
+        output_md_path=output_md_path,
+    )
+    refresh_reason = "forced" if force else reason
+    should_refresh = bool(force or stale)
+
+    if should_refresh:
+        summary_payload = (
+            _load_json(summary_cache_path)
+            if isinstance(summary_cache_path, Path) and summary_cache_path.exists()
+            else None
+        )
+        report = _build_decomposition(
+            payload,
+            artifact_path=artifact_path,
+            summary_payload=summary_payload,
+        )
+        output_json_path.parent.mkdir(parents=True, exist_ok=True)
+        output_json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        if isinstance(output_md_path, Path):
+            output_md_path.parent.mkdir(parents=True, exist_ok=True)
+            output_md_path.write_text(_render_markdown(report), encoding="utf-8")
+    else:
+        report = existing_report or {}
+        if isinstance(output_md_path, Path) and not output_md_path.exists():
+            output_md_path.parent.mkdir(parents=True, exist_ok=True)
+            output_md_path.write_text(_render_markdown(report), encoding="utf-8")
+
+    refresh_result = {
+        "ok": True,
+        "refreshed": should_refresh,
+        "reason": refresh_reason,
+        "artifact_path": str(artifact_path.resolve()),
+        "output_json_path": str(output_json_path.resolve()),
+        "output_md_path": str(output_md_path.resolve()) if isinstance(output_md_path, Path) else "",
+        "summary_cache_path": str(summary_cache_path.resolve()) if isinstance(summary_cache_path, Path) else "",
+    }
+    return report, refresh_result
 
 
 def _render_markdown(report: Dict[str, Any]) -> str:
@@ -569,45 +675,45 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Decompose production gate failures by blocker type.")
     parser.add_argument(
         "--gate-artifact",
-        default=str(Path("logs") / "audit_gate" / "production_gate_latest.json"),
+        default=str(DEFAULT_GATE_ARTIFACT),
         help="Path to production gate artifact JSON.",
     )
     parser.add_argument(
         "--out-json",
-        default=str(Path("logs") / "audit_gate" / "production_gate_decomposition_latest.json"),
+        default=str(DEFAULT_OUT_JSON),
         help="Output path for decomposition JSON.",
     )
     parser.add_argument(
         "--summary-cache",
-        default=str(Path("logs") / "forecast_audits_cache" / "latest_summary.json"),
+        default=str(DEFAULT_SUMMARY_CACHE),
         help="Optional summary cache path for reason-code decomposition.",
     )
     parser.add_argument(
         "--out-md",
-        default=str(Path("logs") / "audit_gate" / "production_gate_decomposition_latest.md"),
+        default=str(DEFAULT_OUT_MD),
         help="Output path for markdown report with waterfall visualization.",
     )
     args = parser.parse_args()
 
     artifact_path = Path(args.gate_artifact)
-    payload = _load_json(artifact_path)
-    if payload is None:
+    if _load_json(artifact_path) is None:
         print(f"[ERROR] unable_to_load_gate_artifact: {artifact_path}", file=sys.stderr)
         return 1
 
-    summary_path = Path(args.summary_cache)
-    summary_payload = _load_json(summary_path) if summary_path.exists() else None
-    report = _build_decomposition(
-        payload,
-        artifact_path=artifact_path,
-        summary_payload=summary_payload,
-    )
     out_path = Path(args.out_json)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     md_path = Path(args.out_md)
-    md_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.write_text(_render_markdown(report), encoding="utf-8")
+    summary_path = Path(args.summary_cache)
+    try:
+        report, _ = refresh_decomposition_report(
+            artifact_path=artifact_path,
+            output_json_path=out_path,
+            summary_cache_path=summary_path,
+            output_md_path=md_path,
+            force=True,
+        )
+    except ValueError:
+        print(f"[ERROR] unable_to_load_gate_artifact: {artifact_path}", file=sys.stderr)
+        return 1
 
     _print_report(report)
     print(f"Output JSON     : {out_path}")

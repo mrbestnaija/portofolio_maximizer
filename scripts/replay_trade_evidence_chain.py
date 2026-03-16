@@ -27,6 +27,7 @@ from utils.evidence_io import atomic_write_json, build_manifest_entry, quarantin
 SCENARIOS = {
     "happy_path",
     "missing_entry_link",
+    "blocked_by_net_edge",
     "invalid_context",
     "missing_metadata",
     "duplicate_conflict",
@@ -51,6 +52,7 @@ def _base_payload(*, audit_id: str) -> Dict[str, Any]:
             "run_id": "replay_20260314",
             "entry_ts": "2026-03-14T09:30:00+00:00",
             "forecast_horizon": 5,
+            "evidence_source_classification": "producer-native",
         },
         "lineage_v2": {
             "run_id": "replay_20260314",
@@ -80,7 +82,22 @@ def _base_payload(*, audit_id: str) -> Dict[str, Any]:
             "duplicate_conflict": False,
             "missing_execution_metadata": False,
             "missing_execution_metadata_fields": [],
+            "execution_policy_blocked": False,
+            "evidence_source_classification": "producer-native",
             "manifest_registered": None,
+        },
+        "execution_decision": {
+            "status": "EXECUTED",
+            "reason": None,
+            "executed": True,
+            "execution_policy_blocked": False,
+            "admission_override_reason_code": None,
+            "admission_override_reason_codes": [],
+            "expected_return": 0.04,
+            "net_trade_return": 0.03,
+            "roundtrip_cost_fraction": 0.01,
+            "signal_to_noise": 1.8,
+            "source_classification": "producer-native",
         },
     }
 
@@ -92,6 +109,9 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
         payload["lineage_v2"]["event_type"] = "TRADE_CLOSE"
         payload["lineage_v2"]["entry_trade_id"] = None
         payload["lineage_v2"]["close_trade_id"] = 202
+        payload["execution_decision"]["status"] = "REJECTED"
+        payload["execution_decision"]["reason"] = "Missing entry_trade_id"
+        payload["execution_decision"]["executed"] = False
         payload["semantic_admission"].update(
             {
                 "admissible_for_readiness": False,
@@ -99,6 +119,45 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
                 "gate_bucket": "ACCEPTED_NONELIGIBLE",
                 "reason_code": "MISSING_ENTRY_TRADE_ID",
                 "reason_codes": ["MISSING_ENTRY_TRADE_ID"],
+            }
+        )
+    elif scenario == "blocked_by_net_edge":
+        payload["execution_decision"].update(
+            {
+                "status": "REJECTED",
+                "reason": "Net expected return did not clear roundtrip cost gate.",
+                "executed": False,
+                "execution_policy_blocked": True,
+                "admission_override_reason_code": "NON_POSITIVE_NET_EDGE",
+                "admission_override_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+                "expected_return": 0.0015,
+                "net_trade_return": -0.0008,
+                "roundtrip_cost_fraction": 0.0023,
+                "signal_to_noise": 0.4,
+            }
+        )
+        payload["signal_context"].update(
+            {
+                "decision_status": "REJECTED",
+                "decision_reason": "Net expected return did not clear roundtrip cost gate.",
+                "executed": False,
+                "execution_policy_blocked": True,
+                "admission_override_reason_code": "NON_POSITIVE_NET_EDGE",
+                "admission_override_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+                "expected_return": 0.0015,
+                "net_trade_return": -0.0008,
+                "roundtrip_cost_fraction": 0.0023,
+                "signal_to_noise": 0.4,
+            }
+        )
+        payload["semantic_admission"].update(
+            {
+                "admissible_for_readiness": False,
+                "gate_eligible": False,
+                "gate_bucket": "ACCEPTED_NONELIGIBLE",
+                "reason_code": "NON_POSITIVE_NET_EDGE",
+                "reason_codes": ["NON_POSITIVE_NET_EDGE"],
+                "execution_policy_blocked": True,
             }
         )
     elif scenario == "invalid_context":
@@ -142,10 +201,14 @@ def _prepare_payload(scenario: str) -> Dict[str, Any]:
 
 def _validate_payload(payload: Dict[str, Any]) -> tuple[bool, str]:
     semantic = payload.get("semantic_admission") if isinstance(payload.get("semantic_admission"), dict) else {}
+    gate_bucket = str(semantic.get("gate_bucket") or "").strip().upper()
+    reason_code = str(semantic.get("reason_code") or "READY")
     if str(payload.get("event_type") or "").upper() == "TRADE_CLOSE" and not payload.get("lineage_v2", {}).get("entry_trade_id"):
-        return False, "MISSING_ENTRY_TRADE_ID"
-    if not bool(semantic.get("gate_eligible")):
-        return False, str(semantic.get("reason_code") or "GATE_INELIGIBLE")
+        return gate_bucket != "QUARANTINED", "MISSING_ENTRY_TRADE_ID"
+    if gate_bucket == "QUARANTINED" or bool(semantic.get("quarantined")):
+        return False, reason_code or "QUARANTINED"
+    if bool(semantic.get("accepted_for_audit_history", True)):
+        return True, reason_code
     return True, "READY"
 
 
@@ -243,7 +306,7 @@ def run_replay(*, output_dir: Path, scenario: str) -> Dict[str, Any]:
     return {
         "scenario": scenario,
         "status": "PASS",
-        "reason_code": "READY",
+        "reason_code": str((payload.get("semantic_admission") or {}).get("reason_code") or "READY"),
         "latest_exists": latest_path.exists(),
         "quarantine_count": len(list(quarantine_dir.glob("*.json"))),
     }

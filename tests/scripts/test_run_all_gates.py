@@ -118,12 +118,20 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
                 "warmup_expired": True,
                 "phase3_ready": False,
                 "phase3_reason": "THIN_LINKAGE",
-                "production_profitability_gate": {"gate_semantics_status": "INCONCLUSIVE_BLOCKED"},
+                "lift_gate": {"status": "INCONCLUSIVE", "pass": False, "gate_semantics_status": "INCONCLUSIVE_BLOCKED"},
+                "profitability_proof": {"status": "PASS", "pass": True},
+                "production_profitability_gate": {
+                    "status": "INCONCLUSIVE_BLOCKED",
+                    "pass": False,
+                    "gate_semantics_status": "INCONCLUSIVE_BLOCKED",
+                },
                 "readiness": {
                     "gates_pass": False,
                     "linkage_pass": False,
                     "evidence_hygiene_pass": True,
                     "integrity_pass": True,
+                    "phase3_ready": False,
+                    "phase3_reason": "THIN_LINKAGE",
                 },
             }
         ),
@@ -190,3 +198,83 @@ def test_run_all_gates_writes_current_run_artifact_before_institutional_gate(
     assert seen_overall_before_institutional == [False], (
         "Institutional gate must observe current-run status artifact, not stale prior-run PASS."
     )
+
+
+def test_production_gate_schema_missing_forces_fail(monkeypatch, capsys, tmp_path) -> None:
+    import scripts.run_all_gates as mod
+
+    artifact = tmp_path / "logs" / "audit_gate" / "production_gate_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps({"phase3_ready": True}), encoding="utf-8")
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", artifact)
+
+    with monkeypatch.context() as m:
+        m.setattr(mod.sys, "argv", ["run_all_gates.py", "--json"])
+        with pytest.raises(SystemExit) as exc:
+            mod.main()
+
+    assert exc.value.code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["overall_passed"] is False
+    assert summary["production_gate_schema_ok"] is False
+    assert any("readiness" in w for w in summary["production_gate_schema_warnings"])
+
+
+def test_skipped_gate_labels_populated(monkeypatch, capsys, tmp_path) -> None:
+    import scripts.run_all_gates as mod
+
+    artifact = tmp_path / "logs" / "audit_gate" / "production_gate_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "pass_semantics_version": 3,
+                "lift_inconclusive_allowed": False,
+                "proof_profitable_required": True,
+                "warmup_expired": True,
+                "phase3_ready": True,
+                "phase3_reason": "READY",
+                "lift_gate": {},
+                "profitability_proof": {},
+                "production_profitability_gate": {"status": "PASS", "pass": True, "gate_semantics_status": "PASS"},
+                "readiness": {
+                    "gates_pass": True,
+                    "linkage_pass": True,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                    "phase3_ready": True,
+                    "phase3_reason": "READY",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", artifact)
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            mod.sys,
+            "argv",
+            ["run_all_gates.py", "--json", "--skip-forecast-gate", "--skip-institutional-gate"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            mod.main()
+
+    # Two optional skips exceed MAX_SKIPPED_OPTIONAL_GATES, so overall must FAIL.
+    assert exc.value.code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["skipped_optional_gates"] == 2
+    assert set(summary["skipped_gate_labels"]) == {
+        "check_quant_validation_health",
+        "institutional_unattended_gate",
+    }

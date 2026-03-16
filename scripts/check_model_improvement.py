@@ -78,6 +78,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
     1: {
+        "baseline_model",
+        "lift_threshold_rmse_ratio",
         "lift_fraction_global",
         "lift_fraction_recent",
         "samossa_da_zero_pct",
@@ -118,6 +120,19 @@ def _empty_metrics(layer: int, **overrides) -> dict:
     return base
 
 
+def _json_safe(value):  # type: ignore[no-untyped-def]
+    """Recursively normalize non-finite floats so JSON output stays standards-compliant."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -> Path:
     """Resolve Layer 1's audit universe from active production/cohort state."""
     if explicit_audit_dir is not None:
@@ -142,6 +157,30 @@ def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -
         return production_dir
 
     return REPO_ROOT / "logs" / "forecast_audits"
+
+
+def _load_layer1_regression_contract() -> tuple[str, float]:
+    baseline_model = "BEST_SINGLE"
+    min_lift_rmse_ratio = 0.0
+    try:
+        import yaml as _yaml_layer1_contract
+
+        monitor_cfg_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if monitor_cfg_path.exists():
+            monitor_cfg = _yaml_layer1_contract.safe_load(
+                monitor_cfg_path.read_text(encoding="utf-8")
+            ) or {}
+            regression_cfg = monitor_cfg.get("forecaster_monitoring", {}).get(
+                "regression_metrics",
+                {},
+            )
+            baseline_model = str(
+                regression_cfg.get("baseline_model", baseline_model) or baseline_model
+            ).strip().upper() or "BEST_SINGLE"
+            min_lift_rmse_ratio = float(regression_cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+    except Exception:
+        pass
+    return baseline_model, 1.0 - min_lift_rmse_ratio
 
 
 # ---------------------------------------------------------------------------
@@ -251,22 +290,27 @@ def run_layer1_forecast_quality(
         "coverage_ratio": coverage_ratio,
     }
 
+    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
+
     if n_used == 0:
         return LayerResult(
             layer=1,
             name="Forecast Quality",
             status="SKIP",
-            metrics={
+            metrics=_empty_metrics(
+                1,
                 **quality,
-                "lift_fraction_global": 0.0,
-                "lift_fraction_recent": 0.0,
-                "samossa_da_zero_pct": 0.0,
-                "lift_mean": float("nan"),
-                "lift_ci_low": float("nan"),
-                "lift_ci_high": float("nan"),
-                "lift_win_fraction": 0.0,
-                "lift_ci_insufficient_data": True,
-            },
+                baseline_model=baseline_model,
+                lift_threshold_rmse_ratio=lift_threshold_rmse_ratio,
+                lift_fraction_global=0.0,
+                lift_fraction_recent=0.0,
+                samossa_da_zero_pct=0.0,
+                lift_mean=None,
+                lift_ci_low=None,
+                lift_ci_high=None,
+                lift_win_fraction=0.0,
+                lift_ci_insufficient_data=True,
+            ),
             summary=(
                 f"SKIP -- 0 usable windows "
                 f"(total={n_total}, malformed={n_malformed}, missing_metrics={n_missing})"
@@ -289,20 +333,7 @@ def run_layer1_forecast_quality(
 
     # WIRE-01 fix: read min_lift_rmse_ratio from forecaster_monitoring.yml so Layer 1 lift
     # computation is aligned with check_forecast_audits.py (which also uses this value).
-    _min_lift_rmse_ratio = 0.0
-    try:
-        import yaml as _yaml_wire01
-        _fm_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
-        if _fm_path.exists():
-            _fm_cfg = _yaml_wire01.safe_load(_fm_path.read_text(encoding="utf-8")) or {}
-            _min_lift_rmse_ratio = float(
-                _fm_cfg.get("forecaster_monitoring", {})
-                .get("regression_metrics", {})
-                .get("min_lift_rmse_ratio", 0.0)
-            )
-    except Exception:
-        pass
-    _lift_threshold = 1.0 - _min_lift_rmse_ratio  # 1.0 when min_lift_rmse_ratio=0.0 (default)
+    _lift_threshold = lift_threshold_rmse_ratio
 
     # Lift fractions
     def _lift_frac(ws: list[dict]) -> float:
@@ -330,6 +361,8 @@ def run_layer1_forecast_quality(
 
     metrics = {
         **quality,
+        "baseline_model": baseline_model,
+        "lift_threshold_rmse_ratio": lift_threshold_rmse_ratio,
         "lift_fraction_global": lift_global,
         "lift_fraction_recent": lift_recent,
         "samossa_da_zero_pct": samossa_da_zero_pct,
@@ -397,7 +430,8 @@ def run_layer1_forecast_quality(
 
     reason_str = " | " + "; ".join(reasons) if reasons else ""
     summary = (
-        f"{status} | lift_global={lift_global:.3f} lift_recent={lift_recent:.3f} "
+        f"{status} | baseline={baseline_model} lift_threshold={lift_threshold_rmse_ratio:.3f} "
+        f"lift_global={lift_global:.3f} lift_recent={lift_recent:.3f} "
         f"samossa_da_zero={samossa_da_zero_pct:.1%} n_used={n_used}{reason_str}"
     )
     return LayerResult(layer=1, name="Forecast Quality", status=status, metrics=metrics, summary=summary)
@@ -759,13 +793,16 @@ def save_baseline(results: list[LayerResult], path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "timestamp_utc": datetime.datetime.utcnow().isoformat(),
+        "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat(),
         "results": [
             {"layer": r.layer, "name": r.name, "status": r.status, "metrics": r.metrics}
             for r in results
         ],
     }
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    path.write_text(
+        json.dumps(_json_safe(payload), indent=2, default=str, allow_nan=False),
+        encoding="utf-8",
+    )
     log.info("Baseline saved to %s", path)
 
 
@@ -950,12 +987,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.json_output:
         output = {
-            "timestamp_utc": datetime.datetime.utcnow().isoformat(),
+            "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat(),
             "results": [asdict(r) for r in results],
         }
         if args.baseline:
             output["comparison"] = compare_baseline(results, Path(args.baseline))
-        print(json.dumps(output, indent=2, default=str))
+        print(json.dumps(_json_safe(output), indent=2, default=str, allow_nan=False))
     else:
         print_summary_table(results)
         if args.baseline:

@@ -31,6 +31,7 @@ from scripts.run_auto_trader import (  # noqa: E402
     _attach_signal_context_to_forecast_audit,
     _build_cohort_identity,
     _build_semantic_admission,
+    _execute_signal,
 )
 
 
@@ -263,6 +264,7 @@ class TestSemanticAdmission:
         assert "MISSING_EXPECTED_CLOSE_TS" in admission["reason_codes"]
         assert admission["quarantined"] is False
         assert admission["missing_execution_metadata"] is False
+        assert admission["evidence_source_classification"] == "producer-native"
 
     def test_missing_execution_metadata_is_written_by_producer(self, tmp_path: Path) -> None:
         audit_file = tmp_path / "production" / "forecast_audit_20260309_000001_semantic.json"
@@ -291,6 +293,122 @@ class TestSemanticAdmission:
         assert admission["missing_execution_metadata"] is True
         assert admission["missing_execution_metadata_fields"] == ["run_id", "entry_ts"]
         assert admission["reason_codes"][:2] == ["MISSING_RUN_ID", "MISSING_ENTRY_TS"]
+
+    def test_execution_policy_block_is_not_gate_eligible(self, tmp_path: Path) -> None:
+        audit_file = tmp_path / "production" / "forecast_audit_20260309_000002_semantic.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(_make_audit_payload()), encoding="utf-8")
+
+        cohort_identity = _build_cohort_identity(audit_file)
+        admission = _build_semantic_admission(
+            audit_path=audit_file,
+            signal_context={
+                "context_type": "TRADE",
+                "event_type": "TRADE_FORECAST_AUDIT",
+                "ts_signal_id": "ts_AAPL_20260101_0003",
+                "ticker": "AAPL",
+                "run_id": "20260101_000000",
+                "entry_ts": "2026-01-01T00:00:00+00:00",
+                "expected_close_ts": "2026-01-31T00:00:00+00:00",
+                "forecast_horizon": 30,
+                "execution_policy_blocked": True,
+                "admission_override_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+            },
+            audit_id="audit_3",
+            cohort_identity=cohort_identity,
+        )
+
+        assert admission["gate_eligible"] is False
+        assert admission["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+        assert admission["execution_policy_blocked"] is True
+        assert admission["reason_code"] == "NON_POSITIVE_NET_EDGE"
+        assert admission["reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
+
+    def test_attach_signal_context_persists_execution_policy_block_decision(self, tmp_path: Path) -> None:
+        audit_file = tmp_path / "production" / "forecast_audit_20260310_000000_execgate.json"
+        audit_file.parent.mkdir(parents=True, exist_ok=True)
+        audit_file.write_text(json.dumps(_make_audit_payload()), encoding="utf-8")
+
+        forecast_bundle: Dict[str, Any] = {
+            "horizon": 30,
+            "forecast_audit_path": str(audit_file),
+        }
+        execution_report = {
+            "ts_signal_id": "ts_AAPL_20260101_0004",
+            "signal_timestamp": "2026-01-01T00:00:00+00:00",
+            "status": "REJECTED",
+            "reason": "Net expected return did not clear roundtrip cost gate.",
+            "executed": False,
+            "action": "BUY",
+            "execution_policy_blocked": True,
+            "admission_override_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+            "expected_return": 0.0015,
+            "net_trade_return": -0.0008,
+            "roundtrip_cost_fraction": 0.0023,
+            "signal_to_noise": 0.4,
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle=forecast_bundle,
+                execution_report=execution_report,
+                ticker="AAPL",
+                run_id="20260101_000000",
+            )
+
+        result = json.loads(audit_file.read_text())
+        sc = result["signal_context"]
+        assert sc["execution_policy_blocked"] is True
+        assert sc["admission_override_reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
+        assert result["execution_decision"]["status"] == "REJECTED"
+        assert result["execution_decision"]["source_classification"] == "producer-native"
+        assert result["semantic_admission"]["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+        assert result["semantic_admission"]["reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
+
+
+def test_execute_signal_returns_auditable_preorder_block(monkeypatch) -> None:
+    class _Bundle:
+        def __init__(self) -> None:
+            self.primary_signal = {
+                "signal_id": "sig-1",
+                "ts_signal_id": "sig-1",
+                "action": "BUY",
+                "confidence": 0.82,
+                "expected_return": 0.0015,
+                "net_trade_return": -0.0008,
+                "roundtrip_cost_fraction": 0.0023,
+                "signal_to_noise": 0.4,
+                "execution_policy_blocked": True,
+                "execution_policy_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+                "execution_policy_detail": "Net expected return did not clear roundtrip cost gate.",
+                "source": "TIME_SERIES",
+            }
+
+    router = MagicMock()
+    router.route_signal.return_value = _Bundle()
+    trading_engine = MagicMock()
+    market_data = MagicMock()
+
+    result = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=market_data,
+        quality={"quality_score": 0.9},
+        data_source="yfinance",
+        mid_price=100.0,
+        run_id="run_1",
+    )
+
+    trading_engine.execute_signal.assert_not_called()
+    assert result is not None
+    assert result["status"] == "REJECTED"
+    assert result["executed"] is False
+    assert result["execution_policy_blocked"] is True
+    assert result["admission_override_reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
+    assert result["evidence_source_classification"] == "producer-native"
 
 
 # ---------------------------------------------------------------------------

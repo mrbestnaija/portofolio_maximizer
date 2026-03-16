@@ -29,6 +29,28 @@ def test_replay_trade_evidence_chain_duplicate_conflict_quarantines_conflict(tmp
     assert latest["semantic_admission"]["reason_code"] == "READY"
 
 
+def test_replay_trade_evidence_chain_missing_entry_link_is_preserved_noneligible(tmp_path: Path) -> None:
+    summary = mod.run_replay(output_dir=tmp_path, scenario="missing_entry_link")
+
+    assert summary["status"] == "PASS"
+    assert summary["reason_code"] == "MISSING_ENTRY_TRADE_ID"
+    latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest["semantic_admission"]["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+    assert latest["semantic_admission"]["gate_eligible"] is False
+
+
+def test_replay_trade_evidence_chain_blocked_by_net_edge_is_preserved_noneligible(tmp_path: Path) -> None:
+    summary = mod.run_replay(output_dir=tmp_path, scenario="blocked_by_net_edge")
+
+    assert summary["status"] == "PASS"
+    assert summary["reason_code"] == "NON_POSITIVE_NET_EDGE"
+    latest = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert latest["semantic_admission"]["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
+    assert latest["semantic_admission"]["reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
+    assert latest["execution_decision"]["execution_policy_blocked"] is True
+    assert latest["execution_decision"]["source_classification"] == "producer-native"
+
+
 def test_replay_trade_evidence_chain_manifest_failure_never_promotes_latest(tmp_path: Path) -> None:
     summary = mod.run_replay(output_dir=tmp_path, scenario="manifest_registration_failure")
 

@@ -441,6 +441,9 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     assert summary["window_counts"]["n_admission_missing_execution_metadata_records"] == 2
     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
+    assert summary["measurement_contract_version"] == 1
+    assert summary["baseline_model"] == "BEST_SINGLE"
+    assert summary["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
     assert summary["admission_summary"]["missing_execution_metadata_records"] == 2
     assert summary["telemetry_contract"]["schema_version"] == 3
     assert summary["telemetry_contract"]["outcomes_loaded"] is False
@@ -1621,6 +1624,9 @@ def test_check_forecast_audits_failure_summary_retains_rmse_and_lift_metrics(
     assert summary["violation_count"] == 1
     assert summary["violation_rate"] == pytest.approx(1.0)
     assert summary["lift_fraction"] == pytest.approx(0.0)
+    assert summary["measurement_contract_version"] == 1
+    assert summary["baseline_model"] == "BEST_SINGLE"
+    assert summary["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
     assert summary["window_counts"]["n_rmse_windows_processed"] == 1
     assert summary["window_counts"]["n_rmse_windows_usable"] == 1
 

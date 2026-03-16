@@ -13,6 +13,9 @@ def _make_lift_summary(audit_dir: Path, **overrides) -> dict:
         "generated_utc": "2026-03-15T12:00:00+00:00",
         "audit_dir": str(audit_dir),
         "max_files": 500,
+        "measurement_contract_version": 1,
+        "baseline_model": "BEST_SINGLE",
+        "lift_threshold_rmse_ratio": 1.0,
         "scope": {"include_research": False, "production_audit_only": False},
         "effective_audits": 20,
         "violation_rate": 0.0,
@@ -39,6 +42,9 @@ def _make_lift_summary(audit_dir: Path, **overrides) -> dict:
             },
         },
         "window_counts": {
+            "n_rmse_windows_processed": 20,
+            "n_rmse_windows_usable": 20,
+            "n_outcome_windows_not_due": 2,
             "n_outcome_windows_eligible": 12,
             "n_outcome_windows_matched": 10,
             "n_outcome_windows_invalid_context": 0,
@@ -60,43 +66,6 @@ def _make_lift_summary(audit_dir: Path, **overrides) -> dict:
         overrides["window_counts"] = merged_counts
     base.update(overrides)
     return base
-
-
-def test_extract_lift_output_metrics_inconclusive() -> None:
-    import scripts.production_audit_gate as mod
-
-    output = "\n".join(
-        [
-            "Effective audits with RMSE: 7",
-            "Violations (ensemble worse than baseline beyond tolerance): 2",
-            "Violation rate: 28.57% (max allowed 35.00%)",
-            "RMSE gate inconclusive: effective_audits=7 < required_audits=20.",
-        ]
-    )
-    metrics = mod._extract_lift_output_metrics(output)
-    assert metrics["effective_audits"] == 7
-    assert metrics["violation_count"] == 2
-    assert metrics["violation_rate"] == pytest.approx(0.2857, abs=1e-6)
-    assert metrics["max_violation_rate"] == pytest.approx(0.35, abs=1e-6)
-    assert metrics["decision"] is None
-    assert metrics["decision_reason"] is None
-
-
-def test_extract_lift_output_metrics_decision_and_lift_fraction() -> None:
-    import scripts.production_audit_gate as mod
-
-    output = "\n".join(
-        [
-            "Ensemble lift fraction: 28.57% (required >= 25.00%)",
-            "Decision: KEEP (lift demonstrated during holding period)",
-        ]
-    )
-    metrics = mod._extract_lift_output_metrics(output)
-    assert metrics["lift_fraction"] == pytest.approx(0.2857, abs=1e-6)
-    assert metrics["min_lift_fraction"] == pytest.approx(0.25, abs=1e-6)
-    assert metrics["decision"] == "KEEP"
-    assert metrics["decision_reason"] == "lift demonstrated during holding period"
-
 
 def test_collect_thresholds_uses_configs() -> None:
     import scripts.production_audit_gate as mod
@@ -211,6 +180,31 @@ def test_summary_matches_invocation_include_research_mismatch() -> None:
     )
 
 
+def test_missing_summary_metric_keys_requires_measurement_contract_and_nested_counts() -> None:
+    import scripts.production_audit_gate as mod
+
+    missing = mod._missing_summary_metric_keys(
+        {
+            "effective_audits": 20,
+            "violation_rate": 0.0,
+            "max_violation_rate": 0.35,
+            "lift_fraction": 0.30,
+            "min_lift_fraction": 0.25,
+            "decision": "KEEP",
+            "decision_reason": "ok",
+            "window_counts": {
+                "n_rmse_windows_processed": 20,
+            },
+        }
+    )
+    assert "measurement_contract_version" in missing
+    assert "baseline_model" in missing
+    assert "lift_threshold_rmse_ratio" in missing
+    assert "window_counts.n_rmse_windows_usable" in missing
+    assert "window_counts.n_outcome_windows_not_due" in missing
+    assert "window_counts.n_readiness_denominator_included" in missing
+
+
 def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
     import scripts.production_audit_gate as mod
 
@@ -288,7 +282,19 @@ def test_main_prefers_structured_summary_over_stdout_metrics(
     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
     monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_load_latest_live_cycle_binding",
+        lambda _db_path: {
+            "available": False,
+            "latest_live_cycle_ts_utc": None,
+            "latest_live_run_id": None,
+            "latest_live_trade_id": None,
+            "query_error": "test_stubbed",
+        },
+    )
     monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
+    monkeypatch.setattr(mod, "_count_masked_unlinked_closes", lambda _db_path: (0, []))
     monkeypatch.setattr(
         mod,
         "_compute_lifecycle_integrity",
@@ -324,6 +330,105 @@ def test_main_prefers_structured_summary_over_stdout_metrics(
     payload = original_safe_load_json(output_json)
     assert payload["lift_gate"]["effective_audits"] == 20
     assert payload["lift_gate"]["lift_fraction"] == pytest.approx(0.30)
+    assert payload["lift_gate"]["baseline_model"] == "BEST_SINGLE"
+    assert payload["lift_gate"]["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
+    assert payload["lift_gate"]["rmse_windows_usable"] == 20
+    assert payload["lift_gate"]["outcome_windows_not_due"] == 2
+
+
+def test_main_fails_closed_when_structured_summary_missing_contract_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "Effective audits with RMSE: 99",
+                        "Violation rate: 0.00% (max allowed 35.00%)",
+                        "Ensemble lift fraction: 99.00% (required >= 25.00%)",
+                        "Decision: KEEP (stdout should not be trusted)",
+                    ]
+                ),
+                stderr="",
+            )
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 100.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    original_safe_load_json = mod._safe_load_json
+
+    def _fake_safe_load_json(path: Path):  # noqa: ANN001
+        if Path(path).name == "latest_summary.json":
+            summary = _make_lift_summary(audit_dir)
+            summary.pop("baseline_model", None)
+            summary["window_counts"].pop("n_rmse_windows_usable", None)
+            return summary
+        return original_safe_load_json(path)
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _db_path: {
+            "close_before_entry_count": 0,
+            "closed_missing_exit_reason_count": 0,
+            "query_error": None,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 1
+    payload = original_safe_load_json(output_json)
+    assert payload["lift_gate"]["summary_metrics_error"] == "SUMMARY_METRICS_MISSING"
+    assert "baseline_model" in payload["lift_gate"]["missing_summary_metric_keys"]
+    assert "window_counts.n_rmse_windows_usable" in payload["lift_gate"]["missing_summary_metric_keys"]
+    assert payload["lift_gate"]["decision"] is None
+    assert payload["lift_gate"]["pass"] is False
 
 
 def test_main_preserves_admission_summary_from_structured_summary(

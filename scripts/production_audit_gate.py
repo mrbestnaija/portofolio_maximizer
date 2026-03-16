@@ -1011,59 +1011,11 @@ def _binding_safe_lift_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     return {k: summary.get(k) for k in keep if k in summary}
 
 
-def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
-    text = output or ""
-
-    def _capture_int(pattern: str) -> Optional[int]:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            return None
-        try:
-            return int(match.group(1))
-        except Exception:
-            return None
-
-    def _capture_ratio(pattern: str) -> Optional[float]:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if not match:
-            return None
-        try:
-            return float(match.group(1)) / 100.0
-        except Exception:
-            return None
-
-    metrics: Dict[str, Any] = {}
-    metrics["effective_audits"] = _capture_int(r"Effective audits with RMSE:\s*(\d+)")
-    metrics["violation_count"] = _capture_int(
-        r"Violations \(ensemble worse than baseline beyond tolerance\):\s*(\d+)"
-    )
-    metrics["violation_rate"] = _capture_ratio(
-        r"Violation rate:\s*([0-9]+(?:\.[0-9]+)?)%\s*\(max allowed"
-    )
-    metrics["max_violation_rate"] = _capture_ratio(
-        r"Violation rate:\s*[0-9]+(?:\.[0-9]+)?%\s*\(max allowed\s*([0-9]+(?:\.[0-9]+)?)%\)"
-    )
-    metrics["lift_fraction"] = _capture_ratio(
-        r"Ensemble lift fraction:\s*([0-9]+(?:\.[0-9]+)?)%\s*\(required"
-    )
-    metrics["min_lift_fraction"] = _capture_ratio(
-        r"Ensemble lift fraction:\s*[0-9]+(?:\.[0-9]+)?%\s*\(required\s*>=\s*([0-9]+(?:\.[0-9]+)?)%\)"
-    )
-    metrics["ensemble_missing_rate"] = _capture_ratio(
-        r"Missing ensemble metrics\s*:\s*\d+/\d+\s*\(([0-9]+(?:\.[0-9]+)?)%\)"
-    )
-    metrics["max_missing_ensemble_rate"] = _capture_ratio(
-        r"Missing ensemble metrics\s*:\s*\d+/\d+\s*\([0-9]+(?:\.[0-9]+)?%\)\s*\(max allowed\s*([0-9]+(?:\.[0-9]+)?)%\)"
-    )
-
-    decision_match = re.search(r"Decision:\s*([A-Z_]+)\s*\((.+?)\)", text)
-    metrics["decision"] = decision_match.group(1) if decision_match else None
-    metrics["decision_reason"] = decision_match.group(2) if decision_match else None
-    return metrics
-
-
 def _missing_summary_metric_keys(summary: Dict[str, Any]) -> List[str]:
     required_top_level = (
+        "measurement_contract_version",
+        "baseline_model",
+        "lift_threshold_rmse_ratio",
         "effective_audits",
         "violation_rate",
         "max_violation_rate",
@@ -1074,8 +1026,22 @@ def _missing_summary_metric_keys(summary: Dict[str, Any]) -> List[str]:
         "window_counts",
     )
     missing = [key for key in required_top_level if key not in summary]
-    if "window_counts" not in missing and not isinstance(summary.get("window_counts"), dict):
+    window_counts = summary.get("window_counts")
+    if "window_counts" not in missing and not isinstance(window_counts, dict):
         missing.append("window_counts")
+        window_counts = None
+    required_window_counts = (
+        "n_rmse_windows_processed",
+        "n_rmse_windows_usable",
+        "n_outcome_windows_not_due",
+        "n_readiness_denominator_included",
+    )
+    if isinstance(window_counts, dict):
+        missing.extend(
+            f"window_counts.{key}"
+            for key in required_window_counts
+            if key not in window_counts
+        )
     return missing
 
 
@@ -1318,6 +1284,14 @@ def main() -> int:
     lift_max_violation_rate = lift_summary.get("max_violation_rate")
     lift_fraction = lift_summary.get("lift_fraction")
     min_lift_fraction = lift_summary.get("min_lift_fraction")
+    lift_measurement_contract_version = lift_summary.get("measurement_contract_version")
+    lift_baseline_model = lift_summary.get("baseline_model")
+    lift_threshold_rmse_ratio = lift_summary.get("lift_threshold_rmse_ratio")
+    lift_window_counts = lift_summary.get("window_counts") if isinstance(lift_summary.get("window_counts"), dict) else {}
+    lift_rmse_windows_processed = lift_window_counts.get("n_rmse_windows_processed")
+    lift_rmse_windows_usable = lift_window_counts.get("n_rmse_windows_usable")
+    lift_outcome_windows_not_due = lift_window_counts.get("n_outcome_windows_not_due")
+    lift_readiness_denominator_included = lift_window_counts.get("n_readiness_denominator_included")
 
     proof_cmd = [
         python_bin,
@@ -1524,6 +1498,9 @@ def main() -> int:
             "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
             "summary_metrics_error": summary_metrics_error,
             "missing_summary_metric_keys": missing_summary_metric_keys,
+            "measurement_contract_version": lift_measurement_contract_version,
+            "baseline_model": lift_baseline_model,
+            "lift_threshold_rmse_ratio": lift_threshold_rmse_ratio,
             "decision": lift_decision,
             "decision_reason": lift_decision_reason,
             "effective_audits": lift_effective_audits,
@@ -1531,6 +1508,10 @@ def main() -> int:
             "max_violation_rate": lift_max_violation_rate,
             "lift_fraction": lift_fraction,
             "min_lift_fraction": min_lift_fraction,
+            "rmse_windows_processed": lift_rmse_windows_processed,
+            "rmse_windows_usable": lift_rmse_windows_usable,
+            "readiness_denominator_included": lift_readiness_denominator_included,
+            "outcome_windows_not_due": lift_outcome_windows_not_due,
             "output_tail": _tail_lines(lift_output),
         },
         "profitability_proof": {
@@ -1610,6 +1591,13 @@ def main() -> int:
             "contract_version_drift": bool(contract_version_drift),
             "cohort_fingerprint_drift": bool(cohort_fingerprint_drift),
             "production_audit_only": production_audit_only,
+            "measurement_contract_version": lift_measurement_contract_version,
+            "baseline_model": lift_baseline_model,
+            "lift_threshold_rmse_ratio": lift_threshold_rmse_ratio,
+            "rmse_windows_processed": lift_rmse_windows_processed,
+            "rmse_windows_usable": lift_rmse_windows_usable,
+            "readiness_denominator_included": lift_readiness_denominator_included,
+            "outcome_windows_not_due": lift_outcome_windows_not_due,
             "linkage_waterfall": linkage_waterfall,
             "admission_summary": admission_summary,
         },
