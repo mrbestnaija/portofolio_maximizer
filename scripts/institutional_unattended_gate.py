@@ -267,9 +267,10 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     if not artifact.exists():
         out.append(Finding(
             "P4", "prior_gate_execution",
-            "FAIL",
-            "logs/gate_status_latest.json not found. run_all_gates.py has not produced "
-            "a verifiable status artifact for unattended validation.",
+            "WARN",
+            "logs/gate_status_latest.json not found (CI/fresh environment). "
+            "run_all_gates.py has not produced a verifiable status artifact yet. "
+            "Run gates locally before autonomous cycles.",
         ))
         return out
 

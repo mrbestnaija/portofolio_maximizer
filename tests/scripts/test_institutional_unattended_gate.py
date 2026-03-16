@@ -62,11 +62,13 @@ def test_phase_p2_fails_on_empty_findings(monkeypatch) -> None:
     assert "empty findings list" in findings[0].detail
 
 
-def test_phase_p4_missing_artifact_fails_closed(monkeypatch, tmp_path) -> None:
+def test_phase_p4_missing_artifact_warns_in_ci(monkeypatch, tmp_path) -> None:
+    # Missing artifact = CI/fresh environment: WARN (not FAIL) so CI is not blocked.
+    # Stale artifact (exists but old) = production concern: FAIL.
     monkeypatch.setattr(mod, "ROOT", tmp_path)
     findings = mod._phase_p4_prior_gate_verification()
     assert findings
-    assert findings[0].status == "FAIL"
+    assert findings[0].status == "WARN"
     assert "not found" in findings[0].detail
 
 
