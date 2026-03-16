@@ -576,12 +576,18 @@ def derive_model_confidence(
     if samossa_score is not None:
         confidence["samossa"] = samossa_score
 
-    baseline_var = mssa_summary.get("baseline_variance")
+    baseline_var = (
+        mssa_summary.get("baseline_variance_ratio")
+        if mssa_summary.get("baseline_variance_ratio") is not None
+        else mssa_summary.get("normalized_baseline_variance")
+    )
+    if baseline_var is None:
+        baseline_var = mssa_summary.get("baseline_variance")
     mssa_score = None
     if baseline_var is not None:
-        # Phase 7.10: Use log-scaled baseline_variance to avoid crushing score
-        # when variance is large.  Previous formula 1/(1+var) gave ~0.09 for
-        # var=10; log-scale gives ~0.30 which is fairer relative to other models.
+        # Phase 7.10 + 7.16: prefer the scale-free residual variance ratio when
+        # available so ensemble default selection is invariant to raw price
+        # level. Fall back to the legacy raw variance only for older payloads.
         mssa_score = 1.0 / (1.0 + max(0.0, float(np.log1p(baseline_var))))
     mssa_metrics = mssa_summary.get("regression_metrics", {}) or {}
     mssa_score = _combine_scores(

@@ -225,9 +225,14 @@ def _build_semantic_admission(
     event_type = str(signal_context.get("event_type") or "").strip().upper()
     routing_mode = str(cohort_identity.get("routing_mode") or "")
     production_labeled = audit_path.parent.name.strip().lower() == "production"
+    override_reason_codes = _normalize_reason_codes(
+        signal_context.get("admission_override_reason_codes"),
+        fallback_reason_code=signal_context.get("admission_override_reason_code"),
+    )
     missing_execution_metadata_fields: list[str] = []
 
     reason_codes: list[str] = []
+    reason_codes.extend(override_reason_codes)
     if context_type != "TRADE":
         reason_codes.append("NON_TRADE_CONTEXT")
     if not audit_id:
@@ -270,7 +275,327 @@ def _build_semantic_admission(
         "duplicate_conflict": False,
         "missing_execution_metadata": bool(missing_execution_metadata_fields),
         "missing_execution_metadata_fields": missing_execution_metadata_fields,
+        "execution_policy_blocked": bool(signal_context.get("execution_policy_blocked")),
+        "evidence_source_classification": str(
+            signal_context.get("evidence_source_classification") or "producer-native"
+        ),
         "manifest_registered": None,
+    }
+
+
+def _normalize_reason_code(raw: Any) -> str:
+    text = str(raw or "").strip().upper()
+    if not text:
+        return ""
+    normalized = re.sub(r"[^A-Z0-9]+", "_", text).strip("_")
+    return normalized
+
+
+def _normalize_reason_codes(raw: Any, *, fallback_reason_code: Any = None) -> list[str]:
+    out: list[str] = []
+
+    def _append(value: Any) -> None:
+        normalized = _normalize_reason_code(value)
+        if normalized and normalized not in out:
+            out.append(normalized)
+
+    if isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            _append(item)
+    elif isinstance(raw, str):
+        parts = [part.strip() for part in raw.split(",")] if "," in raw else [raw]
+        for part in parts:
+            _append(part)
+
+    if not out and fallback_reason_code is not None:
+        _append(fallback_reason_code)
+    return out
+
+
+def _extract_execution_policy_block(signal_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    blocked = any(
+        bool(signal_payload.get(flag))
+        for flag in (
+            "execution_policy_blocked",
+            "pre_order_blocked",
+            "no_trade_gate_blocked",
+            "blocked_by_net_edge",
+        )
+    )
+    if not blocked:
+        return None
+
+    reason_codes = _normalize_reason_codes(
+        signal_payload.get("execution_policy_reason_codes")
+        or signal_payload.get("pre_order_block_reason_codes")
+        or signal_payload.get("no_trade_reason_codes")
+        or signal_payload.get("admission_override_reason_codes"),
+        fallback_reason_code=(
+            signal_payload.get("execution_policy_reason_code")
+            or signal_payload.get("pre_order_block_reason_code")
+            or signal_payload.get("no_trade_reason_code")
+            or signal_payload.get("admission_override_reason_code")
+            or ("NON_POSITIVE_NET_EDGE" if signal_payload.get("blocked_by_net_edge") else "EXECUTION_POLICY_BLOCKED")
+        ),
+    )
+    reason_text = str(
+        signal_payload.get("execution_policy_detail")
+        or signal_payload.get("pre_order_block_detail")
+        or signal_payload.get("no_trade_reason_detail")
+        or signal_payload.get("reason")
+        or ",".join(reason_codes)
+        or "execution_policy_blocked"
+    ).strip()
+    return {
+        "reason_code": ",".join(reason_codes) if reason_codes else "EXECUTION_POLICY_BLOCKED",
+        "reason_codes": reason_codes or ["EXECUTION_POLICY_BLOCKED"],
+        "detail": reason_text,
+    }
+
+
+def _build_nonexecuted_execution_report(
+    *,
+    ticker: str,
+    primary_payload: Dict[str, Any],
+    primary_signal: Dict[str, Any],
+    status: str,
+    reason: Any,
+    quality: Optional[Dict[str, Any]],
+    data_source: Optional[str],
+    mid_px: Optional[float],
+    validation_warnings: Optional[List[str]] = None,
+    policy_block: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    override_codes = (
+        list(policy_block.get("reason_codes") or [])
+        if isinstance(policy_block, dict)
+        else _normalize_reason_codes(
+            primary_payload.get("admission_override_reason_codes"),
+            fallback_reason_code=primary_payload.get("admission_override_reason_code"),
+        )
+    )
+    override_reason_code = (
+        str(policy_block.get("reason_code") or "").strip()
+        if isinstance(policy_block, dict)
+        else ",".join(override_codes)
+    )
+    return {
+        "ticker": ticker,
+        "status": str(status or "REJECTED"),
+        "reason": str(reason or override_reason_code or "NOT_EXECUTED"),
+        "executed": False,
+        "signal_id": primary_payload.get("signal_id"),
+        "ts_signal_id": primary_payload.get("ts_signal_id"),
+        "order_id": None,
+        "position_id": None,
+        "entry_trade_id": None,
+        "close_trade_id": None,
+        "action": primary_payload.get("action"),
+        "signal_source": primary_signal.get("source", "TIME_SERIES"),
+        "signal_confidence": primary_signal.get("confidence"),
+        "signal_timestamp": primary_payload.get("signal_timestamp"),
+        "bar_timestamp": primary_payload.get("bar_timestamp"),
+        "warnings": list(validation_warnings or []),
+        "quality": quality,
+        "data_source": data_source,
+        "mid_price": mid_px,
+        "barbell_bucket": primary_payload.get("barbell_bucket"),
+        "barbell_multiplier": primary_payload.get("barbell_multiplier"),
+        "expected_return": primary_payload.get("expected_return", primary_signal.get("expected_return")),
+        "expected_return_net": primary_payload.get("expected_return_net"),
+        "net_trade_return": primary_payload.get("net_trade_return"),
+        "roundtrip_cost_fraction": primary_payload.get("roundtrip_cost_fraction"),
+        "signal_to_noise": primary_payload.get("signal_to_noise"),
+        "uncertainty_proxy": primary_payload.get("uncertainty_proxy"),
+        "uncertainty_penalty": primary_payload.get("uncertainty_penalty"),
+        "net_edge_after_uncertainty": primary_payload.get("net_edge_after_uncertainty"),
+        "edge_over_risk_score": primary_payload.get("edge_over_risk_score"),
+        "execution_rank": primary_payload.get("execution_rank"),
+        "llm_primary_takeover": bool(primary_payload.get("llm_primary_takeover")),
+        "fallback_reason": primary_payload.get("fallback_reason"),
+        "execution_policy_blocked": bool(policy_block),
+        "admission_override_reason_code": override_reason_code or None,
+        "admission_override_reason_codes": override_codes,
+        "evidence_source_classification": "producer-native",
+    }
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(parsed):
+        return None
+    return float(parsed)
+
+
+def _parse_float_env(name: str) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    return _safe_float(str(raw).strip())
+
+
+def _append_execution_policy_block(
+    signal_payload: Dict[str, Any],
+    *,
+    reason_code: str,
+    detail: str,
+) -> None:
+    existing_codes = _normalize_reason_codes(
+        signal_payload.get("execution_policy_reason_codes"),
+        fallback_reason_code=signal_payload.get("execution_policy_reason_code"),
+    )
+    normalized = _normalize_reason_code(reason_code)
+    if normalized and normalized not in existing_codes:
+        existing_codes.append(normalized)
+    signal_payload["execution_policy_blocked"] = True
+    signal_payload["pre_order_blocked"] = True
+    signal_payload["execution_policy_reason_codes"] = existing_codes
+    signal_payload["execution_policy_reason_code"] = ",".join(existing_codes) if existing_codes else normalized
+    prior_detail = str(signal_payload.get("execution_policy_detail") or "").strip()
+    detail = str(detail or "").strip()
+    if prior_detail and detail and detail not in prior_detail:
+        signal_payload["execution_policy_detail"] = f"{prior_detail}; {detail}"
+    elif detail:
+        signal_payload["execution_policy_detail"] = detail
+
+
+def _estimate_uncertainty_proxy(signal_payload: Dict[str, Any]) -> Optional[float]:
+    net_trade_return = _safe_float(signal_payload.get("net_trade_return"))
+    expected_return = _safe_float(signal_payload.get("expected_return"))
+    signal_to_noise = _safe_float(signal_payload.get("signal_to_noise"))
+    if signal_to_noise is not None and signal_to_noise > 0.0 and expected_return is not None:
+        uncertainty = abs(expected_return) / signal_to_noise
+        if uncertainty >= 0.0 and np.isfinite(uncertainty):
+            return float(uncertainty)
+
+    volatility = _safe_float(signal_payload.get("volatility"))
+    if volatility is not None and volatility >= 0.0:
+        return float(abs(volatility))
+
+    lower_ci = _safe_float(signal_payload.get("lower_ci"))
+    upper_ci = _safe_float(signal_payload.get("upper_ci"))
+    entry_price = _safe_float(signal_payload.get("entry_price"))
+    if (
+        lower_ci is not None
+        and upper_ci is not None
+        and entry_price is not None
+        and entry_price > 0.0
+        and upper_ci > lower_ci
+    ):
+        sigma_price = (upper_ci - lower_ci) / (2.0 * 1.96)
+        sigma_return = sigma_price / entry_price
+        if sigma_return >= 0.0 and np.isfinite(sigma_return):
+            return float(sigma_return)
+
+    if net_trade_return is not None and net_trade_return >= 0.0:
+        return None
+    return None
+
+
+def _build_execution_policy_metrics(
+    signal_payload: Dict[str, Any],
+    *,
+    current_position: int,
+    proof_mode: bool,
+    llm_primary_takeover: bool,
+) -> Dict[str, Any]:
+    action = str(signal_payload.get("action") or "HOLD").strip().upper()
+    reducing_position = (
+        (current_position > 0 and action == "SELL")
+        or (current_position < 0 and action == "BUY")
+    )
+    entry_like = action in {"BUY", "SELL"} and not reducing_position
+
+    expected_return_net = _safe_float(signal_payload.get("expected_return_net"))
+    net_trade_return = _safe_float(signal_payload.get("net_trade_return"))
+    if net_trade_return is None and expected_return_net is not None:
+        net_trade_return = abs(expected_return_net)
+    if net_trade_return is None:
+        expected_return = _safe_float(signal_payload.get("expected_return"))
+        roundtrip_cost = _safe_float(signal_payload.get("roundtrip_cost_fraction")) or 0.0
+        if expected_return is not None:
+            net_trade_return = max(0.0, abs(expected_return) - roundtrip_cost)
+
+    uncertainty_proxy = _estimate_uncertainty_proxy(signal_payload)
+    uncertainty_lambda = _parse_float_env("PMX_EXECUTION_UNCERTAINTY_LAMBDA")
+    if uncertainty_lambda is None:
+        uncertainty_lambda = 0.75 if proof_mode else 0.5
+    uncertainty_penalty = (
+        float(uncertainty_lambda * uncertainty_proxy)
+        if uncertainty_proxy is not None
+        else None
+    )
+    edge_after_uncertainty = (
+        float(net_trade_return - uncertainty_penalty)
+        if net_trade_return is not None and uncertainty_penalty is not None
+        else None
+    )
+    edge_over_risk_score = (
+        float(net_trade_return / max(uncertainty_proxy, 1e-6))
+        if net_trade_return is not None and uncertainty_proxy is not None
+        else None
+    )
+
+    fallback_edge_floor = _parse_float_env("PMX_FALLBACK_MIN_NET_EDGE")
+    if fallback_edge_floor is None:
+        fallback_edge_floor = 0.0025 if proof_mode else 0.0010
+    required_edge_floor = float(fallback_edge_floor if llm_primary_takeover else 0.0)
+
+    blocked = False
+    reason_codes: list[str] = []
+    detail_parts: list[str] = []
+
+    if entry_like:
+        if net_trade_return is None:
+            blocked = True
+            reason_codes.append(
+                "LLM_FALLBACK_MISSING_EDGE_METRICS"
+                if llm_primary_takeover
+                else "MISSING_NET_EDGE_METRICS"
+            )
+            detail_parts.append("Net trade return is unavailable for entry screening.")
+        if uncertainty_proxy is None:
+            blocked = True
+            reason_codes.append(
+                "LLM_FALLBACK_MISSING_UNCERTAINTY"
+                if llm_primary_takeover
+                else "MISSING_UNCERTAINTY_PROXY"
+            )
+            detail_parts.append("Uncertainty proxy is unavailable for entry screening.")
+        if edge_after_uncertainty is not None and edge_after_uncertainty <= required_edge_floor + 1e-12:
+            blocked = True
+            if llm_primary_takeover and required_edge_floor > 0.0:
+                reason_codes.append("FALLBACK_EDGE_BELOW_FLOOR")
+                detail_parts.append(
+                    "Fallback entry edge %.4f%% did not clear floor %.4f%% after uncertainty penalty."
+                    % (edge_after_uncertainty * 100.0, required_edge_floor * 100.0)
+                )
+            else:
+                reason_codes.append("NON_POSITIVE_NET_EDGE_AFTER_UNCERTAINTY")
+                detail_parts.append(
+                    "Net edge %.4f%% did not remain positive after uncertainty penalty."
+                    % (edge_after_uncertainty * 100.0)
+                )
+
+    return {
+        "action": action,
+        "current_position": int(current_position),
+        "entry_like": bool(entry_like),
+        "llm_primary_takeover": bool(llm_primary_takeover),
+        "expected_return_net": expected_return_net,
+        "net_trade_return": net_trade_return,
+        "uncertainty_proxy": uncertainty_proxy,
+        "uncertainty_lambda": float(uncertainty_lambda),
+        "uncertainty_penalty": uncertainty_penalty,
+        "net_edge_after_uncertainty": edge_after_uncertainty,
+        "edge_over_risk_score": edge_over_risk_score,
+        "required_edge_floor": required_edge_floor,
+        "blocked": bool(blocked),
+        "reason_codes": reason_codes,
+        "detail": "; ".join(detail_parts).strip(),
     }
 
 
@@ -1356,6 +1681,10 @@ def build_trade_signal_context(
         or execution_report.get("timestamp")
     )
     expected_close_ts = _compute_expected_close_ts(incoming_entry_ts, signal_horizon)
+    override_reason_codes = _normalize_reason_codes(
+        execution_report.get("admission_override_reason_codes"),
+        fallback_reason_code=execution_report.get("admission_override_reason_code"),
+    )
     return {
         "context_type": "TRADE",
         "event_type": "TRADE_FORECAST_AUDIT",
@@ -1366,6 +1695,28 @@ def build_trade_signal_context(
         "expected_close_ts": expected_close_ts,
         "forecast_horizon": signal_horizon,
         "signal_context_missing": not bool(incoming_tsid),
+        "decision_status": execution_report.get("status"),
+        "decision_reason": execution_report.get("reason"),
+        "executed": bool(execution_report.get("executed")),
+        "execution_policy_blocked": bool(execution_report.get("execution_policy_blocked")),
+        "admission_override_reason_code": ",".join(override_reason_codes) if override_reason_codes else None,
+        "admission_override_reason_codes": override_reason_codes,
+        "expected_return": execution_report.get("expected_return"),
+        "expected_return_net": execution_report.get("expected_return_net"),
+        "net_trade_return": execution_report.get("net_trade_return"),
+        "roundtrip_cost_fraction": execution_report.get("roundtrip_cost_fraction"),
+        "signal_to_noise": execution_report.get("signal_to_noise"),
+        "uncertainty_proxy": execution_report.get("uncertainty_proxy"),
+        "uncertainty_penalty": execution_report.get("uncertainty_penalty"),
+        "net_edge_after_uncertainty": execution_report.get("net_edge_after_uncertainty"),
+        "edge_over_risk_score": execution_report.get("edge_over_risk_score"),
+        "execution_rank": execution_report.get("execution_rank"),
+        "execution_source": execution_report.get("signal_source"),
+        "llm_primary_takeover": bool(execution_report.get("llm_primary_takeover")),
+        "fallback_reason": execution_report.get("fallback_reason"),
+        "evidence_source_classification": str(
+            execution_report.get("evidence_source_classification") or "producer-native"
+        ),
     }
 
 
@@ -1472,9 +1823,57 @@ def _attach_signal_context_to_forecast_audit(
             or canonical_context.get("expected_close_ts")
             or merged.get("expected_close_ts")
         )
+        for field in (
+            "decision_status",
+            "decision_reason",
+            "executed",
+            "execution_policy_blocked",
+            "admission_override_reason_code",
+            "admission_override_reason_codes",
+            "expected_return",
+            "expected_return_net",
+            "net_trade_return",
+            "roundtrip_cost_fraction",
+            "signal_to_noise",
+            "uncertainty_proxy",
+            "uncertainty_penalty",
+            "net_edge_after_uncertainty",
+            "edge_over_risk_score",
+            "execution_rank",
+            "execution_source",
+            "llm_primary_takeover",
+            "fallback_reason",
+            "evidence_source_classification",
+        ):
+            incoming_value = canonical_context.get(field)
+            if incoming_value in (None, "", []):
+                continue
+            merged[field] = incoming_value
 
         merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
         payload["signal_context"] = merged
+        payload["execution_decision"] = {
+            "status": merged.get("decision_status"),
+            "reason": merged.get("decision_reason"),
+            "executed": bool(merged.get("executed")),
+            "execution_policy_blocked": bool(merged.get("execution_policy_blocked")),
+            "admission_override_reason_code": merged.get("admission_override_reason_code"),
+            "admission_override_reason_codes": list(merged.get("admission_override_reason_codes") or []),
+            "expected_return": merged.get("expected_return"),
+            "expected_return_net": merged.get("expected_return_net"),
+            "net_trade_return": merged.get("net_trade_return"),
+            "roundtrip_cost_fraction": merged.get("roundtrip_cost_fraction"),
+            "signal_to_noise": merged.get("signal_to_noise"),
+            "uncertainty_proxy": merged.get("uncertainty_proxy"),
+            "uncertainty_penalty": merged.get("uncertainty_penalty"),
+            "net_edge_after_uncertainty": merged.get("net_edge_after_uncertainty"),
+            "edge_over_risk_score": merged.get("edge_over_risk_score"),
+            "execution_rank": merged.get("execution_rank"),
+            "execution_source": merged.get("execution_source"),
+            "llm_primary_takeover": bool(merged.get("llm_primary_takeover")),
+            "fallback_reason": merged.get("fallback_reason"),
+            "source_classification": merged.get("evidence_source_classification") or "producer-native",
+        }
 
         # Backfill ticker into dataset section when missing (prevents MISSING_TICKER gate failures).
         ticker_val = merged.get("ticker")
@@ -1526,9 +1925,29 @@ def _attach_signal_context_to_forecast_audit(
                     "cohort_id": payload.get("cohort_id"),
                     "evidence_contract_version": 2,
                     "event_type": payload.get("event_type"),
+                    "reason_code": (
+                        (payload.get("semantic_admission") or {}).get("reason_code")
+                        if isinstance(payload.get("semantic_admission"), dict)
+                        else None
+                    ),
                     "gate_bucket": (
                         (payload.get("semantic_admission") or {}).get("gate_bucket")
                         if isinstance(payload.get("semantic_admission"), dict)
+                        else None
+                    ),
+                    "execution_status": (
+                        (payload.get("execution_decision") or {}).get("status")
+                        if isinstance(payload.get("execution_decision"), dict)
+                        else None
+                    ),
+                    "executed": (
+                        (payload.get("execution_decision") or {}).get("executed")
+                        if isinstance(payload.get("execution_decision"), dict)
+                        else None
+                    ),
+                    "source_classification": (
+                        (payload.get("execution_decision") or {}).get("source_classification")
+                        if isinstance(payload.get("execution_decision"), dict)
                         else None
                     ),
                 },
@@ -1652,11 +2071,11 @@ def _validate_market_window(validator: DataValidator, data: pd.DataFrame) -> boo
     return False
 
 
-def _execute_signal(
+def _prepare_execution_candidate(
+    *,
     router: SignalRouter,
-    trading_engine: PaperTradingEngine,
     ticker: str,
-    forecast_bundle: Dict,
+    forecast_bundle: Dict[str, Any],
     current_price: float,
     market_data: pd.DataFrame,
     quality: Optional[Dict[str, Any]] = None,
@@ -1670,8 +2089,8 @@ def _execute_signal(
     barbell_cfg: Optional[BarbellConfig] = None,
     proof_mode: bool = False,
     is_intraday: bool = False,
-) -> Optional[Dict]:
-    """Route signals and push the primary decision through the execution engine."""
+    current_position: int = 0,
+) -> Optional[Dict[str, Any]]:
     bundle = router.route_signal(
         ticker=ticker,
         forecast_bundle=forecast_bundle,
@@ -1689,10 +2108,44 @@ def _execute_signal(
 
     primary_payload = dict(primary)
     if not primary_payload.get("ts_signal_id"):
-        # Backward-compatible bridge: some legacy callers only provide string signal_id.
         raw_signal_id = primary_payload.get("signal_id")
         if isinstance(raw_signal_id, str) and raw_signal_id.strip():
             primary_payload["ts_signal_id"] = raw_signal_id.strip()
+
+    provenance = (
+        primary_payload.get("provenance")
+        if isinstance(primary_payload.get("provenance"), dict)
+        else {}
+    )
+    decision_context = (
+        provenance.get("decision_context")
+        if isinstance(provenance.get("decision_context"), dict)
+        else {}
+    )
+    for key in (
+        "expected_return_net",
+        "gross_trade_return",
+        "net_trade_return",
+        "roundtrip_cost_fraction",
+        "roundtrip_cost_bps",
+        "signal_to_noise",
+        "volatility",
+    ):
+        if primary_payload.get(key) is None and decision_context.get(key) is not None:
+            primary_payload[key] = decision_context.get(key)
+
+    raw_bundle_metadata = getattr(bundle, "metadata", {})
+    bundle_metadata = raw_bundle_metadata if isinstance(raw_bundle_metadata, dict) else {}
+    primary_payload["execution_source"] = (
+        primary_payload.get("source")
+        or bundle_metadata.get("primary_source")
+        or "TIME_SERIES"
+    )
+    primary_payload["llm_primary_takeover"] = bool(bundle_metadata.get("llm_primary_takeover"))
+    if bundle_metadata.get("fallback_trigger") is not None:
+        primary_payload["fallback_reason"] = bundle_metadata.get("fallback_trigger")
+    primary_payload.setdefault("execution_policy_blocked", False)
+
     if run_id:
         primary_payload["run_id"] = run_id
     if execution_mode:
@@ -1719,8 +2172,6 @@ def _execute_signal(
         except Exception:
             logger.debug("Skipping barbell sizing overlay for %s", ticker, exc_info=True)
 
-    # Anchor execution timestamps to the last observed market bar for auditable
-    # historical replay and trading-day evidence accounting.
     last_bar_ts = _extract_last_bar_timestamp(market_data)
     if last_bar_ts is not None:
         bar_iso = _format_bar_timestamp(last_bar_ts)
@@ -1728,28 +2179,20 @@ def _execute_signal(
             primary_payload["signal_timestamp"] = bar_iso
             primary_payload["bar_timestamp"] = bar_iso
 
-    # Proof-mode overrides: tighter exits for guaranteed round trips.
     if proof_mode:
-        # Phase 7.19: was 5; widened to 8 to let winners develop before time-exit fires.
-        # Audit (2026-03-01): 5-day cap was clipping winners (avg time-exit gain $2.71)
-        # while stops hit at full size (avg stop-loss -$46.69). 8 days preserves the
-        # protective stop while giving trades ~3 extra bars to reach target_price.
         default_horizon = 6 if is_intraday else 8
         proof_horizon = default_horizon
-        # ATR-based stops/targets and adaptive holding period.
         if isinstance(market_data, pd.DataFrame) and len(market_data) >= 14:
-            atr = (market_data['High'] - market_data['Low']).rolling(14).mean().iloc[-1]
+            atr = (market_data["High"] - market_data["Low"]).rolling(14).mean().iloc[-1]
             if pd.notna(atr) and atr > 0 and current_price and current_price > 0:
                 atr_pct = atr / current_price
-                # Adaptive holding: high-ATR stocks exit sooner, low-ATR hold longer
-                if atr_pct > 0.03:       # ATR > 3% of price -> volatile
+                if atr_pct > 0.03:
                     proof_horizon = 3 if not is_intraday else 4
-                elif atr_pct > 0.015:    # ATR 1.5-3% -> moderate
+                elif atr_pct > 0.015:
                     proof_horizon = default_horizon
-                else:                    # ATR < 1.5% -> calm
+                else:
                     proof_horizon = (default_horizon + 2) if not is_intraday else (default_horizon + 1)
                 sig_action = primary_payload.get("action", "").upper()
-                # Tighter stops/targets scaled to ATR regime
                 stop_mult = 1.0 if atr_pct > 0.03 else 1.25
                 target_mult = 1.5 if atr_pct > 0.03 else 1.75
                 if sig_action == "BUY":
@@ -1767,8 +2210,182 @@ def _execute_signal(
         primary_payload["forecast_horizon"] = proof_horizon
         logger.info(
             "[PROOF_MODE] %s: horizon=%d, stop=%s, target=%s",
-            ticker, proof_horizon,
-            primary_payload.get("stop_loss"), primary_payload.get("target_price"),
+            ticker,
+            proof_horizon,
+            primary_payload.get("stop_loss"),
+            primary_payload.get("target_price"),
+        )
+
+    policy = _build_execution_policy_metrics(
+        primary_payload,
+        current_position=current_position,
+        proof_mode=proof_mode,
+        llm_primary_takeover=bool(primary_payload.get("llm_primary_takeover")),
+    )
+    for key in (
+        "expected_return_net",
+        "net_trade_return",
+        "uncertainty_proxy",
+        "uncertainty_penalty",
+        "net_edge_after_uncertainty",
+        "edge_over_risk_score",
+    ):
+        if policy.get(key) is not None:
+            primary_payload[key] = policy.get(key)
+    existing_policy_block = _extract_execution_policy_block(primary_payload)
+    if policy.get("blocked") and existing_policy_block is None:
+        for code in policy.get("reason_codes") or ["EXECUTION_POLICY_BLOCKED"]:
+            _append_execution_policy_block(
+                primary_payload,
+                reason_code=code,
+                detail=str(policy.get("detail") or code),
+            )
+
+    return {
+        "ticker": ticker,
+        "primary": primary,
+        "primary_payload": primary_payload,
+        "policy": policy,
+        "current_position": int(current_position),
+    }
+
+
+def _rank_prepared_execution_candidates(
+    prepared_candidates: List[Dict[str, Any]],
+    *,
+    proof_mode: bool,
+) -> List[Dict[str, Any]]:
+    if not prepared_candidates:
+        return []
+
+    top_k = _parse_int_env("PMX_EXECUTION_TOP_K")
+    if top_k is None and proof_mode:
+        top_k = 3
+    min_edge_score = _parse_float_env("PMX_MIN_EDGE_OVER_RISK_SCORE")
+    if min_edge_score is None:
+        min_edge_score = 0.25 if proof_mode else 0.0
+
+    ranked_entries: List[Dict[str, Any]] = []
+    passthrough: List[Dict[str, Any]] = []
+    for idx, prepared in enumerate(prepared_candidates):
+        prepared["_original_index"] = idx
+        policy = prepared.get("policy") or {}
+        if bool(policy.get("entry_like")):
+            ranked_entries.append(prepared)
+        else:
+            passthrough.append(prepared)
+
+    ranked_entries.sort(
+        key=lambda prepared: (
+            _safe_float((prepared.get("policy") or {}).get("edge_over_risk_score")) or -1e12,
+            _safe_float((prepared.get("policy") or {}).get("net_trade_return")) or -1e12,
+            _safe_float((prepared.get("primary_payload") or {}).get("confidence")) or -1e12,
+            -int(prepared.get("_original_index", 0)),
+        ),
+        reverse=True,
+    )
+
+    for rank, prepared in enumerate(ranked_entries, start=1):
+        policy = prepared.get("policy") or {}
+        primary_payload = prepared.get("primary_payload") or {}
+        policy["execution_rank"] = rank
+        policy["cycle_top_k"] = top_k
+        policy["edge_over_risk_threshold"] = min_edge_score
+        primary_payload["execution_rank"] = rank
+        primary_payload["cycle_top_k"] = top_k
+        primary_payload["edge_over_risk_threshold"] = min_edge_score
+
+        score = _safe_float(policy.get("edge_over_risk_score"))
+        if score is not None and score < float(min_edge_score):
+            _append_execution_policy_block(
+                primary_payload,
+                reason_code="EDGE_OVER_RISK_BELOW_THRESHOLD",
+                detail=(
+                    "Edge-over-risk score %.3f is below threshold %.3f."
+                    % (score, float(min_edge_score))
+                ),
+            )
+        if top_k is not None and rank > int(top_k):
+            _append_execution_policy_block(
+                primary_payload,
+                reason_code="EDGE_RANK_OUTSIDE_TOP_K",
+                detail=f"Cycle execution rank {rank} is outside top {int(top_k)}.",
+            )
+
+    passthrough.sort(key=lambda prepared: int(prepared.get("_original_index", 0)))
+    return passthrough + ranked_entries
+
+
+def _execute_signal(
+    router: SignalRouter,
+    trading_engine: PaperTradingEngine,
+    ticker: str,
+    forecast_bundle: Dict,
+    current_price: float,
+    market_data: pd.DataFrame,
+    quality: Optional[Dict[str, Any]] = None,
+    data_source: Optional[str] = None,
+    mid_price: Optional[float] = None,
+    run_id: Optional[str] = None,
+    execution_mode: Optional[str] = None,
+    synthetic_dataset_id: Optional[str] = None,
+    synthetic_generator_version: Optional[str] = None,
+    barbell_sizing_enabled: bool = False,
+    barbell_cfg: Optional[BarbellConfig] = None,
+    proof_mode: bool = False,
+    is_intraday: bool = False,
+    prepared_candidate: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict]:
+    """Route signals and push the primary decision through the execution engine."""
+    if prepared_candidate is None:
+        current_position = 0
+        try:
+            current_position = int(trading_engine.portfolio.positions.get(ticker, 0))
+        except Exception:
+            current_position = 0
+        prepared_candidate = _prepare_execution_candidate(
+            router=router,
+            ticker=ticker,
+            forecast_bundle=forecast_bundle,
+            current_price=current_price,
+            market_data=market_data,
+            quality=quality,
+            data_source=data_source,
+            mid_price=mid_price,
+            run_id=run_id,
+            execution_mode=execution_mode,
+            synthetic_dataset_id=synthetic_dataset_id,
+            synthetic_generator_version=synthetic_generator_version,
+            barbell_sizing_enabled=barbell_sizing_enabled,
+            barbell_cfg=barbell_cfg,
+            proof_mode=proof_mode,
+            is_intraday=is_intraday,
+            current_position=current_position,
+        )
+    if prepared_candidate is None:
+        return None
+
+    primary = dict(prepared_candidate.get("primary") or {})
+    primary_payload = dict(prepared_candidate.get("primary_payload") or {})
+
+    policy_block = _extract_execution_policy_block(primary_payload)
+    if policy_block is not None:
+        logger.info(
+            "Execution policy blocked %s before order placement: %s",
+            ticker,
+            policy_block["reason_code"],
+        )
+        return _build_nonexecuted_execution_report(
+            ticker=ticker,
+            primary_payload=primary_payload,
+            primary_signal=primary,
+            status="REJECTED",
+            reason=policy_block["detail"],
+            quality=quality,
+            data_source=data_source,
+            mid_px=mid_price if mid_price is not None else _compute_mid_price(market_data),
+            validation_warnings=[],
+            policy_block=policy_block,
         )
 
     result = trading_engine.execute_signal(
@@ -1791,29 +2408,18 @@ def _execute_signal(
         and int(entry_trade_id) != int(db_trade_id)
     )
     if result.status != "EXECUTED":
-        return {
-            "ticker": ticker,
-            "status": result.status,
-            "reason": result.reason,
-            "executed": False,
-            "signal_id": primary_payload.get("signal_id"),
-            "ts_signal_id": primary_payload.get("ts_signal_id"),
-            "order_id": None,
-            "position_id": None,
-            "entry_trade_id": None,
-            "close_trade_id": None,
-            "action": primary_payload.get("action"),
-            "signal_source": primary.get("source", "TIME_SERIES"),
-            "signal_confidence": primary.get("confidence"),
-            "signal_timestamp": primary_payload.get("signal_timestamp"),
-            "bar_timestamp": primary_payload.get("bar_timestamp"),
-            "warnings": result.validation_warnings,
-            "quality": quality,
-            "data_source": data_source,
-            "mid_price": mid_px,
-            "barbell_bucket": primary_payload.get("barbell_bucket"),
-            "barbell_multiplier": primary_payload.get("barbell_multiplier"),
-        }
+        return _build_nonexecuted_execution_report(
+            ticker=ticker,
+            primary_payload=primary_payload,
+            primary_signal=primary,
+            status=result.status,
+            reason=result.reason,
+            quality=quality,
+            data_source=data_source,
+            mid_px=mid_px,
+            validation_warnings=result.validation_warnings,
+            policy_block=policy_block,
+        )
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
     realized_pnl_pct = getattr(result.trade, "realized_pnl_pct", None)
@@ -1847,6 +2453,17 @@ def _execute_signal(
         "barbell_bucket": primary_payload.get("barbell_bucket"),
         "barbell_multiplier": primary_payload.get("barbell_multiplier"),
         "expected_return": primary.get("expected_return"),
+        "expected_return_net": primary_payload.get("expected_return_net"),
+        "net_trade_return": primary_payload.get("net_trade_return"),
+        "roundtrip_cost_fraction": primary_payload.get("roundtrip_cost_fraction"),
+        "signal_to_noise": primary_payload.get("signal_to_noise"),
+        "uncertainty_proxy": primary_payload.get("uncertainty_proxy"),
+        "uncertainty_penalty": primary_payload.get("uncertainty_penalty"),
+        "net_edge_after_uncertainty": primary_payload.get("net_edge_after_uncertainty"),
+        "edge_over_risk_score": primary_payload.get("edge_over_risk_score"),
+        "execution_rank": primary_payload.get("execution_rank"),
+        "llm_primary_takeover": bool(primary_payload.get("llm_primary_takeover")),
+        "fallback_reason": primary_payload.get("fallback_reason"),
         "quality": quality,
         "data_source": data_source,
         "timestamp": executed_at,
@@ -2707,6 +3324,8 @@ def main(
                 interval=interval,
             )
 
+        prepared_execution_candidates: List[Dict[str, Any]] = []
+
         for candidate in candidates:
             ticker = candidate["ticker"]
             symbol = candidate["symbol"]
@@ -2757,9 +3376,12 @@ def main(
             except Exception:
                 logger.debug("Skipping forecast snapshot persistence for %s", ticker, exc_info=True)
 
-            execution_report = _execute_signal(
+            try:
+                current_position = int(trading_engine.portfolio.positions.get(ticker, 0))
+            except Exception:
+                current_position = 0
+            prepared_candidate = _prepare_execution_candidate(
                 router=signal_router,
-                trading_engine=trading_engine,
                 ticker=ticker,
                 forecast_bundle=forecast_bundle,
                 current_price=current_price,
@@ -2775,6 +3397,48 @@ def main(
                 barbell_cfg=barbell_cfg,
                 proof_mode=proof_mode,
                 is_intraday=interval is not None and interval != "1d",
+                current_position=current_position,
+            )
+            if prepared_candidate is None:
+                continue
+
+            prepared_candidate["ticker_frame"] = ticker_frame
+            prepared_candidate["forecast_bundle"] = forecast_bundle
+            prepared_candidate["quality"] = quality
+            prepared_candidate["data_source"] = data_source
+            prepared_candidate["mid_price"] = mid_price
+            prepared_execution_candidates.append(prepared_candidate)
+
+        for prepared_candidate in _rank_prepared_execution_candidates(
+            prepared_execution_candidates,
+            proof_mode=proof_mode,
+        ):
+            ticker = str(prepared_candidate.get("ticker") or "")
+            ticker_frame = prepared_candidate.get("ticker_frame")
+            forecast_bundle = prepared_candidate.get("forecast_bundle")
+            quality = prepared_candidate.get("quality")
+            data_source = prepared_candidate.get("data_source")
+            mid_price = prepared_candidate.get("mid_price")
+            primary_payload = prepared_candidate.get("primary_payload") or {}
+            execution_report = _execute_signal(
+                router=signal_router,
+                trading_engine=trading_engine,
+                ticker=ticker,
+                forecast_bundle=forecast_bundle,
+                current_price=float(primary_payload.get("entry_price") or price_map.get(ticker) or 0.0),
+                market_data=ticker_frame,
+                quality=quality,
+                data_source=data_source,
+                mid_price=mid_price,
+                run_id=run_id,
+                execution_mode=effective_execution_mode,
+                synthetic_dataset_id=window_dataset_id,
+                synthetic_generator_version=window_generator_version,
+                barbell_sizing_enabled=barbell_sizing_enabled,
+                barbell_cfg=barbell_cfg,
+                proof_mode=proof_mode,
+                is_intraday=interval is not None and interval != "1d",
+                prepared_candidate=prepared_candidate,
             )
 
             if execution_report:

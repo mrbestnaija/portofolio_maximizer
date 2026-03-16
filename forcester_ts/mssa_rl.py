@@ -142,6 +142,8 @@ class MSSARLForecaster:
         self._fitted = False
         self._q_table: Dict[Tuple[int, int], float] = {}
         self._baseline_variance: float = 0.0
+        self._baseline_variance_ratio: float = 0.0
+        self._series_variance: float = 0.0
         self._last_index: Optional[pd.Timestamp] = None
         self._change_points: Optional[pd.DatetimeIndex] = None
         self._reconstruction: Optional[pd.Series] = None
@@ -293,7 +295,16 @@ class MSSARLForecaster:
 
         self._reconstruction = pd.Series(recon, index=cleaned.index)
         residuals = cleaned - self._reconstruction
+        self._series_variance = float(cleaned.var(ddof=1))
+        if not np.isfinite(self._series_variance) or self._series_variance < 0.0:
+            self._series_variance = 0.0
         self._baseline_variance = float(residuals.var(ddof=1))
+        if not np.isfinite(self._baseline_variance) or self._baseline_variance < 0.0:
+            self._baseline_variance = 0.0
+        denom = max(self._series_variance, 1e-12)
+        self._baseline_variance_ratio = float(
+            np.clip(self._baseline_variance / denom, 0.0, 1e12)
+        )
         try:
             self._last_reconstruction_error = float(abs(residuals.iloc[-1]))
         except Exception:
@@ -438,6 +449,9 @@ class MSSARLForecaster:
             "change_points": self._change_points,
             "q_table_size": len(self._q_table),
             "baseline_variance": self._baseline_variance,
+            "baseline_variance_ratio": self._baseline_variance_ratio,
+            "normalized_baseline_variance": self._baseline_variance_ratio,
+            "series_variance": self._series_variance,
         }
 
     def get_diagnostics(self) -> Dict[str, Any]:
@@ -451,6 +465,9 @@ class MSSARLForecaster:
             ),
             "q_table": dict(self._q_table),
             "baseline_variance": self._baseline_variance,
+            "baseline_variance_ratio": self._baseline_variance_ratio,
+            "normalized_baseline_variance": self._baseline_variance_ratio,
+            "series_variance": self._series_variance,
             "change_point_density": self._change_point_density,
             "recent_change_point_days": self._recent_change_point_days,
             "use_gpu": self._use_gpu,
