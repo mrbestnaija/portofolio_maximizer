@@ -1,1 +1,0 @@
-{"file":"replay_happy_path.json","sha256":"2f73bab1d7f5a5161531868a4842cfb2885ca7e41e46fc8f65027f980f432cd5","bytes":1270,"recorded_at_utc":"2026-03-14T19:48:45.390467+00:00","source":"scripts.replay_trade_evidence_chain","audit_id":"replay_happy_path","event_type":"TRADE_FORECAST_AUDIT","cohort_id":"replay_shadow_v2"}

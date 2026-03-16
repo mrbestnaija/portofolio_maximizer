@@ -218,6 +218,13 @@ logs/inbox/
 logs/inbox/*
 logs/llm_activity/
 logs/ollama/
+logs/audit_gate/
+logs/evidence_replay/
+logs/forecast_audits/cohorts/
+logs/forecast_audits_cache/
+logs/overnight_denominator/
+logs/forecast_audits/*.tmp
+logs/forecast_audits/**/*.tmp
 
 # Email artifacts (can contain sensitive content)
 *.eml
