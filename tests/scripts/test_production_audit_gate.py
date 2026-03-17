@@ -568,6 +568,9 @@ def test_run_reconcile_step_apply_fails_when_unlinked_remains_even_if_command_ex
         )
 
     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    # Ensure whitelist does not mask trade 66 (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75
+    # is set in some environments; clear it so the count sees the unlinked close).
+    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
 
     res = mod._run_reconcile_step(
         python_bin="python",
