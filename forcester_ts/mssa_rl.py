@@ -154,6 +154,9 @@ class MSSARLForecaster:
         if self.config.use_gpu and not self._use_gpu:
             # CuPy is optional; when unavailable we fall back to CPU silently.
             logger.debug("MSSARL: CuPy unavailable; falling back to CPU.")
+        # Phase 8.1: per-action reconstruction matrices (set by _truncate_svd / fit)
+        self._recon_matrix_by_action: Dict[int, np.ndarray] = {}
+        self._reconstructions_by_action: Dict[int, pd.Series] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -168,30 +171,53 @@ class MSSARLForecaster:
         return np.column_stack([series.values[i : i + L] for i in range(K)])
 
     def _truncate_svd(self, trajectory: np.ndarray) -> np.ndarray:
+        """Run SVD and return the 90%-variance reconstruction (standard action=1).
+
+        Also stores per-action reconstructions in self._recon_matrix_by_action for
+        Phase 8.1 component selection:
+          action=0 (mean_revert)  -> top 25% cumulative variance (low-frequency, smooth)
+          action=1 (hold)        -> top 90% cumulative variance (current behaviour)
+          action=2 (trend_follow)-> all components (highest fidelity, retains noise)
+        """
         if self._use_gpu:
             xp = cp
             traj = cp.asarray(trajectory)
             U, s, Vt = xp.linalg.svd(traj, full_matrices=False)
             cumulative = cp.asnumpy(cp.cumsum(s) / cp.sum(s))
+            U_np = cp.asnumpy(U)
+            s_np = cp.asnumpy(s)
+            Vt_np = cp.asnumpy(Vt)
         else:
             xp = np
             U, s, Vt = svd(trajectory, full_matrices=False)
             cumulative = np.cumsum(s) / np.sum(s)
+            U_np, s_np, Vt_np = U, s, Vt
+
+        max_rank = trajectory.shape[0]
 
         rank = self.config.rank
         if rank is None:
             rank = int(np.searchsorted(cumulative, 0.9)) + 1
-            rank = max(1, min(rank, trajectory.shape[0]))
+            rank = max(1, min(rank, max_rank))
             self.config.rank = rank
 
-        U_r = U[:, :rank]
-        s_r = s[:rank]
-        Vt_r = Vt[:rank, :]
+        # Phase 8.1: precompute per-action rank cutoffs from the same SVD.
+        rank_25 = max(1, int(np.searchsorted(cumulative, 0.25)) + 1)
+        rank_25 = min(rank_25, max_rank)
+        rank_90 = rank  # already set above
+        rank_all = max_rank
 
-        recon = U_r @ xp.diag(s_r) @ Vt_r
-        if self._use_gpu:
-            recon = cp.asnumpy(recon)
-        return recon
+        def _recon_for_rank(r: int) -> np.ndarray:
+            mat = U_np[:, :r] @ np.diag(s_np[:r]) @ Vt_np[:r, :]
+            return mat
+
+        self._recon_matrix_by_action: Dict[int, np.ndarray] = {
+            0: _recon_for_rank(rank_25),
+            1: _recon_for_rank(rank_90),
+            2: _recon_for_rank(rank_all),
+        }
+
+        return self._recon_matrix_by_action[1]
 
     def _cusum_change_points(self, residuals: pd.Series) -> pd.DatetimeIndex:
         cleaned = residuals.dropna()
@@ -280,18 +306,31 @@ class MSSARLForecaster:
 
         self._last_index = cleaned.index[-1]
         trajectory = self._construct_page_matrix(cleaned)
+        # _truncate_svd populates self._recon_matrix_by_action as a side-effect (Phase 8.1).
         recon_matrix = self._truncate_svd(trajectory)
 
-        recon = np.zeros(len(cleaned))
-        counts = np.zeros(len(cleaned))
-        L, K = recon_matrix.shape
-        for i in range(L):
-            for j in range(K):
-                recon[i + j] += recon_matrix[i, j]
-                counts[i + j] += 1
-        recon /= counts
+        def _diagonal_average(mat: np.ndarray, n: int) -> np.ndarray:
+            """Anti-diagonal averaging of an SSA trajectory/reconstruction matrix."""
+            out = np.zeros(n)
+            cnt = np.zeros(n)
+            rows, cols = mat.shape
+            for i in range(rows):
+                for j in range(cols):
+                    out[i + j] += mat[i, j]
+                    cnt[i + j] += 1
+            cnt = np.where(cnt == 0, 1, cnt)
+            return out / cnt
 
+        n = len(cleaned)
+        recon = _diagonal_average(recon_matrix, n)
         self._reconstruction = pd.Series(recon, index=cleaned.index)
+
+        # Phase 8.1: precompute per-action reconstructed series for component selection.
+        self._reconstructions_by_action: Dict[int, pd.Series] = {}
+        for action_key, rmat in getattr(self, "_recon_matrix_by_action", {}).items():
+            self._reconstructions_by_action[action_key] = pd.Series(
+                _diagonal_average(rmat, n), index=cleaned.index
+            )
         residuals = cleaned - self._reconstruction
         self._baseline_variance = float(residuals.var(ddof=1))
         try:
@@ -361,6 +400,38 @@ class MSSARLForecaster:
         # Phase 7.10b: Replace naive constant forecast with trend-adjusted forecast.
         # Compute slope from last window_length bars of reconstructed series.
         recon_arr = self._reconstruction.values if self._reconstruction is not None else np.array([base_value])
+
+        # Phase 8.1: Q-strategy selection now controls component set (not just slope sign).
+        # States: {0=low_vol, 1=normal_vol, 2=high_vol}
+        # Actions: {0=mean_revert, 1=hold, 2=trend_follow}
+        best_action = 1  # default: standard 90%-variance components
+        q_direction_weight = 0.0
+        if getattr(self.config, "use_q_strategy_selection", True) and self._q_table:
+            try:
+                recent_var = float(np.var(recon_arr[-min(10, len(recon_arr)):]))
+                var_ratio = recent_var / max(self._baseline_variance, 1e-12)
+                current_state = int(np.digitize([var_ratio], bins=[0.8, 1.2])[0])
+                q_vals = {a: self._q_table.get((current_state, a), 0.0) for a in range(3)}
+                best_action = max(q_vals, key=q_vals.__getitem__)
+                # Legacy slope-direction signal (retained; blended at 0.5 weight below).
+                action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
+                q_direction_weight = action_to_sign[best_action]
+            except Exception as qe:
+                logger.debug("Q-strategy selection error: %s", qe)
+
+        # Phase 8.1: select the reconstruction that matches the Q-table action.
+        # action=0 -> low-frequency components (25% variance) -> smoothed mean-revert signal
+        # action=1 -> standard components (90% variance)      -> current behaviour
+        # action=2 -> all components (100% variance)          -> high-fidelity trend signal
+        active_recon = getattr(self, "_reconstructions_by_action", {}).get(best_action)
+        if active_recon is not None and len(active_recon) > 0:
+            recon_arr = active_recon.values
+            logger.debug(
+                "MSSARL forecast: action=%d selected reconstruction "
+                "(n_components via variance cutoff), len=%d",
+                best_action, len(recon_arr),
+            )
+
         slope = 0.0
         if len(recon_arr) >= 3:
             k = min(self.config.window_length, len(recon_arr))
@@ -368,27 +439,7 @@ class MSSARLForecaster:
             if k >= 2:
                 slope = float(np.polyfit(np.arange(k), slope_arr, deg=1)[0])
 
-        # Phase 7.10b: Q-strategy selection — use Q-table to determine direction signal.
-        # States: {0=low_vol, 1=normal_vol, 2=high_vol}
-        # Actions: {0=mean_revert, 1=hold, 2=trend_follow}
-        # Q-driven direction overrides or reinforces the slope direction.
-        q_direction_weight = 0.0  # how much Q-learning shifts slope
-        if getattr(self.config, "use_q_strategy_selection", True) and self._q_table:
-            # Determine current state from recent variance ratio
-            try:
-                recent_var = float(np.var(recon_arr[-min(10, len(recon_arr)):]))
-                var_ratio = recent_var / max(self._baseline_variance, 1e-12)
-                current_state = int(np.digitize([var_ratio], bins=[0.8, 1.2])[0])
-                # Best action = argmax Q(state, .)
-                q_vals = {a: self._q_table.get((current_state, a), 0.0) for a in range(3)}
-                best_action = max(q_vals, key=q_vals.__getitem__)
-                # action 0=mean_revert (-slope), 1=hold (no change), 2=trend_follow (+slope)
-                action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
-                q_direction_weight = action_to_sign[best_action]
-            except Exception as qe:
-                logger.debug("Q-strategy selection error: %s", qe)
-
-        # Blend slope from reconstruction with Q-strategy signal.
+        # Blend slope from reconstruction with Q-direction signal (legacy 0.5-weight).
         # When Q-table has no data (new model), q_direction_weight == 0 -> pure slope.
         effective_slope = slope + q_direction_weight * abs(slope) * 0.5
 
@@ -438,6 +489,8 @@ class MSSARLForecaster:
             "change_points": self._change_points,
             "q_table_size": len(self._q_table),
             "baseline_variance": self._baseline_variance,
+            # Phase 8.1: which component set was used (0=mean_revert, 1=hold, 2=trend_follow)
+            "active_action": best_action,
         }
 
     def get_diagnostics(self) -> Dict[str, Any]:
