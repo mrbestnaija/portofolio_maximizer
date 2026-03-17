@@ -341,6 +341,169 @@ def _pid_running(pid: int) -> bool:
     return False
 
 
+def _process_command_line(pid: int) -> str:
+    if pid <= 0:
+        return ""
+
+    if os.name == "nt":
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            (
+                f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId = {int(pid)}\" "
+                "-ErrorAction SilentlyContinue; "
+                "if ($p) { $p.CommandLine }"
+            ),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return (proc.stdout or "").strip()
+        except Exception:
+            return ""
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return (proc.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _lock_holder_matches_process(holder: dict[str, Any]) -> bool:
+    pid = 0
+    try:
+        pid = int(holder.get("pid") or 0)
+    except Exception:
+        pid = 0
+    if pid <= 0:
+        return False
+    if not _pid_running(pid):
+        return False
+
+    expected_parts: list[str] = []
+    script_name = Path(__file__).name.lower()
+    raw_command = str(holder.get("command") or "").strip()
+    if raw_command:
+        low = raw_command.lower()
+        if script_name in low:
+            expected_parts.append(script_name)
+        mode = str(holder.get("mode") or "").strip().lower()
+        if mode == "watch" and "--watch" in low:
+            expected_parts.append("--watch")
+
+    if not expected_parts:
+        return True
+
+    process_command = _process_command_line(pid).lower()
+    if not process_command:
+        return False
+    return all(part in process_command for part in expected_parts)
+
+
+def _listener_matches_expected_gateway(listener: dict[str, Any], expected_port: int) -> bool:
+    if not isinstance(listener, dict):
+        return False
+    command = str(listener.get("command") or "").strip().lower()
+    command_line = str(listener.get("commandLine") or "").strip().lower()
+    text = f"{command} {command_line}".strip()
+    if not text:
+        return False
+    if "openclaw" not in text or "gateway" not in text:
+        return False
+    if int(expected_port) > 0:
+        if f"--port {int(expected_port)}" not in text:
+            return False
+    return True
+
+
+def _terminate_pid(pid: int) -> _CmdResult:
+    if pid <= 0:
+        return _CmdResult(False, 1, [], "", "invalid_pid")
+
+    if os.name == "nt":
+        cmd = ["taskkill", "/PID", str(int(pid)), "/F", "/T"]
+    else:
+        cmd = ["kill", "-TERM", str(int(pid))]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return _CmdResult(False, 127, cmd, "", str(exc))
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        err = exc.stderr if isinstance(exc.stderr, str) else ""
+        return _CmdResult(False, 124, cmd, out, err or "timeout")
+    return _CmdResult(int(proc.returncode) == 0, int(proc.returncode), cmd, proc.stdout or "", proc.stderr or "")
+
+
+def _recover_detached_gateway_listener(
+    *,
+    oc_base: list[str],
+    listener: dict[str, Any],
+    expected_port: int,
+) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "attempted": False,
+        "matched_expected_gateway": False,
+        "listener_pid": None,
+        "actions": [],
+        "warnings": [],
+        "errors": [],
+    }
+    if not isinstance(listener, dict):
+        return info
+
+    listener_pid = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else 0
+    info["listener_pid"] = listener_pid or None
+    if listener_pid <= 0:
+        _append_unique(info["warnings"], "gateway_listener_pid_missing")
+        return info
+
+    if not _listener_matches_expected_gateway(listener, expected_port):
+        _append_unique(info["warnings"], "gateway_listener_identity_unverified")
+        return info
+
+    info["matched_expected_gateway"] = True
+    info["attempted"] = True
+
+    stop_res = _run_openclaw(oc_base=oc_base, args=["gateway", "stop"], timeout_seconds=30.0)
+    if stop_res.ok:
+        _append_unique(info["actions"], "gateway_stop_detached_listener_recovery")
+    else:
+        _append_unique(info["warnings"], f"gateway_stop_detached_listener_failed:rc={stop_res.returncode}")
+
+    if not _pid_running(listener_pid):
+        _append_unique(info["actions"], f"gateway_listener_cleared:{listener_pid}")
+        return info
+
+    kill_res = _terminate_pid(listener_pid)
+    if not kill_res.ok:
+        _append_unique(info["errors"], f"gateway_listener_terminate_failed:{listener_pid}:rc={kill_res.returncode}")
+        return info
+
+    _append_unique(info["actions"], f"gateway_listener_terminated:{listener_pid}")
+    return info
+
+
 def _state_seconds_since(value: Any) -> Optional[float]:
     ts = _parse_ts(value)
     if ts is None:
@@ -402,7 +565,7 @@ def _acquire_run_lock(
                 holder_pid = 0
             holder_age = _state_seconds_since(holder.get("created_at_utc"))
             stale = False
-            if holder_pid > 0 and not _pid_running(holder_pid):
+            if holder_pid > 0 and not _lock_holder_matches_process(holder):
                 stale = True
             elif holder_pid <= 0 and holder_age is not None and holder_age >= max(60, int(stale_seconds)):
                 stale = True
@@ -891,6 +1054,7 @@ def _gateway_health_and_heal(
     port = gateway_payload.get("port") if isinstance(gateway_payload.get("port"), dict) else {}
     listeners = port.get("listeners") if isinstance(port.get("listeners"), list) else []
     listener = listeners[0] if listeners and isinstance(listeners[0], dict) else {}
+    gateway_port = int(gateway_payload.get("gateway", {}).get("port") or 0) if isinstance(gateway_payload.get("gateway"), dict) else 0
     out["rpc_ok"] = bool(rpc.get("ok"))
     out["service_status"] = str(runtime.get("status") or "")
     out["service_state"] = str(runtime.get("state") or "")
@@ -918,6 +1082,43 @@ def _gateway_health_and_heal(
     if listener_conflict:
         _append_unique(out["warnings"], "gateway_detached_listener_conflict")
         _append_unique(out["manual_actions"], "run: openclaw gateway status --json")
+        if apply and primary_issue and _listener_matches_expected_gateway(listener, gateway_port):
+            detached_recovery = _recover_detached_gateway_listener(
+                oc_base=oc_base,
+                listener=listener,
+                expected_port=gateway_port,
+            )
+            out["detached_listener_recovery"] = detached_recovery
+            for action in detached_recovery.get("actions") or []:
+                _append_unique(out["actions"], str(action))
+            for warning in detached_recovery.get("warnings") or []:
+                _append_unique(out["warnings"], str(warning))
+            for error in detached_recovery.get("errors") or []:
+                _append_unique(out["errors"], str(error))
+            if not detached_recovery.get("errors"):
+                _, gateway_payload_after_detached = _run_openclaw_json(
+                    oc_base=oc_base,
+                    args=["gateway", "status"],
+                    timeout_seconds=20.0,
+                )
+                if isinstance(gateway_payload_after_detached, dict):
+                    gateway_payload = gateway_payload_after_detached
+                    rpc = gateway_payload.get("rpc") if isinstance(gateway_payload.get("rpc"), dict) else {}
+                    service = gateway_payload.get("service") if isinstance(gateway_payload.get("service"), dict) else {}
+                    runtime = service.get("runtime") if isinstance(service.get("runtime"), dict) else {}
+                    port = gateway_payload.get("port") if isinstance(gateway_payload.get("port"), dict) else {}
+                    listeners = port.get("listeners") if isinstance(port.get("listeners"), list) else []
+                    listener = listeners[0] if listeners and isinstance(listeners[0], dict) else {}
+                    out["rpc_ok"] = bool(rpc.get("ok"))
+                    out["service_status"] = str(runtime.get("status") or "")
+                    out["service_state"] = str(runtime.get("state") or "")
+                    out["gateway_port_status"] = str(port.get("status") or "")
+                    out["gateway_listener_pid"] = int(listener.get("pid")) if str(listener.get("pid") or "").isdigit() else None
+                listener_conflict = bool(
+                    bool(out["rpc_ok"])
+                    and str(out["gateway_port_status"]).strip().lower() == "busy"
+                    and str(out["service_status"]).strip().lower() in {"stopped", "ready"}
+                )
 
     dns_diag = out.get("dns") if isinstance(out.get("dns"), dict) else {}
     dns_reprobe_ok: Optional[bool] = None

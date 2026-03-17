@@ -65,3 +65,49 @@ def test_exec_env_check_passes_with_valid_values(monkeypatch, tmp_path) -> None:
     check = mod._openclaw_exec_environment_check()
     assert check["ok"] is True
     assert check["signals"] == ["exec_env_valid"]
+
+
+def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    data_dir = project_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+
+    captured: list[tuple[str, list[str]]] = []
+
+    def fake_run_check(name, cmd, timeout_seconds, **kwargs):
+        del timeout_seconds, kwargs
+        captured.append((str(name), list(cmd)))
+        return {
+            "name": str(name),
+            "ok": True,
+            "returncode": 0,
+            "duration_seconds": 0.0,
+            "command": " ".join(cmd),
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "_run_check", fake_run_check)
+    monkeypatch.setattr(
+        mod,
+        "_openclaw_exec_environment_check",
+        lambda: {
+            "name": "openclaw_exec_env",
+            "ok": True,
+            "returncode": 0,
+            "duration_seconds": 0.0,
+            "command": "validate",
+            "stdout": "ok",
+            "stderr": "",
+            "signals": ["exec_env_valid"],
+        },
+    )
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0)
+    assert payload["status"] == "ok"
+
+    by_name = {name: cmd for name, cmd in captured}
+    prod_cmd = by_name["production_gate"]
+    assert "--unattended-profile" in prod_cmd

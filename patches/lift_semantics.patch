@@ -1,0 +1,3330 @@
+diff --git a/scripts/check_forecast_audits.py b/scripts/check_forecast_audits.py
+index 574a1f0..750317a 100644
+--- a/scripts/check_forecast_audits.py
++++ b/scripts/check_forecast_audits.py
+@@ -240,6 +240,627 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+         raise last_error
+ 
+ 
++def _counts_toward_readiness_denominator(
++    *,
++    context_type: str,
++    outcome_status: str,
++    gate_eligible: bool = True,
++) -> bool:
++    normalized_context = str(context_type or "TRADE").strip().upper() or "TRADE"
++    normalized_status = str(outcome_status or "OUTCOMES_NOT_LOADED").strip().upper()
++    return bool(gate_eligible) and (
++        normalized_context == "TRADE"
++        and normalized_status
++        not in {
++            "INVALID_CONTEXT",
++            "NON_TRADE_CONTEXT",
++            "OUTCOMES_NOT_LOADED",
++            "NOT_DUE",
++        }
++    )
++
++
++def _merge_summary_fields(summary: Dict[str, Any], summary_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
++    if not isinstance(summary_fields, dict):
++        return summary
++    for key, value in summary_fields.items():
++        if key == "window_counts" and isinstance(value, dict):
++            base = summary.get("window_counts")
++            if not isinstance(base, dict):
++                base = {}
++            merged = dict(base)
++            merged.update(value)
++            summary["window_counts"] = merged
++            continue
++        if key == "telemetry_contract" and isinstance(value, dict):
++            base = summary.get("telemetry_contract")
++            if not isinstance(base, dict):
++                base = {}
++            merged = dict(base)
++            merged.update(value)
++            summary["telemetry_contract"] = merged
++            continue
++        summary[key] = value
++    return summary
++
++
++def _normalize_reason_codes(
++    reason_codes: Any,
++    *,
++    fallback_reason_code: Optional[str] = None,
++) -> List[str]:
++    if isinstance(reason_codes, list):
++        normalized = [str(item).strip().upper() for item in reason_codes if str(item).strip()]
++        if normalized:
++            return normalized
++    fallback = str(fallback_reason_code or "").strip().upper()
++    if not fallback or fallback == "READY":
++        return []
++    return [part.strip() for part in fallback.split(",") if part.strip()]
++
++
++def _summarize_admission_entries(dataset_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
++    bucket_counts = {
++        "ELIGIBLE": 0,
++        "ACCEPTED_NONELIGIBLE": 0,
++        "QUARANTINED": 0,
++    }
++    source_counts = {
++        "producer": 0,
++        "legacy_derived": 0,
++    }
++    for entry in dataset_entries:
++        bucket = str(entry.get("gate_bucket") or "").strip().upper()
++        if bucket in bucket_counts:
++            bucket_counts[bucket] += 1
++        source = str(entry.get("semantic_admission_source") or "").strip().lower()
++        if source in source_counts:
++            source_counts[source] += 1
++    return {
++        "accepted_records": sum(1 for entry in dataset_entries if bool(entry.get("accepted_for_audit_history"))),
++        "accepted_noneligible_records": bucket_counts["ACCEPTED_NONELIGIBLE"],
++        "eligible_records": sum(1 for entry in dataset_entries if bool(entry.get("gate_eligible"))),
++        "quarantined_records": bucket_counts["QUARANTINED"],
++        "duplicate_conflicts": sum(1 for entry in dataset_entries if bool(entry.get("duplicate_conflict"))),
++        "missing_execution_metadata_records": sum(
++            1 for entry in dataset_entries if bool(entry.get("missing_execution_metadata"))
++        ),
++        "bucket_counts": bucket_counts,
++        "source_counts": source_counts,
++    }
++
++
++def _derive_semantic_admission(
++    entry: Dict[str, Any],
++    *,
++    include_research: bool,
++) -> Dict[str, Any]:
++    semantic = entry.get("semantic_admission")
++    semantic = semantic if isinstance(semantic, dict) else {}
++    producer_present = any(
++        key in semantic
++        for key in (
++            "accepted_for_audit_history",
++            "admissible_for_readiness",
++            "gate_eligible",
++            "gate_bucket",
++            "reason_code",
++            "reason_codes",
++            "duplicate_conflict",
++            "quarantined",
++            "missing_execution_metadata",
++        )
++    )
++    context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
++    manifest_status = str(entry.get("manifest_verification_status") or "").strip().lower()
++    duplicate_conflict = bool(entry.get("duplicate_conflict")) or bool(semantic.get("duplicate_conflict"))
++    quarantined = bool(entry.get("quarantined")) or bool(semantic.get("quarantined"))
++    production_labeled = bool(
++        semantic.get("production_labeled")
++        if "production_labeled" in semantic
++        else (not include_research or str(entry.get("cohort_id") or "").strip().lower() == "production")
++    )
++    accepted_for_audit_history = bool(semantic.get("accepted_for_audit_history", True))
++
++    if producer_present:
++        explicit_admissible = semantic.get("admissible_for_readiness")
++        explicit_gate_eligible = semantic.get("gate_eligible")
++        if explicit_admissible is None:
++            admissible_for_readiness = bool(explicit_gate_eligible)
++        else:
++            admissible_for_readiness = bool(explicit_admissible)
++        gate_eligible = (
++            bool(explicit_gate_eligible)
++            if explicit_gate_eligible is not None
++            else bool(admissible_for_readiness)
++        )
++        gate_bucket = str(
++            semantic.get("gate_bucket")
++            or ("ELIGIBLE" if gate_eligible else "ACCEPTED_NONELIGIBLE")
++        ).strip().upper() or ("ELIGIBLE" if gate_eligible else "ACCEPTED_NONELIGIBLE")
++        reason_code = str(
++            semantic.get("reason_code")
++            or semantic.get("admission_reason_code")
++            or ("READY" if gate_eligible else "NON_ELIGIBLE")
++        ).strip().upper() or ("READY" if gate_eligible else "NON_ELIGIBLE")
++        missing_execution_metadata_fields = semantic.get("missing_execution_metadata_fields")
++        if isinstance(missing_execution_metadata_fields, list):
++            missing_execution_metadata_fields = [
++                str(item).strip()
++                for item in missing_execution_metadata_fields
++                if str(item).strip()
++            ]
++        else:
++            missing_execution_metadata_fields = []
++        missing_execution_metadata = bool(semantic.get("missing_execution_metadata"))
++        if missing_execution_metadata_fields:
++            missing_execution_metadata = True
++        if "duplicate_conflict" in semantic:
++            duplicate_conflict = bool(semantic.get("duplicate_conflict"))
++        if "quarantined" in semantic:
++            quarantined = bool(semantic.get("quarantined"))
++        elif "not_quarantined" in semantic:
++            quarantined = not bool(semantic.get("not_quarantined"))
++        return {
++            "accepted_for_audit_history": accepted_for_audit_history,
++            "admissible_for_readiness": admissible_for_readiness,
++            "gate_eligible": gate_eligible,
++            "gate_bucket": gate_bucket,
++            "admission_reason_code": reason_code,
++            "admission_reason_codes": _normalize_reason_codes(
++                semantic.get("reason_codes"),
++                fallback_reason_code=reason_code,
++            ),
++            "duplicate_conflict": duplicate_conflict,
++            "quarantined": quarantined,
++            "production_labeled": bool(semantic.get("production_labeled", production_labeled)),
++            "missing_execution_metadata": missing_execution_metadata,
++            "missing_execution_metadata_fields": missing_execution_metadata_fields,
++            "semantic_admission_source": "producer",
++            "semantic_admission_preserved": True,
++        }
++
++    reason_codes: list[str] = []
++    if not production_labeled:
++        reason_codes.append("NOT_PRODUCTION_LABELED")
++    if context_type != "TRADE":
++        reason_codes.append("NON_TRADE_CONTEXT")
++    if manifest_status and manifest_status != "verified":
++        reason_codes.append(f"MANIFEST_{manifest_status.upper()}")
++    if duplicate_conflict:
++        reason_codes.append("DUPLICATE_CONFLICT")
++    if quarantined:
++        reason_codes.append("QUARANTINED")
++
++    explicit_admissible = semantic.get("admissible_for_readiness")
++    if explicit_admissible is None:
++        admissible_for_readiness = accepted_for_audit_history and len(reason_codes) == 0
++    else:
++        admissible_for_readiness = bool(explicit_admissible) and len(reason_codes) == 0
++
++    if quarantined or duplicate_conflict:
++        gate_bucket = "QUARANTINED"
++    elif admissible_for_readiness:
++        gate_bucket = "ELIGIBLE"
++    else:
++        gate_bucket = "ACCEPTED_NONELIGIBLE"
++    missing_execution_metadata_fields: List[str] = []
++    if not str(entry.get("run_id") or "").strip():
++        missing_execution_metadata_fields.append("run_id")
++    if not str(entry.get("entry_ts") or "").strip():
++        missing_execution_metadata_fields.append("entry_ts")
++    missing_execution_metadata = (
++        str(entry.get("outcome_reason") or "").strip().upper() == "MISSING_EXECUTION_METADATA"
++        or bool(missing_execution_metadata_fields)
++    )
++
++    return {
++        "accepted_for_audit_history": accepted_for_audit_history,
++        "admissible_for_readiness": admissible_for_readiness,
++        "gate_eligible": admissible_for_readiness,
++        "gate_bucket": gate_bucket,
++        "admission_reason_code": "READY" if admissible_for_readiness else ",".join(reason_codes) or "NON_ELIGIBLE",
++        "admission_reason_codes": [] if admissible_for_readiness else reason_codes,
++        "duplicate_conflict": duplicate_conflict,
++        "quarantined": quarantined,
++        "production_labeled": production_labeled,
++        "missing_execution_metadata": missing_execution_metadata,
++        "missing_execution_metadata_fields": missing_execution_metadata_fields,
++        "semantic_admission_source": "legacy_derived",
++        "semantic_admission_preserved": False,
++    }
++
++
++def _write_summary_with_guard(path: Path, payload: Dict[str, Any]) -> None:
++    required = (
++        "audit_dir",
++        "audit_roots",
++        "generated_utc",
++        "source_script",
++        "schema_version",
++        "max_files",
++        "scope",
++    )
++    missing = [key for key in required if key not in payload]
++    if missing:
++        raise ValueError("summary_missing_required_fields:" + ",".join(missing))
++    _write_json_atomic(path, payload)
++
++
++def _build_failure_dataset_snapshot(
++    *,
++    audit_roots: List[Path],
++    max_files: int,
++    db_path: Optional[Path],
++    min_forecast_horizon: Optional[int],
++    generated_utc: str,
++) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool, Optional[str]]:
++    files = _collect_audit_files(audit_roots=audit_roots, max_files=max_files)
++
++    def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
++        dataset = audit.get("dataset") or {}
++        ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper() or None
++        return (
++            ticker,
++            dataset.get("start"),
++            dataset.get("end"),
++            dataset.get("length"),
++            dataset.get("forecast_horizon"),
++        )
++
++    parseable_count = 0
++    parse_error_count = 0
++    dedup_map: Dict[Tuple[Any, ...], Tuple[Path, Dict[str, Any]]] = {}
++    horizon_filtered_count = 0
++
++    for path in files:
++        audit, _ = _load_audit_with_error(path)
++        if not audit:
++            parse_error_count += 1
++            continue
++        parseable_count += 1
++        if min_forecast_horizon is not None:
++            horizon = _parse_non_negative_int((audit.get("dataset") or {}).get("forecast_horizon"))
++            if horizon is None or horizon < min_forecast_horizon:
++                horizon_filtered_count += 1
++                continue
++        key = _outcome_dedupe_key_from_audit(audit)
++        if key not in dedup_map:
++            dedup_map[key] = (path, audit)
++
++    outcomes_loaded = False
++    outcome_join_error: Optional[str] = None
++    closed_trade_counts: Dict[str, int] = {}
++    if db_path is not None:
++        outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(db_path)
++
++    now = now_utc()
++    dataset_entries: List[Dict[str, Any]] = []
++
++    outcome_windows_eligible = 0
++    outcome_windows_matched = 0
++    outcome_windows_missing = 0
++    outcome_windows_ambiguous = 0
++    outcome_windows_not_due = 0
++    outcome_windows_not_yet_eligible = 0
++    outcome_windows_invalid_context = 0
++    outcome_windows_outcomes_not_loaded = 0
++    outcome_windows_no_signal_id = 0
++    outcome_windows_non_trade_context = 0
++    outcome_windows_missing_execution_metadata = 0
++
++    def _legacy_to_status(outcome_status: str) -> str:
++        mapping = {
++            "MATCHED": "PASS",
++            "OUTCOME_MISSING": "FAIL",
++            "NOT_DUE": "INCONCLUSIVE_ALLOWED",
++            "INVALID_CONTEXT": "INVALID_CONTEXT",
++            "NON_TRADE_CONTEXT": "WARN",
++            "OUTCOMES_NOT_LOADED": "WARN",
++        }
++        return mapping.get(outcome_status, "WARN")
++
++    for path, audit in dedup_map.values():
++        ds = (audit or {}).get("dataset") or {}
++        signal_context = (audit or {}).get("signal_context") or {}
++        if not isinstance(signal_context, dict):
++            signal_context = {}
++
++        context_type = str(signal_context.get("context_type") or "").strip().upper() or "TRADE"
++        raw_ts_signal_id = signal_context.get("ts_signal_id")
++        ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
++        ts_signal_id = ts_signal_id or None
++
++        expected_close, expected_close_source = compute_expected_close(signal_context, ds)
++        meta = _extract_window_metadata(audit or {})
++
++        entry: Dict[str, Any] = {
++            "file": path.name,
++            "audit_id": str((audit or {}).get("audit_id") or path.stem).strip() or path.stem,
++            "start": ds.get("start"),
++            "end": ds.get("end"),
++            "length": ds.get("length"),
++            "forecast_horizon": ds.get("forecast_horizon"),
++            "ticker": meta.get("ticker"),
++            "detected_regime": meta.get("detected_regime"),
++            "end_day": meta.get("end_day"),
++            "context_type": context_type,
++            "ts_signal_id": ts_signal_id,
++            "run_id": signal_context.get("run_id"),
++            "entry_ts": signal_context.get("entry_ts"),
++            "signal_context_missing": bool(signal_context.get("signal_context_missing")),
++            "dataset_forecast_horizon": ds.get("forecast_horizon"),
++            "signal_forecast_horizon": signal_context.get("forecast_horizon"),
++            "expected_close_ts": expected_close.isoformat() if expected_close else None,
++            "expected_close_source": expected_close_source,
++            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
++            "cohort_id": (audit or {}).get("cohort_id"),
++            "cohort_identity": (audit or {}).get("cohort_identity"),
++            "semantic_admission": (audit or {}).get("semantic_admission"),
++            "outcome_status": None,
++            "outcome_reason": None,
++        }
++
++        ticker = str(entry.get("ticker") or "").strip().upper()
++        run_id = str(entry.get("run_id") or "").strip()
++        entry_ts_raw = str(entry.get("entry_ts") or "").strip()
++        signal_horizon = _parse_non_negative_int(entry.get("signal_forecast_horizon"))
++        dataset_horizon = _parse_non_negative_int(entry.get("dataset_forecast_horizon"))
++        expected_close_ts = _parse_utc_datetime(entry.get("expected_close_ts"))
++        entry_ts = _parse_utc_datetime(entry.get("entry_ts"))
++
++        if context_type != "TRADE":
++            entry["outcome_status"] = "NON_TRADE_CONTEXT"
++            entry["outcome_reason"] = "NON_TRADE_CONTEXT"
++            outcome_windows_non_trade_context += 1
++        elif not ticker:
++            entry["outcome_status"] = "NON_TRADE_CONTEXT"
++            entry["outcome_reason"] = "MISSING_TICKER"
++            outcome_windows_non_trade_context += 1
++        elif not run_id or not entry_ts_raw:
++            entry["outcome_status"] = "INVALID_CONTEXT"
++            entry["outcome_reason"] = "MISSING_EXECUTION_METADATA"
++            outcome_windows_missing_execution_metadata += 1
++            outcome_windows_invalid_context += 1
++        elif not ts_signal_id:
++            entry["outcome_status"] = "INVALID_CONTEXT"
++            entry["outcome_reason"] = "MISSING_SIGNAL_ID"
++            outcome_windows_no_signal_id += 1
++            outcome_windows_invalid_context += 1
++        elif (
++            signal_horizon is not None
++            and dataset_horizon is not None
++            and signal_horizon != dataset_horizon
++        ):
++            entry["outcome_status"] = "INVALID_CONTEXT"
++            entry["outcome_reason"] = "HORIZON_MISMATCH"
++            outcome_windows_invalid_context += 1
++        elif expected_close_ts is None:
++            entry["outcome_status"] = "INVALID_CONTEXT"
++            entry["outcome_reason"] = "EXPECTED_CLOSE_UNAVAILABLE"
++            outcome_windows_invalid_context += 1
++        elif entry_ts is not None and expected_close_ts < entry_ts:
++            entry["outcome_status"] = "INVALID_CONTEXT"
++            entry["outcome_reason"] = "CAUSALITY_VIOLATION"
++            outcome_windows_invalid_context += 1
++        elif (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now:
++            entry["outcome_status"] = "NOT_DUE"
++            entry["outcome_reason"] = "OUTCOME_WINDOW_OPEN"
++            outcome_windows_not_due += 1
++            outcome_windows_not_yet_eligible += 1
++        elif not outcomes_loaded:
++            entry["outcome_status"] = "OUTCOMES_NOT_LOADED"
++            entry["outcome_reason"] = "OUTCOME_JOIN_UNAVAILABLE"
++            outcome_windows_outcomes_not_loaded += 1
++        else:
++            match_count = int(closed_trade_counts.get(ts_signal_id, 0))
++            entry["outcome_match_count"] = match_count
++            if match_count == 1:
++                entry["outcome_status"] = "MATCHED"
++                entry["outcome_reason"] = "ONE_TO_ONE_MATCH"
++                outcome_windows_eligible += 1
++                outcome_windows_matched += 1
++            elif match_count == 0:
++                entry["outcome_status"] = "OUTCOME_MISSING"
++                entry["outcome_reason"] = "DUE_BUT_MISSING_CLOSE"
++                outcome_windows_eligible += 1
++                outcome_windows_missing += 1
++            else:
++                entry["outcome_status"] = "INVALID_CONTEXT"
++                entry["outcome_reason"] = "AMBIGUOUS_MATCH"
++                outcome_windows_ambiguous += 1
++                outcome_windows_invalid_context += 1
++
++        outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
++        outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
++        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
++        counts_toward_readiness = _counts_toward_readiness_denominator(
++            context_type=context_type,
++            outcome_status=outcome_status,
++        )
++        severity = "LOW"
++        blocking = False
++        if outcome_status == "INVALID_CONTEXT":
++            severity = "HIGH"
++            blocking = True
++        elif outcome_status in {"OUTCOME_MISSING", "OUTCOMES_NOT_LOADED"}:
++            severity = "MEDIUM"
++        entry.update(
++            _derive_semantic_admission(
++                entry,
++                include_research=False,
++            )
++        )
++        entry.update(
++            normalize_telemetry_payload(
++                {
++                    "status": _legacy_to_status(outcome_status),
++                    "reason_code": outcome_reason,
++                    "context_type": context_type,
++                    "severity": severity,
++                    "blocking": blocking,
++                    "counts_toward_readiness_denominator": counts_toward_readiness,
++                    "counts_toward_linkage_denominator": counts_toward_linkage,
++                    "generated_utc": generated_utc,
++                    "source_script": "scripts/check_forecast_audits.py",
++                },
++                source_script="scripts/check_forecast_audits.py",
++                generated_utc=generated_utc,
++            )
++        )
++        dataset_entries.append(entry)
++
++    readiness_denominator_included = sum(
++        1 for entry in dataset_entries if bool(entry.get("counts_toward_readiness_denominator"))
++    )
++    linkage_denominator_included = sum(
++        1 for entry in dataset_entries if bool(entry.get("counts_toward_linkage_denominator"))
++    )
++    readiness_excluded_non_trade = sum(
++        1
++        for entry in dataset_entries
++        if str(entry.get("outcome_status") or "").strip().upper() == "NON_TRADE_CONTEXT"
++    )
++    readiness_excluded_invalid = sum(
++        1
++        for entry in dataset_entries
++        if str(entry.get("outcome_status") or "").strip().upper() == "INVALID_CONTEXT"
++    )
++    readiness_excluded_not_due = sum(
++        1
++        for entry in dataset_entries
++        if str(entry.get("outcome_status") or "").strip().upper() == "NOT_DUE"
++    )
++
++    window_counts = {
++        "n_raw_windows": len(files),
++        "n_parseable_windows": parseable_count,
++        "n_deduped_windows": len(dedup_map),
++        "n_outcome_deduped_windows": len(dedup_map),
++        "n_rmse_windows_processed": 0,
++        "n_rmse_windows_usable": 0,
++        "n_outcome_windows_eligible": outcome_windows_eligible,
++        "n_outcome_windows_matched": outcome_windows_matched,
++        "n_outcome_windows_missing": outcome_windows_missing,
++        "n_outcome_windows_ambiguous": outcome_windows_ambiguous,
++        "n_outcome_windows_not_due": outcome_windows_not_due,
++        "n_outcome_windows_not_yet_eligible": outcome_windows_not_yet_eligible,
++        "n_outcome_windows_invalid_context": outcome_windows_invalid_context,
++        "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
++        "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
++        "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
++        "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
++        "n_readiness_denominator_included": readiness_denominator_included,
++        "n_linkage_denominator_included": linkage_denominator_included,
++        "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,
++        "n_readiness_excluded_invalid_context": readiness_excluded_invalid,
++        "n_readiness_excluded_not_due": readiness_excluded_not_due,
++        "n_horizon_filtered_windows": horizon_filtered_count,
++    }
++
++    return dataset_entries, window_counts, outcomes_loaded, outcome_join_error
++
++
++def _emit_failure_summary_and_exit(
++    *,
++    message: str,
++    audit_dir: Path,
++    audit_roots: List[Path],
++    include_research: bool,
++    max_files: int,
++    db_path: Optional[Path] = None,
++    min_forecast_horizon: Optional[int] = None,
++    exit_code: int = 1,
++    summary_fields: Optional[Dict[str, Any]] = None,
++) -> None:
++    generated_utc = telemetry_now_utc()
++    cache_dir = Path("logs/forecast_audits_cache")
++    cache_dir.mkdir(parents=True, exist_ok=True)
++    cache_path = cache_dir / "latest_summary.json"
++    dataset_entries, window_counts, outcomes_loaded, outcome_join_error = _build_failure_dataset_snapshot(
++        audit_roots=audit_roots,
++        max_files=int(max_files),
++        db_path=db_path,
++        min_forecast_horizon=min_forecast_horizon,
++        generated_utc=generated_utc,
++    )
++    admission_summary = _summarize_admission_entries(dataset_entries)
++    summary: Dict[str, Any] = {
++        "audit_dir": str(audit_dir),
++        "audit_roots": [str(root) for root in audit_roots],
++        "generated_utc": generated_utc,
++        "source_script": "scripts/check_forecast_audits.py",
++        "schema_version": TELEMETRY_SCHEMA_VERSION,
++        "status": "PASS" if int(exit_code) == 0 else "FAIL",
++        "exit_code": int(exit_code),
++        "exit_reason": str(message).strip() or "UNSPECIFIED_FAILURE",
++        "max_files": int(max_files),
++        "effective_audits": None,
++        "effective_outcome_audits": None,
++        "total_unique_audits": window_counts.get("n_deduped_windows"),
++        "violation_count": None,
++        "violation_rate": None,
++        "max_violation_rate": None,
++        "ensemble_missing_count": None,
++        "ensemble_missing_rate": None,
++        "max_missing_ensemble_rate": None,
++        "holding_period_required": None,
++        "lift_fraction": None,
++        "min_lift_fraction": None,
++        "percentiles": {"p10": None, "p50": None, "p90": None},
++        "ratio_distribution": {"count": 0, "min": None, "max": None, "mean": None, "p10": None, "p50": None, "p90": None},
++        "decision": None,
++        "decision_reason": str(message).strip() or "UNSPECIFIED_FAILURE",
++        "recent_window_audits": None,
++        "recent_effective_audits": None,
++        "recent_violation_count": None,
++        "recent_violation_rate": None,
++        "recent_window_max_violation_rate": None,
++        "recent_rmse_ratio_p90": None,
++        "recent_window_max_p90_rmse_ratio": None,
++        "scope": {
++            "include_research": bool(include_research),
++            "production_audit_only": not bool(include_research),
++        },
++        "window_counts": window_counts,
++        "admission_summary": admission_summary,
++        "dataset_windows": dataset_entries,
++        "telemetry_contract": normalize_telemetry_payload(
++            {
++                "schema_version": TELEMETRY_SCHEMA_VERSION,
++                "rmse_inputs_present": False,
++                "outcomes_loaded": outcomes_loaded,
++                "execution_log_loaded": False,
++                "outcome_join_attempted": db_path is not None,
++                "status": "FAIL",
++                "reason_code": "FAILURE_SUMMARY_EXIT",
++                "context_type": "TRADE",
++                "severity": "MEDIUM",
++                "blocking": True,
++                "counts_toward_readiness_denominator": False,
++                "counts_toward_linkage_denominator": False,
++                "generated_utc": generated_utc,
++                "source_script": "scripts/check_forecast_audits.py",
++                "outcome_join_error": outcome_join_error,
++            },
++            source_script="scripts/check_forecast_audits.py",
++            generated_utc=generated_utc,
++        ),
++        "cache_status": {"write_ok": True, "errors": []},
++    }
++    summary = _merge_summary_fields(summary, summary_fields)
++    summary["telemetry_contract"] = normalize_telemetry_payload(
++        summary.get("telemetry_contract", {}),
++        source_script="scripts/check_forecast_audits.py",
++        generated_utc=generated_utc,
++    )
++    try:
++        _write_summary_with_guard(cache_path, summary)
++    except Exception as exc:
++        print(f"[WARN] forecast_audits_cache_write_failed target=latest_summary error={exc}")
++    raise SystemExit(int(exit_code))
++
++
+ def _resolve_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
+     roots: List[Path] = []
+     seen: set[Path] = set()
+@@ -608,11 +1229,21 @@ def main() -> None:
+         # logs/forecast_audits without production/research partitioning.
+         audit_dir = DEFAULT_AUDIT_ROOT
+     db_path = Path(args.db) if args.db else None
++    min_forecast_horizon: Optional[int] = None
+     audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
+     files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
+     if not files:
+         roots_text = ", ".join(str(root) for root in audit_roots)
+-        raise SystemExit(f"No forecast_audit_*.json files found in: {roots_text}")
++        _emit_failure_summary_and_exit(
++            message=f"No forecast_audit_*.json files found in: {roots_text}",
++            audit_dir=audit_dir,
++            audit_roots=audit_roots,
++            include_research=bool(args.include_research),
++            max_files=int(args.max_files),
++            db_path=db_path,
++            min_forecast_horizon=min_forecast_horizon,
++            exit_code=1,
++        )
+ 
+     monitoring_cfg = _load_monitoring_thresholds(
+         Path(args.config_path) if args.config_path else None
+@@ -857,16 +1488,35 @@ def main() -> None:
+                 + int(manifest_stats.get("invalid_records", 0))
+             )
+             if not bool(manifest_stats.get("manifest_exists", False)):
+-                raise SystemExit(
+-                    f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}"
++                _emit_failure_summary_and_exit(
++                    message=(
++                        "Manifest integrity mode=fail but manifest file is missing: "
++                        f"{manifest_path}"
++                    ),
++                    audit_dir=audit_dir,
++                    audit_roots=audit_roots,
++                    include_research=bool(args.include_research),
++                    max_files=int(args.max_files),
++                    db_path=db_path,
++                    min_forecast_horizon=min_forecast_horizon,
++                    exit_code=1,
+                 )
+             if unverified > 0:
+-                raise SystemExit(
+-                    "Manifest integrity failed: "
+-                    f"missing={manifest_stats.get('missing', 0)} "
+-                    f"mismatch={manifest_stats.get('mismatch', 0)} "
+-                    f"hash_failed={manifest_stats.get('hash_failed', 0)} "
+-                    f"invalid_records={manifest_stats.get('invalid_records', 0)}"
++                _emit_failure_summary_and_exit(
++                    message=(
++                        "Manifest integrity failed: "
++                        f"missing={manifest_stats.get('missing', 0)} "
++                        f"mismatch={manifest_stats.get('mismatch', 0)} "
++                        f"hash_failed={manifest_stats.get('hash_failed', 0)} "
++                        f"invalid_records={manifest_stats.get('invalid_records', 0)}"
++                    ),
++                    audit_dir=audit_dir,
++                    audit_roots=audit_roots,
++                    include_research=bool(args.include_research),
++                    max_files=int(args.max_files),
++                    db_path=db_path,
++                    min_forecast_horizon=min_forecast_horizon,
++                    exit_code=1,
+                 )
+ 
+     violation_count = sum(1 for r in results if r.violation)
+@@ -969,15 +1619,98 @@ def main() -> None:
+         f"{ensemble_missing_count}/{len(results)} ({ensemble_missing_rate:.2%}) "
+         f"(max allowed {max_missing_ensemble_rate:.2%})"
+     )
++    warmup_required: Optional[int] = None
++
++    def _current_failure_summary(
++        *,
++        decision: Optional[str] = None,
++        decision_reason: Optional[str] = None,
++    ) -> Dict[str, Any]:
++        lift_value = 0.0
++        if effective_n:
++            lift_threshold = 1.0 - min_lift_rmse_ratio
++            lift_count = sum(
++                1
++                for r in results
++                if (
++                    r.rmse_ratio is not None
++                    and isinstance(r.rmse_ratio, (int, float))
++                    and float(r.rmse_ratio) < float(lift_threshold)
++                )
++            )
++            lift_value = lift_count / effective_n
++
++        ratios_filtered = [
++            (r.path.name, float(r.rmse_ratio))
++            for r in results
++            if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
++        ]
++        ratio_values = [val for _, val in ratios_filtered]
++        ratio_stats = {
++            "count": len(ratio_values),
++            "min": min(ratio_values) if ratio_values else None,
++            "max": max(ratio_values) if ratio_values else None,
++            "mean": (sum(ratio_values) / len(ratio_values)) if ratio_values else None,
++            "p10": pct.get(0.1) if pct else None,
++            "p50": pct.get(0.5) if pct else None,
++            "p90": pct.get(0.9) if pct else None,
++        }
++        return {
++            "effective_audits": effective_n,
++            "effective_outcome_audits": None,
++            "total_unique_audits": len(results),
++            "violation_count": violation_count,
++            "violation_rate": violation_rate,
++            "max_violation_rate": max_violation_rate,
++            "ensemble_missing_count": ensemble_missing_count,
++            "ensemble_missing_rate": ensemble_missing_rate,
++            "max_missing_ensemble_rate": max_missing_ensemble_rate,
++            "holding_period_required": warmup_required,
++            "lift_fraction": lift_value,
++            "min_lift_fraction": min_lift_fraction,
++            "percentiles": {
++                "p10": pct.get(0.1) if pct else None,
++                "p50": pct.get(0.5) if pct else None,
++                "p90": pct.get(0.9) if pct else None,
++            },
++            "ratio_distribution": ratio_stats,
++            "decision": decision,
++            "decision_reason": decision_reason,
++            "recent_window_audits": recent_window_audits,
++            "recent_effective_audits": recent_effective_n,
++            "recent_violation_count": recent_violation_count,
++            "recent_violation_rate": recent_violation_rate,
++            "recent_window_max_violation_rate": recent_window_max_violation_rate,
++            "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
++            "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
++            "window_counts": {
++                "n_rmse_windows_processed": rmse_windows_processed,
++                "n_rmse_windows_usable": effective_n,
++            },
++        }
++
+     if (
+         len(results) > 0
+         and max_missing_ensemble_rate >= 0
+     ):
+         if ensemble_missing_rate > max_missing_ensemble_rate:
+-            raise SystemExit(
+-                "Missing ensemble metric rate "
+-                f"{ensemble_missing_rate:.2%} exceeds max "
+-                f"{max_missing_ensemble_rate:.2%}"
++            _emit_failure_summary_and_exit(
++                message=(
++                    "Missing ensemble metric rate "
++                    f"{ensemble_missing_rate:.2%} exceeds max "
++                    f"{max_missing_ensemble_rate:.2%}"
++                ),
++                audit_dir=audit_dir,
++                audit_roots=audit_roots,
++                include_research=bool(args.include_research),
++                max_files=int(args.max_files),
++                db_path=db_path,
++                min_forecast_horizon=min_forecast_horizon,
++                exit_code=1,
++                summary_fields=_current_failure_summary(
++                    decision=DEFAULT_DECISION_RESEARCH,
++                    decision_reason="missing ensemble metrics exceed threshold",
++                ),
+             )
+     if pct:
+         print(
+@@ -1005,10 +1738,23 @@ def main() -> None:
+             )
+         else:
+             if recent_violation_rate > recent_window_max_violation_rate:
+-                raise SystemExit(
+-                    f"Recent-window violation rate {recent_violation_rate:.2%} exceeds "
+-                    f"max-violation-rate {recent_window_max_violation_rate:.2%} "
+-                    f"(window={recent_window_audits})"
++                _emit_failure_summary_and_exit(
++                    message=(
++                        f"Recent-window violation rate {recent_violation_rate:.2%} exceeds "
++                        f"max-violation-rate {recent_window_max_violation_rate:.2%} "
++                        f"(window={recent_window_audits})"
++                    ),
++                    audit_dir=audit_dir,
++                    audit_roots=audit_roots,
++                    include_research=bool(args.include_research),
++                    max_files=int(args.max_files),
++                    db_path=db_path,
++                    min_forecast_horizon=min_forecast_horizon,
++                    exit_code=1,
++                    summary_fields=_current_failure_summary(
++                        decision=DEFAULT_DECISION_RESEARCH,
++                        decision_reason="recent window violation rate exceeds threshold",
++                    ),
+                 )
+             if (
+                 recent_window_max_p90_rmse_ratio is not None
+@@ -1016,10 +1762,23 @@ def main() -> None:
+                 and recent_pct.get(0.9) is not None
+                 and float(recent_pct.get(0.9)) > float(recent_window_max_p90_rmse_ratio)
+             ):
+-                raise SystemExit(
+-                    f"Recent-window p90 RMSE ratio {float(recent_pct.get(0.9)):.3f} exceeds "
+-                    f"{float(recent_window_max_p90_rmse_ratio):.3f} "
+-                    f"(window={recent_window_audits})"
++                _emit_failure_summary_and_exit(
++                    message=(
++                        f"Recent-window p90 RMSE ratio {float(recent_pct.get(0.9)):.3f} exceeds "
++                        f"{float(recent_window_max_p90_rmse_ratio):.3f} "
++                        f"(window={recent_window_audits})"
++                    ),
++                    audit_dir=audit_dir,
++                    audit_roots=audit_roots,
++                    include_research=bool(args.include_research),
++                    max_files=int(args.max_files),
++                    db_path=db_path,
++                    min_forecast_horizon=min_forecast_horizon,
++                    exit_code=1,
++                    summary_fields=_current_failure_summary(
++                        decision=DEFAULT_DECISION_RESEARCH,
++                        decision_reason="recent window p90 rmse ratio exceeds threshold",
++                    ),
+                 )
+ 
+     warmup_required = max(min_effective_audits, holding_period, 0)
+@@ -1031,19 +1790,49 @@ def main() -> None:
+         if args.require_effective_audits is not None:
+             explicit_required = int(args.require_effective_audits)
+         if explicit_required is not None and effective_n < explicit_required:
+-            raise SystemExit(
+-                f"Insufficient effective audits for RMSE gating: effective_audits={effective_n} "
+-                f"< required_audits={explicit_required}"
++            _emit_failure_summary_and_exit(
++                message=(
++                    "Insufficient effective audits for RMSE gating: "
++                    f"effective_audits={effective_n} < required_audits={explicit_required}"
++                ),
++                audit_dir=audit_dir,
++                audit_roots=audit_roots,
++                include_research=bool(args.include_research),
++                max_files=int(args.max_files),
++                db_path=db_path,
++                min_forecast_horizon=min_forecast_horizon,
++                exit_code=1,
++                summary_fields=_current_failure_summary(
++                    decision="INCONCLUSIVE",
++                    decision_reason=(
++                        f"effective_audits={effective_n} < required_audits={explicit_required}"
++                    ),
++                ),
+             )
+         if (
+             fail_on_violation_during_holding_period
+             and effective_n > 0
+             and violation_rate > max_violation_rate
+         ):
+-            raise SystemExit(
+-                f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
+-                f"max-violation-rate {max_violation_rate:.2%} during holding period "
+-                f"(effective_audits={effective_n} < required_audits={warmup_required})"
++            _emit_failure_summary_and_exit(
++                message=(
++                    f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
++                    f"max-violation-rate {max_violation_rate:.2%} during holding period "
++                    f"(effective_audits={effective_n} < required_audits={warmup_required})"
++                ),
++                audit_dir=audit_dir,
++                audit_roots=audit_roots,
++                include_research=bool(args.include_research),
++                max_files=int(args.max_files),
++                db_path=db_path,
++                min_forecast_horizon=min_forecast_horizon,
++                exit_code=1,
++                summary_fields=_current_failure_summary(
++                    decision=DEFAULT_DECISION_RESEARCH,
++                    decision_reason=(
++                        "violation rate exceeds threshold during holding period"
++                    ),
++                ),
+             )
+         print(
+             f"\nRMSE gate inconclusive: effective_audits={effective_n} "
+@@ -1106,9 +1895,22 @@ def main() -> None:
+                 decision = DEFAULT_DECISION_DISABLE
+                 decision_reason = "insufficient lift vs baseline"
+                 if disable_if_no_lift:
+-                    raise SystemExit(
+-                        "Ensemble shows insufficient lift over baseline during holding period; "
+-                        "disable ensemble as default source of truth (reward-to-effort)."
++                    _emit_failure_summary_and_exit(
++                        message=(
++                            "Ensemble shows insufficient lift over baseline during holding period; "
++                            "disable ensemble as default source of truth (reward-to-effort)."
++                        ),
++                        audit_dir=audit_dir,
++                        audit_roots=audit_roots,
++                        include_research=bool(args.include_research),
++                        max_files=int(args.max_files),
++                        db_path=db_path,
++                        min_forecast_horizon=min_forecast_horizon,
++                        exit_code=1,
++                        summary_fields=_current_failure_summary(
++                            decision=DEFAULT_DECISION_DISABLE,
++                            decision_reason="insufficient lift vs baseline",
++                        ),
+                     )
+                 print(
+                     "No-lift hard fail disabled by config; keeping ensemble in "
+@@ -1122,9 +1924,24 @@ def main() -> None:
+             decision_reason = (
+                 f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
+             )
+-            raise SystemExit(
+-                f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
+-                f"max-violation-rate {max_violation_rate:.2%}"
++            _emit_failure_summary_and_exit(
++                message=(
++                    f"Ensemble RMSE violation rate {violation_rate:.2%} exceeds "
++                    f"max-violation-rate {max_violation_rate:.2%}"
++                ),
++                audit_dir=audit_dir,
++                audit_roots=audit_roots,
++                include_research=bool(args.include_research),
++                max_files=int(args.max_files),
++                db_path=db_path,
++                min_forecast_horizon=min_forecast_horizon,
++                exit_code=1,
++                summary_fields=_current_failure_summary(
++                    decision=DEFAULT_DECISION_RESEARCH,
++                    decision_reason=(
++                        f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
++                    ),
++                ),
+             )
+ 
+         if promotion_margin > 0 and effective_n > 0 and decision == DEFAULT_DECISION_KEEP:
+@@ -1181,6 +1998,9 @@ def main() -> None:
+         signal_context = (audit or {}).get("signal_context") or {}
+         if not isinstance(signal_context, dict):
+             signal_context = {}
++        semantic_admission = (audit or {}).get("semantic_admission") or {}
++        if not isinstance(semantic_admission, dict):
++            semantic_admission = {}
+         raw_ts_signal_id = signal_context.get("ts_signal_id")
+         ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
+         ts_signal_id = ts_signal_id or None
+@@ -1190,8 +2010,17 @@ def main() -> None:
+         if not context_type:
+             context_type = "TRADE"
+         meta = _extract_window_metadata(audit or {})
++        manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
++        audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
++        event_type = str(
++            (audit or {}).get("event_type")
++            or signal_context.get("event_type")
++            or "FORECAST_AUDIT"
++        ).strip().upper()
+         entry = {
+             "file": f.name,
++            "audit_id": audit_id,
++            "event_type": event_type,
+             "start": ds.get("start"),
+             "end": ds.get("end"),
+             "length": ds.get("length"),
+@@ -1208,6 +2037,12 @@ def main() -> None:
+             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
+             "expected_close_ts": expected_close.isoformat() if expected_close else None,
+             "expected_close_source": expected_close_source,
++            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
++            "cohort_id": (audit or {}).get("cohort_id"),
++            "cohort_identity": (audit or {}).get("cohort_identity"),
++            "manifest_verification_status": manifest_status,
++            "semantic_admission": semantic_admission,
++            "payload_sha256": _sha256_file(f),
+             "outcome_status": None,
+             "outcome_reason": None,
+         }
+@@ -1225,6 +2060,20 @@ def main() -> None:
+                 rmse_usable_entries.append(entry)
+         dataset_entries.append(entry)
+ 
++    audit_fingerprints: Dict[str, Optional[str]] = {}
++    duplicate_conflict_ids: set[str] = set()
++    for entry in dataset_entries:
++        audit_id = str(entry.get("audit_id") or "").strip()
++        if not audit_id:
++            continue
++        payload_sha = str(entry.get("payload_sha256") or "").strip() or None
++        prior_sha = audit_fingerprints.get(audit_id)
++        if prior_sha is None:
++            audit_fingerprints[audit_id] = payload_sha
++            continue
++        if payload_sha != prior_sha:
++            duplicate_conflict_ids.add(audit_id)
++
+     if db_path is not None:
+         outcome_join_attempted = True
+         closed_trade_counts: Dict[str, int] = {}
+@@ -1337,15 +2186,30 @@ def main() -> None:
+     for entry in dataset_entries:
+         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
+         outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
++        semantic_admission = entry.get("semantic_admission")
++        if (
++            str(entry.get("audit_id") or "").strip() in duplicate_conflict_ids
++            and not (isinstance(semantic_admission, dict) and "duplicate_conflict" in semantic_admission)
++        ):
++            entry["duplicate_conflict"] = True
++        admission = _derive_semantic_admission(
++            entry,
++            include_research=bool(args.include_research),
++        )
++        entry.update(admission)
+         context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
+-        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+-        counts_toward_readiness = (
+-            context_type == "TRADE"
+-            and outcome_status not in {"INVALID_CONTEXT", "NON_TRADE_CONTEXT", "OUTCOMES_NOT_LOADED"}
++        counts_toward_linkage = bool(entry.get("gate_eligible")) and outcome_status in {"MATCHED", "OUTCOME_MISSING"}
++        counts_toward_readiness = _counts_toward_readiness_denominator(
++            context_type=context_type,
++            outcome_status=outcome_status,
++            gate_eligible=bool(entry.get("gate_eligible")),
+         )
+         severity = "LOW"
+         blocking = False
+-        if outcome_status == "INVALID_CONTEXT":
++        if bool(entry.get("duplicate_conflict")) or bool(entry.get("quarantined")):
++            severity = "HIGH"
++            blocking = True
++        elif outcome_status == "INVALID_CONTEXT":
+             severity = "HIGH"
+             blocking = True
+         elif outcome_status == "OUTCOME_MISSING":
+@@ -1381,14 +2245,48 @@ def main() -> None:
+     readiness_excluded_invalid = sum(
+         1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "INVALID_CONTEXT"
+     )
++    readiness_excluded_not_due = sum(
++        1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "NOT_DUE"
++    )
++    admission_summary = _summarize_admission_entries(dataset_entries)
++    accepted_records = int(admission_summary["accepted_records"])
++    accepted_noneligible_records = int(admission_summary["accepted_noneligible_records"])
++    eligible_records = int(admission_summary["eligible_records"])
++    quarantined_records = int(admission_summary["quarantined_records"])
++    duplicate_conflicts = int(admission_summary["duplicate_conflicts"])
++    admission_missing_execution_metadata_records = int(
++        admission_summary["missing_execution_metadata_records"]
++    )
++    cohort_fingerprints = {
++        str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
++        for entry in dataset_entries
++        if isinstance(entry.get("cohort_identity"), dict)
++        and str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
++    }
++    contract_versions = {
++        str(entry.get("evidence_contract_version")).strip()
++        for entry in dataset_entries
++        if entry.get("evidence_contract_version") is not None
++    }
++    contract_version_drift = len(contract_versions) > 1
++    cohort_fingerprint_drift = len(cohort_fingerprints) > 1
+ 
+     if (
+         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
+         and (not outcomes_loaded or not outcome_join_attempted)
+     ):
+-        raise SystemExit(
+-            "Telemetry contract violation: outcome window counts > 0 without "
+-            "outcomes_loaded=true and outcome_join_attempted=true."
++        _emit_failure_summary_and_exit(
++            message=(
++                "Telemetry contract violation: outcome window counts > 0 without "
++                "outcomes_loaded=true and outcome_join_attempted=true."
++            ),
++            audit_dir=audit_dir,
++            audit_roots=audit_roots,
++            include_research=bool(args.include_research),
++            max_files=int(args.max_files),
++            db_path=db_path,
++            min_forecast_horizon=min_forecast_horizon,
++            exit_code=1,
+         )
+ 
+     if outcome_join_attempted and outcome_join_error:
+@@ -1397,23 +2295,31 @@ def main() -> None:
+         "Outcome join   : "
+         f"outcomes_loaded={int(outcomes_loaded)} "
+         f"join_attempted={int(outcome_join_attempted)} "
+-        f"eligible={outcome_windows_eligible} "
++        f"accepted={accepted_records} "
++        f"accepted_noneligible={accepted_noneligible_records} "
++        f"eligible={eligible_records} "
++        f"quarantined={quarantined_records} "
++        f"due_eligible={outcome_windows_eligible} "
+         f"matched={outcome_windows_matched} "
+         f"missing={outcome_windows_missing} "
+         f"ambiguous={outcome_windows_ambiguous} "
+         f"not_due={outcome_windows_not_due} "
+         f"invalid_context={outcome_windows_invalid_context} "
+         f"not_yet_eligible={outcome_windows_not_yet_eligible} "
++        f"duplicate_conflicts={duplicate_conflicts} "
++        f"contract_drift={int(contract_version_drift)} "
++        f"cohort_drift={int(cohort_fingerprint_drift)} "
+         f"no_signal_id={outcome_windows_no_signal_id} "
+         f"non_trade_context={outcome_windows_non_trade_context} "
+-        f"missing_exec_meta={outcome_windows_missing_execution_metadata}"
++        f"missing_exec_meta={admission_missing_execution_metadata_records}"
+     )
+     print(
+         "Denominators   : "
+         f"readiness_included={readiness_denominator_included} "
+         f"linkage_included={linkage_denominator_included} "
+         f"excluded_non_trade={readiness_excluded_non_trade} "
+-        f"excluded_invalid={readiness_excluded_invalid}"
++        f"excluded_invalid={readiness_excluded_invalid} "
++        f"excluded_not_due={readiness_excluded_not_due}"
+     )
+ 
+     healthy_tickers = {"NVDA", "MSFT", "GOOG", "JPM"}
+@@ -1453,6 +2359,7 @@ def main() -> None:
+         "generated_utc": generated_utc,
+         "source_script": "scripts/check_forecast_audits.py",
+         "schema_version": TELEMETRY_SCHEMA_VERSION,
++        "max_files": int(args.max_files),
+         "effective_audits": effective_n,
+         "effective_outcome_audits": outcome_windows_matched,
+         "total_unique_audits": len(results),
+@@ -1483,14 +2390,24 @@ def main() -> None:
+         "recent_window_max_violation_rate": recent_window_max_violation_rate,
+         "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
+         "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
++        "admission_summary": admission_summary,
+         "outcome_join": {
+             "db_path": str(db_path) if db_path is not None else None,
+             "error": outcome_join_error,
+             "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
++            "accepted_records": accepted_records,
++            "accepted_noneligible_records": accepted_noneligible_records,
++            "eligible_records": eligible_records,
++            "quarantined_records": quarantined_records,
++            "duplicate_conflicts": duplicate_conflicts,
++            "missing_execution_metadata_records": admission_missing_execution_metadata_records,
++            "contract_version_drift": contract_version_drift,
++            "cohort_fingerprint_drift": cohort_fingerprint_drift,
+             "readiness_denominator_included": readiness_denominator_included,
+             "linkage_denominator_included": linkage_denominator_included,
+             "readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+             "readiness_excluded_invalid_context": readiness_excluded_invalid,
++            "readiness_excluded_not_due": readiness_excluded_not_due,
+             "status_taxonomy": [
+                 "MATCHED",
+                 "OUTCOME_MISSING",
+@@ -1537,10 +2454,19 @@ def main() -> None:
+             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
+             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
+             "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
++            "n_accepted_records": accepted_records,
++            "n_accepted_noneligible_records": accepted_noneligible_records,
++            "n_eligible_records": eligible_records,
++            "n_quarantined_records": quarantined_records,
++            "n_duplicate_conflicts": duplicate_conflicts,
++            "n_admission_missing_execution_metadata_records": admission_missing_execution_metadata_records,
++            "n_contract_versions": len(contract_versions),
++            "n_cohort_fingerprints": len(cohort_fingerprints),
+             "n_readiness_denominator_included": readiness_denominator_included,
+             "n_linkage_denominator_included": linkage_denominator_included,
+             "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,
+             "n_readiness_excluded_invalid_context": readiness_excluded_invalid,
++            "n_readiness_excluded_not_due": readiness_excluded_not_due,
+         },
+         "window_diversity": diversity,
+         "dataset_windows": dataset_entries,
+@@ -1561,7 +2487,7 @@ def main() -> None:
+         print(f"[WARN] forecast_audits_cache_write_failed target=ratio_distribution error={exc}")
+     summary["cache_status"] = cache_status
+     try:
+-        _write_json_atomic(cache_path, summary)
++        _write_summary_with_guard(cache_path, summary)
+     except Exception as exc:
+         print(f"[WARN] forecast_audits_cache_write_failed target=latest_summary error={exc}")
+ 
+diff --git a/scripts/check_model_improvement.py b/scripts/check_model_improvement.py
+index 3e188f0..0b3f1c3 100644
+--- a/scripts/check_model_improvement.py
++++ b/scripts/check_model_improvement.py
+@@ -26,13 +26,14 @@ dir, DB not found, etc.). It provides no health signal.
+ """
+ from __future__ import annotations
+ 
+-import argparse
+-import datetime
+-import json
+-import logging
+-import math
+-import subprocess
+-import sys
++import argparse
++import datetime
++import json
++import logging
++import math
++import os
++import subprocess
++import sys
+ from dataclasses import asdict, dataclass, field
+ from pathlib import Path
+ from typing import Optional
+@@ -110,11 +111,37 @@ class LayerResult:
+     error: Optional[str] = None
+ 
+ 
+-def _empty_metrics(layer: int, **overrides) -> dict:
+-    """Produce a metrics dict with all required keys set to None, plus any overrides."""
+-    base = {k: None for k in LAYER_REQUIRED_KEYS[layer]}
+-    base.update(overrides)
+-    return base
++def _empty_metrics(layer: int, **overrides) -> dict:
++    """Produce a metrics dict with all required keys set to None, plus any overrides."""
++    base = {k: None for k in LAYER_REQUIRED_KEYS[layer]}
++    base.update(overrides)
++    return base
++
++
++def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -> Path:
++    """Resolve Layer 1's audit universe from active production/cohort state."""
++    if explicit_audit_dir is not None:
++        explicit_raw = str(explicit_audit_dir).strip()
++        if explicit_raw:
++            return Path(explicit_raw)
++
++    env_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
++    if env_audit_dir:
++        return Path(env_audit_dir)
++
++    cohort_id = str(os.environ.get("PMX_EVIDENCE_COHORT_ID") or "").strip()
++    if cohort_id:
++        cohort_production_dir = (
++            REPO_ROOT / "logs" / "forecast_audits" / "cohorts" / cohort_id / "production"
++        )
++        if cohort_production_dir.exists():
++            return cohort_production_dir
++
++    production_dir = REPO_ROOT / "logs" / "forecast_audits" / "production"
++    if production_dir.exists():
++        return production_dir
++
++    return REPO_ROOT / "logs" / "forecast_audits"
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -351,13 +378,22 @@ def run_layer1_forecast_quality(
+                 f"coverage_ratio={coverage_ratio:.1%} < 20% "
+                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
+             )
+-        # Phase 7.25: advisory WARN when CI spans zero (informational ? does not override FAIL)
+-        if not sig["insufficient_data"] and sig["ci_low"] <= 0.0 and n_used >= 20:
+-            status = "WARN"
+-            reasons.append(
+-                f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
+-                f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
+-            )
++        # Phase 7.25/7.37: spans-zero CI ? advisory WARN (only from PASS, requires ci_high >= 0)
++        if not sig["insufficient_data"] and n_used >= 20:
++            if sig["ci_low"] <= 0.0 and sig["ci_high"] >= 0.0:
++                status = "WARN"
++                reasons.append(
++                    f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
++                    f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
++                )
++
++    # Phase 7.37: definitively negative CI ? hard FAIL (promotes WARN to FAIL; both bounds < 0)
++    if not sig["insufficient_data"] and n_used >= 20 and sig["ci_high"] < 0.0:
++        status = "FAIL"
++        reasons.append(
++            f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] definitively negative "
++            f"(win_fraction={sig['lift_win_fraction']:.1%}) -- ensemble consistently worse than best single"
++        )
+ 
+     reason_str = " | " + "; ".join(reasons) if reasons else ""
+     summary = (
+@@ -844,11 +880,15 @@ def main(argv: Optional[list[str]] = None) -> int:
+         choices=["all", "1", "2", "3", "4"],
+         help="Which layer(s) to run (default: all)",
+     )
+-    parser.add_argument(
+-        "--audit-dir",
+-        default=str(REPO_ROOT / "logs" / "forecast_audits"),
+-        help="Directory containing forecast_audit_*.json files (Layer 1)",
+-    )
++    parser.add_argument(
++        "--audit-dir",
++        default=None,
++        help=(
++            "Directory containing forecast_audit_*.json files (Layer 1). "
++            "Default resolution: TS_FORECAST_AUDIT_DIR -> active cohort production dir "
++            "-> logs/forecast_audits/production -> logs/forecast_audits"
++        ),
++    )
+     parser.add_argument(
+         "--db",
+         default=str(REPO_ROOT / "data" / "portfolio_maximizer.db"),
+@@ -872,7 +912,7 @@ def main(argv: Optional[list[str]] = None) -> int:
+     )
+ 
+     layers_to_run: list[int] = [1, 2, 3, 4] if args.layer == "all" else [int(args.layer)]
+-    audit_dir = Path(args.audit_dir)
++    audit_dir = _resolve_layer1_audit_dir(args.audit_dir)
+     db_path = Path(args.db)
+     jsonl_path = Path(args.jsonl_path)
+ 
+diff --git a/scripts/production_audit_gate.py b/scripts/production_audit_gate.py
+index 97cdbcc..e752ff2 100644
+--- a/scripts/production_audit_gate.py
++++ b/scripts/production_audit_gate.py
+@@ -23,6 +23,10 @@ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional, Tuple
+ 
++ROOT_PATH = Path(__file__).resolve().parent.parent
++if str(ROOT_PATH) not in sys.path:
++    sys.path.insert(0, str(ROOT_PATH))
++
+ try:
+     from scripts.audit_gate_defaults import FORECAST_AUDIT_MAX_FILES_DEFAULT
+ except Exception:  # pragma: no cover - script execution path fallback
+@@ -33,6 +37,8 @@ try:
+ except Exception:  # pragma: no cover - script execution path fallback
+     from telemetry_adapter import normalize_telemetry_payload
+ 
++from utils.evidence_io import write_promoted_json_artifact
++
+ 
+ # Phase 7.13-C1: central path constants
+ try:
+@@ -65,6 +71,22 @@ def _safe_load_json(path: Path) -> Optional[Dict[str, Any]]:
+         return None
+ 
+ 
++def _validate_output_artifact(payload: Dict[str, Any]) -> tuple[bool, str]:
++    if not isinstance(payload, dict):
++        return False, "payload_not_dict"
++    required = [
++        "timestamp_utc",
++        "phase3_ready",
++        "phase3_reason",
++        "readiness",
++        "production_profitability_gate",
++    ]
++    missing = [key for key in required if key not in payload]
++    if missing:
++        return False, f"missing:{','.join(missing)}"
++    return True, "ok"
++
++
+ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+     return subprocess.run(
+         cmd,
+@@ -74,6 +96,39 @@ def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+     )
+ 
+ 
++def _count_masked_unlinked_closes(db_path: Path) -> Tuple[int, List[int]]:
++    """Count whitelisted IDs that are actually present as unlinked closes in the DB.
++
++    This provides fail-open visibility: if the whitelist suppresses violations,
++    operators can see exactly how many are masked vs genuinely resolved.
++    Returns (masked_count, masked_ids_found_in_db).
++    """
++    _whitelist_raw = os.environ.get("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
++    _whitelist_ids: set[int] = set()
++    for _tok in _whitelist_raw.split(","):
++        _tok = _tok.strip()
++        if _tok.isdigit():
++            _whitelist_ids.add(int(_tok))
++
++    if not _whitelist_ids or not db_path.exists():
++        return 0, []
++
++    try:
++        conn = sqlite3.connect(str(db_path))
++        conn.row_factory = sqlite3.Row
++        placeholders = ",".join("?" for _ in _whitelist_ids)
++        rows = conn.execute(
++            f"SELECT id FROM trade_executions "
++            f"WHERE is_close = 1 AND entry_trade_id IS NULL AND id IN ({placeholders})",
++            tuple(sorted(_whitelist_ids)),
++        ).fetchall()
++        conn.close()
++        found = [int(r["id"]) for r in rows]
++        return len(found), found
++    except Exception:
++        return 0, []
++
++
+ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None) -> Tuple[Optional[int], List[int], Optional[str]]:
+     """
+     Verify unlinked-close backlog directly from DB.
+@@ -448,6 +503,49 @@ def _load_regression_monitoring_config(path: Path) -> Dict[str, Any]:
+         return {}
+ 
+ 
++def _collect_thresholds(
++    *,
++    monitor_config: Path,
++    proof_requirements: Dict[str, Any],
++    lift_inconclusive_allowed: bool,
++    proof_profitable_required: bool,
++    require_holding_period: bool,
++    warmup_policy: Dict[str, Any],
++) -> Dict[str, Any]:
++    rmse_cfg = _load_regression_monitoring_config(monitor_config)
++    stat_req = (proof_requirements.get("statistical_significance") or {}) if isinstance(proof_requirements, dict) else {}
++    perf_req = (proof_requirements.get("performance") or {}) if isinstance(proof_requirements, dict) else {}
++    audit_req = (proof_requirements.get("audit_trail") or {}) if isinstance(proof_requirements, dict) else {}
++
++    return {
++        "lift": {
++            "min_lift_fraction": rmse_cfg.get("min_lift_fraction"),
++            "max_violation_rate": rmse_cfg.get("max_violation_rate"),
++            "recent_window_max_violation_rate": rmse_cfg.get("recent_window_max_violation_rate"),
++            "max_missing_ensemble_rate": rmse_cfg.get("max_missing_ensemble_rate"),
++            "holding_period_audits": rmse_cfg.get("holding_period_audits"),
++            "promotion_margin": rmse_cfg.get("promotion_margin"),
++            "max_warmup_days": rmse_cfg.get("max_warmup_days", DEFAULT_MAX_WARMUP_DAYS),
++            "require_holding_period": bool(require_holding_period),
++        },
++        "proof": {
++            "min_closed_trades": stat_req.get("min_closed_trades"),
++            "min_trading_days": stat_req.get("min_trading_days"),
++            "max_win_rate": stat_req.get("max_win_rate"),
++            "min_win_rate": stat_req.get("min_win_rate"),
++            "min_profit_factor": perf_req.get("min_profit_factor"),
++            "max_drawdown": perf_req.get("max_drawdown"),
++            "min_sharpe_ratio": perf_req.get("min_sharpe_ratio"),
++            "require_entry_exit_matching": audit_req.get("require_entry_exit_matching"),
++        },
++        "semantics": {
++            "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
++            "proof_profitable_required": bool(proof_profitable_required),
++            "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
++        },
++    }
++
++
+ def _first_audit_ts_utc(audit_dir: Path) -> Optional[datetime]:
+     try:
+         files = list(audit_dir.glob("forecast_audit_*.json"))
+@@ -502,6 +600,202 @@ def _safe_ratio(num: int, den: int) -> float:
+     return float(num) / float(den)
+ 
+ 
++def _parse_timestamp_utc(raw: Any) -> Optional[datetime]:
++    """Best-effort ISO/SQLite timestamp parser returning timezone-aware UTC."""
++    if raw is None:
++        return None
++    text = str(raw).strip()
++    if not text:
++        return None
++    try:
++        # Handle trailing Z for strict UTC ISO strings.
++        if text.endswith("Z"):
++            text = text[:-1] + "+00:00"
++        parsed = datetime.fromisoformat(text)
++    except Exception:
++        # SQLite defaults (YYYY-MM-DD HH:MM:SS) without timezone.
++        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
++            try:
++                parsed = datetime.strptime(text, fmt)
++                break
++            except Exception:
++                parsed = None
++        if parsed is None:
++            return None
++    if parsed.tzinfo is None:
++        parsed = parsed.replace(tzinfo=timezone.utc)
++    return parsed.astimezone(timezone.utc)
++
++
++def _load_latest_live_cycle_binding(db_path: Path) -> Dict[str, Any]:
++    """Load latest live-cycle provenance from trade_executions (best-effort)."""
++    result: Dict[str, Any] = {
++        "available": False,
++        "latest_live_cycle_ts_utc": None,
++        "latest_live_run_id": None,
++        "latest_live_trade_id": None,
++        "query_error": None,
++    }
++    if not db_path.exists():
++        result["query_error"] = f"db_not_found:{db_path}"
++        return result
++
++    conn: Optional[sqlite3.Connection] = None
++    try:
++        conn = sqlite3.connect(str(db_path))
++        conn.row_factory = sqlite3.Row
++
++        cols = {
++            str(row["name"]).strip()
++            for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()
++            if row and row["name"] is not None
++        }
++        if not cols:
++            result["query_error"] = "trade_executions_missing_or_unreadable"
++            return result
++
++        ts_candidates = [c for c in ("created_at", "bar_timestamp", "trade_date") if c in cols]
++        if not ts_candidates:
++            result["query_error"] = "trade_executions_missing_time_columns"
++            return result
++        ts_expr = "COALESCE(" + ", ".join(ts_candidates) + ")"
++
++        run_expr = "run_id" if "run_id" in cols else "NULL"
++        id_expr = "id" if "id" in cols else "NULL"
++
++        where = []
++        params: List[Any] = []
++        if "execution_mode" in cols:
++            where.append("LOWER(COALESCE(execution_mode, '')) = 'live'")
++        if "is_synthetic" in cols:
++            where.append("COALESCE(is_synthetic, 0) = 0")
++        if "is_diagnostic" in cols:
++            where.append("COALESCE(is_diagnostic, 0) = 0")
++        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
++
++        row = conn.execute(
++            f"""
++            SELECT
++                {id_expr} AS trade_id,
++                {run_expr} AS run_id,
++                {ts_expr} AS cycle_ts
++            FROM trade_executions
++            {where_sql}
++            ORDER BY cycle_ts DESC, trade_id DESC
++            LIMIT 1
++            """,
++            tuple(params),
++        ).fetchone()
++        if not row:
++            result["query_error"] = "no_live_cycles_found"
++            return result
++
++        parsed_ts = _parse_timestamp_utc(row["cycle_ts"])
++        result["available"] = True
++        result["latest_live_cycle_ts_utc"] = parsed_ts.isoformat() if parsed_ts else None
++        result["latest_live_run_id"] = str(row["run_id"]).strip() if row["run_id"] is not None else None
++        if result["latest_live_run_id"] == "":
++            result["latest_live_run_id"] = None
++        result["latest_live_trade_id"] = _safe_int(row["trade_id"], 0) if row["trade_id"] is not None else None
++        return result
++    except Exception as exc:
++        result["query_error"] = str(exc)
++        return result
++    finally:
++        if conn is not None:
++            conn.close()
++
++
++def _build_linkage_waterfall(window_counts: Dict[str, Any], *, production_audit_only: bool) -> Dict[str, Any]:
++    """Build denominator waterfall counts for readiness diagnostics."""
++    raw_candidates = _safe_int(
++        window_counts.get("n_outcome_deduped_windows"),
++        _safe_int(window_counts.get("n_deduped_windows"), 0),
++    )
++    non_trade = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
++    invalid_context = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
++    linked = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
++    matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
++    readiness_included = _safe_int(window_counts.get("n_readiness_denominator_included"), 0)
++
++    production_only_count = max(0, raw_candidates - non_trade) if production_audit_only else raw_candidates
++    hygiene_pass_count = max(0, readiness_included)
++
++    return {
++        "raw_candidates": raw_candidates,
++        "production_only": production_only_count,
++        "linked": linked,
++        "hygiene_pass": hygiene_pass_count,
++        "matched": matched,
++        "excluded_non_trade_context": non_trade,
++        "excluded_invalid_context": invalid_context,
++        "matched_over_linked": _safe_ratio(matched, linked),
++        "linked_over_production_only": _safe_ratio(linked, production_only_count),
++        "hygiene_over_production_only": _safe_ratio(hygiene_pass_count, production_only_count),
++    }
++
++
++def _evaluate_artifact_binding(
++    *,
++    lift_summary: Dict[str, Any],
++    live_cycle_binding: Dict[str, Any],
++    repo_state: Dict[str, Any],
++) -> Dict[str, Any]:
++    """Evaluate freshness + run/commit binding for production evidence."""
++    summary_generated_raw = (
++        lift_summary.get("generated_utc")
++        if isinstance(lift_summary, dict)
++        else None
++    )
++    summary_generated_ts = _parse_timestamp_utc(summary_generated_raw)
++    latest_live_raw = live_cycle_binding.get("latest_live_cycle_ts_utc")
++    latest_live_ts = _parse_timestamp_utc(latest_live_raw)
++    latest_live_run_id = (
++        str(live_cycle_binding.get("latest_live_run_id")).strip()
++        if live_cycle_binding.get("latest_live_run_id") is not None
++        else None
++    )
++    if latest_live_run_id == "":
++        latest_live_run_id = None
++
++    repo_head = (
++        str(repo_state.get("head")).strip()
++        if isinstance(repo_state, dict) and repo_state.get("head") is not None
++        else None
++    )
++    if repo_head == "":
++        repo_head = None
++
++    freshness_pass = False
++    reasons: List[str] = []
++    if latest_live_ts is None:
++        reasons.append("NO_LIVE_CYCLE_TIMESTAMP")
++    if summary_generated_ts is None:
++        reasons.append("MISSING_SUMMARY_GENERATED_TS")
++    if latest_live_ts is not None and summary_generated_ts is not None:
++        if summary_generated_ts >= latest_live_ts:
++            freshness_pass = True
++        else:
++            reasons.append("SUMMARY_STALE_BEFORE_LIVE_CYCLE")
++    if not latest_live_run_id:
++        reasons.append("MISSING_LIVE_RUN_ID")
++    if not repo_head:
++        reasons.append("MISSING_REPO_COMMIT_HASH")
++
++    binding_pass = bool(freshness_pass and latest_live_run_id and repo_head)
++    return {
++        "pass": binding_pass,
++        "reason_codes": reasons,
++        "summary_generated_utc": summary_generated_ts.isoformat() if summary_generated_ts else None,
++        "latest_live_cycle_ts_utc": latest_live_ts.isoformat() if latest_live_ts else None,
++        "latest_live_run_id": latest_live_run_id,
++        "repo_head": repo_head,
++        "freshness_pass": bool(freshness_pass),
++        "run_id_present": bool(latest_live_run_id),
++        "commit_hash_present": bool(repo_head),
++    }
++
++
+ def _compute_lifecycle_integrity(
+     db_path: Path,
+ ) -> Dict[str, Any]:
+@@ -530,6 +824,8 @@ def _compute_lifecycle_integrity(
+                   AND c.bar_timestamp IS NOT NULL
+                   AND e.bar_timestamp IS NOT NULL
+                   AND c.bar_timestamp < e.bar_timestamp
++                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
++                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
+                 """
+             ).fetchone()
+             close_before_entry = _safe_int(row["n"] if row else 0)
+@@ -543,6 +839,8 @@ def _compute_lifecycle_integrity(
+                   AND c.trade_date IS NOT NULL
+                   AND e.trade_date IS NOT NULL
+                   AND c.trade_date < e.trade_date
++                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
++                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
+                 """
+             ).fetchone()
+             close_before_entry = _safe_int(row["n"] if row else 0)
+@@ -641,16 +939,76 @@ def _summary_matches_invocation(
+     *,
+     audit_dir: Path,
+     max_files: int,
++    include_research: bool,
+ ) -> bool:
+     if not _summary_matches_audit_dir(summary, audit_dir):
+         return False
+     raw_max_files = summary.get("max_files")
+-    if raw_max_files is None:
++    if raw_max_files is not None:
++        try:
++            if int(raw_max_files) != int(max_files):
++                return False
++        except Exception:
++            return False
++
++    scope = summary.get("scope", {})
++    if isinstance(scope, dict):
++        raw_include_research = scope.get("include_research")
++        if raw_include_research is not None and bool(raw_include_research) != bool(include_research):
++            return False
++
++    return True
++
++
++def _fail_on_unknown_args(unknown: List[str]) -> None:
++    if not unknown:
++        return
++    msg = "Unknown args are not allowed (fail-closed to prevent wiring drift): " + " ".join(unknown)
++    print(f"[FAIL] {msg}", file=sys.stderr)
++    raise SystemExit(2)
++
++
++def _safe_bool(raw: Any, default: bool = False) -> bool:
++    if isinstance(raw, bool):
++        return raw
++    if raw is None:
++        return default
++    text = str(raw).strip().lower()
++    if text in {"1", "true", "yes", "y", "on"}:
+         return True
+-    try:
+-        return int(raw_max_files) == int(max_files)
+-    except Exception:
++    if text in {"0", "false", "no", "n", "off"}:
+         return False
++    return default
++
++
++def _summary_scope_flag(summary: Dict[str, Any], name: str) -> Optional[bool]:
++    scope = summary.get("scope", {})
++    if not isinstance(scope, dict):
++        return None
++    raw = scope.get(name)
++    if raw is None:
++        return None
++    return _safe_bool(raw)
++
++
++def _binding_safe_lift_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
++    """Retain only provenance/binding fields when lift command fails."""
++    if not isinstance(summary, dict):
++        return {}
++    keep = {
++        "audit_dir",
++        "audit_roots",
++        "generated_utc",
++        "source_script",
++        "schema_version",
++        "max_files",
++        "scope",
++        "window_counts",
++        "status",
++        "exit_code",
++        "exit_reason",
++    }
++    return {k: summary.get(k) for k in keep if k in summary}
+ 
+ 
+ def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
+@@ -704,6 +1062,23 @@ def _extract_lift_output_metrics(output: str) -> Dict[str, Any]:
+     return metrics
+ 
+ 
++def _missing_summary_metric_keys(summary: Dict[str, Any]) -> List[str]:
++    required_top_level = (
++        "effective_audits",
++        "violation_rate",
++        "max_violation_rate",
++        "lift_fraction",
++        "min_lift_fraction",
++        "decision",
++        "decision_reason",
++        "window_counts",
++    )
++    missing = [key for key in required_top_level if key not in summary]
++    if "window_counts" not in missing and not isinstance(summary.get("window_counts"), dict):
++        missing.append("window_counts")
++    return missing
++
++
+ def main() -> int:
+     repo_root = Path(__file__).resolve().parents[1]
+     sys.path.insert(0, str(repo_root))
+@@ -826,8 +1201,7 @@ def main() -> int:
+         help="OpenClaw command timeout in seconds (default: 20).",
+     )
+     args, unknown = parser.parse_known_args()
+-    if unknown:
+-        print(f"[WARN] Ignoring unknown args: {' '.join(unknown)}", file=sys.stderr)
++    _fail_on_unknown_args(unknown)
+     python_bin = str(Path(args.python_bin))
+     db_path = _resolve_path(repo_root, args.db)
+     proof_requirements_path = _resolve_path(repo_root, args.proof_requirements)
+@@ -875,56 +1249,75 @@ def main() -> int:
+ 
+     lift_proc = _run_command(lift_cmd, cwd=repo_root)
+     lift_output = f"{lift_proc.stdout or ''}\n{lift_proc.stderr or ''}".strip()
+-    lift_inconclusive = "RMSE gate inconclusive" in lift_output
+-    lift_output_metrics = _extract_lift_output_metrics(lift_output)
+ 
+     lift_summary = _safe_load_json(summary_cache_path) or {}
+-    if lift_summary and not _summary_matches_invocation(
+-        lift_summary,
+-        audit_dir=audit_dir,
+-        max_files=int(args.max_files),
+-    ):
+-        lift_summary = {}
++    summary_invocation_match = True
++    summary_mismatch_details: Dict[str, Any] = {}
++    if lift_summary:
++        summary_invocation_match = _summary_matches_invocation(
++            lift_summary,
++            audit_dir=audit_dir,
++            max_files=int(args.max_files),
++            include_research=bool(args.include_research),
++        )
++        if not summary_invocation_match:
++            summary_mismatch_details = {
++                "audit_dir": str(lift_summary.get("audit_dir")),
++                "max_files": lift_summary.get("max_files"),
++                "scope_include_research": _summary_scope_flag(lift_summary, "include_research"),
++                "expected_audit_dir": str(audit_dir),
++                "expected_max_files": int(args.max_files),
++                "expected_include_research": bool(args.include_research),
++            }
++            lift_summary = {}
++
++    summary_metrics_error: Optional[str] = None
++    missing_summary_metric_keys: List[str] = []
++    if not lift_summary:
++        summary_metrics_error = "SUMMARY_MISSING"
++        if not summary_invocation_match:
++            summary_metrics_error = "SUMMARY_INVOCATION_MISMATCH"
++    else:
++        missing_summary_metric_keys = _missing_summary_metric_keys(lift_summary)
++        if missing_summary_metric_keys:
++            summary_metrics_error = "SUMMARY_METRICS_MISSING"
++
++    lift_decision = lift_summary.get("decision")
++    lift_decision_reason = lift_summary.get("decision_reason")
++    lift_inconclusive = str(lift_decision or "").strip().upper() == "INCONCLUSIVE"
+ 
+     lift_status = "PASS"
+-    if lift_proc.returncode != 0:
++    if summary_metrics_error:
++        lift_status = "FAIL"
++    elif lift_proc.returncode != 0:
+         lift_status = "FAIL"
+-        # Do not attach stale cached decision metadata when the active lift run failed.
+-        lift_summary = {}
+     elif lift_inconclusive:
+         lift_status = "INCONCLUSIVE"
+ 
+-    lift_pass = lift_proc.returncode == 0 and (
++    lift_pass = summary_metrics_error is None and lift_proc.returncode == 0 and (
+         lift_inconclusive_allowed or not lift_inconclusive
+     )
+ 
+-    lift_decision = lift_output_metrics.get("decision") or lift_summary.get("decision")
+-    lift_decision_reason = lift_output_metrics.get("decision_reason") or lift_summary.get(
+-        "decision_reason"
+-    )
+-    if lift_inconclusive:
++    if summary_metrics_error == "SUMMARY_INVOCATION_MISMATCH":
++        lift_decision = None
++        lift_decision_reason = "SUMMARY_INVOCATION_MISMATCH"
++    elif summary_metrics_error == "SUMMARY_METRICS_MISSING":
++        lift_decision = None
++        lift_decision_reason = (
++            "SUMMARY_METRICS_MISSING:" + ",".join(missing_summary_metric_keys)
++        )
++    elif summary_metrics_error == "SUMMARY_MISSING":
++        lift_decision = None
++        lift_decision_reason = "SUMMARY_MISSING"
++    elif lift_inconclusive:
+         lift_decision = None
+         lift_decision_reason = "insufficient effective audits for RMSE gate"
+ 
+-    lift_effective_audits = lift_output_metrics.get("effective_audits")
+-    if lift_effective_audits is None:
+-        lift_effective_audits = lift_summary.get("effective_audits")
+-
+-    lift_violation_rate = lift_output_metrics.get("violation_rate")
+-    if lift_violation_rate is None:
+-        lift_violation_rate = lift_summary.get("violation_rate")
+-
+-    lift_max_violation_rate = lift_output_metrics.get("max_violation_rate")
+-    if lift_max_violation_rate is None:
+-        lift_max_violation_rate = lift_summary.get("max_violation_rate")
+-
+-    lift_fraction = lift_output_metrics.get("lift_fraction")
+-    if lift_fraction is None:
+-        lift_fraction = lift_summary.get("lift_fraction")
+-
+-    min_lift_fraction = lift_output_metrics.get("min_lift_fraction")
+-    if min_lift_fraction is None:
+-        min_lift_fraction = lift_summary.get("min_lift_fraction")
++    lift_effective_audits = lift_summary.get("effective_audits")
++    lift_violation_rate = lift_summary.get("violation_rate")
++    lift_max_violation_rate = lift_summary.get("max_violation_rate")
++    lift_fraction = lift_summary.get("lift_fraction")
++    min_lift_fraction = lift_summary.get("min_lift_fraction")
+ 
+     proof_cmd = [
+         python_bin,
+@@ -953,7 +1346,16 @@ def main() -> int:
+     if reconcile_result.get("requested"):
+         reconcile_pass = str(reconcile_result.get("status") or "FAIL").upper() == "PASS"
+ 
+-    gate_pass = lift_pass and proof_pass and reconcile_pass
++    repo_state = _collect_git_state(repo_root)
++    live_cycle_binding = _load_latest_live_cycle_binding(db_path)
++    artifact_binding = _evaluate_artifact_binding(
++        lift_summary=lift_summary,
++        live_cycle_binding=live_cycle_binding,
++        repo_state=repo_state,
++    )
++    artifact_binding_pass = bool(artifact_binding.get("pass", False))
++
++    gate_pass = lift_pass and proof_pass and reconcile_pass and artifact_binding_pass
+     gate_status = "PASS" if gate_pass else "FAIL"
+     if lift_inconclusive:
+         gate_semantics_status = (
+@@ -986,6 +1388,43 @@ def main() -> int:
+     evidence_hygiene_pass = (
+         production_audit_only and non_trade_count == 0 and invalid_context_count == 0
+     )
++    linkage_waterfall = _build_linkage_waterfall(
++        window_counts,
++        production_audit_only=production_audit_only,
++    )
++    admission_summary = lift_summary.get("admission_summary")
++    admission_summary = admission_summary if isinstance(admission_summary, dict) else {}
++    accepted_records = _safe_int(
++        admission_summary.get("accepted_records"),
++        _safe_int(window_counts.get("n_accepted_records"), 0),
++    )
++    accepted_noneligible_records = _safe_int(
++        admission_summary.get("accepted_noneligible_records"),
++        _safe_int(
++            window_counts.get("n_accepted_noneligible_records"),
++            max(0, linkage_waterfall.get("raw_candidates", 0) - linkage_waterfall.get("linked", 0)),
++        ),
++    )
++    eligible_records = _safe_int(
++        admission_summary.get("eligible_records"),
++        _safe_int(window_counts.get("n_eligible_records"), outcome_eligible),
++    )
++    quarantined_records = _safe_int(
++        admission_summary.get("quarantined_records"),
++        _safe_int(window_counts.get("n_quarantined_records"), 0),
++    )
++    duplicate_conflicts = _safe_int(
++        admission_summary.get("duplicate_conflicts"),
++        _safe_int(window_counts.get("n_duplicate_conflicts"), 0),
++    )
++    admission_missing_execution_metadata_records = _safe_int(
++        admission_summary.get("missing_execution_metadata_records"),
++        _safe_int(window_counts.get("n_admission_missing_execution_metadata_records"), 0),
++    )
++    contract_version_count = _safe_int(window_counts.get("n_contract_versions"), 0)
++    cohort_fingerprint_count = _safe_int(window_counts.get("n_cohort_fingerprints"), 0)
++    contract_version_drift = contract_version_count > 1
++    cohort_fingerprint_drift = cohort_fingerprint_count > 1
+ 
+     integrity_metrics = _compute_lifecycle_integrity(db_path)
+     close_before_entry_count = _safe_int(integrity_metrics.get("close_before_entry_count"), 0)
+@@ -996,8 +1435,19 @@ def main() -> int:
+     integrity_query_error = integrity_metrics.get("query_error")
+     integrity_pass = high_integrity_violation_count == 0 and not integrity_query_error
+ 
++    masked_violation_count, masked_violation_ids = _count_masked_unlinked_closes(db_path)
++
+     gates_pass = bool(gate_pass)
+-    phase3_ready = bool(gates_pass and linkage_pass and evidence_hygiene_pass and integrity_pass)
++    phase3_ready = bool(
++        gates_pass
++        and linkage_pass
++        and evidence_hygiene_pass
++        and integrity_pass
++        and duplicate_conflicts == 0
++        and quarantined_records == 0
++        and not contract_version_drift
++        and not cohort_fingerprint_drift
++    )
+     phase3_fail_reasons: List[str] = []
+     if not gates_pass:
+         phase3_fail_reasons.append("GATES_FAIL")
+@@ -1007,8 +1457,31 @@ def main() -> int:
+         phase3_fail_reasons.append("EVIDENCE_HYGIENE_FAIL")
+     if not integrity_pass:
+         phase3_fail_reasons.append("HIGH_INTEGRITY_VIOLATION")
++    if duplicate_conflicts > 0:
++        phase3_fail_reasons.append("DUPLICATE_CONFLICT")
++    if quarantined_records > 0:
++        phase3_fail_reasons.append("QUARANTINED_RECORDS")
++    if contract_version_drift:
++        phase3_fail_reasons.append("CONTRACT_VERSION_DRIFT")
++    if cohort_fingerprint_drift:
++        phase3_fail_reasons.append("COHORT_FINGERPRINT_DRIFT")
++    if summary_metrics_error:
++        phase3_fail_reasons.append(summary_metrics_error)
++    if not summary_invocation_match and summary_metrics_error != "SUMMARY_INVOCATION_MISMATCH":
++        phase3_fail_reasons.append("SUMMARY_INVOCATION_MISMATCH")
++    if not artifact_binding_pass:
++        phase3_fail_reasons.append("ARTIFACT_STALE_OR_UNBOUND")
+     phase3_reason = "READY" if phase3_ready else ",".join(phase3_fail_reasons)
+ 
++    thresholds = _collect_thresholds(
++        monitor_config=monitor_config,
++        proof_requirements=proof_requirements,
++        lift_inconclusive_allowed=lift_inconclusive_allowed,
++        proof_profitable_required=proof_profitable_required,
++        require_holding_period=bool(args.require_holding_period),
++        warmup_policy=warmup_policy,
++    )
++
+     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+@@ -1024,7 +1497,7 @@ def main() -> int:
+         "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
+         "phase3_ready": bool(phase3_ready),
+         "phase3_reason": phase3_reason,
+-        "repo_state": _collect_git_state(repo_root),
++        "repo_state": repo_state,
+         "inputs": {
+             "db": str(db_path),
+             "proof_requirements": str(proof_requirements_path),
+@@ -1036,8 +1509,12 @@ def main() -> int:
+             "include_research": bool(args.include_research),
+             "require_profitable": bool(args.require_profitable),
+             "unattended_profile": bool(args.unattended_profile),
+-            "unknown_args_ignored": unknown,
++            "unknown_args_ignored": [],
+         },
++        "summary_invocation_match": bool(summary_invocation_match),
++        "summary_invocation_mismatch": summary_mismatch_details,
++        "artifact_binding": artifact_binding,
++        "live_cycle_binding": live_cycle_binding,
+         "reconciliation": reconcile_result,
+         "lift_gate": {
+             "status": lift_status,
+@@ -1045,6 +1522,8 @@ def main() -> int:
+             "exit_code": int(lift_proc.returncode),
+             "inconclusive": lift_inconclusive,
+             "lift_inconclusive_allowed": bool(lift_inconclusive_allowed),
++            "summary_metrics_error": summary_metrics_error,
++            "missing_summary_metric_keys": missing_summary_metric_keys,
+             "decision": lift_decision,
+             "decision_reason": lift_decision_reason,
+             "effective_audits": lift_effective_audits,
+@@ -1088,17 +1567,53 @@ def main() -> int:
+             "linkage_pass": bool(linkage_pass),
+             "evidence_hygiene_pass": bool(evidence_hygiene_pass),
+             "integrity_pass": bool(integrity_pass),
++            "artifact_binding_pass": bool(artifact_binding_pass),
+             "outcome_matched": outcome_matched,
+             "outcome_eligible": outcome_eligible,
+             "matched_over_eligible": matched_over_eligible,
+             "non_trade_context_count": non_trade_count,
+             "invalid_context_count": invalid_context_count,
++            "linkage_waterfall": linkage_waterfall,
+             "production_audit_only": production_audit_only,
+             "high_integrity_violation_count": high_integrity_violation_count,
+             "close_before_entry_count": close_before_entry_count,
+             "closed_missing_exit_reason_count": missing_exit_reason_count,
+             "integrity_query_error": integrity_query_error,
++            "masked_integrity_violations": masked_violation_count,
++            "masked_integrity_violation_ids": masked_violation_ids,
++            "admission_summary": admission_summary,
++        },
++        "readiness_v2": {
++            "overall_ready": bool(phase3_ready),
++            "evidence_chain_ready": bool(
++                linkage_pass
++                and evidence_hygiene_pass
++                and duplicate_conflicts == 0
++                and quarantined_records == 0
++                and not contract_version_drift
++                and not cohort_fingerprint_drift
++            ),
++            "economic_ready": bool(gates_pass),
++            "operational_ready": bool(integrity_pass and artifact_binding_pass and summary_invocation_match),
++            "reason_code": phase3_reason,
++            "accepted_records": accepted_records,
++            "accepted_noneligible_records": accepted_noneligible_records,
++            "eligible_records": eligible_records,
++            "eligible_opens": 0,
++            "eligible_closes": outcome_eligible,
++            "linked_closes": linkage_waterfall.get("linked"),
++            "matched_closes": outcome_matched,
++            "orphan_closes": close_before_entry_count,
++            "quarantined_records": quarantined_records,
++            "duplicate_conflicts": duplicate_conflicts,
++            "missing_execution_metadata_records": admission_missing_execution_metadata_records,
++            "contract_version_drift": bool(contract_version_drift),
++            "cohort_fingerprint_drift": bool(cohort_fingerprint_drift),
++            "production_audit_only": production_audit_only,
++            "linkage_waterfall": linkage_waterfall,
++            "admission_summary": admission_summary,
+         },
++        "thresholds": thresholds,
+     }
+     payload["telemetry_contract"] = normalize_telemetry_payload(
+         {
+@@ -1116,9 +1631,13 @@ def main() -> int:
+         generated_utc=timestamp_utc,
+     )
+ 
+-    artifact_text = json.dumps(payload, indent=2)
+-    output_path.write_text(artifact_text, encoding="utf-8")
+-    stamped_output.write_text(artifact_text, encoding="utf-8")
++    write_promoted_json_artifact(
++        stamped_path=stamped_output,
++        latest_path=output_path,
++        payload=payload,
++        validate_fn=_validate_output_artifact,
++        quarantine_dir=output_path.parent / "quarantine",
++    )
+ 
+     print("=== Production Audit Gate ===")
+     print(f"Timestamp (UTC): {timestamp_utc}")
+@@ -1139,6 +1658,17 @@ def main() -> int:
+         f"profitable_required={int(proof_profitable_required)} "
+         f"warmup_expired={int(bool(warmup_policy.get('warmup_expired', True)))}"
+     )
++    lift_thr = thresholds.get("lift", {})
++    proof_thr = thresholds.get("proof", {})
++    print(
++        "Thresholds    : "
++        f"lift_min={lift_thr.get('min_lift_fraction')} "
++        f"max_violation={lift_thr.get('max_violation_rate')} "
++        f"missing_rate={lift_thr.get('max_missing_ensemble_rate')} | "
++        f"proof_pf>={proof_thr.get('min_profit_factor')} "
++        f"min_trades={proof_thr.get('min_closed_trades')} "
++        f"min_days={proof_thr.get('min_trading_days')}"
++    )
+     print(
+         "Proof runway   : "
+         f"closed={evidence_progress.get('closed_trades')}/{evidence_progress.get('min_closed_trades')} "
+@@ -1151,6 +1681,19 @@ def main() -> int:
+         f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "
+         f"integrity_high={high_integrity_violation_count})"
+     )
++    print(
++        "Artifact bind  : "
++        f"{'PASS' if artifact_binding_pass else 'FAIL'} "
++        f"(summary_ts={artifact_binding.get('summary_generated_utc')}, "
++        f"live_ts={artifact_binding.get('latest_live_cycle_ts_utc')}, "
++        f"run_id={artifact_binding.get('latest_live_run_id')}, "
++        f"commit={artifact_binding.get('repo_head')})"
++    )
++    if not artifact_binding_pass:
++        print(
++            "Artifact reason: "
++            f"{','.join(artifact_binding.get('reason_codes') or []) or 'UNKNOWN'}"
++        )
+     if reconcile_result.get("requested"):
+         print(
+             "Reconcile step : "
+diff --git a/tests/scripts/test_check_forecast_audits.py b/tests/scripts/test_check_forecast_audits.py
+index 02924df..28deb9e 100644
+--- a/tests/scripts/test_check_forecast_audits.py
++++ b/tests/scripts/test_check_forecast_audits.py
+@@ -22,6 +22,7 @@ def _write_audit(
+     ticker: str | None = None,
+     regime: str | None = None,
+     signal_context: dict | None = None,
++    semantic_admission: dict | None = None,
+ ) -> None:
+     payload = {
+         "dataset": {
+@@ -39,6 +40,8 @@ def _write_audit(
+     }
+     if signal_context is not None:
+         payload["signal_context"] = signal_context
++    if semantic_admission is not None:
++        payload["semantic_admission"] = semantic_admission
+     path.write_text(json.dumps(payload), encoding="utf-8")
+ 
+ 
+@@ -405,9 +408,10 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
+     output = capsys.readouterr().out
+     assert "RMSE coverage  : raw=2 parseable=2 deduped=2 processed=2 usable=2" in output
+     assert (
+-        "Outcome join   : outcomes_loaded=0 join_attempted=0 eligible=0 matched=0 "
+-        "missing=0 ambiguous=0 not_due=0 invalid_context=0 not_yet_eligible=0 "
+-        "no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
++        "Outcome join   : outcomes_loaded=0 join_attempted=0 accepted=2 accepted_noneligible=0 "
++        "eligible=2 quarantined=0 due_eligible=0 matched=0 missing=0 ambiguous=0 "
++        "not_due=0 invalid_context=0 not_yet_eligible=0 duplicate_conflicts=0 "
++        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=2"
+     ) in output
+     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
+ 
+@@ -429,8 +433,15 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
+     assert summary["window_counts"]["n_outcome_windows_no_signal_id"] == 0
+     assert summary["window_counts"]["n_outcome_windows_non_trade_context"] == 0
+     assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
++    assert summary["window_counts"]["n_accepted_records"] == 2
++    assert summary["window_counts"]["n_accepted_noneligible_records"] == 0
++    assert summary["window_counts"]["n_eligible_records"] == 2
++    assert summary["window_counts"]["n_quarantined_records"] == 0
++    assert summary["window_counts"]["n_duplicate_conflicts"] == 0
++    assert summary["window_counts"]["n_admission_missing_execution_metadata_records"] == 2
+     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
+     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
++    assert summary["admission_summary"]["missing_execution_metadata_records"] == 2
+     assert summary["telemetry_contract"]["schema_version"] == 3
+     assert summary["telemetry_contract"]["outcomes_loaded"] is False
+     assert "cache_status" in summary
+@@ -943,9 +954,103 @@ def test_outcome_join_marks_future_window_as_not_due_not_missing(
+     summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+     assert summary["window_counts"]["n_outcome_windows_not_due"] == 1
+     assert summary["window_counts"]["n_outcome_windows_missing"] == 0
++    assert summary["window_counts"]["n_readiness_denominator_included"] == 0
++    assert summary["window_counts"]["n_readiness_excluded_not_due"] == 1
+     assert summary["dataset_windows"][0]["outcome_status"] == "NOT_DUE"
+ 
+ 
++def test_check_forecast_audits_preserves_producer_admission_fields_in_summary(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++
++    _write_audit(
++        audit_dir / "forecast_audit_admission_contract.json",
++        start="2024-01-01",
++        end="2024-01-31",
++        length=180,
++        horizon=5,
++        ticker="AAPL",
++        regime="LOW_VOL",
++        signal_context={
++            "context_type": "TRADE",
++            "event_type": "TRADE_FORECAST_AUDIT",
++            "ts_signal_id": "ts_missing_meta",
++            "ticker": "AAPL",
++            "run_id": None,
++            "entry_ts": None,
++            "forecast_horizon": 5,
++            "signal_context_missing": False,
++        },
++        semantic_admission={
++            "admission_contract_version": 1,
++            "accepted_for_audit_history": True,
++            "admissible_for_readiness": False,
++            "gate_eligible": False,
++            "gate_bucket": "ACCEPTED_NONELIGIBLE",
++            "reason_code": "MISSING_RUN_ID,MISSING_ENTRY_TS",
++            "reason_codes": ["MISSING_RUN_ID", "MISSING_ENTRY_TS"],
++            "production_labeled": True,
++            "duplicate_conflict": False,
++            "quarantined": False,
++            "not_quarantined": True,
++            "missing_execution_metadata": True,
++            "missing_execution_metadata_fields": ["run_id", "entry_ts"],
++        },
++        weights={"sarimax": 1.0},
++        eval_metrics={"sarimax": {"rmse": 2.0}, "ensemble": {"rmse": 2.0}},
++    )
++
++    cfg = tmp_path / "forecaster_monitoring.yml"
++    cfg.write_text(
++        "\n".join(
++            [
++                "forecaster_monitoring:",
++                "  regression_metrics:",
++                "    baseline_model: BEST_SINGLE",
++                "    holding_period_audits: 1",
++                "    disable_ensemble_if_no_lift: false",
++                "    max_rmse_ratio_vs_baseline: 1.1",
++                "    max_violation_rate: 0.25",
++            ]
++        ),
++        encoding="utf-8",
++    )
++
++    import scripts.check_forecast_audits as mod
++
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "check_forecast_audits.py",
++            "--audit-dir",
++            str(audit_dir),
++            "--config-path",
++            str(cfg),
++            "--max-files",
++            "50",
++        ],
++    )
++    with pytest.raises(SystemExit):
++        mod.main()
++
++    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
++    entry = summary["dataset_windows"][0]
++    assert entry["semantic_admission_source"] == "producer"
++    assert entry["semantic_admission_preserved"] is True
++    assert entry["gate_bucket"] == "ACCEPTED_NONELIGIBLE"
++    assert entry["admission_reason_code"] == "MISSING_RUN_ID,MISSING_ENTRY_TS"
++    assert entry["admission_reason_codes"] == ["MISSING_RUN_ID", "MISSING_ENTRY_TS"]
++    assert entry["missing_execution_metadata"] is True
++    assert entry["missing_execution_metadata_fields"] == ["run_id", "entry_ts"]
++    assert summary["admission_summary"]["accepted_noneligible_records"] == 1
++    assert summary["admission_summary"]["missing_execution_metadata_records"] == 1
++    assert summary["admission_summary"]["source_counts"]["producer"] == 1
++
++
+ def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:
+     audit = tmp_path / "audit_garch_best.json"
+     _write_audit(
+@@ -1298,6 +1403,228 @@ def test_check_forecast_audits_no_lift_gate_fails(tmp_path: Path, monkeypatch: p
+     assert excinfo.value.code != 0
+ 
+ 
++def test_check_forecast_audits_failure_writes_latest_summary_with_generated_utc(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++
++    _write_audit(
++        audit_dir / "forecast_audit_0.json",
++        start="2024-01-01",
++        end="2024-02-01",
++        length=220,
++        horizon=30,
++        weights={"samossa": 1.0},
++        eval_metrics={
++            "sarimax": {"rmse": 5.0},
++            "samossa": {"rmse": 5.0},
++            "ensemble": {"rmse": 8.0},
++        },
++    )
++
++    cfg = tmp_path / "forecaster_monitoring.yml"
++    cfg.write_text(
++        "\n".join(
++            [
++                "forecaster_monitoring:",
++                "  regression_metrics:",
++                "    baseline_model: BEST_SINGLE",
++                "    holding_period_audits: 1",
++                "    disable_ensemble_if_no_lift: false",
++                "    max_rmse_ratio_vs_baseline: 1.1",
++                "    max_violation_rate: 0.25",
++            ]
++        ),
++        encoding="utf-8",
++    )
++
++    import scripts.check_forecast_audits as mod
++
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "check_forecast_audits.py",
++            "--audit-dir",
++            str(audit_dir),
++            "--config-path",
++            str(cfg),
++            "--max-files",
++            "50",
++        ],
++    )
++    with pytest.raises(SystemExit) as excinfo:
++        mod.main()
++    assert excinfo.value.code != 0
++
++    summary_path = tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json"
++    summary = json.loads(summary_path.read_text(encoding="utf-8"))
++    assert summary["status"] == "FAIL"
++    assert summary["exit_code"] == 1
++    assert isinstance(summary.get("generated_utc"), str) and summary["generated_utc"]
++    assert summary["audit_dir"] == str(audit_dir)
++    assert summary["max_files"] == 50
++    assert summary["scope"]["include_research"] is False
++
++
++def test_check_forecast_audits_failure_summary_preserves_outcome_windows(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++
++    ts_signal_id = "ts_AAPL_20240101T000000Z_dead_0001"
++    _write_audit(
++        audit_dir / "forecast_audit_0.json",
++        start="2023-11-01",
++        end="2024-01-01",
++        length=220,
++        horizon=30,
++        weights={"samossa": 1.0},
++        eval_metrics={
++            "sarimax": {"rmse": 5.0},
++            "samossa": {"rmse": 5.0},
++            "ensemble": {"rmse": 8.0},
++        },
++        ticker="AAPL",
++        signal_context={
++            "context_type": "TRADE",
++            "ts_signal_id": ts_signal_id,
++            "run_id": "20240101_000000",
++            "entry_ts": "2024-01-01T00:00:00+00:00",
++            "forecast_horizon": 30,
++        },
++    )
++
++    db_path = tmp_path / "portfolio_maximizer.db"
++    _write_closed_trades_db(
++        db_path,
++        [
++            {
++                "ts_signal_id": ts_signal_id,
++                "is_close": 1,
++                "is_diagnostic": 0,
++                "is_synthetic": 0,
++            }
++        ],
++    )
++
++    cfg = tmp_path / "forecaster_monitoring.yml"
++    cfg.write_text(
++        "\n".join(
++            [
++                "forecaster_monitoring:",
++                "  regression_metrics:",
++                "    baseline_model: BEST_SINGLE",
++                "    holding_period_audits: 1",
++                "    disable_ensemble_if_no_lift: false",
++                "    max_rmse_ratio_vs_baseline: 1.1",
++                "    max_violation_rate: 0.25",
++            ]
++        ),
++        encoding="utf-8",
++    )
++
++    import scripts.check_forecast_audits as mod
++
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "check_forecast_audits.py",
++            "--audit-dir",
++            str(audit_dir),
++            "--config-path",
++            str(cfg),
++            "--db",
++            str(db_path),
++            "--max-files",
++            "50",
++        ],
++    )
++    with pytest.raises(SystemExit) as excinfo:
++        mod.main()
++    assert excinfo.value.code != 0
++
++    summary_path = tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json"
++    summary = json.loads(summary_path.read_text(encoding="utf-8"))
++    assert summary["status"] == "FAIL"
++    assert len(summary["dataset_windows"]) == 1
++    assert summary["dataset_windows"][0]["outcome_status"] == "MATCHED"
++    assert bool(summary["dataset_windows"][0]["counts_toward_linkage_denominator"]) is True
++    assert summary["window_counts"]["n_outcome_windows_matched"] == 1
++
++
++def test_check_forecast_audits_failure_summary_retains_rmse_and_lift_metrics(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++
++    _write_audit(
++        audit_dir / "forecast_audit_0.json",
++        start="2024-01-01",
++        end="2024-02-01",
++        length=220,
++        horizon=30,
++        weights={"samossa": 1.0},
++        eval_metrics={
++            "sarimax": {"rmse": 5.0},
++            "samossa": {"rmse": 5.0},
++            "ensemble": {"rmse": 8.0},
++        },
++    )
++
++    cfg = tmp_path / "forecaster_monitoring.yml"
++    cfg.write_text(
++        "\n".join(
++            [
++                "forecaster_monitoring:",
++                "  regression_metrics:",
++                "    baseline_model: BEST_SINGLE",
++                "    holding_period_audits: 1",
++                "    disable_ensemble_if_no_lift: false",
++                "    max_rmse_ratio_vs_baseline: 1.1",
++                "    max_violation_rate: 0.25",
++            ]
++        ),
++        encoding="utf-8",
++    )
++
++    import scripts.check_forecast_audits as mod
++
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "check_forecast_audits.py",
++            "--audit-dir",
++            str(audit_dir),
++            "--config-path",
++            str(cfg),
++            "--max-files",
++            "50",
++        ],
++    )
++    with pytest.raises(SystemExit) as excinfo:
++        mod.main()
++    assert excinfo.value.code != 0
++
++    summary = json.loads(
++        (tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text(encoding="utf-8")
++    )
++    assert summary["effective_audits"] == 1
++    assert summary["violation_count"] == 1
++    assert summary["violation_rate"] == pytest.approx(1.0)
++    assert summary["lift_fraction"] == pytest.approx(0.0)
++    assert summary["window_counts"]["n_rmse_windows_processed"] == 1
++    assert summary["window_counts"]["n_rmse_windows_usable"] == 1
++
++
+ def test_check_forecast_audits_no_lift_soft_mode_sets_disable_default_decision(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+ ) -> None:
+diff --git a/tests/scripts/test_check_model_improvement.py b/tests/scripts/test_check_model_improvement.py
+index 6149c05..dee656f 100644
+--- a/tests/scripts/test_check_model_improvement.py
++++ b/tests/scripts/test_check_model_improvement.py
+@@ -24,11 +24,12 @@ if str(SCRIPTS_DIR) not in sys.path:
+ if str(REPO_ROOT) not in sys.path:
+     sys.path.insert(0, str(REPO_ROOT))
+ 
+-from check_model_improvement import (
+-    LAYER_REQUIRED_KEYS,
+-    LayerResult,
+-    compare_baseline,
+-    run_layer1_forecast_quality,
++from check_model_improvement import (
++    LAYER_REQUIRED_KEYS,
++    _resolve_layer1_audit_dir,
++    LayerResult,
++    compare_baseline,
++    run_layer1_forecast_quality,
+     run_layer2_gate_status,
+     run_layer3_trade_quality,
+     run_layer4_calibration,
+@@ -111,6 +112,65 @@ class TestLayer1ForecastQuality:
+         assert result.status == "WARN"
+         assert "coverage_threshold" in result.summary or "n_used" in result.summary
+ 
++    def test_fails_when_ci_definitively_negative(self, tmp_path):
++        """25 windows where ensemble RMSE > best-single RMSE ? CI fully below zero ? FAIL."""
++        for i in range(25):
++            audit = {
++                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
++                "summary": {"forecast_horizon": 5},
++                "artifacts": {
++                    "evaluation_metrics": {
++                        "garch":    {"rmse": 1.2, "directional_accuracy": 0.5, "smape": 2.0},
++                        "samossa":  {"rmse": 1.3, "directional_accuracy": 0.5, "smape": 2.5},
++                        "mssa_rl":  {"rmse": 1.4, "directional_accuracy": 0.4, "smape": 3.0},
++                        "ensemble": {"rmse": 1.6, "directional_accuracy": 0.4},
++                    },
++                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
++                },
++            }
++            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
++        # warn_coverage_threshold=25 so n_used=25 passes; min_windows_for_fail=100 so
++        # existing lift_global FAIL path doesn't fire ? only the CI path should produce FAIL.
++        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
++        assert result.status == "FAIL"
++        assert "definitively negative" in result.summary
++
++    def test_warns_when_ci_spans_zero(self, tmp_path, monkeypatch):
++        """CI spanning zero (ci_low<0, ci_high>0) with sufficient windows ? WARN, not FAIL."""
++        import ensemble_health_audit  # ensure module is in sys.modules for monkeypatching
++
++        for i in range(25):
++            audit = {
++                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
++                "summary": {"forecast_horizon": 5},
++                "artifacts": {
++                    "evaluation_metrics": {
++                        "garch":    {"rmse": 1.3, "directional_accuracy": 0.6, "smape": 2.0},
++                        "samossa":  {"rmse": 1.4, "directional_accuracy": 0.5, "smape": 2.5},
++                        "mssa_rl":  {"rmse": 1.5, "directional_accuracy": 0.4, "smape": 3.0},
++                        "ensemble": {"rmse": 1.2, "directional_accuracy": 0.5},
++                    },
++                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
++                },
++            }
++            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
++        # Force CI to span zero: ci_low < 0 but ci_high > 0
++        monkeypatch.setattr(
++            ensemble_health_audit,
++            "compute_lift_significance",
++            lambda *a, **kw: {
++                "mean_lift": 0.02,
++                "ci_low": -0.04,
++                "ci_high": 0.08,
++                "lift_win_fraction": 0.60,
++                "insufficient_data": False,
++            },
++        )
++        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
++        assert result.status == "WARN"
++        assert "spans zero" in result.summary
++        assert "definitively negative" not in result.summary
++
+ 
+ # ---------------------------------------------------------------------------
+ # Layer 2 tests
+@@ -359,7 +419,7 @@ class TestBaselineSaveCompare:
+ # ---------------------------------------------------------------------------
+ # CLI integration
+ # ---------------------------------------------------------------------------
+-class TestCLIExitCodes:
++class TestCLIExitCodes:
+     def test_cli_exit_0_when_all_layers_pass_or_warn_or_skip(self, tmp_path, monkeypatch):
+         """All layers SKIP/WARN (no data) ? exit 0."""
+         from check_model_improvement import main
+@@ -394,8 +454,57 @@ class TestCLIExitCodes:
+             "--layer", "2",
+             "--audit-dir", str(tmp_path),
+             "--db", str(tmp_path / "nonexistent.db"),
+-        ])
+-        assert exit_code == 1
++        ])
++        assert exit_code == 1
++
++
++class TestLayer1AuditDirResolution:
++    def test_prefers_explicit_audit_dir_over_env_and_repo_defaults(self, tmp_path, monkeypatch):
++        explicit_dir = tmp_path / "explicit"
++        explicit_dir.mkdir()
++        env_dir = tmp_path / "env"
++        env_dir.mkdir()
++
++        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
++        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cohort_alpha")
++        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
++
++        resolved = _resolve_layer1_audit_dir(explicit_dir)
++        assert resolved == explicit_dir
++
++    def test_prefers_ts_forecast_audit_dir_env_when_no_explicit_override(self, tmp_path, monkeypatch):
++        env_dir = tmp_path / "cohorts" / "env_active" / "production"
++        env_dir.mkdir(parents=True)
++
++        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
++        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
++
++        resolved = _resolve_layer1_audit_dir()
++        assert resolved == env_dir
++
++    def test_uses_active_cohort_production_dir_before_shared_production_dir(self, tmp_path, monkeypatch):
++        cohort_dir = tmp_path / "logs" / "forecast_audits" / "cohorts" / "cleanroom_a" / "production"
++        cohort_dir.mkdir(parents=True)
++        fallback_production = tmp_path / "logs" / "forecast_audits" / "production"
++        fallback_production.mkdir(parents=True)
++
++        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
++        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cleanroom_a")
++        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
++
++        resolved = _resolve_layer1_audit_dir()
++        assert resolved == cohort_dir
++
++    def test_falls_back_to_shared_production_dir_when_no_env_or_cohort(self, tmp_path, monkeypatch):
++        production_dir = tmp_path / "logs" / "forecast_audits" / "production"
++        production_dir.mkdir(parents=True)
++
++        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
++        monkeypatch.delenv("PMX_EVIDENCE_COHORT_ID", raising=False)
++        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
++
++        resolved = _resolve_layer1_audit_dir()
++        assert resolved == production_dir
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tests/scripts/test_production_audit_gate.py b/tests/scripts/test_production_audit_gate.py
+index e102f58..e184d42 100644
+--- a/tests/scripts/test_production_audit_gate.py
++++ b/tests/scripts/test_production_audit_gate.py
+@@ -8,6 +8,60 @@ import sys
+ import pytest
+ 
+ 
++def _make_lift_summary(audit_dir: Path, **overrides) -> dict:
++    base = {
++        "generated_utc": "2026-03-15T12:00:00+00:00",
++        "audit_dir": str(audit_dir),
++        "max_files": 500,
++        "scope": {"include_research": False, "production_audit_only": False},
++        "effective_audits": 20,
++        "violation_rate": 0.0,
++        "max_violation_rate": 0.35,
++        "lift_fraction": 0.30,
++        "min_lift_fraction": 0.25,
++        "decision": "KEEP",
++        "decision_reason": "lift demonstrated during holding period",
++        "admission_summary": {
++            "accepted_records": 12,
++            "accepted_noneligible_records": 0,
++            "eligible_records": 12,
++            "quarantined_records": 0,
++            "duplicate_conflicts": 0,
++            "missing_execution_metadata_records": 0,
++            "bucket_counts": {
++                "ELIGIBLE": 12,
++                "ACCEPTED_NONELIGIBLE": 0,
++                "QUARANTINED": 0,
++            },
++            "source_counts": {
++                "producer": 12,
++                "legacy_derived": 0,
++            },
++        },
++        "window_counts": {
++            "n_outcome_windows_eligible": 12,
++            "n_outcome_windows_matched": 10,
++            "n_outcome_windows_invalid_context": 0,
++            "n_outcome_windows_non_trade_context": 0,
++            "n_accepted_records": 12,
++            "n_accepted_noneligible_records": 0,
++            "n_eligible_records": 12,
++            "n_quarantined_records": 0,
++            "n_duplicate_conflicts": 0,
++            "n_contract_versions": 1,
++            "n_cohort_fingerprints": 1,
++            "n_readiness_denominator_included": 12,
++        },
++    }
++    if "window_counts" in overrides and isinstance(overrides["window_counts"], dict):
++        merged_counts = dict(base["window_counts"])
++        merged_counts.update(overrides["window_counts"])
++        overrides = dict(overrides)
++        overrides["window_counts"] = merged_counts
++    base.update(overrides)
++    return base
++
++
+ def test_extract_lift_output_metrics_inconclusive() -> None:
+     import scripts.production_audit_gate as mod
+ 
+@@ -44,20 +98,330 @@ def test_extract_lift_output_metrics_decision_and_lift_fraction() -> None:
+     assert metrics["decision_reason"] == "lift demonstrated during holding period"
+ 
+ 
++def test_collect_thresholds_uses_configs() -> None:
++    import scripts.production_audit_gate as mod
++
++    proof_req = mod._load_profitability_requirements(Path("config/profitability_proof_requirements.yml"))
++    thresholds = mod._collect_thresholds(
++        monitor_config=Path("config/forecaster_monitoring.yml"),
++        proof_requirements=proof_req,
++        lift_inconclusive_allowed=True,
++        proof_profitable_required=True,
++        require_holding_period=True,
++        warmup_policy={"warmup_expired": False, "max_warmup_days": 30},
++    )
++
++    assert thresholds["proof"]["min_closed_trades"] == 30
++    assert thresholds["proof"]["min_profit_factor"] == pytest.approx(1.1)
++    assert thresholds["lift"]["min_lift_fraction"] == pytest.approx(0.25)
++    assert thresholds["semantics"]["proof_profitable_required"] is True
++
++
++def test_build_linkage_waterfall_counts() -> None:
++    import scripts.production_audit_gate as mod
++
++    waterfall = mod._build_linkage_waterfall(
++        {
++            "n_outcome_deduped_windows": 20,
++            "n_outcome_windows_non_trade_context": 3,
++            "n_outcome_windows_invalid_context": 2,
++            "n_outcome_windows_eligible": 10,
++            "n_outcome_windows_matched": 7,
++            "n_readiness_denominator_included": 12,
++        },
++        production_audit_only=True,
++    )
++    assert waterfall["raw_candidates"] == 20
++    assert waterfall["production_only"] == 17
++    assert waterfall["linked"] == 10
++    assert waterfall["hygiene_pass"] == 12
++    assert waterfall["matched"] == 7
++    assert waterfall["matched_over_linked"] == pytest.approx(0.7)
++
++
++def test_evaluate_artifact_binding_passes_when_fresh_and_bound() -> None:
++    import scripts.production_audit_gate as mod
++
++    binding = mod._evaluate_artifact_binding(
++        lift_summary={"generated_utc": "2026-03-09T19:35:00+00:00"},
++        live_cycle_binding={
++            "latest_live_cycle_ts_utc": "2026-03-09T19:30:00+00:00",
++            "latest_live_run_id": "20260309_193000",
++        },
++        repo_state={"head": "abc123"},
++    )
++    assert binding["pass"] is True
++    assert binding["freshness_pass"] is True
++    assert binding["run_id_present"] is True
++    assert binding["commit_hash_present"] is True
++    assert binding["reason_codes"] == []
++
++
++def test_evaluate_artifact_binding_fails_when_stale() -> None:
++    import scripts.production_audit_gate as mod
++
++    binding = mod._evaluate_artifact_binding(
++        lift_summary={"generated_utc": "2026-03-09T19:20:00+00:00"},
++        live_cycle_binding={
++            "latest_live_cycle_ts_utc": "2026-03-09T19:30:00+00:00",
++            "latest_live_run_id": "20260309_193000",
++        },
++        repo_state={"head": "abc123"},
++    )
++    assert binding["pass"] is False
++    assert "SUMMARY_STALE_BEFORE_LIVE_CYCLE" in binding["reason_codes"]
++
++
+ def test_summary_matches_invocation_max_files_match() -> None:
+     import scripts.production_audit_gate as mod
+ 
+     audit_dir = Path.cwd() / "logs" / "forecast_audits"
+-    summary = {"audit_dir": str(audit_dir), "max_files": 500}
+-    assert mod._summary_matches_invocation(summary, audit_dir=audit_dir, max_files=500)
++    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": False}}
++    assert mod._summary_matches_invocation(
++        summary,
++        audit_dir=audit_dir,
++        max_files=500,
++        include_research=False,
++    )
+ 
+ 
+ def test_summary_matches_invocation_max_files_mismatch() -> None:
+     import scripts.production_audit_gate as mod
+ 
+     audit_dir = Path.cwd() / "logs" / "forecast_audits"
+-    summary = {"audit_dir": str(audit_dir), "max_files": 500}
+-    assert not mod._summary_matches_invocation(summary, audit_dir=audit_dir, max_files=50)
++    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": False}}
++    assert not mod._summary_matches_invocation(
++        summary,
++        audit_dir=audit_dir,
++        max_files=50,
++        include_research=False,
++    )
++
++
++def test_summary_matches_invocation_include_research_mismatch() -> None:
++    import scripts.production_audit_gate as mod
++
++    audit_dir = Path.cwd() / "logs" / "forecast_audits"
++    summary = {"audit_dir": str(audit_dir), "max_files": 500, "scope": {"include_research": True}}
++    assert not mod._summary_matches_invocation(
++        summary,
++        audit_dir=audit_dir,
++        max_files=500,
++        include_research=False,
++    )
++
++
++def test_binding_safe_lift_summary_retains_freshness_fields_only() -> None:
++    import scripts.production_audit_gate as mod
++
++    raw = {
++        "generated_utc": "2026-03-09T20:46:01+00:00",
++        "audit_dir": str(Path.cwd() / "logs" / "forecast_audits"),
++        "max_files": 500,
++        "scope": {"include_research": False},
++        "decision": "KEEP",
++        "effective_audits": 35,
++        "window_counts": {"n_outcome_windows_eligible": 10},
++    }
++    safe = mod._binding_safe_lift_summary(raw)
++    assert safe["generated_utc"] == raw["generated_utc"]
++    assert safe["audit_dir"] == raw["audit_dir"]
++    assert safe["max_files"] == 500
++    assert "window_counts" in safe
++    assert "decision" not in safe
++    assert "effective_audits" not in safe
++
++
++def test_main_prefers_structured_summary_over_stdout_metrics(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import scripts.production_audit_gate as mod
++
++    output_json = tmp_path / "production_gate.json"
++    monitor_cfg = tmp_path / "monitor.yml"
++    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
++    proof_cfg = tmp_path / "proof.yml"
++    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++    db_path = tmp_path / "portfolio.db"
++    sqlite3.connect(str(db_path)).close()
++
++    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
++        del cwd
++        joined = " ".join(cmd)
++        if "check_forecast_audits.py" in joined:
++            return subprocess.CompletedProcess(
++                args=cmd,
++                returncode=0,
++                stdout="\n".join(
++                    [
++                        "Effective audits with RMSE: 99",
++                        "Violation rate: 99.00% (max allowed 35.00%)",
++                        "Ensemble lift fraction: 99.00% (required >= 25.00%)",
++                        "Decision: KEEP (stdout should not be trusted)",
++                    ]
++                ),
++                stderr="",
++            )
++        if "validate_profitability_proof.py" in joined:
++            return subprocess.CompletedProcess(
++                args=cmd,
++                returncode=0,
++                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 100.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
++                stderr="",
++            )
++        raise AssertionError(f"Unexpected command: {joined}")
++
++    original_safe_load_json = mod._safe_load_json
++
++    def _fake_safe_load_json(path: Path):  # noqa: ANN001
++        if Path(path).name == "latest_summary.json":
++            return _make_lift_summary(
++                audit_dir,
++                effective_audits=20,
++                violation_rate=0.0,
++                lift_fraction=0.30,
++            )
++        return original_safe_load_json(path)
++
++    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
++    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
++    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
++    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
++    monkeypatch.setattr(
++        mod,
++        "_compute_lifecycle_integrity",
++        lambda _db_path: {
++            "close_before_entry_count": 0,
++            "closed_missing_exit_reason_count": 0,
++            "query_error": None,
++        },
++    )
++    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
++    monkeypatch.setenv("OPENCLAW_TARGETS", "")
++    monkeypatch.setenv("OPENCLAW_TO", "")
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "production_audit_gate.py",
++            "--db",
++            str(db_path),
++            "--proof-requirements",
++            str(proof_cfg),
++            "--audit-dir",
++            str(audit_dir),
++            "--monitor-config",
++            str(monitor_cfg),
++            "--output-json",
++            str(output_json),
++        ],
++    )
++
++    rc = mod.main()
++    assert rc == 0
++    payload = original_safe_load_json(output_json)
++    assert payload["lift_gate"]["effective_audits"] == 20
++    assert payload["lift_gate"]["lift_fraction"] == pytest.approx(0.30)
++
++
++def test_main_preserves_admission_summary_from_structured_summary(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import scripts.production_audit_gate as mod
++
++    output_json = tmp_path / "production_gate.json"
++    monitor_cfg = tmp_path / "monitor.yml"
++    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
++    proof_cfg = tmp_path / "proof.yml"
++    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
++    audit_dir = tmp_path / "audits"
++    audit_dir.mkdir(parents=True, exist_ok=True)
++    db_path = tmp_path / "portfolio.db"
++    sqlite3.connect(str(db_path)).close()
++
++    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
++        del cwd
++        joined = " ".join(cmd)
++        if "check_forecast_audits.py" in joined:
++            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
++        if "validate_profitability_proof.py" in joined:
++            return subprocess.CompletedProcess(
++                args=cmd,
++                returncode=0,
++                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 100.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
++                stderr="",
++            )
++        raise AssertionError(f"Unexpected command: {joined}")
++
++    original_safe_load_json = mod._safe_load_json
++
++    def _fake_safe_load_json(path: Path):  # noqa: ANN001
++        if Path(path).name == "latest_summary.json":
++            return _make_lift_summary(
++                audit_dir,
++                admission_summary={
++                    "accepted_records": 9,
++                    "accepted_noneligible_records": 3,
++                    "eligible_records": 6,
++                    "quarantined_records": 1,
++                    "duplicate_conflicts": 2,
++                    "missing_execution_metadata_records": 4,
++                    "bucket_counts": {
++                        "ELIGIBLE": 6,
++                        "ACCEPTED_NONELIGIBLE": 3,
++                        "QUARANTINED": 1,
++                    },
++                    "source_counts": {
++                        "producer": 9,
++                        "legacy_derived": 0,
++                    },
++                },
++            )
++        return original_safe_load_json(path)
++
++    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
++    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
++    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
++    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
++    monkeypatch.setattr(
++        mod,
++        "_compute_lifecycle_integrity",
++        lambda _db_path: {
++            "close_before_entry_count": 0,
++            "closed_missing_exit_reason_count": 0,
++            "query_error": None,
++        },
++    )
++    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
++    monkeypatch.setenv("OPENCLAW_TARGETS", "")
++    monkeypatch.setenv("OPENCLAW_TO", "")
++    monkeypatch.setattr(
++        sys,
++        "argv",
++        [
++            "production_audit_gate.py",
++            "--db",
++            str(db_path),
++            "--proof-requirements",
++            str(proof_cfg),
++            "--audit-dir",
++            str(audit_dir),
++            "--monitor-config",
++            str(monitor_cfg),
++            "--output-json",
++            str(output_json),
++        ],
++    )
++
++    rc = mod.main()
++    assert rc == 0
++    payload = original_safe_load_json(output_json)
++    assert payload["readiness"]["admission_summary"]["missing_execution_metadata_records"] == 4
++    assert payload["readiness_v2"]["admission_summary"]["bucket_counts"]["QUARANTINED"] == 1
++    assert payload["readiness_v2"]["accepted_records"] == 9
++    assert payload["readiness_v2"]["duplicate_conflicts"] == 2
+ 
+ 
+ def _seed_trade_exec_table(db_path: Path, *, close_id: int, entry_trade_id: int | None) -> None:
+@@ -84,6 +448,7 @@ def test_run_reconcile_step_apply_fails_when_unlinked_remains_even_if_command_ex
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     import scripts.production_audit_gate as mod
++    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+ 
+     db_path = tmp_path / "portfolio.db"
+     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=None)
+@@ -117,6 +482,7 @@ def test_run_reconcile_step_apply_passes_when_verified_zero_unlinked(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     import scripts.production_audit_gate as mod
++    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+ 
+     db_path = tmp_path / "portfolio.db"
+     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=12345)
+@@ -149,6 +515,7 @@ def test_run_reconcile_step_dry_run_fails_when_unlinked_detected(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+     import scripts.production_audit_gate as mod
++    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
+ 
+     db_path = tmp_path / "portfolio.db"
+     _seed_trade_exec_table(db_path, close_id=66, entry_trade_id=None)
+@@ -219,6 +586,14 @@ def test_main_fails_gate_when_reconcile_status_is_fail(
+         raise AssertionError(f"Unexpected command: {joined}")
+ 
+     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
++    original_safe_load_json = mod._safe_load_json
++    monkeypatch.setattr(
++        mod,
++        "_safe_load_json",
++        lambda path: _make_lift_summary(audit_dir)
++        if Path(path).name == "latest_summary.json"
++        else original_safe_load_json(path),
++    )
+     monkeypatch.setattr(
+         mod,
+         "_run_reconcile_step",
+@@ -273,6 +648,15 @@ def test_main_fails_gate_when_reconcile_status_is_fail(
+     assert "Reconcile step : FAIL" in out
+ 
+ 
++def test_main_fails_closed_on_unknown_args(monkeypatch: pytest.MonkeyPatch) -> None:
++    import scripts.production_audit_gate as mod
++
++    monkeypatch.setattr(sys, "argv", ["production_audit_gate.py", "--unknown-flag"])
++    with pytest.raises(SystemExit) as excinfo:
++        mod.main()
++    assert excinfo.value.code == 2
++
++
+ def test_unattended_profile_requires_profitable_proof(
+     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
+@@ -315,6 +699,14 @@ def test_unattended_profile_requires_profitable_proof(
+         raise AssertionError(f"Unexpected command: {joined}")
+ 
+     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
++    original_safe_load_json = mod._safe_load_json
++    monkeypatch.setattr(
++        mod,
++        "_safe_load_json",
++        lambda path: _make_lift_summary(audit_dir, effective_audits=21)
++        if Path(path).name == "latest_summary.json"
++        else original_safe_load_json(path),
++    )
+     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+     monkeypatch.setattr(
+         mod,
+@@ -401,6 +793,19 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
+         raise AssertionError(f"Unexpected command: {joined}")
+ 
+     monkeypatch.setattr(mod, "_run_command", _fake_run_command)
++    original_safe_load_json = mod._safe_load_json
++    monkeypatch.setattr(
++        mod,
++        "_safe_load_json",
++        lambda path: _make_lift_summary(
++            audit_dir,
++            effective_audits=7,
++            decision="INCONCLUSIVE",
++            decision_reason="effective_audits=7 < required_audits=20",
++        )
++        if Path(path).name == "latest_summary.json"
++        else original_safe_load_json(path),
++    )
+     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+     monkeypatch.setattr(
+         mod,
+@@ -444,3 +849,112 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
+     assert payload["lift_gate"]["inconclusive"] is True
+     assert payload["lift_gate"]["pass"] is False
+     assert payload["production_profitability_gate"]["gate_semantics_status"] == "INCONCLUSIVE_BLOCKED"
++
++
++def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> None:
++    """Legacy trades (ts_signal_id LIKE 'legacy_%') must not be flagged for
++    close_before_entry ? their bar_timestamps are historical forecast bars, not
++    execution clocks, and are unreliable for chronological ordering."""
++    import scripts.production_audit_gate as mod
++
++    db = tmp_path / "test.db"
++    conn = sqlite3.connect(str(db))
++    conn.executescript(
++        """
++        CREATE TABLE trade_executions (
++            id INTEGER PRIMARY KEY, ticker TEXT, trade_date TEXT, action TEXT,
++            realized_pnl REAL, is_close INTEGER DEFAULT 0,
++            is_diagnostic INTEGER DEFAULT 0, is_synthetic INTEGER DEFAULT 0,
++            bar_timestamp TEXT, exit_reason TEXT, entry_trade_id INTEGER,
++            ts_signal_id TEXT
++        );
++        -- Legacy open leg: bar_timestamp from 2025 (historical forecast bar)
++        INSERT INTO trade_executions VALUES
++          (1,'MSFT','2026-02-10','BUY',NULL,0,0,0,
++           '2025-07-25T00:00:00+00:00',NULL,NULL,'legacy_2026-02-10_1');
++        -- Legacy close leg: bar_timestamp from 2025 ? EARLIER than open (artifact)
++        INSERT INTO trade_executions VALUES
++          (2,'MSFT','2026-02-10','SELL',72.5,1,0,0,
++           '2025-07-18T00:00:00+00:00','TIME_EXIT',1,'legacy_2026-02-10_2');
++        CREATE VIEW production_closed_trades AS
++          SELECT * FROM trade_executions
++          WHERE is_close=1
++            AND COALESCE(is_diagnostic,0)=0
++            AND COALESCE(is_synthetic,0)=0;
++        """
++    )
++    conn.close()
++
++    result = mod._compute_lifecycle_integrity(db)
++
++    assert result["close_before_entry_count"] == 0, (
++        "Legacy trades must not be counted as close_before_entry violations"
++    )
++    assert result["query_error"] is None
++
++
++def test_count_masked_unlinked_closes_returns_zero_when_whitelist_empty(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """masked count must be 0 when no whitelist env var is set."""
++    import scripts.production_audit_gate as mod
++
++    monkeypatch.delenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", raising=False)
++    db = tmp_path / "test.db"
++    conn = sqlite3.connect(str(db))
++    conn.executescript(
++        "CREATE TABLE trade_executions "
++        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
++        "INSERT INTO trade_executions VALUES (255, 1, NULL);"
++    )
++    conn.close()
++
++    count, ids = mod._count_masked_unlinked_closes(db)
++    assert count == 0
++    assert ids == []
++
++
++def test_count_masked_unlinked_closes_counts_matching_ids(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """masked count must reflect whitelisted IDs actually in DB as unlinked closes."""
++    import scripts.production_audit_gate as mod
++
++    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75,255")
++    db = tmp_path / "test.db"
++    conn = sqlite3.connect(str(db))
++    conn.executescript(
++        "CREATE TABLE trade_executions "
++        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
++        # id=255: unlinked live close (whitelisted)
++        "INSERT INTO trade_executions VALUES (255, 1, NULL);"
++        # id=66: whitelisted but has an entry_trade_id (linked ? not counted)
++        "INSERT INTO trade_executions VALUES (66, 1, 50);"
++        # id=999: unlinked but NOT in whitelist
++        "INSERT INTO trade_executions VALUES (999, 1, NULL);"
++    )
++    conn.close()
++
++    count, ids = mod._count_masked_unlinked_closes(db)
++    assert count == 1, "only id=255 is both whitelisted AND unlinked"
++    assert ids == [255]
++
++
++def test_count_masked_unlinked_closes_absent_from_db_returns_zero(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """masked count must be 0 when whitelisted IDs are not in DB at all."""
++    import scripts.production_audit_gate as mod
++
++    monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66,75,255")
++    db = tmp_path / "test.db"
++    conn = sqlite3.connect(str(db))
++    conn.executescript(
++        "CREATE TABLE trade_executions "
++        "(id INTEGER PRIMARY KEY, is_close INTEGER, entry_trade_id INTEGER);"
++    )
++    conn.close()
++
++    count, ids = mod._count_masked_unlinked_closes(db)
++    assert count == 0
++    assert ids == []

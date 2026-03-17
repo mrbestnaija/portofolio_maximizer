@@ -14,6 +14,7 @@ persisting writes into a separate audit DB to avoid contention.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -31,7 +32,22 @@ DEFAULT_ELIGIBILITY_PATH = ROOT / "logs" / "ticker_eligibility.json"
 DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
 DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
+DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
+DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
+DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
+DEFAULT_POSITIONS_MAX_AGE_DAYS = 14
+DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
+DASHBOARD_REQUIRED_TOP_LEVEL_KEYS = (
+    "meta",
+    "pnl",
+    "signals",
+    "trade_events",
+    "price_series",
+    "robustness",
+    "live_denominator",
+    "quant_validation",
+)
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -101,6 +117,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _payload_digest(payload: Dict[str, Any]) -> str:
+    cloned = json.loads(json.dumps(payload, sort_keys=True))
+    meta = cloned.get("meta")
+    if isinstance(meta, dict):
+        meta.pop("payload_digest", None)
+    raw = json.dumps(cloned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.as_posix()}?mode=ro"
     # [SETUP-PHASE BYPASS] The guardrail authorizer is a whitelist: any PRAGMA not in
@@ -149,6 +174,20 @@ def _safe_fetchall(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...]
 def _safe_fetchone(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...] = ()) -> Optional[sqlite3.Row]:
     rows = _safe_fetchall(conn, query, params)
     return rows[0] if rows else None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set:
+    try:
+        rows = _safe_fetchall(conn, f"PRAGMA table_info({table_name})")
+    except sqlite3.DatabaseError:
+        return set()
+    cols: set = set()
+    for row in rows:
+        try:
+            cols.add(str(row["name"]))
+        except Exception:
+            continue
+    return cols
 
 
 def _default_tickers(conn: sqlite3.Connection) -> List[str]:
@@ -317,8 +356,10 @@ def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
         or trade_sources.get("synthetic")
         or synthetic_dataset_ids
     )
+    has_non_synthetic_ohlcv = any(src for src in ohlcv_sources if src and src != "synthetic")
+    has_non_synthetic_trades = any(src for src in trade_sources if src and src != "synthetic")
     origin = "synthetic" if has_synthetic else "live"
-    if has_synthetic and any(src for src in ohlcv_sources if src and src != "synthetic"):
+    if has_synthetic and (has_non_synthetic_ohlcv or has_non_synthetic_trades):
         origin = "mixed"
 
     data_source = None
@@ -343,11 +384,29 @@ def _provenance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
-def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+def _positions_max_age_days() -> float:
+    try:
+        value = float(os.getenv("PMX_POSITIONS_MAX_AGE_DAYS", str(DEFAULT_POSITIONS_MAX_AGE_DAYS)))
+    except Exception:
+        value = float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
+    return value if value >= 0 else float(DEFAULT_POSITIONS_MAX_AGE_DAYS)
+
+
+def _positions(
+    conn: sqlite3.Connection,
+) -> tuple:
     row = _safe_fetchone(conn, "SELECT MAX(position_date) AS d FROM portfolio_positions")
     if not row or not row["d"]:
-        return _positions_from_executions(conn)
+        return _positions_from_executions(conn), False, None, "trade_executions_fallback"
     latest = str(row["d"])
+    latest_ts = _parse_utc_datetime(latest)
+    max_age_days = _positions_max_age_days()
+    positions_stale = False
+    if latest_ts is not None:
+        age_days = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 86400.0
+        positions_stale = age_days > max_age_days
+    if positions_stale:
+        return _positions_from_executions(conn), True, latest, "trade_executions_fallback_stale"
     # Backward-compatible: some environments/tests may have a minimal schema.
     query_full = """
     SELECT ticker, shares, average_cost, current_price, unrealized_pnl, unrealized_pnl_pct, market_value
@@ -418,7 +477,7 @@ def _positions(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
         if market_value is not None:
             out[t]["market_value"] = market_value
         out[t]["status"] = "ACTIVE" if shares else "FLAT"
-    return out
+    return out, False, latest, "portfolio_positions"
 
 
 def _latest_close(conn: sqlite3.Connection, ticker: str) -> Optional[float]:
@@ -448,15 +507,23 @@ def _positions_from_executions(conn: sqlite3.Connection) -> Dict[str, Dict[str, 
     closes don't distort entry price. Uses latest close from ohlcv_data as
     current price when available.
     """
-    rows = _safe_fetchall(
-        conn,
-        """
+    cols = _table_columns(conn, "trade_executions")
+    where_parts = [
+        "ticker IS NOT NULL",
+        "action IS NOT NULL",
+    ]
+    if "is_diagnostic" in cols:
+        where_parts.append("COALESCE(is_diagnostic, 0) = 0")
+    if "is_synthetic" in cols:
+        where_parts.append("COALESCE(is_synthetic, 0) = 0")
+    where_sql = " AND ".join(where_parts)
+    query = f"""
         SELECT ticker, action, shares, price, trade_date, created_at
         FROM trade_executions
-        WHERE ticker IS NOT NULL AND action IS NOT NULL
+        WHERE {where_sql}
         ORDER BY COALESCE(created_at, trade_date) ASC, id ASC
-        """,
-    )
+    """
+    rows = _safe_fetchall(conn, query)
     positions: Dict[str, Dict[str, Any]] = {}
 
     def _apply_trade(state: Dict[str, Any], signed_qty: float, price: float) -> None:
@@ -678,28 +745,24 @@ def _trade_events_filtered(
     if latest_run_only and latest_run_id:
         run_clause = " AND run_id = ? "
         params_base = ticker_list + [latest_run_id, int(limit)]
-    query_full = f"""
-    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps,
-           data_source, execution_mode,
-           barbell_bucket, barbell_multiplier, base_confidence, effective_confidence
+    trade_cols = _table_columns(conn, "trade_executions")
+    preferred_cols = [
+        "ticker", "action", "shares", "price", "trade_date", "created_at",
+        "realized_pnl", "realized_pnl_pct", "mid_slippage_bps",
+        "exit_reason", "data_source", "execution_mode",
+        "barbell_bucket", "barbell_multiplier", "base_confidence", "effective_confidence",
+    ]
+    select_cols = [name for name in preferred_cols if not trade_cols or name in trade_cols]
+    if not select_cols:
+        select_cols = ["ticker", "action", "shares", "price", "trade_date", "created_at"]
+    query = f"""
+    SELECT {", ".join(select_cols)}
     FROM trade_executions
     WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
     ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
     LIMIT ?
     """
-    query_min = f"""
-    SELECT ticker, action, shares, price, trade_date, created_at, realized_pnl, realized_pnl_pct, mid_slippage_bps
-    FROM trade_executions
-    WHERE UPPER(ticker) IN ({placeholders}) {run_clause}
-    ORDER BY COALESCE(created_at, trade_date) DESC, id DESC
-    LIMIT ?
-    """
-    try:
-        rows = _safe_fetchall(conn, query_full, tuple(params_base))
-    except sqlite3.OperationalError as exc:
-        if "no such column" not in str(exc).lower():
-            raise
-        rows = _safe_fetchall(conn, query_min, tuple(params_base))
+    rows = _safe_fetchall(conn, query, tuple(params_base))
     out: List[Dict[str, Any]] = []
     for r in rows:
         t = str(r["ticker"]).upper()
@@ -739,7 +802,11 @@ def _trade_events_filtered(
                 "bar_timestamp": str(r["trade_date"]) if r["trade_date"] else None,
                 "realized_pnl": pnl,
                 "realized_pnl_pct": pnl_pct,
-                "exit_reason": None,
+                "exit_reason": (
+                    str(r["exit_reason"])
+                    if ("exit_reason" in r.keys() and r["exit_reason"] is not None)
+                    else None
+                ),
                 "slippage": float(slippage),
                 "data_source": str(r["data_source"] or "") if ("data_source" in r.keys()) else "",
                 "execution_mode": str(r["execution_mode"] or "") if ("execution_mode" in r.keys()) else "",
@@ -761,6 +828,8 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
         db_path = conn.execute("PRAGMA database_list").fetchone()[2]
         canonical = _canonical_metrics_pnl_integrity(db_path)
         if canonical:
+            canonical["performance_unknown"] = False
+            canonical["performance_source"] = "pnl_integrity_enforcer"
             return canonical
     except Exception:
         pass  # Fall back to performance_metrics table
@@ -794,29 +863,37 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
             raise
     if not row:
         return {
-            "pnl_abs": 0.0,
-            "pnl_pct": 0.0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "trade_count": 0,
-            "sharpe": 0.0,
-            "sortino": 0.0,
-            "max_drawdown": 0.0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "largest_win": 0.0,
-            "largest_loss": 0.0,
+            "pnl_abs": None,
+            "pnl_pct": None,
+            "win_rate": None,
+            "profit_factor": None,
+            "trade_count": None,
+            "sharpe": None,
+            "sortino": None,
+            "max_drawdown": None,
+            "avg_win": None,
+            "avg_loss": None,
+            "largest_win": None,
+            "largest_loss": None,
+            "performance_unknown": True,
+            "performance_source": "performance_metrics_missing",
         }
-    def _f(key: str, default: float = 0.0) -> float:
+    def _f(key: str) -> Optional[float]:
         try:
-            return float(row[key] or 0.0)
+            value = row[key]
+            if value is None:
+                return None
+            return float(value)
         except Exception:
-            return default
-    def _i(key: str, default: int = 0) -> int:
+            return None
+    def _i(key: str) -> Optional[int]:
         try:
-            return int(row[key] or 0)
+            value = row[key]
+            if value is None:
+                return None
+            return int(value)
         except Exception:
-            return default
+            return None
     pnl_abs = _f("total_return")
     pnl_pct = _f("total_return_pct")
     win_rate = _f("win_rate")
@@ -835,6 +912,8 @@ def _latest_performance(conn: sqlite3.Connection) -> Dict[str, Any]:
         "avg_loss": _f("avg_loss"),
         "largest_win": _f("largest_win"),
         "largest_loss": _f("largest_loss"),
+        "performance_unknown": False,
+        "performance_source": "performance_metrics",
     }
 
 
@@ -878,6 +957,97 @@ def _canonical_metrics_pnl_integrity(db_path: str) -> Dict[str, Any]:
         return {}
 
 
+def _quant_validation_payload() -> Dict[str, Any]:
+    path = DEFAULT_QUANT_VALIDATION_LOG_PATH
+    if not path.exists():
+        return {
+            "status": "MISSING",
+            "path": str(path),
+            "warnings": ["quant_validation_missing"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+
+    try:
+        from scripts.check_quant_validation_health import (
+            _load_entries,
+            _load_monitoring_cfg,
+            _summarize_global,
+        )
+
+        entries = _load_entries(path)
+        monitoring_cfg = _load_monitoring_cfg(DEFAULT_MONITORING_CONFIG_PATH)
+        qv_cfg = monitoring_cfg.get("quant_validation") or {}
+        max_fail_frac = float(qv_cfg.get("max_fail_fraction", 0.95))
+        max_neg_exp_frac = float(qv_cfg.get("max_negative_expected_profit_fraction", 0.50))
+        warn_fail_frac = float(qv_cfg.get("warn_fail_fraction", max_fail_frac))
+        warn_neg_exp_frac = float(
+            qv_cfg.get("warn_negative_expected_profit_fraction", max_neg_exp_frac)
+        )
+
+        summary = _summarize_global(entries)
+        violations: List[str] = []
+        if summary.fail_fraction > max_fail_frac:
+            violations.append("FAIL_fraction_exceeds_max")
+        if summary.negative_expected_profit_fraction > max_neg_exp_frac:
+            violations.append("negative_expected_profit_fraction_exceeds_max")
+
+        if violations:
+            status = "RED"
+        elif (
+            summary.fail_fraction > warn_fail_frac
+            or summary.negative_expected_profit_fraction > warn_neg_exp_frac
+        ):
+            status = "YELLOW"
+        else:
+            status = "GREEN"
+
+        age = _sidecar_age_minutes(path, {})
+        return {
+            "status": status,
+            "path": str(path),
+            "warnings": violations,
+            "total": int(summary.total),
+            "pass_count": int(summary.pass_count),
+            "fail_count": int(summary.fail_count),
+            "fail_fraction": float(summary.fail_fraction),
+            "negative_expected_profit_count": int(summary.negative_expected_profit_count),
+            "negative_expected_profit_fraction": float(summary.negative_expected_profit_fraction),
+            "age_minutes": round(age, 2) if age is not None else None,
+        }
+    except SystemExit as exc:
+        return {
+            "status": "ERROR",
+            "path": str(path),
+            "warnings": [f"quant_validation_error:{exc}"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "path": str(path),
+            "warnings": [f"quant_validation_error:{exc}"],
+            "total": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "fail_fraction": 0.0,
+            "negative_expected_profit_count": 0,
+            "negative_expected_profit_fraction": 0.0,
+            "age_minutes": None,
+        }
+
+
 def build_dashboard_payload(
     *,
     conn: sqlite3.Connection,
@@ -886,14 +1056,25 @@ def build_dashboard_payload(
     max_signals: int,
     max_trades: int,
     latest_run_only: bool = True,
+    db_path: Optional[Path] = None,
+    read_path: Optional[Path] = None,
+    mirror_path: Optional[Path] = None,
+    output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     perf = _latest_performance(conn)
+    positions, positions_stale, positions_asof, positions_source = _positions(conn)
     run_id = _latest_run_id(conn) or "db_bridge"
     ts = _utc_now_iso()
     bucket_map = _barbell_bucket_map()
     model_params = _model_params(conn)
     checks = _data_checks(conn)
+    if positions_stale:
+        checks.append(
+            f"portfolio_positions stale (as_of={positions_asof},"
+            f" max_age_days={_positions_max_age_days():.0f}); using filtered trade_executions fallback."
+        )
     provenance = _provenance_summary(conn)
+    quant_validation = _quant_validation_payload()
 
     qual_records: List[Dict[str, Any]] = []
     for t in tickers:
@@ -902,6 +1083,23 @@ def build_dashboard_payload(
             qual_records.append(rec)
     avg_q = sum(r["quality_score"] for r in qual_records) / len(qual_records) if qual_records else 0.0
     min_q = min((r["quality_score"] for r in qual_records), default=0.0)
+
+    def _opt_float(raw: Any) -> Optional[float]:
+        try:
+            if raw is None:
+                return None
+            value = float(raw)
+            return value if value == value else None  # reject NaN
+        except Exception:
+            return None
+
+    def _opt_int(raw: Any) -> Optional[int]:
+        try:
+            if raw is None:
+                return None
+            return int(raw)
+        except Exception:
+            return None
 
     payload: Dict[str, Any] = {
         # NOTE: keep payload self-contained for the static HTML dashboard.
@@ -912,11 +1110,20 @@ def build_dashboard_payload(
             "cycles": None,
             "llm_enabled": None,
             "dashboard_version": "db_bridge_v1",
+            "payload_schema_version": DASHBOARD_PAYLOAD_SCHEMA_VERSION,
+            "payload_required_sections": list(DASHBOARD_REQUIRED_TOP_LEVEL_KEYS),
             "data_origin": provenance.get("origin"),
             "dataset_id": provenance.get("dataset_id"),
             "data_source": provenance.get("data_source"),
             "execution_mode": provenance.get("execution_mode"),
             "provenance": provenance,
+            "storage": {
+                "db_path": str(db_path) if db_path else None,
+                "read_path": str(read_path) if read_path else None,
+                "mirror_path": str(mirror_path) if mirror_path else None,
+                "using_mirror": bool(read_path and mirror_path and Path(read_path) == Path(mirror_path)),
+                "output_path": str(output_path) if output_path else None,
+            },
             "scope": [
                 "Close",
                 "Entry",
@@ -929,11 +1136,18 @@ def build_dashboard_payload(
             ],
             "ticker_buckets": {t: bucket_map.get(t, "other") for t in tickers},
         },
-        "pnl": {"absolute": float(perf["pnl_abs"]), "pct": float(perf["pnl_pct"])},
-        "win_rate": float(perf["win_rate"]),
-        "trade_count": int(perf["trade_count"]),
+        "pnl": {
+            "absolute": _opt_float(perf.get("pnl_abs")),
+            "pct": _opt_float(perf.get("pnl_pct")),
+        },
+        "win_rate": _opt_float(perf.get("win_rate")),
+        "trade_count": _opt_int(perf.get("trade_count")),
+        "performance_unknown": bool(perf.get("performance_unknown", False)),
         "performance": perf,
-        "positions": _positions(conn),
+        "positions": positions,
+        "positions_stale": positions_stale,
+        "positions_asof": positions_asof,
+        "positions_source": positions_source,
         "latency": {"ts_ms": None, "llm_ms": None},
         "routing": {"ts_signals": 0, "llm_signals": 0, "fallback_used": 0},
         "quality": {"average": float(avg_q), "minimum": float(min_q), "records": qual_records},
@@ -951,7 +1165,10 @@ def build_dashboard_payload(
         "model_params": model_params,
         "checks": checks,
         "robustness": _robustness_payload(),
+        "live_denominator": _live_denominator_payload(),
+        "quant_validation": quant_validation,
     }
+    payload["meta"]["payload_digest"] = _payload_digest(payload)
     return payload
 
 
@@ -1009,6 +1226,7 @@ def _sidecar_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]
 def _robustness_payload() -> Dict[str, Any]:
     load_warnings: List[str] = []
     semantic_warnings: List[str] = []
+    optional_warnings: List[str] = []
     eligibility, elig_err = _load_sidecar_json(DEFAULT_ELIGIBILITY_PATH)
     context, ctx_err = _load_sidecar_json(DEFAULT_CONTEXT_QUALITY_PATH)
     performance, perf_err = _load_sidecar_json(DEFAULT_PERFORMANCE_METRICS_PATH)
@@ -1029,7 +1247,9 @@ def _robustness_payload() -> Dict[str, Any]:
     if perf_err:
         load_warnings.append(f"performance_metrics_{perf_err}")
     if forecast_summary_err and forecast_summary_err != "missing":
-        load_warnings.append(f"forecast_summary_{forecast_summary_err}")
+        optional_warnings.append(f"forecast_summary_{forecast_summary_err}")
+
+    freshness_critical_sidecars = {"eligibility", "context_quality", "performance_metrics"}
 
     for name, path, payload, err in (
         ("eligibility", DEFAULT_ELIGIBILITY_PATH, eligibility, elig_err),
@@ -1043,8 +1263,10 @@ def _robustness_payload() -> Dict[str, Any]:
         age = _sidecar_age_minutes(path, payload)
         sidecar_age_minutes[name] = round(age, 2) if age is not None else None
         if age is not None and age > sidecar_max_age_minutes:
-            stale_sidecars.append(name)
-            semantic_warnings.append(f"stale_sidecar:{name}")
+            if name in freshness_critical_sidecars:
+                stale_sidecars.append(name)
+            else:
+                optional_warnings.append(f"stale_sidecar:{name}")
 
     tickers = eligibility.get("tickers", {}) if isinstance(eligibility, dict) else {}
     weak_tickers = sorted(
@@ -1099,7 +1321,7 @@ def _robustness_payload() -> Dict[str, Any]:
         semantic_warnings.append("context_partial_data")
     missing_count = sum(1 for err in (elig_err, ctx_err, perf_err) if err == "missing")
     present_count = sum(1 for payload in (eligibility, context, performance) if isinstance(payload, dict) and payload)
-    all_warnings = sorted(set(load_warnings + semantic_warnings))
+    all_warnings = sorted(set(load_warnings + semantic_warnings + optional_warnings))
     if stale_sidecars:
         freshness_status = "STALE"
         freshness_reason = "STALE_SIDECAR"
@@ -1115,6 +1337,8 @@ def _robustness_payload() -> Dict[str, Any]:
     elif load_warnings or stale_sidecars:
         robustness_status = "STALE"
     elif (
+        bool(optional_warnings)
+        or
         (isinstance(perf_metrics, dict) and perf_metrics.get("status") == "WARN")
         or (isinstance(sufficiency, dict) and sufficiency.get("status") not in (None, "SUFFICIENT"))
         or bool(semantic_warnings)
@@ -1147,6 +1371,50 @@ def _robustness_payload() -> Dict[str, Any]:
         "performance_metrics": perf_metrics,
         "chart_paths": chart_paths if isinstance(chart_paths, dict) else {},
         "warnings": all_warnings,
+    }
+
+
+def _live_denominator_payload() -> Dict[str, Any]:
+    payload, payload_err = _load_sidecar_json(DEFAULT_LIVE_DENOMINATOR_PATH)
+    if payload_err:
+        return {
+            "status": "MISSING",
+            "warnings": [f"live_denominator_{payload_err}"],
+            "run_meta": {},
+            "current": {},
+            "cycles_completed": 0,
+        }
+
+    run_meta = payload.get("run_meta", {}) if isinstance(payload.get("run_meta"), dict) else {}
+    cycles = payload.get("cycles", []) if isinstance(payload.get("cycles"), list) else []
+    current = cycles[-1] if cycles and isinstance(cycles[-1], dict) else {}
+    warnings: List[str] = []
+
+    sleep_seconds = 0
+    try:
+        sleep_seconds = int(run_meta.get("sleep_seconds") or 0)
+    except (TypeError, ValueError):
+        sleep_seconds = 0
+
+    age = _sidecar_age_minutes(DEFAULT_LIVE_DENOMINATOR_PATH, current or run_meta)
+    age_minutes = round(age, 2) if age is not None else None
+
+    status = "WAITING"
+    if current.get("progress_triggered"):
+        status = "PROGRESS"
+    if age is not None:
+        stale_limit_minutes = max(180.0, (sleep_seconds / 60.0) * 2.0) if sleep_seconds > 0 else 180.0
+        if age > stale_limit_minutes:
+            status = "STALE"
+            warnings.append("live_denominator_stale")
+
+    return {
+        "status": status,
+        "warnings": warnings,
+        "age_minutes": age_minutes,
+        "run_meta": run_meta,
+        "current": current,
+        "cycles_completed": len(cycles),
     }
 
 
@@ -1307,6 +1575,7 @@ def main() -> None:
         return _default_tickers(conn)
 
     while True:
+        read_path_used = _select_read_path(db_path)
         conn = _connect_ro_with_fallback(db_path)
         try:
             try:
@@ -1318,6 +1587,10 @@ def main() -> None:
                     max_signals=int(args.max_signals),
                     max_trades=int(args.max_trades),
                     latest_run_only=bool(args.latest_run_only),
+                    db_path=db_path,
+                    read_path=read_path_used,
+                    mirror_path=mirror_path,
+                    output_path=out_path,
                 )
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
@@ -1332,6 +1605,7 @@ def main() -> None:
                     if mirror_path.exists():
                         conn.close()
                         conn = _connect_ro(mirror_path)
+                        read_path_used = mirror_path
                         tickers = _tickers(conn)
                         payload = build_dashboard_payload(
                             conn=conn,
@@ -1339,6 +1613,11 @@ def main() -> None:
                             lookback_days=int(args.lookback_days),
                             max_signals=int(args.max_signals),
                             max_trades=int(args.max_trades),
+                            latest_run_only=bool(args.latest_run_only),
+                            db_path=db_path,
+                            read_path=read_path_used,
+                            mirror_path=mirror_path,
+                            output_path=out_path,
                         )
                     else:
                         raise
@@ -1348,6 +1627,8 @@ def main() -> None:
             conn.close()
 
         merged = _maybe_merge_with_existing(out_path, payload)
+        if isinstance(merged.get("meta"), dict):
+            merged["meta"]["payload_digest"] = _payload_digest(merged)
         _atomic_write_json(out_path, merged)
         if args.persist_snapshot:
             _persist_snapshot(Path(args.audit_db_path).expanduser(), merged)

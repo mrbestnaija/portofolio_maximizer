@@ -149,6 +149,9 @@ if (-not $NoApply) {
 
 $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
 
+$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")
+& $pythonExe @execEnvArgs
+
 $proc = Start-Process `
     -FilePath $pythonExe `
     -ArgumentList ($args -join " ") `

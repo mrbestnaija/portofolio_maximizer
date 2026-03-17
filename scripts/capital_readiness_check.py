@@ -5,13 +5,19 @@ One command answers: "Ready to scale capital?"
 Composes Layer 1-4 diagnostics + adversarial status into a single PASS/FAIL/INSUFFICIENT_DATA
 verdict.  This is a *diagnostic* gate, not a production trading gate.
 
-Verdict rules (R1–R4 are hard gates; R5 is advisory):
+Verdict rules (R1–R4, R6 are hard gates; R5 is conditional):
 
   R1  No confirmed CRITICAL or HIGH adversarial findings.
   R2  Gate artifact (logs/gate_status_latest.json) exists, overall_passed=True, age < 26 h.
   R3  Trade quality: n_trades >= 20, win_rate >= 0.45, profit_factor >= 1.30.
   R4  Calibration not inactive: tier != 'inactive', brier < 0.25.
-  R5  Lift CI positive (advisory): lift_ci_low > 0.  Emits WARNING, never FAIL.
+  R5  Lift CI:
+        ci_high < 0 with n_used >= 20 windows → hard FAIL (ensemble definitively
+          underperforms best single model across a substantial sample).
+        ci_low <= 0 with ci_high >= 0 → advisory WARNING only (spans zero;
+          lift direction not yet statistically confirmed).
+        ci_low > 0 → silent PASS.
+        Insufficient data (n < 5) → skipped entirely (no penalty).
 
 Usage::
 
@@ -167,30 +173,70 @@ def _check_r4_calibration(db_path: Path, jsonl_path: Path) -> tuple[Optional[boo
         return None, f"R4: error -- {exc}", metrics
 
 
-def _check_r5_lift_ci(db_path: Path, audit_dir: Path) -> tuple[str, dict]:
-    """R5 (advisory): lift CI_low > 0.  Returns a warning string or '' if confirmed."""
-    metrics: dict[str, Any] = {"lift_ci_low": None}
+def _check_r5_lift_ci(
+    db_path: Path, audit_dir: Path
+) -> tuple[Optional[bool], str, str, dict]:
+    """R5: lift CI gate.
+
+    Returns (hard_ok, fail_reason, warn_reason, metrics):
+      hard_ok=None  — insufficient data; skip R5 (no penalty).
+      hard_ok=False — definitively negative CI (ci_high < 0, n_used >= 20); hard FAIL.
+      hard_ok=True  — either CI positive (silent) or spans zero (warn_reason non-empty).
+
+    Phase 7.40: Aligns with check_model_improvement Layer 1 escalation rule —
+    definitively negative CI is a hard gate, not merely advisory.
+    """
+    metrics: dict[str, Any] = {"lift_ci_low": None, "lift_ci_high": None}
     try:
         from check_model_improvement import run_layer1_forecast_quality
 
         result = run_layer1_forecast_quality(audit_dir=audit_dir)
         ci_low = result.metrics.get("lift_ci_low")
+        ci_high = result.metrics.get("lift_ci_high")
         insufficient = result.metrics.get("lift_ci_insufficient_data", True)
+        # Key is "n_used_windows" in Layer 1 metrics schema (LAYER_REQUIRED_KEYS[1])
+        n_used = result.metrics.get("n_used_windows", 0) or 0
+        win_frac = result.metrics.get("lift_win_fraction", float("nan"))
         metrics["lift_ci_low"] = ci_low
-        if insufficient or ci_low is None:
-            return "", metrics  # not enough data to warn
-        if ci_low <= 0.0:
-            import math
-            ci_high = result.metrics.get("lift_ci_high", float("nan"))
-            win_frac = result.metrics.get("lift_win_fraction", float("nan"))
+        metrics["lift_ci_high"] = ci_high
+
+        import math as _math
+        if insufficient or ci_low is None or ci_high is None or not (
+            _math.isfinite(ci_low) and _math.isfinite(ci_high)
+        ):
+            return None, "", "", metrics  # not enough data; skip
+
+        # Definitively negative: entire CI below zero with substantial evidence
+        if ci_high < 0.0 and n_used >= 20:
             return (
-                f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] spans zero "
-                f"(win_fraction={win_frac:.1%}) -- lift not statistically confirmed"
-            ), metrics
-        return "", metrics
+                False,
+                (
+                    f"R5: ensemble lift is definitively negative "
+                    f"CI=[{ci_low:.4f}, {ci_high:.4f}] across {n_used} windows "
+                    f"(win_fraction={win_frac:.1%}) -- "
+                    "ensemble reliably underperforms best single model"
+                ),
+                "",
+                metrics,
+            )
+
+        # CI spans zero: direction ambiguous; advisory warning only
+        if ci_low <= 0.0:
+            return (
+                True,
+                "",
+                (
+                    f"R5: lift CI [{ci_low:.4f}, {ci_high:.4f}] spans zero "
+                    f"(win_fraction={win_frac:.1%}) -- lift not statistically confirmed"
+                ),
+                metrics,
+            )
+
+        # ci_low > 0: confirmed positive lift
+        return True, "", "", metrics
     except Exception as exc:
         log.warning("R5 lift CI check failed: %s", exc)
-        return "", metrics
+        return None, "", "", metrics
 
 
 def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, dict]:
@@ -219,6 +265,8 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
                   AND c.bar_timestamp IS NOT NULL
                   AND e.bar_timestamp IS NOT NULL
                   AND c.bar_timestamp < e.bar_timestamp
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry_count = int(row["n"]) if row else 0
@@ -232,6 +280,8 @@ def _check_r6_lifecycle_integrity(db_path: Path) -> tuple[Optional[bool], str, d
                   AND c.trade_date IS NOT NULL
                   AND e.trade_date IS NOT NULL
                   AND c.trade_date < e.trade_date
+                  AND COALESCE(c.ts_signal_id, '') NOT LIKE 'legacy_%'
+                  AND COALESCE(e.ts_signal_id, '') NOT LIKE 'legacy_%'
                 """
             ).fetchone()
             close_before_entry_count = int(row["n"]) if row else 0
@@ -332,10 +382,12 @@ def run_capital_readiness(
     elif not r4_ok:
         reasons.append(r4_msg)
 
-    # R5: lift CI (advisory)
-    r5_warn, r5_m = _check_r5_lift_ci(db_path, audit_dir)
+    # R5: lift CI (hard fail when definitively negative; advisory when spanning zero)
+    r5_ok, r5_fail, r5_warn, r5_m = _check_r5_lift_ci(db_path, audit_dir)
     all_metrics.update(r5_m)
-    if r5_warn:
+    if r5_ok is False:
+        reasons.append(r5_fail)
+    elif r5_warn:
         warnings.append(r5_warn)
 
     # R6: lifecycle integrity (hard gate)

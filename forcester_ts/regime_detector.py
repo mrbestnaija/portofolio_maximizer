@@ -97,18 +97,19 @@ class RegimeDetector:
         adf_pvalue = self._adf_test(returns_series.iloc[-window:])
 
         # Jump detection (tail risk)
+        # Flat returns series produces NaN for skew/kurtosis (undefined moments).
         skewness = recent_returns.skew()
         kurtosis = recent_returns.kurtosis()
 
         return {
-            'realized_volatility': float(realized_vol),
-            'vol_of_vol': float(vol_of_vol) if not np.isnan(vol_of_vol) else 0.0,
-            'trend_strength': float(trend_strength),
-            'hurst_exponent': float(hurst),
-            'adf_pvalue': float(adf_pvalue),
-            'skewness': float(skewness),
-            'kurtosis': float(kurtosis),
-            'mean_return': float(recent_returns.mean()),
+            'realized_volatility': float(realized_vol) if np.isfinite(realized_vol) else 0.0,
+            'vol_of_vol': float(vol_of_vol) if np.isfinite(vol_of_vol) else 0.0,
+            'trend_strength': float(trend_strength) if np.isfinite(trend_strength) else 0.0,
+            'hurst_exponent': float(hurst) if np.isfinite(hurst) else 0.5,
+            'adf_pvalue': float(adf_pvalue) if np.isfinite(adf_pvalue) else 1.0,
+            'skewness': float(skewness) if np.isfinite(skewness) else 0.0,
+            'kurtosis': float(kurtosis) if np.isfinite(kurtosis) else 0.0,
+            'mean_return': float(recent_returns.mean()) if np.isfinite(recent_returns.mean()) else 0.0,
         }
 
     def _calculate_trend_strength(self, price_series: pd.Series) -> float:
@@ -123,8 +124,17 @@ class RegimeDetector:
         x = np.arange(len(price_series))
         y = price_series.values
 
+        # Flat series has zero variance → correlation undefined (NaN from linregress).
+        # A constant price is definitionally trend-free.
+        if np.std(y) < 1e-10:
+            return 0.0
+
         # Fit linear regression
         slope, intercept, r_value, _, _ = scipy_stats.linregress(x, y)
+
+        # Guard against NaN r_value (e.g., near-constant series with numerical noise)
+        if not np.isfinite(r_value):
+            return 0.0
 
         # R² as trend strength
         r_squared = r_value ** 2
@@ -149,10 +159,15 @@ class RegimeDetector:
             tau.append(np.std(diffs))
 
         # Fit power law: tau ~ lag^H
+        # Clamp tau to avoid log(0) = -inf which causes polyfit to return NaN
+        # silently (it does not raise on all-infinite inputs).
         if len(tau) > 0:
             try:
-                poly = np.polyfit(np.log(lags), np.log(tau), 1)
+                tau_clamped = [max(t, 1e-12) for t in tau]
+                poly = np.polyfit(np.log(lags), np.log(tau_clamped), 1)
                 hurst = poly[0]
+                if not np.isfinite(hurst):
+                    return 0.5
                 return float(np.clip(hurst, 0.0, 1.0))
             except (ValueError, np.linalg.LinAlgError):
                 return 0.5
@@ -237,6 +252,12 @@ class RegimeDetector:
         """
         vol = features['realized_volatility']
         trend = features['trend_strength']
+
+        # Guard against NaN/inf propagated from degenerate feature extraction
+        if not np.isfinite(vol):
+            vol = 0.0
+        if not np.isfinite(trend):
+            trend = 0.0
 
         # Strong signals = high confidence
         vol_signal = min(vol / 0.5, 1.0)  # 50% vol = max signal

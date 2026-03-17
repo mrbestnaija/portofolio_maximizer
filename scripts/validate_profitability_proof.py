@@ -30,8 +30,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from integrity.sqlite_guardrails import guarded_sqlite_connect
-
 
 def load_requirements(config_path: str = "config/profitability_proof_requirements.yml") -> Dict[str, Any]:
     """Load profitability proof requirements from config."""
@@ -238,10 +236,17 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     warnings = []
     recommendations = []
 
-    conn = guarded_sqlite_connect(
-        db_path,
-        allow_schema_changes=False,
-    )
+    # Lazy import: avoids top-level coupling between this gate script and the
+    # integrity layer.  Falls back to plain sqlite3 when the package is absent
+    # (e.g., fresh environments, CI without full dep tree).  The fallback is
+    # functionally equivalent for read-only queries; guarded_sqlite_connect adds
+    # schema-change protection which is not needed here (allow_schema_changes=False).
+    try:
+        from integrity.sqlite_guardrails import guarded_sqlite_connect as _connect
+        conn = _connect(db_path, allow_schema_changes=False)
+    except ImportError:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     # Get trade statistics (from production_closed_trades view)

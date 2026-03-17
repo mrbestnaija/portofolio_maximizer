@@ -164,3 +164,5 @@ forecaster_monitoring:
       min_annual_return: 0.05
       min_pass_rate: 0.05
       disable_time_series: true
+    GS:
+      disable_time_series: true

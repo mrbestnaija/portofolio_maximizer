@@ -796,6 +796,7 @@ class TimeSeriesForecaster:
             start=str(price_series.index.min()),
             end=str(price_series.index.max()),
             frequency=normalize_freq(str(getattr(price_series.index, "freqstr", None) or price_series.attrs.get("_pm_freq_hint"))),
+            ticker=ticker or None,
         )
         if self._series_diagnostics:
             self._instrumentation.record_artifact("series_diagnostics", self._series_diagnostics)
@@ -1309,6 +1310,7 @@ class TimeSeriesForecaster:
             results["regime_recommendations"] = None
         # Phase 7.14-D: alias for DB persistence (database_manager reads 'detected_regime')
         results["detected_regime"] = results["regime"] if results["regime"] != "STATIC" else None
+        self._instrumentation.set_dataset_metadata(detected_regime=results["detected_regime"])
 
         self._latest_results = results
         results["model_errors"] = dict(self._model_errors)
@@ -1471,8 +1473,30 @@ class TimeSeriesForecaster:
         }
         try:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            with manifest_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            # Load existing entries, filtering out invalid JSON, non-dict records, and stale entries
+            # for the same filename so the manifest stays clean and idempotent.
+            existing: list[dict] = []
+            if manifest_path.exists():
+                for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        rec = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("file") == audit_path.name:
+                        continue  # Drop stale entry for the same file
+                    existing.append(rec)
+            existing.append(entry)
+            tmp_path = manifest_path.with_suffix(f".{audit_path.stem}.tmp")
+            tmp_path.write_text(
+                "\n".join(json.dumps(r, separators=(",", ":")) for r in existing) + "\n",
+                encoding="utf-8",
+            )
+            tmp_path.replace(manifest_path)
         except Exception as exc:
             logger.warning(
                 "Failed to append forecast audit manifest entry for %s: %s",

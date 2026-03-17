@@ -155,3 +155,38 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
     assert summary["warmup_expired"] is True
     assert summary["phase3_ready"] is False
     assert summary["phase3_reason"] == "THIN_LINKAGE"
+
+
+def test_run_all_gates_writes_current_run_artifact_before_institutional_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    seen_overall_before_institutional: list[bool] = []
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        if label == "ci_integrity_gate":
+            return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+        if label == "check_quant_validation_health":
+            return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+        if label == "production_audit_gate":
+            return {"label": label, "exit_code": 1, "passed": False, "stdout": "", "stderr": ""}
+        if label == "institutional_unattended_gate":
+            if mod.GATE_STATUS_ARTIFACT.exists():
+                payload = json.loads(mod.GATE_STATUS_ARTIFACT.read_text(encoding="utf-8"))
+                seen_overall_before_institutional.append(bool(payload.get("overall_passed")))
+            return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "GATE_STATUS_ARTIFACT", tmp_path / "logs" / "gate_status_latest.json")
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", tmp_path / "logs" / "audit_gate" / "production_gate_latest.json")
+
+    with monkeypatch.context() as m:
+        m.setattr(mod.sys, "argv", ["run_all_gates.py", "--json"])
+        with pytest.raises(SystemExit) as exc_info:
+            mod.main()
+
+    assert exc_info.value.code == 1
+    assert seen_overall_before_institutional == [False], (
+        "Institutional gate must observe current-run status artifact, not stale prior-run PASS."
+    )

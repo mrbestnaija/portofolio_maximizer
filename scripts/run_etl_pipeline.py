@@ -56,20 +56,12 @@ from etl.preprocessor import Preprocessor
 from etl.data_storage import DataStorage
 from etl.checkpoint_manager import CheckpointManager
 from etl.pipeline_logger import PipelineLogger
-from etl.ticker_discovery import (
-    AlphaVantageTickerLoader,
-    TickerUniverseManager,
-    TickerValidator,
-)
 from etl.portfolio_math import (
     calculate_enhanced_portfolio_metrics,
     optimize_portfolio_markowitz,
 )
 from etl.split_diagnostics import summarize_returns, drift_metrics, validate_non_overlap
-from etl.frontier_markets import (
-    FRONTIER_MARKET_TICKERS_BY_REGION,
-    merge_frontier_tickers,
-)
+from etl.data_universe import ResolvedUniverse, resolve_ticker_universe
 
 # LLM Integration (Phase 5.2)
 from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -925,58 +917,45 @@ def _initialize_llm_components(
     return components
 
 
-def _prepare_ticker_list(
+def _prepare_ticker_universe(
     tickers_argument: str,
     discovery_cfg: Dict[str, Any],
+    active_source: str,
+    include_frontier_tickers: bool,
     use_ticker_discovery: bool,
     refresh_ticker_universe: bool,
-) -> List[str]:
+) -> ResolvedUniverse:
     manual_tickers = [t.strip() for t in tickers_argument.split(',') if t.strip()]
     discovery_enabled = discovery_cfg.get('enabled', False) or use_ticker_discovery
 
-    if not discovery_enabled:
-        return manual_tickers
+    if discovery_enabled:
+        loader_type = discovery_cfg.get('loader', 'alpha_vantage').lower()
+        if loader_type != 'alpha_vantage':
+            raise ValueError(f"Unsupported ticker discovery loader: {loader_type}")
 
-    loader_type = discovery_cfg.get('loader', 'alpha_vantage').lower()
-    if loader_type != 'alpha_vantage':
-        raise ValueError(f"Unsupported ticker discovery loader: {loader_type}")
-
-    loader = AlphaVantageTickerLoader(
-        api_key=discovery_cfg.get('api_key'),
-        cache_dir=discovery_cfg.get('cache_dir'),
-    )
-    validator = TickerValidator()
-    universe_manager = TickerUniverseManager(
-        loader=loader,
-        validator=validator,
-        universe_path=discovery_cfg.get('universe_path'),
-    )
-    fallback_csv = discovery_cfg.get('fallback_csv')
-    fallback_path = Path(fallback_csv) if fallback_csv else None
-
-    try:
-        if refresh_ticker_universe or discovery_cfg.get('auto_refresh', False):
-            universe = universe_manager.refresh_universe(
-                force_download=True,
-                fallback_csv=fallback_path,
+        discovered = resolve_ticker_universe(
+            base_tickers=[],
+            include_frontier=include_frontier_tickers,
+            active_source=active_source,
+            use_discovery=True,
+            discovery_config=discovery_cfg,
+            refresh_discovery=refresh_ticker_universe,
+        )
+        if discovered.tickers:
+            return discovered
+        if manual_tickers:
+            logger.warning(
+                "Ticker discovery produced an empty universe; falling back to CLI tickers through resolve_ticker_universe."
             )
         else:
-            universe = universe_manager.load_universe()
-            if not universe.tickers:
-                universe = universe_manager.refresh_universe(
-                    force_download=False,
-                    fallback_csv=fallback_path,
-                )
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("Ticker discovery failed (%s); falling back to CLI tickers.", exc)
-        return manual_tickers
+            return discovered
 
-    if not universe.tickers:
-        logger.warning("Ticker discovery produced an empty universe; using CLI tickers instead.")
-        return manual_tickers
-
-    logger.info("Using %s tickers from discovery universe.", len(universe.tickers))
-    return universe.tickers
+    return resolve_ticker_universe(
+        base_tickers=manual_tickers,
+        include_frontier=include_frontier_tickers,
+        active_source=active_source,
+        use_discovery=False,
+    )
 
 
 def _log_split_strategy(settings: CVSettings) -> None:
@@ -1085,23 +1064,37 @@ def execute_pipeline(
     train_ratio = cv_settings.train_ratio
     val_ratio = cv_settings.val_ratio
 
-    ticker_list = _prepare_ticker_list(
+    execution_mode = execution_mode.lower()
+    if dry_run:
+        execution_mode = 'synthetic'
+        logger.info("Execution mode overridden to SYNTHETIC via --dry-run flag")
+    elif execution_mode not in EXECUTION_MODES:
+        raise click.BadParameter(f"Invalid execution mode '{execution_mode}'. "
+                                 f"Choose from {', '.join(EXECUTION_MODES)}.")
+    logger.info(f"Execution mode: {execution_mode.upper()}")
+    allow_live_fallback = (execution_mode == 'auto')
+    if allow_live_fallback:
+        logger.info("Auto mode: attempting live extraction first, synthetic fallback enabled on failure")
+
+    storage = DataStorage()
+    data_source_manager = DataSourceManager(
+        config_path='config/data_sources_config.yml',
+        storage=storage,
+        execution_mode=execution_mode,
+    )
+    active_source = data_source_manager.get_active_source()
+
+    ticker_universe = _prepare_ticker_universe(
         tickers_argument=tickers,
         discovery_cfg=discovery_cfg,
+        active_source=active_source,
+        include_frontier_tickers=include_frontier_tickers,
         use_ticker_discovery=use_ticker_discovery,
         refresh_ticker_universe=refresh_ticker_universe,
     )
-
-    if include_frontier_tickers:
-        original_count = len(ticker_list)
-        ticker_list = merge_frontier_tickers(ticker_list, include_frontier=True)
-        appended = len(ticker_list) - original_count
-        regions = ", ".join(FRONTIER_MARKET_TICKERS_BY_REGION.keys())
-        logger.info(
-            "Frontier market coverage enabled (+%d tickers across %s)",
-            appended,
-            regions,
-        )
+    ticker_list = ticker_universe.tickers
+    if not ticker_list:
+        raise click.BadParameter("At least one ticker symbol is required (no tickers resolved).")
 
     llm_config_data: Dict[str, Any] = {}
     llm_cfg: Dict[str, Any] = {}
@@ -1122,22 +1115,13 @@ def execute_pipeline(
     validator_version = llm_components.validator_version
 
     logger.info("Pipeline: Portfolio Maximizer v45 (Phase 5.2)")
-    logger.info("Data Source: %s", data_source if data_source else 'from config')
+    logger.info("Data Source: %s", active_source or (data_source if data_source else 'from config'))
+    logger.info("Ticker universe source: %s", ticker_universe.universe_source or 'none')
+    if ticker_universe.notes:
+        logger.info("Ticker universe notes: %s", ticker_universe.notes)
     logger.info("Tickers: %s", ', '.join(ticker_list) if ticker_list else '(none)')
     logger.info("Date range: %s to %s", start, end)
     logger.info("LLM Integration: %s", 'ENABLED' if enable_llm else 'DISABLED')
-
-    execution_mode = execution_mode.lower()
-    if dry_run:
-        execution_mode = 'synthetic'
-        logger.info("Execution mode overridden to SYNTHETIC via --dry-run flag")
-    elif execution_mode not in EXECUTION_MODES:
-        raise click.BadParameter(f"Invalid execution mode '{execution_mode}'. "
-                                 f"Choose from {', '.join(EXECUTION_MODES)}.")
-    logger.info(f"Execution mode: {execution_mode.upper()}")
-    allow_live_fallback = (execution_mode == 'auto')
-    if allow_live_fallback:
-        logger.info("Auto mode: attempting live extraction first, synthetic fallback enabled on failure")
 
     # Initialize LLM component handles
     llm_client = llm_components.client
@@ -1145,9 +1129,6 @@ def execute_pipeline(
     llm_signal_generator = llm_components.signal_generator
     risk_assessor = llm_components.risk_assessor
     signal_validator = llm_components.signal_validator
-
-    # Initialize storage
-    storage = DataStorage()
 
     # Initialize database for persistent storage
     # Allow overrides for synthetic/brutal runs so they don't contend with the primary DB.
@@ -1176,30 +1157,19 @@ def execute_pipeline(
         'synthetic_dataset_env': os.getenv("SYNTHETIC_DATASET_ID") or os.getenv("SYNTHETIC_DATASET_PATH"),
     })
 
-    # Initialize data source manager (platform-agnostic)
+    logger.info(f"OK Data source manager initialized")
+    logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
+    logger.info(f"  Active source: {data_source_manager.get_active_source()}")
     try:
-        data_source_manager = DataSourceManager(
-            config_path='config/data_sources_config.yml',
-            storage=storage,
+        db_manager.record_run_provenance(
+            run_id=pipeline_id,
             execution_mode=execution_mode,
+            data_source=data_source_manager.get_active_source(),
+            synthetic_dataset_id=os.getenv("SYNTHETIC_DATASET_ID") or os.getenv("SYNTHETIC_DATASET_PATH"),
+            note="etl_pipeline_start",
         )
-        logger.info(f"OK Data source manager initialized")
-        logger.info(f"  Available sources: {', '.join(data_source_manager.get_available_sources())}")
-        logger.info(f"  Active source: {data_source_manager.get_active_source()}")
-        try:
-            db_manager.record_run_provenance(
-                run_id=pipeline_id,
-                execution_mode=execution_mode,
-                data_source=data_source_manager.get_active_source(),
-                synthetic_dataset_id=os.getenv("SYNTHETIC_DATASET_ID") or os.getenv("SYNTHETIC_DATASET_PATH"),
-                note="etl_pipeline_start",
-            )
-        except Exception:
-            logger.debug("Failed to record pipeline provenance", exc_info=True)
-    except Exception as e:
-        logger.error(f"Failed to initialize data source manager: {e}")
-        logger.error("Pipeline cannot continue without data source")
-        raise
+    except Exception:
+        logger.debug("Failed to record pipeline provenance", exc_info=True)
 
     # Determine split strategy and log configuration
     _log_split_strategy(cv_settings)
