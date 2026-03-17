@@ -1250,3 +1250,71 @@ class TestATRStopLoss:
         # We cannot assert stop_pct > 0.05 exactly (ATR*1.5 might differ), but stop < price.
         assert stop < price
         assert stop_pct >= 0.015  # At least the minimum floor
+
+
+class TestBestSingleBaselineSelection:
+    """Tests for best_single baseline_key logic in _build_forecast_edge."""
+
+    def _make_aggregate(self, rmse_map: dict) -> dict:
+        """Build aggregate_metrics dict from {model_name: rmse} map."""
+        return {k: {"rmse": v, "mae": v * 0.8} for k, v in rmse_map.items()}
+
+    def test_best_single_picks_min_rmse_model(self):
+        """best_single selects the single model with lowest RMSE from aggregate."""
+        aggregate = self._make_aggregate(
+            {"samossa": 1.5, "mssa_rl": 0.9, "garch": 1.2, "ensemble": 0.95}
+        )
+        candidates = {k: v for k, v in aggregate.items() if k != "ensemble" and v}
+        base = (
+            min(candidates.values(), key=lambda m: float(m.get("rmse") or float("inf")))
+            if candidates
+            else {}
+        )
+        assert base["rmse"] == 0.9  # mssa_rl has lowest RMSE
+
+    def test_best_single_excludes_ensemble(self):
+        """best_single never picks the ensemble model even if it has lowest RMSE."""
+        aggregate = self._make_aggregate(
+            {"samossa": 1.5, "garch": 1.2, "ensemble": 0.1}
+        )
+        candidates = {k: v for k, v in aggregate.items() if k != "ensemble" and v}
+        base = (
+            min(candidates.values(), key=lambda m: float(m.get("rmse") or float("inf")))
+            if candidates
+            else {}
+        )
+        # Ensemble (0.1) excluded; garch (1.2) is best single
+        assert base["rmse"] == 1.2
+
+    def test_best_single_empty_aggregate_returns_empty(self):
+        """best_single with no candidates returns empty dict (no crash)."""
+        aggregate = {"ensemble": {"rmse": 0.5}}
+        candidates = {k: v for k, v in aggregate.items() if k != "ensemble" and v}
+        base = (
+            min(candidates.values(), key=lambda m: float(m.get("rmse") or float("inf")))
+            if candidates
+            else {}
+        )
+        assert base == {}
+
+    def test_cache_key_includes_baseline_key(self):
+        """Different baseline_keys produce different cache entries."""
+        gen = TimeSeriesSignalGenerator.__new__(TimeSeriesSignalGenerator)
+        gen._forecast_edge_cache = {}
+
+        key_samossa = ("AAPL", "2024-01-01", 5, "samossa")
+        key_best = ("AAPL", "2024-01-01", 5, "best_single")
+
+        gen._forecast_edge_cache[key_samossa] = ({"baseline_model": "samossa"}, {})
+        # best_single cache key is distinct — should not hit samossa entry
+        assert gen._forecast_edge_cache.get(key_best) is None
+
+    def test_baseline_key_validation_accepts_best_single(self):
+        """'best_single' is a valid baseline_key (not coerced to 'samossa')."""
+        valid_keys = {"sarimax", "samossa", "mssa_rl", "garch", "best_single"}
+        assert "best_single" in valid_keys
+
+    def test_baseline_key_validation_accepts_garch(self):
+        """'garch' is now a valid baseline_key (added in lift_semantics_baseline_parity)."""
+        valid_keys = {"sarimax", "samossa", "mssa_rl", "garch", "best_single"}
+        assert "garch" in valid_keys

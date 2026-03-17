@@ -37,6 +37,32 @@ from typing import Any
 # With 3 optional gates, allowing only 1 skip means at least 2/3 must actually run.
 MAX_SKIPPED_OPTIONAL_GATES = 1
 
+REQUIRED_PRODUCTION_PAYLOAD_KEYS = {
+    "pass_semantics_version",
+    "lift_inconclusive_allowed",
+    "proof_profitable_required",
+    "warmup_expired",
+    "phase3_ready",
+    "phase3_reason",
+    "lift_gate",
+    "profitability_proof",
+    "production_profitability_gate",
+    "readiness",
+}
+REQUIRED_READINESS_KEYS = {
+    "gates_pass",
+    "linkage_pass",
+    "evidence_hygiene_pass",
+    "integrity_pass",
+    "phase3_ready",
+    "phase3_reason",
+}
+REQUIRED_GATE_BLOCK_KEYS = {
+    "status",
+    "pass",
+    "gate_semantics_status",
+}
+
 # Artifact written after every run so downstream tools (e.g. institutional gate) can
 # verify gates ran recently without re-running them (BYP-03 fix).
 GATE_STATUS_ARTIFACT = Path(__file__).resolve().parents[1] / "logs" / "gate_status_latest.json"
@@ -74,6 +100,33 @@ def _run(cmd: list[str], label: str) -> dict[str, Any]:
         }
 
 
+def _validate_production_gate_payload(payload: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Fail-closed schema guard to prevent mismatched wiring or threshold dodge."""
+    if not isinstance(payload, dict) or not payload:
+        return False, ["payload_missing"]
+
+    warnings: list[str] = []
+    for key in sorted(REQUIRED_PRODUCTION_PAYLOAD_KEYS):
+        if key not in payload:
+            warnings.append(f"missing:{key}")
+
+    readiness = payload.get("readiness") if isinstance(payload.get("readiness"), dict) else {}
+    for key in sorted(REQUIRED_READINESS_KEYS):
+        if key not in readiness:
+            warnings.append(f"missing:readiness.{key}")
+
+    gate_block = (
+        payload.get("production_profitability_gate")
+        if isinstance(payload.get("production_profitability_gate"), dict)
+        else {}
+    )
+    for key in sorted(REQUIRED_GATE_BLOCK_KEYS):
+        if key not in gate_block:
+            warnings.append(f"missing:production_gate.{key}")
+
+    return len(warnings) == 0, warnings
+
+
 def _print_gate_result(result: dict[str, Any], *, emit_json: bool) -> None:
     if emit_json:
         return
@@ -103,6 +156,9 @@ def _build_summary(
     results: list[dict[str, Any]],
     production_gate_payload: dict[str, Any],
     stage: str,
+    production_gate_schema_ok: bool,
+    production_gate_schema_warnings: list[str],
+    skipped_gate_labels: list[str],
 ) -> dict[str, Any]:
     readiness = (
         production_gate_payload.get("readiness", {})
@@ -129,12 +185,15 @@ def _build_summary(
         "gate_semantics_status": gate_payload_block.get("gate_semantics_status"),
         "phase3_ready": bool(production_gate_payload.get("phase3_ready", False)),
         "phase3_reason": production_gate_payload.get("phase3_reason"),
+        "production_gate_schema_ok": production_gate_schema_ok,
+        "production_gate_schema_warnings": production_gate_schema_warnings,
         "readiness_components": {
             "gates_pass": readiness.get("gates_pass"),
             "linkage_pass": readiness.get("linkage_pass"),
             "evidence_hygiene_pass": readiness.get("evidence_hygiene_pass"),
             "integrity_pass": readiness.get("integrity_pass"),
         },
+        "skipped_gate_labels": skipped_gate_labels,
     }
 
 
@@ -238,15 +297,31 @@ def main() -> None:
         for r in results
     )
     production_gate_payload = _load_json_file(PRODUCTION_GATE_ARTIFACT) if production_gate_ran else {}
+    schema_ok, schema_warnings = (True, [])
+    if production_gate_ran:
+        schema_ok, schema_warnings = _validate_production_gate_payload(production_gate_payload)
+        schema_result = {
+            "label": "production_gate_schema",
+            "exit_code": 0 if schema_ok else 1,
+            "passed": bool(schema_ok),
+            "warnings": schema_warnings,
+        }
+        results.append(schema_result)
+        overall_pass = overall_pass and schema_ok
+
     # Publish a pre-institutional snapshot so institutional P4 validates current run
     # state instead of stale prior-run artifacts.
     pre_skipped_optional = sum(1 for r in results if r.get("skipped", False))
+    skipped_labels_pre = [str(r.get("label")) for r in results if r.get("skipped", False)]
     pre_summary = _build_summary(
         overall_pass=overall_pass,
         skipped_optional=pre_skipped_optional,
         results=results,
         production_gate_payload=production_gate_payload,
         stage="pre_institutional",
+        production_gate_schema_ok=schema_ok,
+        production_gate_schema_warnings=schema_warnings,
+        skipped_gate_labels=skipped_labels_pre,
     )
     _write_gate_status_artifact(pre_summary)
 
@@ -280,6 +355,9 @@ def main() -> None:
         results=results,
         production_gate_payload=production_gate_payload,
         stage="final",
+        production_gate_schema_ok=schema_ok,
+        production_gate_schema_warnings=schema_warnings,
+        skipped_gate_labels=[str(r.get("label")) for r in results if r.get("skipped", False)],
     )
     _write_gate_status_artifact(summary)
 
