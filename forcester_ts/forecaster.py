@@ -465,6 +465,31 @@ class TimeSeriesForecaster:
         else:
             diagnostics["kpss_available"] = diagnostics.get("kpss_error") is None and kpss is not None
 
+        # Phase 8.3: explicit stationarity verdict when ADF and KPSS are both available.
+        # ADF H0=unit root (reject -> stationary); KPSS H0=stationary (reject -> non-stationary).
+        adf_pv = diagnostics.get("adf_pvalue")
+        kpss_pv = diagnostics.get("kpss_pvalue")
+        if adf_pv is not None and kpss_pv is not None:
+            adf_stationary = adf_pv < 0.05
+            kpss_stationary = kpss_pv > 0.05
+            if adf_stationary and kpss_stationary:
+                verdict = "stationary"
+                force_difference = False
+            elif not adf_stationary and not kpss_stationary:
+                verdict = "non_stationary"
+                force_difference = True
+            else:
+                # Disagreement: structural break likely — ADF may be fooled by level shift.
+                verdict = "conflicted"
+                force_difference = True  # conservative: difference anyway
+                logger.warning(
+                    "ADF/KPSS conflict (adf_p=%.4f, kpss_p=%.4f): "
+                    "stationarity_verdict=conflicted; forcing differencing.",
+                    adf_pv, kpss_pv,
+                )
+            diagnostics["stationarity_verdict"] = verdict
+            diagnostics["force_difference"] = force_difference
+
         self._record_model_event(
             "series",
             "diagnostics",

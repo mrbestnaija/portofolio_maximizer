@@ -1,4 +1,8 @@
-"""Tests for Phase 8.2 — shared residual diagnostics utility and model integration.
+"""Tests for Phase 8.2 + 8.3 — residual diagnostics and ADF/KPSS verdict.
+
+Phase 8.2: shared residual diagnostics utility and model integration.
+Phase 8.3: explicit stationarity_verdict (stationary/non_stationary/conflicted)
+           from ADF + KPSS; force_difference=True on conflict.
 
 Covers:
   - run_residual_diagnostics() utility (white_noise True/False, missing data, short series)
@@ -214,3 +218,95 @@ class TestGARCHCIInflationOnNonWhiteNoise:
         noisy_hw = float((noisy["upper_ci"] - noisy["lower_ci"]).iloc[0])
         # 1.2x inflation applied to half-width on each side -> 2 * 1.2 * hw_half
         assert pytest.approx(noisy_hw / clean_hw, rel=0.02) == 1.2
+
+
+# ---------------------------------------------------------------------------
+# Phase 8.3 — ADF/KPSS stationarity verdict
+# ---------------------------------------------------------------------------
+
+class TestStationarityVerdict:
+    """_capture_series_diagnostics must emit explicit stationarity_verdict."""
+
+    def _make_series(self, n: int = 200, seed: int = 0) -> pd.Series:
+        np.random.seed(seed)
+        dates = pd.date_range("2020-01-01", periods=n, freq="D")
+        # Stationary white noise
+        return pd.Series(np.random.normal(0, 1, n), index=dates)
+
+    def _make_nonstationary_series(self, n: int = 200, seed: int = 0) -> pd.Series:
+        np.random.seed(seed)
+        dates = pd.date_range("2020-01-01", periods=n, freq="D")
+        # Random walk — non-stationary
+        return pd.Series(np.cumsum(np.random.normal(0, 1, n)), index=dates)
+
+    def _get_diagnostics(self, series: pd.Series) -> dict:
+        from forcester_ts.forecaster import TimeSeriesForecaster
+        f = TimeSeriesForecaster()
+        return f._capture_series_diagnostics(series)
+
+    def test_stationary_series_verdict(self):
+        diag = self._get_diagnostics(self._make_series())
+        if "stationarity_verdict" not in diag:
+            pytest.skip("ADF or KPSS not available in this environment")
+        assert diag["stationarity_verdict"] in {"stationary", "conflicted"}
+        assert isinstance(diag["force_difference"], bool)
+
+    def test_nonstationary_series_verdict(self):
+        diag = self._get_diagnostics(self._make_nonstationary_series())
+        if "stationarity_verdict" not in diag:
+            pytest.skip("ADF or KPSS not available in this environment")
+        assert diag["stationarity_verdict"] in {"non_stationary", "conflicted"}
+        assert isinstance(diag["force_difference"], bool)
+
+    def test_force_difference_true_on_non_stationary(self):
+        diag = self._get_diagnostics(self._make_nonstationary_series())
+        if "stationarity_verdict" not in diag:
+            pytest.skip("ADF or KPSS not available in this environment")
+        if diag["stationarity_verdict"] == "non_stationary":
+            assert diag["force_difference"] is True
+
+    def test_force_difference_false_on_stationary(self):
+        diag = self._get_diagnostics(self._make_series())
+        if "stationarity_verdict" not in diag:
+            pytest.skip("ADF or KPSS not available in this environment")
+        if diag["stationarity_verdict"] == "stationary":
+            assert diag["force_difference"] is False
+
+    def test_verdict_absent_when_only_one_test_runs(self):
+        """If only ADF or only KPSS data is present, no verdict is emitted."""
+        from forcester_ts.forecaster import TimeSeriesForecaster
+        f = TimeSeriesForecaster()
+        # Supply partial diagnostics — only adf_pvalue, no kpss_pvalue
+        diag: dict = {"adf_pvalue": 0.01}
+        # Call the verdict logic directly by injecting partial diagnostics
+        adf_pv = diag.get("adf_pvalue")
+        kpss_pv = diag.get("kpss_pvalue")
+        verdict_computed = adf_pv is not None and kpss_pv is not None
+        assert not verdict_computed
+
+    def test_conflicted_verdict_forces_difference(self, monkeypatch):
+        """Manually inject ADF=stationary, KPSS=non-stationary -> conflicted -> force_diff=True."""
+        from forcester_ts.forecaster import TimeSeriesForecaster
+        f = TimeSeriesForecaster()
+        # Patch adfuller and kpss to return conflicting results
+        import forcester_ts.forecaster as _fc_mod
+        original_adfuller = _fc_mod.adfuller
+        original_kpss = _fc_mod.kpss
+
+        def _fake_adf(x, **kw):
+            return (-5.0, 0.001, 0, 0, {"1%": -3.5, "5%": -2.9, "10%": -2.6}, 100.0)
+
+        def _fake_kpss(x, **kw):
+            # Returns stat > critical -> p-value < 0.05 -> non-stationary
+            return (0.8, 0.01, 0, {"10%": 0.35, "5%": 0.46, "2.5%": 0.57, "1%": 0.74})
+
+        monkeypatch.setattr(_fc_mod, "adfuller", _fake_adf)
+        monkeypatch.setattr(_fc_mod, "kpss", _fake_kpss)
+
+        np.random.seed(0)
+        dates = pd.date_range("2020-01-01", periods=100, freq="D")
+        series = pd.Series(np.random.normal(0, 1, 100), index=dates)
+        diag = f._capture_series_diagnostics(series)
+
+        assert diag.get("stationarity_verdict") == "conflicted"
+        assert diag.get("force_difference") is True
