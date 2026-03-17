@@ -31,6 +31,7 @@ import datetime
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -115,6 +116,32 @@ def _empty_metrics(layer: int, **overrides) -> dict:
     base = {k: None for k in LAYER_REQUIRED_KEYS[layer]}
     base.update(overrides)
     return base
+
+
+def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -> Path:
+    """Resolve Layer 1's audit universe from active production/cohort state."""
+    if explicit_audit_dir is not None:
+        explicit_raw = str(explicit_audit_dir).strip()
+        if explicit_raw:
+            return Path(explicit_raw)
+
+    env_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
+    if env_audit_dir:
+        return Path(env_audit_dir)
+
+    cohort_id = str(os.environ.get("PMX_EVIDENCE_COHORT_ID") or "").strip()
+    if cohort_id:
+        cohort_production_dir = (
+            REPO_ROOT / "logs" / "forecast_audits" / "cohorts" / cohort_id / "production"
+        )
+        if cohort_production_dir.exists():
+            return cohort_production_dir
+
+    production_dir = REPO_ROOT / "logs" / "forecast_audits" / "production"
+    if production_dir.exists():
+        return production_dir
+
+    return REPO_ROOT / "logs" / "forecast_audits"
 
 
 # ---------------------------------------------------------------------------
@@ -855,8 +882,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--audit-dir",
-        default=str(REPO_ROOT / "logs" / "forecast_audits"),
-        help="Directory containing forecast_audit_*.json files (Layer 1)",
+        default=None,
+        help=(
+            "Directory containing forecast_audit_*.json files (Layer 1). "
+            "Default resolution: TS_FORECAST_AUDIT_DIR env var -> active cohort production dir "
+            "-> logs/forecast_audits/production -> logs/forecast_audits"
+        ),
     )
     parser.add_argument(
         "--db",
@@ -881,7 +912,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     layers_to_run: list[int] = [1, 2, 3, 4] if args.layer == "all" else [int(args.layer)]
-    audit_dir = Path(args.audit_dir)
+    audit_dir = _resolve_layer1_audit_dir(args.audit_dir)
     db_path = Path(args.db)
     jsonl_path = Path(args.jsonl_path)
 

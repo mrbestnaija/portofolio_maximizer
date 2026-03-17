@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 from check_model_improvement import (
     LAYER_REQUIRED_KEYS,
     LayerResult,
+    _resolve_layer1_audit_dir,
     compare_baseline,
     run_layer1_forecast_quality,
     run_layer2_gate_status,
@@ -572,3 +573,55 @@ class TestPhase719Hardening:
         assert result.status == "SKIP"
         # coverage_ratio in metrics (may be None from _empty_metrics or 0.0 from n_used==0)
         assert "coverage_ratio" in result.metrics
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 audit-dir dynamic resolution
+# ---------------------------------------------------------------------------
+class TestLayer1AuditDirResolution:
+    def test_prefers_explicit_audit_dir_over_env_and_repo_defaults(self, tmp_path, monkeypatch):
+        explicit_dir = tmp_path / "explicit"
+        explicit_dir.mkdir()
+        env_dir = tmp_path / "env"
+        env_dir.mkdir()
+
+        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
+        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cohort_alpha")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir(explicit_dir)
+        assert resolved == explicit_dir
+
+    def test_prefers_ts_forecast_audit_dir_env_when_no_explicit_override(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "cohorts" / "env_active" / "production"
+        env_dir.mkdir(parents=True)
+
+        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == env_dir
+
+    def test_uses_active_cohort_production_dir_before_shared_production_dir(self, tmp_path, monkeypatch):
+        cohort_dir = tmp_path / "logs" / "forecast_audits" / "cohorts" / "cleanroom_a" / "production"
+        cohort_dir.mkdir(parents=True)
+        fallback_production = tmp_path / "logs" / "forecast_audits" / "production"
+        fallback_production.mkdir(parents=True)
+
+        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
+        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cleanroom_a")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == cohort_dir
+
+    def test_falls_back_to_shared_production_dir_when_no_env_or_cohort(self, tmp_path, monkeypatch):
+        production_dir = tmp_path / "logs" / "forecast_audits" / "production"
+        production_dir.mkdir(parents=True)
+
+        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
+        monkeypatch.delenv("PMX_EVIDENCE_COHORT_ID", raising=False)
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == production_dir
