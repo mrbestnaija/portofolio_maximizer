@@ -1166,6 +1166,25 @@ class TimeSeriesForecaster:
                 self._record_model_event("samossa", "forecast_start", horizon=horizon)
                 with self._instrumentation.track("samossa", "forecast", horizon=horizon) as meta:
                     samossa_result = self._samossa.forecast(steps=horizon)
+                    # Phase 8.2: inflate CI 1.2x when residuals fail white-noise check.
+                    _rd_s = (samossa_result or {}).get("residual_diagnostics") or {}
+                    if not _rd_s.get("white_noise", True) and _rd_s.get("n", 0) >= 10:
+                        logger.warning(
+                            "SAMOSSA residuals not white noise "
+                            "(lb_p=%.4f, jb_p=%.4f): inflating CI by 1.2x.",
+                            _rd_s.get("lb_pvalue") or 0.0,
+                            _rd_s.get("jb_pvalue") or 0.0,
+                        )
+                        _fc = samossa_result.get("forecast")
+                        _lo = samossa_result.get("lower_ci")
+                        _hi = samossa_result.get("upper_ci")
+                        if _fc is not None and _lo is not None and _hi is not None:
+                            _hw_lo = (_fc - _lo) * 1.2
+                            _hw_hi = (_hi - _fc) * 1.2
+                            samossa_result = dict(samossa_result)
+                            samossa_result["lower_ci"] = _fc - _hw_lo
+                            samossa_result["upper_ci"] = _fc + _hw_hi
+                            samossa_result["residual_diagnostics_ci_inflated"] = True
                     results["samossa_forecast"] = samossa_result
                     summary = self._samossa.get_model_summary()
                     meta["trend_strength"] = summary.get("trend_strength")
@@ -1398,6 +1417,31 @@ class TimeSeriesForecaster:
                 upper.append(p * (1.0 + z * s))
             out["lower_ci"] = pd.Series(lower, index=forecast.index[: len(lower)], name="garch_lower_ci")
             out["upper_ci"] = pd.Series(upper, index=forecast.index[: len(upper)], name="garch_upper_ci")
+
+            # Phase 8.2: Inflate CI by 1.2x when residuals fail white-noise check.
+            # Softer than convergence failure's 1.5x; warns of potential mis-specification.
+            rd = payload.get("residual_diagnostics") or {}
+            if not rd.get("white_noise", True) and rd.get("n", 0) >= 10:
+                logger.warning(
+                    "GARCH residuals not white noise "
+                    "(lb_p=%.4f, jb_p=%.4f): inflating CI by 1.2x.",
+                    rd.get("lb_pvalue") or 0.0,
+                    rd.get("jb_pvalue") or 0.0,
+                )
+                lower_arr = out["lower_ci"].to_numpy(dtype=float)
+                upper_arr = out["upper_ci"].to_numpy(dtype=float)
+                price_arr = forecast.to_numpy(dtype=float)
+                out["lower_ci"] = pd.Series(
+                    np.maximum(0.0, price_arr - (price_arr - lower_arr) * 1.2),
+                    index=forecast.index[: len(lower_arr)],
+                    name="garch_lower_ci",
+                )
+                out["upper_ci"] = pd.Series(
+                    price_arr + (upper_arr - price_arr) * 1.2,
+                    index=forecast.index[: len(upper_arr)],
+                    name="garch_upper_ci",
+                )
+                out["residual_diagnostics_ci_inflated"] = True
 
             # Phase 7.14-C: Inflate CI by 1.5x when GARCH optimizer did not converge.
             # Wide CI -> SNR drops below threshold -> signal_generator.py:478 blocks signal.

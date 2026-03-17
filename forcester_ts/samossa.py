@@ -105,6 +105,8 @@ class SAMOSSAForecaster:
         self._trend_slope: float = 0.0
         self._trend_intercept: float = 0.0
         self._trend_strength: float = 0.0
+        # Phase 8.2: residual diagnostics populated after fit() completes.
+        self._residual_diagnostics: Dict[str, Any] = {}
         self._last_observed: Optional[float] = None
 
     # ------------------------------------------------------------------
@@ -431,6 +433,21 @@ class SAMOSSAForecaster:
         self._residuals = residuals
         self._fit_residual_model(residuals)
 
+        # Phase 8.2: run residual diagnostics and warn if not white noise.
+        try:
+            from .residual_diagnostics import run_residual_diagnostics  # pylint: disable=import-outside-toplevel
+            self._residual_diagnostics = run_residual_diagnostics(residuals)
+            if not self._residual_diagnostics.get("white_noise", True):
+                logger.warning(
+                    "SAMOSSA residuals fail white-noise check "
+                    "(lb_p=%.4f, jb_p=%.4f, n=%d) — model may be mis-specified.",
+                    self._residual_diagnostics.get("lb_pvalue") or 0.0,
+                    self._residual_diagnostics.get("jb_pvalue") or 0.0,
+                    self._residual_diagnostics.get("n", 0),
+                )
+        except Exception as _rd_exc:
+            logger.debug("SAMOSSA residual_diagnostics failed: %s", _rd_exc)
+
         # Phase 7.16: Record learned AR lag in OrderLearner for future warm-start.
         if order_learner is not None and ticker:
             try:
@@ -516,6 +533,8 @@ class SAMOSSAForecaster:
             "residual_model_order": getattr(self._residual_model, "k_ar", 0) if self._residual_model is not None else 0,
             "directional_signal": directional_signal,
             "directional_confidence": directional_confidence,
+            # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
+            "residual_diagnostics": self._residual_diagnostics,
         }
 
     def get_model_summary(self) -> Dict[str, Any]:

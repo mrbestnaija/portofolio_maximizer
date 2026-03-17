@@ -324,6 +324,27 @@ class MSSARLForecaster:
         n = len(cleaned)
         recon = _diagonal_average(recon_matrix, n)
         self._reconstruction = pd.Series(recon, index=cleaned.index)
+        residuals = cleaned - self._reconstruction
+        self._baseline_variance = float(residuals.var(ddof=1))
+        try:
+            self._last_reconstruction_error = float(abs(residuals.iloc[-1]))
+        except Exception:
+            self._last_reconstruction_error = None
+
+        # Phase 8.2: run residual diagnostics and warn if not white noise.
+        try:
+            from .residual_diagnostics import run_residual_diagnostics  # pylint: disable=import-outside-toplevel
+            self._residual_diagnostics = run_residual_diagnostics(residuals)
+            if not self._residual_diagnostics.get("white_noise", True):
+                logger.warning(
+                    "MSSA-RL residuals fail white-noise check "
+                    "(lb_p=%.4f, jb_p=%.4f, n=%d) — model may be mis-specified.",
+                    self._residual_diagnostics.get("lb_pvalue") or 0.0,
+                    self._residual_diagnostics.get("jb_pvalue") or 0.0,
+                    self._residual_diagnostics.get("n", 0),
+                )
+        except Exception as _rd_exc:
+            logger.debug("MSSARL residual_diagnostics failed: %s", _rd_exc)
 
         # Phase 8.1: precompute per-action reconstructed series for component selection.
         self._reconstructions_by_action: Dict[int, pd.Series] = {}
@@ -331,12 +352,6 @@ class MSSARLForecaster:
             self._reconstructions_by_action[action_key] = pd.Series(
                 _diagonal_average(rmat, n), index=cleaned.index
             )
-        residuals = cleaned - self._reconstruction
-        self._baseline_variance = float(residuals.var(ddof=1))
-        try:
-            self._last_reconstruction_error = float(abs(residuals.iloc[-1]))
-        except Exception:
-            self._last_reconstruction_error = None
 
         change_points = self._cusum_change_points(residuals)
         self._change_points = change_points
@@ -491,6 +506,8 @@ class MSSARLForecaster:
             "baseline_variance": self._baseline_variance,
             # Phase 8.1: which component set was used (0=mean_revert, 1=hold, 2=trend_follow)
             "active_action": best_action,
+            # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
+            "residual_diagnostics": self._residual_diagnostics,
         }
 
     def get_diagnostics(self) -> Dict[str, Any]:

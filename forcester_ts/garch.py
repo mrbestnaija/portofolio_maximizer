@@ -78,6 +78,8 @@ class GARCHForecaster:
         self._fallback_state: Optional[Dict[str, Any]] = None
         self._differenced: bool = False  # Track if series was differenced for stationarity
         self._convergence_ok: bool = True  # Phase 7.14-C: False when optimizer did not converge
+        # Phase 8.2: residual diagnostics populated after fit() completes.
+        self._residual_diagnostics: Dict[str, Any] = {}
 
     def fit(
         self,
@@ -324,6 +326,7 @@ class GARCHForecaster:
                             "GJR-GARCH fitted (persistence=%.4f); using asymmetric model.",
                             gjr_persistence,
                         )
+                        self._residual_diagnostics = self._capture_residual_diagnostics()
                         return self
                 except Exception as gjr_exc:
                     logger.debug("GJR-GARCH attempt failed (%s); falling back to EWMA.", gjr_exc)
@@ -343,7 +346,31 @@ class GARCHForecaster:
             self.dist,
             persistence if persistence is not None else 0.0,
         )
+        self._residual_diagnostics = self._capture_residual_diagnostics()
         return self
+
+    def _capture_residual_diagnostics(self) -> Dict[str, Any]:
+        """Phase 8.2: run Ljung-Box + Jarque-Bera on GARCH standardized residuals."""
+        try:
+            from .residual_diagnostics import run_residual_diagnostics  # pylint: disable=import-outside-toplevel
+            if self.fitted_model is None or self.fitted_model is True:
+                return {}
+            resid = getattr(self.fitted_model, "resid", None)
+            if resid is None:
+                return {}
+            diag = run_residual_diagnostics(resid)
+            if not diag.get("white_noise", True):
+                logger.warning(
+                    "GARCH residuals fail white-noise check "
+                    "(lb_p=%.4f, jb_p=%.4f, n=%d) — model may be mis-specified.",
+                    diag.get("lb_pvalue") or 0.0,
+                    diag.get("jb_pvalue") or 0.0,
+                    diag.get("n", 0),
+                )
+            return diag
+        except Exception as exc:
+            logger.debug("GARCH _capture_residual_diagnostics failed: %s", exc)
+            return {}
 
     def _garch_persistence(self) -> Optional[float]:
         """Sum of alpha + beta coefficients (persistence parameter).
@@ -421,6 +448,7 @@ class GARCHForecaster:
                 "aic": None,
                 "bic": None,
                 "convergence_ok": True,  # EWMA/GJR fallback is always "converged"
+                "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
             }
             return self.forecast_results
 
@@ -451,6 +479,8 @@ class GARCHForecaster:
             # Phase 7.14-C: Propagate convergence status so _enrich_garch_forecast
             # can inflate CI width when the optimizer did not converge.
             "convergence_ok": bool(getattr(self, "_convergence_ok", True)),
+            # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
+            "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
         }
         return self.forecast_results
 
