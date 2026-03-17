@@ -1,0 +1,418 @@
+# bash/overnight_classifier_bootstrap.ps1
+# Phase 9: Overnight directional classifier bootstrap + PnL A/B comparison.
+#
+# What this script does:
+#   Phase 1 - Bootstrap: 12 historical synthetic cycles (2020-2024) to
+#              generate JSONL entries with classifier_features.
+#   Phase 2 - Build dataset + train directional classifier.
+#   Phase 3 - Control run: 4 holdout dates with gate DISABLED.
+#   Phase 4 - Treatment run: same 4 holdout dates with gate ENABLED.
+#   Phase 5 - Report: PnL / WR / trade-count delta (treatment vs control).
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File bash\overnight_classifier_bootstrap.ps1
+#   powershell -ExecutionPolicy Bypass -File bash\overnight_classifier_bootstrap.ps1 -Tickers "AAPL,MSFT,NVDA"
+#   powershell -ExecutionPolicy Bypass -File bash\overnight_classifier_bootstrap.ps1 -SkipBootstrap -SkipTrain
+#   powershell -ExecutionPolicy Bypass -File bash\overnight_classifier_bootstrap.ps1 -DryRun
+#
+# Estimated runtime: 90-150 minutes (all phases)
+# Log: logs\run_audit\classifier_bootstrap_YYYYMMDD_HHMMSS.log
+
+param(
+    [string]$Tickers       = "AAPL,MSFT,NVDA,GS,AMZN",
+    [switch]$SkipBootstrap,
+    [switch]$SkipTrain,
+    [switch]$DryRun
+)
+
+$ErrorActionPreference = "Continue"
+
+$RootDir   = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$PythonBin = Join-Path $RootDir "simpleTrader_env\Scripts\python.exe"
+$env:PYTHONPATH = $RootDir
+
+if (-not (Test-Path $PythonBin)) {
+    Write-Host "[ERROR] Python not found at $PythonBin" -ForegroundColor Red
+    exit 1
+}
+
+Set-Location $RootDir
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+$RunTag  = Get-Date -Format "yyyyMMdd_HHmmss"
+$LogDir  = Join-Path $RootDir "logs\run_audit"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$LogFile = Join-Path $LogDir "classifier_bootstrap_${RunTag}.log"
+$SummaryFile = Join-Path $LogDir "classifier_bootstrap_${RunTag}_summary.txt"
+
+function Log($msg, $color = "White") {
+    $line = "$(Get-Date -Format 'HH:mm:ss') $msg"
+    Write-Host $line -ForegroundColor $color
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+}
+function LogSection($msg) {
+    Log ""
+    Log "============================================================"
+    Log $msg
+    Log "============================================================"
+}
+function LogPass($msg)  { Log "[PASS]  $msg" "Green" }
+function LogWarn($msg)  { Log "[WARN]  $msg" "Yellow" }
+function LogError($msg) { Log "[ERROR] $msg" "Red" }
+
+# ---------------------------------------------------------------------------
+# Helper: run a command, capture to log, return exit code
+# ---------------------------------------------------------------------------
+function RunCmd($label, [string[]]$cmdArgs) {
+    if ($DryRun) {
+        Log "[DRY_RUN] Would run: $($cmdArgs -join ' ')"
+        return 0
+    }
+    Log "--- $label"
+    & $PythonBin @cmdArgs 2>&1 | Tee-Object -FilePath $LogFile -Append
+    return $LASTEXITCODE
+}
+
+# ---------------------------------------------------------------------------
+# Helper: snapshot canonical DB metrics, return hashtable
+# ---------------------------------------------------------------------------
+function DbSnapshot() {
+    if ($DryRun) {
+        return @{ round_trips = 0; total_pnl = 0.0; win_rate = 0.0; win_count = 0; loss_count = 0 }
+    }
+    $raw = & $PythonBin -c @"
+import json, sys
+sys.path.insert(0, r'$RootDir')
+from integrity.pnl_integrity_enforcer import PnLIntegrityEnforcer
+with PnLIntegrityEnforcer(r'data\portfolio_maximizer.db') as e:
+    m = e.get_canonical_metrics()
+    print(json.dumps({
+        'round_trips': m.total_round_trips,
+        'total_pnl': round(float(m.total_realized_pnl or 0), 4),
+        'win_count': m.win_count,
+        'loss_count': m.loss_count,
+        'win_rate': round(float(m.win_rate or 0), 4),
+    }))
+"@ 2>$null
+    try {
+        return $raw | ConvertFrom-Json
+    } catch {
+        return @{ round_trips = 0; total_pnl = 0.0; win_rate = 0.0; win_count = 0; loss_count = 0 }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Helper: toggle directional_classifier.enabled in signal_routing_config.yml
+# ---------------------------------------------------------------------------
+function SetGateEnabled([string]$enabled) {
+    if ($DryRun) { Log "[DRY_RUN] Would set directional_classifier.enabled=$enabled"; return }
+    & $PythonBin -c @"
+import pathlib, re
+p = pathlib.Path(r'config\signal_routing_config.yml')
+txt = p.read_text(encoding='utf-8')
+txt = re.sub(
+    r'(directional_classifier:.*?enabled:\s*)(?:true|false)',
+    lambda m: m.group(1) + '$enabled',
+    txt, flags=re.DOTALL, count=1
+)
+p.write_text(txt, encoding='utf-8')
+print('set directional_classifier.enabled=$enabled')
+"@ 2>&1 | Tee-Object -FilePath $LogFile -Append
+}
+
+# ---------------------------------------------------------------------------
+# Training window: 12 AS_OF dates (2020-2024)
+# ---------------------------------------------------------------------------
+$BootstrapDates = @(
+    "2020-06-01", "2020-12-01",
+    "2021-06-01", "2021-12-01",
+    "2022-03-01", "2022-09-01",
+    "2023-01-02", "2023-07-03",
+    "2024-01-02", "2024-04-01",
+    "2024-07-01", "2024-10-01"
+)
+
+# Evaluation window: 4 holdout dates (2025, unseen relative to training)
+$EvalDates = @(
+    "2025-01-06",
+    "2025-04-01",
+    "2025-07-01",
+    "2025-10-01"
+)
+
+# ---------------------------------------------------------------------------
+# STEP 0: Baseline snapshot
+# ---------------------------------------------------------------------------
+LogSection "Overnight Classifier Bootstrap -- $RunTag"
+Log "Python        : $PythonBin"
+Log "Root          : $RootDir"
+Log "Tickers       : $Tickers"
+Log "Log           : $LogFile"
+Log "Options       : SkipBootstrap=$SkipBootstrap SkipTrain=$SkipTrain DryRun=$DryRun"
+Log "Est. runtime  : 90-150 min (all phases)"
+
+LogSection "STEP 0: DB baseline snapshot"
+$Baseline = DbSnapshot
+Log "Baseline: $($Baseline.round_trips) closed trades, PnL=$($Baseline.total_pnl), WR=$($Baseline.win_rate)"
+
+$Errors = 0
+
+# ---------------------------------------------------------------------------
+# PHASE 1: Bootstrap
+# ---------------------------------------------------------------------------
+LogSection "PHASE 1/5: Bootstrap synthetic cycles (training window 2020-2024)"
+
+if ($SkipBootstrap) {
+    Log "Skipping Phase 1 (-SkipBootstrap)"
+} else {
+    $bootPass = 0; $bootFail = 0
+    foreach ($asOf in $BootstrapDates) {
+        $rc = RunCmd "bootstrap as-of $asOf" @(
+            "scripts\run_auto_trader.py",
+            "--tickers", $Tickers,
+            "--cycles", "1",
+            "--execution-mode", "synthetic",
+            "--as-of-date", $asOf,
+            "--no-resume",
+            "--sleep-seconds", "0"
+        )
+        if ($rc -eq 0) { $bootPass++ } else { $bootFail++; $Errors++ }
+    }
+    Log "Bootstrap complete: $bootPass passed / $bootFail failed"
+}
+
+# Count JSONL entries with classifier_features
+$featuresCount = 0
+if (-not $DryRun) {
+    $featuresCount = & $PythonBin -c @"
+import json, pathlib
+p = pathlib.Path(r'logs\signals\quant_validation.jsonl')
+if not p.exists():
+    print(0); exit()
+entries = []
+for l in p.read_text(encoding='utf-8').splitlines():
+    try: entries.append(json.loads(l))
+    except: pass
+print(sum(1 for e in entries if e.get('classifier_features')))
+"@ 2>$null
+}
+Log "JSONL entries with classifier_features: $featuresCount"
+
+# ---------------------------------------------------------------------------
+# PHASE 2: Build + train
+# ---------------------------------------------------------------------------
+LogSection "PHASE 2/5: Build training dataset + train classifier"
+
+$ModelTrained = $false
+
+if ($SkipTrain) {
+    Log "Skipping Phase 2 (-SkipTrain)"
+    $ModelTrained = $true
+} else {
+    # Step 2a: build
+    Log "--- build_directional_training_data.py --fallback-to-pnl-label"
+    if (-not $DryRun) {
+        & $PythonBin "scripts\build_directional_training_data.py" "--fallback-to-pnl-label" 2>&1 |
+            Tee-Object -FilePath $LogFile -Append
+    }
+
+    $summaryPath = Join-Path $RootDir "logs\directional_training_latest.json"
+    if ((Test-Path $summaryPath) -and (-not $DryRun)) {
+        & $PythonBin -c @"
+import json
+s = json.loads(open(r'$summaryPath', encoding='utf-8').read())
+print(f'  n_labeled   : {s.get(\"n_labeled\", 0)}')
+print(f'  n_positive  : {s.get(\"n_positive\", 0)}')
+print(f'  n_negative  : {s.get(\"n_negative\", 0)}')
+print(f'  win_rate    : {s.get(\"win_rate\")}')
+print(f'  cold_start  : {s.get(\"cold_start\")}')
+if s.get('cold_start_reason'):
+    print(f'  reason      : {s.get(\"cold_start_reason\")}')
+"@ 2>&1 | Tee-Object -FilePath $LogFile -Append
+    }
+
+    # Step 2b: train
+    Log "--- train_directional_classifier.py"
+    $trainRc = 0
+    if (-not $DryRun) {
+        & $PythonBin "scripts\train_directional_classifier.py" 2>&1 |
+            Tee-Object -FilePath $LogFile -Append
+        $trainRc = $LASTEXITCODE
+    }
+
+    switch ($trainRc) {
+        0 {
+            $ModelTrained = $true
+            LogPass "Classifier trained and saved"
+            $metaPath = Join-Path $RootDir "data\classifiers\directional_v1.meta.json"
+            if (Test-Path $metaPath) {
+                & $PythonBin -c @"
+import json
+m = json.loads(open(r'$metaPath', encoding='utf-8').read())
+print(f'  n_train         : {m.get(\"n_train\")}')
+print(f'  walk_forward_DA : {m.get(\"walk_forward_da\")}')
+print(f'  best_C          : {m.get(\"best_c\")}')
+for f in (m.get('top3_features') or []):
+    print(f'  feature: {f[\"name\"]} coef={f[\"coef\"]:+.4f}')
+"@ 2>&1 | Tee-Object -FilePath $LogFile -Append
+            }
+        }
+        2 { LogWarn "Cold start -- not enough labeled data. A/B test will be skipped."; $Errors++ }
+        default { LogError "Training failed (exit $trainRc)"; $Errors++ }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# PHASE 3: Control (gate DISABLED)
+# ---------------------------------------------------------------------------
+LogSection "PHASE 3/5: Control evaluation -- gate DISABLED"
+$BeforeControl = DbSnapshot
+Log "DB before control: $($BeforeControl.round_trips) trades, PnL=$($BeforeControl.total_pnl)"
+
+SetGateEnabled "false"
+
+$ctrlPass = 0; $ctrlFail = 0
+foreach ($asOf in $EvalDates) {
+    $rc = RunCmd "control as-of $asOf" @(
+        "scripts\run_auto_trader.py",
+        "--tickers", $Tickers,
+        "--cycles", "1",
+        "--execution-mode", "synthetic",
+        "--as-of-date", $asOf,
+        "--no-resume",
+        "--sleep-seconds", "0"
+    )
+    if ($rc -eq 0) { $ctrlPass++ } else { $ctrlFail++; $Errors++ }
+}
+
+$AfterControl = DbSnapshot
+Log "DB after control : $($AfterControl.round_trips) trades, PnL=$($AfterControl.total_pnl)"
+Log "Control cycles   : $ctrlPass passed / $ctrlFail failed"
+
+$ControlDeltaTrades = $AfterControl.round_trips - $BeforeControl.round_trips
+$ControlDeltaPnl    = [math]::Round($AfterControl.total_pnl - $BeforeControl.total_pnl, 4)
+$ControlWinRate     = $AfterControl.win_rate
+Log "Control result   : trades_added=$ControlDeltaTrades  pnl_delta=$ControlDeltaPnl  wr=$ControlWinRate"
+
+# ---------------------------------------------------------------------------
+# PHASE 4: Treatment (gate ENABLED)
+# ---------------------------------------------------------------------------
+LogSection "PHASE 4/5: Treatment evaluation -- gate ENABLED"
+
+$TreatDeltaTrades = "n/a"; $TreatDeltaPnl = "n/a"; $TreatWinRate = "n/a"
+
+$pkPath = Join-Path $RootDir "data\classifiers\directional_v1.pkl"
+if (-not $ModelTrained) {
+    LogWarn "Skipping Phase 4 -- classifier not trained (cold start)"
+} elseif ((-not $DryRun) -and (-not (Test-Path $pkPath))) {
+    LogWarn "Skipping Phase 4 -- data\classifiers\directional_v1.pkl not found"
+} else {
+    $BeforeTreat = DbSnapshot
+    Log "DB before treatment: $($BeforeTreat.round_trips) trades, PnL=$($BeforeTreat.total_pnl)"
+
+    SetGateEnabled "true"
+
+    $treatPass = 0; $treatFail = 0
+    foreach ($asOf in $EvalDates) {
+        $rc = RunCmd "treatment as-of $asOf" @(
+            "scripts\run_auto_trader.py",
+            "--tickers", $Tickers,
+            "--cycles", "1",
+            "--execution-mode", "synthetic",
+            "--as-of-date", $asOf,
+            "--no-resume",
+            "--sleep-seconds", "0"
+        )
+        if ($rc -eq 0) { $treatPass++ } else { $treatFail++; $Errors++ }
+    }
+
+    $AfterTreat = DbSnapshot
+    Log "DB after treatment : $($AfterTreat.round_trips) trades, PnL=$($AfterTreat.total_pnl)"
+    Log "Treatment cycles   : $treatPass passed / $treatFail failed"
+
+    $TreatDeltaTrades = $AfterTreat.round_trips - $BeforeTreat.round_trips
+    $TreatDeltaPnl    = [math]::Round($AfterTreat.total_pnl - $BeforeTreat.total_pnl, 4)
+    $TreatWinRate     = $AfterTreat.win_rate
+    Log "Treatment result   : trades_added=$TreatDeltaTrades  pnl_delta=$TreatDeltaPnl  wr=$TreatWinRate"
+
+    # Restore gate to disabled
+    SetGateEnabled "false"
+    Log "Gate restored to: disabled"
+}
+
+# ---------------------------------------------------------------------------
+# PHASE 5: Report
+# ---------------------------------------------------------------------------
+LogSection "PHASE 5/5: Results"
+
+$PnlImprovement = "n/a"
+$Verdict        = "n/a"
+if ($TreatDeltaPnl -ne "n/a" -and $ControlDeltaPnl -ne "n/a") {
+    $delta = [math]::Round($TreatDeltaPnl - $ControlDeltaPnl, 4)
+    $PnlImprovement = if ($delta -ge 0) { "+$delta" } else { "$delta" }
+    $Verdict = if ($TreatDeltaPnl -gt $ControlDeltaPnl) { "IMPROVEMENT" }
+               elseif ($TreatDeltaPnl -lt $ControlDeltaPnl) { "REGRESSION" }
+               else { "NO_CHANGE" }
+}
+
+$report = @"
+
+==============================
+ DIRECTIONAL CLASSIFIER A/B
+==============================
+
+  Bootstrap cycles  : $($BootstrapDates.Count) historical dates x tickers
+  JSONL w/ features : $featuresCount
+  Eval dates        : $($EvalDates.Count) holdout dates (2025)
+
+  CONTROL  (gate off) | trades=$ControlDeltaTrades  pnl=$ControlDeltaPnl  wr=$ControlWinRate
+  TREATMENT (gate on) | trades=$TreatDeltaTrades  pnl=$TreatDeltaPnl  wr=$TreatWinRate
+
+  PnL delta (treatment - control): $PnlImprovement
+  Verdict: $Verdict
+
+"@
+
+switch ($Verdict) {
+    "IMPROVEMENT" {
+        $report += @"
+  [ACTION] Gate shows positive PnL impact.
+           To enable permanently:
+             Set directional_classifier.enabled: true
+             in config\signal_routing_config.yml
+"@
+    }
+    "REGRESSION" {
+        $report += @"
+  [INFO] Gate shows PnL regression -- classifier needs more training data.
+         Continue accumulating JSONL entries and re-run this script.
+"@
+    }
+    default {
+        $report += @"
+  [INFO] Classifier was not trained (cold start) or no trades generated.
+         Need >= 60 labeled examples. Check logs\directional_training_latest.json
+"@
+    }
+}
+
+$report += @"
+
+  Errors (non-fatal): $Errors
+  Full log  : $LogFile
+  Summary   : $SummaryFile
+
+  Next steps:
+    python scripts\update_platt_outcomes.py
+    python scripts\production_audit_gate.py --allow-inconclusive-lift
+    powershell -ExecutionPolicy Bypass -File bash\train_directional_classifier.ps1
+
+"@
+
+Write-Host $report
+Add-Content -Path $LogFile    -Value $report -Encoding UTF8
+Set-Content  -Path $SummaryFile -Value $report -Encoding UTF8
+
+exit 0
