@@ -369,3 +369,150 @@ def test_model_confidence_variance_screening_does_not_reward_higher_variance():
     }
     confidence = derive_model_confidence(summaries)
     assert confidence["mssa_rl"] < confidence["samossa"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8.6 — ensemble index sync
+# ---------------------------------------------------------------------------
+
+def _make_coordinator(weights: Dict[str, float]) -> EnsembleCoordinator:
+    config = EnsembleConfig(
+        enabled=True,
+        candidate_weights=[weights],
+    )
+    coordinator = EnsembleCoordinator(config)
+    coordinator.selected_weights = weights
+    return coordinator
+
+
+class TestEnsembleIndexSync:
+    """Phase 8.6: blend_forecasts() must detect and recover from index mismatches."""
+
+    def _aligned_series(self, n: int = 5, offset: int = 0) -> pd.Series:
+        idx = pd.RangeIndex(start=offset, stop=offset + n, name="horizon")
+        return pd.Series(np.ones(n) * 1.0, index=idx)
+
+    def test_aligned_inputs_no_mismatch_flag(self):
+        """Perfectly aligned series: ensemble_index_mismatch must NOT be set."""
+        coordinator = _make_coordinator({"garch": 0.5, "samossa": 0.5})
+        s = self._aligned_series(5)
+        result = coordinator.blend_forecasts(
+            model_series={"garch": s.copy(), "samossa": s.copy()},
+            lower_bounds={"garch": None, "samossa": None},
+            upper_bounds={"garch": None, "samossa": None},
+        )
+        assert result is not None
+        assert "ensemble_index_mismatch" not in result
+
+    def test_mismatched_length_sets_flag(self):
+        """Critically mismatched lengths (1/5 overlap < 50%): ensemble_index_mismatch=True."""
+        coordinator = _make_coordinator({"garch": 0.5, "samossa": 0.5})
+        # garch: 0..4 (len=5), samossa: 4..8 (len=5) → intersection={4} (1 pt = 20% < 50%)
+        garch_s = self._aligned_series(5, offset=0)    # 0..4
+        samossa_s = self._aligned_series(5, offset=4)  # 4..8
+        result = coordinator.blend_forecasts(
+            model_series={"garch": garch_s, "samossa": samossa_s},
+            lower_bounds={"garch": None, "samossa": None},
+            upper_bounds={"garch": None, "samossa": None},
+        )
+        assert result is not None
+        assert result.get("ensemble_index_mismatch") is True
+
+    def test_mismatched_index_values_sets_flag(self):
+        """Completely non-overlapping indices: ensemble_index_mismatch=True."""
+        coordinator = _make_coordinator({"garch": 0.5, "samossa": 0.5})
+        # garch: 0..4, samossa: 100..104 → empty intersection
+        result = coordinator.blend_forecasts(
+            model_series={
+                "garch": self._aligned_series(5, offset=0),     # 0..4
+                "samossa": self._aligned_series(5, offset=100), # 100..104
+            },
+            lower_bounds={"garch": None, "samossa": None},
+            upper_bounds={"garch": None, "samossa": None},
+        )
+        assert result is not None
+        assert result.get("ensemble_index_mismatch") is True
+
+    def test_partial_overlap_within_threshold_no_flag(self):
+        """3/5 overlap is 60% > 50% threshold — must NOT flag (expected partial overlap)."""
+        coordinator = _make_coordinator({"garch": 0.5, "samossa": 0.5})
+        # garch: 0..4, samossa: 2..6 → intersection 2..4 = 3 pts (60%)
+        garch_s = self._aligned_series(5, offset=0)
+        samossa_s = self._aligned_series(5, offset=2)
+        result = coordinator.blend_forecasts(
+            model_series={"garch": garch_s, "samossa": samossa_s},
+            lower_bounds={"garch": None, "samossa": None},
+            upper_bounds={"garch": None, "samossa": None},
+        )
+        assert result is not None
+        assert "ensemble_index_mismatch" not in result
+
+    def test_mismatch_recovery_uses_intersection(self):
+        """On critical mismatch, blended forecast contains only the intersection rows."""
+        coordinator = _make_coordinator({"garch": 0.5, "samossa": 0.5})
+        # garch: 0..4 (5 pts), samossa: 4..8 (5 pts) → intersection={4} (20% < 50%)
+        garch_s = pd.Series([10.0, 11.0, 12.0, 13.0, 14.0], index=range(5))
+        samossa_s = pd.Series([20.0, 21.0, 22.0, 23.0, 24.0], index=range(4, 9))
+        result = coordinator.blend_forecasts(
+            model_series={"garch": garch_s, "samossa": samossa_s},
+            lower_bounds={"garch": None, "samossa": None},
+            upper_bounds={"garch": None, "samossa": None},
+        )
+        assert result is not None
+        blended_idx = set(result["forecast"].index)
+        assert blended_idx == {4}, (
+            f"Expected intersection {{4}} but got {blended_idx}"
+        )
+
+    def test_single_model_no_mismatch_check(self):
+        """Single contributing model: no comparison possible, flag must not be set."""
+        coordinator = _make_coordinator({"garch": 1.0})
+        result = coordinator.blend_forecasts(
+            model_series={"garch": self._aligned_series(5)},
+            lower_bounds={"garch": None},
+            upper_bounds={"garch": None},
+        )
+        assert result is not None
+        assert "ensemble_index_mismatch" not in result
+
+    def test_mismatch_flag_propagated_to_forecast_bundle(self, monkeypatch):
+        """forecaster._build_ensemble_forecast() propagates flag into forecast_bundle."""
+        from forcester_ts.forecaster import TimeSeriesForecaster
+        import forcester_ts.ensemble as _ens_mod
+
+        idx = pd.RangeIndex(3, name="horizon")
+        fake_blend = {
+            "forecast": pd.Series([1.0, 1.0, 1.0], index=idx),
+            "lower_ci": None,
+            "upper_ci": None,
+            "ensemble_index_mismatch": True,
+        }
+
+        # Patch EnsembleCoordinator.blend_forecasts to return our fake result
+        monkeypatch.setattr(
+            _ens_mod.EnsembleCoordinator,
+            "blend_forecasts",
+            lambda self, *a, **kw: fake_blend,
+        )
+        # Also patch select_weights to return something valid
+        monkeypatch.setattr(
+            _ens_mod.EnsembleCoordinator,
+            "select_weights",
+            lambda self, conf: ({"samossa": 1.0}, 0.8),
+        )
+
+        forecaster = TimeSeriesForecaster()
+        fake_results = {
+            "samossa_forecast": {
+                "forecast": pd.Series([1.0, 1.0, 1.0], index=idx),
+                "lower_ci": None,
+                "upper_ci": None,
+            }
+        }
+        bundle_result = forecaster._build_ensemble(fake_results)
+        assert bundle_result is not None, "Expected a bundle result"
+        fb = bundle_result.get("forecast_bundle", {})
+        meta = bundle_result.get("metadata", {})
+        assert fb.get("ensemble_index_mismatch") is True or meta.get("ensemble_index_mismatch") is True, (
+            "ensemble_index_mismatch flag should be propagated into forecast_bundle or metadata"
+        )

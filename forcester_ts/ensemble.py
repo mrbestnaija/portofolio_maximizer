@@ -299,6 +299,32 @@ class EnsembleCoordinator:
         if not contributing:
             return None
 
+        # Phase 8.6: detect critically-misaligned forecast indices.
+        # Partial date-range overlap is expected and handled by NaN-fill in _rowwise_blend.
+        # Only flag when the index intersection is < 50% of the longest contributing series,
+        # which indicates models returned entirely different horizon windows (a real bug).
+        index_mismatch = False
+        if len(contributing) > 1:
+            ref_name, ref_series = next(iter(contributing.items()))
+            all_indices = [s.index for s in contributing.values()]
+            max_len = max(len(s) for s in contributing.values())
+            common_idx = all_indices[0]
+            for idx in all_indices[1:]:
+                common_idx = common_idx.intersection(idx)
+            if len(common_idx) < max_len * 0.5:
+                mismatched_models = [
+                    m for m, s in contributing.items()
+                    if m != ref_name and (len(s) != len(ref_series) or not s.index.equals(ref_series.index))
+                ]
+                index_mismatch = True
+                logger.error(
+                    "Phase 8.6 ensemble index mismatch: models %s have critically different "
+                    "index from reference '%s' (intersection=%d < 50%% of max=%d). "
+                    "Using intersection to recover.",
+                    mismatched_models, ref_name, len(common_idx), max_len,
+                )
+                contributing = {m: s.reindex(common_idx) for m, s in contributing.items()}
+
         combined_df = pd.DataFrame(contributing)
         weights = pd.Series(self.selected_weights, dtype=float)
         aligned_weights = weights.reindex(combined_df.columns).fillna(0.0)
@@ -326,11 +352,14 @@ class EnsembleCoordinator:
         lower = _blend_ci(lower_bounds)
         upper = _blend_ci(upper_bounds)
 
-        return {
+        result: Dict[str, Any] = {
             "forecast": forecast,
             "lower_ci": lower,
             "upper_ci": upper,
         }
+        if index_mismatch:
+            result["ensemble_index_mismatch"] = True
+        return result
 
 
 def canonical_model_key(key: str) -> str:

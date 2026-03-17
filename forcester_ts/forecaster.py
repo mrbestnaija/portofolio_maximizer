@@ -1857,12 +1857,16 @@ class TimeSeriesForecaster:
             "selection_score": score,
             "primary_model": primary_model,
         }
+        if blended.get("ensemble_index_mismatch"):
+            forecast_bundle["ensemble_index_mismatch"] = True
         metadata = {
             "weights": weights,
             "confidence": confidence,
             "selection_score": score,
             "primary_model": primary_model,
         }
+        if blended.get("ensemble_index_mismatch"):
+            metadata["ensemble_index_mismatch"] = True
         preselection_gate = self._preselection_default_gate()
         metadata["preselection_gate"] = preselection_gate
         metadata["allow_as_default"] = bool(preselection_gate.get("allow_as_default", True))
