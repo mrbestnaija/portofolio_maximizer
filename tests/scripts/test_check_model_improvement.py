@@ -77,8 +77,11 @@ class TestLayer1ForecastQuality:
         # 2 of 3 fixtures have lift (healthy: 1.30<1.40, ensemble_lift: 1.60<1.85)
         # samossa_da_zero: ensemble 1.25 > best_single 1.10 -> no lift
         assert result.metrics["lift_fraction_global"] == pytest.approx(2 / 3, abs=0.02)
+        assert result.metrics["baseline_model"] == "BEST_SINGLE"
+        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
         # Only 3 windows < warn_coverage_threshold=50 -> WARN
         assert result.status == "WARN"
+        assert "baseline=BEST_SINGLE" in result.summary
 
     def test_warns_when_samossa_da_zero_pct_exceeds_threshold(self, tmp_path):
         """All 3 fixture files replaced with copies having SAMOSSA DA=0.0."""
@@ -111,6 +114,24 @@ class TestLayer1ForecastQuality:
         assert result.metrics["n_used_windows"] == 3
         assert result.status == "WARN"
         assert "coverage_threshold" in result.summary or "n_used" in result.summary
+
+    def test_zero_usable_windows_preserve_contract_and_emit_finite_metrics(self, tmp_path):
+        audit = {
+            "dataset": {"ticker": "AAPL", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+            "summary": {"forecast_horizon": 5},
+            "artifacts": {},
+        }
+        (tmp_path / "forecast_audit_missing_metrics.json").write_text(json.dumps(audit), encoding="utf-8")
+
+        result = run_layer1_forecast_quality(tmp_path)
+
+        assert result.status == "SKIP"
+        assert result.metrics["baseline_model"] == "BEST_SINGLE"
+        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
+        assert result.metrics["lift_mean"] is None
+        assert result.metrics["lift_ci_low"] is None
+        assert result.metrics["lift_ci_high"] is None
+        assert result.metrics["lift_ci_insufficient_data"] is True
 
     def test_fails_when_ci_definitively_negative(self, tmp_path):
         """25 windows where ensemble RMSE > best-single RMSE → CI fully below zero → FAIL."""

@@ -119,8 +119,19 @@ class TimeSeriesForecaster:
                 len(self.config.ensemble_kwargs.get('candidate_weights', [])),
             )
 
+        # Strip forecaster-routing keys (e.g. audit_log_dir) that are not
+        # EnsembleConfig dataclass fields.  Callers may embed routing hints
+        # inside ensemble_kwargs for convenience; the EnsembleConfig boundary
+        # must not receive unknown kwargs or a TypeError silently kills the
+        # whole forecaster while the pipeline reports success with 0 forecasts.
+        import dataclasses as _dc
+        _ensemble_valid_fields = {f.name for f in _dc.fields(EnsembleConfig)}
+        _ensemble_kw = {
+            k: v for k, v in self.config.ensemble_kwargs.items()
+            if k in _ensemble_valid_fields
+        }
         self._ensemble_config = (
-            EnsembleConfig(**self.config.ensemble_kwargs)
+            EnsembleConfig(**_ensemble_kw)
             if self.config.ensemble_enabled
             else EnsembleConfig(enabled=False)
         )
@@ -193,7 +204,9 @@ class TimeSeriesForecaster:
         else:
             audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
         if audit_dir is None:
-            self._audit_dir = Path("logs/forecast_audits")
+            _default_root = Path("logs/forecast_audits")
+            _prod_subdir = _default_root / "production"
+            self._audit_dir = _prod_subdir if _prod_subdir.exists() else _default_root
         else:
             audit_text = str(audit_dir).strip()
             if audit_text.lower() in {"", "0", "off", "none", "false"}:
