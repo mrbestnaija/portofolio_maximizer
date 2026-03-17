@@ -160,7 +160,13 @@ class TestSARIMAXXInstrumentation:
         forecaster.fit(price_series=price_series, returns_series=returns_series)
         report = forecaster.get_instrumentation_report()
         exog = (report.get("artifacts") or {}).get("sarimax_exogenous") or {}
-        assert exog.get("columns") == ["ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"]
+        # Phase 8.4: VIF screening may prune correlated features; verify retained
+        # columns are a subset of the original 5 core features.
+        _all_core = {"ret_1", "vol_10", "mom_5", "ema_gap_10", "zscore_20"}
+        assert set(exog.get("columns", [])).issubset(_all_core), (
+            f"Unexpected columns after VIF screening: {exog.get('columns')}"
+        )
+        assert len(exog.get("columns", [])) >= 1, "VIF screening must retain at least one feature"
         sarimax_summary = (forecaster.get_component_summaries() or {}).get("sarimax") or {}
         assert sarimax_summary.get("aic") is not None
         assert sarimax_summary.get("order") is not None
@@ -269,6 +275,106 @@ class TestMSSARL:
         change_points = diagnostics.get("change_points", [])
         change_points = [pd.to_datetime(cp) for cp in change_points]
         assert any(abs((cp - dates[120]).days) <= 5 for cp in change_points)
+
+
+@pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
+class TestDropHighVifFeatures:
+    """Phase 8.4 — VIF screening on SARIMAX exogenous features."""
+
+    def _make_forecaster(self) -> "TimeSeriesForecaster":
+        from forcester_ts.forecaster import TimeSeriesForecaster
+        return TimeSeriesForecaster()
+
+    def _collinear_exog(self) -> "pd.DataFrame":
+        """Return a DataFrame where col_b is almost identical to col_a (high VIF)."""
+        np.random.seed(0)
+        n = 200
+        base = np.random.normal(0, 1, n)
+        return pd.DataFrame(
+            {
+                "col_a": base,
+                "col_b": base + np.random.normal(0, 0.01, n),  # nearly identical
+                "col_c": np.random.normal(0, 1, n),             # independent
+            }
+        )
+
+    def _uncorrelated_exog(self) -> "pd.DataFrame":
+        np.random.seed(1)
+        n = 200
+        return pd.DataFrame(
+            {
+                "feat_x": np.random.normal(0, 1, n),
+                "feat_y": np.random.normal(5, 2, n),
+                "feat_z": np.random.normal(-3, 0.5, n),
+            }
+        )
+
+    def test_collinear_pair_is_pruned(self) -> None:
+        """col_a and col_b are nearly identical -> at least one should be dropped."""
+        f = self._make_forecaster()
+        exog = self._collinear_exog()
+        result = f._drop_high_vif_features(exog, threshold=10.0, max_features=3)
+        # After VIF screening, col_a and col_b should not both survive
+        assert not (("col_a" in result.columns) and ("col_b" in result.columns)), (
+            "Collinear pair should have been pruned but both survived VIF screening"
+        )
+
+    def test_uncorrelated_features_retained(self) -> None:
+        """Independently-drawn features should all have low VIF and be retained."""
+        f = self._make_forecaster()
+        exog = self._uncorrelated_exog()
+        result = f._drop_high_vif_features(exog, threshold=10.0, max_features=3)
+        # Independent features should survive (VIF close to 1)
+        assert result.shape[1] == 3
+
+    def test_max_features_cap_respected(self) -> None:
+        """max_features=2 must limit output columns even if VIFs are all below threshold."""
+        f = self._make_forecaster()
+        exog = self._uncorrelated_exog()
+        result = f._drop_high_vif_features(exog, threshold=10.0, max_features=2)
+        assert result.shape[1] <= 2
+
+    def test_single_column_passthrough(self) -> None:
+        """A single-column DataFrame cannot be pruned; must be returned as-is."""
+        f = self._make_forecaster()
+        exog = pd.DataFrame({"only": np.random.normal(0, 1, 100)})
+        result = f._drop_high_vif_features(exog, threshold=10.0, max_features=3)
+        assert list(result.columns) == ["only"]
+
+    def test_output_is_subset_of_input_columns(self) -> None:
+        """All retained columns must come from the original DataFrame."""
+        f = self._make_forecaster()
+        exog = self._collinear_exog()
+        result = f._drop_high_vif_features(exog)
+        assert set(result.columns).issubset(set(exog.columns))
+
+    def test_returns_dataframe_not_array(self) -> None:
+        f = self._make_forecaster()
+        exog = self._uncorrelated_exog()
+        result = f._drop_high_vif_features(exog)
+        assert isinstance(result, pd.DataFrame)
+
+    def test_vol10_zscore20_pruned_in_sarimax_exog(self) -> None:
+        """vol_10 and zscore_20 are both driven by realized volatility.
+
+        When fed through _build_sarimax_exogenous -> _drop_high_vif_features,
+        at least one of the two should be pruned by VIF > 10 screening.
+        """
+        np.random.seed(42)
+        n = 300
+        dates = pd.date_range("2020-01-01", periods=n, freq="D")
+        prices = pd.Series(100 + np.cumsum(np.random.normal(0, 1, n)), index=dates)
+        returns = prices.pct_change()
+
+        f = self._make_forecaster()
+        exog = f._build_sarimax_exogenous(price_series=prices, returns_series=returns)
+        # After VIF screening, vol_10 and zscore_20 should not both be present
+        # (they are highly correlated in typical price series)
+        surviving = set(exog.columns)
+        assert not (("vol_10" in surviving) and ("zscore_20" in surviving)), (
+            f"Expected VIF screening to remove one of vol_10/zscore_20, "
+            f"but both survived: {surviving}"
+        )
 
 
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")

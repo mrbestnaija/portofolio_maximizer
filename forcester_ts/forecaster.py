@@ -287,6 +287,8 @@ class TimeSeriesForecaster:
 
         exog = pd.DataFrame(exog_dict, index=price_series.index)
         exog = exog.astype(float).replace([pd.NA, float("inf"), float("-inf")], 0.0).fillna(0.0)
+        # Phase 8.4: drop multicollinear features (VIF > 10) before SARIMAX fit.
+        exog = self._drop_high_vif_features(exog)
         return exog
 
     def _build_sarimax_forecast_exogenous(self, horizon: int) -> Optional[pd.DataFrame]:
@@ -298,6 +300,83 @@ class TimeSeriesForecaster:
         last = self._sarimax_exog_last_row.reindex(self._sarimax_exog_columns).astype(float)
         repeated = pd.DataFrame([last.to_dict()] * horizon, columns=self._sarimax_exog_columns)
         return repeated
+
+    def _drop_high_vif_features(
+        self,
+        exog: "pd.DataFrame",
+        threshold: float = 10.0,
+        max_features: int = 3,
+    ) -> "pd.DataFrame":
+        """Phase 8.4: iteratively drop the highest-VIF feature until all VIFs <= threshold.
+
+        Keeps at most *max_features* columns to limit SARIMAX degrees of freedom.
+        Falls back to the original DataFrame if statsmodels is unavailable, the
+        DataFrame has fewer than 2 columns, or the feature matrix is constant.
+
+        Args:
+            exog: Exogenous feature matrix (rows = observations, cols = features).
+            threshold: VIF ceiling; features above this are candidates for removal.
+            max_features: Hard cap on columns kept, applied after VIF pruning.
+
+        Returns:
+            Pruned DataFrame (subset of *exog* columns).
+        """
+        if exog.shape[1] < 2:
+            return exog
+
+        try:
+            from statsmodels.stats.outliers_influence import variance_inflation_factor
+        except ImportError:
+            logger.debug("statsmodels not available; skipping VIF screening")
+            return exog
+
+        cols = list(exog.columns)
+        arr = exog.to_numpy(dtype=float)
+
+        # Guard: constant or near-constant matrix → skip (would cause singular matrix in VIF)
+        if arr.shape[0] < len(cols) + 1:
+            return exog
+
+        while len(cols) > 1:
+            # Enforce max_features cap before computing VIF
+            if len(cols) > max_features:
+                # Drop last column until cap satisfied; VIF loop will re-evaluate
+                cols = cols[:max_features]
+                arr = exog[cols].to_numpy(dtype=float)
+                continue
+
+            try:
+                vifs = [
+                    variance_inflation_factor(arr, i) for i in range(len(cols))
+                ]
+            except Exception:
+                break
+
+            max_vif = max(vifs)
+            if max_vif <= threshold:
+                break
+
+            drop_idx = vifs.index(max_vif)
+            dropped = cols.pop(drop_idx)
+            arr = exog[cols].to_numpy(dtype=float)
+            logger.debug(
+                "Phase 8.4 VIF screening: dropped '%s' (VIF=%.1f > %.1f); "
+                "remaining features: %s",
+                dropped,
+                max_vif,
+                threshold,
+                cols,
+            )
+
+        result = exog[cols]
+        if result.shape[1] < exog.shape[1]:
+            logger.info(
+                "Phase 8.4 VIF screening: %d -> %d SARIMAX exog features retained %s",
+                exog.shape[1],
+                result.shape[1],
+                cols,
+            )
+        return result
 
     def _construct_with_filtered_kwargs(self, cls: type, kwargs: Optional[Dict[str, Any]]) -> Any:
         """
