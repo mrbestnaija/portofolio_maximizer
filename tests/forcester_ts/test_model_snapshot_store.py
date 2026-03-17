@@ -234,3 +234,124 @@ class TestListAndPrune:
         assert snap["n_obs"] == 42
         assert snap["aic"] == pytest.approx(123.4)
         assert snap["metadata"]["p"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase 8.5 — version fingerprint sidecar (.meta.json)
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+
+
+class TestVersionFingerprint:
+    """save() writes .meta.json; load() validates Python version compatibility."""
+
+    def test_save_writes_meta_sidecar(self, store):
+        store.save("AAPL", "GARCH", None, {"x": 1}, n_obs=10, data_hash="h", aic=0.0)
+        pkl_files = list(store._dir.glob("*.pkl"))
+        assert len(pkl_files) == 1
+        meta_path = store._meta_path_for(pkl_files[0])
+        assert meta_path.exists(), "Expected .meta.json sidecar alongside .pkl"
+
+    def test_meta_sidecar_contains_python_version(self, store):
+        store.save("AAPL", "GARCH", None, {"x": 1}, n_obs=10, data_hash="h", aic=0.0)
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta = json.loads(store._meta_path_for(pkl_path).read_text(encoding="utf-8"))
+        assert "python_version" in meta
+        assert "python_major_minor" in meta
+        assert meta["python_major_minor"] == f"{_sys.version_info.major}.{_sys.version_info.minor}"
+
+    def test_meta_sidecar_contains_library_versions(self, store):
+        store.save("AAPL", "GARCH", None, {"x": 1}, n_obs=10, data_hash="h", aic=0.0)
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta = json.loads(store._meta_path_for(pkl_path).read_text(encoding="utf-8"))
+        assert "libraries" in meta
+        assert isinstance(meta["libraries"], dict)
+        # At minimum numpy and joblib should be present
+        assert "numpy" in meta["libraries"]
+        assert "joblib" in meta["libraries"]
+
+    def test_meta_sidecar_contains_model_provenance(self, store):
+        store.save("MSFT", "SAMOSSA", "TRENDING", {"v": 2}, n_obs=50, data_hash="h2", aic=1.0)
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta = json.loads(store._meta_path_for(pkl_path).read_text(encoding="utf-8"))
+        assert meta["ticker"] == "MSFT"
+        assert meta["model_type"] == "SAMOSSA"
+        assert meta["regime"] == "TRENDING"
+        assert meta.get("schema_version") == 1
+
+    def test_load_succeeds_with_matching_meta(self, store):
+        obj = {"ok": True}
+        store.save("AAPL", "GARCH", None, obj, n_obs=10, data_hash="h", aic=0.0)
+        loaded = store.load("AAPL", "GARCH", None, current_n_obs=10, current_data_hash="h")
+        assert loaded == obj
+
+    def test_load_warns_but_succeeds_for_legacy_snapshot_without_meta(self, store, caplog):
+        """Snapshot with no .meta.json → warning emitted, load proceeds."""
+        import logging
+        obj = {"legacy": True}
+        store.save("AAPL", "GARCH", None, obj, n_obs=10, data_hash="h", aic=0.0)
+        # Remove the meta sidecar to simulate a legacy snapshot
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta_path = store._meta_path_for(pkl_path)
+        meta_path.unlink()
+
+        with caplog.at_level(logging.WARNING, logger="forcester_ts.model_snapshot_store"):
+            loaded = store.load("AAPL", "GARCH", None, current_n_obs=10, current_data_hash="h")
+        assert loaded == obj
+        assert any("legacy" in r.message or "meta sidecar" in r.message for r in caplog.records)
+
+    def test_load_blocked_on_python_major_version_mismatch(self, store, monkeypatch):
+        """Different Python major version → load returns None."""
+        obj = {"critical": True}
+        store.save("AAPL", "GARCH", None, obj, n_obs=10, data_hash="h", aic=0.0)
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta_path = store._meta_path_for(pkl_path)
+        # Overwrite meta with a different major version
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["python_major_minor"] = "2.7"  # incompatible major
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+        loaded = store.load("AAPL", "GARCH", None, current_n_obs=10, current_data_hash="h")
+        assert loaded is None, "Should refuse to load when Python major version mismatches"
+
+    def test_load_warns_but_proceeds_on_minor_version_mismatch(self, store, caplog, monkeypatch):
+        """Different Python minor version within same major → warning, load proceeds."""
+        import logging
+        obj = {"data": 42}
+        store.save("AAPL", "GARCH", None, obj, n_obs=10, data_hash="h", aic=0.0)
+        pkl_path = next(store._dir.glob("*.pkl"))
+        meta_path = store._meta_path_for(pkl_path)
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        # Use same major, different minor
+        current_major = _sys.version_info.major
+        different_minor = _sys.version_info.minor + 1
+        meta["python_major_minor"] = f"{current_major}.{different_minor}"
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="forcester_ts.model_snapshot_store"):
+            loaded = store.load("AAPL", "GARCH", None, current_n_obs=10, current_data_hash="h")
+        assert loaded == obj
+        assert any("minor" in r.message for r in caplog.records)
+
+    def test_prune_removes_orphan_meta_json(self, store):
+        """prune_old() deletes .meta.json files with no corresponding .pkl."""
+        store.save("AAPL", "GARCH", None, {"x": 1}, n_obs=5, data_hash="h", aic=0.0)
+        # Create an orphan .meta.json (no .pkl counterpart)
+        orphan_meta = store._dir / "ORPHAN_20260101.meta.json"
+        orphan_meta.write_text('{"orphan": true}', encoding="utf-8")
+        store.prune_old()
+        assert not orphan_meta.exists(), "Orphan .meta.json should have been pruned"
+
+    def test_prune_removes_meta_sidecar_alongside_orphan_pkl(self, store):
+        """When an orphan .pkl is pruned, its .meta.json is also deleted."""
+        store.save("AAPL", "GARCH", None, {"x": 1}, n_obs=5, data_hash="h", aic=0.0)
+        # Create an orphan pkl + sidecar not referenced by manifest
+        orphan_pkl = store._dir / "ORPHAN_20260101.pkl"
+        orphan_pkl.write_bytes(b"fake")
+        orphan_meta = store._meta_path_for(orphan_pkl)
+        orphan_meta.write_text('{"orphan": true}', encoding="utf-8")
+
+        store.prune_old()
+        assert not orphan_pkl.exists()
+        assert not orphan_meta.exists()

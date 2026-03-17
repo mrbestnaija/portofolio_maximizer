@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,28 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.=-]+$")
+
+# Phase 8.5: libraries whose versions are captured in the meta sidecar.
+_META_LIBRARIES = ("joblib", "numpy", "pandas", "statsmodels", "arch", "scipy")
+_META_SCHEMA_VERSION = 1
+
+
+def _collect_version_fingerprint() -> dict:
+    """Return Python version + key library versions for the meta sidecar."""
+    info = sys.version_info
+    fingerprint: dict = {
+        "schema_version": _META_SCHEMA_VERSION,
+        "python_version": f"{info.major}.{info.minor}.{info.micro}",
+        "python_major_minor": f"{info.major}.{info.minor}",
+        "libraries": {},
+    }
+    for lib in _META_LIBRARIES:
+        try:
+            import importlib.metadata as _im
+            fingerprint["libraries"][lib] = _im.version(lib)
+        except Exception:
+            fingerprint["libraries"][lib] = "unknown"
+    return fingerprint
 
 
 class ModelSnapshotStore:
@@ -90,6 +113,11 @@ class ModelSnapshotStore:
     # Security
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _meta_path_for(pkl_path: Path) -> Path:
+        """Return the .meta.json sidecar path alongside a .pkl file."""
+        return pkl_path.with_name(pkl_path.stem + ".meta.json")
+
     def _safe_pkl_path(self, filename: str) -> Path:
         """
         Resolve filename relative to _dir and assert it stays inside _dir.
@@ -148,6 +176,22 @@ class ModelSnapshotStore:
         except Exception as exc:
             logger.warning("ModelSnapshotStore.save failed to dump %s: %s", filename, exc)
             return pkl_path
+
+        # Phase 8.5: write version fingerprint sidecar alongside the .pkl.
+        meta = _collect_version_fingerprint()
+        meta["ticker"] = str(ticker)
+        meta["model_type"] = str(model_type)
+        meta["regime"] = str(regime or "NONE")
+        meta["saved_at"] = datetime.utcnow().isoformat() + "Z"
+        meta_path = self._meta_path_for(pkl_path)
+        try:
+            tmp_meta = meta_path.with_suffix(".tmp")
+            tmp_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            tmp_meta.replace(meta_path)
+        except Exception as exc:
+            logger.warning(
+                "ModelSnapshotStore: failed to write meta sidecar for %s: %s", filename, exc
+            )
 
         manifest = self._load_manifest()
         key = self._make_key(ticker, model_type, regime)
@@ -238,6 +282,40 @@ class ModelSnapshotStore:
         if not pkl_path.exists():
             return None
 
+        # Phase 8.5: version compatibility check from .meta.json sidecar.
+        meta_path = self._meta_path_for(pkl_path)
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                saved_py = meta.get("python_major_minor", "")
+                current_py = f"{sys.version_info.major}.{sys.version_info.minor}"
+                if saved_py:
+                    saved_major = saved_py.split(".")[0]
+                    current_major = str(sys.version_info.major)
+                    if saved_major != current_major:
+                        logger.error(
+                            "ModelSnapshotStore: Python major version mismatch for %s "
+                            "(saved=%s, current=%s) — refusing to load",
+                            filename, saved_py, current_py,
+                        )
+                        return None
+                    if saved_py != current_py:
+                        logger.warning(
+                            "ModelSnapshotStore: Python minor version mismatch for %s "
+                            "(saved=%s, current=%s) — loading anyway",
+                            filename, saved_py, current_py,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "ModelSnapshotStore: could not read meta sidecar for %s: %s", filename, exc
+                )
+        else:
+            logger.warning(
+                "ModelSnapshotStore: no meta sidecar for %s — legacy snapshot, "
+                "version compatibility unknown",
+                filename,
+            )
+
         try:
             obj = joblib.load(pkl_path)
             logger.debug(
@@ -273,13 +351,28 @@ class ModelSnapshotStore:
             if isinstance(entry, dict) and isinstance(entry.get("path"), str)
         }
 
-        # Delete all pkl files NOT in manifest (orphans)
+        # Delete all pkl files NOT in manifest (orphans) + their meta sidecars.
         deleted = 0
         for pkl_file in self._dir.glob("*.pkl"):
             if pkl_file.name not in active_files:
                 try:
                     pkl_file.unlink()
                     deleted += 1
+                except Exception:
+                    pass
+                meta_file = self._meta_path_for(pkl_file)
+                if meta_file.exists():
+                    try:
+                        meta_file.unlink()
+                    except Exception:
+                        pass
+
+        # Also delete any orphan .meta.json files with no corresponding .pkl.
+        for meta_file in self._dir.glob("*.meta.json"):
+            corresponding_pkl = meta_file.with_name(meta_file.name.replace(".meta.json", ".pkl"))
+            if not corresponding_pkl.exists():
+                try:
+                    meta_file.unlink()
                 except Exception:
                     pass
 
