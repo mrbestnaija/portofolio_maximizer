@@ -2238,8 +2238,11 @@ class TimeSeriesSignalGenerator:
         pairs_conf, pairs_win = self._load_jsonl_outcome_pairs(limit=2000)
         source = "jsonl"
 
-        if len(pairs_conf) < 30:
-            # 2. Ticker-local DB fallback.
+        _j_n = len(pairs_conf)
+        _j_w = int(sum(pairs_win)) if pairs_win else 0
+        _j_l = _j_n - _j_w
+        if _j_n < 30 or _j_w < 5 or _j_l < 5:
+            # 2. Ticker-local DB fallback — also triggers when JSONL is class-imbalanced.
             db_file = Path(
                 db_path
                 or os.getenv("PORTFOLIO_DB_PATH")
@@ -2252,7 +2255,10 @@ class TimeSeriesSignalGenerator:
             )
             source = "db_local"
 
-            if len(pairs_conf) < 30 and ticker:
+            _db_n = len(pairs_conf)
+            _db_w = int(sum(pairs_win)) if pairs_win else 0
+            _db_l = _db_n - _db_w
+            if (_db_n < 30 or _db_w < 5 or _db_l < 5) and ticker:
                 # 3. Global DB fallback.
                 pairs_conf, pairs_win = self._load_realized_outcome_pairs(
                     db_file=db_file,
