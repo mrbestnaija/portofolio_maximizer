@@ -83,3 +83,8 @@ signal_routing:
   # - TIME_SERIES_PRIMARY_LLM_REDUNDANCY
   # - TIME_SERIES_ONLY
   # - LLM_ONLY (legacy mode)
+
+  directional_classifier:
+    enabled: false                    # Phase 9: inactive until training set >= 60 labeled examples
+    p_up_threshold_buy: 0.55          # P(price_up) must exceed this for BUY to pass gate
+    p_up_threshold_sell: 0.55         # P(price_down) = 1 - p_up must exceed this for SELL

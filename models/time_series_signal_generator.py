@@ -138,6 +138,8 @@ class TimeSeriesSignal:
     upper_ci: Optional[float] = None
     signal_id: Optional[str] = None  # Phase 7.13-A2: globally unique ts_signal_id string
     confidence_calibrated: Optional[float] = None  # Pure Platt-scaled probability (before raw blend)
+    p_up: Optional[float] = None                # Phase 9: directional probability P(price_up)
+    directional_gate_applied: bool = False      # Phase 9: True if classifier demoted action to HOLD
 
 
 class TimeSeriesSignalGenerator:
@@ -264,6 +266,10 @@ class TimeSeriesSignalGenerator:
         # Include requested baseline so baseline-policy changes never reuse stale math.
         self._forecast_edge_cache: Dict[Tuple[str, str, int, str], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
 
+        # Phase 9: directional classifier gate (lazy-loaded; off by default)
+        self._directional_classifier: Optional[Any] = None
+        self._signal_routing_config: Optional[Dict[str, Any]] = self._load_signal_routing_config()
+
         logger.info(
             "Time Series Signal Generator initialized "
             "(confidence_threshold=%.2f, min_return=%.2f%%, max_risk=%.2f, quant_validation=%s)",
@@ -316,6 +322,42 @@ class TimeSeriesSignalGenerator:
             return payload
 
         return {}
+
+    def _load_signal_routing_config(self) -> Optional[Dict[str, Any]]:
+        """Phase 9: Load the full signal_routing section from signal_routing_config.yml."""
+        cfg_path = Path("config/signal_routing_config.yml")
+        if not cfg_path.exists():
+            return None
+        try:
+            with cfg_path.open("r", encoding="utf-8") as handle:
+                payload = yaml.safe_load(handle) or {}
+            routing = payload.get("signal_routing") or {}
+            return dict(routing) if isinstance(routing, dict) else None
+        except Exception as exc:
+            logger.debug("Unable to load signal routing config: %s", exc)
+            return None
+
+    def _directional_gate_enabled(self) -> bool:
+        """Phase 9: Read feature flag from signal_routing_config.yml."""
+        try:
+            cfg = self._signal_routing_config or {}
+            dc_cfg = cfg.get("directional_classifier") or {}
+            return bool(dc_cfg.get("enabled", False))
+        except Exception:
+            return False
+
+    def _score_directional(self, features: Dict[str, Any]) -> Optional[float]:
+        """Phase 9: Score directional probability. Returns None when gate is disabled or cold-start."""
+        # Feature flag: directional classifier must be explicitly enabled
+        if not self._directional_gate_enabled():
+            return None
+        if self._directional_classifier is None:
+            try:
+                from forcester_ts.directional_classifier import DirectionalClassifier
+                self._directional_classifier = DirectionalClassifier()
+            except Exception:
+                return None
+        return self._directional_classifier.score(features)
 
     def _build_forecast_edge_forecaster_config(
         self,
@@ -592,6 +634,18 @@ class TimeSeriesSignalGenerator:
             model_agreement = self._check_model_agreement(forecast_bundle)
             diagnostics = self._evaluate_diagnostics_details(forecast_bundle)
 
+            # Phase 9: extract classifier features while all signal-time data is available.
+            _clf_features = self._extract_classifier_features(
+                forecast_bundle=forecast_bundle,
+                current_price=current_price,
+                expected_return=expected_return,
+                lower_ci=lower_ci,
+                upper_ci=upper_ci,
+                snr=snr,
+                model_agreement=model_agreement,
+                market_data=market_data,
+            )
+
             # Calculate confidence score (discriminative: net edge + uncertainty + model quality).
             confidence = self._calculate_confidence(
                 expected_return=expected_return,
@@ -634,6 +688,28 @@ class TimeSeriesSignalGenerator:
                 min_expected_return=min_expected_return,
                 max_risk_score=max_risk_score,
             )
+
+            # Phase 9: directional gate (inactive by default; enabled via config).
+            _p_up = self._score_directional(_clf_features)
+            _directional_gate_applied = False
+            if _p_up is not None and action != "HOLD":
+                _dc_cfg = (self._signal_routing_config or {}).get("directional_classifier") or {}
+                _threshold_buy = float(_dc_cfg.get("p_up_threshold_buy", 0.55))
+                _threshold_sell = float(_dc_cfg.get("p_up_threshold_sell", 0.55))
+                if action == "BUY" and _p_up < _threshold_buy:
+                    logger.info(
+                        "Phase 9 directional gate: demoting BUY to HOLD for %s (p_up=%.3f < %.3f)",
+                        ticker, _p_up, _threshold_buy,
+                    )
+                    action = "HOLD"
+                    _directional_gate_applied = True
+                elif action == "SELL" and _p_up > (1.0 - _threshold_sell):
+                    logger.info(
+                        "Phase 9 directional gate: demoting SELL to HOLD for %s (p_up=%.3f > %.3f)",
+                        ticker, _p_up, 1.0 - _threshold_sell,
+                    )
+                    action = "HOLD"
+                    _directional_gate_applied = True
 
             # Calculate target and stop loss (market_data enables ATR-based stops)
             target_price, stop_loss = self._calculate_targets(
@@ -691,6 +767,11 @@ class TimeSeriesSignalGenerator:
             provenance["pipeline_id"] = str(pipeline_id) if pipeline_id is not None else None
             if run_id is not None:
                 provenance["run_id"] = str(run_id)
+            provenance["classifier_features"] = _clf_features
+            if _p_up is not None:
+                provenance["p_up"] = _p_up
+            if _directional_gate_applied:
+                provenance["directional_gate_applied"] = True
 
             provenance['decision_context'] = {
                 'expected_return': expected_return,
@@ -731,6 +812,8 @@ class TimeSeriesSignalGenerator:
                 signal_id=self._make_ts_signal_id(),  # Phase 7.13-A2: globally unique string
                 # B5: pure Platt-scaled probability from the most recent calibration call
                 confidence_calibrated=getattr(self, '_platt_calibrated', None),
+                p_up=_p_up,
+                directional_gate_applied=_directional_gate_applied,
             )
 
             quant_profile = self._build_quant_success_profile(
@@ -1241,6 +1324,123 @@ class TimeSeriesSignalGenerator:
         )
 
         return self._clamp01(confidence)
+
+    def _extract_classifier_features(
+        self,
+        *,
+        forecast_bundle: Dict[str, Any],
+        current_price: float,
+        expected_return: float,
+        lower_ci: Optional[float],
+        upper_ci: Optional[float],
+        snr: Optional[float],
+        model_agreement: float,
+        market_data: Optional[pd.DataFrame],
+    ) -> Dict[str, Any]:
+        """Phase 9: Extract classifier feature vector for directional classifier.
+
+        All features are computable at signal time — no lookahead.
+        Missing values are represented as float('nan').
+        Feature names match forcester_ts.directional_classifier._FEATURE_NAMES.
+        """
+        nan = float("nan")
+
+        # --- A: Forecast geometry ---
+        feat: Dict[str, Any] = {
+            "ensemble_pred_return": expected_return,
+            "ci_width_normalized": (
+                (float(upper_ci) - float(lower_ci)) / float(current_price)
+                if lower_ci is not None and upper_ci is not None and current_price > 0
+                else nan
+            ),
+            "snr": snr if snr is not None else nan,
+            "model_agreement": model_agreement,
+        }
+
+        # directional_vote_fraction: fraction of available models predicting same
+        # direction as expected_return
+        direction = float(np.sign(expected_return))
+        model_vals = []
+        for key in ("sarimax_forecast", "samossa_forecast", "mssa_rl_forecast", "garch_forecast"):
+            payload = forecast_bundle.get(key)
+            if isinstance(payload, dict) and payload:
+                val = self._extract_forecast_value(payload)
+                if val is not None and current_price > 0:
+                    model_vals.append(float(np.sign(val - current_price)))
+        if model_vals and direction != 0:
+            feat["directional_vote_fraction"] = float(
+                sum(1 for v in model_vals if v == direction) / len(model_vals)
+            )
+        else:
+            feat["directional_vote_fraction"] = nan
+
+        # --- B: Per-model confidence ---
+        ensemble_metadata = forecast_bundle.get("ensemble_metadata") or {}
+        conf_dict = ensemble_metadata.get("confidence") or {} if isinstance(ensemble_metadata, dict) else {}
+        feat["garch_conf"] = float(conf_dict["garch"]) if "garch" in conf_dict else nan
+        feat["samossa_conf"] = float(conf_dict["samossa"]) if "samossa" in conf_dict else nan
+        feat["mssa_rl_conf"] = float(conf_dict["mssa_rl"]) if "mssa_rl" in conf_dict else nan
+
+        # igarch_fallback_flag: 1 if GARCH fell back to EWMA
+        garch_payload = forecast_bundle.get("garch_forecast") or {}
+        garch_summary = garch_payload.get("summary") or {} if isinstance(garch_payload, dict) else {}
+        igarch_flag = garch_summary.get("igarch_fallback") or garch_payload.get("igarch_fallback")
+        feat["igarch_fallback_flag"] = 1.0 if igarch_flag else 0.0
+
+        # samossa_evr: explained variance ratio from SAMOSSA
+        samossa_payload = forecast_bundle.get("samossa_forecast") or {}
+        samossa_summary = samossa_payload.get("summary") or {} if isinstance(samossa_payload, dict) else {}
+        evr = samossa_summary.get("explained_variance_ratio") or samossa_payload.get("explained_variance_ratio")
+        feat["samossa_evr"] = float(evr) if evr is not None else nan
+
+        # --- C: Regime and series structure ---
+        regime_features = forecast_bundle.get("regime_features") or {}
+        series_diag = forecast_bundle.get("series_diagnostics") or {}
+        if not isinstance(regime_features, dict):
+            regime_features = {}
+        if not isinstance(series_diag, dict):
+            series_diag = {}
+
+        feat["hurst_exponent"] = float(regime_features["hurst_exponent"]) if "hurst_exponent" in regime_features else nan
+        feat["trend_strength"] = float(regime_features["trend_strength"]) if "trend_strength" in regime_features else nan
+        feat["realized_vol_annualized"] = float(regime_features["realized_vol_annualized"]) if "realized_vol_annualized" in regime_features else nan
+        feat["adf_pvalue"] = float(series_diag["adf_pvalue"]) if "adf_pvalue" in series_diag else nan
+
+        # Regime one-hot encoding (4 regimes, all 4 included — no drop needed for LR with intercept)
+        detected_regime = str(forecast_bundle.get("detected_regime") or "").upper()
+        feat["regime_liquid_rangebound"] = 1.0 if "LIQUID_RANGEBOUND" in detected_regime else 0.0
+        feat["regime_moderate_trending"] = 1.0 if "MODERATE_TRENDING" in detected_regime else 0.0
+        feat["regime_high_vol_trending"] = 1.0 if "HIGH_VOL_TRENDING" in detected_regime else 0.0
+        feat["regime_crisis"] = 1.0 if "CRISIS" in detected_regime else 0.0
+
+        # --- D: Recent market context (from market_data) ---
+        if market_data is not None and not market_data.empty and "Close" in market_data.columns:
+            try:
+                close = market_data["Close"].dropna()
+                if len(close) >= 6:
+                    feat["recent_return_5d"] = float((close.iloc[-1] / close.iloc[-6]) - 1.0)
+                else:
+                    feat["recent_return_5d"] = nan
+                if len(close) >= 60:
+                    ret = close.pct_change().dropna()
+                    vol_5 = float(ret.iloc[-5:].std()) if len(ret) >= 5 else nan
+                    vol_60 = float(ret.iloc[-60:].std()) if len(ret) >= 60 else nan
+                    feat["recent_vol_ratio"] = float(vol_5 / vol_60) if vol_60 and vol_60 > 0 else nan
+                else:
+                    feat["recent_vol_ratio"] = nan
+            except Exception:
+                feat["recent_return_5d"] = nan
+                feat["recent_vol_ratio"] = nan
+        else:
+            feat["recent_return_5d"] = nan
+            feat["recent_vol_ratio"] = nan
+
+        # Sanitize: replace non-finite with nan
+        for k, v in feat.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                feat[k] = nan
+
+        return feat
 
     def _check_model_agreement(self, forecast_bundle: Dict[str, Any]) -> float:
         """Check agreement between different models (0.0 to 1.0)"""
@@ -2600,6 +2800,12 @@ class TimeSeriesSignalGenerator:
             'visualization_path': visualization_path,
             'quant_validation': quant_profile,
             'market_context': market_context,
+            'classifier_features': (
+                (signal.provenance or {}).get("classifier_features")
+                if isinstance(signal.provenance, dict) else None
+            ),
+            'p_up': signal.p_up,
+            'directional_gate_applied': signal.directional_gate_applied,
         }
 
         try:

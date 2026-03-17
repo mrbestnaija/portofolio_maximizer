@@ -1373,3 +1373,45 @@ class TestBestSingleBaselineSelection:
         """'garch' is now a valid baseline_key (added in lift_semantics_baseline_parity)."""
         valid_keys = {"sarimax", "samossa", "mssa_rl", "garch", "best_single"}
         assert "garch" in valid_keys
+
+
+class TestDirectionalGate:
+    """Phase 9: directional gate is inactive by default."""
+
+    def _make_bundle(self):
+        import pandas as pd
+        idx = pd.RangeIndex(5, name="horizon")
+        return {
+            "forecast": pd.Series([105.0] * 5, index=idx),
+            "lower_ci": pd.Series([100.0] * 5, index=idx),
+            "upper_ci": pd.Series([110.0] * 5, index=idx),
+            "ensemble_metadata": {"weights": {"samossa": 1.0}, "confidence": {"samossa": 0.7}},
+            "detected_regime": "MODERATE_TRENDING",
+        }
+
+    def test_gate_inactive_by_default(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        # Gate should be off by default regardless of routing config
+        assert gen._directional_gate_enabled() is False
+
+    def test_p_up_field_on_signal(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator, TimeSeriesSignal
+        gen = TimeSeriesSignalGenerator()
+        signal = gen.generate_signal(
+            forecast_bundle=self._make_bundle(),
+            current_price=100.0,
+            ticker="AAPL",
+        )
+        # p_up should be None (gate disabled) or a float
+        assert signal.p_up is None or isinstance(signal.p_up, float)
+
+    def test_directional_gate_applied_false_by_default(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        signal = gen.generate_signal(
+            forecast_bundle=self._make_bundle(),
+            current_price=100.0,
+            ticker="AAPL",
+        )
+        assert signal.directional_gate_applied is False
