@@ -261,7 +261,8 @@ class TimeSeriesSignalGenerator:
         # Cache for expensive forecast-edge validation runs (rolling CV).
         # Keyed by (ticker, last_bar_ts, horizon) so repeated calls on the same
         # bar (or across near-identical windows) stay fast.
-        self._forecast_edge_cache: Dict[Tuple[str, str, int], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
+        # Include requested baseline so baseline-policy changes never reuse stale math.
+        self._forecast_edge_cache: Dict[Tuple[str, str, int, str], Tuple[Dict[str, Any], Dict[str, bool]]] = {}
 
         logger.info(
             "Time Series Signal Generator initialized "
@@ -349,9 +350,11 @@ class TimeSeriesSignalGenerator:
         mssa_kwargs = {k: v for k, v in mssa_cfg.items() if k != "enabled"}
 
         if fast_intraday_cv:
-            sarimax_enabled = baseline_key == "sarimax"
-            samossa_enabled = baseline_key == "samossa"
-            mssa_enabled = baseline_key == "mssa_rl"
+            resolve_best_single = baseline_key == "best_single"
+            sarimax_enabled = resolve_best_single or baseline_key == "sarimax"
+            samossa_enabled = resolve_best_single or baseline_key == "samossa"
+            mssa_enabled = resolve_best_single or baseline_key == "mssa_rl"
+            garch_enabled = resolve_best_single or baseline_key == "garch"
 
             if sarimax_enabled:
                 sarimax_kwargs.update(_pmx_intraday_sarimax_kwargs(interval_hint))
@@ -367,16 +370,18 @@ class TimeSeriesSignalGenerator:
                     mssa_kwargs["use_gpu"] = bool(_pmx_env_flag("MSSA_RL_USE_GPU") or False)
             else:
                 mssa_kwargs = {}
+            if not garch_enabled:
+                garch_kwargs = {}
 
             return TimeSeriesForecasterConfig(
                 forecast_horizon=horizon,
                 sarimax_enabled=sarimax_enabled,
                 samossa_enabled=samossa_enabled,
                 mssa_rl_enabled=mssa_enabled,
-                garch_enabled=False,
+                garch_enabled=garch_enabled,
                 ensemble_enabled=True,
                 sarimax_kwargs=sarimax_kwargs,
-                garch_kwargs={},
+                garch_kwargs=garch_kwargs,
                 samossa_kwargs=samossa_kwargs,
                 mssa_rl_kwargs=mssa_kwargs,
                 ensemble_kwargs=ensemble_kwargs,
@@ -1873,14 +1878,14 @@ class TimeSeriesSignalGenerator:
             last_ts = pd.to_datetime(price_series.index[-1]).isoformat()
         except Exception:
             last_ts = str(price_series.index[-1]) if len(price_series.index) else ""
-        cache_key = (symbol, last_ts, horizon)
+        baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
+        if baseline_key not in {"sarimax", "samossa", "mssa_rl", "garch", "best_single"}:
+            baseline_key = "samossa"
+
+        cache_key = (symbol, last_ts, horizon, baseline_key)
         cached = self._forecast_edge_cache.get(cache_key)
         if cached is not None:
             return cached
-
-        baseline_key = str(baseline_model or "samossa").strip().lower().replace("-", "_")
-        if baseline_key not in {"sarimax", "samossa", "mssa_rl"}:
-            baseline_key = "samossa"
 
         edge_payload: Dict[str, Any] = {
             "mode": "forecast_edge",
@@ -1931,7 +1936,15 @@ class TimeSeriesSignalGenerator:
             aggregate = report.get("aggregate_metrics") or {}
             fold_count = int(report.get("fold_count") or 0)
             ens = aggregate.get("ensemble") or {}
-            base = aggregate.get(baseline_key) or {}
+            if baseline_key == "best_single":
+                _candidates = {k: v for k, v in aggregate.items() if k != "ensemble" and v}
+                base = (
+                    min(_candidates.values(), key=lambda m: float(m.get("rmse") or float("inf")))
+                    if _candidates
+                    else {}
+                )
+            else:
+                base = aggregate.get(baseline_key) or {}
             edge_payload.update(
                 {
                     "fold_count": fold_count,
