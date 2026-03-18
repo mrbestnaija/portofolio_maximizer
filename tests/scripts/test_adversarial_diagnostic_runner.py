@@ -210,6 +210,35 @@ class TestDuplicateCloseNullBypass:
         con.close()
         assert result.passed is True
 
+    def test_cleared_when_unlinked_closes_are_all_whitelisted(self, tmp_path, monkeypatch):
+        """INT-02 clears when all unlinked closes are in the whitelist env var."""
+        db = _make_trade_db(tmp_path, [
+            (1, "AAPL", "BUY",  0, 0, 0, None, None),
+            (2, "AAPL", "SELL", 1, 0, 0, None, 30.0),  # unlinked — id=2 is whitelisted
+        ])
+        monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "2")
+        con = _connect(db)
+        result = chk_duplicate_close_null_bypass(con)
+        con.close()
+        assert result.passed is True, (
+            "INT-02 should clear when all unlinked closes are whitelisted"
+        )
+
+    def test_confirmed_when_mix_of_whitelisted_and_non_whitelisted(self, tmp_path, monkeypatch):
+        """INT-02 fires when at least one unlinked close is NOT in the whitelist."""
+        db = _make_trade_db(tmp_path, [
+            (1, "AAPL", "BUY",  0, 0, 0, None, None),
+            (2, "AAPL", "SELL", 1, 0, 0, None, 30.0),  # whitelisted
+            (3, "AAPL", "SELL", 1, 0, 0, None, 30.0),  # NOT whitelisted — triggers confirm
+        ])
+        monkeypatch.setenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "2")
+        con = _connect(db)
+        result = chk_duplicate_close_null_bypass(con)
+        con.close()
+        assert result.passed is False, (
+            "INT-02 should fire when non-whitelisted unlinked closes exist"
+        )
+
 
 class TestProofRawTable:
     """INT-03 — CRITICAL: validate_profitability_proof.py reads raw table."""
@@ -821,15 +850,6 @@ class TestRunAllChecks:
             if confirmed_done:
                 assert f.passed, "All confirmed findings must precede cleared findings"
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "INT-02: 1 unlinked close (trade 255) in prod DB triggers DUPLICATE_CLOSE "
-            "null-bypass detection. Root cause: synthetic run contaminated portfolio_state; "
-            "trade 255 whitelist is justified (synthetic origin, documented 2026-03-09). "
-            "Will clear when trade 255 is formally closed or DB is rebuilt."
-        ),
-    )
     def test_critical_confirmed_findings_exist_in_production_codebase(self, tmp_path):
         """CRITICAL findings baseline after Phase 7.21-7.29 fixes.
 
