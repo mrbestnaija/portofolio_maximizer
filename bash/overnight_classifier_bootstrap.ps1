@@ -138,15 +138,28 @@ print('set directional_classifier.enabled=$enabled')
 }
 
 # ---------------------------------------------------------------------------
-# Training window: 12 AS_OF dates (2020-2024)
+# Training window: ETL pipeline runs per ticker over historical ranges.
+# run_etl_pipeline.py downloads real market data + saves checkpoint parquets
+# (real prices) AND logs JSONL entries with classifier_features via
+# TimeSeriesSignalGenerator. This is what enables forward-price labeling.
+# run_auto_trader.py --execution-mode synthetic generates SYNTHETIC random
+# prices with no real checkpoint parquets -- forward price lookup always fails.
+#
+# Each ticker uses 3 partially-overlapping ranges to maximise CV diversity
+# while keeping each ETL run under ~5 min. Ranges chosen so the checkpoint
+# parquets cover the signal timestamps produced inside each run.
 # ---------------------------------------------------------------------------
-$BootstrapDates = @(
-    "2020-06-01", "2020-12-01",
-    "2021-06-01", "2021-12-01",
-    "2022-03-01", "2022-09-01",
-    "2023-01-02", "2023-07-03",
-    "2024-01-02", "2024-04-01",
-    "2024-07-01", "2024-10-01"
+$BootstrapRuns = @(
+    @{ Ticker="AAPL"; Start="2019-01-01"; End="2022-06-01" },
+    @{ Ticker="AAPL"; Start="2021-01-01"; End="2024-06-01" },
+    @{ Ticker="MSFT"; Start="2019-01-01"; End="2022-06-01" },
+    @{ Ticker="MSFT"; Start="2021-01-01"; End="2024-06-01" },
+    @{ Ticker="NVDA"; Start="2019-01-01"; End="2022-06-01" },
+    @{ Ticker="NVDA"; Start="2021-01-01"; End="2024-06-01" },
+    @{ Ticker="GS";   Start="2019-01-01"; End="2022-06-01" },
+    @{ Ticker="GS";   Start="2021-01-01"; End="2024-06-01" },
+    @{ Ticker="AMZN"; Start="2019-01-01"; End="2022-06-01" },
+    @{ Ticker="AMZN"; Start="2021-01-01"; End="2024-06-01" }
 )
 
 # Evaluation window: 4 holdout dates (2025, unseen relative to training)
@@ -177,29 +190,27 @@ $Errors = 0
 # ---------------------------------------------------------------------------
 # PHASE 1: Bootstrap
 # ---------------------------------------------------------------------------
-LogSection "PHASE 1/5: Bootstrap synthetic cycles (training window 2020-2024)"
+LogSection "PHASE 1/5: Bootstrap ETL runs (real prices + classifier_features)"
 
 if ($SkipBootstrap) {
     Log "Skipping Phase 1 (-SkipBootstrap)"
 } else {
-    $bootPass = 0; $bootWarn = 0; $bootFail = 0
-    foreach ($asOf in $BootstrapDates) {
-        $outcome = RunAutoTrader "bootstrap as-of $asOf" @(
-            "scripts\run_auto_trader.py",
-            "--tickers", $Tickers,
-            "--cycles", "1",
-            "--execution-mode", "synthetic",
-            "--as-of-date", $asOf,
-            "--no-resume",
-            "--sleep-seconds", "0"
+    $bootPass = 0; $bootFail = 0
+    foreach ($run in $BootstrapRuns) {
+        $label = "ETL $($run.Ticker) $($run.Start)..$($run.End)"
+        $rc = RunCmd $label @(
+            "scripts\run_etl_pipeline.py",
+            "--tickers", $run.Ticker,
+            "--start",   $run.Start,
+            "--end",     $run.End,
+            "--execution-mode", "synthetic"
         )
-        switch ($outcome) {
-            "pass" { $bootPass++ }
-            "warn" { $bootWarn++ }   # no trades = normal, not an error
-            "fail" { $bootFail++; $Errors++ }
+        if ($rc -eq 0) { $bootPass++ } else {
+            Log "  [WARN] $label exited $rc (non-fatal, continuing)"
+            $bootFail++
         }
     }
-    Log "Bootstrap complete: $bootPass pass / $bootWarn warn(no-trade) / $bootFail hard-fail"
+    Log "Bootstrap complete: $bootPass pass / $bootFail warn-or-fail"
 }
 
 # Count JSONL entries with classifier_features
@@ -398,7 +409,7 @@ $report = @"
  DIRECTIONAL CLASSIFIER A/B
 ==============================
 
-  Bootstrap cycles  : $($BootstrapDates.Count) historical dates x tickers
+  Bootstrap runs    : $($BootstrapRuns.Count) ETL runs (5 tickers x 2 date ranges)
   JSONL w/ features : $featuresCount
   Eval dates        : $($EvalDates.Count) holdout dates (2025)
 

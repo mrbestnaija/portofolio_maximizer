@@ -130,13 +130,20 @@ def build_dataset(
         except json.JSONDecodeError:
             pass
 
-    # Filter: BUY/SELL only, non-synthetic
+    # Include ALL actions (BUY/SELL/HOLD) that have classifier_features.
+    # The classifier predicts price *direction* — independent of what action was taken.
+    # Filtering to BUY/SELL introduces selection bias (only confident signals) and
+    # discards the majority of logged data. HOLD signals are equally valid direction labels.
+    # Exclude synthetic entries only when using PnL fallback labels (synthetic outcomes
+    # are meaningless for production calibration); for price-based labels synthetic is fine.
     tradeable = [
         e for e in entries
-        if e.get("action") in ("BUY", "SELL")
-        and str(e.get("execution_mode") or "").lower() not in ("synthetic",)
+        if e.get("classifier_features")  # must have Phase 9 features logged
     ]
-    logger.info("JSONL: %d total entries, %d BUY/SELL non-synthetic", len(entries), len(tradeable))
+    logger.info(
+        "JSONL: %d total entries, %d with classifier_features (any action)",
+        len(entries), len(tradeable),
+    )
 
     rows: List[Dict[str, Any]] = []
     n_skipped = 0
@@ -170,15 +177,17 @@ def build_dataset(
             if current_close is not None and forward_close is not None and current_close > 0:
                 y_directional = 1 if forward_close > current_close else 0
 
-        # Fallback: use PnL win/loss label if requested and no price available
+        # Fallback: use PnL win/loss label if requested and no price available.
+        # Only valid for non-synthetic entries (synthetic PnL is random walk, not real).
         if y_directional is None and fallback_to_pnl_label:
-            outcome = e.get("outcome")
-            if isinstance(outcome, dict):
-                win = outcome.get("win")
-                if isinstance(win, bool):
-                    y_directional = 1 if win else 0
-                    # Mark fallback label source
-                    features = dict(features)
+            is_synthetic = str(e.get("execution_mode") or "").lower() == "synthetic"
+            if not is_synthetic:
+                outcome = e.get("outcome")
+                if isinstance(outcome, dict):
+                    win = outcome.get("win")
+                    if isinstance(win, bool):
+                        y_directional = 1 if win else 0
+                        features = dict(features)
 
         if y_directional is None:
             n_skipped += 1
@@ -208,7 +217,7 @@ def build_dataset(
     summary = {
         "built_at": datetime.utcnow().isoformat() + "Z",
         "n_jsonl_entries": len(entries),
-        "n_tradeable": len(tradeable),
+        "n_with_features": len(tradeable),
         "n_labeled": n_total,
         "n_skipped": n_skipped,
         "n_positive": n_pos,
