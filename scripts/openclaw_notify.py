@@ -60,7 +60,7 @@ def _redact_text(text: str) -> str:
         upper = name.upper()
         if any(marker in upper for marker in secret_markers):
             payload = payload.replace(value, "[REDACTED]")
-    payload = re.sub(r"(Bearer\\s+)[A-Za-z0-9\\-\\._~\\+/]+=*", r"\\1[REDACTED]", payload)
+    payload = re.sub(r"(Bearer\s+)[A-Za-z0-9\-._~+/]+=*", r"\1[REDACTED]", payload)
     return payload
 
 
