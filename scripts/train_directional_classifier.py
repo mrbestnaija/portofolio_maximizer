@@ -216,6 +216,7 @@ def train(
         "cold_start": False,
         "calibration_method": "sigmoid",
         "calibration_cv_folds": _calib_cv,
+        "feature_names": list(_FEATURE_NAMES),  # persisted for inference-time validation
         "python_version": f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
         "libraries": libraries,
         "schema_version": 2,  # v2: CalibratedClassifierCV (sigmoid) wrapping base pipeline

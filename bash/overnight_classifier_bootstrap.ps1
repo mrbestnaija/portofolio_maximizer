@@ -203,7 +203,7 @@ if ($DryRun) {
         "--eval-dates", ($EvalDates -join ",")
     )
     if ($preflightRc -eq 1) {
-        LogError "Pre-flight validation FAILED — resolve the FAIL(s) above before running the pipeline."
+        LogError "Pre-flight validation FAILED -- resolve the FAIL(s) above before running the pipeline."
         LogError "Common causes:"
         LogError "  V1: Rename parquets to include ticker name (e.g. AAPL_pipeline_*.parquet)"
         LogError "  V3: Use generate_classifier_training_labels.py (parquet scan) not build_directional_training_data.py"
@@ -302,10 +302,21 @@ if ($SkipTrain) {
     #   2. JSONL entries have wall-clock timestamps (today) outside the 2019-2024 parquet range
     # generate_classifier_training_labels.py reads parquets directly with historical timestamps.
     Log "--- generate_classifier_training_labels.py (parquet scan, all $Tickers tickers)"
+    $generateRc = 0
     if (-not $DryRun) {
         & $PythonBin "scripts\generate_classifier_training_labels.py" "--ticker" $Tickers "--auto-parquet" 2>&1 |
             ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } |
             Tee-Object -FilePath $LogFile -Append
+        $generateRc = $LASTEXITCODE  # capture BEFORE any other PS command resets it
+    }
+    if ($generateRc -eq 1) {
+        LogError "Label generation failed (exit 1) -- check logs. Pipeline will skip training."
+        $Errors++
+        $trainRc = 2  # skip training; treat as cold start
+    } elseif ($generateRc -eq 2) {
+        LogWarn "Label generation: cold start (exit 2) -- insufficient labeled examples accumulated."
+    } else {
+        LogPass "Label generation: complete (exit 0)"
     }
 
     $summaryPath = Join-Path $RootDir "logs\directional_training_latest.json"
@@ -401,11 +412,15 @@ SetGateEnabled "false"
 
 $ctrlPass = 0; $ctrlWarn = 0; $ctrlFail = 0
 foreach ($asOf in $EvalDates) {
+    # Use --execution-mode auto so the auto_trader reads the real cached parquets
+    # from Phase 1. Using synthetic here would generate random-walk prices which
+    # are uncorrelated with the real price features the classifier was trained on,
+    # making the A/B comparison meaningless.
     $outcome = RunAutoTrader "control as-of $asOf" @(
         "scripts\run_auto_trader.py",
         "--tickers", $Tickers,
         "--cycles", "1",
-        "--execution-mode", "synthetic",
+        "--execution-mode", "auto",
         "--as-of-date", $asOf,
         "--no-resume",
         "--sleep-seconds", "0"
@@ -450,7 +465,7 @@ if (-not $ModelTrained) {
             "scripts\run_auto_trader.py",
             "--tickers", $Tickers,
             "--cycles", "1",
-            "--execution-mode", "synthetic",
+            "--execution-mode", "auto",
             "--as-of-date", $asOf,
             "--no-resume",
             "--sleep-seconds", "0"
@@ -499,7 +514,7 @@ $report = @"
 
   Bootstrap runs    : $($BootstrapRuns.Count) ETL runs (5 tickers x 2 date ranges)
   JSONL w/ features : $featuresCount
-  Eval dates        : $($EvalDates.Count) holdout dates (2025)
+  Eval dates        : $($EvalDates.Count) holdout dates ($($EvalDates[0].Substring(0,4))-$($EvalDates[-1].Substring(0,4)))
 
   CONTROL  (gate off) | trades=$ControlDeltaTrades  pnl=$ControlDeltaPnl  wr=$ControlWinRate
   TREATMENT (gate on) | trades=$TreatDeltaTrades  pnl=$TreatDeltaPnl  wr=$TreatWinRate

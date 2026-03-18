@@ -93,6 +93,18 @@ class DirectionalClassifier:
                         n,
                     )
                     return False
+                # Feature-vector ordering validation: if the saved feature list
+                # doesn't match the current _FEATURE_NAMES, the model's learned
+                # coefficients are mapped to the wrong columns at inference time.
+                saved_features = meta.get("feature_names")
+                if saved_features and saved_features != list(_FEATURE_NAMES):
+                    logger.error(
+                        "DirectionalClassifier: feature_names mismatch between model "
+                        "(trained with %d features) and current _FEATURE_NAMES (%d). "
+                        "Retrain the model. Scoring disabled to prevent silent wrong results.",
+                        len(saved_features), len(_FEATURE_NAMES),
+                    )
+                    return False
             self._pipeline = joblib.load(self._model_path)
             logger.info(
                 "DirectionalClassifier: loaded model from %s", self._model_path

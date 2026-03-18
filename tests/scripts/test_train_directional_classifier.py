@@ -140,3 +140,38 @@ class TestTrainDirectionalClassifier:
         features = {name: 0.0 for name in _FEATURE_NAMES}
         result = clf.score(features)
         assert isinstance(result, float) and 0.0 <= result <= 1.0
+
+    def test_meta_contains_feature_names(self, tmp_path):
+        """Feature names saved in meta must match _FEATURE_NAMES used during training."""
+        import json
+        from scripts.train_directional_classifier import train
+        from forcester_ts.directional_classifier import _FEATURE_NAMES
+        df = self._make_dataset(n=80)
+        path = tmp_path / "d.parquet"
+        model_path = tmp_path / "m.pkl"
+        meta_path = tmp_path / "m.meta.json"
+        df.to_parquet(path, index=False)
+        train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert "feature_names" in meta, "meta must include feature_names for inference-time validation"
+        assert meta["feature_names"] == list(_FEATURE_NAMES)
+
+    def test_feature_name_mismatch_disables_scoring(self, tmp_path):
+        """If saved feature_names differ from current _FEATURE_NAMES, score() must return None."""
+        import json
+        from scripts.train_directional_classifier import train
+        from forcester_ts.directional_classifier import DirectionalClassifier, _FEATURE_NAMES
+        df = self._make_dataset(n=80)
+        path = tmp_path / "d.parquet"
+        model_path = tmp_path / "m.pkl"
+        meta_path = tmp_path / "m.meta.json"
+        df.to_parquet(path, index=False)
+        train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        # Tamper the meta to simulate a stale model with a different feature list
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["feature_names"] = ["wrong_feature_a", "wrong_feature_b"]
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        clf = DirectionalClassifier(model_path=model_path)
+        features = {name: 0.0 for name in _FEATURE_NAMES}
+        result = clf.score(features)
+        assert result is None, "Mismatched feature_names must disable scoring (returns None)"
