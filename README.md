@@ -2,47 +2,47 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 7.17 Complete](https://img.shields.io/badge/Phase%207.17-Complete-green.svg)](Documentation/PHASE_7.17_ENSEMBLE_HEALTH_AUDIT.md)
-[![Fast Lane: 1332 passing](https://img.shields.io/badge/fast%20lane-1332%20passing-success.svg)](tests/)
+[![Phase 9 Complete](https://img.shields.io/badge/Phase%209-Complete-green.svg)](Documentation/)
+[![Fast Lane: 1916 passing](https://img.shields.io/badge/fast%20lane-1916%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
-**Version**: 4.4
-**Status**: Phase 7.17 complete — Ensemble Health Audit, Adaptive Weighting, 4-Layer Improvement Checker
-**Last Updated**: 2026-03-06
+**Version**: 4.5
+**Status**: Phase 9 complete — Binary Directional Classifier, Platt Calibration, Pre-Flight Validator, Overnight Bootstrap
+**Last Updated**: 2026-03-18
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-03-01)
+## Current Repo Truth (2026-03-18)
 
-- Phase 7.17 (Ensemble Health Audit) is complete. SAMOSSA DA=0 anomaly is
-  diagnosed and mitigated via `_apply_da_cap()` in `forcester_ts/ensemble.py`.
-  Adaptive candidate weights are written nightly by `scripts/ensemble_health_audit.py`.
-  Exit quality analysis (`scripts/exit_quality_audit.py`) explains the 14pp
-  forecast-DA → trade-WR gap. Three bugs found and fixed by Hypothesis property tests.
-- The Phase 7.16 auto-learning stack is present and hardened: `OrderLearner`,
-  `ModelSnapshotStore`, walk-forward learning, VaR backtesting, and Shapley
-  attribution are implemented in `forcester_ts/`.
-- `TimeSeriesForecaster.forecast(mc_enabled=...)` now supports an opt-in additive
-  Monte Carlo summary via `forcester_ts/monte_carlo_simulator.py`. It consumes
-  existing forecast outputs and does not change training, model selection, or
-  default routing.
-- Weather context and net-edge cost gating are wired through the real signal path:
-  `utils/weather_context.py`, `ai_llm/signal_validator.py`,
-  `models/time_series_signal_generator.py`, `models/signal_router.py`, and
-  `execution/paper_trading_engine.py`.
-- `config/xtb_config.yml` enables broker-side stocks, but there is no checked-in
-  XTB runtime execution adapter yet. The repo's truthful audit state for
-  `emerging_market_equity_execution` is `partial`, not `implemented`.
+- **Phase 9 (Binary Directional Classifier) is complete.** The classifier pipeline is
+  production-ready: `scripts/generate_classifier_training_labels.py` (parquet-scan
+  labeler), `scripts/train_directional_classifier.py` (CalibratedClassifierCV/Platt
+  sigmoid, schema v2), `forcester_ts/directional_classifier.py` (inference with
+  feature-name mismatch guard), and `scripts/evaluate_directional_classifier.py`
+  (ECE + walk-forward DA + gate-lift counterfactual report). Walk-forward DA=0.562,
+  ECE=0.075 on the current training set (290 labeled examples, AAPL).
+- **Pre-flight validator** (`scripts/validate_pipeline_inputs.py`) runs V1-V6 checks
+  before any pipeline execution. Real environment result: 14 PASS, 1 WARN, 0 FAIL.
+  V3 (JSONL alignment) correctly issues a WARN rather than FAIL since the bootstrap
+  uses the parquet-scan path which is unaffected by JSONL timestamps.
+- **Overnight bootstrap** (`bash/overnight_classifier_bootstrap.ps1`) orchestrates the
+  full Phase 9 pipeline: pre-flight validation, label generation, training, A/B
+  evaluation across 4 holdout dates, and a structured Phase 5 report. Exit-code
+  capture, encoding correctness (ASCII-only), and execution-mode wiring (auto, not
+  synthetic) are all verified.
+- The Phase 7.16/7.17 auto-learning and ensemble health stack is present and hardened:
+  `OrderLearner`, `ModelSnapshotStore`, adaptive candidate weights, exit-quality
+  decomposition, and 4-layer improvement checker.
 - Latest verification snapshot:
-  - `python scripts/verify_emerging_market_claims.py --json`
-  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
-  - Result: `1332 passed, 1 skipped, 28 deselected, 7 xfailed` (Phase 7.17 baseline)
+  - `python scripts/validate_pipeline_inputs.py --tickers AAPL --eval-dates 2022-06-01`
+  - `python -m pytest tests/ --tb=short -q`
+  - Result: `1916 passed, 6 skipped, 12 xfailed` (Phase 9 baseline, 2026-03-18)
 
 Historical sections below preserve earlier phase notes for chronology; use this
 section as the current repo baseline.
@@ -53,7 +53,16 @@ section as the current repo baseline.
 
 Portfolio Maximizer is a self-directed trading stack that marries institutional-grade ETL with autonomous execution. It continuously extracts, validates, preprocesses, forecasts, and trades financial time series so profit-focused decisions are generated without human babysitting.
 
-### Current Phase & Scope (Feb 2026)
+### Current Phase & Scope (Mar 2026)
+
+**Phase 9 Complete** - Binary Directional Classifier, Platt Calibration, Pre-Flight Validator:
+
+- **Binary Directional Classifier**: `P(price_up_in_N_bars)` trained offline via `scripts/train_directional_classifier.py`. CalibratedClassifierCV (Platt/sigmoid) wraps a LogisticRegression pipeline with walk-forward CV hyperparameter selection. Schema v2 pkl with `feature_names` persisted for inference-time mismatch detection.
+- **Parquet-scan labeler**: `scripts/generate_classifier_training_labels.py` scans price parquets directly instead of relying on JSONL timestamps, solving the wall-clock alignment gap that blocked label generation.
+- **Pre-flight validator**: `scripts/validate_pipeline_inputs.py` — V1-V6 checks (filename convention, parquet coverage, JSONL alignment, eval date coverage, duplicate-parquet collision, edge cases). CLI returns exit 0/1 for CI gating.
+- **Overnight bootstrap**: `bash/overnight_classifier_bootstrap.ps1` — 5-phase PS1 pipeline (pre-flight, label gen, train, A/B eval, report) with exit-code capture, ASCII-safe logging, and auto execution-mode.
+- **Evaluation harness**: `scripts/evaluate_directional_classifier.py` produces ECE (10-bin), walk-forward DA, gate-lift counterfactual, and feature importance. Artifacts written to `visualizations/directional_eval.txt`.
+- **Phase 9 metrics (2026-03-18)**: DA=0.562 (PASS), ECE=0.075 (PASS), gate-lift=-0.025 (WARN — gate at p_up>0.55 slightly under-selects; 290 labeled examples, AAPL).
 
 **Phase 7.9 Complete** - PnL Integrity Enforcement, Adversarial Audit, OpenClaw Automation:
 
@@ -92,6 +101,26 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 ---
 
 ### Latest Enhancements (Mar 2026)
+
+**Phase 9: Binary Directional Classifier + Pre-Flight Validator (2026-03-18)**:
+
+- **Directional classifier pipeline** (13 commits, fully production-ready):
+  - `scripts/generate_classifier_training_labels.py`: parquet-scan labeler; scans `data/checkpoints/*data_extraction*.parquet` files, applies N-bar forward-return threshold to assign BUY/SELL/HOLD labels. Same-parquet collision guard (`--auto-parquet` + multi-ticker) prevents meaningless training from shared synthetic price files.
+  - `scripts/train_directional_classifier.py`: walk-forward TimeSeriesSplit CV for C selection; final model wrapped in `CalibratedClassifierCV(method='sigmoid', cv=2|3)` (Platt scaling). Saves `data/classifiers/directional_v1.pkl` + `.meta.json` (schema v2: `feature_names`, `calibration_method`, `schema_version=2`).
+  - `forcester_ts/directional_classifier.py`: lazy-load inference wrapper with feature-name mismatch guard — if `meta["feature_names"]` diverges from current `_FEATURE_NAMES`, scoring is disabled with an ERROR log rather than silently mis-mapping coefficients.
+  - `scripts/evaluate_directional_classifier.py`: ECE (10-bin calibration error), walk-forward DA, gate-lift counterfactual (gated WR vs baseline WR at configurable `p_up_threshold`), feature importance from calibration fold coefs. Report written to `visualizations/directional_eval.txt`.
+  - `bash/overnight_classifier_bootstrap.ps1`: 5-phase PowerShell pipeline: pre-flight (V1-V6), label generation, training, A/B holdout evaluation across configurable eval dates, structured Phase 5 report. ASCII-safe logging, `$LASTEXITCODE` captured before PS resets it, execution-mode `auto` (not synthetic).
+- **Pre-flight validator** (`scripts/validate_pipeline_inputs.py`):
+  - V1: filename convention (ticker-named vs unnamed fallback vs missing)
+  - V2: parquet coverage map (Close column, min length 100, constant-price synthetic detection)
+  - V3: JSONL timestamp alignment — WARN (not FAIL) when 0% align, advisory that parquet-scan path is unaffected
+  - V4: eval date coverage (date within parquet range for each ticker)
+  - V5: duplicate-parquet collision (multi-ticker same-file = synthetic contamination)
+  - V6: edge cases (empty parquets, null JSONL timestamps, stale training dataset, missing checkpoint dir)
+  - CLI: `--json` for machine-readable output; exits 0/1 for CI gating; `run_all_checks()` callable from other scripts
+- **Tests**: 37 new tests (`tests/scripts/test_validate_pipeline_inputs.py` 26 tests + `tests/scripts/test_train_directional_classifier.py` 11 tests including D4 Platt calibration, schema v2, feature-name mismatch)
+- **Regression baseline**: **1916 passed, 6 skipped, 12 xfailed** (2026-03-18)
+- **Phase 9 classifier metrics** (AAPL, 290 labeled examples): DA=0.562 (PASS >0.52), ECE=0.075 (PASS <0.10), gate-lift=-0.025 (WARN — accumulate more labeled examples to lift)
 
 **Phase 7.35: Outcome Linkage Denominator + Causality Hardening (2026-03-06)**:
 

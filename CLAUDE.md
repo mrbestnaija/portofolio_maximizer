@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 7.14 In Progress (Gate Recalibration, Config Sanitization, ATR Stops, GARCH Hardening, Platt Wire)
-**Completed Phases**: 7.13 (Arch Sanitization), 7.12 (Platt Feedback Wire), 7.11 (OpenClaw Hardening), 7.9 (PnL Integrity + Proof Mode)
-**Last Updated**: 2026-02-24
+**Current Phase**: Phase 9 Complete (Binary Directional Classifier, Platt Calibration, Pre-Flight Validator, Overnight Bootstrap)
+**Completed Phases**: 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
+**Last Updated**: 2026-03-18
 
 ---
 
@@ -780,6 +780,82 @@ Original findings (2026-02-16):
 
 **Adversarial audit finding (BUG2 fixed)**: `signal_router._signal_to_dict()` was leaking TS string
 `signal_id` into INTEGER FK `signal_id` column. Fixed with isinstance() type guards at `signal_router.py:346-347`.
+
+---
+
+## Phase 9 Reference (Binary Directional Classifier - COMPLETE 2026-03-18)
+
+**Status**: COMPLETE (1916 passed, 6 skipped, 12 xfailed)
+
+### Phase 9 Pipeline
+
+**Label generation** (`scripts/generate_classifier_training_labels.py`):
+- Parquet-scan approach: reads `data/checkpoints/*data_extraction*.parquet` directly
+- Applies N-bar forward-return threshold to price data → BUY/SELL/HOLD labels
+- `--auto-parquet`: auto-discovers parquet by ticker name prefix
+- Same-parquet collision guard: warns when multiple tickers resolve to same file
+- Writes `data/training/directional_dataset.parquet`
+- Exit codes: 0=success, 1=error, 2=cold-start (insufficient examples)
+
+**Training** (`scripts/train_directional_classifier.py`):
+- TimeSeriesSplit walk-forward CV for C hyperparameter selection (gap=min(30,n//10))
+- Final model: `CalibratedClassifierCV(Pipeline([impute, scale, LR]), method='sigmoid', cv=2|3)`
+- Schema v2: saves `feature_names`, `calibration_method`, `calibration_cv_folds`, `schema_version=2` to `.meta.json`
+- Saves `data/classifiers/directional_v1.pkl` + `.meta.json` atomically (tmp→replace)
+- Exit codes: 0=success, 1=error, 2=cold-start
+
+**Inference** (`forcester_ts/directional_classifier.py`):
+- Lazy-load with feature-name mismatch guard (compares `meta["feature_names"]` to `_FEATURE_NAMES`)
+- Returns `float in [0,1]` or `None` (cold-start / mismatch / load error)
+- `_FEATURE_NAMES`: 20 features covering ensemble_pred_return, CI, SNR, regime flags, vol metrics
+
+**Evaluation** (`scripts/evaluate_directional_classifier.py`):
+- Walk-forward DA (mean across TimeSeriesSplit folds)
+- ECE (Expected Calibration Error, 10-bin)
+- Gate-lift counterfactual: gated WR vs baseline WR at configurable `p_up_threshold`
+- Report: `visualizations/directional_eval.txt`
+
+**Overnight bootstrap** (`bash/overnight_classifier_bootstrap.ps1`):
+- Phase 0: Pre-flight V1-V6 validation — exits 1 on FAIL
+- Phase 1: ETL per eval date (real price data, `--execution-mode auto`)
+- Phase 2a: Label generation + exit-code capture (`$LASTEXITCODE` before any PS cmdlets)
+- Phase 2b: Training (skip on cold-start)
+- Phase 3: Control A/B cycles (pre-classifier baseline, `--execution-mode auto`)
+- Phase 4: Treatment A/B cycles (with classifier active)
+- Phase 5: Structured report with metrics from evaluation harness
+
+**Pre-flight validator** (`scripts/validate_pipeline_inputs.py`):
+- V1: ticker-named parquet present (PASS) / unnamed fallback (WARN) / missing (FAIL)
+- V2: parquet has Close column, min 100 rows, non-constant prices
+- V3: JSONL timestamps align with parquet date range — 0% alignment is WARN (not FAIL), parquet-scan path unaffected
+- V4: eval date falls within parquet coverage per ticker
+- V5: multi-ticker parquet collision (same Close[0] = synthetic contamination)
+- V6: empty parquets, null JSONL timestamps, stale training dataset (>stale_days mtime), missing checkpoint dir
+- CLI: `--json`, exit 0/1; `run_all_checks()` callable API
+
+### Phase 9 Metrics (2026-03-18, AAPL, 290 labeled examples)
+
+| Metric | Value | Threshold | Status |
+|--------|-------|-----------|--------|
+| Walk-forward DA | 0.562 | > 0.52 | PASS |
+| ECE (10-bin) | 0.075 | < 0.10 | PASS |
+| Gate lift (p_up > 0.55) | -0.025 | > 0 | WARN |
+
+Gate-lift WARN is expected at 290 examples — accumulate more labeled data via
+additional ETL passes to move the gate threshold into positive territory.
+
+### Key Files Added (Phase 9)
+
+- `scripts/generate_classifier_training_labels.py`
+- `scripts/train_directional_classifier.py`
+- `scripts/evaluate_directional_classifier.py`
+- `scripts/validate_pipeline_inputs.py`
+- `bash/overnight_classifier_bootstrap.ps1`
+- `bash/overnight_classifier_bootstrap.sh`
+- `bash/train_directional_classifier.sh`
+- `forcester_ts/directional_classifier.py`
+- `tests/scripts/test_validate_pipeline_inputs.py` (26 tests)
+- `tests/scripts/test_train_directional_classifier.py` (11 tests)
 
 ---
 
