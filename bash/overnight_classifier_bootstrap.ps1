@@ -162,12 +162,15 @@ $BootstrapRuns = @(
     @{ Ticker="AMZN"; Start="2021-01-01"; End="2024-06-01" }
 )
 
-# Evaluation window: 4 holdout dates (2025, unseen relative to training)
+# Evaluation window: 4 holdout dates within parquet coverage.
+# Must be within the checkpoint parquet range (2019-2024) so the auto_trader
+# can load real price data for forecasting. Using 2022-2023 (end of first range /
+# start of second) gives genuine holdout relative to the 2019-2022 training window.
 $EvalDates = @(
-    "2025-01-06",
-    "2025-04-01",
-    "2025-07-01",
-    "2025-10-01"
+    "2022-07-01",
+    "2022-10-01",
+    "2023-01-01",
+    "2023-04-01"
 )
 
 # ---------------------------------------------------------------------------
@@ -198,13 +201,38 @@ if ($SkipBootstrap) {
     $bootPass = 0; $bootFail = 0
     foreach ($run in $BootstrapRuns) {
         $label = "ETL $($run.Ticker) $($run.Start)..$($run.End)"
+
+        # Snapshot existing parquets BEFORE the ETL run so we can identify the new one
+        $existingParquets = @(Get-ChildItem "$RootDir\data\checkpoints" -Filter "*.parquet" -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName)
+
+        # Use --execution-mode auto (not synthetic) so yfinance downloads REAL price data.
+        # --execution-mode synthetic uses SyntheticExtractor which generates the same
+        # random walk for all tickers (same seed) → meaningless, non-ticker-specific parquets.
         $rc = RunCmd $label @(
             "scripts\run_etl_pipeline.py",
             "--tickers", $run.Ticker,
             "--start",   $run.Start,
             "--end",     $run.End,
-            "--execution-mode", "synthetic"
+            "--execution-mode", "auto"
         )
+
+        # Rename the newly created parquet(s) to include the ticker name.
+        # This allows _load_price_parquet to find the right file per ticker
+        # (the ETL saves generic pipeline_TIMESTAMP_data_extraction_TIMESTAMP.parquet
+        # with no ticker in the name; the rename fixes the lookup pattern).
+        $newParquets = @(Get-ChildItem "$RootDir\data\checkpoints" -Filter "*.parquet" -ErrorAction SilentlyContinue |
+            Where-Object { $existingParquets -notcontains $_.FullName -and $_.Name -notmatch $run.Ticker } |
+            Sort-Object LastWriteTime -Descending)
+        foreach ($pq in $newParquets) {
+            $safeName = $pq.Name -replace "pipeline_", "$($run.Ticker)_pipeline_"
+            $dest = Join-Path $pq.DirectoryName $safeName
+            if (-not (Test-Path $dest)) {
+                Rename-Item $pq.FullName $dest -ErrorAction SilentlyContinue
+                Log "  [parquet] renamed -> $safeName"
+            }
+        }
+
         if ($rc -eq 0) { $bootPass++ } else {
             Log "  [WARN] $label exited $rc (non-fatal, continuing)"
             $bootFail++
@@ -241,10 +269,14 @@ if ($SkipTrain) {
     Log "Skipping Phase 2 (-SkipTrain)"
     $ModelTrained = $true
 } else {
-    # Step 2a: build
-    Log "--- build_directional_training_data.py --fallback-to-pnl-label"
+    # Step 2a: build training labels from checkpoint parquets (bypasses JSONL timestamp issue)
+    # NOTE: build_directional_training_data.py (JSONL-based) cannot produce labels because:
+    #   1. Checkpoint parquets use generic filenames with no ticker → _load_price_parquet returns None
+    #   2. JSONL entries have wall-clock timestamps (today) outside the 2019-2024 parquet range
+    # generate_classifier_training_labels.py reads parquets directly with historical timestamps.
+    Log "--- generate_classifier_training_labels.py (parquet scan, all $Tickers tickers)"
     if (-not $DryRun) {
-        & $PythonBin "scripts\build_directional_training_data.py" "--fallback-to-pnl-label" 2>&1 |
+        & $PythonBin "scripts\generate_classifier_training_labels.py" "--ticker" $Tickers "--auto-parquet" 2>&1 |
             ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } |
             Tee-Object -FilePath $LogFile -Append
     }
