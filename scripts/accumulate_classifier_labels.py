@@ -30,7 +30,7 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -77,14 +77,18 @@ logger = logging.getLogger(__name__)
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def _load_outcome_map(db_path: Path) -> Dict[str, float]:
+def _load_outcome_map(db_path: Path) -> Tuple[Dict[str, float], str]:
     """
-    Returns {ts_signal_id -> realized_pnl} for all production closed trades
-    that have a non-legacy ts_signal_id.
+    Returns (outcome_map, status) where status is one of:
+      "ok"         — DB found and queried successfully (map may be empty if no closed trades)
+      "db_missing" — DB file does not exist (map is empty; live cycles needed)
+      "db_error"   — DB exists but query failed (map is empty; investigate)
+
+    Callers MUST check status to distinguish "no trades yet" from "DB broken".
     """
     if not db_path.exists():
-        logger.warning("DB not found: %s", db_path)
-        return {}
+        logger.warning("DB not found: %s — no outcome-linked labels possible until live cycles run", db_path)
+        return {}, "db_missing"
     try:
         conn = sqlite3.connect(str(db_path))
         rows = conn.execute(
@@ -100,10 +104,10 @@ def _load_outcome_map(db_path: Path) -> Dict[str, float]:
             """
         ).fetchall()
         conn.close()
-        return {r[0]: float(r[1]) for r in rows}
+        return {r[0]: float(r[1]) for r in rows}, "ok"
     except Exception as exc:
-        logger.error("DB query failed: %s", exc)
-        return {}
+        logger.error("DB query failed (%s): %s", db_path, exc)
+        return {}, "db_error"
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +158,7 @@ def accumulate(
     Returns a summary dict with keys:
       n_candidates, n_matched, n_new, n_total, n_by_source, feature_fill_rates
     """
-    outcome_map = _load_outcome_map(db_path)
+    outcome_map, db_status = _load_outcome_map(db_path)
     candidates = _load_jsonl_candidates(jsonl_path)
 
     logger.info(
@@ -267,6 +271,7 @@ def accumulate(
     return {
         "n_candidates": len(candidates),
         "n_outcome_map": len(outcome_map),
+        "db_status": db_status,
         "n_matched": n_matched,
         "n_skipped_no_outcome": n_skipped_no_outcome,
         "n_skipped_duplicate": n_skipped_duplicate,

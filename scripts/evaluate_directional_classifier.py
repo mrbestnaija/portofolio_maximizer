@@ -366,13 +366,16 @@ def _optimal_gate_threshold(
     p_pred: np.ndarray,
     candidate_thresholds: List[float] | None = None,
     min_gated: int = 10,
-) -> float:
+) -> Tuple[float, bool]:
     """
-    Return the p_up threshold that maximises gate_lift_buy subject to at least
-    min_gated BUY examples passing the gate.  Scans candidate_thresholds in order
-    and picks the one with the highest (gated_buy_wr - baseline_wr).
+    Return (threshold, optimized) where:
+      - threshold: the p_up value that maximises gate_lift_buy subject to
+        at least min_gated BUY examples passing the gate.
+      - optimized: True if at least one candidate met min_gated; False means
+        the threshold is a hardcoded fallback (0.55), NOT a data-driven result.
 
-    Falls back to 0.55 if no candidate has sufficient coverage.
+    Callers MUST check the second return value before treating the threshold
+    as meaningful — a False here means the gate is effectively uncalibrated.
     """
     if candidate_thresholds is None:
         candidate_thresholds = [round(t, 2) for t in np.arange(0.50, 0.91, 0.05)]
@@ -380,19 +383,30 @@ def _optimal_gate_threshold(
     baseline_wr = float(y_true.mean()) if len(y_true) > 0 else float("nan")
     best_thresh = 0.55
     best_lift = float("-inf")
+    any_candidate_valid = False
 
     for thresh in candidate_thresholds:
         mask = p_pred >= thresh
         n_gated = int(mask.sum())
         if n_gated < min_gated:
             continue
+        any_candidate_valid = True
         gated_wr = float(y_true[mask].mean())
         lift = gated_wr - baseline_wr
         if lift > best_lift:
             best_lift = lift
             best_thresh = thresh
 
-    return best_thresh
+    if not any_candidate_valid:
+        logger.warning(
+            "Gate threshold optimization failed: no candidate threshold achieved "
+            "min_gated=%d examples (n_test=%d). Returning uncalibrated fallback 0.55. "
+            "Increase dataset size before activating classifier gate.",
+            min_gated,
+            len(y_true),
+        )
+
+    return best_thresh, any_candidate_valid
 
 
 def evaluate(
@@ -495,15 +509,22 @@ def evaluate(
     cf_result: Dict[str, Any] = {}
     if len(y_te_ece) >= 10 and ece_result.get("ece") is not None:
         if p_up_threshold is None:
-            _gate_thresh = _optimal_gate_threshold(y_te_ece, p_pred)
-            logger.info("Auto-optimised gate threshold: %.2f", _gate_thresh)
+            _gate_thresh, _thresh_optimized = _optimal_gate_threshold(y_te_ece, p_pred)
+            logger.info(
+                "Gate threshold: %.2f (%s)",
+                _gate_thresh,
+                "data-driven" if _thresh_optimized else "UNCALIBRATED FALLBACK",
+            )
         else:
             _gate_thresh = p_up_threshold
+            _thresh_optimized = True  # explicitly supplied by caller
         cf_result = _win_rate_counterfactual(y_te_ece, p_pred, p_up_threshold=_gate_thresh)
+        cf_result["threshold_optimized"] = _thresh_optimized
     else:
         cf_result = {
             "note": "insufficient held-out data for counterfactual",
             "n_total": n_total,
+            "threshold_optimized": False,
         }
 
     # 4. Feature importance from training meta
