@@ -191,6 +191,33 @@ Log "Baseline: $($Baseline.round_trips) closed trades, PnL=$($Baseline.total_pnl
 $Errors = 0
 
 # ---------------------------------------------------------------------------
+# PRE-FLIGHT: Pipeline input validation
+# ---------------------------------------------------------------------------
+LogSection "PRE-FLIGHT: Pipeline input validation (V1-V6)"
+if ($DryRun) {
+    Log "[DRY_RUN] Would run: validate_pipeline_inputs.py --tickers $Tickers"
+} else {
+    $preflightRc = RunCmd "validate_pipeline_inputs" @(
+        "scripts\validate_pipeline_inputs.py",
+        "--tickers", $Tickers,
+        "--eval-dates", ($EvalDates -join ",")
+    )
+    if ($preflightRc -eq 1) {
+        LogError "Pre-flight validation FAILED — resolve the FAIL(s) above before running the pipeline."
+        LogError "Common causes:"
+        LogError "  V1: Rename parquets to include ticker name (e.g. AAPL_pipeline_*.parquet)"
+        LogError "  V3: Use generate_classifier_training_labels.py (parquet scan) not build_directional_training_data.py"
+        LogError "  V4: Change eval dates to fall within your parquet coverage window"
+        LogError "  V5: Re-run ETL with --execution-mode auto (not synthetic)"
+        exit 1
+    } elseif ($preflightRc -eq 2) {
+        LogWarn "Validator could not run (infrastructure error, exit 2) -- proceeding with caution."
+    } else {
+        LogPass "Pre-flight validation passed (PASS/WARN only) -- pipeline may proceed."
+    }
+}
+
+# ---------------------------------------------------------------------------
 # PHASE 1: Bootstrap
 # ---------------------------------------------------------------------------
 LogSection "PHASE 1/5: Bootstrap ETL runs (real prices + classifier_features)"

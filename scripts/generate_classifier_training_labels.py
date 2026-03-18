@@ -418,6 +418,28 @@ def main(argv: Optional[list] = None) -> int:
     if not args.parquet and not args.auto_parquet:
         parser.error("Provide --parquet <path> or --auto-parquet to scan data/checkpoints/")
 
+    # Detect duplicate-parquet collisions before generating labels.
+    # When two tickers resolve to the same physical file the ETL was likely run
+    # with --execution-mode synthetic (SyntheticExtractor, same seed → identical prices).
+    # Labels from such data are meaningless; warn loudly so operators can fix it.
+    if args.auto_parquet and len(tickers) > 1:
+        from collections import defaultdict as _defaultdict
+        _path_to_tickers: dict = _defaultdict(list)
+        for _tk in tickers:
+            _candidates = _find_parquets_for_ticker(_tk, checkpoint_dir)
+            if _candidates:
+                _path_to_tickers[str(_candidates[0].resolve())].append(_tk)
+        for _pstr, _shared in _path_to_tickers.items():
+            if len(_shared) > 1:
+                logger.warning(
+                    "[V5] Tickers %s all resolve to the same parquet %s. "
+                    "Price data may not be ticker-specific (was ETL run with "
+                    "--execution-mode synthetic?). Training labels from shared price "
+                    "data are meaningless. Re-run ETL with --execution-mode auto and "
+                    "rename parquets to include the ticker name (e.g. AAPL_pipeline_*).",
+                    _shared, Path(_pstr).name,
+                )
+
     total_new = 0
     for ticker in tickers:
         parquet_path = Path(args.parquet) if args.parquet else None
