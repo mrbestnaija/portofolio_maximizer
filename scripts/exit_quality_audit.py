@@ -97,7 +97,8 @@ def load_production_trades(db_path: Path, tail_n: int | None = None) -> pd.DataF
     )
 
     risk_unit = (df["atr_proxy"] * 1.5).replace(0.0, np.nan)
-    df["r_multiple"] = df["realized_pnl"].fillna(0.0) / risk_unit
+    _r = pd.to_numeric(df["realized_pnl"].fillna(0.0) / risk_unit, errors="coerce")
+    df["r_multiple"] = np.where(np.isfinite(_r.values.astype(float)), _r, np.nan)  # NS-02: guard inf/obj-dtype (pandas 2.x safe)
 
     # Correct direction but negative PnL:
     # BUY: exit_price > entry_price AND realized_pnl < 0

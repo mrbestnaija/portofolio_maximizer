@@ -100,6 +100,10 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
 }
 
 
+# Phase 7.19: fraction of audit files in post-Phase-7.15-F format required
+# to avoid WARN on coverage_ratio check. Centralised here so tests can pin it.
+_COVERAGE_RATIO_WARN_THRESHOLD: float = 0.20
+
 # ---------------------------------------------------------------------------
 # LayerResult dataclass
 # ---------------------------------------------------------------------------
@@ -405,10 +409,10 @@ def run_layer1_forecast_quality(
         if n_used < warn_coverage_threshold:
             status = "WARN"
             reasons.append(f"n_used={n_used} < coverage_threshold={warn_coverage_threshold}")
-        if coverage_ratio < 0.20:
+        if coverage_ratio < _COVERAGE_RATIO_WARN_THRESHOLD:
             status = "WARN"
             reasons.append(
-                f"coverage_ratio={coverage_ratio:.1%} < 20% "
+                f"coverage_ratio={coverage_ratio:.1%} < {_COVERAGE_RATIO_WARN_THRESHOLD:.0%} "
                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
             )
         # Phase 7.25/7.37: spans-zero CI → advisory WARN (only from PASS, requires ci_high >= 0)
