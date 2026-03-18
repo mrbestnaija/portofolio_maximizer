@@ -403,11 +403,21 @@ class SARIMAXForecaster:
         self,
         data: pd.Series,
         exogenous: Optional[pd.DataFrame] = None,
+        forced_d: Optional[int] = None,
     ) -> Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]:
         logger.info("Selecting optimal SARIMAX order...")
 
         stationary, recommend_d = self._test_stationarity(data)
-        d = recommend_d if self.enforce_stationarity else 0
+        if forced_d is not None:
+            # Phase 8.3: honour the joint ADF+KPSS verdict from the forecaster layer.
+            d = forced_d
+            logger.info(
+                "SARIMAX d overridden by forecaster stationarity verdict: forced_d=%d "
+                "(ADF recommend_d=%d, enforce_stationarity=%s)",
+                forced_d, recommend_d, self.enforce_stationarity,
+            )
+        else:
+            d = recommend_d if self.enforce_stationarity else 0
 
         freq_hint = None
         try:
@@ -665,6 +675,7 @@ class SARIMAXForecaster:
         order_learner=None,
         ticker: str = "",
         regime: str | None = None,
+        forced_d: Optional[int] = None,
     ) -> "SARIMAXForecaster":
         if series.isna().all():
             raise ValueError("Series contains only NaNs")
@@ -703,6 +714,7 @@ class SARIMAXForecaster:
             self.best_order, self.best_seasonal_order = self._select_best_order(
                 prepared,
                 aligned_exog,
+                forced_d=forced_d,
             )
 
         freq_valid = getattr(self, "_frequency_hint_valid", False)
