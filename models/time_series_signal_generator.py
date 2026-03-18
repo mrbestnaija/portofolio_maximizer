@@ -341,21 +341,44 @@ class TimeSeriesSignalGenerator:
         """Phase 9: Read feature flag from signal_routing_config.yml."""
         try:
             cfg = self._signal_routing_config or {}
+            if not isinstance(cfg, dict):
+                logger.warning(
+                    "DirectionalGate: signal_routing_config is not a dict (type=%s); gate disabled",
+                    type(cfg).__name__,
+                )
+                return False
             dc_cfg = cfg.get("directional_classifier") or {}
+            if not isinstance(dc_cfg, dict):
+                logger.warning(
+                    "DirectionalGate: directional_classifier section is not a dict; gate disabled"
+                )
+                return False
             return bool(dc_cfg.get("enabled", False))
-        except Exception:
+        except Exception as exc:
+            logger.error("DirectionalGate: failed to read config: %s", exc)
             return False
+
+    # Sentinel value written to self._directional_classifier after a failed import
+    # so we don't retry the import on every subsequent signal call.
+    _DIRECTIONAL_CLASSIFIER_FAILED = object()
 
     def _score_directional(self, features: Dict[str, Any]) -> Optional[float]:
         """Phase 9: Score directional probability. Returns None when gate is disabled or cold-start."""
-        # Feature flag: directional classifier must be explicitly enabled
         if not self._directional_gate_enabled():
             return None
+        if self._directional_classifier is self._DIRECTIONAL_CLASSIFIER_FAILED:
+            return None  # previous import failed — do not retry
         if self._directional_classifier is None:
             try:
                 from forcester_ts.directional_classifier import DirectionalClassifier
                 self._directional_classifier = DirectionalClassifier()
-            except Exception:
+            except Exception as exc:
+                logger.error(
+                    "DirectionalGate: failed to import/load DirectionalClassifier: %s — "
+                    "gate will be skipped for this session",
+                    exc,
+                )
+                self._directional_classifier = self._DIRECTIONAL_CLASSIFIER_FAILED
                 return None
         return self._directional_classifier.score(features)
 
@@ -1418,7 +1441,11 @@ class TimeSeriesSignalGenerator:
             try:
                 close = market_data["Close"].dropna()
                 if len(close) >= 6:
-                    feat["recent_return_5d"] = float((close.iloc[-1] / close.iloc[-6]) - 1.0)
+                    price_6d_ago = float(close.iloc[-6])
+                    if price_6d_ago > 0:  # guard: division-by-zero on zero/corrupt price
+                        feat["recent_return_5d"] = float(close.iloc[-1] / price_6d_ago) - 1.0
+                    else:
+                        feat["recent_return_5d"] = nan
                 else:
                     feat["recent_return_5d"] = nan
                 if len(close) >= 60:
@@ -1428,7 +1455,8 @@ class TimeSeriesSignalGenerator:
                     feat["recent_vol_ratio"] = float(vol_5 / vol_60) if vol_60 and vol_60 > 0 else nan
                 else:
                     feat["recent_vol_ratio"] = nan
-            except Exception:
+            except Exception as exc:
+                logger.debug("Market context feature extraction failed (will use NaN): %s", exc)
                 feat["recent_return_5d"] = nan
                 feat["recent_vol_ratio"] = nan
         else:
