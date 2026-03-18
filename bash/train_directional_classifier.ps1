@@ -124,6 +124,21 @@ print('       To activate: set directional_classifier.enabled: true')
 print('       in config/signal_routing_config.yml')
 "@
         }
+
+        # Step 3: Evaluate (walk-forward DA, ECE, counterfactual)
+        Log ""
+        Log "--- Step 3: Evaluate directional classifier"
+        & $PythonBin "scripts\evaluate_directional_classifier.py"
+        $evalRc = $LASTEXITCODE
+        switch ($evalRc) {
+            0 {
+                Log ""
+                Log "[OK] Evaluation complete. Report: visualizations\directional_eval.txt" -ForegroundColor Green
+            }
+            2 { Log "[INFO] Evaluation skipped (cold start -- too few labeled examples)" -ForegroundColor Yellow }
+            default { Log "[WARN] Evaluation returned exit $evalRc (non-blocking)" -ForegroundColor Yellow }
+        }
+        Log ""
         exit 0
     }
     2 {

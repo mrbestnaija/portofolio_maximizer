@@ -303,6 +303,35 @@ for f in (m.get('top3_features') or []):
 }
 
 # ---------------------------------------------------------------------------
+# PHASE 2b: Evaluate classifier (walk-forward DA, ECE, win-rate counterfactual)
+# ---------------------------------------------------------------------------
+if ($ModelTrained) {
+    Log "--- Phase 2b: Evaluate directional classifier"
+    if (-not $DryRun) {
+        & $PythonBin "scripts\evaluate_directional_classifier.py" 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { "  [eval] $($_.ToString())" }
+            else { "  [eval] $_" }
+        } | Tee-Object -FilePath $LogFile -Append
+        $evalRc = $LASTEXITCODE
+        switch ($evalRc) {
+            0 {
+                Log "Evaluation complete. Check logs\directional_eval_latest.json"
+                $evalPath = Join-Path $RootDir "visualizations\directional_eval.txt"
+                if (Test-Path $evalPath) {
+                    Log ""
+                    Get-Content $evalPath | Tee-Object -FilePath $LogFile -Append
+                    Log ""
+                }
+            }
+            2 { LogWarn "Evaluation cold start -- skipped (insufficient data)" }
+            default { LogWarn "Evaluation returned exit $evalRc (non-blocking)" }
+        }
+    } else {
+        Log "DryRun: skipping evaluation"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # PHASE 3: Control (gate DISABLED)
 # ---------------------------------------------------------------------------
 LogSection "PHASE 3/5: Control evaluation -- gate DISABLED"
