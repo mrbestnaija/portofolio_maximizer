@@ -93,7 +93,8 @@ forecaster_monitoring:
 
     # "Lift" means ensemble_rmse <= (1 - min_lift_rmse_ratio) * baseline_rmse.
     # 0.00 means "any improvement counts". 0.02 means ">=2% RMSE improvement".
-    min_lift_rmse_ratio: 0.00
+    # Phase 7.14: raised to 0.02 — epsilon improvement no longer counts as lift.
+    min_lift_rmse_ratio: 0.02
 
     # Minimum fraction of effective audits that must show lift; otherwise we
     # recommend disbanding the ensemble as default source of truth.

@@ -74,11 +74,11 @@ class TestLayer1ForecastQuality:
         assert result.metrics["n_used_windows"] == 3
         assert result.metrics["n_skipped_malformed"] == 0
         assert result.metrics["n_skipped_missing_metrics"] == 0
-        # 2 of 3 fixtures have lift (healthy: 1.30<1.40, ensemble_lift: 1.60<1.85)
-        # samossa_da_zero: ensemble 1.25 > best_single 1.10 -> no lift
+        # 2 of 3 fixtures have lift (healthy: 0.929<0.98, ensemble_lift: 0.865<0.98)
+        # samossa_da_zero: 1.136 >= 0.98 -> no lift (min_lift_rmse_ratio=0.02 from config)
         assert result.metrics["lift_fraction_global"] == pytest.approx(2 / 3, abs=0.02)
         assert result.metrics["baseline_model"] == "BEST_SINGLE"
-        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
+        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(0.98)
         # Only 3 windows < warn_coverage_threshold=50 -> WARN
         assert result.status == "WARN"
         assert "baseline=BEST_SINGLE" in result.summary
@@ -127,7 +127,7 @@ class TestLayer1ForecastQuality:
 
         assert result.status == "SKIP"
         assert result.metrics["baseline_model"] == "BEST_SINGLE"
-        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
+        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(0.98)
         assert result.metrics["lift_mean"] is None
         assert result.metrics["lift_ci_low"] is None
         assert result.metrics["lift_ci_high"] is None
