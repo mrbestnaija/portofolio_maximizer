@@ -998,11 +998,16 @@ class TimeSeriesForecaster:
                     )
                     meta["restored_from_snapshot"] = restored_from_snapshot
                     if not restored_from_snapshot:
+                        # Phase 8.3: thread joint ADF+KPSS verdict into SARIMAX d selection.
+                        _force_diff = bool(
+                            (self._series_diagnostics or {}).get("force_difference", False)
+                        )
                         self._sarimax.fit(
                             price_series, exogenous=exog,
                             order_learner=self._order_learner,
                             ticker=ticker,
                             regime=_ol_regime,
+                            forced_d=1 if _force_diff else None,
                         )
                         self._maybe_save_snapshot(
                             component="sarimax",
