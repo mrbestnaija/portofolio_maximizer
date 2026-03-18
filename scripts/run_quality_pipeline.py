@@ -170,7 +170,7 @@ def run_quality_pipeline(
             "name": "data_sufficiency_monitor",
             "status": _step_status_from_flags(warnings=sufficiency_warnings, error=sufficiency_error),
             "warnings": sufficiency_warnings,
-            "output": None,
+            "output": sufficiency.get("status", "unknown"),
         }
     )
     warnings.extend(sufficiency_warnings)

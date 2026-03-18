@@ -983,7 +983,7 @@ def _quant_validation_payload() -> Dict[str, Any]:
         entries = _load_entries(path)
         monitoring_cfg = _load_monitoring_cfg(DEFAULT_MONITORING_CONFIG_PATH)
         qv_cfg = monitoring_cfg.get("quant_validation") or {}
-        max_fail_frac = float(qv_cfg.get("max_fail_fraction", 0.95))
+        max_fail_frac = float(qv_cfg.get("max_fail_fraction", 0.85))  # Phase 7.14: 0.95→0.85
         max_neg_exp_frac = float(qv_cfg.get("max_negative_expected_profit_fraction", 0.50))
         warn_fail_frac = float(qv_cfg.get("warn_fail_fraction", max_fail_frac))
         warn_neg_exp_frac = float(

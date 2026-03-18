@@ -41,6 +41,12 @@ DEFAULT_METRICS_PATH = DEFAULT_OUT_DIR / "metrics_summary.json"
 
 R3_WIN_RATE = R3_MIN_WIN_RATE
 
+# Two intentionally-different profit-factor caps:
+# DB cap (99.0): sentinel for "no losing trades"; stored in metrics_summary.json.
+# Chart cap (5.0): visual readability; bars beyond 5x would dominate the y-axis.
+_PF_CAP_DB: float = 99.0
+_PF_CAP_CHART: float = 5.0
+
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -103,7 +109,7 @@ def _load_per_ticker(db_path: Path) -> list[dict[str, Any]]:
             if gross_loss > 0:
                 pf = gross_win / gross_loss
             elif gross_win > 0:
-                pf = 99.0
+                pf = _PF_CAP_DB  # sentinel: no losing trades
             else:
                 pf = 0.0
             rows.append(
@@ -111,7 +117,7 @@ def _load_per_ticker(db_path: Path) -> list[dict[str, Any]]:
                     "ticker": str(row["ticker"] or "").upper(),
                     "n": n,
                     "win_rate": wins / n if n else 0.0,
-                    "profit_factor": min(pf, 99.0),
+                    "profit_factor": min(pf, _PF_CAP_DB),
                     "total_pnl": _finite_float(row["total_pnl"]),
                 }
             )
@@ -154,7 +160,10 @@ def _load_wr_over_time(db_path: Path) -> list[dict[str, Any]]:
 def _load_lift_metrics(audit_dir: Path) -> dict[str, Any]:
     try:
         from check_model_improvement import run_layer1_forecast_quality
-
+    except ImportError as exc:
+        log.error("check_model_improvement not importable (missing dep?): %s", exc)
+        return {}
+    try:
         result = run_layer1_forecast_quality(audit_dir=audit_dir)
         return result.metrics or {}
     except Exception as exc:
@@ -257,7 +266,7 @@ def chart_per_ticker_wr_pf(rows: list[dict[str, Any]], out_path: Path) -> None:
         return
     tickers = [row["ticker"] for row in rows]
     wrs = [_finite_float(row["win_rate"]) * 100 for row in rows]
-    pfs = [min(max(_finite_float(row["profit_factor"]), 0.0), 5.0) for row in rows]
+    pfs = [min(max(_finite_float(row["profit_factor"]), 0.0), _PF_CAP_CHART) for row in rows]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
     colors_wr = [

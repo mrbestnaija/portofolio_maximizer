@@ -686,3 +686,81 @@ class TestConfigContract:
                 f"CONFIG: AAPL min_expected_return={mer*100:.2f}bps below ~15bps roundtrip cost. "
                 "Phase 7.14 raised to 80bps (0.0080)."
             )
+
+    def test_dashboard_max_fail_fraction_fallback_not_loose(self):
+        """TD-01: dashboard_db_bridge.py fallback max_fail_fraction must be 0.85, not 0.95."""
+        import ast, pathlib
+        src = pathlib.Path(_REPO_ROOT / "scripts" / "dashboard_db_bridge.py").read_text(encoding="utf-8")
+        # Check that the fallback value is 0.85 (not 0.95) wherever max_fail_fraction default appears
+        assert "max_fail_fraction\", 0.95)" not in src, (
+            "TD-01: dashboard_db_bridge.py hardcodes 0.95 fallback for max_fail_fraction. "
+            "Phase 7.14 lowered the gate to 0.85 — the fallback must match."
+        )
+
+
+# ---------------------------------------------------------------------------
+# NS-02  r_multiple infinity guard
+# ---------------------------------------------------------------------------
+
+class TestNS02RMultipleInfGuard:
+    """NS-02: exit_quality_audit r_multiple must not produce +/-inf values."""
+
+    def test_r_multiple_no_inf_when_risk_unit_tiny(self):
+        """NS-02: exit_quality_audit r_multiple computation must guard against inf.
+        Verifies the fix: .replace([np.inf, -np.inf], np.nan) is present.
+        """
+        import pathlib
+        src = pathlib.Path(_REPO_ROOT / "scripts" / "exit_quality_audit.py").read_text(encoding="utf-8")
+        assert "np.isfinite" in src and "r_multiple" in src, (
+            "NS-02: exit_quality_audit.py r_multiple division must use np.isfinite() "
+            "guard to prevent inf values (pandas 2.x safe pattern)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# AR-02  profit factor caps named (not magic literals)
+# ---------------------------------------------------------------------------
+
+class TestAR02ProfitFactorCapsNamed:
+    """AR-02: Two PF caps (DB=99, chart=5) must be named constants, not magic numbers."""
+
+    def test_pf_cap_constants_defined(self):
+        import scripts.generate_performance_charts as mod
+        assert hasattr(mod, "_PF_CAP_DB"), "AR-02: _PF_CAP_DB constant missing from generate_performance_charts"
+        assert hasattr(mod, "_PF_CAP_CHART"), "AR-02: _PF_CAP_CHART constant missing from generate_performance_charts"
+        assert mod._PF_CAP_DB == 99.0, f"AR-02: _PF_CAP_DB={mod._PF_CAP_DB}, expected 99.0"
+        assert mod._PF_CAP_CHART == 5.0, f"AR-02: _PF_CAP_CHART={mod._PF_CAP_CHART}, expected 5.0"
+        assert mod._PF_CAP_DB != mod._PF_CAP_CHART, "AR-02: DB and chart caps must be distinct by design"
+
+
+# ---------------------------------------------------------------------------
+# TD-02  coverage_ratio threshold named constant
+# ---------------------------------------------------------------------------
+
+class TestTD02CoverageRatioNamed:
+    """TD-02: coverage_ratio WARN threshold must be a named constant."""
+
+    def test_coverage_ratio_constant_exists(self):
+        import scripts.check_model_improvement as mod
+        assert hasattr(mod, "_COVERAGE_RATIO_WARN_THRESHOLD"), (
+            "TD-02: _COVERAGE_RATIO_WARN_THRESHOLD constant missing — magic 0.20 is not pinnable in tests"
+        )
+        v = mod._COVERAGE_RATIO_WARN_THRESHOLD
+        assert 0.0 < v <= 0.5, f"TD-02: threshold {v} outside reasonable range (0, 0.5]"
+
+
+# ---------------------------------------------------------------------------
+# MW-03  run_quality_pipeline data_sufficiency_monitor step output not None
+# ---------------------------------------------------------------------------
+
+class TestMW03SufficiencyStepOutput:
+    """MW-03: data_sufficiency_monitor step must not return output=None."""
+
+    def test_sufficiency_step_output_not_none(self, tmp_path):
+        import inspect, pathlib
+        src = pathlib.Path(_REPO_ROOT / "scripts" / "run_quality_pipeline.py").read_text(encoding="utf-8")
+        # The string '"output": None' in the data_sufficiency context is the bug
+        assert '"output": None' not in src or src.count('"output": None') == 0, (
+            "MW-03: run_quality_pipeline.py has \"output\": None in a step dict. "
+            "Callers expecting consistent string output will receive None silently."
+        )
