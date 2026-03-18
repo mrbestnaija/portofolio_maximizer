@@ -59,6 +59,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Load .env so whitelist env vars (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS etc.)
+# are available both in CLI runs and in pytest integration tests against the real DB.
+try:
+    import dotenv as _dotenv
+    _dotenv.load_dotenv(ROOT / ".env", override=False)
+except ImportError:
+    pass
+
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
@@ -215,18 +223,40 @@ def chk_duplicate_close_null_bypass(conn: Optional[sqlite3.Connection]) -> Findi
         f.detail += " DB not found."
         return f
     try:
-        # Check how many NULL-linked closes exist
-        n_unlinked = _db_scalar(
-            conn,
-            "SELECT COUNT(*) FROM trade_executions WHERE is_close=1 AND entry_trade_id IS NULL "
-            "AND COALESCE(is_diagnostic,0)=0 AND COALESCE(is_synthetic,0)=0",
-        )
-        enforceable_threshold = 0
-        if n_unlinked and n_unlinked > enforceable_threshold:
-            f.detail += f" ACTIVE EXPOSURE: {n_unlinked} unlinked close(s) in production view."
+        # Load whitelist — resume-originated orphans documented in .env
+        # (INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS=66,75,255)
+        _whitelist: set[int] = set()
+        _raw = os.environ.get("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "")
+        for _tok in _raw.split(","):
+            _tok = _tok.strip()
+            if _tok:
+                try:
+                    _whitelist.add(int(_tok))
+                except ValueError:
+                    pass
+
+        # Fetch all unlinked production closes then subtract whitelisted IDs
+        rows = conn.execute(
+            "SELECT id FROM trade_executions WHERE is_close=1 AND entry_trade_id IS NULL "
+            "AND COALESCE(is_diagnostic,0)=0 AND COALESCE(is_synthetic,0)=0"
+        ).fetchall()
+        unlinked_ids = [int(r[0]) for r in rows]
+        non_whitelisted = [i for i in unlinked_ids if i not in _whitelist]
+
+        if non_whitelisted:
+            f.detail += (
+                f" ACTIVE EXPOSURE: {len(non_whitelisted)} unlinked close(s) in production view"
+                + (f" ({len(unlinked_ids) - len(non_whitelisted)} whitelisted)" if _whitelist else "")
+                + f". IDs: {non_whitelisted[:10]}"
+            )
         else:
             f.passed = True
-            f.detail += " No unlinked closes in current DB. Structural risk remains."
+            masked = len(unlinked_ids) - len(non_whitelisted)
+            f.detail += (
+                f" No unlinked closes in current DB (beyond {masked} whitelisted). "
+                "Structural risk remains." if masked
+                else " No unlinked closes in current DB. Structural risk remains."
+            )
     except Exception as exc:
         f.detail += f" [DB error: {exc}]"
     return f
