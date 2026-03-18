@@ -127,9 +127,10 @@ class TestV3JsonlAlignment:
         result = check_v3_jsonl_alignment(tmp_path / "missing.jsonl", tmp_path)
         assert result.status == "SKIP"
 
-    def test_fail_when_zero_alignable(self, tmp_path):
+    def test_warn_when_zero_alignable(self, tmp_path):
+        # 0% alignable = WARN (not FAIL): generate_classifier_training_labels.py
+        # is unaffected by JSONL timestamps; blocking would be a false positive.
         from scripts.validate_pipeline_inputs import check_v3_jsonl_alignment
-        # Parquet covers 2020; JSONL entry has 2026 timestamp → 0% alignable
         _write_parquet(_make_price_df(n=200, start="2020-01-01"),
                        tmp_path / "AAPL_data_extraction.parquet")
         jsonl = tmp_path / "quant.jsonl"
@@ -138,7 +139,7 @@ class TestV3JsonlAlignment:
              "classifier_features": {"realized_vol": 0.2}},
         ], jsonl)
         result = check_v3_jsonl_alignment(jsonl, tmp_path)
-        assert result.status == "FAIL"
+        assert result.status == "WARN"
         assert "0 of" in result.message
 
     def test_pass_when_timestamps_align(self, tmp_path):

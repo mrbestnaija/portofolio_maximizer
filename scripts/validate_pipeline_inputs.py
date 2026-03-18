@@ -405,13 +405,22 @@ def check_v3_jsonl_alignment(
     }
 
     if pct_alignable == 0.0:
+        # WARN (not FAIL): 0% alignment means build_directional_training_data.py
+        # (the JSONL-based labeler) cannot produce labels, but
+        # generate_classifier_training_labels.py (the parquet-scan labeler used
+        # by the bootstrap) is completely unaffected by JSONL timestamps — it reads
+        # checkpoint parquets directly. Blocking the pipeline here would be a false
+        # positive for any setup that already uses the parquet-scan path.
         return CheckResult(
-            "V3.alignment", "FAIL",
+            "V3.alignment", "WARN",
             (
                 f"0 of {n_total} JSONL entries have timestamps within any parquet's "
-                f"date range. All timestamps appear to be wall-clock ({current_year}). "
-                "build_directional_training_data.py will produce 0 labeled examples. "
-                "Use generate_classifier_training_labels.py (parquet scan) instead."
+                f"date range (all are wall-clock {current_year}, parquets cover "
+                f"{min(r[0] for r in parquet_ranges).date()} - "
+                f"{max(r[1] for r in parquet_ranges).date()} if parquets exist). "
+                "build_directional_training_data.py will produce 0 labeled examples -- "
+                "use generate_classifier_training_labels.py (parquet scan) instead. "
+                "The bootstrap already uses the parquet-scan path, so this is advisory only."
             ),
             details,
         )
