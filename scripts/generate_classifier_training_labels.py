@@ -139,21 +139,64 @@ def _compute_price_features(close: pd.Series) -> Dict[str, float]:
         except Exception as exc:
             logger.debug("ADF test failed: %s", exc)
 
-    # Hurst exponent + trend strength + regime one-hots via RegimeDetector
+    # Hurst exponent + trend strength + regime one-hots.
+    # Implemented inline (pure numpy/statsmodels) so the script can be run as
+    # 'python scripts/generate_classifier_training_labels.py' without the project
+    # root on sys.path — avoids ModuleNotFoundError for forcester_ts.
     if n >= 30:
         try:
-            from forcester_ts.regime_detector import RegimeDetector
-            rd = RegimeDetector()
-            rf = rd.extract_features(close.values)
-            feat["hurst_exponent"] = float(rf.get("hurst_exponent", nan))
-            feat["trend_strength"] = float(rf.get("trend_strength", nan))
+            prices = close.values.astype(float)
 
-            regime_label = rd.detect_regime(close.values)
-            regime_key = str(regime_label).lower().replace(" ", "_")
-            for r in ("liquid_rangebound", "moderate_trending", "high_vol_trending", "crisis"):
-                feat[f"regime_{r}"] = 1.0 if regime_key == r else 0.0
+            # --- Hurst exponent (rescaled range / R-S analysis) ---
+            def _hurst(x: np.ndarray) -> float:
+                m = len(x)
+                lags, rs_vals = [], []
+                for lag in range(2, min(20, m // 2)):
+                    nw = m // lag
+                    if nw < 2:
+                        continue
+                    rs_per_w = []
+                    for i in range(nw):
+                        w = x[i * lag:(i + 1) * lag]
+                        dev = np.cumsum(w - w.mean())
+                        s = w.std(ddof=1)
+                        if s > 0:
+                            rs_per_w.append((dev.max() - dev.min()) / s)
+                    if rs_per_w:
+                        rs_vals.append(np.log(np.mean(rs_per_w)))
+                        lags.append(np.log(lag))
+                if len(lags) < 2:
+                    return 0.5
+                h = np.polyfit(lags, rs_vals, 1)[0]
+                return float(np.clip(h, 0.0, 1.0))
+
+            feat["hurst_exponent"] = _hurst(prices)
+
+            # --- Trend strength (linear-regression R²) ---
+            x = np.arange(n, dtype=float)
+            coeffs = np.polyfit(x, prices, 1)
+            y_hat = np.polyval(coeffs, x)
+            ss_res = float(np.sum((prices - y_hat) ** 2))
+            ss_tot = float(np.sum((prices - prices.mean()) ** 2))
+            feat["trend_strength"] = float(np.clip(1.0 - ss_res / ss_tot, 0.0, 1.0)) \
+                if ss_tot > 1e-12 else 0.0
+
+            # --- Regime one-hots (aligned with RegimeDetector thresholds) ---
+            vol_ann = feat.get("realized_vol_annualized", nan)
+            ts = feat["trend_strength"]
+            if np.isfinite(vol_ann):
+                if vol_ann > 0.40:
+                    regime = "crisis"
+                elif vol_ann > 0.20 and ts > 0.30:
+                    regime = "high_vol_trending"
+                elif ts > 0.40:
+                    regime = "moderate_trending"
+                else:
+                    regime = "liquid_rangebound"
+                for r in ("liquid_rangebound", "moderate_trending", "high_vol_trending", "crisis"):
+                    feat[f"regime_{r}"] = 1.0 if regime == r else 0.0
         except Exception as exc:
-            logger.debug("RegimeDetector failed: %s", exc)
+            logger.debug("Inline regime features failed: %s", exc)
 
     # Sanitize: replace inf with nan
     for k, v in feat.items():

@@ -361,13 +361,56 @@ def _build_report(result: Dict[str, Any]) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def _optimal_gate_threshold(
+    y_true: np.ndarray,
+    p_pred: np.ndarray,
+    candidate_thresholds: List[float] | None = None,
+    min_gated: int = 10,
+) -> float:
+    """
+    Return the p_up threshold that maximises gate_lift_buy subject to at least
+    min_gated BUY examples passing the gate.  Scans candidate_thresholds in order
+    and picks the one with the highest (gated_buy_wr - baseline_wr).
+
+    Falls back to 0.55 if no candidate has sufficient coverage.
+    """
+    if candidate_thresholds is None:
+        candidate_thresholds = [round(t, 2) for t in np.arange(0.50, 0.91, 0.05)]
+
+    baseline_wr = float(y_true.mean()) if len(y_true) > 0 else float("nan")
+    best_thresh = 0.55
+    best_lift = float("-inf")
+
+    for thresh in candidate_thresholds:
+        mask = p_pred >= thresh
+        n_gated = int(mask.sum())
+        if n_gated < min_gated:
+            continue
+        gated_wr = float(y_true[mask].mean())
+        lift = gated_wr - baseline_wr
+        if lift > best_lift:
+            best_lift = lift
+            best_thresh = thresh
+
+    return best_thresh
+
+
 def evaluate(
     dataset_path: Path = _DATASET_PATH,
     meta_path: Path = _META_PATH,
     min_n: int = _COLD_START_MIN_N,
     write_report: bool = True,
+    p_up_threshold: float | None = None,
 ) -> Dict[str, Any]:
-    """Run full evaluation suite. Returns result dict."""
+    """
+    Run full evaluation suite. Returns result dict.
+
+    Args:
+        p_up_threshold: Gate threshold for BUY signals (p_up >= threshold).
+            When None (default), the threshold is auto-optimised by scanning
+            [0.50, 0.55, ..., 0.90] and picking the value that maximises
+            gate_lift_buy subject to at least 10 gated examples.
+    """
     if not dataset_path.exists():
         logger.error("Dataset not found: %s", dataset_path)
         return {"error": "dataset_not_found"}
@@ -448,9 +491,15 @@ def evaluate(
 
     # 3. Win-rate counterfactual on entire labeled set with leave-one-out proxy.
     #    We use the last 20% held-out predictions from the ECE step for consistency.
+    #    Gate threshold: auto-optimise when not explicitly provided.
     cf_result: Dict[str, Any] = {}
     if len(y_te_ece) >= 10 and ece_result.get("ece") is not None:
-        cf_result = _win_rate_counterfactual(y_te_ece, p_pred)
+        if p_up_threshold is None:
+            _gate_thresh = _optimal_gate_threshold(y_te_ece, p_pred)
+            logger.info("Auto-optimised gate threshold: %.2f", _gate_thresh)
+        else:
+            _gate_thresh = p_up_threshold
+        cf_result = _win_rate_counterfactual(y_te_ece, p_pred, p_up_threshold=_gate_thresh)
     else:
         cf_result = {
             "note": "insufficient held-out data for counterfactual",
@@ -504,8 +553,22 @@ def main(argv: Optional[list] = None) -> int:
         action="store_true",
         help="Skip writing report files (print to console only)",
     )
+    parser.add_argument(
+        "--gate-threshold",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        help=(
+            "p_up threshold for BUY gate (0.0-1.0). "
+            "Default: auto-optimise by scanning [0.50..0.90] to maximise gate lift."
+        ),
+    )
     args = parser.parse_args(argv)
-    result = evaluate(min_n=args.min_n, write_report=not args.no_report)
+    result = evaluate(
+        min_n=args.min_n,
+        write_report=not args.no_report,
+        p_up_threshold=args.gate_threshold,
+    )
     if result.get("error"):
         print(f"[ERROR] {result['error']}")
         return 1

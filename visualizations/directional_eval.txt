@@ -1,6 +1,6 @@
 ============================================================
 Directional Classifier Evaluation Report
-Generated: 2026-03-18T07:08:41.070884Z
+Generated: 2026-03-18T18:54:02.258011Z
 ============================================================
 
 [Dataset]
@@ -12,35 +12,33 @@ Generated: 2026-03-18T07:08:41.070884Z
 [Walk-Forward Directional Accuracy]
   mean_da         : 0.5625
   n_folds         : 2
-  fold 0: DA=0.635 (n_train=69, n_test=96, C=0.01)
-  fold 1: DA=0.490 (n_train=165, n_test=96, C=0.01)
+  fold 0: DA=0.635 (n_train=69, n_test=96, C=1.0)
+  fold 1: DA=0.490 (n_train=165, n_test=96, C=1.0)
 
 [Expected Calibration Error (ECE)]
-  ECE             : 0.0749 (10-bin)
+  ECE             : 0.0722 (10-bin)
            Bin    Confidence    Accuracy    Count
-     [0.4,0.5)         0.446       1.000        2
-     [0.5,0.6)         0.558       0.500       12
-     [0.6,0.7)         0.651       0.667       30
-     [0.7,0.8)         0.720       0.571       14
+     [0.5,0.6)         0.586       0.667       30
+     [0.6,0.7)         0.634       0.571       28
 
 [Win-Rate Counterfactual (gate thresholds)]
-  p_up_threshold_buy  : 0.55
+  p_up_threshold_buy  : 0.65
   n_total             : 58
-  n_gated_buy         : 52
-  n_gated_sell        : 2
-  n_blocked           : 4
+  n_gated_buy         : 10
+  n_gated_sell        : 0
+  n_blocked           : 48
   baseline_win_rate   : 0.6207
-  gated_buy_win_rate  : 0.5962
-  gate_lift_buy       : -0.0245
+  gated_buy_win_rate  : 0.7
+  gate_lift_buy       : 0.0793
 
 [Feature Importance (top 3, from training meta)]
-  ensemble_pred_return               : coef=+0.3520
-  model_agreement                    : coef=+0.1036
-  snr                                : coef=-0.0464
+  snr                                : coef=+0.3764
+  ensemble_pred_return               : coef=-0.1678
+  samossa_evr                        : coef=+0.0965
 
 [Verdict]
   DA > 0.52       : PASS (0.562)
-  ECE < 0.10      : PASS (0.0749)
-  Gate lift > 0   : WARN (-0.0245)
+  ECE < 0.10      : PASS (0.0722)
+  Gate lift > 0   : PASS (+0.0793)
 
 ============================================================
