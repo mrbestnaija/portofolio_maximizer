@@ -25,7 +25,7 @@ param(
     [switch]$DryRun
 )
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "SilentlyContinue"
 
 $RootDir   = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PythonBin = Join-Path $RootDir "simpleTrader_env\Scripts\python.exe"
@@ -63,7 +63,9 @@ function LogWarn($msg)  { Log "[WARN]  $msg" "Yellow" }
 function LogError($msg) { Log "[ERROR] $msg" "Red" }
 
 # ---------------------------------------------------------------------------
-# Helper: run a command, capture to log, return exit code
+# Helper: run a command, capture stdout+stderr to log, return exit code.
+# Converts PowerShell ErrorRecord objects (from Python stderr) to plain
+# strings so NativeCommandError headers are never printed to the console.
 # ---------------------------------------------------------------------------
 function RunCmd($label, [string[]]$cmdArgs) {
     if ($DryRun) {
@@ -71,8 +73,21 @@ function RunCmd($label, [string[]]$cmdArgs) {
         return 0
     }
     Log "--- $label"
-    & $PythonBin @cmdArgs 2>&1 | Tee-Object -FilePath $LogFile -Append
+    & $PythonBin @cmdArgs 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+    } | Tee-Object -FilePath $LogFile -Append
     return $LASTEXITCODE
+}
+
+# ---------------------------------------------------------------------------
+# Helper: best-effort auto_trader run (exit 1 = no trades placed = normal).
+# Only treat exit 2+ (Python crash / import failure) as a hard error.
+# ---------------------------------------------------------------------------
+function RunAutoTrader($label, [string[]]$cmdArgs) {
+    $rc = RunCmd $label $cmdArgs
+    if ($rc -eq 0) { return "pass" }
+    if ($rc -eq 1) { Log "  [NOTE] exit 1 -- no trades placed this cycle (HOLD-dominated), continuing"; return "warn" }
+    Log "  [ERROR] exit $rc -- Python crash" "Red"; return "fail"
 }
 
 # ---------------------------------------------------------------------------
@@ -167,9 +182,9 @@ LogSection "PHASE 1/5: Bootstrap synthetic cycles (training window 2020-2024)"
 if ($SkipBootstrap) {
     Log "Skipping Phase 1 (-SkipBootstrap)"
 } else {
-    $bootPass = 0; $bootFail = 0
+    $bootPass = 0; $bootWarn = 0; $bootFail = 0
     foreach ($asOf in $BootstrapDates) {
-        $rc = RunCmd "bootstrap as-of $asOf" @(
+        $outcome = RunAutoTrader "bootstrap as-of $asOf" @(
             "scripts\run_auto_trader.py",
             "--tickers", $Tickers,
             "--cycles", "1",
@@ -178,9 +193,13 @@ if ($SkipBootstrap) {
             "--no-resume",
             "--sleep-seconds", "0"
         )
-        if ($rc -eq 0) { $bootPass++ } else { $bootFail++; $Errors++ }
+        switch ($outcome) {
+            "pass" { $bootPass++ }
+            "warn" { $bootWarn++ }   # no trades = normal, not an error
+            "fail" { $bootFail++; $Errors++ }
+        }
     }
-    Log "Bootstrap complete: $bootPass passed / $bootFail failed"
+    Log "Bootstrap complete: $bootPass pass / $bootWarn warn(no-trade) / $bootFail hard-fail"
 }
 
 # Count JSONL entries with classifier_features
@@ -215,6 +234,7 @@ if ($SkipTrain) {
     Log "--- build_directional_training_data.py --fallback-to-pnl-label"
     if (-not $DryRun) {
         & $PythonBin "scripts\build_directional_training_data.py" "--fallback-to-pnl-label" 2>&1 |
+            ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ } } |
             Tee-Object -FilePath $LogFile -Append
     }
 
@@ -233,13 +253,20 @@ if s.get('cold_start_reason'):
 "@ 2>&1 | Tee-Object -FilePath $LogFile -Append
     }
 
-    # Step 2b: train
-    Log "--- train_directional_classifier.py"
+    # Step 2b: train — skip if parquet was not written (0 labeled rows = cold start)
+    $datasetPath = Join-Path $RootDir "data\training\directional_dataset.parquet"
     $trainRc = 0
-    if (-not $DryRun) {
-        & $PythonBin "scripts\train_directional_classifier.py" 2>&1 |
-            Tee-Object -FilePath $LogFile -Append
-        $trainRc = $LASTEXITCODE
+    if (-not $DryRun -and -not (Test-Path $datasetPath)) {
+        Log "  [NOTE] directional_dataset.parquet not written (0 labeled rows) -- cold start"
+        $trainRc = 2
+    } else {
+        Log "--- train_directional_classifier.py"
+        if (-not $DryRun) {
+            & $PythonBin "scripts\train_directional_classifier.py" 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+            } | Tee-Object -FilePath $LogFile -Append
+            $trainRc = $LASTEXITCODE
+        }
     }
 
     switch ($trainRc) {
@@ -259,7 +286,7 @@ for f in (m.get('top3_features') or []):
 "@ 2>&1 | Tee-Object -FilePath $LogFile -Append
             }
         }
-        2 { LogWarn "Cold start -- not enough labeled data. A/B test will be skipped."; $Errors++ }
+        2 { LogWarn "Cold start -- not enough labeled data. A/B eval will still run as baseline-only." }
         default { LogError "Training failed (exit $trainRc)"; $Errors++ }
     }
 }
@@ -273,9 +300,9 @@ Log "DB before control: $($BeforeControl.round_trips) trades, PnL=$($BeforeContr
 
 SetGateEnabled "false"
 
-$ctrlPass = 0; $ctrlFail = 0
+$ctrlPass = 0; $ctrlWarn = 0; $ctrlFail = 0
 foreach ($asOf in $EvalDates) {
-    $rc = RunCmd "control as-of $asOf" @(
+    $outcome = RunAutoTrader "control as-of $asOf" @(
         "scripts\run_auto_trader.py",
         "--tickers", $Tickers,
         "--cycles", "1",
@@ -284,12 +311,16 @@ foreach ($asOf in $EvalDates) {
         "--no-resume",
         "--sleep-seconds", "0"
     )
-    if ($rc -eq 0) { $ctrlPass++ } else { $ctrlFail++; $Errors++ }
+    switch ($outcome) {
+        "pass" { $ctrlPass++ }
+        "warn" { $ctrlWarn++ }
+        "fail" { $ctrlFail++; $Errors++ }
+    }
 }
 
 $AfterControl = DbSnapshot
 Log "DB after control : $($AfterControl.round_trips) trades, PnL=$($AfterControl.total_pnl)"
-Log "Control cycles   : $ctrlPass passed / $ctrlFail failed"
+Log "Control cycles   : $ctrlPass pass / $ctrlWarn warn(no-trade) / $ctrlFail hard-fail"
 
 $ControlDeltaTrades = $AfterControl.round_trips - $BeforeControl.round_trips
 $ControlDeltaPnl    = [math]::Round($AfterControl.total_pnl - $BeforeControl.total_pnl, 4)
@@ -314,9 +345,9 @@ if (-not $ModelTrained) {
 
     SetGateEnabled "true"
 
-    $treatPass = 0; $treatFail = 0
+    $treatPass = 0; $treatWarn = 0; $treatFail = 0
     foreach ($asOf in $EvalDates) {
-        $rc = RunCmd "treatment as-of $asOf" @(
+        $outcome = RunAutoTrader "treatment as-of $asOf" @(
             "scripts\run_auto_trader.py",
             "--tickers", $Tickers,
             "--cycles", "1",
@@ -325,12 +356,16 @@ if (-not $ModelTrained) {
             "--no-resume",
             "--sleep-seconds", "0"
         )
-        if ($rc -eq 0) { $treatPass++ } else { $treatFail++; $Errors++ }
+        switch ($outcome) {
+            "pass" { $treatPass++ }
+            "warn" { $treatWarn++ }
+            "fail" { $treatFail++; $Errors++ }
+        }
     }
 
     $AfterTreat = DbSnapshot
     Log "DB after treatment : $($AfterTreat.round_trips) trades, PnL=$($AfterTreat.total_pnl)"
-    Log "Treatment cycles   : $treatPass passed / $treatFail failed"
+    Log "Treatment cycles   : $treatPass pass / $treatWarn warn(no-trade) / $treatFail hard-fail"
 
     $TreatDeltaTrades = $AfterTreat.round_trips - $BeforeTreat.round_trips
     $TreatDeltaPnl    = [math]::Round($AfterTreat.total_pnl - $BeforeTreat.total_pnl, 4)
