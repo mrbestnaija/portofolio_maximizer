@@ -6,10 +6,19 @@ Phase 9: Train binary directional classifier P(price_up_in_N_bars).
 
 Reads data/training/directional_dataset.parquet produced by
 build_directional_training_data.py, trains a scikit-learn Pipeline
-(SimpleImputer -> StandardScaler -> LogisticRegression), and saves:
+(SimpleImputer -> StandardScaler -> LogisticRegression) wrapped in
+CalibratedClassifierCV (Platt/sigmoid calibration), and saves:
 
-  data/classifiers/directional_v1.pkl         — fitted Pipeline (joblib)
+  data/classifiers/directional_v1.pkl         — fitted CalibratedClassifierCV
   data/classifiers/directional_v1.meta.json   — version fingerprint + metrics
+
+Calibration note: class_weight='balanced' during walk-forward CV tunes the
+decision boundary for class-imbalanced data. The final model is wrapped in
+CalibratedClassifierCV(method='sigmoid') so that predict_proba() returns
+genuine probabilities rather than the distorted scores produced by balanced
+weighting alone. Platt sigmoid calibration is used (not isotonic) because it
+is reliable for n < 1000 and avoids the overfitting risk of isotonic regression
+on small datasets.
 
 Exits with code 2 when cold_start is True (insufficient data).
 
@@ -80,6 +89,7 @@ def train(
 
     # Walk-forward CV for hyperparameter selection
     try:
+        from sklearn.calibration import CalibratedClassifierCV
         from sklearn.model_selection import TimeSeriesSplit
         from sklearn.pipeline import Pipeline
         from sklearn.impute import SimpleImputer
@@ -134,26 +144,54 @@ def train(
 
     logger.info("Best C=%.3f (walk-forward DA=%.3f)", best_c, best_da)
 
-    # Final fit on all data with best C
-    final_pipe = Pipeline([
+    # Final fit on all data with best C, wrapped in Platt calibration.
+    #
+    # D4 fix: class_weight='balanced' adjusts penalty weights so the LR decision
+    # boundary handles imbalanced labels, but it distorts predict_proba() outputs
+    # (overconfident positives on majority class, underconfident on minority).
+    # CalibratedClassifierCV(method='sigmoid') applies Platt scaling: fits a
+    # sigmoid on out-of-fold probability estimates to re-anchor them to true
+    # empirical frequencies.  Sigmoid ('Platt') is used (not 'isotonic') because
+    # it is robust for n < 1000 and avoids isotonic's overfitting on small sets.
+    #
+    # cv_count is set adaptively so each calibration fold has ≥ 30 samples:
+    #   n < 90  → cv=2  (~30 per fold after gap)
+    #   n ≥ 90  → cv=3  (~30 per fold after gap)
+    # Minimum 2 folds enforced; maximum capped at 3 (diminishing returns beyond).
+    _n = len(y)
+    _calib_cv = 3 if _n >= 90 else 2
+    logger.info("Calibration CV folds: %d (n=%d)", _calib_cv, _n)
+
+    base_pipe = Pipeline([
         ("impute", SimpleImputer(strategy="mean")),
         ("scale", StandardScaler()),
         ("clf", LogisticRegression(
             C=best_c, max_iter=500, solver="lbfgs", class_weight="balanced"
         )),
     ])
-    final_pipe.fit(X_df, y)
+    final_model = CalibratedClassifierCV(base_pipe, cv=_calib_cv, method="sigmoid")
+    final_model.fit(X_df, y)
 
-    # Save model
+    # Save model (CalibratedClassifierCV wrapping the pipeline)
     _MODEL_DIR.mkdir(parents=True, exist_ok=True)
     import joblib
     tmp = model_path.with_suffix(".tmp.pkl")
-    joblib.dump(final_pipe, tmp)
+    joblib.dump(final_model, tmp)
     tmp.replace(model_path)
 
-    # Coefficient feature importance (logistic regression coefficients)
-    coefs = final_pipe.named_steps["clf"].coef_[0]
-    feature_importance = {name: float(coef) for name, coef in zip(_FEATURE_NAMES, coefs)}
+    # Coefficient feature importance: average LR coefs across calibration folds.
+    # CalibratedClassifierCV fits one base_pipe per calibration fold internally;
+    # we access each fold's estimator to extract coef_ and average across folds.
+    try:
+        all_coefs = [
+            cc.estimator.named_steps["clf"].coef_[0]
+            for cc in final_model.calibrated_classifiers_
+        ]
+        mean_coefs = np.mean(all_coefs, axis=0)
+        feature_importance = {name: float(coef) for name, coef in zip(_FEATURE_NAMES, mean_coefs)}
+    except Exception as exc:
+        logger.warning("Could not extract feature importance from calibrated model: %s", exc)
+        feature_importance = {}
     top3 = sorted(feature_importance.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
 
     # Build meta sidecar
@@ -176,9 +214,11 @@ def train(
         "fold_results": fold_results,
         "top3_features": [{"name": k, "coef": round(v, 4)} for k, v in top3],
         "cold_start": False,
+        "calibration_method": "sigmoid",
+        "calibration_cv_folds": _calib_cv,
         "python_version": f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}",
         "libraries": libraries,
-        "schema_version": 1,
+        "schema_version": 2,  # v2: CalibratedClassifierCV (sigmoid) wrapping base pipeline
     }
     tmp_meta = meta_path.with_suffix(".tmp.json")
     tmp_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")

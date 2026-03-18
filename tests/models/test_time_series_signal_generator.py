@@ -1415,3 +1415,62 @@ class TestDirectionalGate:
             ticker="AAPL",
         )
         assert signal.directional_gate_applied is False
+
+    # G1: gate observability / exception paths (audit finding A1/A2)
+
+    def test_gate_disabled_when_config_is_not_dict(self):
+        """A1: non-dict signal_routing_config must disable gate gracefully, not raise."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        gen._signal_routing_config = "not-a-dict"
+        assert gen._directional_gate_enabled() is False
+
+    def test_gate_disabled_when_dc_section_is_not_dict(self):
+        """A1: non-dict directional_classifier section must disable gate gracefully."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        gen._signal_routing_config = {"directional_classifier": "yes-please"}
+        assert gen._directional_gate_enabled() is False
+
+    def test_gate_enabled_when_config_explicitly_set(self):
+        """A1: gate returns True when config dict has enabled=True."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        gen._signal_routing_config = {
+            "directional_classifier": {"enabled": True, "p_up_threshold_buy": 0.55}
+        }
+        assert gen._directional_gate_enabled() is True
+
+    def test_score_directional_returns_none_after_import_failure(self):
+        """A2: failed import writes sentinel and subsequent calls return None without retrying."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        gen._signal_routing_config = {
+            "directional_classifier": {"enabled": True, "p_up_threshold_buy": 0.55}
+        }
+        # Simulate a failed import by setting the sentinel directly
+        gen._directional_classifier = TimeSeriesSignalGenerator._DIRECTIONAL_CLASSIFIER_FAILED
+        result = gen._score_directional({})
+        assert result is None
+
+    def test_market_data_none_produces_nan_for_context_features(self):
+        """A4/E1: market_data=None should not raise; context features should be NaN."""
+        import math
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator()
+        bundle = self._make_bundle()
+        features = gen._extract_classifier_features(
+            forecast_bundle=bundle,
+            current_price=100.0,
+            expected_return=0.02,
+            lower_ci=98.0,
+            upper_ci=102.0,
+            snr=1.5,
+            model_agreement=0.8,
+            market_data=None,
+        )
+        # Context features must be NaN (not missing from dict)
+        assert "recent_return_5d" in features
+        assert "recent_vol_ratio" in features
+        assert math.isnan(features["recent_return_5d"])
+        assert math.isnan(features["recent_vol_ratio"])

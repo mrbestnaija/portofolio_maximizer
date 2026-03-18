@@ -76,3 +76,67 @@ class TestTrainDirectionalClassifier:
         # Walk-forward DA should be above random (50%) on linearly separable data
         # (may be close to 50% due to small fold sizes, so use a low bar)
         assert result.get("walk_forward_da", 0.0) >= 0.40
+
+    # D4: CalibratedClassifierCV (schema v2) tests
+
+    def test_saved_model_is_calibrated_classifier(self, tmp_path):
+        """D4: saved pkl must be CalibratedClassifierCV, not bare Pipeline."""
+        import joblib
+        from sklearn.calibration import CalibratedClassifierCV
+        from scripts.train_directional_classifier import train
+        df = self._make_dataset(n=80)
+        path = tmp_path / "directional_dataset.parquet"
+        model_path = tmp_path / "directional_v1.pkl"
+        meta_path = tmp_path / "directional_v1.meta.json"
+        df.to_parquet(path, index=False)
+        train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        model = joblib.load(model_path)
+        assert isinstance(model, CalibratedClassifierCV), (
+            f"Expected CalibratedClassifierCV, got {type(model).__name__}"
+        )
+
+    def test_meta_has_calibration_fields(self, tmp_path):
+        """D4: meta sidecar must include calibration_method and schema_version=2."""
+        from scripts.train_directional_classifier import train
+        df = self._make_dataset(n=80)
+        path = tmp_path / "directional_dataset.parquet"
+        model_path = tmp_path / "directional_v1.pkl"
+        meta_path = tmp_path / "directional_v1.meta.json"
+        df.to_parquet(path, index=False)
+        result = train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        assert result.get("calibration_method") == "sigmoid"
+        assert result.get("calibration_cv_folds") in (2, 3)
+        assert result.get("schema_version") == 2
+
+    def test_calibrated_model_predict_proba_in_unit_interval(self, tmp_path):
+        """D4: calibrated model must return probabilities in [0, 1]."""
+        import joblib
+        import pandas as pd
+        from forcester_ts.directional_classifier import _FEATURE_NAMES
+        from scripts.train_directional_classifier import train
+        df = self._make_dataset(n=80)
+        path = tmp_path / "directional_dataset.parquet"
+        model_path = tmp_path / "directional_v1.pkl"
+        meta_path = tmp_path / "directional_v1.meta.json"
+        df.to_parquet(path, index=False)
+        train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        model = joblib.load(model_path)
+        X_test = pd.DataFrame(np.random.randn(10, len(_FEATURE_NAMES)), columns=_FEATURE_NAMES)
+        proba = model.predict_proba(X_test)
+        assert proba.shape == (10, 2)
+        assert (proba >= 0.0).all() and (proba <= 1.0).all(), "Probabilities must be in [0, 1]"
+
+    def test_directional_classifier_loads_schema_v2(self, tmp_path):
+        """D4: DirectionalClassifier.score() works with schema v2 pkl (CalibratedClassifierCV)."""
+        from scripts.train_directional_classifier import train
+        from forcester_ts.directional_classifier import DirectionalClassifier, _FEATURE_NAMES
+        df = self._make_dataset(n=80)
+        path = tmp_path / "directional_dataset.parquet"
+        model_path = tmp_path / "directional_v1.pkl"
+        meta_path = tmp_path / "directional_v1.meta.json"
+        df.to_parquet(path, index=False)
+        train(dataset_path=path, model_path=model_path, meta_path=meta_path, c_values=[1.0])
+        clf = DirectionalClassifier(model_path=model_path)
+        features = {name: 0.0 for name in _FEATURE_NAMES}
+        result = clf.score(features)
+        assert isinstance(result, float) and 0.0 <= result <= 1.0

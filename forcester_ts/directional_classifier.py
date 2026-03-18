@@ -3,9 +3,14 @@ forcester_ts/directional_classifier.py
 ---------------------------------------
 Phase 9: Binary directional classifier P(price_up_in_N_bars).
 
-Loads a serialized scikit-learn Pipeline from data/classifiers/directional_v1.pkl
+Loads a serialized sklearn estimator from data/classifiers/directional_v1.pkl
 and scores feature vectors at inference time. Falls back to None (cold-start)
 when the model file does not exist or the training set was too small.
+
+Schema v1: saved object was a bare Pipeline.
+Schema v2: saved object is CalibratedClassifierCV wrapping a Pipeline (Platt
+  sigmoid calibration). Both expose identical predict_proba() so inference code
+  is unchanged between schema versions.
 
 The classifier is trained offline by scripts/train_directional_classifier.py.
 This module is inference-only.
