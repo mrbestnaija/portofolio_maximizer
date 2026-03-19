@@ -1867,7 +1867,7 @@ def execute_pipeline(
                     def _build_model_config(target_horizon: int) -> TimeSeriesForecasterConfig:
                         return TimeSeriesForecasterConfig(
                             forecast_horizon=int(target_horizon),
-                            sarimax_enabled=sarimax_cfg.get('enabled', False),
+                            sarimax_enabled=sarimax_cfg.get('enabled', True),
                             garch_enabled=garch_cfg.get('enabled', True),
                             samossa_enabled=samossa_cfg.get('enabled', False),
                             mssa_rl_enabled=mssa_rl_cfg.get('enabled', True),

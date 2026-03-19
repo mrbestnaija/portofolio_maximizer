@@ -183,13 +183,13 @@ class TestConfigLoading:
             raw = _load_yaml(QUANT_SUCCESS_CFG)
             assert isinstance(raw, dict)
 
-    def test_sarimax_disabled_by_default(self):
-        """SARIMAX should be disabled in config (fast-only ensemble)."""
+    def test_sarimax_enabled_by_default(self):
+        """Phase 10: SARIMAX should be enabled in config for model-class diversity."""
         raw = _load_yaml(FORECASTING_CFG)
         fc = raw.get("forecasting", raw)
         sarimax = fc.get("sarimax", {})
-        assert sarimax.get("enabled") is False or sarimax.get("enabled", True) is False, (
-            "SARIMAX should be disabled by default in forecasting_config.yml"
+        assert sarimax.get("enabled") is True, (
+            "Phase 10: SARIMAX should be enabled by default in forecasting_config.yml"
         )
 
 
@@ -377,11 +377,12 @@ class TestForecasterConfigContract:
         )
         assert isinstance(config.regime_detection_kwargs, dict)
 
-    def test_config_sarimax_disabled_default(self):
+    def test_config_sarimax_enabled_default(self):
+        """Phase 10: TimeSeriesForecasterConfig defaults sarimax_enabled=True."""
         from etl.time_series_forecaster import TimeSeriesForecasterConfig
         config = TimeSeriesForecasterConfig()
-        assert config.sarimax_enabled is False, (
-            "TimeSeriesForecasterConfig should default sarimax_enabled=False"
+        assert config.sarimax_enabled is True, (
+            "Phase 10: TimeSeriesForecasterConfig should default sarimax_enabled=True"
         )
 
     def test_config_deep_copy_preserves_ensemble_kwargs(self):
@@ -409,8 +410,8 @@ class TestForecasterConstruction:
         forecaster = TimeSeriesForecaster(config=config)
         assert forecaster is not None
 
-    def test_forecaster_ensemble_config_no_sarimax(self):
-        """Default ensemble config should not contain SARIMAX candidates."""
+    def test_forecaster_ensemble_config_includes_sarimax(self):
+        """Phase 10: default ensemble config includes SARIMAX candidates for model diversity."""
         from etl.time_series_forecaster import (
             TimeSeriesForecaster,
             TimeSeriesForecasterConfig,
@@ -418,10 +419,10 @@ class TestForecasterConstruction:
         config = TimeSeriesForecasterConfig()
         forecaster = TimeSeriesForecaster(config=config)
         ec = forecaster._ensemble_config
-        for i, cand in enumerate(ec.candidate_weights):
-            assert "sarimax" not in cand, (
-                f"Candidate {i} contains sarimax: {cand}"
-            )
+        sarimax_count = sum(1 for c in ec.candidate_weights if "sarimax" in c)
+        assert sarimax_count >= 2, (
+            f"Phase 10: default ensemble should have >=2 SARIMAX candidates, got {sarimax_count}"
+        )
 
     def test_forecaster_with_explicit_ensemble_kwargs(self):
         from etl.time_series_forecaster import (
@@ -924,15 +925,16 @@ class TestTimestampHygiene:
 # ===================================================================
 
 class TestEnsembleConfigRegression:
-    """Guard against re-introduction of stale SARIMAX defaults."""
+    """Phase 10: Ensemble config guards — SARIMAX now active by default."""
 
-    def test_ensemble_config_defaults_no_sarimax(self):
+    def test_ensemble_config_defaults_include_sarimax(self):
+        """Phase 10: default candidates include SARIMAX for model-class diversity."""
         from forcester_ts.ensemble import EnsembleConfig
         ec = EnsembleConfig()
-        for i, cand in enumerate(ec.candidate_weights):
-            assert "sarimax" not in cand, (
-                f"Default candidate {i} contains sarimax: {cand}"
-            )
+        sarimax_count = sum(1 for c in ec.candidate_weights if "sarimax" in c)
+        assert sarimax_count >= 2, (
+            f"Phase 10: default candidates should include >=2 SARIMAX entries, got {sarimax_count}"
+        )
 
     def test_forecasting_config_yml_sarimax_candidates_optional(self):
         """YAML candidates may include SARIMAX for when it's re-enabled.

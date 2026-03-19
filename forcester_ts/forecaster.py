@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TimeSeriesForecasterConfig:
-    sarimax_enabled: bool = False  # Off by default; slow SARIMAX grid search
+    sarimax_enabled: bool = True  # Phase 10: enabled by default for model-class diversity
     garch_enabled: bool = True
     samossa_enabled: bool = True
     mssa_rl_enabled: bool = True

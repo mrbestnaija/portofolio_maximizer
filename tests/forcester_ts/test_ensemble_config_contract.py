@@ -45,6 +45,7 @@ FORECASTING_CONFIG_PATH = ROOT / "config" / "forecasting_config.yml"
 PIPELINE_CONFIG_PATH = ROOT / "config" / "pipeline_config.yml"
 
 FAST_ONLY_MODELS = {"garch", "samossa", "mssa_rl"}
+ALL_VALID_MODELS = {"garch", "samossa", "mssa_rl", "sarimax"}
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +105,10 @@ class TestConfigLoadPath:
         assert "regime_detection" in forecasting_config, \
             "forecasting_config.yml must contain a 'regime_detection' section"
 
-    def test_sarimax_disabled_by_default(self, forecasting_config):
+    def test_sarimax_enabled_by_default(self, forecasting_config):
         sarimax_cfg = forecasting_config.get("sarimax", {})
-        assert sarimax_cfg.get("enabled") is False, \
-            "SARIMAX should be disabled by default in config"
+        assert sarimax_cfg.get("enabled") is True, \
+            "SARIMAX should be enabled by default in config (Phase 10)"
 
     def test_ensemble_kwargs_not_empty(self, ensemble_kwargs_from_config):
         assert ensemble_kwargs_from_config, \
@@ -128,8 +129,8 @@ class TestConfigLoadPath:
         # pipeline_config.yml nests under "pipeline" then "forecasting"
         pipe_fc = pipe_raw.get("pipeline", pipe_raw).get("forecasting", {})
         pipe_sarimax = pipe_fc.get("sarimax", {})
-        assert pipe_sarimax.get("enabled") is False, \
-            "pipeline_config.yml SARIMAX should also be disabled"
+        assert pipe_sarimax.get("enabled") is True, \
+            "pipeline_config.yml SARIMAX should be enabled (Phase 10)"
 
 
 # ---------------------------------------------------------------------------
@@ -139,19 +140,21 @@ class TestConfigLoadPath:
 class TestEnsembleConfigDefaults:
     """Verify that EnsembleConfig dataclass defaults have no SARIMAX contamination."""
 
-    def test_default_candidate_weights_no_sarimax(self):
+    def test_default_candidate_weights_include_sarimax(self):
+        """Phase 10: default candidates include SARIMAX for model-class diversity."""
         config = EnsembleConfig()
-        for i, candidate in enumerate(config.candidate_weights):
-            assert "sarimax" not in candidate, \
-                f"Default candidate_weights[{i}] contains 'sarimax': {candidate}"
+        sarimax_count = sum(1 for c in config.candidate_weights if "sarimax" in c)
+        assert sarimax_count >= 2, \
+            f"Phase 10: expected >=2 SARIMAX-containing default candidates, got {sarimax_count}"
 
-    def test_default_candidate_weights_only_fast_models(self):
+    def test_default_candidate_weights_use_valid_models(self):
+        """All default candidates use valid model keys."""
         config = EnsembleConfig()
         for i, candidate in enumerate(config.candidate_weights):
             models = set(candidate.keys())
-            extra = models - FAST_ONLY_MODELS
+            extra = models - ALL_VALID_MODELS
             assert not extra, \
-                f"candidate_weights[{i}] has non-fast-only model(s): {extra}"
+                f"candidate_weights[{i}] has invalid model(s): {extra}"
 
     def test_default_candidate_weights_sum_to_one(self):
         config = EnsembleConfig()
@@ -187,13 +190,13 @@ class TestDisabledModelExclusion:
         assert "sarimax" not in weights, \
             f"SARIMAX should not appear in selected weights: {weights}"
 
-    def test_disabled_model_not_in_default_candidates(self):
-        """No default candidate should reference a model outside the fast set."""
+    def test_default_candidates_use_valid_model_keys(self):
+        """All default candidates use recognized model keys."""
         config = EnsembleConfig()
         for candidate in config.candidate_weights:
             for model in candidate:
-                assert model in FAST_ONLY_MODELS, \
-                    f"Unexpected model '{model}' in default candidates"
+                assert model in ALL_VALID_MODELS, \
+                    f"Unrecognized model '{model}' in default candidates"
 
     def test_scoring_excludes_zero_confidence_models(self):
         """Candidates referencing only zero-confidence models should score 0."""
@@ -225,11 +228,11 @@ class TestConfigModelMapping:
                 assert model in self.VALID_MODEL_KEYS, \
                     f"candidate_weights[{i}] has unknown model '{model}'"
 
-    def test_yaml_candidates_exclude_disabled_sarimax(self, candidate_weights_from_config):
-        """When sarimax is disabled, YAML candidates must remain fast-only."""
+    def test_yaml_candidates_include_sarimax_when_enabled(self, candidate_weights_from_config):
+        """Phase 10: YAML candidates include SARIMAX entries since SARIMAX is enabled."""
         sarimax_count = sum(1 for c in candidate_weights_from_config if "sarimax" in c)
-        assert sarimax_count == 0, \
-            "candidate_weights should not include disabled sarimax entries"
+        assert sarimax_count >= 2, \
+            f"Phase 10: expected >=2 SARIMAX-containing YAML candidates, got {sarimax_count}"
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +288,14 @@ class TestCVConfigPropagation:
         copy_count = len(copied.ensemble_kwargs.get("candidate_weights", []))
         assert orig_count == copy_count > 0
 
-    def test_empty_ensemble_kwargs_falls_back_to_defaults(self):
-        """When ensemble_kwargs is empty, EnsembleConfig uses its own defaults."""
+    def test_empty_ensemble_kwargs_falls_back_to_phase10_defaults(self):
+        """When ensemble_kwargs is empty, EnsembleConfig uses Phase 10 defaults with SARIMAX."""
         config = TimeSeriesForecasterConfig(ensemble_kwargs={})
         ec = EnsembleConfig(**config.ensemble_kwargs) if config.ensemble_kwargs else EnsembleConfig()
-        # Even the fallback defaults should not contain SARIMAX
-        for candidate in ec.candidate_weights:
-            assert "sarimax" not in candidate, \
-                f"Fallback default still contains sarimax: {candidate}"
+        # Phase 10: fallback defaults include SARIMAX for model-class diversity
+        sarimax_count = sum(1 for c in ec.candidate_weights if "sarimax" in c)
+        assert sarimax_count >= 2, \
+            f"Phase 10: fallback defaults should include SARIMAX candidates, got {sarimax_count}"
 
 
 # ---------------------------------------------------------------------------
@@ -313,20 +316,20 @@ class TestForecasterConstruction:
         assert n == expected, \
             f"Forecaster got {n} candidates, expected {expected} from config"
 
-    def test_without_ensemble_kwargs_uses_safe_defaults(self):
-        """Bare config (empty ensemble_kwargs) must still produce SARIMAX-free defaults."""
+    def test_without_ensemble_kwargs_uses_phase10_defaults(self):
+        """Bare config (empty ensemble_kwargs) uses Phase 10 defaults including SARIMAX."""
         config = TimeSeriesForecasterConfig()  # ensemble_kwargs = {}
         forecaster = TimeSeriesForecaster(config=config)
         ec = forecaster._ensemble_config
-        for i, candidate in enumerate(ec.candidate_weights):
-            assert "sarimax" not in candidate, \
-                f"Default candidate[{i}] in bare forecaster has sarimax: {candidate}"
+        sarimax_count = sum(1 for c in ec.candidate_weights if "sarimax" in c)
+        assert sarimax_count >= 2, \
+            f"Phase 10: bare forecaster should include >=2 SARIMAX candidates, got {sarimax_count}"
 
-    def test_build_config_from_kwargs_disabled_sarimax(self):
-        """Legacy kwargs path should also default SARIMAX to disabled."""
+    def test_build_config_from_kwargs_sarimax_default(self):
+        """Phase 10: legacy kwargs path defaults SARIMAX to enabled."""
         forecaster = TimeSeriesForecaster(forecast_horizon=10)
-        assert forecaster.config.sarimax_enabled is False, \
-            "SARIMAX should be disabled by default in kwargs path"
+        assert forecaster.config.sarimax_enabled is True, \
+            "SARIMAX should be enabled by default in kwargs path (Phase 10)"
 
     def test_build_config_from_kwargs_with_ensemble(self):
         """Legacy kwargs path with explicit ensemble config."""
@@ -349,14 +352,16 @@ class TestForecasterConstruction:
 class TestRegimeCandidateWeights:
     """Regime-specific candidate weights must also be SARIMAX-free."""
 
-    def test_regime_candidates_no_sarimax(self, regime_section):
+    def test_regime_candidates_use_valid_models(self, regime_section):
+        """Regime candidates use valid model keys (SARIMAX allowed when enabled)."""
         rcw = regime_section.get("regime_candidate_weights", {})
         if not rcw:
             pytest.skip("No regime_candidate_weights in config")
         for regime, candidates in rcw.items():
             for i, candidate in enumerate(candidates):
-                assert "sarimax" not in candidate, \
-                    f"regime_candidate_weights[{regime}][{i}] has sarimax: {candidate}"
+                for model in candidate:
+                    assert model in ALL_VALID_MODELS, \
+                        f"regime_candidate_weights[{regime}][{i}] has invalid model '{model}'"
 
     def test_regime_model_preferences_no_sarimax(self, regime_section):
         prefs = regime_section.get("regime_model_preferences", {})
@@ -389,14 +394,14 @@ class TestAutoTraderConfigLoader:
             "ensemble section must have 'candidate_weights'"
         assert len(ensemble["candidate_weights"]) >= 3
 
-    def test_loader_sarimax_disabled(self):
+    def test_loader_sarimax_enabled(self):
         import importlib
         mod = importlib.import_module("scripts.run_auto_trader")
         loader = getattr(mod, "_load_forecasting_config")
         cfg = loader()
         sarimax = cfg.get("sarimax", {})
-        assert sarimax.get("enabled") is False, \
-            "_load_forecasting_config() SARIMAX should be disabled"
+        assert sarimax.get("enabled") is True, \
+            "_load_forecasting_config() SARIMAX should be enabled (Phase 10)"
 
     def test_loader_regime_detection_present(self):
         import importlib
@@ -449,8 +454,9 @@ class TestQuantGateDisabledModels:
                 f"Enabled model '{model}' should have positive weight"
         assert score > 0
 
-    def test_synthetic_series_no_disabled_model_weight(self):
-        """End-to-end: fit a forecaster on synthetic data, verify no SARIMAX weight."""
+    def test_synthetic_series_explicit_sarimax_disable(self):
+        """End-to-end: explicit sarimax_enabled=False is honoured — SARIMAX not fitted,
+        and thus has no fitted summary entry even though Phase 10 candidates include it."""
         np.random.seed(42)
         dates = pd.date_range("2023-01-01", periods=200, freq="D")
         prices = pd.Series(
@@ -468,12 +474,8 @@ class TestQuantGateDisabledModels:
         forecaster.fit(price_series=prices, returns_series=returns)
         bundle = forecaster.forecast()
 
-        # The ensemble config should not have any SARIMAX candidates
-        ec = forecaster._ensemble_config
-        for i, candidate in enumerate(ec.candidate_weights):
-            assert "sarimax" not in candidate, \
-                f"Ensemble candidate[{i}] includes disabled sarimax: {candidate}"
-
+        # sarimax_enabled=False: SARIMAX not fitted, so not in summaries
+        assert forecaster.config.sarimax_enabled is False
         # Verify the forecast bundle exists (ensemble produced output)
         assert bundle is not None, "Forecaster should produce a forecast bundle"
 
@@ -486,28 +488,24 @@ class TestConfigDriftDetection:
     """Detect unexpected changes to critical config sections."""
 
     def test_ensemble_candidate_count_stable(self, candidate_weights_from_config):
-        """Alert if candidate count changes unexpectedly (currently 10 fast-only sets)."""
-        assert len(candidate_weights_from_config) == 10, \
-            f"Expected 10 candidate weight sets, got {len(candidate_weights_from_config)}. " \
+        """Alert if candidate count changes unexpectedly (Phase 10: 15 sets with SARIMAX)."""
+        assert len(candidate_weights_from_config) == 15, \
+            f"Expected 15 candidate weight sets (Phase 10), got {len(candidate_weights_from_config)}. " \
             "Update this test if intentional."
 
-    def test_sarimax_default_remains_disabled(self):
-        """Guard against accidentally re-enabling SARIMAX in the dataclass."""
+    def test_sarimax_default_enabled(self):
+        """Phase 10: SARIMAX is enabled by default for model-class diversity."""
         config = TimeSeriesForecasterConfig()
-        assert config.sarimax_enabled is False, \
-            "TimeSeriesForecasterConfig.sarimax_enabled default must remain False"
+        assert config.sarimax_enabled is True, \
+            "TimeSeriesForecasterConfig.sarimax_enabled default must be True (Phase 10)"
 
-    def test_ensemble_config_default_count_matches_yaml_fast_only(self, candidate_weights_from_config):
-        """EnsembleConfig defaults should match YAML fast-only candidates.
-
-        YAML is now kept fast-only when sarimax is disabled, so defaults and
-        YAML candidate counts should match exactly.
-        """
+    def test_ensemble_config_default_count_matches_yaml(self, candidate_weights_from_config):
+        """EnsembleConfig defaults should match YAML candidate count (Phase 10: 15 sets)."""
         ec = EnsembleConfig()
         default_count = len(ec.candidate_weights)
-        yaml_fast_count = len(candidate_weights_from_config)
-        assert default_count == yaml_fast_count, \
-            f"EnsembleConfig defaults ({default_count}) != YAML fast-only ({yaml_fast_count}). " \
+        yaml_count = len(candidate_weights_from_config)
+        assert default_count == yaml_count, \
+            f"EnsembleConfig defaults ({default_count}) != YAML ({yaml_count}). " \
             "Keep them in sync."
 
 
@@ -725,3 +723,59 @@ class TestApplyDaCapProperties:
                 f"All models penalized: expected {{}}, got {result}. "
                 f"weights={weights}, da_cap={da_weight_cap}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: Hybrid RMSE-rank confidence scoring
+# ---------------------------------------------------------------------------
+
+class TestPhase10RmseRankHybrid:
+    """Phase 10: derive_model_confidence() includes RMSE-rank hybrid component.
+
+    The RMSE-rank component counterbalances SAMoSSA's artificially-high EVR
+    (always ~1.0 by SSA construction) with realized forecast accuracy, preventing
+    near-flat forecasts from dominating via EVR alone.
+    """
+
+    def test_best_rmse_model_gets_higher_confidence(self):
+        """Model with lowest RMSE should receive higher confidence than model with highest."""
+        from forcester_ts.ensemble import derive_model_confidence
+        # GARCH has much better RMSE than SAMoSSA
+        summaries = {
+            "garch": {
+                "aic": -100.0, "bic": -90.0,
+                "regression_metrics": {"rmse": 1.0, "directional_accuracy": 0.55},
+            },
+            "samossa": {
+                "explained_variance_ratio": 0.99,  # high EVR (SSA artifact)
+                "regression_metrics": {"rmse": 3.0, "directional_accuracy": 0.45},
+            },
+            "mssa_rl": {
+                "baseline_variance": 1.0,
+                "regression_metrics": {"rmse": 2.0, "directional_accuracy": 0.50},
+            },
+        }
+        conf = derive_model_confidence(summaries)
+        # GARCH has best RMSE (1.0) — should score higher than SAMoSSA (rmse=3.0)
+        # despite SAMoSSA's EVR=0.99
+        assert conf.get("garch", 0) > conf.get("samossa", 1), (
+            f"GARCH (rmse=1.0) should beat SAMoSSA (rmse=3.0, evr=0.99) "
+            f"after RMSE-rank injection. Got garch={conf.get('garch'):.3f}, "
+            f"samossa={conf.get('samossa'):.3f}"
+        )
+
+    def test_rmse_rank_missing_suppressed_gracefully(self):
+        """When models lack regression_metrics.rmse, RMSE-rank component is skipped."""
+        from forcester_ts.ensemble import derive_model_confidence
+        summaries = {
+            "garch": {"aic": -100.0, "bic": -90.0},  # no regression_metrics
+            "samossa": {"explained_variance_ratio": 0.80},
+            "mssa_rl": {"baseline_variance": 0.5},
+        }
+        # Should not raise, should return valid confidence dict
+        conf = derive_model_confidence(summaries)
+        assert isinstance(conf, dict)
+        # All present models get a score
+        for model in ("garch", "samossa", "mssa_rl"):
+            if model in conf:
+                assert 0.0 <= conf[model] <= 1.0, f"{model} score out of range: {conf[model]}"

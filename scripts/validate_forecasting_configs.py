@@ -5,7 +5,7 @@ This guard ensures:
 1) forecasting config contains required sections and ensemble schema.
 2) pipeline config embeds a compatible forecasting block.
 3) candidate weight dictionaries are structurally valid.
-4) regime candidate weights avoid disabled SARIMAX contamination.
+4) regime candidate weights avoid disabled-SARIMAX contamination (skipped when SARIMAX is enabled).
 """
 
 from __future__ import annotations
@@ -96,13 +96,24 @@ def _validate_candidate_weights(
     return errors
 
 
-def _validate_regime_candidate_weights(regime_cfg: Dict[str, Any], context: str) -> List[str]:
+def _validate_regime_candidate_weights(
+    regime_cfg: Dict[str, Any],
+    context: str,
+    outer_cfg: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     errors: List[str] = []
     rcw = regime_cfg.get("regime_candidate_weights")
     if rcw is None:
         return errors
     if not isinstance(rcw, dict):
         return [f"{context}: regime_detection.regime_candidate_weights must be a mapping"]
+
+    # Only flag sarimax in regime candidates when sarimax is actually disabled
+    sarimax_enabled = False
+    if isinstance(outer_cfg, dict):
+        sarimax_node = outer_cfg.get("sarimax")
+        if isinstance(sarimax_node, dict):
+            sarimax_enabled = bool(sarimax_node.get("enabled", False))
 
     for regime, candidates in rcw.items():
         if not isinstance(candidates, list):
@@ -116,7 +127,7 @@ def _validate_regime_candidate_weights(regime_cfg: Dict[str, Any], context: str)
                     f"{context}: regime_candidate_weights['{regime}'][{idx}] must be a mapping"
                 )
                 continue
-            if "sarimax" in candidate:
+            if not sarimax_enabled and "sarimax" in candidate:
                 errors.append(
                     f"{context}: regime_candidate_weights['{regime}'][{idx}] includes disabled 'sarimax'"
                 )
@@ -131,12 +142,13 @@ def _validate_required_sections(cfg: Dict[str, Any], context: str) -> List[str]:
     return errors
 
 
-def _validate_sarimax_disabled(cfg: Dict[str, Any], context: str) -> List[str]:
+def _validate_sarimax_configured(cfg: Dict[str, Any], context: str) -> List[str]:
     sarimax = cfg.get("sarimax") if isinstance(cfg, dict) else None
     if not isinstance(sarimax, dict):
         return [f"{context}: section 'sarimax' must be a mapping"]
-    if sarimax.get("enabled") is not False:
-        return [f"{context}: sarimax.enabled must be false by default"]
+    enabled = sarimax.get("enabled")
+    if enabled not in (True, False):
+        return [f"{context}: sarimax.enabled must be explicitly true or false (got {enabled!r})"]
     return []
 
 
@@ -191,8 +203,8 @@ def validate_configs(
 
     errors.extend(_validate_required_sections(forecast_cfg, "forecasting_config"))
     errors.extend(_validate_required_sections(pipeline_cfg, "pipeline_config"))
-    errors.extend(_validate_sarimax_disabled(forecast_cfg, "forecasting_config"))
-    errors.extend(_validate_sarimax_disabled(pipeline_cfg, "pipeline_config"))
+    errors.extend(_validate_sarimax_configured(forecast_cfg, "forecasting_config"))
+    errors.extend(_validate_sarimax_configured(pipeline_cfg, "pipeline_config"))
 
     ensemble = forecast_cfg.get("ensemble") if isinstance(forecast_cfg, dict) else {}
     if isinstance(ensemble, dict):
@@ -224,13 +236,13 @@ def validate_configs(
 
     regime_cfg = forecast_cfg.get("regime_detection") if isinstance(forecast_cfg, dict) else {}
     if isinstance(regime_cfg, dict):
-        errors.extend(_validate_regime_candidate_weights(regime_cfg, "forecasting_config"))
+        errors.extend(_validate_regime_candidate_weights(regime_cfg, "forecasting_config", outer_cfg=forecast_cfg))
     else:
         errors.append("forecasting_config: section 'regime_detection' must be a mapping")
 
     p_regime_cfg = pipeline_cfg.get("regime_detection") if isinstance(pipeline_cfg, dict) else {}
     if isinstance(p_regime_cfg, dict):
-        errors.extend(_validate_regime_candidate_weights(p_regime_cfg, "pipeline_config"))
+        errors.extend(_validate_regime_candidate_weights(p_regime_cfg, "pipeline_config", outer_cfg=pipeline_cfg))
     else:
         errors.append("pipeline_config: section 'regime_detection' must be a mapping")
 
