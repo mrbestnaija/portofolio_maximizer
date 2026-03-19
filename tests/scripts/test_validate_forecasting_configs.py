@@ -37,6 +37,7 @@ def test_validate_configs_fails_when_required_sections_missing(tmp_path: Path) -
 
 
 def test_validate_configs_flags_sarimax_in_regime_candidates(tmp_path: Path) -> None:
+    """When sarimax is disabled, regime candidates with sarimax should be flagged."""
     forecasting = tmp_path / "forecasting.yml"
     pipeline = tmp_path / "pipeline.yml"
 
@@ -79,6 +80,78 @@ def test_validate_configs_flags_sarimax_in_regime_candidates(tmp_path: Path) -> 
     report = vfc.validate_configs(forecasting, pipeline)
     assert report["ok"] is False
     assert any("includes disabled 'sarimax'" in msg for msg in report["errors"])
+
+
+def test_validate_configs_allows_sarimax_in_regime_candidates_when_enabled(tmp_path: Path) -> None:
+    """When sarimax is enabled, sarimax in regime candidates should pass validation."""
+    forecasting = tmp_path / "forecasting.yml"
+    pipeline = tmp_path / "pipeline.yml"
+
+    base_forecasting = {
+        "forecasting": {
+            "sarimax": {"enabled": True},
+            "garch": {},
+            "samossa": {},
+            "mssa_rl": {},
+            "ensemble": {
+                "minimum_component_weight": 0.05,
+                "candidate_weights": [{"sarimax": 0.5, "garch": 0.5}],
+            },
+            "regime_detection": {
+                "regime_candidate_weights": {
+                    "CRISIS": [{"sarimax": 0.45, "garch": 0.40, "mssa_rl": 0.15}],
+                }
+            },
+        }
+    }
+    base_pipeline = {
+        "pipeline": {
+            "forecasting": {
+                "sarimax": {"enabled": True},
+                "garch": {},
+                "samossa": {},
+                "mssa_rl": {},
+                "ensemble": {
+                    "minimum_component_weight": 0.05,
+                    "candidate_weights": [{"sarimax": 0.5, "garch": 0.5}],
+                },
+                "regime_detection": {
+                    "regime_candidate_weights": {
+                        "CRISIS": [{"sarimax": 0.45, "garch": 0.40, "mssa_rl": 0.15}],
+                    }
+                }
+            }
+        }
+    }
+
+    forecasting.write_text(yaml.safe_dump(base_forecasting), encoding="utf-8")
+    pipeline.write_text(yaml.safe_dump(base_pipeline), encoding="utf-8")
+
+    report = vfc.validate_configs(forecasting, pipeline)
+    assert report["ok"] is True, f"Enabled SARIMAX in regime candidates should pass: {report['errors']}"
+
+
+def test_validate_configs_accepts_sarimax_enabled_true(tmp_path: Path) -> None:
+    """Validator accepts sarimax.enabled=True (was previously erroring)."""
+    forecasting = tmp_path / "forecasting.yml"
+    pipeline = tmp_path / "pipeline.yml"
+
+    base = {
+        "sarimax": {"enabled": True},
+        "garch": {"enabled": True},
+        "samossa": {"enabled": True},
+        "mssa_rl": {"enabled": True},
+        "ensemble": {
+            "minimum_component_weight": 0.05,
+            "candidate_weights": [{"garch": 1.0}],
+        },
+        "regime_detection": {"regime_candidate_weights": {"CRISIS": [{"garch": 1.0}]}},
+    }
+    forecasting.write_text(yaml.safe_dump({"forecasting": base}), encoding="utf-8")
+    pipeline.write_text(yaml.safe_dump({"pipeline": {"forecasting": base}}), encoding="utf-8")
+
+    report = vfc.validate_configs(forecasting, pipeline)
+    assert report["ok"] is True, f"sarimax.enabled=True should pass validator: {report['errors']}"
 
 
 def test_validate_configs_flags_sarimax_in_ensemble_candidates(tmp_path: Path) -> None:

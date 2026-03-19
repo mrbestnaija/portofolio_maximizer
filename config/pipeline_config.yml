@@ -255,7 +255,7 @@ pipeline:
     minimum_history_strict: 30
 
     sarimax:
-      enabled: false  # Disabled by default; slow grid search
+      enabled: true  # Phase 10: re-enabled for model-class diversity (ARIMA orthogonal to spectral/GARCH/RL)
       auto_select_order: true
       max_p: 3
       max_d: 1
@@ -320,17 +320,27 @@ pipeline:
       confidence_scaling: false
       diversity_tolerance: 0.15  # Phase 7.9: lowered from default to reduce blend dilution
       candidate_weights:
+        # Phase 10: SARIMAX-anchored (model-class diversity vs spectral/RL/GARCH)
+        - {sarimax: 0.50, garch: 0.30, mssa_rl: 0.20}
+        - {sarimax: 0.40, mssa_rl: 0.35, garch: 0.25}
+        # Phase 10: MSSA-RL elevated to positions 3-4 (was buried at 6-7)
+        - {mssa_rl: 0.55, garch: 0.30, samossa: 0.15}
+        - {mssa_rl: 0.50, sarimax: 0.30, garch: 0.20}
+        # GARCH-heavy blends (retained from Phase 7.9)
         - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
         - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
         - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
+        # SAMoSSA-anchored
         - {samossa: 0.60, mssa_rl: 0.40}
         - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
-        # Phase 7.9: mssa_rl-dominant blends (addresses audit violations)
+        # MSSA-RL dominant (Phase 7.9)
         - {mssa_rl: 0.70, garch: 0.30}
         - {mssa_rl: 0.70, samossa: 0.30}
+        # Single-model anchors
         - {garch: 1.0}
         - {samossa: 1.0}
         - {mssa_rl: 1.0}
+        - {sarimax: 1.0}
       minimum_component_weight: 0.05
 
     # Phase 7.5: Regime Detection for Adaptive Model Selection
@@ -350,14 +360,14 @@ pipeline:
       # Constraint: GARCH >= 40% in first candidate to preserve Phase 7.4 RMSE baseline.
       regime_candidate_weights:
         CRISIS:
+          - {sarimax: 0.45, garch: 0.40, mssa_rl: 0.15}
           - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
-          - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
         MODERATE_MIXED:
           - {garch: 0.45, samossa: 0.35, mssa_rl: 0.20}
           - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
         MODERATE_TRENDING:
+          - {sarimax: 0.35, garch: 0.40, mssa_rl: 0.25}
           - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
-          - {garch: 0.55, samossa: 0.35, mssa_rl: 0.10}
         HIGH_VOL_TRENDING:
           - {garch: 0.45, samossa: 0.40, mssa_rl: 0.15}
           - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}

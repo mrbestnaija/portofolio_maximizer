@@ -110,18 +110,27 @@ class EnsembleConfig:
     diversity_tolerance: float = 0.35
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
-            # Phase 7.10: Defaults exclude SARIMAX (disabled by default).
-            # YAML config adds SARIMAX candidates that activate when re-enabled.
+            # Phase 10: SARIMAX-anchored (model-class diversity vs spectral/RL/GARCH)
+            {"sarimax": 0.50, "garch": 0.30, "mssa_rl": 0.20},
+            {"sarimax": 0.40, "mssa_rl": 0.35, "garch": 0.25},
+            # Phase 10: MSSA-RL elevated to positions 3-4 (was buried at 6-7)
+            {"mssa_rl": 0.55, "garch": 0.30, "samossa": 0.15},
+            {"mssa_rl": 0.50, "sarimax": 0.30, "garch": 0.20},
+            # GARCH-heavy blends (retained from Phase 7.9)
             {"garch": 0.85, "samossa": 0.10, "mssa_rl": 0.05},
             {"garch": 0.70, "samossa": 0.20, "mssa_rl": 0.10},
             {"garch": 0.60, "samossa": 0.25, "mssa_rl": 0.15},
+            # SAMoSSA-anchored
             {"samossa": 0.60, "mssa_rl": 0.40},
             {"samossa": 0.45, "garch": 0.35, "mssa_rl": 0.20},
+            # MSSA-RL dominant (Phase 7.9)
             {"mssa_rl": 0.70, "garch": 0.30},
             {"mssa_rl": 0.70, "samossa": 0.30},
+            # Single-model anchors
             {"garch": 1.0},
             {"samossa": 1.0},
             {"mssa_rl": 1.0},
+            {"sarimax": 1.0},
         ]
     )
     # Phase 7.17: Auto-computed adaptive candidates prepended before static ones.
@@ -415,6 +424,28 @@ def derive_model_confidence(
     baseline_rmse = float(min(rmse_candidates)) if rmse_candidates else None
     baseline_te = baseline_metrics.get("tracking_error")
 
+    # Phase 10: Hybrid RMSE-rank component — rank-normalized RMSE across available models.
+    # EVR (SAMoSSA) is always ~1.0 by SSA construction; this counterbalances it with realized
+    # forecast accuracy, preventing confidence_scaling from over-weighting near-flat forecasts.
+    _rmse_values = {
+        model: float(m.get("rmse"))
+        for model, m in metrics_map.items()
+        if m.get("rmse") is not None
+    }
+    if len(_rmse_values) >= 2:
+        _min_rmse = min(_rmse_values.values())
+        _max_rmse = max(_rmse_values.values())
+        _rmse_rank_scores: Dict[str, float] = {
+            model: float(np.clip(
+                1.0 - (rmse - _min_rmse) / (_max_rmse - _min_rmse + 1e-10),
+                0.05, 0.95,
+            ))
+            for model, rmse in _rmse_values.items()
+        }
+        logger.info("Phase 10 RMSE-rank scores: %s", {m: f"{v:.3f}" for m, v in _rmse_rank_scores.items()})
+    else:
+        _rmse_rank_scores: Dict[str, float] = {}
+
     def _combine_scores(*scores: Optional[float]) -> Optional[float]:
         valid = [float(np.clip(s, 0.0, 1.0)) for s in scores if s is not None]
         if not valid:
@@ -512,6 +543,7 @@ def derive_model_confidence(
         _variance_test_score(sarimax_metrics, baseline_metrics)
         if baseline_metrics
         else None,
+        _rmse_rank_scores.get("sarimax"),  # Phase 10: RMSE-rank hybrid
     )
     if sarimax_score is not None:
         confidence["sarimax"] = sarimax_score
@@ -584,6 +616,7 @@ def derive_model_confidence(
         _variance_test_score(garch_metrics, baseline_metrics)
         if baseline_metrics
         else None,
+        _rmse_rank_scores.get("garch"),  # Phase 10: RMSE-rank hybrid
     )
     # garch_normalized is always non-None, so _combine_scores always returns
     # non-None.  GARCH is always included in the confidence pool.
@@ -601,6 +634,7 @@ def derive_model_confidence(
         # SAMOSSA is treated as the primary baseline; skip variance
         # test against itself to avoid degenerate scores.
         None,
+        _rmse_rank_scores.get("samossa"),  # Phase 10: RMSE-rank hybrid
     )
     if samossa_score is not None:
         confidence["samossa"] = samossa_score
@@ -620,6 +654,7 @@ def derive_model_confidence(
         if baseline_metrics
         else None,
         _change_point_boost(mssa_summary),
+        _rmse_rank_scores.get("mssa_rl"),  # Phase 10: RMSE-rank hybrid
     )
     # Phase 7.10: MSSA-RL floor -- adversarial audit shows MSSA-RL is best single
     # model 60% of the time but receives only 8.7% weight.  Ensure minimum score.

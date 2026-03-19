@@ -4,7 +4,7 @@ forecasting:
   minimum_history_required: 90
   minimum_history_strict: 30
   sarimax:
-    enabled: false
+    enabled: true
     auto_select_order: true
     max_p: 3
     max_d: 1
@@ -70,6 +70,21 @@ forecasting:
     prefer_diversified_candidate: true
     diversity_tolerance: 0.05
     candidate_weights:
+    # Phase 10: SARIMAX-anchored (model-class diversity vs spectral/RL/GARCH)
+    - sarimax: 0.5
+      garch: 0.3
+      mssa_rl: 0.2
+    - sarimax: 0.4
+      mssa_rl: 0.35
+      garch: 0.25
+    # Phase 10: MSSA-RL elevated to positions 3-4 (was buried at 6-7)
+    - mssa_rl: 0.55
+      garch: 0.3
+      samossa: 0.15
+    - mssa_rl: 0.5
+      sarimax: 0.3
+      garch: 0.2
+    # GARCH-heavy blends (retained from Phase 7.9)
     - garch: 0.85
       samossa: 0.1
       mssa_rl: 0.05
@@ -79,18 +94,22 @@ forecasting:
     - garch: 0.6
       samossa: 0.25
       mssa_rl: 0.15
+    # SAMoSSA-anchored
     - samossa: 0.6
       mssa_rl: 0.4
     - samossa: 0.45
       garch: 0.35
       mssa_rl: 0.2
+    # MSSA-RL dominant (Phase 7.9)
     - mssa_rl: 0.7
       garch: 0.3
     - mssa_rl: 0.7
       samossa: 0.3
+    # Single-model anchors
     - garch: 1.0
     - samossa: 1.0
     - mssa_rl: 1.0
+    - sarimax: 1.0
     minimum_component_weight: 0.05
     da_floor: 0.1
     da_weight_cap: 0.1
@@ -103,11 +122,11 @@ forecasting:
     trend_threshold_strong: 0.6
     regime_candidate_weights:
       CRISIS:
+      - sarimax: 0.45
+        garch: 0.4
+        mssa_rl: 0.15
       - garch: 0.5
         samossa: 0.35
-        mssa_rl: 0.15
-      - garch: 0.4
-        samossa: 0.45
         mssa_rl: 0.15
       MODERATE_MIXED:
       - mssa_rl: 0.55
@@ -117,12 +136,12 @@ forecasting:
         samossa: 0.35
         mssa_rl: 0.2
       MODERATE_TRENDING:
+      - sarimax: 0.35
+        garch: 0.4
+        mssa_rl: 0.25
       - garch: 0.4
         samossa: 0.45
         mssa_rl: 0.15
-      - garch: 0.55
-        samossa: 0.35
-        mssa_rl: 0.1
       HIGH_VOL_TRENDING:
       - garch: 0.45
         samossa: 0.4
