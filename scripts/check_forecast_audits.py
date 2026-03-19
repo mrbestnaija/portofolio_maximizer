@@ -2161,6 +2161,12 @@ def main() -> None:
                     continue
                 if (
                     (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now
+                    and not (
+                        # Early-credit: skip NOT_DUE if the trade is already confirmed
+                        # closed in production_closed_trades — outcome is known.
+                        ts_signal_id
+                        and int(closed_trade_counts.get(ts_signal_id, 0)) == 1
+                    )
                 ):
                     entry["outcome_status"] = "NOT_DUE"
                     entry["outcome_reason"] = "OUTCOME_WINDOW_OPEN"
