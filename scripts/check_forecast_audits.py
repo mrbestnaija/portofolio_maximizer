@@ -652,7 +652,13 @@ def _build_failure_dataset_snapshot(
             entry["outcome_status"] = "INVALID_CONTEXT"
             entry["outcome_reason"] = "CAUSALITY_VIOLATION"
             outcome_windows_invalid_context += 1
-        elif (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now:
+        elif (expected_close_ts + OUTCOME_ELIGIBILITY_BUFFER) > now and not (
+            # Early-credit: if the trade is already confirmed closed in the DB,
+            # skip the NOT_DUE wait — no point deferring a known outcome.
+            outcomes_loaded
+            and ts_signal_id is not None
+            and int(closed_trade_counts.get(ts_signal_id, 0)) == 1
+        ):
             entry["outcome_status"] = "NOT_DUE"
             entry["outcome_reason"] = "OUTCOME_WINDOW_OPEN"
             outcome_windows_not_due += 1
