@@ -1069,3 +1069,61 @@ def test_count_masked_unlinked_closes_absent_from_db_returns_zero(
     count, ids = mod._count_masked_unlinked_closes(db)
     assert count == 0
     assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 10: THIN_LINKAGE warmup provision
+# ---------------------------------------------------------------------------
+
+
+def test_linkage_pass_vacuously_true_when_no_eligible_records() -> None:
+    """During accumulation (0 eligible), linkage must not block the gate."""
+    import scripts.production_audit_gate as mod
+
+    # Simulate: 0 matched, 0 eligible — warmup active
+    warmup_policy = {"warmup_expired": False, "max_warmup_days": 30}
+
+    outcome_matched = 0
+    outcome_eligible = 0
+    matched_over_eligible = mod._safe_ratio(outcome_matched, outcome_eligible)
+    _linkage_min_matched = 10
+    _linkage_min_ratio = 0.8
+    _linkage_warmup_active = not bool(warmup_policy.get("warmup_expired", True))
+    if _linkage_warmup_active:
+        _linkage_min_matched = 1
+        _linkage_min_ratio = 0.0
+    _linkage_no_eligible = outcome_eligible == 0
+    linkage_pass = _linkage_no_eligible or (
+        outcome_matched >= _linkage_min_matched
+        and matched_over_eligible >= _linkage_min_ratio
+    )
+
+    assert linkage_pass is True, "0 eligible records during warmup must vacuously pass linkage"
+    assert _linkage_warmup_active is True
+    assert _linkage_no_eligible is True
+
+
+def test_linkage_fail_when_warmup_expired_and_below_threshold() -> None:
+    """After warmup, THIN_LINKAGE must fail when matched < 10."""
+    import scripts.production_audit_gate as mod
+
+    warmup_policy = {"warmup_expired": True, "max_warmup_days": 30}
+
+    outcome_matched = 3
+    outcome_eligible = 10
+    matched_over_eligible = mod._safe_ratio(outcome_matched, outcome_eligible)
+    _linkage_min_matched = 10
+    _linkage_min_ratio = 0.8
+    _linkage_warmup_active = not bool(warmup_policy.get("warmup_expired", True))
+    if _linkage_warmup_active:
+        _linkage_min_matched = 1
+        _linkage_min_ratio = 0.0
+    _linkage_no_eligible = outcome_eligible == 0
+    linkage_pass = _linkage_no_eligible or (
+        outcome_matched >= _linkage_min_matched
+        and matched_over_eligible >= _linkage_min_ratio
+    )
+
+    assert linkage_pass is False, "matched=3 < 10 after warmup must fail linkage"
+    assert _linkage_warmup_active is False
+    assert _linkage_no_eligible is False

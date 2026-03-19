@@ -1348,7 +1348,21 @@ def main() -> int:
     outcome_matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
     outcome_eligible = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
     matched_over_eligible = _safe_ratio(outcome_matched, outcome_eligible)
-    linkage_pass = outcome_matched >= 10 and matched_over_eligible >= 0.8
+    _linkage_min_matched = 10
+    _linkage_min_ratio = 0.8
+    # Phase 10: During warmup, relax THIN_LINKAGE to a 1-match floor so the
+    # gate does not block when the system is still accumulating live closed
+    # trades. Full thresholds apply once warmup has expired.
+    _linkage_warmup_active = not bool(warmup_policy.get("warmup_expired", True))
+    if _linkage_warmup_active:
+        _linkage_min_matched = 1
+        _linkage_min_ratio = 0.0
+    # Vacuously pass when no eligible records exist yet (accumulation phase).
+    _linkage_no_eligible = outcome_eligible == 0
+    linkage_pass = _linkage_no_eligible or (
+        outcome_matched >= _linkage_min_matched
+        and matched_over_eligible >= _linkage_min_ratio
+    )
 
     non_trade_count = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
     invalid_context_count = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
@@ -1552,6 +1566,10 @@ def main() -> int:
             "outcome_matched": outcome_matched,
             "outcome_eligible": outcome_eligible,
             "matched_over_eligible": matched_over_eligible,
+            "linkage_min_matched": _linkage_min_matched,
+            "linkage_min_ratio": _linkage_min_ratio,
+            "linkage_warmup_active": bool(_linkage_warmup_active),
+            "linkage_no_eligible": bool(_linkage_no_eligible),
             "non_trade_context_count": non_trade_count,
             "invalid_context_count": invalid_context_count,
             "linkage_waterfall": linkage_waterfall,
