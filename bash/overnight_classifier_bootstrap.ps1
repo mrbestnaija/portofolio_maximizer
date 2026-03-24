@@ -211,7 +211,8 @@ if ($DryRun) {
         LogError "  V5: Re-run ETL with --execution-mode auto (not synthetic)"
         exit 1
     } elseif ($preflightRc -eq 2) {
-        LogWarn "Validator could not run (infrastructure error, exit 2) -- proceeding with caution."
+        LogError "Validator could not run (infrastructure error, exit 2) -- blocking pipeline."
+        exit 1
     } else {
         LogPass "Pre-flight validation passed (PASS/WARN only) -- pipeline may proceed."
     }

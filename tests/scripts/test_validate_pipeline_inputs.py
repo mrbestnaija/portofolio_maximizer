@@ -127,6 +127,17 @@ class TestV3JsonlAlignment:
         result = check_v3_jsonl_alignment(tmp_path / "missing.jsonl", tmp_path)
         assert result.status == "SKIP"
 
+    def test_fail_when_no_readable_parquet_coverage(self, tmp_path):
+        from scripts.validate_pipeline_inputs import check_v3_jsonl_alignment
+        jsonl = tmp_path / "quant.jsonl"
+        _write_jsonl([
+            {"timestamp": "2020-06-01T12:00:00Z",
+             "classifier_features": {"realized_vol": 0.2}},
+        ], jsonl)
+        result = check_v3_jsonl_alignment(jsonl, tmp_path)
+        assert result.status == "FAIL"
+        assert "No readable parquet coverage" in result.message
+
     def test_warn_when_zero_alignable(self, tmp_path):
         # 0% alignable = WARN (not FAIL): generate_classifier_training_labels.py
         # is unaffected by JSONL timestamps; blocking would be a false positive.
@@ -156,6 +167,35 @@ class TestV3JsonlAlignment:
         _write_jsonl(entries, jsonl)
         result = check_v3_jsonl_alignment(jsonl, tmp_path)
         assert result.status == "PASS"
+
+    def test_alignment_is_ticker_scoped(self, tmp_path):
+        from scripts.validate_pipeline_inputs import check_v3_jsonl_alignment
+        _write_parquet(_make_price_df(n=200, start="2020-01-01"),
+                       tmp_path / "MSFT_data_extraction.parquet")
+        jsonl = tmp_path / "quant.jsonl"
+        _write_jsonl([
+            {"ticker": "AAPL",
+             "timestamp": "2020-03-02T12:00:00Z",
+             "classifier_features": {"realized_vol": 0.2}},
+        ], jsonl)
+        result = check_v3_jsonl_alignment(jsonl, tmp_path, tickers=["AAPL", "MSFT"])
+        assert result.status == "WARN"
+        assert result.details["n_alignable"] == 0
+        assert result.details["n_missing_ticker_coverage"] == 1
+
+    def test_signal_id_can_supply_ticker_scope(self, tmp_path):
+        from scripts.validate_pipeline_inputs import check_v3_jsonl_alignment
+        _write_parquet(_make_price_df(n=200, start="2020-01-01"),
+                       tmp_path / "AAPL_data_extraction.parquet")
+        jsonl = tmp_path / "quant.jsonl"
+        _write_jsonl([
+            {"signal_id": "ts_AAPL_20200302_0001",
+             "timestamp": "2020-03-02T12:00:00Z",
+             "classifier_features": {"realized_vol": 0.2}},
+        ], jsonl)
+        result = check_v3_jsonl_alignment(jsonl, tmp_path, tickers=["AAPL"])
+        assert result.status == "PASS"
+        assert result.details["n_alignable"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +231,8 @@ class TestV4EvalDateCoverage:
         results = check_v4_eval_date_coverage(
             ["2020-06-01"], ["AAPL", "MSFT"], tmp_path
         )
-        assert results[0].status in ("WARN", "PASS")  # MSFT falls back to AAPL file
+        assert results[0].status == "WARN"
+        assert "MSFT" in results[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +304,20 @@ class TestV6EdgeCases:
         missing_dir = tmp_path / "no_such_dir"
         results = check_v6_edge_cases(missing_dir, tmp_path / "missing.jsonl", tmp_path / "missing.parquet")
         assert any(r.status == "FAIL" and "missing_checkpoint_dir" in r.check_id for r in results)
+
+    def test_warn_on_malformed_jsonl_timestamp(self, tmp_path):
+        from scripts.validate_pipeline_inputs import check_v6_edge_cases
+        _write_parquet(_make_price_df(n=200), tmp_path / "AAPL_data_extraction.parquet")
+        jsonl = tmp_path / "quant.jsonl"
+        _write_jsonl([
+            {"timestamp": "not-a-timestamp",
+             "classifier_features": {"realized_vol": 0.2}},
+        ], jsonl)
+        results = check_v6_edge_cases(tmp_path, jsonl, tmp_path / "missing.parquet")
+        malformed = [r for r in results if r.check_id == "V6.malformed_timestamps"]
+        assert malformed
+        assert malformed[0].status == "WARN"
+        assert malformed[0].details["malformed_count"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,13 @@ class TestEvaluateDirectionalClassifier:
         result = evaluate(dataset_path=path, min_n=60, write_report=False)
         assert result.get("cold_start") is True
 
+    def test_returns_dataset_unreadable_for_corrupt_parquet(self, tmp_path):
+        from scripts.evaluate_directional_classifier import evaluate
+        path = tmp_path / "directional_dataset.parquet"
+        path.write_text("not a parquet", encoding="utf-8")
+        result = evaluate(dataset_path=path, write_report=False)
+        assert result.get("error") == "dataset_unreadable"
+
     def test_returns_walk_forward_da(self, tmp_path):
         from scripts.evaluate_directional_classifier import evaluate
         df = self._make_dataset(n=120)

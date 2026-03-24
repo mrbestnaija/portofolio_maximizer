@@ -62,7 +62,11 @@ def train(
         logger.error("Dataset not found: %s", dataset_path)
         return {"error": "dataset_not_found", "cold_start": True}
 
-    df = pd.read_parquet(dataset_path)
+    try:
+        df = pd.read_parquet(dataset_path)
+    except Exception as exc:
+        logger.error("Dataset unreadable at %s: %s", dataset_path, exc)
+        return {"error": "dataset_unreadable", "cold_start": True}
     if "y_directional" not in df.columns:
         return {"error": "missing_label_column", "cold_start": True}
 

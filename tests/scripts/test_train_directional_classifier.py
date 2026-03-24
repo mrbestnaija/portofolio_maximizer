@@ -33,6 +33,14 @@ class TestTrainDirectionalClassifier:
         result = train(dataset_path=path, model_path=tmp_path / "m.pkl", meta_path=tmp_path / "m.meta.json")
         assert result.get("cold_start") is True
 
+    def test_returns_dataset_unreadable_for_corrupt_parquet(self, tmp_path):
+        from scripts.train_directional_classifier import train
+        path = tmp_path / "directional_dataset.parquet"
+        path.write_text("not a parquet", encoding="utf-8")
+        result = train(dataset_path=path, model_path=tmp_path / "m.pkl", meta_path=tmp_path / "m.meta.json")
+        assert result.get("error") == "dataset_unreadable"
+        assert result.get("cold_start") is True
+
     def test_trains_and_saves_model(self, tmp_path):
         from scripts.train_directional_classifier import train
         df = self._make_dataset(n=80)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
@@ -169,6 +170,21 @@ class TestLoadBestParquet:
         result = _load_best_parquet("AAPL", tmp_path)
         assert result is not None
 
+    def test_multi_ticker_run_rejects_single_generic_fallback(self, tmp_path):
+        from scripts.generate_classifier_training_labels import _load_best_parquet
+        df = _make_price_df(n=200)
+        path = tmp_path / "pipeline_data_extraction.parquet"
+        df.to_parquet(path)
+        result = _load_best_parquet("AAPL", tmp_path, known_tickers=["AAPL", "MSFT"])
+        assert result is None
+
+    def test_rejects_multiple_generic_candidates_without_ticker_name(self, tmp_path):
+        from scripts.generate_classifier_training_labels import _load_best_parquet
+        _make_price_df(n=200, seed=1).to_parquet(tmp_path / "pipeline_a_data_extraction.parquet")
+        _make_price_df(n=220, seed=2).to_parquet(tmp_path / "pipeline_b_data_extraction.parquet")
+        result = _load_best_parquet("AAPL", tmp_path)
+        assert result is None
+
 
 class TestCLI:
     def test_cold_start_exit_code_2(self, tmp_path):
@@ -187,3 +203,79 @@ class TestCLI:
         )
         # May be 0 (enough rows) or 2 (cold start) — both acceptable, just not 1
         assert result.returncode in (0, 2), f"Unexpected exit: {result.returncode}\n{result.stderr}"
+
+    def test_main_fails_when_requested_ticker_is_missing_even_with_existing_dataset(self, tmp_path):
+        from scripts import generate_classifier_training_labels as mod
+
+        existing = pd.DataFrame({
+            "ts_signal_id": [f"gen_AAPL_20200101_{i:05d}" for i in range(80)],
+            "ticker": ["AAPL"] * 80,
+            "entry_ts": pd.date_range("2020-01-01", periods=80, freq="D", tz="UTC").astype(str),
+            "y_directional": [i % 2 for i in range(80)],
+            "label_source": ["price_parquet_scan"] * 80,
+        })
+        output = tmp_path / "directional_dataset.parquet"
+        existing.to_parquet(output, index=False)
+        summary = tmp_path / "directional_training_latest.json"
+
+        with patch.object(mod, "_SUMMARY_PATH", summary):
+            rc = mod.main([
+                "--ticker", "MSFT",
+                "--auto-parquet",
+                "--checkpoint-dir", str(tmp_path),
+                "--output", str(output),
+            ])
+
+        assert rc == 1
+        payload = json.loads(summary.read_text(encoding="utf-8"))
+        assert payload["ticker_results"]["MSFT"]["status"] == "missing_parquet"
+        assert payload["requested_tickers"] == ["MSFT"]
+
+    def test_main_fails_on_ambiguous_generic_parquet_selection(self, tmp_path):
+        from scripts import generate_classifier_training_labels as mod
+
+        _make_price_df(n=200, seed=1).to_parquet(tmp_path / "pipeline_a_data_extraction.parquet")
+        _make_price_df(n=220, seed=2).to_parquet(tmp_path / "pipeline_b_data_extraction.parquet")
+        summary = tmp_path / "directional_training_latest.json"
+        output = tmp_path / "directional_dataset.parquet"
+
+        with patch.object(mod, "_SUMMARY_PATH", summary):
+            rc = mod.main([
+                "--ticker", "AAPL",
+                "--auto-parquet",
+                "--checkpoint-dir", str(tmp_path),
+                "--output", str(output),
+            ])
+
+        assert rc == 1
+        payload = json.loads(summary.read_text(encoding="utf-8"))
+        assert payload["ticker_results"]["AAPL"]["status"] == "ambiguous_parquet"
+
+    def test_allow_partial_permits_missing_ticker_with_existing_dataset(self, tmp_path):
+        from scripts import generate_classifier_training_labels as mod
+
+        _make_price_df(n=260, seed=3).to_parquet(tmp_path / "AAPL_data_extraction.parquet")
+        existing = pd.DataFrame({
+            "ts_signal_id": [f"gen_AAPL_20200101_{i:05d}" for i in range(80)],
+            "ticker": ["AAPL"] * 80,
+            "entry_ts": pd.date_range("2020-01-01", periods=80, freq="D", tz="UTC").astype(str),
+            "y_directional": [i % 2 for i in range(80)],
+            "label_source": ["price_parquet_scan"] * 80,
+        })
+        output = tmp_path / "directional_dataset.parquet"
+        existing.to_parquet(output, index=False)
+        summary = tmp_path / "directional_training_latest.json"
+
+        with patch.object(mod, "_SUMMARY_PATH", summary):
+            rc = mod.main([
+                "--ticker", "AAPL,MSFT",
+                "--auto-parquet",
+                "--checkpoint-dir", str(tmp_path),
+                "--output", str(output),
+                "--allow-partial",
+            ])
+
+        assert rc == 0
+        payload = json.loads(summary.read_text(encoding="utf-8"))
+        assert payload["ticker_results"]["MSFT"]["status"] == "missing_parquet"
+        assert payload["allow_partial"] is True
