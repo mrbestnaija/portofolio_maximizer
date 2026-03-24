@@ -263,6 +263,35 @@ OpenClaw supports multiple channels. On Windows, the most reliable "remote" opti
 - `python scripts/openclaw_notify.py --channel telegram --to "@mychat" --message "PMX test"`
 - `python scripts/openclaw_notify.py --channel discord --to channel:123456789012345678 --message "PMX test"`
 
+## Discord Connectivity Troubleshooting (401 / Failed To Resolve Application ID)
+
+If `openclaw status --deep` shows `Discord WARN failed (401) - getMe failed (401)` or the Discord channel logs show `Failed to resolve Discord application id`:
+
+1. Confirm the Discord bot token is actually present in `.env`:
+
+- `python scripts/validate_credentials.py`
+
+2. If the interactions app is configured but `discord_bot_token` is still reported missing, add one of:
+
+- `DISCORD_BOT_TOKEN`
+- `DISCORD_TOKEN`
+
+3. Re-apply the channel from `.env` and restart the gateway:
+
+- `python scripts/openclaw_env.py plugins enable discord`
+- `python scripts/openclaw_env.py channels add --channel discord --use-env`
+- `openclaw gateway restart`
+
+4. Re-check the live runtime:
+
+- `openclaw channels status --json`
+- `openclaw channels logs --channel discord --lines 80`
+- `openclaw status --deep`
+
+5. Do not count Discord as healthy until `openclaw status --deep` reports `Discord OK`.
+
+For a sanitized repo-local audit and remediation record, see `Documentation/OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md`.
+
 ## WhatsApp Connectivity Troubleshooting (408 Handshake Timeout)
 
 If `openclaw channels status` shows WhatsApp `stopped/disconnected` with an "Opening handshake has timed out" error:

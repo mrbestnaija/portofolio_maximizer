@@ -17,6 +17,7 @@ Operational procedures for running the system in production/unattended modes.
 | [INSTITUTIONAL_WORKFLOW_RUNBOOK.md](INSTITUTIONAL_WORKFLOW_RUNBOOK.md) | Step-by-step workflow for full institutional-grade run cycles |
 | [PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md](PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md) | Security posture, adversarial checks, and profitability proof requirements |
 | [CRON_AUTOMATION.md](CRON_AUTOMATION.md) | OpenClaw cron job definitions, schedules, and anomaly-announce rules |
+| [OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md](OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md) | Sanitized Discord token audit, runtime evidence, and remediation steps for OpenClaw |
 
 ---
 
@@ -145,6 +146,7 @@ cleanup pass after all referencing systems have been updated.
 - [BOOTSTRAP.md](BOOTSTRAP.md) — Agent onboarding guide
 - [HEARTBEAT.md](HEARTBEAT.md) — System status / active sessions
 - [OPENCLAW_INTEGRATION.md](OPENCLAW_INTEGRATION.md) — OpenClaw cron + LLM orchestration
+- [OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md](OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md) — Discord token troubleshooting and March 24 audit record
 - [GIT_WORKFLOW.md](GIT_WORKFLOW.md) — Branching, commit, and PR workflow
 
 ### Metrics and Evaluation
