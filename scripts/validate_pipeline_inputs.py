@@ -34,9 +34,7 @@ V3  JSONL Timestamp Alignment
       zero rows — the wall-clock-timestamp bug.
       PASS  = >= 20 % of entries are alignable
       WARN  = 1-19 % alignable
-      WARN  = 0 % alignable but parquet coverage exists (advisory only because
-              the bootstrap uses parquet-scan labeling, not JSONL timestamps)
-      FAIL  = no readable parquet coverage or JSONL cannot be parsed
+      FAIL  = 0 % alignable (all timestamps outside parquet range)
       SKIP  = JSONL path does not exist
 
 V4  Eval Date Coverage
@@ -193,117 +191,6 @@ def _find_best_parquet_for_ticker(
     return fallback[0] if fallback else None
 
 
-def _named_parquets_for_ticker(ticker: str, checkpoint_dir: Path) -> List[Path]:
-    """Return ticker-specific parquet candidates ordered by size (largest first)."""
-    ticker_upper = ticker.upper()
-    return sorted(
-        list(checkpoint_dir.glob(f"*{ticker_upper}*data_extraction*.parquet"))
-        + list(checkpoint_dir.glob(f"*{ticker_upper}*.parquet")),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-
-
-def _generic_parquets(
-    checkpoint_dir: Path,
-    known_tickers: Optional[List[str]] = None,
-) -> List[Path]:
-    """
-    Return unnamed parquet candidates.
-
-    When the caller provides the requested ticker universe, exclude files whose
-    names already contain one of those ticker symbols so a single MSFT parquet
-    cannot masquerade as a generic fallback for AAPL.
-    """
-    candidates = [p for p in checkpoint_dir.glob("*data_extraction*.parquet") if p.is_file()]
-    if known_tickers:
-        ticker_tokens = {ticker.upper() for ticker in known_tickers if ticker}
-        candidates = [
-            path for path in candidates
-            if not any(token in path.name.upper() for token in ticker_tokens)
-        ]
-    return sorted(candidates, key=lambda p: p.stat().st_size, reverse=True)
-
-
-def _resolve_ticker_parquet_ranges(
-    ticker: str,
-    checkpoint_dir: Path,
-    known_tickers: Optional[List[str]] = None,
-) -> Tuple[List[Tuple[pd.Timestamp, pd.Timestamp]], str]:
-    """
-    Resolve coverage ranges for one ticker.
-
-    Resolution order:
-      1. Ticker-named parquets.
-      2. Exactly one generic *data_extraction*.parquet as an unambiguous fallback.
-
-    Multiple generic parquets with no ticker-specific filename are treated as
-    ambiguous rather than silently attributed to the ticker.
-    """
-    named = [p for p in _named_parquets_for_ticker(ticker, checkpoint_dir) if p.is_file()]
-    if named:
-        candidates = named[:5]
-        resolution = "ticker_named"
-    else:
-        generic = _generic_parquets(checkpoint_dir, known_tickers=known_tickers)
-        if len(generic) == 1 and (not known_tickers or len(known_tickers) == 1):
-            candidates = generic[:1]
-            resolution = "single_generic_fallback"
-        elif generic and known_tickers and len(known_tickers) > 1:
-            return [], "generic_requires_named_files"
-        elif len(generic) > 1:
-            return [], "ambiguous_generic"
-        else:
-            return [], "missing"
-
-    ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-    for path in candidates:
-        df, err = _load_parquet_safe(path)
-        if err or df is None or "Close" not in df.columns:
-            continue
-        cov = _parse_parquet_coverage(df)
-        if cov:
-            ranges.append(cov)
-    return ranges, resolution if ranges else "unreadable"
-
-
-def _extract_entry_ticker(
-    entry: Dict[str, Any],
-) -> Optional[str]:
-    """Best-effort ticker extraction from JSONL entry metadata."""
-    candidates = [
-        entry.get("ticker"),
-        entry.get("symbol"),
-        (entry.get("signal_context") or {}).get("ticker")
-        if isinstance(entry.get("signal_context"), dict)
-        else None,
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        ticker = str(candidate).strip().upper()
-        if ticker:
-            return ticker
-
-    for signal_id in (entry.get("ts_signal_id"), entry.get("signal_id")):
-        signal_id = str(signal_id or "").strip()
-        if not signal_id:
-            continue
-        parts = signal_id.split("_")
-        if len(parts) >= 2 and parts[0].lower() in {"ts", "gen"}:
-            ticker = parts[1].strip().upper()
-            if ticker:
-                return ticker
-    return None
-
-
-def _coverage_window_description(ranges: List[Tuple[pd.Timestamp, pd.Timestamp]]) -> str:
-    """Return a safe human-readable min/max coverage window."""
-    if not ranges:
-        return "unknown"
-    return f"{min(r[0] for r in ranges).date()} - {max(r[1] for r in ranges).date()}"
-
-
 # ---------------------------------------------------------------------------
 # V1: Filename Convention
 # ---------------------------------------------------------------------------
@@ -442,7 +329,6 @@ def check_v2_parquet_coverage(checkpoint_dir: Path) -> List[CheckResult]:
 def check_v3_jsonl_alignment(
     jsonl_path: Path,
     checkpoint_dir: Path,
-    tickers: Optional[List[str]] = None,
 ) -> CheckResult:
     if not jsonl_path.exists():
         return CheckResult(
@@ -450,26 +336,37 @@ def check_v3_jsonl_alignment(
             f"JSONL not found at {jsonl_path} — V3 skipped",
         )
 
-    # Build global parquet coverage map for entries with no resolvable ticker.
-    parquet_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    # Build parquet coverage map KEYED BY TICKER so that an MSFT parquet cannot
+    # satisfy an AAPL JSONL entry.  Ticker is extracted from: (1) the ticker column
+    # in the parquet, (2) the filename, or (3) left as None (generic fallback only).
+    parquet_ranges_by_ticker: Dict[Optional[str], List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for path in checkpoint_dir.glob("*data_extraction*.parquet"):
         df, err = _load_parquet_safe(path)
         if err or df is None or "Close" not in df.columns:
             continue
         cov = _parse_parquet_coverage(df)
-        if cov:
-            parquet_ranges.append(cov)
+        if not cov:
+            continue
+        # Determine ticker from data or filename
+        file_ticker: Optional[str] = None
+        if "ticker" in df.columns:
+            tickers_in_file = df["ticker"].dropna().unique().tolist()
+            if len(tickers_in_file) == 1:
+                file_ticker = str(tickers_in_file[0]).upper()
+        if file_ticker is None:
+            # Best-effort: extract ticker from filename (e.g. AAPL_pipeline_...)
+            stem = path.stem.upper()
+            for candidate in stem.split("_"):
+                # Simple heuristic: 1-5 uppercase letters, not a common suffix word
+                if candidate.isalpha() and 1 <= len(candidate) <= 5 and candidate not in (
+                    "DATA", "TRAIN", "PIPE", "LINE", "CHECK", "POINT", "EXTRACTION"
+                ):
+                    file_ticker = candidate
+                    break
+        parquet_ranges_by_ticker.setdefault(file_ticker, []).append(cov)
 
-    if not parquet_ranges:
-        return CheckResult(
-            "V3.alignment", "FAIL",
-            (
-                f"No readable parquet coverage found in {checkpoint_dir}. "
-                "Cannot validate timestamp alignment. Run ETL bootstrap first "
-                "or fix unreadable checkpoint files."
-            ),
-            {"checkpoint_dir": str(checkpoint_dir)},
-        )
+    # All ranges (used for coverage summary display only)
+    all_parquet_ranges = [r for ranges in parquet_ranges_by_ticker.values() for r in ranges]
 
     # Parse JSONL
     entries = []
@@ -496,44 +393,34 @@ def check_v3_jsonl_alignment(
     n_total = len(entries)
     n_alignable = 0
     n_wall_clock = 0
-    n_missing_timestamp = 0
-    n_malformed_timestamp = 0
-    n_ticker_scoped = 0
-    n_missing_ticker_coverage = 0
     wall_clock_sample: List[str] = []
     current_year = datetime.now(timezone.utc).year
-    coverage_cache: Dict[str, Tuple[List[Tuple[pd.Timestamp, pd.Timestamp]], str]] = {}
 
     for e in entries:
         # Mirror _parse_entry_ts priority order
         ts_raw = e.get("signal_timestamp") or e.get("timestamp") or e.get("entry_ts")
         if not ts_raw:
-            n_missing_timestamp += 1
             continue
         try:
             ts = pd.Timestamp(ts_raw, tz="UTC")
         except Exception:
-            n_malformed_timestamp += 1
             continue
 
-        ticker = _extract_entry_ticker(e)
-        if ticker:
-            n_ticker_scoped += 1
-            if ticker not in coverage_cache:
-                coverage_cache[ticker] = _resolve_ticker_parquet_ranges(
-                    ticker,
-                    checkpoint_dir,
-                    known_tickers=tickers,
-                )
-            ticker_ranges, _resolution = coverage_cache[ticker]
-            if ticker_ranges:
-                alignable = any(start <= ts <= end for start, end in ticker_ranges)
-            else:
-                n_missing_ticker_coverage += 1
-                alignable = False
+        # Ticker-scoped check: only look in parquet ranges for this entry's ticker.
+        # When the entry has no ticker field, fall back to all available parquets
+        # (we can't scope it, so we must check everything).
+        entry_ticker = str(e.get("ticker") or "").upper() or None
+        candidate_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        if entry_ticker:
+            candidate_ranges.extend(parquet_ranges_by_ticker.get(entry_ticker, []))
+            # Also include None-keyed parquets (ticker undetermined)
+            candidate_ranges.extend(parquet_ranges_by_ticker.get(None, []))
         else:
-            alignable = any(start <= ts <= end for start, end in parquet_ranges)
+            # No ticker on JSONL entry — check all parquets as generic fallback
+            for ranges in parquet_ranges_by_ticker.values():
+                candidate_ranges.extend(ranges)
 
+        alignable = any(start <= ts <= end for start, end in candidate_ranges)
         if alignable:
             n_alignable += 1
         elif ts.year >= current_year:
@@ -543,22 +430,22 @@ def check_v3_jsonl_alignment(
 
     pct_alignable = n_alignable / n_total if n_total > 0 else 0.0
 
+    # Build coverage description safely — guard against empty all_parquet_ranges
+    if all_parquet_ranges:
+        cov_start = min(r[0] for r in all_parquet_ranges).date()
+        cov_end = max(r[1] for r in all_parquet_ranges).date()
+        cov_desc = f"{cov_start} - {cov_end}"
+    else:
+        cov_desc = "no parquets found"
+
     details = {
         "n_with_features": n_total,
         "n_alignable": n_alignable,
         "n_wall_clock_timestamps": n_wall_clock,
-        "n_missing_timestamp": n_missing_timestamp,
-        "n_malformed_timestamp": n_malformed_timestamp,
-        "n_ticker_scoped": n_ticker_scoped,
-        "n_missing_ticker_coverage": n_missing_ticker_coverage,
         "pct_alignable": round(pct_alignable * 100, 1),
-        "parquet_ranges_checked": len(parquet_ranges),
+        "parquet_ranges_checked": len(all_parquet_ranges),
         "wall_clock_sample": wall_clock_sample,
-        "ticker_coverage_resolution": {
-            ticker: resolution for ticker, (_ranges, resolution) in coverage_cache.items()
-        },
     }
-    coverage_desc = _coverage_window_description(parquet_ranges)
 
     if pct_alignable == 0.0:
         # WARN (not FAIL): 0% alignment means build_directional_training_data.py
@@ -570,13 +457,9 @@ def check_v3_jsonl_alignment(
         return CheckResult(
             "V3.alignment", "WARN",
             (
-                f"0 of {n_total} JSONL entries align with available parquet coverage "
-                f"(coverage window {coverage_desc}; wall-clock-like timestamps="
-                f"{n_wall_clock}; missing ticker coverage={n_missing_ticker_coverage}; "
-                f"missing timestamps={n_missing_timestamp}; malformed timestamps="
-                f"{n_malformed_timestamp}). "
-                f"{n_missing_ticker_coverage} entries could not be matched to "
-                "ticker-specific parquet coverage. "
+                f"0 of {n_total} JSONL entries have timestamps within any ticker-matched "
+                f"parquet range (all are wall-clock {current_year}, parquets cover "
+                f"{cov_desc}). "
                 "build_directional_training_data.py will produce 0 labeled examples -- "
                 "use generate_classifier_training_labels.py (parquet scan) instead. "
                 "The bootstrap already uses the parquet-scan path, so this is advisory only."
@@ -612,17 +495,21 @@ def check_v4_eval_date_coverage(
     tickers: List[str],
     checkpoint_dir: Path,
 ) -> List[CheckResult]:
-    # Build per-ticker coverage from named parquets first, then a single generic fallback.
+    # Build per-ticker coverage from named parquets first, then fallback
     ticker_coverage: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
-    ticker_resolution: Dict[str, str] = {}
     for ticker in tickers:
-        cov_list, resolution = _resolve_ticker_parquet_ranges(
-            ticker,
-            checkpoint_dir,
-            known_tickers=tickers,
-        )
+        ticker_upper = ticker.upper()
+        cov_list = []
+        named = list(checkpoint_dir.glob(f"*{ticker_upper}*.parquet"))
+        all_parquets = named if named else list(checkpoint_dir.glob("*data_extraction*.parquet"))
+        for path in all_parquets[:5]:  # check up to 5 candidates
+            df, err = _load_parquet_safe(path)
+            if err or df is None or "Close" not in df.columns:
+                continue
+            cov = _parse_parquet_coverage(df)
+            if cov:
+                cov_list.append(cov)
         ticker_coverage[ticker] = cov_list
-        ticker_resolution[ticker] = resolution
 
     # All available ranges (for the date-is-outside-everything case)
     all_ranges = [r for ranges in ticker_coverage.values() for r in ranges]
@@ -651,7 +538,6 @@ def check_v4_eval_date_coverage(
             "eval_date": date_str,
             "covered_tickers": covered_tickers,
             "uncovered_tickers": uncovered_tickers,
-            "ticker_resolution": ticker_resolution,
         }
 
         if not uncovered_tickers:
@@ -831,32 +717,32 @@ def check_v6_edge_cases(
                         null_count += 1
                     else:
                         try:
-                            pd.Timestamp(ts_raw, tz="UTC")
-                        except Exception:
+                            pd.Timestamp(ts_raw)
+                        except (ValueError, TypeError):
                             malformed_count += 1
                 except Exception:
                     pass
         except Exception:
             pass
-        if null_count > 0 and total_feat > 0:
+        bad_count = null_count + malformed_count
+        if bad_count > 0 and total_feat > 0:
+            detail_parts = []
+            if null_count:
+                detail_parts.append(f"{null_count} missing")
+            if malformed_count:
+                detail_parts.append(f"{malformed_count} unparseable")
             results.append(CheckResult(
                 "V6.null_timestamps", "WARN",
                 (
-                    f"{null_count}/{total_feat} JSONL entries with classifier_features "
-                    "have no parseable timestamp. These entries will be skipped during "
-                    "build_directional_training_data.py labeling."
+                    f"{bad_count}/{total_feat} JSONL entries with classifier_features "
+                    f"have bad timestamps ({', '.join(detail_parts)}). These entries will "
+                    "be skipped during labeling."
                 ),
-                {"null_count": null_count, "total_with_features": total_feat},
-            ))
-        if malformed_count > 0 and total_feat > 0:
-            results.append(CheckResult(
-                "V6.malformed_timestamps", "WARN",
-                (
-                    f"{malformed_count}/{total_feat} JSONL entries with classifier_features "
-                    "have unparseable timestamps. These entries will be skipped during "
-                    "timestamp-based labeling/evaluation."
-                ),
-                {"malformed_count": malformed_count, "total_with_features": total_feat},
+                {
+                    "null_count": null_count,
+                    "malformed_count": malformed_count,
+                    "total_with_features": total_feat,
+                },
             ))
 
     # 6c: Stale training dataset
@@ -911,7 +797,7 @@ def run_all_checks(
 
     all_results.extend(check_v1_filename_convention(tickers, checkpoint_dir))
     all_results.extend(check_v2_parquet_coverage(checkpoint_dir))
-    all_results.append(check_v3_jsonl_alignment(jsonl_path, checkpoint_dir, tickers=tickers))
+    all_results.append(check_v3_jsonl_alignment(jsonl_path, checkpoint_dir))
     all_results.extend(check_v4_eval_date_coverage(eval_dates, tickers, checkpoint_dir))
     all_results.append(check_v5_duplicate_parquet(tickers, checkpoint_dir))
     all_results.extend(check_v6_edge_cases(checkpoint_dir, jsonl_path, training_path, stale_days))

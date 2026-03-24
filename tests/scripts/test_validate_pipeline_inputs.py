@@ -319,6 +319,41 @@ class TestV6EdgeCases:
         assert malformed[0].status == "WARN"
         assert malformed[0].details["malformed_count"] == 1
 
+    def test_warn_on_malformed_timestamps(self, tmp_path):
+        """V6 must detect malformed timestamp strings, not just None/missing."""
+        from scripts.validate_pipeline_inputs import check_v6_edge_cases
+        import json
+        jsonl = tmp_path / "quant.jsonl"
+        entries = [
+            {"signal_timestamp": "not-a-timestamp", "classifier_features": {"a": 1}},
+            {"signal_timestamp": "2020-06-01T00:00:00Z", "classifier_features": {"a": 1}},
+        ]
+        jsonl.write_text("\n".join(json.dumps(e) for e in entries), encoding="utf-8")
+        _write_parquet(_make_price_df(n=200), tmp_path / "AAPL_data_extraction.parquet")
+        results = check_v6_edge_cases(tmp_path, jsonl, tmp_path / "missing.parquet")
+        warn = next((r for r in results if "null_timestamp" in r.check_id), None)
+        assert warn is not None, "Expected V6.null_timestamps warning for malformed timestamp"
+        assert warn.status == "WARN"
+        assert warn.details.get("malformed_count", 0) == 1
+
+    def test_warn_counts_both_null_and_malformed(self, tmp_path):
+        """V6 null_timestamps warning counts null + malformed separately in details."""
+        from scripts.validate_pipeline_inputs import check_v6_edge_cases
+        import json
+        jsonl = tmp_path / "quant.jsonl"
+        entries = [
+            {"signal_timestamp": None, "classifier_features": {"a": 1}},
+            {"signal_timestamp": "bad-ts", "classifier_features": {"a": 1}},
+            {"signal_timestamp": "2020-06-01T00:00:00Z", "classifier_features": {"a": 1}},
+        ]
+        jsonl.write_text("\n".join(json.dumps(e) for e in entries), encoding="utf-8")
+        _write_parquet(_make_price_df(n=200), tmp_path / "AAPL_data_extraction.parquet")
+        results = check_v6_edge_cases(tmp_path, jsonl, tmp_path / "missing.parquet")
+        warn = next((r for r in results if "null_timestamp" in r.check_id), None)
+        assert warn is not None
+        assert warn.details.get("null_count", 0) == 1
+        assert warn.details.get("malformed_count", 0) == 1
+
 
 # ---------------------------------------------------------------------------
 # run_all_checks integration

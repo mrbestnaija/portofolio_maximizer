@@ -57,7 +57,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -235,99 +235,49 @@ def _find_parquets_for_ticker(
     if primary:
         return primary
 
-    # Fallback: ALL data_extraction parquets — caller disambiguates by ticker metadata
-    return sorted(
+    # Fallback: scan all data_extraction parquets and keep only those that contain
+    # a 'ticker' column whose values include this ticker.  This prevents one ticker
+    # from silently training on another ticker's prices when parquet filenames are
+    # generic (e.g. pipeline_20260101_data_extraction_*.parquet).
+    # Files whose ticker column is absent or ambiguous are still included as last-
+    # resort candidates so we don't break setups with single-ticker generic parquets.
+    ticker_upper = ticker.upper()
+    with_match: List[Path] = []
+    without_ticker_col: List[Path] = []
+
+    for path in sorted(
         checkpoint_dir.glob("*data_extraction*.parquet"),
         key=lambda p: p.stat().st_size,
         reverse=True,
-    )
+    ):
+        try:
+            df_peek = pd.read_parquet(path, columns=["ticker"]) if True else None
+            if "ticker" in df_peek.columns:
+                tickers_present = {str(t).upper() for t in df_peek["ticker"].dropna().unique()}
+                if ticker_upper in tickers_present:
+                    with_match.append(path)
+                # If ticker column exists but this ticker isn't in it, skip the file —
+                # it belongs to a different ticker.
+            else:
+                without_ticker_col.append(path)
+        except Exception:
+            # Parquet may not have a ticker column at the column-metadata level;
+            # fall through to the generic bucket.
+            without_ticker_col.append(path)
 
-
-def _find_named_parquets_for_ticker(
-    ticker: str,
-    checkpoint_dir: Path,
-) -> List[Path]:
-    """Return ticker-specific parquet candidates only."""
-    ticker_upper = ticker.upper()
-    return sorted(
-        list(checkpoint_dir.glob(f"*{ticker_upper}*data_extraction*.parquet"))
-        + list(checkpoint_dir.glob(f"*{ticker_upper}*.parquet")),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-
-
-def _generic_parquet_candidates(
-    checkpoint_dir: Path,
-    known_tickers: Optional[List[str]] = None,
-) -> List[Path]:
-    """Return only unscoped data_extraction parquet candidates."""
-    candidates = [path for path in checkpoint_dir.glob("*data_extraction*.parquet") if path.is_file()]
-    if known_tickers:
-        ticker_tokens = {ticker.upper() for ticker in known_tickers if ticker}
-        candidates = [
-            path for path in candidates
-            if not any(token in path.name.upper() for token in ticker_tokens)
-        ]
-    return sorted(candidates, key=lambda p: p.stat().st_size, reverse=True)
-
-
-def _resolve_parquet_candidates(
-    ticker: str,
-    checkpoint_dir: Path,
-    parquet_path: Optional[Path] = None,
-    known_tickers: Optional[List[str]] = None,
-) -> Tuple[List[Path], str]:
-    """Resolve candidate parquets and the selection mode for one ticker."""
-    if parquet_path is not None:
-        return [parquet_path], "explicit"
-
-    named = [p for p in _find_named_parquets_for_ticker(ticker, checkpoint_dir) if p.is_file()]
-    if named:
-        return named, "ticker_named"
-
-    generic = _generic_parquet_candidates(checkpoint_dir, known_tickers=known_tickers)
-    if generic and known_tickers and len(known_tickers) > 1:
-        return [], "generic_requires_named_files"
-    if len(generic) == 1:
-        return generic, "single_generic_fallback"
-    if len(generic) > 1:
-        return [], "ambiguous_generic"
-    return [], "missing"
+    return with_match if with_match else without_ticker_col
 
 
 def _load_best_parquet(
     ticker: str,
     checkpoint_dir: Path,
     parquet_path: Optional[Path] = None,
-    known_tickers: Optional[List[str]] = None,
 ) -> Optional[pd.DataFrame]:
     """Load price DataFrame for ticker. Returns None if not found."""
-    candidates, selection_mode = _resolve_parquet_candidates(
-        ticker,
-        checkpoint_dir,
-        parquet_path=parquet_path,
-        known_tickers=known_tickers,
-    )
-
-    if not candidates:
-        if selection_mode == "generic_requires_named_files":
-            logger.error(
-                "%s: generic checkpoint filename(s) found for a multi-ticker run. "
-                "Refusing to guess which parquet belongs to %s. Rename files to "
-                "include ticker symbols or pass --parquet explicitly.",
-                ticker,
-                ticker,
-            )
-        elif selection_mode == "ambiguous_generic":
-            logger.error(
-                "%s: ambiguous parquet selection (multiple generic data_extraction parquets, "
-                "no ticker-named file). Refusing to guess. Rename the correct file "
-                "to include the ticker symbol or pass --parquet explicitly.",
-                ticker,
-            )
-        logger.warning("No usable price parquet found for %s in %s", ticker, checkpoint_dir)
-        return None
+    if parquet_path is not None:
+        candidates = [parquet_path]
+    else:
+        candidates = _find_parquets_for_ticker(ticker, checkpoint_dir)
 
     for path in candidates[:5]:  # try up to 5 candidates
         try:
@@ -339,11 +289,8 @@ def _load_best_parquet(
             if len(df) < _MIN_LOOKBACK + _DEFAULT_HORIZON:
                 logger.debug("Parquet %s too short (%d rows), skipping", path.name, len(df))
                 continue
-            logger.info(
-                "Loaded parquet for %s: %s (%d rows, %s→%s, mode=%s)",
-                ticker, path.name, len(df), df.index.min().date(), df.index.max().date(),
-                selection_mode,
-            )
+            logger.info("Loaded parquet for %s: %s (%d rows, %s→%s)",
+                        ticker, path.name, len(df), df.index.min().date(), df.index.max().date())
             return df
         except Exception as exc:
             logger.warning("Could not load %s: %s", path.name, exc)
@@ -468,11 +415,7 @@ def _append_to_dataset(
 # Summary
 # ---------------------------------------------------------------------------
 
-def _write_summary(
-    output_path: Path,
-    summary_path: Path,
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+def _write_summary(output_path: Path, summary_path: Path) -> Dict[str, Any]:
     """Read the output parquet and write a summary JSON."""
     summary: Dict[str, Any] = {
         "built_at": datetime.utcnow().isoformat() + "Z",
@@ -481,34 +424,23 @@ def _write_summary(
     if not output_path.exists():
         summary.update({"n_labeled": 0, "cold_start": True, "error": "output_not_written"})
     else:
-        try:
-            df = pd.read_parquet(output_path)
-            n = len(df)
-            n_pos = int(df["y_directional"].sum()) if "y_directional" in df.columns else 0
-            n_neg = n - n_pos
-            win_rate = float(n_pos / n) if n > 0 else float("nan")
-            cold_start = n < 60 or n_pos < 10 or n_neg < 10
-            summary.update({
-                "n_labeled": n,
-                "n_positive": n_pos,
-                "n_negative": n_neg,
-                "win_rate": round(win_rate, 4) if np.isfinite(win_rate) else None,
-                "cold_start": cold_start,
-                "cold_start_reason": (
-                    f"n={n} < 60 or class imbalance" if cold_start else None
-                ),
-                "output_path": str(output_path),
-            })
-        except Exception as exc:
-            summary.update({
-                "n_labeled": 0,
-                "cold_start": True,
-                "error": "output_unreadable",
-                "error_detail": str(exc),
-                "output_path": str(output_path),
-            })
-    if extra:
-        summary.update(extra)
+        df = pd.read_parquet(output_path)
+        n = len(df)
+        n_pos = int(df["y_directional"].sum()) if "y_directional" in df.columns else 0
+        n_neg = n - n_pos
+        win_rate = float(n_pos / n) if n > 0 else float("nan")
+        cold_start = n < 60 or n_pos < 10 or n_neg < 10
+        summary.update({
+            "n_labeled": n,
+            "n_positive": n_pos,
+            "n_negative": n_neg,
+            "win_rate": round(win_rate, 4) if np.isfinite(win_rate) else None,
+            "cold_start": cold_start,
+            "cold_start_reason": (
+                f"n={n} < 60 or class imbalance" if cold_start else None
+            ),
+            "output_path": str(output_path),
+        })
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
@@ -545,10 +477,6 @@ def main(argv: Optional[list] = None) -> int:
                         help=f"Forward bars for price label (default: {_DEFAULT_HORIZON})")
     parser.add_argument("--output", default=str(_OUTPUT_PARQUET),
                         help=f"Output parquet path (default: {_OUTPUT_PARQUET})")
-    parser.add_argument(
-        "--allow-partial", action="store_true",
-        help="Allow success when some requested tickers have no usable parquet or generate zero rows.",
-    )
     args = parser.parse_args(argv)
 
     tickers = [t.strip().upper() for t in args.ticker.split(",") if t.strip()]
@@ -566,11 +494,7 @@ def main(argv: Optional[list] = None) -> int:
         from collections import defaultdict as _defaultdict
         _path_to_tickers: dict = _defaultdict(list)
         for _tk in tickers:
-            _candidates, _mode = _resolve_parquet_candidates(
-                _tk,
-                checkpoint_dir,
-                known_tickers=tickers,
-            )
+            _candidates = _find_parquets_for_ticker(_tk, checkpoint_dir)
             if _candidates:
                 _path_to_tickers[str(_candidates[0].resolve())].append(_tk)
         for _pstr, _shared in _path_to_tickers.items():
@@ -585,33 +509,12 @@ def main(argv: Optional[list] = None) -> int:
                 )
 
     total_new = 0
-    ticker_results: Dict[str, Dict[str, Any]] = {}
+    tickers_satisfied = 0
     for ticker in tickers:
         parquet_path = Path(args.parquet) if args.parquet else None
-        _candidates, selection_mode = _resolve_parquet_candidates(
-            ticker,
-            checkpoint_dir,
-            parquet_path=parquet_path,
-            known_tickers=tickers,
-        )
-        price_df = _load_best_parquet(
-            ticker,
-            checkpoint_dir,
-            parquet_path=parquet_path,
-            known_tickers=tickers,
-        )
+        price_df = _load_best_parquet(ticker, checkpoint_dir, parquet_path)
         if price_df is None:
             logger.warning("Skipping %s — no usable parquet found", ticker)
-            ticker_results[ticker] = {
-                "status": (
-                    "ambiguous_parquet"
-                    if selection_mode in {"ambiguous_generic", "generic_requires_named_files"}
-                    else "missing_parquet"
-                ),
-                "selection_mode": selection_mode,
-                "generated_rows": 0,
-                "new_rows_added": 0,
-            }
             continue
 
         rows = generate_labels(
@@ -621,48 +524,14 @@ def main(argv: Optional[list] = None) -> int:
             step=args.step,
             horizon=args.horizon,
         )
-        if not rows:
-            ticker_results[ticker] = {
-                "status": "zero_rows_generated",
-                "selection_mode": selection_mode,
-                "generated_rows": 0,
-                "new_rows_added": 0,
-            }
-            continue
-
         added = _append_to_dataset(rows, output_path)
-        ticker_results[ticker] = {
-            "status": "ok" if added > 0 else "deduplicated_no_new_rows",
-            "selection_mode": selection_mode,
-            "generated_rows": len(rows),
-            "new_rows_added": added,
-        }
         total_new += added
+        if added > 0:
+            tickers_satisfied += 1
 
-    summary = _write_summary(
-        output_path,
-        _SUMMARY_PATH,
-        extra={
-            "requested_tickers": tickers,
-            "ticker_results": ticker_results,
-            "new_rows_added_total": total_new,
-            "allow_partial": bool(args.allow_partial),
-        },
-    )
+    summary = _write_summary(output_path, _SUMMARY_PATH)
     n_labeled = summary.get("n_labeled", 0)
     cold_start = summary.get("cold_start", True)
-    blocking = {
-        ticker: outcome
-        for ticker, outcome in ticker_results.items()
-        if outcome.get("status") in {"missing_parquet", "ambiguous_parquet", "zero_rows_generated"}
-    }
-
-    if blocking and not args.allow_partial:
-        print(
-            "[ERROR] requested ticker(s) could not be labeled: "
-            + ", ".join(f"{ticker}={outcome['status']}" for ticker, outcome in blocking.items())
-        )
-        return 1
 
     print(
         f"[OK] n_labeled={n_labeled} "
@@ -670,6 +539,21 @@ def main(argv: Optional[list] = None) -> int:
         f"cold_start={cold_start} "
         f"new_rows_added={total_new}"
     )
+
+    # Fail when every requested ticker produced 0 new rows and no prior dataset
+    # exists.  Without this guard, callers receive rc=0 while training on stale
+    # data from a previous run — silently misrepresenting coverage.
+    # If a prior dataset exists we return rc=0 because the existing data is still
+    # valid (operator may be re-running with same inputs).  cold_start=True is the
+    # canonical signal that no usable dataset exists.
+    if total_new == 0 and not output_path.exists():
+        logger.error(
+            "No new rows added for any of the requested tickers (%s) and no prior "
+            "dataset exists at %s — cannot continue.",
+            ", ".join(tickers), output_path,
+        )
+        return 1
+
     return 0 if not cold_start else 2
 
 

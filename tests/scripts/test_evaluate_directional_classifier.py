@@ -28,6 +28,14 @@ class TestEvaluateDirectionalClassifier:
         result = evaluate(dataset_path=tmp_path / "nonexistent.parquet", write_report=False)
         assert result.get("error") == "dataset_not_found"
 
+    def test_error_when_dataset_unreadable(self, tmp_path):
+        """Corrupt parquet returns dataset_unreadable error dict, not an exception."""
+        from scripts.evaluate_directional_classifier import evaluate
+        bad = tmp_path / "directional_dataset.parquet"
+        bad.write_bytes(b"not a parquet file")
+        result = evaluate(dataset_path=bad, write_report=False)
+        assert result.get("error") == "dataset_unreadable"
+
     def test_cold_start_when_insufficient_data(self, tmp_path):
         from scripts.evaluate_directional_classifier import evaluate
         df = self._make_dataset(n=10)
@@ -35,13 +43,6 @@ class TestEvaluateDirectionalClassifier:
         df.to_parquet(path, index=False)
         result = evaluate(dataset_path=path, min_n=60, write_report=False)
         assert result.get("cold_start") is True
-
-    def test_returns_dataset_unreadable_for_corrupt_parquet(self, tmp_path):
-        from scripts.evaluate_directional_classifier import evaluate
-        path = tmp_path / "directional_dataset.parquet"
-        path.write_text("not a parquet", encoding="utf-8")
-        result = evaluate(dataset_path=path, write_report=False)
-        assert result.get("error") == "dataset_unreadable"
 
     def test_returns_walk_forward_da(self, tmp_path):
         from scripts.evaluate_directional_classifier import evaluate
