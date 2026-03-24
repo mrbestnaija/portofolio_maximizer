@@ -98,6 +98,8 @@ class Trade:
     # PnL integrity enforcement fields (Phase 7.9+)
     is_diagnostic: int = 0
     is_synthetic: int = 0
+    # Phase 10: mechanical exits (stop-loss, max-hold) — excluded from Platt calibration
+    is_forced_exit: int = 0
 
     def __post_init__(self):
         if self.trade_id is None:
@@ -332,10 +334,20 @@ class PaperTradingEngine:
                     reason_prefix if not signal["reasoning"] else f"{signal['reasoning']} | {reason_prefix}"
                 )
                 signal["exit_reason"] = forced_exit_reason
+                # Mark as a forced mechanical exit so Platt calibration and
+                # post-hoc analysis can exclude these rows.  Do NOT overwrite
+                # the model confidence — we need to preserve it for calibration.
+                # Forced exits are deterministic rule executions, not model
+                # predictions, so mixing them into confidence metrics is wrong.
+                signal["forced_exit"] = True
+                # If confidence is missing/invalid, use a neutral placeholder
+                # (0.5) rather than 0.9, which would bias calibration upward.
                 try:
-                    signal["confidence"] = max(float(signal.get("confidence") or 0.0), 0.9)
+                    _orig_conf = float(signal.get("confidence") or 0.0)
+                    if _orig_conf <= 0.0:
+                        signal["confidence"] = 0.5  # neutral; forced exit, not a model call
                 except (TypeError, ValueError):
-                    signal["confidence"] = 0.9
+                    signal["confidence"] = 0.5
                 forced_exit_shares = abs(int(current_position))
 
         # Exit eligibility diagnostic log for every open position.
@@ -610,6 +622,7 @@ class PaperTradingEngine:
             confidence_calibrated=signal.get("confidence_calibrated"),
             is_diagnostic=1 if diag_mode else 0,
             is_synthetic=1 if data_source and "synthetic" in str(data_source).lower() else 0,
+            is_forced_exit=1 if bool(signal.get("forced_exit")) else 0,
         )
         mid_price_hint = signal.get("mid_price_hint")
         try:
@@ -1358,6 +1371,7 @@ class PaperTradingEngine:
                 is_synthetic=trade.is_synthetic,
                 confidence_calibrated=trade.confidence_calibrated,
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
+                is_forced_exit=trade.is_forced_exit,  # Phase 10
             )
 
             # Store entry_trade_id when opening position (for future close linkage)

@@ -202,11 +202,18 @@ class TimeSeriesForecaster:
         if isinstance(self.config.ensemble_kwargs, dict) and "audit_log_dir" in self.config.ensemble_kwargs:
             audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
         else:
-            audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR")
+            # Treat empty / whitespace-only env var the same as unset so that
+            # CI environments with TS_FORECAST_AUDIT_DIR="" don't trip the
+            # explicit-disable branch below and silently discard all audit files.
+            audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR") or None
         if audit_dir is None:
-            _default_root = Path("logs/forecast_audits")
-            _prod_subdir = _default_root / "production"
-            self._audit_dir = _prod_subdir if _prod_subdir.exists() else _default_root
+            # Default to the root audit dir. Callers that own a production
+            # pipeline (run_auto_trader.py) explicitly pass audit_log_dir via
+            # ensemble_kwargs or TS_FORECAST_AUDIT_DIR env var.  Auto-promoting
+            # to production/ when that subdir exists was a silent contamination
+            # vector: research/ETL forecasts would land in production/ and
+            # inflate outcome_eligible counts in the gate.
+            self._audit_dir = Path("logs/forecast_audits")
         else:
             audit_text = str(audit_dir).strip()
             if audit_text.lower() in {"", "0", "off", "none", "false"}:

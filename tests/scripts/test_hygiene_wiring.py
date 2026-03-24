@@ -504,25 +504,31 @@ class TestEtlAuditDirRouting:
 # ---------------------------------------------------------------------------
 
 class TestForecasterAuditDirDefault:
-    """Forecaster._audit_dir defaults to production/ subdir when it exists."""
+    """Forecaster._audit_dir must NOT auto-promote to production/ (Phase 10 fix).
 
-    def test_forecaster_uses_production_subdir_when_exists(self, tmp_path: Path) -> None:
-        """When logs/forecast_audits/production/ exists, default to it."""
+    Prior to Phase 10 the forecaster auto-selected production/ when that subdir
+    existed, silently routing research/ETL forecasts into the production audit dir
+    and inflating outcome_eligible counts in the gate.  The fix requires callers
+    to opt-in explicitly via ensemble_kwargs['audit_log_dir'] or TS_FORECAST_AUDIT_DIR.
+    """
+
+    def test_forecaster_does_NOT_auto_promote_to_production_subdir(self, tmp_path: Path) -> None:
+        """Even when logs/forecast_audits/production/ exists, the default must be root."""
         prod_dir = tmp_path / "logs" / "forecast_audits" / "production"
         prod_dir.mkdir(parents=True)
 
-        # Monkeypatch os.getcwd() so Path("logs/...") resolves under tmp_path
         original_cwd = os.getcwd()
         os.chdir(tmp_path)
         try:
-            # Remove cached env var so it uses code default
             env_backup = os.environ.pop("TS_FORECAST_AUDIT_DIR", None)
             try:
                 from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
                 fc = TimeSeriesForecaster(TimeSeriesForecasterConfig(forecast_horizon=5))
                 assert fc._audit_dir is not None
-                assert "production" in str(fc._audit_dir), (
-                    f"Expected production/ in audit dir, got {fc._audit_dir}"
+                assert "production" not in str(fc._audit_dir), (
+                    "Forecaster must NOT auto-promote to production/ dir. "
+                    "Phase 10 fix: callers must opt-in via audit_log_dir. "
+                    f"Got: {fc._audit_dir}"
                 )
             finally:
                 if env_backup is not None:

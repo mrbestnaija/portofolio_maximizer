@@ -987,6 +987,14 @@ def _generate_time_series_forecast(
         fcfg = _get_forecasting_config()
         ensemble_cfg = fcfg.get("ensemble", {})
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
+        # Explicitly route production forecasts to the production audit subdir.
+        # ETL/research pipelines use logs/forecast_audits/research/ instead.
+        # This prevents the forecaster's neutral default from causing silent
+        # misrouting when both subdirs exist (forecaster.py __init__).
+        ensemble_kwargs.setdefault(
+            "audit_log_dir",
+            str(Path("logs/forecast_audits/production").resolve()),
+        )
         regime_cfg = fcfg.get("regime_detection", {})
         regime_detection_enabled = regime_cfg.get("enabled", False)
         regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != "enabled"}
