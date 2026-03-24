@@ -235,12 +235,37 @@ def _find_parquets_for_ticker(
     if primary:
         return primary
 
-    # Fallback: ALL data_extraction parquets — caller disambiguates by ticker metadata
-    return sorted(
+    # Fallback: scan all data_extraction parquets and keep only those that contain
+    # a 'ticker' column whose values include this ticker.  This prevents one ticker
+    # from silently training on another ticker's prices when parquet filenames are
+    # generic (e.g. pipeline_20260101_data_extraction_*.parquet).
+    # Files whose ticker column is absent or ambiguous are still included as last-
+    # resort candidates so we don't break setups with single-ticker generic parquets.
+    ticker_upper = ticker.upper()
+    with_match: List[Path] = []
+    without_ticker_col: List[Path] = []
+
+    for path in sorted(
         checkpoint_dir.glob("*data_extraction*.parquet"),
         key=lambda p: p.stat().st_size,
         reverse=True,
-    )
+    ):
+        try:
+            df_peek = pd.read_parquet(path, columns=["ticker"]) if True else None
+            if "ticker" in df_peek.columns:
+                tickers_present = {str(t).upper() for t in df_peek["ticker"].dropna().unique()}
+                if ticker_upper in tickers_present:
+                    with_match.append(path)
+                # If ticker column exists but this ticker isn't in it, skip the file —
+                # it belongs to a different ticker.
+            else:
+                without_ticker_col.append(path)
+        except Exception:
+            # Parquet may not have a ticker column at the column-metadata level;
+            # fall through to the generic bucket.
+            without_ticker_col.append(path)
+
+    return with_match if with_match else without_ticker_col
 
 
 def _load_best_parquet(
@@ -484,6 +509,7 @@ def main(argv: Optional[list] = None) -> int:
                 )
 
     total_new = 0
+    tickers_satisfied = 0
     for ticker in tickers:
         parquet_path = Path(args.parquet) if args.parquet else None
         price_df = _load_best_parquet(ticker, checkpoint_dir, parquet_path)
@@ -500,6 +526,8 @@ def main(argv: Optional[list] = None) -> int:
         )
         added = _append_to_dataset(rows, output_path)
         total_new += added
+        if added > 0:
+            tickers_satisfied += 1
 
     summary = _write_summary(output_path, _SUMMARY_PATH)
     n_labeled = summary.get("n_labeled", 0)
@@ -511,6 +539,21 @@ def main(argv: Optional[list] = None) -> int:
         f"cold_start={cold_start} "
         f"new_rows_added={total_new}"
     )
+
+    # Fail when every requested ticker produced 0 new rows and no prior dataset
+    # exists.  Without this guard, callers receive rc=0 while training on stale
+    # data from a previous run — silently misrepresenting coverage.
+    # If a prior dataset exists we return rc=0 because the existing data is still
+    # valid (operator may be re-running with same inputs).  cold_start=True is the
+    # canonical signal that no usable dataset exists.
+    if total_new == 0 and not output_path.exists():
+        logger.error(
+            "No new rows added for any of the requested tickers (%s) and no prior "
+            "dataset exists at %s — cannot continue.",
+            ", ".join(tickers), output_path,
+        )
+        return 1
+
     return 0 if not cold_start else 2
 
 

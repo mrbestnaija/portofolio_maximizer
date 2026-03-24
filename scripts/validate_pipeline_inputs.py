@@ -336,15 +336,37 @@ def check_v3_jsonl_alignment(
             f"JSONL not found at {jsonl_path} — V3 skipped",
         )
 
-    # Build parquet coverage map
-    parquet_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    # Build parquet coverage map KEYED BY TICKER so that an MSFT parquet cannot
+    # satisfy an AAPL JSONL entry.  Ticker is extracted from: (1) the ticker column
+    # in the parquet, (2) the filename, or (3) left as None (generic fallback only).
+    parquet_ranges_by_ticker: Dict[Optional[str], List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for path in checkpoint_dir.glob("*data_extraction*.parquet"):
         df, err = _load_parquet_safe(path)
         if err or df is None or "Close" not in df.columns:
             continue
         cov = _parse_parquet_coverage(df)
-        if cov:
-            parquet_ranges.append(cov)
+        if not cov:
+            continue
+        # Determine ticker from data or filename
+        file_ticker: Optional[str] = None
+        if "ticker" in df.columns:
+            tickers_in_file = df["ticker"].dropna().unique().tolist()
+            if len(tickers_in_file) == 1:
+                file_ticker = str(tickers_in_file[0]).upper()
+        if file_ticker is None:
+            # Best-effort: extract ticker from filename (e.g. AAPL_pipeline_...)
+            stem = path.stem.upper()
+            for candidate in stem.split("_"):
+                # Simple heuristic: 1-5 uppercase letters, not a common suffix word
+                if candidate.isalpha() and 1 <= len(candidate) <= 5 and candidate not in (
+                    "DATA", "TRAIN", "PIPE", "LINE", "CHECK", "POINT", "EXTRACTION"
+                ):
+                    file_ticker = candidate
+                    break
+        parquet_ranges_by_ticker.setdefault(file_ticker, []).append(cov)
+
+    # All ranges (used for coverage summary display only)
+    all_parquet_ranges = [r for ranges in parquet_ranges_by_ticker.values() for r in ranges]
 
     # Parse JSONL
     entries = []
@@ -384,8 +406,21 @@ def check_v3_jsonl_alignment(
         except Exception:
             continue
 
-        # Check if this timestamp falls in any parquet range
-        alignable = any(start <= ts <= end for start, end in parquet_ranges)
+        # Ticker-scoped check: only look in parquet ranges for this entry's ticker.
+        # When the entry has no ticker field, fall back to all available parquets
+        # (we can't scope it, so we must check everything).
+        entry_ticker = str(e.get("ticker") or "").upper() or None
+        candidate_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+        if entry_ticker:
+            candidate_ranges.extend(parquet_ranges_by_ticker.get(entry_ticker, []))
+            # Also include None-keyed parquets (ticker undetermined)
+            candidate_ranges.extend(parquet_ranges_by_ticker.get(None, []))
+        else:
+            # No ticker on JSONL entry — check all parquets as generic fallback
+            for ranges in parquet_ranges_by_ticker.values():
+                candidate_ranges.extend(ranges)
+
+        alignable = any(start <= ts <= end for start, end in candidate_ranges)
         if alignable:
             n_alignable += 1
         elif ts.year >= current_year:
@@ -395,12 +430,20 @@ def check_v3_jsonl_alignment(
 
     pct_alignable = n_alignable / n_total if n_total > 0 else 0.0
 
+    # Build coverage description safely — guard against empty all_parquet_ranges
+    if all_parquet_ranges:
+        cov_start = min(r[0] for r in all_parquet_ranges).date()
+        cov_end = max(r[1] for r in all_parquet_ranges).date()
+        cov_desc = f"{cov_start} - {cov_end}"
+    else:
+        cov_desc = "no parquets found"
+
     details = {
         "n_with_features": n_total,
         "n_alignable": n_alignable,
         "n_wall_clock_timestamps": n_wall_clock,
         "pct_alignable": round(pct_alignable * 100, 1),
-        "parquet_ranges_checked": len(parquet_ranges),
+        "parquet_ranges_checked": len(all_parquet_ranges),
         "wall_clock_sample": wall_clock_sample,
     }
 
@@ -414,10 +457,9 @@ def check_v3_jsonl_alignment(
         return CheckResult(
             "V3.alignment", "WARN",
             (
-                f"0 of {n_total} JSONL entries have timestamps within any parquet's "
-                f"date range (all are wall-clock {current_year}, parquets cover "
-                f"{min(r[0] for r in parquet_ranges).date()} - "
-                f"{max(r[1] for r in parquet_ranges).date()} if parquets exist). "
+                f"0 of {n_total} JSONL entries have timestamps within any ticker-matched "
+                f"parquet range (all are wall-clock {current_year}, parquets cover "
+                f"{cov_desc}). "
                 "build_directional_training_data.py will produce 0 labeled examples -- "
                 "use generate_classifier_training_labels.py (parquet scan) instead. "
                 "The bootstrap already uses the parquet-scan path, so this is advisory only."
@@ -657,6 +699,7 @@ def check_v6_edge_cases(
     # 6b: JSONL null/unparseable timestamps
     if jsonl_path.exists():
         null_count = 0
+        malformed_count = 0
         total_feat = 0
         try:
             for line in jsonl_path.read_text(encoding="utf-8").splitlines():
@@ -672,19 +715,34 @@ def check_v6_edge_cases(
                               or e.get("entry_ts"))
                     if not ts_raw:
                         null_count += 1
+                    else:
+                        try:
+                            pd.Timestamp(ts_raw)
+                        except (ValueError, TypeError):
+                            malformed_count += 1
                 except Exception:
                     pass
         except Exception:
             pass
-        if null_count > 0 and total_feat > 0:
+        bad_count = null_count + malformed_count
+        if bad_count > 0 and total_feat > 0:
+            detail_parts = []
+            if null_count:
+                detail_parts.append(f"{null_count} missing")
+            if malformed_count:
+                detail_parts.append(f"{malformed_count} unparseable")
             results.append(CheckResult(
                 "V6.null_timestamps", "WARN",
                 (
-                    f"{null_count}/{total_feat} JSONL entries with classifier_features "
-                    "have no parseable timestamp. These entries will be skipped during "
-                    "build_directional_training_data.py labeling."
+                    f"{bad_count}/{total_feat} JSONL entries with classifier_features "
+                    f"have bad timestamps ({', '.join(detail_parts)}). These entries will "
+                    "be skipped during labeling."
                 ),
-                {"null_count": null_count, "total_with_features": total_feat},
+                {
+                    "null_count": null_count,
+                    "malformed_count": malformed_count,
+                    "total_with_features": total_feat,
+                },
             ))
 
     # 6c: Stale training dataset

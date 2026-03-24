@@ -25,6 +25,15 @@ class TestTrainDirectionalClassifier:
         result = train(dataset_path=tmp_path / "nonexistent.parquet")
         assert result.get("cold_start") is True
 
+    def test_cold_start_when_dataset_unreadable(self, tmp_path):
+        """Corrupt parquet returns dataset_unreadable error dict, not an exception."""
+        from scripts.train_directional_classifier import train
+        bad = tmp_path / "directional_dataset.parquet"
+        bad.write_bytes(b"not a parquet file")
+        result = train(dataset_path=bad)
+        assert result.get("error") == "dataset_unreadable"
+        assert result.get("cold_start") is True
+
     def test_cold_start_when_insufficient_data(self, tmp_path):
         from scripts.train_directional_classifier import train
         df = self._make_dataset(n=10)
