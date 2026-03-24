@@ -151,28 +151,37 @@ class RegimeDetector:
         if len(series) < max_lag + 1:
             return 0.5  # Assume random walk if insufficient data
 
-        lags = range(2, min(max_lag, len(series) // 2))
+        lags = list(range(2, min(max_lag, len(series) // 2)))
+        # Need at least 2 lag points for polyfit(degree=1) to be defined.
+        if len(lags) < 2:
+            return 0.5  # Insufficient lags — assume random walk
+
+        # Constant series: all diffs are zero -> all tau == 0.
+        # Clamping to 1e-12 gives a horizontal log-log line (slope=0 → H=0),
+        # but a flat/constant series is mean-reverting in spirit.  Detect this
+        # early and return 0.0 explicitly so regime classification sees it as
+        # strongly mean-reverting (GARCH-appropriate) rather than random walk.
+        prices = np.asarray(series.values, dtype=float)
+        if np.std(prices) < 1e-10:
+            return 0.0  # Constant / near-constant series: maximally mean-reverting
+
         tau = []
         for lag in lags:
-            # Calculate standard deviation of differenced series
-            diffs = np.subtract(series.values[lag:], series.values[:-lag])
-            tau.append(np.std(diffs))
+            diffs = np.subtract(prices[lag:], prices[:-lag])
+            tau.append(float(np.std(diffs)))
 
         # Fit power law: tau ~ lag^H
         # Clamp tau to avoid log(0) = -inf which causes polyfit to return NaN
         # silently (it does not raise on all-infinite inputs).
-        if len(tau) > 0:
-            try:
-                tau_clamped = [max(t, 1e-12) for t in tau]
-                poly = np.polyfit(np.log(lags), np.log(tau_clamped), 1)
-                hurst = poly[0]
-                if not np.isfinite(hurst):
-                    return 0.5
-                return float(np.clip(hurst, 0.0, 1.0))
-            except (ValueError, np.linalg.LinAlgError):
+        try:
+            tau_clamped = [max(t, 1e-12) for t in tau]
+            poly = np.polyfit(np.log(lags), np.log(tau_clamped), 1)
+            hurst = float(poly[0])
+            if not np.isfinite(hurst):
                 return 0.5
-
-        return 0.5
+            return float(np.clip(hurst, 0.0, 1.0))
+        except (ValueError, np.linalg.LinAlgError):
+            return 0.5
 
     def _adf_test(self, series: pd.Series) -> float:
         """

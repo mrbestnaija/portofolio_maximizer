@@ -484,18 +484,51 @@ class TimeSeriesSignalGenerator:
         )
 
     def _load_execution_cost_model(self) -> Dict[str, Any]:
-        """Load LOB/execution cost model configuration from disk when available."""
-        cfg_path = Path("config") / "execution_cost_model.yml"
-        if not cfg_path.exists():
-            return {}
-        try:
-            with cfg_path.open("r", encoding="utf-8") as handle:
-                payload = yaml.safe_load(handle) or {}
-            if isinstance(payload, dict):
-                return payload.get("execution_cost_model") or payload
-        except Exception as exc:  # pragma: no cover - config errors are non-fatal
-            logger.debug("Unable to load execution cost model config: %s", exc)
-        return {}
+        """Load LOB/execution cost model configuration from disk when available.
+
+        Merges two sources (lower wins to higher):
+          1. config/execution_cost_model.yml  -- LOB / fill-cost model
+          2. config/signal_routing_config.yml signal_routing.time_series.cost_model
+             -- SNR gate + roundtrip cost overrides
+
+        This ensures min_signal_to_noise is active even when TSSG is
+        constructed directly (not via build_signal_generator()).
+        """
+        result: Dict[str, Any] = {}
+
+        # Source 1: LOB execution cost model
+        ecm_path = Path("config") / "execution_cost_model.yml"
+        if ecm_path.exists():
+            try:
+                with ecm_path.open("r", encoding="utf-8") as handle:
+                    payload = yaml.safe_load(handle) or {}
+                if isinstance(payload, dict):
+                    ecm = payload.get("execution_cost_model") or payload
+                    if isinstance(ecm, dict):
+                        result.update(ecm)
+            except Exception as exc:  # pragma: no cover
+                logger.debug("Unable to load execution cost model config: %s", exc)
+
+        # Source 2: signal_routing_config cost_model section (has min_signal_to_noise)
+        src_path = Path("config") / "signal_routing_config.yml"
+        if src_path.exists():
+            try:
+                with src_path.open("r", encoding="utf-8") as handle:
+                    src_payload = yaml.safe_load(handle) or {}
+                routing_cm = (
+                    (src_payload.get("signal_routing") or {})
+                    .get("time_series", {})
+                    .get("cost_model", {})
+                )
+                if isinstance(routing_cm, dict):
+                    # Only pull scalar gate params; don't override LOB depth profiles
+                    for key in ("min_signal_to_noise", "default_roundtrip_cost_bps"):
+                        if key in routing_cm and key not in result:
+                            result[key] = routing_cm[key]
+            except Exception as exc:  # pragma: no cover
+                logger.debug("Unable to load signal routing cost model: %s", exc)
+
+        return result
 
     @staticmethod
     def _normalize_forecast_payload(payload: Any) -> Optional[Dict[str, Any]]:
@@ -650,9 +683,16 @@ class TimeSeriesSignalGenerator:
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
             )
+            _snr_gate_blocked = False
             if snr is not None and self._min_signal_to_noise > 0 and snr < self._min_signal_to_noise:
+                logger.info(
+                    "[SNR_GATE] %s: SNR %.3f < threshold %.3f — zeroing net return "
+                    "(CI too wide relative to expected return; signal suppressed)",
+                    ticker, snr, self._min_signal_to_noise,
+                )
                 net_trade_return = 0.0
                 net_expected_return = 0.0
+                _snr_gate_blocked = True
 
             model_agreement = self._check_model_agreement(forecast_bundle)
             diagnostics = self._evaluate_diagnostics_details(forecast_bundle)
@@ -795,6 +835,9 @@ class TimeSeriesSignalGenerator:
                 provenance["p_up"] = _p_up
             if _directional_gate_applied:
                 provenance["directional_gate_applied"] = True
+            if _snr_gate_blocked:
+                provenance["snr_gate_blocked"] = True
+                provenance["snr_gate_threshold"] = self._min_signal_to_noise
 
             provenance['decision_context'] = {
                 'expected_return': expected_return,

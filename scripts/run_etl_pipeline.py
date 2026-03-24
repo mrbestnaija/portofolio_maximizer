@@ -1886,7 +1886,13 @@ def execute_pipeline(
                             },
                             ensemble_kwargs={
                                 k: v for k, v in ensemble_cfg.items() if k != 'enabled'
-                            },
+                                # Explicitly route ETL/research forecasts to the research
+                                # audit subdir so they never contaminate production/.
+                                # audit_log_dir overrides the forecaster's default-to-production
+                                # fallback (forcester_ts/forecaster.py __init__ lines 206-209).
+                            } | {"audit_log_dir": str(
+                                Path("logs/forecast_audits/research").resolve()
+                            )},
                             # Phase 7.5: Regime detection for adaptive model selection
                             regime_detection_enabled=regime_detection_cfg.get('enabled', False),
                             regime_detection_kwargs={

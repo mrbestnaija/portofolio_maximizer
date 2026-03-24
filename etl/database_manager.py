@@ -889,6 +889,9 @@ class DatabaseManager:
                 entry_trade_id INTEGER,
                 -- TS model attribution (Phase 7.13-A2): globally unique signal ID from TimeSeriesSignalGenerator
                 ts_signal_id TEXT,
+                -- Phase 10: forced mechanical exits (stop-loss, max-hold) get is_forced_exit=1
+                -- so Platt calibration can exclude them (they are rule-based, not model predictions).
+                is_forced_exit INTEGER DEFAULT 0,
                 bar_open REAL,
                 bar_high REAL,
                 bar_low REAL,
@@ -994,6 +997,12 @@ class DatabaseManager:
             self.cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trade_executions_ts_signal_id "
                 "ON trade_executions(ts_signal_id)"
+            )
+        if "is_forced_exit" not in trade_cols:
+            # Phase 10: forced mechanical exits (stop-loss / max-hold) flagged here
+            # so Platt calibration and confidence metrics can exclude them.
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN is_forced_exit INTEGER DEFAULT 0"
             )
 
         # Database metadata for provenance + governance flags.
@@ -2158,6 +2167,7 @@ class DatabaseManager:
         bar_low: Optional[float] = None,
         bar_close: Optional[float] = None,
         ts_signal_id: Optional[str] = None,
+        is_forced_exit: int = 0,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -2213,6 +2223,7 @@ class DatabaseManager:
                     "bar_low",
                     "bar_close",
                     "ts_signal_id",
+                    "is_forced_exit",
                 ]
                 values = [
                     ticker,
@@ -2260,6 +2271,7 @@ class DatabaseManager:
                     float(bar_low) if bar_low is not None else None,
                     float(bar_close) if bar_close is not None else None,
                     ts_signal_id,
+                    int(is_forced_exit) if is_forced_exit else 0,
                 ]
                 placeholders = ", ".join(["?"] * len(columns))
                 sql = f"INSERT INTO trade_executions ({', '.join(columns)}) VALUES ({placeholders})"
