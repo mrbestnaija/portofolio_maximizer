@@ -17,6 +17,7 @@ from pandas.tseries.frequencies import to_offset
 from scipy import stats
 
 from ._freq_compat import normalize_freq
+from .residual_diagnostics import run_residual_diagnostics
 
 try:
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -128,6 +129,8 @@ class SARIMAXForecaster:
         self._log_shift: Optional[float] = None
         self._frequency_hint_valid: bool = False
         self._fit_metadata: Dict[str, Any] = {}
+        self._stationarity_hint: Dict[str, Any] = {}
+        self._stationarity_metadata: Dict[str, Any] = {}
 
     def _fit_model_instance(
         self,
@@ -233,6 +236,36 @@ class SARIMAXForecaster:
         except Exception as exc:  # pragma: no cover
             logger.warning("ADF stationarity test failed: %s", exc)
             return False, 1
+
+    def _resolve_stationarity_choice(self, data: pd.Series) -> Tuple[bool, int, Dict[str, Any]]:
+        hint = dict(getattr(self, "_stationarity_hint", {}) or {})
+        verdict = hint.get("stationarity_verdict")
+        force_difference = hint.get("force_difference")
+        if force_difference is True:
+            return False, 1, {
+                "stationarity_source": "forecaster_hint",
+                "stationarity_verdict": verdict,
+                "force_difference": True,
+            }
+        if verdict == "stationary":
+            return True, 0, {
+                "stationarity_source": "forecaster_hint",
+                "stationarity_verdict": verdict,
+                "force_difference": False,
+            }
+        if verdict in {"non_stationary", "conflicted"}:
+            return False, 1, {
+                "stationarity_source": "forecaster_hint",
+                "stationarity_verdict": verdict,
+                "force_difference": bool(force_difference),
+            }
+
+        stationary, recommend_d = self._test_stationarity(data)
+        return stationary, recommend_d, {
+            "stationarity_source": "sarimax_local_test",
+            "stationarity_verdict": verdict if isinstance(verdict, str) else None,
+            "force_difference": bool(recommend_d > 0),
+        }
 
     @staticmethod
     def _scale_series(series: pd.Series) -> Tuple[pd.Series, float]:
@@ -392,11 +425,7 @@ class SARIMAXForecaster:
             return None
         aligned = exogenous.reindex(series.index)
         if self.auto_impute:
-            aligned = (
-                aligned.interpolate(limit_direction="both")
-                .ffill()
-                .bfill()
-            )
+            aligned = aligned.ffill()
         return aligned.fillna(0.0)
 
     def _select_best_order(
@@ -407,16 +436,24 @@ class SARIMAXForecaster:
     ) -> Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]:
         logger.info("Selecting optimal SARIMAX order...")
 
-        stationary, recommend_d = self._test_stationarity(data)
         if forced_d is not None:
-            # Phase 8.3: honour the joint ADF+KPSS verdict from the forecaster layer.
-            d = forced_d
+            stationary = forced_d == 0
+            d = int(forced_d)
+            hint = dict(getattr(self, "_stationarity_hint", {}) or {})
+            verdict = hint.get("stationarity_verdict")
+            self._stationarity_metadata = {
+                "stationarity_source": "forced_d_override",
+                "stationarity_verdict": verdict if isinstance(verdict, str) else None,
+                "force_difference": bool(d > 0),
+            }
             logger.info(
                 "SARIMAX d overridden by forecaster stationarity verdict: forced_d=%d "
-                "(ADF recommend_d=%d, enforce_stationarity=%s)",
-                forced_d, recommend_d, self.enforce_stationarity,
+                "(stationarity_verdict=%s, enforce_stationarity=%s)",
+                forced_d, verdict, self.enforce_stationarity,
             )
         else:
+            stationary, recommend_d, stationarity_meta = self._resolve_stationarity_choice(data)
+            self._stationarity_metadata = dict(stationarity_meta)
             d = recommend_d if self.enforce_stationarity else 0
 
         freq_hint = None
@@ -676,9 +713,17 @@ class SARIMAXForecaster:
         ticker: str = "",
         regime: str | None = None,
         forced_d: Optional[int] = None,
+        stationarity_hint: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> "SARIMAXForecaster":
         if series.isna().all():
             raise ValueError("Series contains only NaNs")
+
+        if "stationarity_hint" in kwargs and stationarity_hint is None:
+            stationarity_hint = kwargs.pop("stationarity_hint")
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
 
         freq_hint = None
         try:
@@ -697,6 +742,8 @@ class SARIMAXForecaster:
         prepared, scale_factor = self._scale_series(prepared)
         self._scale_factor = scale_factor
         freq_hint = getattr(self, "_frequency_hint", freq_hint)
+        self._stationarity_hint = dict(stationarity_hint or {})
+        self._stationarity_metadata = {}
 
         aligned_exog = self._align_exogenous(prepared, exogenous)
 
@@ -885,6 +932,10 @@ class SARIMAXForecaster:
             "selected_constraints": "relaxed"
             if str(selected_label).startswith("relaxed")
             else "strict",
+            "stationarity_source": self._stationarity_metadata.get("stationarity_source"),
+            "stationarity_verdict": self._stationarity_metadata.get("stationarity_verdict"),
+            "force_difference": self._stationarity_metadata.get("force_difference"),
+            "differencing_order": int((self.best_order or (0, 0, 0))[1]),
         }
 
         logger.info(
@@ -921,33 +972,15 @@ class SARIMAXForecaster:
                 forecast_mean = forecast_mean - self._log_shift
                 conf_int = conf_int - self._log_shift
 
+        residual_diagnostics = run_residual_diagnostics(residuals)
+        residual_diagnostics["residual_mean"] = float(residuals.mean())
+        residual_diagnostics["residual_std"] = float(residuals.std())
         diagnostics = {
-            "ljung_box_pvalue": None,
-            "jarque_bera_pvalue": None,
-            "residual_mean": float(residuals.mean()),
-            "residual_std": float(residuals.std()),
+            "ljung_box_pvalue": residual_diagnostics.get("lb_pvalue"),
+            "jarque_bera_pvalue": residual_diagnostics.get("jb_pvalue"),
+            "residual_mean": residual_diagnostics.get("residual_mean"),
+            "residual_std": residual_diagnostics.get("residual_std"),
         }
-
-        if len(residuals) > 10:
-            try:
-                lb_df = acorr_ljungbox(
-                    residuals, lags=min(10, len(residuals) // 4), return_df=True
-                )
-                diagnostics["ljung_box_pvalue"] = float(lb_df["lb_pvalue"].iloc[-1])
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Ljung-Box test failed: %s", exc)
-                diagnostics["ljung_box_pvalue"] = None
-
-        if len(residuals) > 5:
-            try:
-                jb_result = jarque_bera(residuals)
-                jb_pvalue = None
-                if isinstance(jb_result, (tuple, list)) and len(jb_result) >= 2:
-                    jb_pvalue = jb_result[1]
-                diagnostics["jarque_bera_pvalue"] = float(jb_pvalue) if jb_pvalue is not None else None
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Jarque-Bera test failed: %s", exc)
-                diagnostics["jarque_bera_pvalue"] = None
 
         forecast_ci = conf_int.rename(
             columns={
@@ -973,6 +1006,7 @@ class SARIMAXForecaster:
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "diagnostics": diagnostics,
+            "residual_diagnostics": residual_diagnostics,
             "convergence": dict(getattr(self, "_fit_metadata", {})),
         }
         return self.forecast_results
@@ -984,6 +1018,9 @@ class SARIMAXForecaster:
             "order": self.best_order,
             "seasonal_order": self.best_seasonal_order,
             "fit_strategy": getattr(self, "_fit_metadata", {}).get("fit_strategy"),
+            "stationarity_source": getattr(self, "_fit_metadata", {}).get("stationarity_source"),
+            "stationarity_verdict": getattr(self, "_fit_metadata", {}).get("stationarity_verdict"),
+            "force_difference": getattr(self, "_fit_metadata", {}).get("force_difference"),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "log_likelihood": float(self.fitted_model.llf),

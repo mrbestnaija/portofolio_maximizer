@@ -100,6 +100,10 @@ class TestMSSARLResidualDiagnostics:
         assert "white_noise" in rd
         assert "lb_pvalue" in rd
         assert "n" in rd
+        assert "active_action" in result
+        assert "active_rank" in result
+        assert "q_state" in result
+        assert "policy_version" in result
 
     def test_fit_populates_residual_diagnostics_attr(self):
         from forcester_ts.mssa_rl import MSSARLForecaster
@@ -160,6 +164,85 @@ class TestGARCHResidualDiagnostics:
         # Must not raise; residual_diagnostics should be present (empty dict is fine)
         assert "residual_diagnostics" in result
         assert isinstance(result["residual_diagnostics"], dict)
+
+    def test_ewma_fallback_forecast_preserves_guardrail_fields(self):
+        from forcester_ts.garch import GARCHForecaster
+
+        forecaster = object.__new__(GARCHForecaster)
+        forecaster.backend = "ewma"
+        forecaster.fitted_model = True
+        forecaster.p = 1
+        forecaster.q = 1
+        forecaster.vol = "GARCH"
+        forecaster.dist = "normal"
+        forecaster._residual_diagnostics = {}
+        forecaster._fallback_state = {
+            "last_variance": 0.0001,
+            "mean": 0.001,
+            "fallback_reason": "convergence_failure",
+            "persistence": 0.992,
+            "volatility_ratio_to_realized": 4.2,
+        }
+
+        result = forecaster.forecast(steps=2)
+
+        assert result["fallback_reason"] == "convergence_failure"
+        assert result["persistence"] == pytest.approx(0.992)
+        assert result["volatility_ratio_to_realized"] == pytest.approx(4.2)
+
+
+class TestSARIMAXResidualDiagnostics:
+    def test_forecast_includes_standardized_residual_diagnostics(self):
+        from forcester_ts.sarimax import SARIMAXForecaster
+
+        class _DummyForecast:
+            def __init__(self):
+                self.predicted_mean = pd.Series(
+                    [101.0, 102.0],
+                    index=pd.RangeIndex(start=0, stop=2, step=1),
+                )
+
+            def conf_int(self, alpha=0.05):  # noqa: ARG002
+                return pd.DataFrame(
+                    {
+                        "lower Close": [99.0, 100.0],
+                        "upper Close": [103.0, 104.0],
+                    },
+                    index=self.predicted_mean.index,
+                )
+
+        class _DummyFit:
+            aic = 100.0
+            bic = 110.0
+            resid = pd.Series(np.random.normal(0, 1, 120))
+
+            def get_forecast(self, steps, exog=None):  # noqa: ARG002
+                assert steps == 2
+                return _DummyForecast()
+
+        forecaster = object.__new__(SARIMAXForecaster)
+        forecaster.fitted_model = _DummyFit()
+        forecaster.best_order = (1, 1, 1)
+        forecaster.best_seasonal_order = (0, 0, 0, 0)
+        forecaster._fit_metadata = {"fit_strategy": "primary_strict"}
+        forecaster._scale_factor = 1.0
+        forecaster.log_transform = False
+        forecaster._series_transform = None
+        forecaster._log_shift = None
+
+        result = forecaster.forecast(steps=2)
+
+        assert "residual_diagnostics" in result
+        assert "diagnostics" in result
+        assert "white_noise" in result["residual_diagnostics"]
+        assert (
+            result["diagnostics"]["ljung_box_pvalue"]
+            == result["residual_diagnostics"]["lb_pvalue"]
+        )
+        assert (
+            result["diagnostics"]["jarque_bera_pvalue"]
+            == result["residual_diagnostics"]["jb_pvalue"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +393,38 @@ class TestStationarityVerdict:
 
         assert diag.get("stationarity_verdict") == "conflicted"
         assert diag.get("force_difference") is True
+
+
+def test_forecaster_passes_stationarity_hint_into_sarimax(monkeypatch):
+    from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+    captured: dict = {}
+
+    def _fake_fit(self, series, exogenous=None, stationarity_hint=None, **kwargs):  # noqa: ARG001
+        captured["stationarity_hint"] = dict(stationarity_hint or {})
+        self.best_order = (1, 1, 1)
+        self.best_seasonal_order = (0, 0, 0, 0)
+        self.fitted_model = type("Dummy", (), {"aic": 1.0, "bic": 2.0, "llf": -1.0, "nobs": len(series)})()
+        self._fit_metadata = dict(stationarity_hint or {})
+        return self
+
+    monkeypatch.setattr("forcester_ts.sarimax.SARIMAXForecaster.fit", _fake_fit)
+    monkeypatch.setattr(
+        "forcester_ts.sarimax.SARIMAXForecaster.get_model_summary",
+        lambda self: {"order": (1, 1, 1), "seasonal_order": (0, 0, 0, 0)},
+    )
+
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=True,
+        garch_enabled=False,
+        samossa_enabled=False,
+        mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    series = pd.Series(np.cumsum(np.random.normal(0, 1, 80)), index=pd.date_range("2024-01-01", periods=80, freq="D"))
+
+    forecaster.fit(series)
+
+    assert captured["stationarity_hint"] == forecaster._series_diagnostics
+    assert "force_difference" in captured["stationarity_hint"]

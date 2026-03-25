@@ -85,3 +85,56 @@ def test_save_audit_report_rewrites_manifest_with_valid_jsonl_only(monkeypatch, 
     assert latest["source"] == "TimeSeriesForecaster.save_audit_report"
     assert latest["bytes"] == audit_path.stat().st_size
     assert not list(tmp_path.glob(".forecast_manifest_*.tmp"))
+
+
+def test_forecast_records_exog_policy_artifacts(monkeypatch) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=True,
+        garch_enabled=False,
+        samossa_enabled=False,
+        mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=6, freq="D")
+    price_series = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0], index=index, name="Close")
+    macro_context = pd.DataFrame(
+        {"vix_level": [18.0, 19.0, 20.0, 21.0]},
+        index=pd.date_range("2024-01-03", periods=4, freq="D"),
+    )
+
+    def _fake_fit(self, series, exogenous=None, **kwargs):  # noqa: ARG001
+        self.best_order = (1, 0, 1)
+        self.best_seasonal_order = (0, 0, 0, 0)
+        self.fitted_model = type("Dummy", (), {"aic": 1.0, "bic": 2.0, "llf": -1.0, "nobs": len(series)})()
+        return self
+
+    def _fake_forecast(self, steps, exogenous=None, alpha=0.05):  # noqa: ARG001
+        idx = pd.RangeIndex(start=1, stop=steps + 1)
+        values = pd.Series([105.0] * steps, index=idx)
+        return {
+            "forecast": values,
+            "lower_ci": values - 1.0,
+            "upper_ci": values + 1.0,
+            "alpha": alpha,
+            "diagnostics": {},
+            "residual_diagnostics": {},
+            "convergence": {},
+        }
+
+    def _fake_summary(self):
+        return {"order": (1, 0, 1), "seasonal_order": (0, 0, 0, 0)}
+
+    monkeypatch.setattr("forcester_ts.sarimax.SARIMAXForecaster.fit", _fake_fit)
+    monkeypatch.setattr("forcester_ts.sarimax.SARIMAXForecaster.forecast", _fake_forecast)
+    monkeypatch.setattr("forcester_ts.sarimax.SARIMAXForecaster.get_model_summary", _fake_summary)
+
+    forecaster.fit(price_series, macro_context=macro_context)
+    result = forecaster.forecast(steps=2)
+
+    artifacts = result["instrumentation_report"]["artifacts"]
+    assert artifacts["exog_policy"]["fit_alignment"] == "ffill_only_zero_leading"
+    assert artifacts["forecast_exog_policy"]["mode"] == "last_observation_hold"
+    assert result["exog_policy"]["fit_alignment"] == "ffill_only_zero_leading"
+    assert result["forecast_exog_policy"]["mode"] == "last_observation_hold"

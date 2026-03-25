@@ -127,6 +127,9 @@ class MSSARLConfig:
     # Phase 7.10b: Q-strategy selection wires Q-values into forecast direction
     use_q_strategy_selection: bool = True
     reward_mode: str = "directional_pnl"  # 'variance_reduction' (legacy) or 'directional_pnl'
+    rank_policy: str = "action_cutoffs"
+    action_rank_cutoffs: Dict[int, float] = None  # type: ignore[assignment]
+    policy_seed: int = 7
 
 
 class MSSARLForecaster:
@@ -139,6 +142,8 @@ class MSSARLForecaster:
 
     def __init__(self, config: Optional[MSSARLConfig] = None) -> None:
         self.config = config or MSSARLConfig()
+        if self.config.action_rank_cutoffs is None:
+            self.config.action_rank_cutoffs = {0: 0.25, 1: 0.90, 2: 1.00}
         self._fitted = False
         self._q_table: Dict[Tuple[int, int], float] = {}
         self._baseline_variance: float = 0.0
@@ -157,6 +162,13 @@ class MSSARLForecaster:
         # Phase 8.1: per-action reconstruction matrices (set by _truncate_svd / fit)
         self._recon_matrix_by_action: Dict[int, np.ndarray] = {}
         self._reconstructions_by_action: Dict[int, pd.Series] = {}
+        self._rank_by_action: Dict[int, int] = {}
+        self._policy_version = "bounded_rank_v1"
+        self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
+        self._state_bins = np.array([0.8, 1.0, 1.2], dtype=float)
+        self._last_q_state: Optional[int] = None
+        self._last_active_action: Optional[int] = None
+        self._last_active_rank: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -198,19 +210,35 @@ class MSSARLForecaster:
         rank = self.config.rank
         if rank is None:
             rank = int(np.searchsorted(cumulative, 0.9)) + 1
-            rank = max(1, min(rank, max_rank))
-            self.config.rank = rank
+        rank = max(1, min(int(rank), max_rank))
+        self.config.rank = rank
 
-        # Phase 8.1: precompute per-action rank cutoffs from the same SVD.
-        rank_25 = max(1, int(np.searchsorted(cumulative, 0.25)) + 1)
-        rank_25 = min(rank_25, max_rank)
-        rank_90 = rank  # already set above
-        rank_all = max_rank
+        cutoffs = {
+            int(action): float(cutoff)
+            for action, cutoff in (self.config.action_rank_cutoffs or {}).items()
+        }
+        rank_policy = str(getattr(self.config, "rank_policy", "action_cutoffs")).lower()
+
+        def _rank_for_cutoff(cutoff: float) -> int:
+            bounded = float(np.clip(cutoff, 0.05, 1.0))
+            resolved = int(np.searchsorted(cumulative, bounded)) + 1
+            return max(1, min(resolved, max_rank))
+
+        rank_25 = _rank_for_cutoff(cutoffs.get(0, 0.25))
+        rank_90 = rank if rank_policy == "fixed_primary" else _rank_for_cutoff(cutoffs.get(1, 0.90))
+        rank_all = _rank_for_cutoff(cutoffs.get(2, 1.00))
+        rank_90 = max(rank_25, min(rank_90, rank_all))
+        self.config.rank = rank_90
 
         def _recon_for_rank(r: int) -> np.ndarray:
             mat = U_np[:, :r] @ np.diag(s_np[:r]) @ Vt_np[:r, :]
             return mat
 
+        self._rank_by_action = {
+            0: rank_25,
+            1: rank_90,
+            2: rank_all,
+        }
         self._recon_matrix_by_action: Dict[int, np.ndarray] = {
             0: _recon_for_rank(rank_25),
             1: _recon_for_rank(rank_90),
@@ -282,10 +310,26 @@ class MSSARLForecaster:
         )
         self._q_table[key] = new_q
 
+    @staticmethod
+    def _default_action_for_state(state: int) -> int:
+        return min(2, max(0, int(state)))
+
+    def _select_policy_action(self, state: int) -> int:
+        if not getattr(self.config, "use_q_strategy_selection", True):
+            return 1
+        epsilon = float(np.clip(self.config.q_learning_epsilon, 0.0, 1.0))
+        if epsilon > 0.0 and float(self._policy_rng.random()) < epsilon:
+            return int(self._policy_rng.integers(0, 3))
+        q_vals = {a: self._q_table.get((state, a), 0.0) for a in range(3)}
+        if len(set(q_vals.values())) == 1:
+            return self._default_action_for_state(state)
+        return max(q_vals, key=q_vals.__getitem__)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def fit(self, series: pd.Series) -> "MSSARLForecaster":
+        self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
         cleaned = series.dropna()
         if len(cleaned) < self.config.window_length + 5:
             raise ValueError("Series length insufficient for mSSA analysis")
@@ -371,7 +415,7 @@ class MSSARLForecaster:
             .fillna(self._baseline_variance)
             / self._baseline_variance
         )
-        state_series = np.digitize(variance_ratio, bins=[0.8, 1.0, 1.2])
+        state_series = np.digitize(variance_ratio, bins=self._state_bins)
 
         # Phase 7.10b: realized returns for directional PnL reward signal.
         # Derived from the input price series (1-period pct change).
@@ -380,7 +424,7 @@ class MSSARLForecaster:
         for (state, ratio), realized_ret in zip(
             zip(state_series, variance_ratio), realized_returns_arr
         ):
-            action = min(2, state)  # simple policy: act proportionally
+            action = self._select_policy_action(int(state))
             self._update_q_table(
                 float(ratio), int(state), action, realized_return=float(realized_ret)
             )
@@ -425,14 +469,16 @@ class MSSARLForecaster:
             try:
                 recent_var = float(np.var(recon_arr[-min(10, len(recon_arr)):]))
                 var_ratio = recent_var / max(self._baseline_variance, 1e-12)
-                current_state = int(np.digitize([var_ratio], bins=[0.8, 1.2])[0])
-                q_vals = {a: self._q_table.get((current_state, a), 0.0) for a in range(3)}
-                best_action = max(q_vals, key=q_vals.__getitem__)
+                current_state = int(np.digitize([var_ratio], bins=self._state_bins)[0])
+                best_action = self._select_policy_action(current_state)
                 # Legacy slope-direction signal (retained; blended at 0.5 weight below).
                 action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
                 q_direction_weight = action_to_sign[best_action]
             except Exception as qe:
                 logger.debug("Q-strategy selection error: %s", qe)
+                current_state = None
+        else:
+            current_state = None
 
         # Phase 8.1: select the reconstruction that matches the Q-table action.
         # action=0 -> low-frequency components (25% variance) -> smoothed mean-revert signal
@@ -496,6 +542,11 @@ class MSSARLForecaster:
 
         forecast_series = pd.Series(baseline_forecast, index=future_index)
         noise = np.sqrt(self._baseline_variance)
+        active_rank = self._rank_by_action.get(best_action, self.config.rank or len(recon_arr))
+        q_state = current_state
+        self._last_q_state = q_state
+        self._last_active_action = best_action
+        self._last_active_rank = active_rank
 
         return {
             "forecast": forecast_series,
@@ -506,6 +557,9 @@ class MSSARLForecaster:
             "baseline_variance": self._baseline_variance,
             # Phase 8.1: which component set was used (0=mean_revert, 1=hold, 2=trend_follow)
             "active_action": best_action,
+            "active_rank": active_rank,
+            "q_state": q_state,
+            "policy_version": self._policy_version,
             # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
             "residual_diagnostics": self._residual_diagnostics,
         }
@@ -524,4 +578,12 @@ class MSSARLForecaster:
             "change_point_density": self._change_point_density,
             "recent_change_point_days": self._recent_change_point_days,
             "use_gpu": self._use_gpu,
+            "rank_policy": self.config.rank_policy,
+            "action_rank_cutoffs": dict(self.config.action_rank_cutoffs or {}),
+            "rank_by_action": dict(self._rank_by_action),
+            "policy_seed": int(self.config.policy_seed),
+            "policy_version": self._policy_version,
+            "q_state": self._last_q_state,
+            "active_action": self._last_active_action,
+            "active_rank": self._last_active_rank,
         }

@@ -106,6 +106,13 @@ forecaster_monitoring:
     min_forecast_horizon: 20
     # Alert/fail if ensemble metrics are missing too often from audit payloads.
     max_missing_ensemble_rate: 0.05
+    # Residual-diagnostics default-path gate: model-backed default selections
+    # should expose diagnostics, and too many non-white-noise residuals should
+    # block promotion/production readiness.
+    max_non_white_noise_rate: 0.25
+    min_residual_diagnostics_n: 20
+    fail_on_missing_residual_diagnostics: true
+    max_index_mismatch_rate: 0.0
     # Audit provenance hardening (set to fail after legacy audit backfill).
     manifest_integrity_mode: warn
     manifest_filename: forecast_audit_manifest.jsonl

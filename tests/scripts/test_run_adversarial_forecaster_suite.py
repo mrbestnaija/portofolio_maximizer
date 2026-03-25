@@ -36,6 +36,7 @@ def test_load_thresholds_from_monitor_config(tmp_path: Path) -> None:
                 "      max_ensemble_under_best_rate: 0.95",
                 "      max_avg_ensemble_ratio_vs_best: 1.10",
                 "      max_ensemble_worse_than_rw_rate: 0.20",
+                "      max_index_mismatch_rate: 0.00",
                 "      require_zero_errors: true",
             ]
         ),
@@ -45,6 +46,7 @@ def test_load_thresholds_from_monitor_config(tmp_path: Path) -> None:
     assert thresholds["max_ensemble_under_best_rate"] == 0.95
     assert thresholds["max_avg_ensemble_ratio_vs_best"] == 1.10
     assert thresholds["max_ensemble_worse_than_rw_rate"] == 0.20
+    assert thresholds["max_index_mismatch_rate"] == 0.00
     assert thresholds["require_zero_errors"] is True
 
 
@@ -69,3 +71,24 @@ def test_evaluate_thresholds_can_use_effective_default_path_metric() -> None:
     breaches = mod.evaluate_thresholds(summary, thresholds)
     # Raw ensemble_worse_than_rw_rate would breach; effective metric should pass.
     assert not any("worse_than_rw_rate" in item for item in breaches)
+
+
+def test_evaluate_thresholds_flags_index_mismatch_rate() -> None:
+    summary = {
+        "prod_like_conf_on": {
+            "errors": 0,
+            "ensemble_under_best_rate": 0.10,
+            "avg_ensemble_ratio_vs_best": 1.01,
+            "ensemble_worse_than_rw_rate": 0.05,
+            "ensemble_index_mismatch_rate": 0.25,
+        }
+    }
+    thresholds = {
+        "max_ensemble_under_best_rate": 1.0,
+        "max_avg_ensemble_ratio_vs_best": 1.2,
+        "max_ensemble_worse_than_rw_rate": 0.3,
+        "max_index_mismatch_rate": 0.0,
+        "require_zero_errors": True,
+    }
+    breaches = mod.evaluate_thresholds(summary, thresholds)
+    assert any("ensemble_index_mismatch_rate" in item for item in breaches)
