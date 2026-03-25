@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 INTEGRITY_COLUMNS = {
     "is_diagnostic": "INTEGER DEFAULT 0",
     "is_synthetic": "INTEGER DEFAULT 0",
+    "is_contaminated": "INTEGER DEFAULT 0",
     "confidence_calibrated": "REAL",
     "entry_trade_id": "INTEGER",
     "bar_open": "REAL",
@@ -50,12 +51,24 @@ INTEGRITY_COLUMNS = {
 # ---------------------------------------------------------------------------
 VIEW_PRODUCTION_CLOSED_TRADES = """
 CREATE VIEW IF NOT EXISTS production_closed_trades AS
-SELECT *
-FROM   trade_executions
-WHERE  is_close = 1
-  AND  COALESCE(is_diagnostic, 0) = 0
-  AND  COALESCE(is_synthetic, 0)  = 0
+SELECT t.*
+FROM   trade_executions t
+WHERE  t.is_close = 1
+  AND  COALESCE(t.is_diagnostic,   0) = 0
+  AND  COALESCE(t.is_synthetic,    0) = 0
+  AND  COALESCE(t.is_contaminated, 0) = 0
+  AND  NOT EXISTS (
+       SELECT 1
+       FROM   trade_executions o
+       WHERE  o.id = t.entry_trade_id
+         AND  COALESCE(o.is_synthetic, 0) = 1
+  )
 """
+
+# Thresholds for metrics-drift warning
+_DRIFT_ROLLING_WINDOW = int(os.environ.get("INTEGRITY_DRIFT_ROLLING_WINDOW", "30"))
+_DRIFT_THRESHOLD = float(os.environ.get("INTEGRITY_DRIFT_THRESHOLD", "0.15"))
+_DRIFT_MIN_TRADES = int(os.environ.get("INTEGRITY_DRIFT_MIN_TRADES", "15"))
 
 VIEW_ROUND_TRIPS = """
 CREATE VIEW IF NOT EXISTS round_trips AS
@@ -110,6 +123,7 @@ class CanonicalMetrics:
     avg_holding_days: float = 0.0
     diagnostic_trades_excluded: int = 0
     synthetic_trades_excluded: int = 0
+    contaminated_trades_excluded: int = 0
     opening_legs_with_pnl: int = 0   # should be 0
 
 
@@ -208,7 +222,19 @@ class PnLIntegrityEnforcer:
         return added
 
     def _ensure_views(self):
-        """Create or replace canonical views."""
+        """Create or replace canonical views.
+
+        Ensures is_contaminated column exists on trade_executions before
+        creating the view (view references this column; older DBs lack it).
+        """
+        # Ensure is_contaminated column exists so the view can reference it.
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trade_executions)")}
+        if "is_contaminated" not in cols:
+            self.conn.execute(
+                "ALTER TABLE trade_executions "
+                "ADD COLUMN is_contaminated INTEGER DEFAULT 0"
+            )
+
         # SQLite doesn't support CREATE OR REPLACE VIEW, so drop first
         self.conn.execute("DROP VIEW IF EXISTS production_closed_trades")
         self.conn.execute("DROP VIEW IF EXISTS round_trips")
@@ -227,14 +253,19 @@ class PnLIntegrityEnforcer:
         """
         metrics = CanonicalMetrics()
 
-        # Production closed trades (is_close=1, not diagnostic, not synthetic)
+        # Production closed trades (is_close=1, not diagnostic, not synthetic, not contaminated)
         rows = self.conn.execute(
             "SELECT realized_pnl, realized_pnl_pct, holding_period_days "
-            "FROM trade_executions "
-            "WHERE is_close = 1 "
-            "  AND COALESCE(is_diagnostic, 0) = 0 "
-            "  AND COALESCE(is_synthetic, 0) = 0 "
-            "  AND realized_pnl IS NOT NULL"
+            "FROM trade_executions t "
+            "WHERE t.is_close = 1 "
+            "  AND COALESCE(t.is_diagnostic,   0) = 0 "
+            "  AND COALESCE(t.is_synthetic,    0) = 0 "
+            "  AND COALESCE(t.is_contaminated, 0) = 0 "
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM trade_executions o "
+            "      WHERE o.id = t.entry_trade_id "
+            "        AND COALESCE(o.is_synthetic, 0) = 1) "
+            "  AND t.realized_pnl IS NOT NULL"
         ).fetchall()
 
         metrics.total_round_trips = len(rows)
@@ -278,6 +309,22 @@ class PnLIntegrityEnforcer:
             "WHERE is_close = 1 AND COALESCE(is_synthetic, 0) = 1"
         ).fetchone()[0]
 
+        metrics.contaminated_trades_excluded = self.conn.execute(
+            "SELECT COUNT(*) FROM trade_executions t "
+            "WHERE t.is_close = 1 "
+            "  AND COALESCE(t.is_contaminated, 0) = 0 "
+            "  AND COALESCE(t.is_synthetic, 0) = 0 "
+            "  AND EXISTS ("
+            "      SELECT 1 FROM trade_executions o "
+            "      WHERE o.id = t.entry_trade_id "
+            "        AND COALESCE(o.is_synthetic, 0) = 1)"
+        ).fetchone()[0]
+        # Add explicitly-tagged contaminated trades
+        metrics.contaminated_trades_excluded += self.conn.execute(
+            "SELECT COUNT(*) FROM trade_executions "
+            "WHERE is_close = 1 AND COALESCE(is_contaminated, 0) = 1"
+        ).fetchone()[0]
+
         # Check for opening legs with PnL (violation indicator)
         metrics.opening_legs_with_pnl = self.conn.execute(
             "SELECT COUNT(*) FROM trade_executions "
@@ -296,9 +343,11 @@ class PnLIntegrityEnforcer:
         violations.extend(self._check_orphaned_positions())
         violations.extend(self._check_short_orphaned_positions())  # INT-04: SELL opens
         violations.extend(self._check_diagnostic_contamination())
+        violations.extend(self._check_cross_mode_contamination())  # INT-05: synthetic-opener closes
         violations.extend(self._check_closing_without_entry_link())
         violations.extend(self._check_pnl_arithmetic())
         violations.extend(self._check_duplicate_close_for_same_entry())
+        violations.extend(self._check_metrics_drift())              # INT-06: rolling WR drift
         return violations
 
     def _check_opening_legs_with_pnl(self) -> List[IntegrityViolation]:
@@ -629,6 +678,119 @@ class PnLIntegrityEnforcer:
             count=len(rows),
         )]
 
+    def _check_cross_mode_contamination(self) -> List[IntegrityViolation]:
+        """HIGH: INT-05 — closing legs whose opener is synthetic (cross-mode contamination).
+
+        When a live session inherits a position from a prior synthetic run (via
+        portfolio_state or direct entry_trade_id linkage to a synthetic opener),
+        the closing leg's PnL is computed against a synthetic entry price — producing
+        phantom losses/gains that corrupt production metrics.
+
+        Detects both:
+          (a) Explicitly-tagged contaminated closes (is_contaminated=1)
+          (b) Untagged closes whose entry_trade_id references a synthetic opener
+        """
+        # (a) explicitly tagged
+        tagged = self.conn.execute(
+            "SELECT id, ticker, realized_pnl, entry_trade_id "
+            "FROM trade_executions "
+            "WHERE is_close = 1 AND COALESCE(is_contaminated, 0) = 1"
+        ).fetchall()
+
+        # (b) untagged live closes linked to synthetic opener
+        # Only flag when the close is live/non-synthetic but opener is synthetic —
+        # synthetic-mode closes against synthetic openers are expected and clean.
+        untagged = self.conn.execute(
+            "SELECT t.id, t.ticker, t.realized_pnl, t.entry_trade_id "
+            "FROM trade_executions t "
+            "JOIN trade_executions o ON t.entry_trade_id = o.id "
+            "WHERE t.is_close = 1 "
+            "  AND COALESCE(t.is_contaminated, 0) = 0 "
+            "  AND COALESCE(t.is_synthetic,    0) = 0 "
+            "  AND COALESCE(o.is_synthetic, 0) = 1"
+        ).fetchall()
+
+        all_rows = list(tagged) + list(untagged)
+        if not all_rows:
+            return []
+
+        total_phantom_pnl = sum(
+            float(r["realized_pnl"]) for r in all_rows if r["realized_pnl"] is not None
+        )
+        untagged_ids = [r["id"] for r in untagged]
+        tag_hint = (
+            f" {len(untagged_ids)} untagged (run migrate_fix_synthetic_contamination.py to fix)."
+            if untagged_ids
+            else ""
+        )
+
+        return [IntegrityViolation(
+            check_name="CROSS_MODE_CONTAMINATION",
+            severity="HIGH",
+            description=(
+                f"{len(all_rows)} closing leg(s) have PnL computed from synthetic entry prices "
+                f"(phantom PnL: ${total_phantom_pnl:+,.2f}). "
+                f"{len(tagged)} explicitly tagged (is_contaminated=1)."
+                + tag_hint
+            ),
+            affected_ids=[r["id"] for r in all_rows],
+            count=len(all_rows),
+        )]
+
+    def _check_metrics_drift(self) -> List[IntegrityViolation]:
+        """HIGH: INT-06 — rolling win-rate drifts significantly from historical baseline.
+
+        Compares the last ``_DRIFT_ROLLING_WINDOW`` trades' WR against the full
+        historical WR.  A drift larger than ``_DRIFT_THRESHOLD`` (default 15pp)
+        signals potential model degradation or data contamination.
+
+        Requires at least ``_DRIFT_MIN_TRADES`` + ``_DRIFT_ROLLING_WINDOW`` trades
+        to avoid false positives during warmup.
+
+        Environment overrides:
+          INTEGRITY_DRIFT_ROLLING_WINDOW  (default 30)
+          INTEGRITY_DRIFT_THRESHOLD       (default 0.15 = 15pp)
+          INTEGRITY_DRIFT_MIN_TRADES      (default 15)
+        """
+        rows = self.conn.execute(
+            "SELECT realized_pnl "
+            "FROM production_closed_trades "
+            "ORDER BY id ASC"
+        ).fetchall()
+
+        pnls = [float(r["realized_pnl"]) for r in rows if r["realized_pnl"] is not None]
+        n = len(pnls)
+
+        min_needed = _DRIFT_MIN_TRADES + _DRIFT_ROLLING_WINDOW
+        if n < min_needed:
+            return []  # insufficient history
+
+        historical_wr = sum(1 for p in pnls[:-_DRIFT_ROLLING_WINDOW] if p > 0) / (
+            n - _DRIFT_ROLLING_WINDOW
+        )
+        rolling_pnls = pnls[-_DRIFT_ROLLING_WINDOW:]
+        rolling_wr = sum(1 for p in rolling_pnls if p > 0) / len(rolling_pnls)
+
+        drift = historical_wr - rolling_wr
+        if abs(drift) <= _DRIFT_THRESHOLD:
+            return []
+
+        direction = "down" if drift > 0 else "up"
+        return [IntegrityViolation(
+            check_name="METRICS_DRIFT",
+            severity="HIGH",
+            description=(
+                f"[MODEL DRIFT WARNING] Rolling {_DRIFT_ROLLING_WINDOW}-trade WR "
+                f"({rolling_wr:.1%}) drifted {direction} {abs(drift):.1%}pp vs "
+                f"historical baseline ({historical_wr:.1%}) — exceeds {_DRIFT_THRESHOLD:.0%} "
+                f"threshold. Investigate recent trades for data contamination or model degradation. "
+                f"(historical_n={n - _DRIFT_ROLLING_WINDOW}, "
+                f"rolling_n={_DRIFT_ROLLING_WINDOW})"
+            ),
+            affected_ids=[],
+            count=_DRIFT_ROLLING_WINDOW,
+        )]
+
     def _check_closing_without_entry_link(self) -> List[IntegrityViolation]:
         """MEDIUM: Closing legs should link to their opening leg.
 
@@ -951,6 +1113,7 @@ class PnLIntegrityEnforcer:
         print(f"  Avg holding days:  {m.avg_holding_days:.1f}")
         print(f"  Diagnostic excl:   {m.diagnostic_trades_excluded}")
         print(f"  Synthetic excl:    {m.synthetic_trades_excluded}")
+        print(f"  Contaminated excl: {m.contaminated_trades_excluded}")
 
         if m.opening_legs_with_pnl > 0:
             print(

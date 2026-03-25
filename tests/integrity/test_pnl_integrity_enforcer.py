@@ -27,6 +27,7 @@ def _create_trade_db(db_path: Path) -> None:
             entry_trade_id INTEGER,
             is_diagnostic INTEGER DEFAULT 0,
             is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
             commission REAL
         );
         """
@@ -205,3 +206,256 @@ def test_orphan_whitelist_ids_249_250_251_253_are_not_flagged(tmp_path):
         f"IDs 249,250,251,253 must be in known_historical whitelist and not trigger ORPHANED_POSITION. "
         f"Got: {orphan_violations}"
     )
+
+
+# ---------------------------------------------------------------------------
+# INT-05: cross-mode contamination detection
+# ---------------------------------------------------------------------------
+
+def _create_contamination_db(db_path: Path) -> None:
+    """Minimal schema for cross-mode contamination tests."""
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            action TEXT NOT NULL,
+            shares REAL DEFAULT 1,
+            price REAL DEFAULT 100,
+            close_size REAL,
+            realized_pnl REAL,
+            realized_pnl_pct REAL,
+            entry_price REAL,
+            exit_price REAL,
+            holding_period_days REAL DEFAULT 0,
+            exit_reason TEXT,
+            execution_mode TEXT DEFAULT 'live',
+            is_close INTEGER NOT NULL DEFAULT 0,
+            entry_trade_id INTEGER,
+            is_diagnostic INTEGER DEFAULT 0,
+            is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
+            commission REAL DEFAULT 0
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_cross_mode_contamination_tagged_closer_detected(tmp_path):
+    """is_contaminated=1 on a closing leg is reported as CROSS_MODE_CONTAMINATION."""
+    db_path = tmp_path / "contam.db"
+    _create_contamination_db(db_path)
+    conn = sqlite3.connect(db_path)
+    # opener: synthetic SELL at synthetic price
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (1,'MSFT','2026-02-27','SELL',3,64.0,0,1,'synthetic')"
+    )
+    # closer: live BUY but is_contaminated=1 (entry_price was $64, real exit $405)
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+        "entry_trade_id, execution_mode) "
+        "VALUES (2,'MSFT','2026-03-04','BUY',3,405.0,3,-1027.0,64.0,405.0,1,1,1,'live')"
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
+    assert len(contam) == 1
+    assert 2 in contam[0].affected_ids
+    assert contam[0].severity == "HIGH"
+
+
+def test_cross_mode_contamination_untagged_closer_detected_via_opener_join(tmp_path):
+    """Closing leg with no is_contaminated flag but opener is_synthetic=1 is also detected."""
+    db_path = tmp_path / "contam_untagged.db"
+    _create_contamination_db(db_path)
+    conn = sqlite3.connect(db_path)
+    # opener: synthetic SELL
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (10,'AAPL','2026-01-01','SELL',2,80.0,0,1,'synthetic')"
+    )
+    # closer: live BUY, is_contaminated NOT set (untagged)
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+        "entry_trade_id, execution_mode) "
+        "VALUES (11,'AAPL','2026-03-01','BUY',2,350.0,2,-540.0,80.0,350.0,1,0,10,'live')"
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
+    assert len(contam) == 1
+    assert 11 in contam[0].affected_ids
+    # description should mention untagged
+    assert "untagged" in contam[0].description
+
+
+def test_cross_mode_contamination_clean_live_round_trip_no_violation(tmp_path):
+    """A normal live-open / live-close round trip produces no contamination violation."""
+    db_path = tmp_path / "clean.db"
+    _create_contamination_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (20,'NVDA','2026-02-01','BUY',1,800.0,0,0,'live')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+        "entry_trade_id, execution_mode) "
+        "VALUES (21,'NVDA','2026-02-10','SELL',1,850.0,1,50.0,800.0,850.0,1,0,20,'live')"
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
+    assert contam == [], f"Clean round-trip must not trigger contamination check: {contam}"
+
+
+def test_cross_mode_contamination_excluded_from_canonical_metrics(tmp_path):
+    """Contaminated closes are excluded from get_canonical_metrics()."""
+    db_path = tmp_path / "metrics.db"
+    _create_contamination_db(db_path)
+    conn = sqlite3.connect(db_path)
+    # clean winning round-trip: +$50
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, execution_mode) VALUES (30,'AAPL','2026-01-01','BUY',1,100.0,0,'live')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, holding_period_days, is_close, "
+        "is_contaminated, entry_trade_id, execution_mode) "
+        "VALUES (31,'AAPL','2026-01-10','SELL',1,150.0,1,50.0,100.0,150.0,9,1,0,30,'live')"
+    )
+    # contaminated losing round-trip: -$1000 (phantom)
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (32,'MSFT','2026-02-01','SELL',3,64.0,0,1,'synthetic')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, holding_period_days, is_close, "
+        "is_contaminated, entry_trade_id, execution_mode) "
+        "VALUES (33,'MSFT','2026-03-01','BUY',3,405.0,3,-1020.0,64.0,405.0,28,1,1,32,'live')"
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        metrics = enforcer.get_canonical_metrics()
+
+    assert metrics.total_round_trips == 1
+    assert abs(metrics.total_realized_pnl - 50.0) < 0.01
+    assert metrics.win_rate == 1.0
+    assert metrics.contaminated_trades_excluded >= 1
+
+
+# ---------------------------------------------------------------------------
+# INT-06: metrics drift detection
+# ---------------------------------------------------------------------------
+
+def _make_pnl_db(db_path: Path, pnls: list[float]) -> None:
+    """Create DB with production_closed_trades populated from given PnL list."""
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL DEFAULT 'AAPL',
+            trade_date TEXT NOT NULL DEFAULT '2026-01-01',
+            action TEXT NOT NULL DEFAULT 'SELL',
+            shares REAL DEFAULT 1,
+            price REAL DEFAULT 100,
+            close_size REAL DEFAULT 1,
+            realized_pnl REAL,
+            entry_price REAL DEFAULT 90,
+            exit_price REAL DEFAULT 100,
+            holding_period_days REAL DEFAULT 1,
+            is_close INTEGER DEFAULT 1,
+            is_diagnostic INTEGER DEFAULT 0,
+            is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
+            entry_trade_id INTEGER,
+            execution_mode TEXT DEFAULT 'live',
+            commission REAL DEFAULT 0
+        );
+        """
+    )
+    for pnl in pnls:
+        conn.execute("INSERT INTO trade_executions (realized_pnl) VALUES (?)", (pnl,))
+    conn.commit()
+    conn.close()
+
+
+def test_metrics_drift_fires_when_rolling_wr_drops(tmp_path, monkeypatch):
+    """Drift check fires HIGH when last-30 WR drops 20pp below historical."""
+    monkeypatch.setenv("INTEGRITY_DRIFT_ROLLING_WINDOW", "30")
+    monkeypatch.setenv("INTEGRITY_DRIFT_THRESHOLD", "0.15")
+    monkeypatch.setenv("INTEGRITY_DRIFT_MIN_TRADES", "15")
+
+    # 30 historical wins then 30 losses (all below $0)
+    pnls = [50.0] * 30 + [-20.0] * 30
+    db_path = tmp_path / "drift_down.db"
+    _make_pnl_db(db_path, pnls)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    drift = [v for v in violations if v.check_name == "METRICS_DRIFT"]
+    assert len(drift) == 1
+    assert drift[0].severity == "HIGH"
+    assert "MODEL DRIFT WARNING" in drift[0].description
+
+
+def test_metrics_drift_no_violation_when_stable(tmp_path, monkeypatch):
+    """Drift check does not fire when WR is consistent across periods."""
+    monkeypatch.setenv("INTEGRITY_DRIFT_ROLLING_WINDOW", "30")
+    monkeypatch.setenv("INTEGRITY_DRIFT_THRESHOLD", "0.15")
+    monkeypatch.setenv("INTEGRITY_DRIFT_MIN_TRADES", "15")
+
+    # Consistent 50% WR across 60 trades
+    pnls = [50.0, -20.0] * 30
+    db_path = tmp_path / "drift_stable.db"
+    _make_pnl_db(db_path, pnls)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    drift = [v for v in violations if v.check_name == "METRICS_DRIFT"]
+    assert drift == [], f"Stable WR must not trigger drift check: {drift}"
+
+
+def test_metrics_drift_skipped_with_insufficient_history(tmp_path, monkeypatch):
+    """Drift check is silently skipped when not enough trades exist."""
+    monkeypatch.setenv("INTEGRITY_DRIFT_ROLLING_WINDOW", "30")
+    monkeypatch.setenv("INTEGRITY_DRIFT_THRESHOLD", "0.15")
+    monkeypatch.setenv("INTEGRITY_DRIFT_MIN_TRADES", "15")
+
+    # Only 20 trades — below min_needed (15+30=45)
+    pnls = [50.0] * 10 + [-20.0] * 10
+    db_path = tmp_path / "drift_short.db"
+    _make_pnl_db(db_path, pnls)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    drift = [v for v in violations if v.check_name == "METRICS_DRIFT"]
+    assert drift == [], "Insufficient history must not trigger drift check"

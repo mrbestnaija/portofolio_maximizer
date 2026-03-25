@@ -98,6 +98,7 @@ class Trade:
     # PnL integrity enforcement fields (Phase 7.9+)
     is_diagnostic: int = 0
     is_synthetic: int = 0
+    is_contaminated: int = 0  # cross-mode: live close against synthetic opener entry price
     # Phase 10: mechanical exits (stop-loss, max-hold) — excluded from Platt calibration
     is_forced_exit: int = 0
 
@@ -1321,6 +1322,7 @@ class PaperTradingEngine:
 
             # Retrieve entry_trade_id when closing position (for audit linkage)
             entry_trade_id_ref = None
+            is_contaminated_ref = 0
             if is_close_ref:
                 entry_trade_id_ref = self.portfolio.entry_trade_ids.get(trade.ticker)
                 if not entry_trade_id_ref:
@@ -1328,6 +1330,24 @@ class PaperTradingEngine:
                         "Closing %s position but no entry_trade_id found - audit trail incomplete",
                         trade.ticker
                     )
+                else:
+                    # INT-05 prevention: detect cross-mode contamination at write time.
+                    # If the opening leg is synthetic, this live close's PnL is phantom.
+                    try:
+                        opener = self.db_manager.conn.execute(
+                            "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id=?",
+                            (entry_trade_id_ref,),
+                        ).fetchone()
+                        if opener and opener[0] == 1:
+                            is_contaminated_ref = 1
+                            logger.warning(
+                                "[INT-05] Cross-mode contamination detected: closing %s "
+                                "(opener trade_id=%d is_synthetic=1, execution_mode=%s). "
+                                "Marking is_contaminated=1 to exclude from production metrics.",
+                                trade.ticker, entry_trade_id_ref, trade.execution_mode,
+                            )
+                    except Exception:
+                        pass  # non-critical — contamination guard fails safe
 
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
@@ -1369,6 +1389,7 @@ class PaperTradingEngine:
                 exit_reason=trade.exit_reason,
                 is_diagnostic=trade.is_diagnostic,
                 is_synthetic=trade.is_synthetic,
+                is_contaminated=max(trade.is_contaminated, is_contaminated_ref),
                 confidence_calibrated=trade.confidence_calibrated,
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
                 is_forced_exit=trade.is_forced_exit,  # Phase 10
