@@ -21,6 +21,10 @@ forecaster_monitoring:
     min_forecast_horizon: 20
     # Hard fail when ensemble metrics disappear from audit payloads.
     max_missing_ensemble_rate: 0.00
+    max_non_white_noise_rate: 0.35
+    min_residual_diagnostics_n: 10
+    fail_on_missing_residual_diagnostics: true
+    max_index_mismatch_rate: 0.0
     # Require digest manifest coverage for all scanned audit artifacts.
     manifest_integrity_mode: fail
     manifest_filename: forecast_audit_manifest.jsonl

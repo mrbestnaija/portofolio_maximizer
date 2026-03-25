@@ -521,6 +521,15 @@ class TestMacroBfillLookahead:
         result = chk_macro_bfill_lookahead(src)
         assert result.passed is True
 
+    def test_cleared_when_macro_context_is_clipped_and_ffilled(self):
+        src = (
+            "macro_context = macro_context.loc[(macro_context.index >= price_series.index.min()) "
+            "& (macro_context.index <= price_series.index.max())]\n"
+            "macro_context = macro_context.ffill()\n"
+        )
+        result = chk_macro_bfill_lookahead(src)
+        assert result.passed is True
+
 
 class TestAuditFileNoValidation:
     """LEAK-03 (category=poisoning) — HIGH: audit JSON loaded without range checks."""

@@ -100,12 +100,30 @@ forecaster_monitoring:
     # recommend disbanding the ensemble as default source of truth.
     # 25% requires meaningful evidence of ensemble benefit over best-single.
     min_lift_fraction: 0.25
+    # Hard-fail threshold for Layer 1: fewer than this fraction of windows
+    # showing lift is an unambiguous signal that the ensemble is broken
+    # (not merely underperforming).  Intentionally lower than min_lift_fraction
+    # so that WARN fires well before FAIL.  Only fires when n_used >= 100.
+    fail_lift_fraction: 0.05
     # Exclude short-horizon research/test audits from production lift gating.
     # Production auto-trader uses longer horizons (typically 30); low-horizon
     # artifacts can inflate recent-window violation rates in narrow scans.
     min_forecast_horizon: 20
     # Alert/fail if ensemble metrics are missing too often from audit payloads.
     max_missing_ensemble_rate: 0.05
+    # Residual-diagnostics default-path gate: model-backed default selections
+    # should expose diagnostics, and too many non-white-noise residuals should
+    # block promotion/production readiness.
+    max_non_white_noise_rate: 0.25
+    min_residual_diagnostics_n: 20
+    fail_on_missing_residual_diagnostics: true
+    max_index_mismatch_rate: 0.0
+    # THIN_LINKAGE gate thresholds (production_audit_gate.py).
+    # Minimum number of outcome windows that must be matched AND the minimum
+    # fraction of eligible windows that must be matched before the linkage gate
+    # passes. Both are relaxed to 1 / 0.0 during the warmup period.
+    linkage_min_matched: 10
+    linkage_min_ratio: 0.8
     # Audit provenance hardening (set to fail after legacy audit backfill).
     manifest_integrity_mode: warn
     manifest_filename: forecast_audit_manifest.jsonl

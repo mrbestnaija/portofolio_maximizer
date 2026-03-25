@@ -344,7 +344,15 @@ class EnsembleCoordinator:
             weight_sum = effective_weights.sum(axis=1)
             normalized_weights = effective_weights.div(weight_sum.replace(0.0, np.nan), axis=0)
             blended = df.mul(normalized_weights, axis=1).sum(axis=1)
-            return blended.dropna()
+            result = blended.dropna()
+            dropped = len(blended) - len(result)
+            if dropped > 0:
+                logger.warning(
+                    "[ENSEMBLE] _rowwise_blend dropped %d/%d timestamps with all-NaN "
+                    "model forecasts — forecast horizon shortened unexpectedly.",
+                    dropped, len(blended),
+                )
+            return result
 
         forecast = _rowwise_blend(combined_df)
 
@@ -430,7 +438,7 @@ def derive_model_confidence(
     _rmse_values = {
         model: float(m.get("rmse"))
         for model, m in metrics_map.items()
-        if m.get("rmse") is not None
+        if m.get("rmse") is not None and np.isfinite(float(m.get("rmse")))
     }
     if len(_rmse_values) >= 2:
         _min_rmse = min(_rmse_values.values())
@@ -447,13 +455,19 @@ def derive_model_confidence(
         _rmse_rank_scores: Dict[str, float] = {}
 
     def _combine_scores(*scores: Optional[float]) -> Optional[float]:
-        valid = [float(np.clip(s, 0.0, 1.0)) for s in scores if s is not None]
+        valid = [
+            float(np.clip(s, 0.0, 1.0))
+            for s in scores
+            if s is not None and np.isfinite(float(s))
+        ]
         if not valid:
             return None
         return float(np.clip(np.mean(valid), 0.05, 0.95))
 
     def _relative_rmse_score(rmse: float, baseline: Optional[float]) -> Optional[float]:
         if baseline is None or baseline <= 0.0:
+            return None
+        if not np.isfinite(float(rmse)):
             return None
         ratio = max(float(rmse) / max(float(baseline), EPSILON), EPSILON)
         # ratio=1.0 -> ~0.7, ratio=1.1 -> ~0.55, ratio=1.5 -> ~0.25
@@ -463,38 +477,84 @@ def derive_model_confidence(
     def _relative_te_score(te: float, baseline: Optional[float]) -> Optional[float]:
         if baseline is None or baseline <= 0.0:
             return None
+        if not np.isfinite(float(te)):
+            return None
         ratio = max(float(te) / max(float(baseline), EPSILON), EPSILON)
         score = 1.0 / (1.0 + 1.2 * (ratio - 1.0))
         return float(np.clip(score, 0.05, 0.95))
 
     def _score_from_metrics(metrics: Dict[str, float]) -> Optional[float]:
+        """Compute model confidence from metrics, separating fit quality from prediction quality.
+
+        Architecture:
+          - Fit quality  (60% weight): RMSE-rank, SMAPE, tracking error.
+            These measure how well the model fits the training data.
+          - Prediction quality (40% weight): 1-step DA, terminal DA, CI coverage.
+            These measure whether the model's outputs are directionally correct and
+            probabilistically calibrated on out-of-sample data.
+
+        Separating these prevents fit quality from masking poor prediction quality
+        (e.g. SAMoSSA EVR=1.0 by SSA construction does not imply directional accuracy).
+        Both components require at least one score; the blend uses whatever is available.
+        """
         if not metrics:
             return None
-        components = []
+
+        _n_obs = metrics.get("n_observations", 0)
+        _n_obs_int = int(_n_obs) if _n_obs is not None and np.isfinite(float(_n_obs)) else 0
+
+        # --- Fit quality components ---
+        fit_components = []
         rmse_val = metrics.get("rmse")
         if rmse_val is not None:
             rmse_score = _relative_rmse_score(float(rmse_val), baseline_rmse)
             if rmse_score is not None:
-                components.append(rmse_score)
+                fit_components.append(rmse_score)
         smape_val = metrics.get("smape")
-        if smape_val is not None:
-            smape = max(float(smape_val), 0.0)
-            smape_score = 1.0 / (1.0 + 0.5 * smape)
-            components.append(float(np.clip(smape_score, 0.05, 0.95)))
+        if smape_val is not None and np.isfinite(float(smape_val)):
+            smape_s = max(float(smape_val), 0.0)
+            fit_components.append(float(np.clip(1.0 / (1.0 + 0.5 * smape_s), 0.05, 0.95)))
         te_val = metrics.get("tracking_error")
-        if te_val is not None:
+        if te_val is not None and np.isfinite(float(te_val)):
             te_score = _relative_te_score(float(te_val), baseline_te)
             if te_score is not None:
-                components.append(te_score)
+                fit_components.append(te_score)
+
+        # --- Prediction quality components (require n_obs >= 30) ---
+        pred_components = []
+        # 1-step DA: fraction of periods where forecast direction matched actual direction.
         da_val = metrics.get("directional_accuracy")
-        if da_val is not None:
-            da = float(da_val)
-            # Treat 0.5 as random baseline; reward edges above that.
-            da_score = max(0.0, (da - 0.5) / 0.5)
-            components.append(float(np.clip(da_score, 0.05, 0.95)))
-        if not components:
+        if da_val is not None and np.isfinite(float(da_val)) and _n_obs_int >= 30:
+            da = float(np.clip(da_val, 0.0, 1.0))
+            pred_components.append(float(np.clip(max(0.0, (da - 0.5) / 0.5), 0.05, 0.95)))
+
+        # Terminal DA: did forecast[-1] correctly predict direction vs forecast[0]?
+        # This maps directly to multi-step trade P&L and is harder to fake than 1-step DA.
+        tda_val = metrics.get("terminal_directional_accuracy")
+        if tda_val is not None and np.isfinite(float(tda_val)) and _n_obs_int >= 30:
+            tda = float(np.clip(tda_val, 0.0, 1.0))
+            pred_components.append(float(np.clip(max(0.0, (tda - 0.5) / 0.5), 0.05, 0.95)))
+
+        # CI coverage: did the actual terminal price fall within the predicted CI?
+        # Low coverage → CI too narrow → SNR inflated → block miscalibrated models.
+        cov_val = metrics.get("terminal_ci_coverage")
+        if cov_val is not None and np.isfinite(float(cov_val)) and _n_obs_int >= 30:
+            pred_components.append(float(np.clip(cov_val, 0.05, 0.95)))
+
+        # Blend: 60% fit quality, 40% prediction quality when both are available.
+        # Fall back to whichever component class has data.
+        if fit_components and pred_components:
+            fit_score = float(np.mean(fit_components))
+            pred_score = float(np.mean(pred_components))
+            blended = 0.60 * fit_score + 0.40 * pred_score
+        elif fit_components:
+            blended = float(np.mean(fit_components))
+        elif pred_components:
+            blended = float(np.mean(pred_components))
+        else:
             return None
-        return float(np.clip(np.mean(components), 0.05, 0.95))
+
+        return float(np.clip(blended, 0.05, 0.95))
 
     def _variance_test_score(metrics: Dict[str, float], baseline: Dict[str, float]) -> Optional[float]:
         if not metrics or not baseline:
@@ -507,15 +567,24 @@ def derive_model_confidence(
             return None
         te = float(te)
         base_te = float(base_te)
+        # Guard: non-finite tracking errors cannot be compared meaningfully.
+        if not np.isfinite(te) or not np.isfinite(base_te):
+            return None
         if te > base_te:
             # One-sided screening: do not reward models with higher residual variance
             # than the baseline.
             return 0.0
         f_stat = (te**2 + EPSILON) / (base_te**2 + EPSILON)
-        dfn = max(int(n) - 1, 1)
-        dfd = max(int(base_n) - 1, 1)
+        if not np.isfinite(f_stat):
+            return None
+        n_int = int(n) if np.isfinite(float(n)) else 2
+        base_n_int = int(base_n) if np.isfinite(float(base_n)) else 2
+        dfn = max(n_int - 1, 1)
+        dfd = max(base_n_int - 1, 1)
         # One-sided p-value for variance reduction (H1: sigma_model^2 < sigma_baseline^2).
         p_value = float(scipy_stats.f.cdf(f_stat, dfn, dfd))
+        if not np.isfinite(p_value):
+            return None
         return float(np.clip(1.0 - p_value, 0.0, 1.0))
 
     def _change_point_boost(summary: Dict[str, Any]) -> Optional[float]:
@@ -534,8 +603,10 @@ def derive_model_confidence(
     aic = sarimax_summary.get("aic")
     bic = sarimax_summary.get("bic")
     sarimax_score = None
-    if aic is not None and bic is not None:
+    if aic is not None and bic is not None and np.isfinite(float(aic)) and np.isfinite(float(bic)):
         sarimax_score = np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6))
+        if not np.isfinite(sarimax_score):
+            sarimax_score = None
     sarimax_metrics = sarimax_summary.get("regression_metrics", {}) or {}
     sarimax_score = _combine_scores(
         sarimax_score,

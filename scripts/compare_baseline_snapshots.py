@@ -23,6 +23,11 @@ class Snapshot:
     horizon_backtest: Optional[Dict[str, Any]] = None
 
 
+def extract_provenance(snapshot: Snapshot) -> Dict[str, Any]:
+    provenance = snapshot.manifest.get("provenance")
+    return provenance if isinstance(provenance, dict) else {}
+
+
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     if not path.exists():
         return None
@@ -170,8 +175,21 @@ def render_markdown(
         f"- A: {snapshot_a.path}",
         f"- B: {snapshot_b.path}",
         "",
-        "## File Changes",
+        "## Provenance",
+        "",
     ]
+    provenance_a = extract_provenance(snapshot_a)
+    provenance_b = extract_provenance(snapshot_b)
+    for key in ("dataset_hash", "db_max_ohlcv_date", "config_hash", "git_commit", "config_paths"):
+        lines.append(
+            f"- `{key}`: A={provenance_a.get(key, 'n/a')} | B={provenance_b.get(key, 'n/a')}"
+        )
+    lines.extend(
+        [
+            "",
+        "## File Changes",
+        ]
+    )
     for category, diffs in file_diffs.items():
         lines.append(f"### {category}")
         for bucket in ("changed", "added", "removed"):
@@ -225,6 +243,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         payload = {
             "a": str(snap_a.path),
             "b": str(snap_b.path),
+            "provenance": {
+                "a": extract_provenance(snap_a),
+                "b": extract_provenance(snap_b),
+            },
             "file_diffs": file_diffs,
             "run_metrics": run_metric_diffs,
             "backtest_metrics": backtest_metric_diffs,

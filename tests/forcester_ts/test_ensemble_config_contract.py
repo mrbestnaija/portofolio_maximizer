@@ -779,3 +779,61 @@ class TestPhase10RmseRankHybrid:
         for model in ("garch", "samossa", "mssa_rl"):
             if model in conf:
                 assert 0.0 <= conf[model] <= 1.0, f"{model} score out of range: {conf[model]}"
+
+    def test_nan_rmse_excluded_from_rank_computation(self):
+        """NaN RMSE must be filtered from _rmse_values so it does not propagate into ranks."""
+        from forcester_ts.ensemble import derive_model_confidence
+        summaries = {
+            "garch": {"regression_metrics": {"rmse": float("nan")}},
+            "samossa": {"regression_metrics": {"rmse": 1.0}},
+            "mssa_rl": {"regression_metrics": {"rmse": 1.2}},
+        }
+        conf = derive_model_confidence(summaries)
+        assert isinstance(conf, dict)
+        for model, score in conf.items():
+            assert np.isfinite(score), f"{model} confidence is non-finite ({score}) — NaN leaked from RMSE"
+
+    def test_inf_rmse_excluded_from_rank_computation(self):
+        """Inf RMSE must be filtered to avoid dividing by Inf in rank normalization."""
+        from forcester_ts.ensemble import derive_model_confidence
+        summaries = {
+            "garch": {"regression_metrics": {"rmse": float("inf")}},
+            "samossa": {"regression_metrics": {"rmse": 1.0}},
+            "mssa_rl": {"regression_metrics": {"rmse": 1.2}},
+        }
+        conf = derive_model_confidence(summaries)
+        assert isinstance(conf, dict)
+        for model, score in conf.items():
+            assert np.isfinite(score), f"{model} confidence is non-finite ({score})"
+
+    def test_nan_aic_bic_does_not_corrupt_sarimax_score(self):
+        """NaN AIC/BIC must produce sarimax_score=None, not propagate NaN into confidence."""
+        from forcester_ts.ensemble import derive_model_confidence
+        summaries = {
+            "sarimax": {"aic": float("nan"), "bic": float("nan")},
+            "garch": {"aic": -100.0, "bic": -90.0},
+        }
+        conf = derive_model_confidence(summaries)
+        assert isinstance(conf, dict)
+        for model, score in conf.items():
+            assert np.isfinite(score), f"{model} confidence is non-finite ({score}) — NaN from AIC/BIC"
+
+    def test_all_nan_inputs_return_empty_or_bounded_confidence(self):
+        """When all inputs are NaN/Inf, no confidence score should be NaN or out of [0,1]."""
+        from forcester_ts.ensemble import derive_model_confidence
+        summaries = {
+            "garch": {
+                "aic": float("nan"),
+                "bic": float("inf"),
+                "regression_metrics": {"rmse": float("nan")},
+            },
+            "samossa": {
+                "explained_variance_ratio": float("nan"),
+                "regression_metrics": {"rmse": float("inf")},
+            },
+        }
+        conf = derive_model_confidence(summaries)
+        assert isinstance(conf, dict)
+        for model, score in conf.items():
+            assert np.isfinite(score), f"{model} confidence is non-finite: {score}"
+            assert 0.0 <= score <= 1.0, f"{model} confidence out of [0,1]: {score}"

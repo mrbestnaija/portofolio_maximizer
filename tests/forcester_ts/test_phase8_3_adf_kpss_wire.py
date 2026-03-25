@@ -180,7 +180,8 @@ class TestForecasterForcedDWire:
         original_sarimax_fit = SARIMAXForecaster.fit
 
         def fake_sarimax_fit(self_inner, series, exogenous=None, order_learner=None,
-                             ticker="", regime=None, forced_d=None):
+                             ticker="", regime=None, forced_d=None,
+                             stationarity_hint=None, **kwargs):
             captured_forced_d.append(forced_d)
             raise StopIteration("short-circuit")
 
@@ -228,7 +229,8 @@ class TestForecasterForcedDWire:
         captured: list = []
 
         def fake_sarimax_fit(self_inner, series, exogenous=None, order_learner=None,
-                             ticker="", regime=None, forced_d=None):
+                             ticker="", regime=None, forced_d=None,
+                             stationarity_hint=None, **kwargs):
             captured.append(forced_d)
             raise StopIteration("short-circuit")
 

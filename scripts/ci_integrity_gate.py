@@ -41,7 +41,17 @@ def main():
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Also fail on MEDIUM severity violations",
+        help="Also fail on MEDIUM severity violations (overrides --max-medium-violations)",
+    )
+    parser.add_argument(
+        "--max-medium-violations",
+        type=int,
+        default=10,
+        dest="max_medium_violations",
+        help=(
+            "Maximum MEDIUM severity violations before CI fails (default: 10). "
+            "Use 0 to fail on any MEDIUM violation. Overridden by --strict."
+        ),
     )
     args = parser.parse_args()
 
@@ -70,8 +80,9 @@ def main():
         sys.exit(0)
 
     # INT-05 fix: MEDIUM violations are always counted; they become blocking when the
-    # count exceeds max_medium_violations (default 10) or when --strict is set.
-    max_medium_violations = 0 if args.strict else 10
+    # count exceeds max_medium_violations or when --strict is set.
+    # Threshold is now configurable via --max-medium-violations (default 10).
+    max_medium_violations = 0 if args.strict else int(args.max_medium_violations)
     medium_violations = [v for v in violations if v.severity == "MEDIUM"]
 
     # Build blocking set: CRITICAL and HIGH always block; MEDIUM blocks when threshold exceeded.

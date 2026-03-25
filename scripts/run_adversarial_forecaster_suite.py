@@ -203,8 +203,12 @@ def run_one(series: pd.Series, cfg: TimeSeriesForecasterConfig, horizon: int):
     weights = meta.get("weights", {}) if isinstance(meta, dict) else {}
     status = meta.get("ensemble_status") if isinstance(meta, dict) else None
     default_model = latest.get("default_model") if isinstance(latest, dict) else None
+    ensemble_index_mismatch = bool(
+        latest.get("ensemble_index_mismatch")
+        or (meta.get("ensemble_index_mismatch") if isinstance(meta, dict) else False)
+    )
 
-    return rw_metrics, model_metrics, weights, status, default_model
+    return rw_metrics, model_metrics, weights, status, default_model, ensemble_index_mismatch
 
 
 def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -215,6 +219,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ensemble_under_best_count": 0,
         "ensemble_worse_than_rw_count": 0,
         "effective_worse_than_rw_count": 0,
+        "ensemble_index_mismatch_count": 0,
         "ensemble_rmse_ratio_vs_best": [],
         "sarimax_rmse_ratio_vs_rw": [],
         "ensemble_status_counts": Counter(),
@@ -226,6 +231,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "ens_under_best": 0,
                 "ens_worse_rw": 0,
                 "effective_worse_rw": 0,
+                "index_mismatch": 0,
                 "ens_ratio": [],
             }
         ),
@@ -247,6 +253,9 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         status = row.get("status")
         if status is not None:
             out["ensemble_status_counts"][str(status)] += 1
+        if bool(row.get("ensemble_index_mismatch")):
+            out["ensemble_index_mismatch_count"] += 1
+            out["scenario_breakdown"][scenario]["index_mismatch"] += 1
 
         weights = row.get("weights") or {}
         if isinstance(weights, dict) and weights:
@@ -303,6 +312,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     out["ensemble_under_best_rate"] = out["ensemble_under_best_count"] / n_ok
     out["ensemble_worse_than_rw_rate"] = out["ensemble_worse_than_rw_count"] / n_ok
     out["effective_worse_than_rw_rate"] = out["effective_worse_than_rw_count"] / n_ok
+    out["ensemble_index_mismatch_rate"] = out["ensemble_index_mismatch_count"] / n_ok
     out["avg_ensemble_ratio_vs_best"] = (
         sum(out["ensemble_rmse_ratio_vs_best"]) / len(out["ensemble_rmse_ratio_vs_best"])
         if out["ensemble_rmse_ratio_vs_best"]
@@ -322,6 +332,7 @@ def summarize(run_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "ensemble_under_best_rate": details["ens_under_best"] / n,
             "ensemble_worse_than_rw_rate": details["ens_worse_rw"] / n,
             "effective_worse_than_rw_rate": details["effective_worse_rw"] / n,
+            "ensemble_index_mismatch_rate": details["index_mismatch"] / n,
             "avg_ens_ratio_vs_best": (
                 sum(details["ens_ratio"]) / len(details["ens_ratio"])
                 if details["ens_ratio"]
@@ -361,6 +372,12 @@ def _load_thresholds(path: Path) -> Dict[str, Any]:
             suite_cfg.get("use_effective_default_path_metric", False)
         ),
         "require_zero_errors": bool(suite_cfg.get("require_zero_errors", True)),
+        "max_index_mismatch_rate": float(
+            suite_cfg.get(
+                "max_index_mismatch_rate",
+                rmse_cfg.get("max_index_mismatch_rate", 1.0),
+            )
+        ),
     }
 
 
@@ -372,6 +389,7 @@ def evaluate_thresholds(summary: Dict[str, Any], thresholds: Dict[str, Any]) -> 
         under_best = float(payload.get("ensemble_under_best_rate", 0.0) or 0.0)
         ratio = payload.get("avg_ensemble_ratio_vs_best")
         ratio = float(ratio) if isinstance(ratio, (int, float)) else None
+        index_mismatch_rate = float(payload.get("ensemble_index_mismatch_rate", 0.0) or 0.0)
         if use_effective_metric and "effective_worse_than_rw_rate" in payload:
             worse_rw_metric = "effective_worse_than_rw_rate"
             worse_rw = float(payload.get("effective_worse_than_rw_rate", 0.0) or 0.0)
@@ -395,6 +413,11 @@ def evaluate_thresholds(summary: Dict[str, Any], thresholds: Dict[str, Any]) -> 
             breaches.append(
                 f"{variant}: {worse_rw_metric}={worse_rw:.4f} > {worse_rw_threshold:.4f}"
             )
+        if index_mismatch_rate > float(thresholds.get("max_index_mismatch_rate", 1.0)):
+            breaches.append(
+                f"{variant}: ensemble_index_mismatch_rate={index_mismatch_rate:.4f} > "
+                f"{float(thresholds.get('max_index_mismatch_rate', 1.0)):.4f}"
+            )
     return breaches
 
 
@@ -414,7 +437,7 @@ def _run_variants(
             for seed in seeds:
                 series = gen_series(scenario, n_points, seed)
                 try:
-                    rw, metrics, weights, status, default_model = run_one(series, cfg, horizon)
+                    rw, metrics, weights, status, default_model, ensemble_index_mismatch = run_one(series, cfg, horizon)
                     results[variant].append(
                         {
                             "scenario": scenario,
@@ -424,6 +447,7 @@ def _run_variants(
                             "weights": weights,
                             "status": status,
                             "default_model": default_model,
+                            "ensemble_index_mismatch": ensemble_index_mismatch,
                             "error": None,
                         }
                     )
@@ -437,6 +461,7 @@ def _run_variants(
                             "weights": {},
                             "status": None,
                             "default_model": None,
+                            "ensemble_index_mismatch": False,
                             "error": str(exc),
                         }
                     )

@@ -1346,8 +1346,10 @@ class PaperTradingEngine:
                                 "Marking is_contaminated=1 to exclude from production metrics.",
                                 trade.ticker, entry_trade_id_ref, trade.execution_mode,
                             )
-                    except Exception:
-                        pass  # non-critical — contamination guard fails safe
+                    except Exception as _cont_exc:
+                        # Contamination guard is best-effort; log so silent failures
+                        # are visible in debug traces without blocking trade execution.
+                        logger.debug("[INT-05] Contamination guard check failed: %s", _cont_exc)
 
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
