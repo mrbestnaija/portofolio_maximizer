@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
 **Current Phase**: Phase 10 Complete (SARIMAX Re-enable, RMSE-Rank Hybrid Confidence, Production Gate Unblock, OpenClaw Integration)
-**Completed Phases**: 10 (SARIMAX + Gate Unblock), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
-**Last Updated**: 2026-03-19
+**Completed Phases**: 10 (SARIMAX + Gate Unblock), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
+**Last Updated**: 2026-03-25
 
 ---
 
@@ -759,8 +759,8 @@ Original findings (2026-02-16):
 
 **Remaining open issues**:
 - signal_id NULL for all trades (no model attribution) -- **FIXED Phase 7.13** (ts_signal_id unification)
-- B5 Platt scaling (confidence calibration) -- **In Phase 7.14-E** (wiring confidence_calibrated)
-- Directional accuracy improvement not yet re-measured -- run adversarial suite after 7.14 complete
+- B5 Platt scaling (confidence calibration) -- **COMPLETE Phase 7.14-E** (confidence_calibrated in PTE + DB; activates at ≥30 pairs)
+- Directional accuracy improvement not yet re-measured -- run adversarial suite to measure post-Phase 9 classifier impact
 
 ---
 
@@ -924,7 +924,7 @@ additional ETL passes to move the gate threshold into positive territory.
 
 ---
 
-## Phase 7.14 Reference (Gate Recalibration - IN PROGRESS 2026-02-24)
+## Phase 7.14 Reference (Gate Recalibration - COMPLETE 2026-03-25)
 
 **Documentation**: `Documentation/PHASE_7.14_GATE_RECALIBRATION.md`
 
@@ -940,10 +940,26 @@ additional ETL passes to move the gate threshold into positive territory.
 - `bash/overnight_refresh.sh`: Removed --proof-mode; added PLATT_BOOTSTRAP=1 loop (8 historical dates 2021-2024)
 - `bash/run_20_audit_sprint.sh`: PROOF_MODE default 1->0
 
-**Phase B (ATR Stop Loss)** -- PENDING: Replace vol*0.5 cap[1.5%,5%] with ATR*1.5 (no cap)
-**Phase C (GARCH Convergence)** -- PENDING: ConvergenceWarning->GJR->CI inflation->SNR gate blocks
-**Phase D (Regime DB Persistence)** -- PENDING: detected_regime saved to time_series_forecasts table
-**Phase E (Platt Wire)** -- PENDING: confidence_calibrated saved by PaperTradingEngine -> Platt can activate
+**Phase B (ATR Stop Loss)** -- COMPLETE:
+- `models/time_series_signal_generator.py` `_calculate_targets()`: uses `_compute_atr()` (ATR*1.5, floor 1.5%, no upper cap);
+  volatility-based fallback only when OHLC unavailable
+
+**Phase C (GARCH Convergence)** -- COMPLETE:
+- `forcester_ts/garch.py`: convergence failure detected via ConvergenceWarning capture (`_convergence_ok=False`);
+  triggers GJR-GARCH asymmetric fallback; only falls through to EWMA when GJR also degenerate
+- `forcester_ts/forecaster.py` `_enrich_garch_forecast()`: inflates CI half-width by 1.5x when `convergence_ok=False`
+
+**Phase D (Regime DB Persistence)** -- COMPLETE:
+- `etl/database_manager.py`: `detected_regime TEXT` + `regime_confidence REAL` columns auto-added via ALTER TABLE
+- `scripts/run_etl_pipeline.py`: extracts `detected_regime`/`regime_confidence` from forecast result, passes to all DB save calls
+- `scripts/migrate_add_regime_to_forecasts.py`: standalone migration script for existing DBs
+
+**Phase E (Platt Wire)** -- COMPLETE:
+- `execution/paper_trading_engine.py`: `Trade.confidence_calibrated` field; populated from `signal["confidence_calibrated"]`
+  at open; written to DB via `save_trade_execution()`; forced/mechanical exits write `None` (not 0.9)
+- `models/time_series_signal_generator.py`: `_platt_calibrated` stored before blending; surfaced in signal dict at
+  `signal.confidence_calibrated`; Platt activates when ≥30 `(conf, outcome)` pairs in quant_validation.jsonl
+
 **Phase F (Factory)** -- DEFERRED TO 7.15
 
 ### Key Thresholds and Rationale (Phase 7.14)
