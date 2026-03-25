@@ -16,6 +16,7 @@ def test_capture_baseline_snapshot_writes_manifest_and_artifacts(tmp_path):
     (root / "config").mkdir(parents=True)
     (root / "logs" / "automation").mkdir(parents=True)
     (root / "logs" / "signals").mkdir(parents=True)
+    (root / "reports").mkdir(parents=True)
     (root / "visualizations").mkdir(parents=True)
     (root / "scripts").mkdir(parents=True)
     (root / "models").mkdir(parents=True)
@@ -53,6 +54,25 @@ def test_capture_baseline_snapshot_writes_manifest_and_artifacts(tmp_path):
         json.dumps({"meta": {"run_id": "RUN_1"}}),
         encoding="utf-8",
     )
+    (root / "reports" / "horizon_backtest_20260101_000000.json").write_text(
+        json.dumps(
+            {
+                "metrics": {"profit_factor": 1.1},
+                "provenance": {
+                    "dataset_hash": "DATA_HASH_1",
+                    "db_max_ohlcv_date": "2024-01-31",
+                    "config_hash": "CFG_HASH_1",
+                    "git_commit": "abc123",
+                    "config_paths": [str(root / "config" / "signal_routing_config.yml")],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "logs" / "automation" / "db_provenance_RUN_1.json").write_text(
+        json.dumps({"db_max_ohlcv_date": "2024-01-31"}),
+        encoding="utf-8",
+    )
 
     result = capture_baseline_snapshot(root=root, out_dir=tmp_path / "out", tag="baseline", run_id=None)
     assert result.run_id == "RUN_1"
@@ -60,7 +80,13 @@ def test_capture_baseline_snapshot_writes_manifest_and_artifacts(tmp_path):
 
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["run_id"] == "RUN_1"
+    assert manifest["provenance"]["dataset_hash"] == "DATA_HASH_1"
+    assert manifest["provenance"]["db_max_ohlcv_date"] == "2024-01-31"
+    assert manifest["provenance"]["config_hash"]
+    assert "git_commit" in manifest["provenance"]
+    assert manifest["provenance"]["config_paths"]
     assert (result.snapshot_dir / "artifacts" / "run_summary_last.json").exists()
     assert (result.snapshot_dir / "artifacts" / "execution_log_tail.jsonl").exists()
     assert (result.snapshot_dir / "artifacts" / "quant_validation_summary.txt").exists()
     assert (result.snapshot_dir / "artifacts" / "dashboard_data.json").exists()
+    assert (result.snapshot_dir / "artifacts" / "horizon_backtest_latest.json").exists()
