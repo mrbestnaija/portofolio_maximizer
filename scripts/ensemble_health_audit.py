@@ -68,9 +68,13 @@ def _window_fingerprint(audit: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def load_audit_windows(audit_dir: Path, dedupe: bool = True) -> list[dict]:
-    """Load all forecast_audit_*.json files, optionally deduplicating by window fingerprint."""
+    """Load all forecast_audit_*.json files, optionally deduplicating by window fingerprint.
+
+    Uses rglob so that subdirectory splits (research/, production/) are included
+    alongside any root-level audit files from older pipeline runs.
+    """
     audit_dir = Path(audit_dir)
-    files = sorted(audit_dir.glob("forecast_audit_*.json"))
+    files = sorted(audit_dir.rglob("forecast_audit_*.json"))
     raw: list[dict] = []
     for f in files:
         try:

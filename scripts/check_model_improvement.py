@@ -237,7 +237,9 @@ def run_layer1_forecast_quality(
         )
 
     # --- Load all forecast_audit_*.json files and track quality ---
-    files = sorted(audit_dir.glob("forecast_audit_*.json"))
+    # rglob includes research/ and production/ subdirectory splits alongside
+    # any root-level files from older pipeline runs.
+    files = sorted(audit_dir.rglob("forecast_audit_*.json"))
     n_total = len(files)
 
     if n_total == 0:
