@@ -1034,3 +1034,103 @@ class TestBarTimestampHelpers:
         df = pd.DataFrame()
         ts = extractor(df)
         assert ts is None, "Empty DataFrame should return None"
+
+
+class TestOosEvaluationAudit:
+    """_run_oos_evaluation_audit must run OOS eval and swallow all errors."""
+
+    @pytest.fixture(autouse=True)
+    def _load_mod(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(Path(__file__).parents[2]))
+        self.mod = importlib.import_module("scripts.run_auto_trader")
+
+    def _make_series(self, n: int = 80) -> "pd.Series":
+        idx = pd.date_range("2024-01-01", periods=n, freq="D")
+        return pd.Series(100.0 + np.arange(n, dtype=float) * 0.1, index=idx)
+
+    def test_skips_when_series_too_short(self):
+        fn = getattr(self.mod, "_run_oos_evaluation_audit")
+        from etl.time_series_forecaster import TimeSeriesForecasterConfig
+        series = self._make_series(n=10)
+        returns = series.pct_change().dropna()
+        cfg = TimeSeriesForecasterConfig(forecast_horizon=20)
+        # Should return silently without raising
+        fn(series, returns, horizon=20, ticker="AAPL", forecaster_config=cfg)
+
+    def test_skips_when_env_var_set(self, monkeypatch):
+        fn = getattr(self.mod, "_run_oos_evaluation_audit")
+        from etl.time_series_forecaster import TimeSeriesForecasterConfig
+        monkeypatch.setenv("SKIP_OOS_EVAL_AUDIT", "1")
+        series = self._make_series(n=200)
+        returns = series.pct_change().dropna()
+        cfg = TimeSeriesForecasterConfig(forecast_horizon=20)
+        called = []
+        orig_cls = self.mod.TimeSeriesForecaster
+        class _Spy:
+            def __init__(self, **kw): called.append("init")
+            def fit(self, **kw): pass
+            def forecast(self): return {}
+            def evaluate(self, _): pass
+        self.mod.TimeSeriesForecaster = _Spy
+        try:
+            fn(series, returns, horizon=20, ticker="AAPL", forecaster_config=cfg)
+        finally:
+            self.mod.TimeSeriesForecaster = orig_cls
+        assert called == [], "TimeSeriesForecaster must not be instantiated when SKIP_OOS_EVAL_AUDIT=1"
+
+    def test_calls_fit_forecast_evaluate_in_order(self, monkeypatch):
+        fn = getattr(self.mod, "_run_oos_evaluation_audit")
+        from etl.time_series_forecaster import TimeSeriesForecasterConfig
+        series = self._make_series(n=100)
+        returns = series.pct_change().dropna()
+        horizon = 10
+        cfg = TimeSeriesForecasterConfig(forecast_horizon=horizon)
+
+        call_log = []
+        orig_cls = self.mod.TimeSeriesForecaster
+
+        class _RecordingForecaster:
+            def __init__(self, config): call_log.append("init")
+            def fit(self, price_series, returns_series, ticker):
+                call_log.append(("fit", len(price_series)))
+            def forecast(self):
+                call_log.append("forecast")
+                return {}
+            def evaluate(self, holdout):
+                call_log.append(("evaluate", len(holdout)))
+
+        self.mod.TimeSeriesForecaster = _RecordingForecaster
+        try:
+            fn(series, returns, horizon=horizon, ticker="AAPL", forecaster_config=cfg)
+        finally:
+            self.mod.TimeSeriesForecaster = orig_cls
+
+        assert call_log[0] == "init"
+        assert call_log[1][0] == "fit"
+        assert call_log[1][1] == len(series) - horizon, "fit_series must exclude holdout tail"
+        assert call_log[2] == "forecast"
+        assert call_log[3] == ("evaluate", horizon), "evaluate must receive exactly horizon bars"
+
+    def test_swallows_exception_from_forecaster(self, monkeypatch):
+        fn = getattr(self.mod, "_run_oos_evaluation_audit")
+        from etl.time_series_forecaster import TimeSeriesForecasterConfig
+        series = self._make_series(n=100)
+        returns = series.pct_change().dropna()
+        cfg = TimeSeriesForecasterConfig(forecast_horizon=10)
+
+        orig_cls = self.mod.TimeSeriesForecaster
+
+        class _BrokenForecaster:
+            def __init__(self, config): pass
+            def fit(self, **kw): raise RuntimeError("boom")
+            def forecast(self): return {}
+            def evaluate(self, _): pass
+
+        self.mod.TimeSeriesForecaster = _BrokenForecaster
+        try:
+            fn(series, returns, horizon=10, ticker="AAPL", forecaster_config=cfg)
+            # Must not raise
+        finally:
+            self.mod.TimeSeriesForecaster = orig_cls

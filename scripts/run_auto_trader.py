@@ -954,6 +954,61 @@ def _prepare_market_window(
     return downcasted
 
 
+def _run_oos_evaluation_audit(
+    close_series: "pd.Series",
+    returns_series: "pd.Series",
+    horizon: int,
+    *,
+    ticker: str = "",
+    forecaster_config: "TimeSeriesForecasterConfig",
+) -> None:
+    """Fit a fresh forecaster on a trimmed series and evaluate on the held-out tail.
+
+    Writes a second audit file to production/ with ``artifacts.evaluation_metrics``
+    populated via proper out-of-sample evaluation.  This gives ``check_forecast_audits``
+    the RMSE data it needs for the production gate, without touching the live signal path.
+
+    Skips silently when:
+    - SKIP_OOS_EVAL_AUDIT=1 env var is set (opt-out for performance-sensitive runs)
+    - Series is too short (< 2 * horizon + 20 bars)
+    - Any exception during fit / forecast / evaluate
+    """
+    if _env_flag("SKIP_OOS_EVAL_AUDIT"):
+        return
+
+    n = len(close_series)
+    if n < 2 * horizon + 20:
+        logger.debug(
+            "OOS eval audit skipped for %s: series too short (%d < %d)",
+            ticker,
+            n,
+            2 * horizon + 20,
+        )
+        return
+
+    try:
+        fit_series = close_series.iloc[:-horizon]
+        holdout_series = close_series.iloc[-horizon:]
+        fit_returns = returns_series.iloc[: len(fit_series) - 1] if returns_series is not None else None
+
+        oos_forecaster = TimeSeriesForecaster(config=forecaster_config)
+        oos_forecaster.fit(
+            price_series=fit_series,
+            returns_series=fit_returns,
+            ticker=ticker,
+        )
+        oos_forecaster.forecast()
+        oos_forecaster.evaluate(holdout_series)
+        logger.debug(
+            "OOS evaluation audit written for %s (fit_n=%d, holdout_n=%d)",
+            ticker,
+            len(fit_series),
+            len(holdout_series),
+        )
+    except Exception:
+        logger.debug("OOS evaluation audit failed for %s", ticker, exc_info=True)
+
+
 def _generate_time_series_forecast(
     price_frame: pd.DataFrame,
     horizon: int,
@@ -1010,33 +1065,42 @@ def _generate_time_series_forecast(
         samossa_cfg = fcfg.get("samossa", {})
         mssa_cfg = fcfg.get("mssa_rl", {})
 
-        forecaster = TimeSeriesForecaster(
-            config=TimeSeriesForecasterConfig(
-                forecast_horizon=horizon,
-                sarimax_enabled=sarimax_enabled,
-                garch_enabled=bool(garch_cfg.get("enabled", True)),
-                samossa_enabled=bool(samossa_cfg.get("enabled", True)),
-                mssa_rl_enabled=bool(mssa_cfg.get("enabled", True)),
-                sarimax_kwargs=sarimax_kwargs,
-                garch_kwargs={k: v for k, v in garch_cfg.items() if k != "enabled"},
-                samossa_kwargs={
-                    **{k: v for k, v in samossa_cfg.items() if k != "enabled"},
-                    "forecast_horizon": int(horizon),
-                },
-                mssa_rl_kwargs={
-                    **{k: v for k, v in mssa_cfg.items() if k != "enabled"},
-                    "forecast_horizon": int(horizon),
-                    "use_gpu": bool(mssa_use_gpu),
-                },
-                ensemble_kwargs=ensemble_kwargs,
-                regime_detection_enabled=regime_detection_enabled,
-                regime_detection_kwargs=regime_detection_kwargs,
-                order_learning_config=order_learning_cfg,  # Phase 7.16
-                monte_carlo_config=monte_carlo_cfg,
-            )
+        fcfg_obj = TimeSeriesForecasterConfig(
+            forecast_horizon=horizon,
+            sarimax_enabled=sarimax_enabled,
+            garch_enabled=bool(garch_cfg.get("enabled", True)),
+            samossa_enabled=bool(samossa_cfg.get("enabled", True)),
+            mssa_rl_enabled=bool(mssa_cfg.get("enabled", True)),
+            sarimax_kwargs=sarimax_kwargs,
+            garch_kwargs={k: v for k, v in garch_cfg.items() if k != "enabled"},
+            samossa_kwargs={
+                **{k: v for k, v in samossa_cfg.items() if k != "enabled"},
+                "forecast_horizon": int(horizon),
+            },
+            mssa_rl_kwargs={
+                **{k: v for k, v in mssa_cfg.items() if k != "enabled"},
+                "forecast_horizon": int(horizon),
+                "use_gpu": bool(mssa_use_gpu),
+            },
+            ensemble_kwargs=ensemble_kwargs,
+            regime_detection_enabled=regime_detection_enabled,
+            regime_detection_kwargs=regime_detection_kwargs,
+            order_learning_config=order_learning_cfg,  # Phase 7.16
+            monte_carlo_config=monte_carlo_cfg,
         )
+        forecaster = TimeSeriesForecaster(config=fcfg_obj)
         forecaster.fit(price_series=close_series, returns_series=returns_series, ticker=ticker)
         forecast_bundle = forecaster.forecast()
+        # OOS holdout evaluation for production gate accumulation.
+        # Uses a fresh forecaster on a trimmed series so the gate gets proper
+        # out-of-sample RMSE without touching the live forecast path.
+        _run_oos_evaluation_audit(
+            clean_close,
+            returns_series,
+            horizon,
+            ticker=ticker,
+            forecaster_config=fcfg_obj,
+        )
         if isinstance(forecast_bundle, dict) and not forecast_bundle.get("forecast_audit_path"):
             try:
                 audit_dir = getattr(forecaster, "_audit_dir", None)
