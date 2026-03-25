@@ -39,6 +39,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 CRON_JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
+OPENCLAW_MAINTENANCE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
 PRIMARY_CHANNEL_DEFAULT = str(os.getenv("OPENCLAW_CHANNEL", "whatsapp")).strip().lower() or "whatsapp"
 _GATEWAY_PORT = 18789
 
@@ -86,6 +87,42 @@ def _parse_json_best_effort(raw: str) -> Any:
         if start >= 0 and end > start:
             return json.loads(text[start : end + 1])
         raise
+
+
+def _read_json_file(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _payload_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]:
+    candidates: List[str] = []
+    for key in ("timestamp_utc", "generated_utc", "updated_utc"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    if path.exists():
+        candidates.append(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat())
+    for value in candidates:
+        normalized = value.replace("Z", "+00:00")
+        try:
+            ts = datetime.fromisoformat(normalized)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 60.0)
+    return None
+
+
+def _load_recent_maintenance_payload() -> Tuple[Dict[str, Any], Optional[float]]:
+    payload = _read_json_file(OPENCLAW_MAINTENANCE_PATH)
+    age_minutes = _payload_age_minutes(OPENCLAW_MAINTENANCE_PATH, payload) if payload else None
+    return payload, age_minutes
 
 
 def _split_openclaw_command(command: str) -> List[str]:
@@ -178,6 +215,29 @@ def _load_live_channels_payload(timeout: float = 12.0) -> Optional[Dict[str, Any
     return payload if rc == 0 and isinstance(payload, dict) else None
 
 
+def _load_live_channels_status(timeout: float = 12.0) -> Dict[str, Any]:
+    started = time.monotonic()
+    rc, payload, out, err = _run_openclaw_json(["channels", "status"], timeout=timeout)
+    elapsed_ms = int(round((time.monotonic() - started) * 1000.0))
+    timeout_hit = bool(
+        rc != 0
+        and any(
+            token in str(text or "")
+            for text in (out, err)
+            for token in (f"Timeout ({timeout}s)", f"Timeout ({int(timeout)}s)", "Timeout (")
+        )
+    )
+    return {
+        "rc": rc,
+        "payload": payload if isinstance(payload, dict) else None,
+        "parsed": isinstance(payload, dict),
+        "elapsed_ms": elapsed_ms,
+        "timeout": timeout_hit,
+        "stdout": out[:500],
+        "stderr": err[:200],
+    }
+
+
 def _channel_row(payload: Dict[str, Any], channel: str) -> Dict[str, Any]:
     channels = payload.get("channels") if isinstance(payload.get("channels"), dict) else {}
     row = channels.get(channel) if isinstance(channels, dict) else None
@@ -232,6 +292,34 @@ def _channel_ready_from_live(payload: Dict[str, Any], channel: str) -> Dict[str,
     return result
 
 
+def _channel_ready_from_snapshot(snapshot: Dict[str, Any], channel: str) -> Dict[str, Any]:
+    configured = bool(snapshot.get("configured", False))
+    enabled = bool(snapshot.get("enabled", configured))
+    running = bool(snapshot.get("running", False))
+    linked = bool(snapshot.get("linked", False))
+    connected = bool(snapshot.get("connected", running))
+    last_error = str(snapshot.get("lastError") or snapshot.get("last_error") or "").strip()
+
+    if channel == "whatsapp":
+        ok = configured and enabled and linked and running and connected and not last_error
+    else:
+        ok = configured and enabled and running and not last_error
+
+    result = {
+        "status": "OK" if ok else ("WARN" if configured or enabled else "OFF"),
+        "configured": configured,
+        "enabled": enabled,
+        "running": running,
+        "last_error": last_error or None,
+        "account_id": str(snapshot.get("accountId") or "default"),
+        "source": "maintenance_snapshot",
+    }
+    if channel == "whatsapp":
+        result["linked"] = linked
+        result["connected"] = connected
+    return result
+
+
 def _channel_ready_from_config(cfg: Dict[str, Any], channel: str) -> Dict[str, Any]:
     channel_cfg = cfg.get("channels", {}).get(channel, {})
     accounts = channel_cfg.get("accounts", {}) if isinstance(channel_cfg.get("accounts"), dict) else {}
@@ -257,6 +345,91 @@ def _primary_channel_ready(payload: Optional[Dict[str, Any]], primary_channel: s
     if not isinstance(payload, dict):
         return False
     return _channel_ready_from_live(payload, primary_channel).get("status") == "OK"
+
+
+def _recent_recovery_context(
+    *,
+    primary_channel: str,
+    maintenance_payload: Optional[Dict[str, Any]],
+    maintenance_age_minutes: Optional[float],
+) -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        "usable": False,
+        "age_minutes": round(float(maintenance_age_minutes), 2) if maintenance_age_minutes is not None else None,
+        "mode": "none",
+        "detail": "",
+        "events": [],
+        "gateway_rpc_ok": None,
+        "channel_snapshot": {},
+    }
+    if not isinstance(maintenance_payload, dict):
+        return context
+
+    freshness_limit_minutes = 15.0
+    try:
+        freshness_limit_minutes = max(
+            1.0,
+            float(os.getenv("PMX_OPENCLAW_RECOVERY_CONTEXT_MAX_AGE_MINUTES", "15")),
+        )
+    except ValueError:
+        freshness_limit_minutes = 15.0
+
+    if maintenance_age_minutes is None or maintenance_age_minutes > freshness_limit_minutes:
+        return context
+
+    steps = maintenance_payload.get("steps") if isinstance(maintenance_payload.get("steps"), dict) else {}
+    fast_supervisor = steps.get("fast_supervisor") if isinstance(steps.get("fast_supervisor"), dict) else {}
+    gateway_health = steps.get("gateway_health") if isinstance(steps.get("gateway_health"), dict) else {}
+    channels_snapshot = (
+        steps.get("channels_status_snapshot")
+        if isinstance(steps.get("channels_status_snapshot"), dict)
+        else {}
+    )
+    snapshot_channels = channels_snapshot.get("channels") if isinstance(channels_snapshot.get("channels"), dict) else {}
+    primary_snapshot = snapshot_channels.get(primary_channel) if isinstance(snapshot_channels.get(primary_channel), dict) else {}
+
+    gateway_warnings = [str(x) for x in gateway_health.get("warnings", [])] if isinstance(gateway_health, dict) else []
+    fast_warnings = [str(x) for x in fast_supervisor.get("warnings", [])] if isinstance(fast_supervisor, dict) else []
+    channel_row = _channel_ready_from_snapshot(primary_snapshot, primary_channel) if primary_snapshot else {}
+    snapshot_ok = channel_row.get("status") == "OK"
+
+    events: List[str] = []
+    if fast_supervisor.get("action") == "soft_timeout_skip" or fast_supervisor.get("reason") == "channels_status_timeout_softened":
+        events.append("channels_status_timeout_softened")
+    if fast_supervisor.get("action") == "gateway_restart_triggered" and not gateway_health.get("primary_channel_issue_final"):
+        events.append("gateway_restart_recovered")
+    if (
+        gateway_health.get("primary_channel_issue") == "whatsapp_handshake_timeout"
+        and not gateway_health.get("primary_channel_issue_final")
+    ):
+        events.append("whatsapp_handshake_recovered")
+    if "gateway_detached_listener_conflict" in gateway_warnings:
+        events.append("gateway_detached_listener_conflict")
+
+    detail_parts: List[str] = []
+    if events:
+        detail_parts.append(",".join(events))
+    if snapshot_ok:
+        detail_parts.append(f"{primary_channel}_snapshot_ok")
+    if gateway_health.get("rpc_ok") is True:
+        detail_parts.append("gateway_rpc_ok")
+
+    context.update(
+        {
+            "usable": bool(events or snapshot_ok or gateway_health.get("rpc_ok") is True),
+            "mode": events[0] if events else ("steady_state" if snapshot_ok else "none"),
+            "detail": "; ".join(detail_parts),
+            "events": events,
+            "gateway_rpc_ok": gateway_health.get("rpc_ok"),
+            "gateway_service_status": str(gateway_health.get("service_status") or ""),
+            "channel_snapshot": channel_row,
+            "fast_supervisor_action": str(fast_supervisor.get("action") or ""),
+            "fast_supervisor_reason": str(fast_supervisor.get("reason") or ""),
+            "gateway_warnings": gateway_warnings,
+            "fast_supervisor_warnings": fast_warnings,
+        }
+    )
+    return context
 
 
 def _mask_target(target: str) -> str:
@@ -332,20 +505,38 @@ def _check_version(cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _check_gateway(cfg: Dict[str, Any], *, primary_channel: str, channels_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _check_gateway(
+    cfg: Dict[str, Any],
+    *,
+    primary_channel: str,
+    channels_payload: Optional[Dict[str, Any]],
+    maintenance_payload: Optional[Dict[str, Any]] = None,
+    maintenance_age_minutes: Optional[float] = None,
+) -> Dict[str, Any]:
     gw = cfg.get("gateway", {})
     mode = str(gw.get("mode", "unknown") or "unknown")
     bind = str(gw.get("bind", "unknown") or "unknown")
     remote_cfg = gw.get("remote", {}) if isinstance(gw.get("remote"), dict) else {}
     reachable, ping_detail = _gateway_local_ping()
     primary_ready = _primary_channel_ready(channels_payload, primary_channel)
+    recovery = _recent_recovery_context(
+        primary_channel=primary_channel,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
 
     issues: List[str] = []
     detail: str
     access_mode = "unknown"
+    status = "OK"
 
     if not reachable:
-        issues.append("local gateway unreachable")
+        if recovery.get("usable"):
+            issues.append("local gateway probe degraded")
+            status = "WARN"
+        else:
+            issues.append("local gateway unreachable")
+            status = "FAIL"
 
     if mode == "remote":
         access_mode = "direct-remote"
@@ -358,16 +549,30 @@ def _check_gateway(cfg: Dict[str, Any], *, primary_channel: str, channels_payloa
         access_mode = "channel-driven"
         if primary_ready:
             detail = f"Loopback gateway reachable; remote dev is channel-driven via {primary_channel}"
+        elif recovery.get("usable") and recovery.get("channel_snapshot", {}).get("status") == "OK":
+            status = "WARN"
+            issues.append(f"{primary_channel} live probe unavailable; recent maintenance snapshot recovered")
+            detail = (
+                f"Loopback gateway is channel-driven via {primary_channel}; "
+                f"live probe degraded but recent maintenance shows {recovery.get('detail') or 'recovered channel state'}"
+            )
         else:
             issues.append(f"{primary_channel} channel not ready")
             detail = f"Loopback gateway reachable, but {primary_channel} is not ready for remote dev"
+            status = "FAIL" if status != "WARN" else status
     else:
         access_mode = f"{mode}:{bind}"
         if not primary_ready:
-            issues.append(f"{primary_channel} channel not ready")
+            if recovery.get("usable") and recovery.get("channel_snapshot", {}).get("status") == "OK":
+                issues.append(f"{primary_channel} live probe unavailable; recent maintenance snapshot recovered")
+                status = "WARN"
+            else:
+                issues.append(f"{primary_channel} channel not ready")
+                status = "FAIL" if status != "WARN" else status
         detail = f"Gateway mode={mode} bind={bind}"
 
-    status = "OK" if not issues else "FAIL"
+    if status == "OK" and issues:
+        status = "WARN"
     return {
         "check": "gateway",
         "required": True,
@@ -380,32 +585,69 @@ def _check_gateway(cfg: Dict[str, Any], *, primary_channel: str, channels_payloa
         "issues": issues,
         "primary_channel_ready": primary_ready,
         "ping_detail": ping_detail[:120] if ping_detail else "",
+        "recovery_context": recovery,
         "detail": detail,
     }
 
 
-def _check_channels(cfg: Dict[str, Any], *, primary_channel: str, channels_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _check_channels(
+    cfg: Dict[str, Any],
+    *,
+    primary_channel: str,
+    channels_payload: Optional[Dict[str, Any]],
+    maintenance_payload: Optional[Dict[str, Any]] = None,
+    maintenance_age_minutes: Optional[float] = None,
+) -> Dict[str, Any]:
     channel_names = ("whatsapp", "telegram", "discord")
+    recovery = _recent_recovery_context(
+        primary_channel=primary_channel,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
     rows: Dict[str, Dict[str, Any]] = {}
+    snapshot_channels = {}
+    if isinstance(maintenance_payload, dict):
+        steps = maintenance_payload.get("steps") if isinstance(maintenance_payload.get("steps"), dict) else {}
+        channels_snapshot = (
+            steps.get("channels_status_snapshot")
+            if isinstance(steps.get("channels_status_snapshot"), dict)
+            else {}
+        )
+        snapshot_channels = channels_snapshot.get("channels") if isinstance(channels_snapshot.get("channels"), dict) else {}
     for name in channel_names:
         if isinstance(channels_payload, dict):
             rows[name] = _channel_ready_from_live(channels_payload, name)
+            rows[name]["source"] = "live"
+        elif isinstance(snapshot_channels.get(name), dict):
+            rows[name] = _channel_ready_from_snapshot(snapshot_channels.get(name), name)
         else:
             rows[name] = _channel_ready_from_config(cfg, name)
+            rows[name]["source"] = "config"
 
     primary_status = rows.get(primary_channel, {}).get("status", "OFF")
     fallback_ready = [name for name in channel_names if name != primary_channel and rows.get(name, {}).get("status") == "OK"]
 
+    using_live = isinstance(channels_payload, dict)
+    if (
+        not using_live
+        and recovery.get("usable")
+        and rows.get(primary_channel, {}).get("source") == "maintenance_snapshot"
+        and primary_status == "OK"
+    ):
+        primary_status = "RECOVERING"
     if primary_status == "OK":
-        overall = "OK" if fallback_ready else "WARN"
+        overall = "OK" if (fallback_ready and using_live) else "WARN"
     elif primary_status == "WARN":
+        overall = "WARN"
+    elif primary_status == "RECOVERING":
         overall = "WARN"
     else:
         overall = "FAIL"
 
     detail = (
         f"Primary {primary_channel}={primary_status}; "
-        f"fallback_ready={','.join(fallback_ready) if fallback_ready else 'none'}"
+        f"fallback_ready={','.join(fallback_ready) if fallback_ready else 'none'}; "
+        f"source={'live' if using_live else rows.get(primary_channel, {}).get('source', 'config')}"
     )
     return {
         "check": "channels",
@@ -415,6 +657,7 @@ def _check_channels(cfg: Dict[str, Any], *, primary_channel: str, channels_paylo
         "primary_status": primary_status,
         "fallback_ready": fallback_ready,
         "channels": rows,
+        "recovery_context": recovery,
         "detail": detail,
     }
 
@@ -535,12 +778,26 @@ def _evaluate_overall(checks: List[Dict[str, Any]]) -> str:
 
 def cmd_status(as_json: bool = False) -> int:
     cfg = _load_config()
-    channels_payload = _load_live_channels_payload()
+    channels_info = _load_live_channels_status()
+    channels_payload = channels_info.get("payload") if isinstance(channels_info.get("payload"), dict) else None
+    maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
 
     checks = [
         _check_version(cfg),
-        _check_gateway(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload),
-        _check_channels(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload),
+        _check_gateway(
+            cfg,
+            primary_channel=PRIMARY_CHANNEL_DEFAULT,
+            channels_payload=channels_payload,
+            maintenance_payload=maintenance_payload,
+            maintenance_age_minutes=maintenance_age_minutes,
+        ),
+        _check_channels(
+            cfg,
+            primary_channel=PRIMARY_CHANNEL_DEFAULT,
+            channels_payload=channels_payload,
+            maintenance_payload=maintenance_payload,
+            maintenance_age_minutes=maintenance_age_minutes,
+        ),
         _check_bindings(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT),
         _check_agents(cfg),
         _check_cron_jobs(),
@@ -553,6 +810,11 @@ def cmd_status(as_json: bool = False) -> int:
         "overall": overall,
         "primary_channel": PRIMARY_CHANNEL_DEFAULT,
         "openclaw_available": _openclaw_available(),
+        "channels_status": {
+            "parsed": bool(channels_info.get("parsed")),
+            "elapsed_ms": channels_info.get("elapsed_ms"),
+            "timeout": bool(channels_info.get("timeout")),
+        },
         "checks": checks,
     }
 
@@ -572,9 +834,23 @@ def cmd_status(as_json: bool = False) -> int:
 
 def cmd_health(as_json: bool = False) -> int:
     cfg = _load_config()
-    channels_payload = _load_live_channels_payload()
-    gateway = _check_gateway(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload)
-    channels = _check_channels(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload)
+    channels_info = _load_live_channels_status()
+    channels_payload = channels_info.get("payload") if isinstance(channels_info.get("payload"), dict) else None
+    maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
+    gateway = _check_gateway(
+        cfg,
+        primary_channel=PRIMARY_CHANNEL_DEFAULT,
+        channels_payload=channels_payload,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
+    channels = _check_channels(
+        cfg,
+        primary_channel=PRIMARY_CHANNEL_DEFAULT,
+        channels_payload=channels_payload,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
     binding = _check_bindings(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT)
     checks = [gateway, channels, binding]
     overall = _evaluate_overall(checks)
@@ -587,6 +863,9 @@ def cmd_health(as_json: bool = False) -> int:
         "primary_status": channels.get("primary_status"),
         "fallback_ready": channels.get("fallback_ready", []),
         "binding_ok": binding.get("status") == "OK",
+        "channels_status_timeout": bool(channels_info.get("timeout")),
+        "channels_status_elapsed_ms": channels_info.get("elapsed_ms"),
+        "recovery_mode": channels.get("recovery_context", {}).get("mode"),
     }
     if as_json:
         print(json.dumps(result, indent=2))
@@ -602,13 +881,18 @@ def cmd_health(as_json: bool = False) -> int:
 
 def cmd_diagnose(as_json: bool = False) -> int:
     cfg = _load_config()
-    channels_payload = _load_live_channels_payload()
+    channels_info = _load_live_channels_status()
+    channels_payload = channels_info.get("payload") if isinstance(channels_info.get("payload"), dict) else None
+    maintenance_payload, maintenance_age_minutes = _load_recent_maintenance_payload()
     diag: Dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "config_path": str(OPENCLAW_CONFIG),
         "config_exists": OPENCLAW_CONFIG.exists(),
         "openclaw_command": _openclaw_base(),
         "openclaw_cli": _openclaw_available(),
+        "maintenance_path": str(OPENCLAW_MAINTENANCE_PATH),
+        "maintenance_exists": OPENCLAW_MAINTENANCE_PATH.exists(),
+        "maintenance_age_minutes": round(maintenance_age_minutes, 2) if maintenance_age_minutes is not None else None,
     }
 
     gw_ok, gw_detail = _gateway_local_ping()
@@ -620,14 +904,20 @@ def cmd_diagnose(as_json: bool = False) -> int:
     diag["openclaw_status_stdout"] = out[:500]
     diag["openclaw_status_stderr"] = err[:200]
 
-    rc, payload, out, err = _run_openclaw_json(["channels", "status"], timeout=12.0)
-    diag["channels_status_rc"] = rc
-    diag["channels_status_parsed"] = isinstance(payload, dict)
-    diag["channels_status_stdout"] = out[:500]
-    diag["channels_status_stderr"] = err[:200]
+    diag["channels_status_rc"] = channels_info.get("rc")
+    diag["channels_status_parsed"] = bool(channels_info.get("parsed"))
+    diag["channels_status_elapsed_ms"] = channels_info.get("elapsed_ms")
+    diag["channels_status_timeout"] = bool(channels_info.get("timeout"))
+    diag["channels_status_stdout"] = channels_info.get("stdout")
+    diag["channels_status_stderr"] = channels_info.get("stderr")
 
     if isinstance(channels_payload, dict):
         diag["primary_channel_snapshot"] = _channel_ready_from_live(channels_payload, PRIMARY_CHANNEL_DEFAULT)
+    diag["recovery_context"] = _recent_recovery_context(
+        primary_channel=PRIMARY_CHANNEL_DEFAULT,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
 
     jobs = _load_cron_jobs()
     failing = [j for j in jobs if j.get("state", {}).get("consecutiveErrors", 0) > 0]
@@ -635,8 +925,20 @@ def cmd_diagnose(as_json: bool = False) -> int:
     diag["cron_failing"] = len(failing)
     diag["cron_failing_names"] = [j["name"] for j in failing]
     diag["interactions_api"] = _check_interactions_api()
-    diag["gateway_check"] = _check_gateway(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload)
-    diag["channel_check"] = _check_channels(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT, channels_payload=channels_payload)
+    diag["gateway_check"] = _check_gateway(
+        cfg,
+        primary_channel=PRIMARY_CHANNEL_DEFAULT,
+        channels_payload=channels_payload,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
+    diag["channel_check"] = _check_channels(
+        cfg,
+        primary_channel=PRIMARY_CHANNEL_DEFAULT,
+        channels_payload=channels_payload,
+        maintenance_payload=maintenance_payload,
+        maintenance_age_minutes=maintenance_age_minutes,
+    )
     diag["binding_check"] = _check_bindings(cfg, primary_channel=PRIMARY_CHANNEL_DEFAULT)
 
     if as_json:

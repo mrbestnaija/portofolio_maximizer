@@ -96,6 +96,112 @@ def test_check_channels_uses_live_runtime_state_not_static_config() -> None:
     assert result["fallback_ready"] == ["telegram"]
 
 
+def test_gateway_softens_probe_failure_when_recent_maintenance_shows_recovered_channel() -> None:
+    cfg = {
+        "gateway": {
+            "mode": "local",
+            "bind": "loopback",
+        }
+    }
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "fast_supervisor": {
+                "action": "soft_timeout_skip",
+                "reason": "channels_status_timeout_softened",
+            },
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            },
+            "channels_status_snapshot": {
+                "channels": {
+                    "whatsapp": {
+                        "configured": True,
+                        "linked": True,
+                        "running": True,
+                        "connected": True,
+                        "lastError": None,
+                    }
+                }
+            },
+        },
+    }
+
+    original = workflow._gateway_local_ping
+    workflow._gateway_local_ping = lambda: (False, "timeout")
+    try:
+        result = workflow._check_gateway(
+            cfg,
+            primary_channel="whatsapp",
+            channels_payload=None,
+            maintenance_payload=maintenance,
+            maintenance_age_minutes=1.0,
+        )
+    finally:
+        workflow._gateway_local_ping = original
+
+    assert result["status"] == "WARN"
+    assert "probe degraded" in result["issues"][0]
+    assert result["recovery_context"]["mode"] == "channels_status_timeout_softened"
+
+
+def test_check_channels_uses_recent_maintenance_snapshot_as_recovering_context() -> None:
+    cfg = {
+        "channels": {
+            "whatsapp": {"enabled": True},
+            "telegram": {"enabled": True},
+            "discord": {"enabled": False},
+        }
+    }
+    maintenance = {
+        "timestamp_utc": "2099-01-01T00:00:00+00:00",
+        "steps": {
+            "fast_supervisor": {
+                "action": "gateway_restart_triggered",
+                "reason": "channels_status_call_failed:rc=124",
+            },
+            "gateway_health": {
+                "rpc_ok": True,
+                "service_status": "running",
+                "primary_channel_issue_final": None,
+                "warnings": [],
+            },
+            "channels_status_snapshot": {
+                "channels": {
+                    "whatsapp": {
+                        "configured": True,
+                        "linked": True,
+                        "running": True,
+                        "connected": True,
+                        "lastError": None,
+                    },
+                    "telegram": {
+                        "configured": True,
+                        "running": True,
+                        "lastError": None,
+                    },
+                }
+            },
+        },
+    }
+
+    result = workflow._check_channels(
+        cfg,
+        primary_channel="whatsapp",
+        channels_payload=None,
+        maintenance_payload=maintenance,
+        maintenance_age_minutes=1.0,
+    )
+
+    assert result["status"] == "WARN"
+    assert result["primary_status"] == "RECOVERING"
+    assert result["channels"]["whatsapp"]["source"] == "maintenance_snapshot"
+    assert result["fallback_ready"] == ["telegram"]
+
+
 def test_channel_test_uses_inferred_whatsapp_target_and_send_helper() -> None:
     calls: list[tuple[str, str, str]] = []
 

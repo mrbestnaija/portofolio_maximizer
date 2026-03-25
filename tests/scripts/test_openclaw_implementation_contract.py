@@ -53,6 +53,9 @@ def test_guardian_enforces_exec_env_before_watch_launch() -> None:
     assert "& $pythonExe @execEnvArgs" in text
     assert '[bool]$DisableBrokenChannels = $true' in text
     assert '$args += "--disable-broken-channels"' in text
+    assert 'OPENCLAW_FAST_SUPERVISOR_FAILURE_THRESHOLD' in text
+    assert 'OPENCLAW_FAST_SUPERVISOR_RESTART_COOLDOWN_SECONDS' in text
+    assert 'OPENCLAW_PRIMARY_RESTART_ATTEMPTS' in text
     assert "$proc = Start-Process" in text
     assert text.index("& $pythonExe @execEnvArgs") < text.index("$proc = Start-Process")
 

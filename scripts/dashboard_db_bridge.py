@@ -1195,9 +1195,11 @@ def _operator_console_payload() -> Dict[str, Any]:
     activity = _recent_llm_activity_payload()
 
     maintenance_step = maintenance.get("steps", {}) if isinstance(maintenance, dict) else {}
+    fast_supervisor = maintenance_step.get("fast_supervisor", {}) if isinstance(maintenance_step, dict) else {}
     session_route = maintenance_step.get("session_route_reconcile", {}) if isinstance(maintenance_step, dict) else {}
     gateway_health = maintenance_step.get("gateway_health", {}) if isinstance(maintenance_step, dict) else {}
     broken_channel_disable = maintenance_step.get("broken_channel_disable", {}) if isinstance(maintenance_step, dict) else {}
+    channels_snapshot = maintenance_step.get("channels_status_snapshot", {}) if isinstance(maintenance_step, dict) else {}
 
     profitability = production_gate.get("profitability_proof", {}) if isinstance(production_gate, dict) else {}
     lift_gate = production_gate.get("lift_gate", {}) if isinstance(production_gate, dict) else {}
@@ -1212,6 +1214,30 @@ def _operator_console_payload() -> Dict[str, Any]:
 
     maintenance_age = _sidecar_age_minutes(DEFAULT_OPENCLAW_MAINTENANCE_PATH, maintenance) if isinstance(maintenance, dict) else None
     gate_age = _sidecar_age_minutes(DEFAULT_PRODUCTION_GATE_PATH, production_gate) if isinstance(production_gate, dict) else None
+    primary_channel_name = str(maintenance.get("primary_channel") or "whatsapp") if isinstance(maintenance, dict) else "whatsapp"
+    snapshot_channels = channels_snapshot.get("channels", {}) if isinstance(channels_snapshot, dict) else {}
+    primary_snapshot = snapshot_channels.get(primary_channel_name, {}) if isinstance(snapshot_channels, dict) else {}
+    gateway_warnings = [str(x) for x in gateway_health.get("warnings", [])] if isinstance(gateway_health, dict) else []
+    fast_supervisor_warnings = [str(x) for x in fast_supervisor.get("warnings", [])] if isinstance(fast_supervisor, dict) else []
+    recovery_events: List[str] = []
+    if (
+        str(fast_supervisor.get("action") or "") == "soft_timeout_skip"
+        or str(fast_supervisor.get("reason") or "") == "channels_status_timeout_softened"
+    ):
+        recovery_events.append("channels_status_timeout_softened")
+    if (
+        str(fast_supervisor.get("action") or "") == "gateway_restart_triggered"
+        and not gateway_health.get("primary_channel_issue_final")
+    ):
+        recovery_events.append("gateway_restart_recovered")
+    if (
+        str(gateway_health.get("primary_channel_issue") or "") == "whatsapp_handshake_timeout"
+        and not gateway_health.get("primary_channel_issue_final")
+    ):
+        recovery_events.append("whatsapp_handshake_recovered")
+    if "gateway_detached_listener_conflict" in gateway_warnings:
+        recovery_events.append("gateway_detached_listener_conflict")
+    recovery_mode = recovery_events[0] if recovery_events else "steady_state"
 
     maintenance_summary = {
         "status": str(maintenance.get("status") or ("MISSING" if maintenance_err else "UNKNOWN")).upper(),
@@ -1220,7 +1246,7 @@ def _operator_console_payload() -> Dict[str, Any]:
         "warnings": [str(x) for x in (maintenance.get("warnings", []) if isinstance(maintenance, dict) else [])],
         "errors": [str(x) for x in (maintenance.get("errors", []) if isinstance(maintenance, dict) else [])],
         "age_minutes": round(maintenance_age, 2) if maintenance_age is not None else None,
-        "primary_channel": str(maintenance.get("primary_channel") or "whatsapp") if isinstance(maintenance, dict) else "whatsapp",
+        "primary_channel": primary_channel_name,
         "bound_agent_id": str(session_route.get("bound_agent_id") or ""),
         "expected_model": str(session_route.get("expected_model") or ""),
         "duplicate_wrong_agent_keys": int(session_route.get("duplicate_wrong_agent_keys") or 0),
@@ -1229,6 +1255,19 @@ def _operator_console_payload() -> Dict[str, Any]:
         "gateway_rpc_ok": gateway_health.get("rpc_ok"),
         "gateway_service_status": gateway_health.get("service_status"),
         "gateway_listener_pid": gateway_health.get("gateway_listener_pid"),
+        "fast_supervisor_action": str(fast_supervisor.get("action") or ""),
+        "fast_supervisor_reason": str(fast_supervisor.get("reason") or ""),
+        "fast_supervisor_warnings": fast_supervisor_warnings,
+        "primary_channel_issue": str(gateway_health.get("primary_channel_issue") or ""),
+        "primary_channel_issue_after_restart": str(gateway_health.get("primary_channel_issue_after_restart") or ""),
+        "primary_channel_issue_final": str(gateway_health.get("primary_channel_issue_final") or ""),
+        "recovery_mode": recovery_mode,
+        "recovery_events": recovery_events,
+        "reconnect_attempts": int(primary_snapshot.get("reconnectAttempts") or 0),
+        "last_connected_at": primary_snapshot.get("lastConnectedAt"),
+        "last_event_at": primary_snapshot.get("lastEventAt"),
+        "last_error": str(primary_snapshot.get("lastError") or ""),
+        "last_disconnect": primary_snapshot.get("lastDisconnect") if isinstance(primary_snapshot.get("lastDisconnect"), dict) else {},
         "broken_channels_disabled": [str(x) for x in broken_channel_disable.get("disabled", [])]
         if isinstance(broken_channel_disable, dict)
         else [],
@@ -1312,6 +1351,33 @@ def _operator_console_payload() -> Dict[str, Any]:
                     "OpenClaw gateway did not respond to the maintenance probe.",
                     "ERROR",
                     "runtime",
+                )
+            )
+        if maintenance_summary["recovery_events"]:
+            issues.append(
+                _operator_issue(
+                    "Control-plane recovery evidence captured",
+                    (
+                        f"recovery_mode={maintenance_summary['recovery_mode']} "
+                        f"fast_action={maintenance_summary['fast_supervisor_action'] or '--'} "
+                        f"reconnect_attempts={maintenance_summary['reconnect_attempts']}."
+                    ),
+                    "INFO",
+                    "runtime",
+                    meta=", ".join(maintenance_summary["recovery_events"]),
+                )
+            )
+        if "gateway_detached_listener_conflict" in gateway_warnings:
+            issues.append(
+                _operator_issue(
+                    "Gateway listener conflict was softened instead of treated as hard-down",
+                    (
+                        f"service_status={maintenance_summary['gateway_service_status'] or '--'} "
+                        f"listener_pid={maintenance_summary['gateway_listener_pid'] or '--'}."
+                    ),
+                    "WARN",
+                    "runtime",
+                    meta="false-down probe noise should not trigger threshold dodge",
                 )
             )
 

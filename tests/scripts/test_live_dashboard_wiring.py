@@ -99,3 +99,6 @@ def test_live_dashboard_operator_console_wiring() -> None:
     assert "renderOperatorConsole(null);" in html
     assert "renderOperatorConsole(data);" in html
     assert "No operator evidence loaded." in html
+    assert "maintenance.recovery_events" in html
+    assert "reconnects=" in html
+    assert "fast_action=" in html

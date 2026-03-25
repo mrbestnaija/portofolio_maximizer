@@ -1,6 +1,6 @@
 Param(
     [int]$WatchIntervalSeconds = 120,
-    [int]$FastSupervisorIntervalSeconds = 5,
+    [int]$FastSupervisorIntervalSeconds = 60,
     [string]$PrimaryChannel = "whatsapp",
     [bool]$DisableBrokenChannels = $true,
     [switch]$NoApply,
@@ -39,6 +39,30 @@ if (-not $OpenClawCommand) {
 }
 if ($FastSupervisorIntervalSeconds -lt 1) { $FastSupervisorIntervalSeconds = 1 }
 
+function Get-EnvInt {
+    Param(
+        [string]$Name,
+        [int]$DefaultValue,
+        [int]$Minimum = 0
+    )
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    $value = $DefaultValue
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed)) {
+            $value = $parsed
+        }
+    }
+    if ($value -lt $Minimum) { return $Minimum }
+    return $value
+}
+
+$FastSupervisorFailureThreshold = Get-EnvInt -Name "OPENCLAW_FAST_SUPERVISOR_FAILURE_THRESHOLD" -DefaultValue 3 -Minimum 1
+$FastSupervisorRestartCooldownSeconds = Get-EnvInt -Name "OPENCLAW_FAST_SUPERVISOR_RESTART_COOLDOWN_SECONDS" -DefaultValue 300 -Minimum 0
+$FastSupervisorProbeTimeoutSeconds = Get-EnvInt -Name "OPENCLAW_FAST_SUPERVISOR_PROBE_TIMEOUT_SECONDS" -DefaultValue 12 -Minimum 3
+$FastSupervisorPostRestartRecheckSeconds = Get-EnvInt -Name "OPENCLAW_FAST_SUPERVISOR_POST_RESTART_RECHECK_SECONDS" -DefaultValue 12 -Minimum 0
+$PrimaryRestartAttempts = Get-EnvInt -Name "OPENCLAW_PRIMARY_RESTART_ATTEMPTS" -DefaultValue 1 -Minimum 1
+
 function Test-GuardianPid {
     Param([int]$ProcessId)
     if ($ProcessId -le 0) { return $false }
@@ -70,6 +94,11 @@ function Write-GuardianPidFile {
         started_at = (Get-Date).ToString("o")
         watch_interval_seconds = [Math]::Max(30, $WatchIntervalSeconds)
         fast_supervisor_interval_seconds = [Math]::Max(1, $FastSupervisorIntervalSeconds)
+        fast_supervisor_failure_threshold = $FastSupervisorFailureThreshold
+        fast_supervisor_restart_cooldown_seconds = $FastSupervisorRestartCooldownSeconds
+        fast_supervisor_probe_timeout_seconds = $FastSupervisorProbeTimeoutSeconds
+        fast_supervisor_post_restart_recheck_seconds = $FastSupervisorPostRestartRecheckSeconds
+        primary_restart_attempts = $PrimaryRestartAttempts
         primary_channel = $PrimaryChannel
         apply = [bool](-not $NoApply)
         integrity_unlinked_close_whitelist_ids = $IntegrityUnlinkedCloseWhitelistIds
@@ -132,15 +161,15 @@ $args = @(
     "--watch-interval", "$([Math]::Max(30, $WatchIntervalSeconds))",
     "--fast-supervisor",
     "--fast-supervisor-interval-seconds", "$([Math]::Max(1, $FastSupervisorIntervalSeconds))",
-    "--fast-supervisor-failure-threshold", "2",
-    "--fast-supervisor-restart-cooldown-seconds", "20",
-    "--fast-supervisor-probe-timeout-seconds", "8",
-    "--fast-supervisor-post-restart-recheck-seconds", "4",
+    "--fast-supervisor-failure-threshold", "$FastSupervisorFailureThreshold",
+    "--fast-supervisor-restart-cooldown-seconds", "$FastSupervisorRestartCooldownSeconds",
+    "--fast-supervisor-probe-timeout-seconds", "$FastSupervisorProbeTimeoutSeconds",
+    "--fast-supervisor-post-restart-recheck-seconds", "$FastSupervisorPostRestartRecheckSeconds",
     "--primary-channel", "$PrimaryChannel",
     "--command", "$OpenClawCommand",
     "--restart-gateway-on-rpc-failure",
     "--attempt-primary-reenable",
-    "--primary-restart-attempts", "2",
+    "--primary-restart-attempts", "$PrimaryRestartAttempts",
     "--recheck-delay-seconds", "8",
     "--report-file", "`"$(Join-Path $repoRoot 'logs\automation\openclaw_maintenance_latest.json')`""
 )

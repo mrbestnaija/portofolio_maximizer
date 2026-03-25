@@ -350,6 +350,11 @@ def test_operator_console_payload_surfaces_wiring_gate_and_activity(tmp_path, mo
                 "warnings": ["channels_status_unavailable"],
                 "errors": [],
                 "steps": {
+                    "fast_supervisor": {
+                        "action": "soft_timeout_skip",
+                        "reason": "channels_status_timeout_softened",
+                        "warnings": ["channels_status_timeout_softened_by_gateway_health"],
+                    },
                     "session_route_reconcile": {
                         "bound_agent_id": "ops",
                         "expected_model": "ollama/qwen3:8b",
@@ -361,8 +366,25 @@ def test_operator_console_payload_surfaces_wiring_gate_and_activity(tmp_path, mo
                         "rpc_ok": True,
                         "service_status": "running",
                         "gateway_listener_pid": 13568,
+                        "primary_channel_issue": "whatsapp_handshake_timeout",
+                        "primary_channel_issue_final": None,
+                        "warnings": ["gateway_detached_listener_conflict"],
                     },
                     "broken_channel_disable": {"disabled": []},
+                    "channels_status_snapshot": {
+                        "channels": {
+                            "whatsapp": {
+                                "configured": True,
+                                "linked": True,
+                                "running": True,
+                                "connected": True,
+                                "reconnectAttempts": 1,
+                                "lastConnectedAt": 1774418027162,
+                                "lastEventAt": 1774418027162,
+                                "lastError": None,
+                            }
+                        }
+                    },
                 },
             }
         ),
@@ -442,12 +464,17 @@ def test_operator_console_payload_surfaces_wiring_gate_and_activity(tmp_path, mo
     assert payload["status"] == "ERROR"
     assert payload["maintenance"]["bound_agent_id"] == "ops"
     assert payload["maintenance"]["expected_model"] == "ollama/qwen3:8b"
+    assert payload["maintenance"]["recovery_mode"] == "channels_status_timeout_softened"
+    assert "gateway_restart_recovered" not in payload["maintenance"]["recovery_events"]
+    assert "whatsapp_handshake_recovered" in payload["maintenance"]["recovery_events"]
+    assert payload["maintenance"]["reconnect_attempts"] == 1
     assert payload["production_gate"]["status"] == "FAIL"
     assert payload["production_gate"]["remaining_trading_days"] == 9
     assert payload["activity"]["short_circuit_events"] == 2
     assert payload["activity"]["tool_calls"] == 1
     assert any(issue["focus"] == "wiring" for issue in payload["issues"])
     assert any(issue["focus"] == "gate" for issue in payload["issues"])
+    assert any("Control-plane recovery evidence captured" in issue["title"] for issue in payload["issues"])
 
 
 # ---------------------------------------------------------------------------

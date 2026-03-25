@@ -1689,6 +1689,8 @@
       const activity = operator.activity || {};
       const issues = Array.isArray(operator.issues) ? operator.issues : [];
       const recentEvents = Array.isArray(activity.recent_events) ? activity.recent_events : [];
+      const recoveryEvents = Array.isArray(maintenance.recovery_events) ? maintenance.recovery_events : [];
+      const reconnectAttempts = Number(maintenance.reconnect_attempts || 0);
       const status = String(operator.status || 'MISSING').toUpperCase();
 
       statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
@@ -1705,17 +1707,28 @@
 
       const primaryChannel = maintenance.primary_channel || 'whatsapp';
       const boundAgent = maintenance.bound_agent_id || '--';
-      primaryEl.textContent = `${primaryChannel} -> ${boundAgent}`;
-      wiringEl.textContent = `${maintenance.expected_model || '--'} / mismatch=${Number(maintenance.duplicate_wrong_agent_keys || 0)}`;
+      primaryEl.textContent = `${primaryChannel} -> ${boundAgent} / reconnects=${reconnectAttempts}`;
+      wiringEl.textContent =
+        `${maintenance.expected_model || '--'} / mismatch=${Number(maintenance.duplicate_wrong_agent_keys || 0)} / recovery=${maintenance.recovery_mode || '--'}`;
       gateEl.textContent = `${productionGate.status || '--'} / proof=${productionGate.proof_status || '--'} / ${Number(productionGate.remaining_trading_days || 0)}d`;
       activityEl.textContent = `${Number(activity.total_events || 0)} evt / fast=${Number(activity.short_circuit_events || 0)} / tools=${Number(activity.tool_calls || 0)}`;
       contextEl.textContent =
         `Context: maintenance=${maintenance.status || '--'} rpc=${maintenance.gateway_rpc_ok === true ? 'up' : maintenance.gateway_rpc_ok === false ? 'down' : '--'} `
+        + `| service=${maintenance.gateway_service_status || '--'} | fast_action=${maintenance.fast_supervisor_action || '--'} `
         + `| gate_age=${productionGate.age_minutes ?? '--'}m | activity_files=${activity.files_scanned ?? 0}`;
 
       listEl.innerHTML = '';
       const rows = [];
       issues.forEach(issue => rows.push(issue));
+      recoveryEvents.slice(0, 3).forEach(event => {
+        rows.push({
+          title: `${primaryChannel}: ${event}`,
+          detail: `Recent control-plane recovery mode: ${maintenance.recovery_mode || event}`,
+          severity: event === 'gateway_detached_listener_conflict' ? 'WARN' : 'INFO',
+          focus: 'runtime',
+          meta: `fast_action=${maintenance.fast_supervisor_action || '--'} reconnect_attempts=${reconnectAttempts}`,
+        });
+      });
       recentEvents.slice(0, 4).forEach(event => {
         const eventLabel = event.event_type || event.type || 'event';
         const channelLabel = event.channel ? `${event.channel}: ` : '';
