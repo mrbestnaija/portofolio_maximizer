@@ -62,6 +62,7 @@ def test_runtime_status_exposes_required_exec_env_signals() -> None:
     for token in (
         "invalid_exec_host",
         "invalid_sandbox_mode",
+        "sandbox_runtime_unavailable",
         "missing_acp_default_agent",
         "exec_env_valid",
     ):
@@ -78,8 +79,12 @@ def test_policy_doc_exists_and_mentions_required_contracts() -> None:
         "acp.defaultagent",
         "enforce_openclaw_exec_environment.py",
         "project_runtime_status.py",
+        "utf-8 bom",
+        "coding",
+        "apply_patch",
         "invalid_exec_host",
         "invalid_sandbox_mode",
+        "sandbox_runtime_unavailable",
         "missing_acp_default_agent",
         "exec_env_valid",
         "openclaw_storm_guard_enabled",

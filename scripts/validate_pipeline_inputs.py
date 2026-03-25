@@ -329,6 +329,7 @@ def check_v2_parquet_coverage(checkpoint_dir: Path) -> List[CheckResult]:
 def check_v3_jsonl_alignment(
     jsonl_path: Path,
     checkpoint_dir: Path,
+    tickers: Optional[List[str]] = None,
 ) -> CheckResult:
     if not jsonl_path.exists():
         return CheckResult(
@@ -368,6 +369,17 @@ def check_v3_jsonl_alignment(
     # All ranges (used for coverage summary display only)
     all_parquet_ranges = [r for ranges in parquet_ranges_by_ticker.values() for r in ranges]
 
+    if not all_parquet_ranges:
+        return CheckResult(
+            "V3.alignment", "FAIL",
+            (
+                f"No readable parquet coverage found in {checkpoint_dir}. "
+                "Cannot validate timestamp alignment. Run ETL bootstrap first "
+                "or fix unreadable checkpoint files."
+            ),
+            {"checkpoint_dir": str(checkpoint_dir)},
+        )
+
     # Parse JSONL
     entries = []
     try:
@@ -393,6 +405,7 @@ def check_v3_jsonl_alignment(
     n_total = len(entries)
     n_alignable = 0
     n_wall_clock = 0
+    n_missing_ticker_coverage = 0
     wall_clock_sample: List[str] = []
     current_year = datetime.now(timezone.utc).year
 
@@ -407,9 +420,25 @@ def check_v3_jsonl_alignment(
             continue
 
         # Ticker-scoped check: only look in parquet ranges for this entry's ticker.
-        # When the entry has no ticker field, fall back to all available parquets
-        # (we can't scope it, so we must check everything).
+        # Ticker derived from: explicit 'ticker' field → signal_id prefix (ts_{TICKER}_...)
+        # → generic fallback when entry has no ticker field.
         entry_ticker = str(e.get("ticker") or "").upper() or None
+        if entry_ticker is None:
+            sig_id = str(e.get("signal_id") or "")
+            if sig_id.startswith("ts_"):
+                parts = sig_id.split("_")
+                if len(parts) >= 2:
+                    entry_ticker = parts[1].upper() or None
+
+        # Track entries for which the requested tickers list has no parquet coverage
+        if tickers and entry_ticker and entry_ticker in {t.upper() for t in tickers}:
+            has_coverage = bool(
+                parquet_ranges_by_ticker.get(entry_ticker)
+                or parquet_ranges_by_ticker.get(None)
+            )
+            if not has_coverage:
+                n_missing_ticker_coverage += 1
+
         candidate_ranges: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
         if entry_ticker:
             candidate_ranges.extend(parquet_ranges_by_ticker.get(entry_ticker, []))
@@ -442,6 +471,7 @@ def check_v3_jsonl_alignment(
         "n_with_features": n_total,
         "n_alignable": n_alignable,
         "n_wall_clock_timestamps": n_wall_clock,
+        "n_missing_ticker_coverage": n_missing_ticker_coverage,
         "pct_alignable": round(pct_alignable * 100, 1),
         "parquet_ranges_checked": len(all_parquet_ranges),
         "wall_clock_sample": wall_clock_sample,
@@ -495,13 +525,15 @@ def check_v4_eval_date_coverage(
     tickers: List[str],
     checkpoint_dir: Path,
 ) -> List[CheckResult]:
-    # Build per-ticker coverage from named parquets first, then fallback
+    # Build per-ticker coverage from named parquets only.  Do NOT fall back to
+    # generic *data_extraction* parquets — they may belong to a different ticker,
+    # which would give MSFT a false PASS using AAPL price data.
     ticker_coverage: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for ticker in tickers:
         ticker_upper = ticker.upper()
         cov_list = []
         named = list(checkpoint_dir.glob(f"*{ticker_upper}*.parquet"))
-        all_parquets = named if named else list(checkpoint_dir.glob("*data_extraction*.parquet"))
+        all_parquets = named
         for path in all_parquets[:5]:  # check up to 5 candidates
             df, err = _load_parquet_safe(path)
             if err or df is None or "Close" not in df.columns:
@@ -731,6 +763,11 @@ def check_v6_edge_cases(
                 detail_parts.append(f"{null_count} missing")
             if malformed_count:
                 detail_parts.append(f"{malformed_count} unparseable")
+            _bad_details = {
+                "null_count": null_count,
+                "malformed_count": malformed_count,
+                "total_with_features": total_feat,
+            }
             results.append(CheckResult(
                 "V6.null_timestamps", "WARN",
                 (
@@ -738,12 +775,18 @@ def check_v6_edge_cases(
                     f"have bad timestamps ({', '.join(detail_parts)}). These entries will "
                     "be skipped during labeling."
                 ),
-                {
-                    "null_count": null_count,
-                    "malformed_count": malformed_count,
-                    "total_with_features": total_feat,
-                },
+                _bad_details,
             ))
+            # Also emit a dedicated malformed check so callers can filter by specific id
+            if malformed_count > 0:
+                results.append(CheckResult(
+                    "V6.malformed_timestamps", "WARN",
+                    (
+                        f"{malformed_count}/{total_feat} JSONL entries have unparseable "
+                        "timestamp strings. These entries will be skipped during labeling."
+                    ),
+                    {"malformed_count": malformed_count, "total_with_features": total_feat},
+                ))
 
     # 6c: Stale training dataset
     if training_path.exists():

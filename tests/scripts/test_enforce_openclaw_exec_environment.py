@@ -58,6 +58,7 @@ def test_enforce_config_file_uses_exec_host_conf_when_host_not_provided(
     conf_path = tmp_path / "exec_host.conf"
     conf_path.write_text("tools.exec.host=sandbox\n", encoding="utf-8")
     monkeypatch.setattr(mod, "DEFAULT_EXEC_HOST_CONF", conf_path)
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: True)
 
     report = mod.enforce_config_file(
         config_path=cfg_path,
@@ -89,3 +90,89 @@ def test_enforce_config_file_missing_config_returns_error(tmp_path: Path) -> Non
     )
     assert report["ok"] is False
     assert str(report["error"]).startswith("config_missing:")
+
+
+def test_enforce_config_file_accepts_utf8_bom(tmp_path: Path, monkeypatch) -> None:
+    cfg_path = tmp_path / "openclaw.json"
+    payload = {"tools": {"exec": {"host": "node"}}, "agents": {"defaults": {"sandbox": {"mode": "non-main"}}}}
+    cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: True)
+
+    report = mod.enforce_config_file(
+        config_path=cfg_path,
+        preferred_host="node",
+        sandbox_mode_for_sandbox_host="non-main",
+        ensure_acp_default_agent=True,
+        preferred_agent="ops",
+        dry_run=False,
+    )
+
+    assert report["ok"] is True
+    updated = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert updated["tools"]["exec"]["host"] == "node"
+    assert updated["acp"]["defaultAgent"] == "ops"
+
+
+def test_enforce_exec_environment_repairs_exec_capable_agent_sandbox_overrides() -> None:
+    cfg = {
+        "agents": {
+            "defaults": {"sandbox": {"mode": "non-main", "scope": "agent"}},
+            "list": [
+                {"id": "ops", "tools": {"profile": "full"}, "sandbox": {"mode": "off"}},
+                {
+                    "id": "training",
+                    "tools": {"profile": "coding", "allow": ["exec"]},
+                    "sandbox": {"mode": "main"},
+                },
+                {
+                    "id": "notifier",
+                    "tools": {"profile": "messaging", "deny": ["exec"]},
+                    "sandbox": {"mode": "off"},
+                },
+            ],
+        },
+        "tools": {"exec": {"host": "sandbox"}},
+    }
+
+    out, changes = mod.enforce_exec_environment(
+        cfg,
+        preferred_host="sandbox",
+        sandbox_mode_for_sandbox_host="non-main",
+        ensure_acp_default_agent=False,
+        preferred_agent="",
+    )
+
+    agents = {agent["id"]: agent for agent in out["agents"]["list"]}
+    assert agents["ops"]["sandbox"]["mode"] == "non-main"
+    assert agents["training"]["sandbox"]["mode"] == "non-main"
+    assert agents["notifier"]["sandbox"]["mode"] == "off"
+    assert any("agents.list[ops].sandbox.mode" in change for change in changes)
+    assert any("agents.list[training].sandbox.mode" in change for change in changes)
+
+
+def test_enforce_config_file_falls_back_to_node_when_docker_sandbox_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cfg_path = tmp_path / "openclaw.json"
+    cfg_path.write_text(json.dumps({"tools": {"exec": {"host": "sandbox"}}}), encoding="utf-8")
+
+    conf_path = tmp_path / "exec_host.conf"
+    conf_path.write_text("tools.exec.host=sandbox\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "DEFAULT_EXEC_HOST_CONF", conf_path)
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: False)
+
+    report = mod.enforce_config_file(
+        config_path=cfg_path,
+        preferred_host="",
+        sandbox_mode_for_sandbox_host="non-main",
+        ensure_acp_default_agent=True,
+        preferred_agent="",
+        dry_run=False,
+    )
+
+    updated = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["host"] == "node"
+    assert report["requested_host"] == "sandbox"
+    assert report["fallback_reason"] == "docker_sandbox_unavailable"
+    assert updated["tools"]["exec"]["host"] == "node"

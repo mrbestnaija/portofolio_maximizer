@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -27,6 +28,7 @@ DEFAULT_EXEC_HOST_CONF = PROJECT_ROOT / "config" / "exec_host.conf"
 VALID_EXEC_HOSTS = {"sandbox", "gateway", "node"}
 VALID_SANDBOX_MODES = {"off", "main", "non-main", "all"}
 VALID_SANDBOX_MODES_FOR_SANDBOX_HOST = {"non-main", "all"}
+DEFAULT_SANDBOX_FALLBACK_HOST = "node"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -42,8 +44,12 @@ def _ensure_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
     return child
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _read_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     return payload if isinstance(payload, dict) else {}
 
 
@@ -71,6 +77,19 @@ def _parse_exec_host_conf(path: Path) -> str:
             return host
         return ""
     return ""
+
+
+def _docker_sandbox_available(timeout_seconds: float = 5.0) -> bool:
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return int(proc.returncode) == 0
 
 
 def _agent_ids(cfg: dict[str, Any]) -> list[str]:
@@ -103,6 +122,20 @@ def _default_agent_from_list(cfg: dict[str, Any]) -> str:
             if aid:
                 return aid
     return ""
+
+
+def _agent_allows_exec(agent: dict[str, Any]) -> bool:
+    tools = _as_dict(agent.get("tools"))
+    deny = {str(item).strip().lower() for item in _as_list(tools.get("deny")) if str(item).strip()}
+    if "exec" in deny or "group:runtime" in deny:
+        return False
+
+    allow = {str(item).strip().lower() for item in _as_list(tools.get("allow")) if str(item).strip()}
+    if allow:
+        return "exec" in allow or "group:runtime" in allow
+
+    profile = str(tools.get("profile") or "").strip().lower()
+    return profile != "messaging"
 
 
 def _pick_acp_default_agent(cfg: dict[str, Any], preferred_agent: str) -> str:
@@ -175,6 +208,26 @@ def enforce_exec_environment(
             sandbox["scope"] = "agent"
             changes.append("agents.defaults.sandbox.scope:<unset>->agent")
 
+        for agent in _as_list(agents.get("list")):
+            if not isinstance(agent, dict) or not _agent_allows_exec(agent):
+                continue
+            aid = str(agent.get("id") or "?").strip() or "?"
+            agent_sandbox = _ensure_dict(agent, "sandbox")
+            current_agent_mode = str(agent_sandbox.get("mode") or "").strip().lower()
+            if current_agent_mode not in VALID_SANDBOX_MODES_FOR_SANDBOX_HOST:
+                agent_sandbox["mode"] = mode_target
+                changes.append(
+                    f"agents.list[{aid}].sandbox.mode:{current_agent_mode or '<unset>'}->{mode_target}"
+                )
+            elif current_agent_mode != mode_target:
+                agent_sandbox["mode"] = mode_target
+                changes.append(f"agents.list[{aid}].sandbox.mode:{current_agent_mode}->{mode_target}")
+
+            current_agent_scope = str(agent_sandbox.get("scope") or "").strip().lower()
+            if not current_agent_scope:
+                agent_sandbox["scope"] = "agent"
+                changes.append(f"agents.list[{aid}].sandbox.scope:<unset>->agent")
+
     if ensure_acp_default_agent:
         acp = _ensure_dict(out, "acp")
         agent = _pick_acp_default_agent(out, preferred_agent)
@@ -215,9 +268,15 @@ def enforce_config_file(
             "changes": [],
         }
 
-    effective_host = str(preferred_host or "").strip().lower()
-    if effective_host not in VALID_EXEC_HOSTS:
-        effective_host = _parse_exec_host_conf(DEFAULT_EXEC_HOST_CONF) or "sandbox"
+    requested_host = str(preferred_host or "").strip().lower()
+    if requested_host not in VALID_EXEC_HOSTS:
+        requested_host = _parse_exec_host_conf(DEFAULT_EXEC_HOST_CONF) or "sandbox"
+
+    effective_host = requested_host
+    fallback_reason = ""
+    if effective_host == "sandbox" and not _docker_sandbox_available():
+        effective_host = DEFAULT_SANDBOX_FALLBACK_HOST
+        fallback_reason = "docker_sandbox_unavailable"
 
     updated, changes = enforce_exec_environment(
         cfg,
@@ -245,7 +304,9 @@ def enforce_config_file(
         "changed": changed,
         "dry_run": bool(dry_run),
         "config_path": str(config_path),
+        "requested_host": requested_host,
         "host": effective_host,
+        "fallback_reason": fallback_reason,
         "changes": changes,
     }
 
@@ -303,6 +364,12 @@ def main(argv: list[str]) -> int:
             f"changed={int(bool(report.get('changed')))} host={report.get('host')} "
             f"path={report.get('config_path')}"
         )
+        if report.get("fallback_reason"):
+            print(
+                "[enforce_openclaw_exec_environment] "
+                f"requested_host={report.get('requested_host')} "
+                f"fallback_reason={report.get('fallback_reason')}"
+            )
         for item in report.get("changes", []):
             print(f"[enforce_openclaw_exec_environment] {item}")
     return 0 if bool(report.get("ok")) else 1

@@ -213,15 +213,22 @@ def _compute_price_features(close: pd.Series) -> Dict[str, float]:
 def _find_parquets_for_ticker(
     ticker: str,
     checkpoint_dir: Path,
+    strict: bool = False,
 ) -> List[Path]:
     """
     Return candidate parquets for ticker in descending size order.
 
     First tries the original filename-based pattern (ticker in name),
     then falls back to scanning all parquets and selecting those whose
-    date index is consistent with having the right kind of financial data.
-    Since each bootstrap ETL run produces one parquet per ticker run,
-    we return ALL candidates and let the caller pick by date coverage.
+    ticker column contains this ticker.
+
+    *strict=True* (multi-ticker runs): generic fallback is disabled.
+    Returns [] if no ticker-specific parquet is found, so the caller
+    can signal an ambiguous/missing error instead of silently training
+    on another ticker's prices.
+
+    When multiple generic parquets with no ticker column exist (ambiguous),
+    returns [] regardless of strict mode.
     """
     ticker_upper = ticker.upper()
 
@@ -235,13 +242,18 @@ def _find_parquets_for_ticker(
     if primary:
         return primary
 
+    # Strict mode: refuse generic fallback for multi-ticker runs
+    if strict:
+        return []
+
     # Fallback: scan all data_extraction parquets and keep only those that contain
     # a 'ticker' column whose values include this ticker.  This prevents one ticker
     # from silently training on another ticker's prices when parquet filenames are
     # generic (e.g. pipeline_20260101_data_extraction_*.parquet).
     # Files whose ticker column is absent or ambiguous are still included as last-
     # resort candidates so we don't break setups with single-ticker generic parquets.
-    ticker_upper = ticker.upper()
+    # EXCEPT: if multiple generic parquets exist with no ticker column, return [] —
+    # it's ambiguous which one to use.
     with_match: List[Path] = []
     without_ticker_col: List[Path] = []
 
@@ -265,19 +277,35 @@ def _find_parquets_for_ticker(
             # fall through to the generic bucket.
             without_ticker_col.append(path)
 
-    return with_match if with_match else without_ticker_col
+    if with_match:
+        return with_match
+    # Ambiguous: multiple generic parquets with no ticker column → cannot pick safely
+    if len(without_ticker_col) > 1:
+        return []
+    return without_ticker_col
 
 
 def _load_best_parquet(
     ticker: str,
     checkpoint_dir: Path,
     parquet_path: Optional[Path] = None,
+    known_tickers: Optional[List[str]] = None,
 ) -> Optional[pd.DataFrame]:
-    """Load price DataFrame for ticker. Returns None if not found."""
+    """Load price DataFrame for ticker. Returns None if not found or ambiguous.
+
+    When *known_tickers* contains more than one ticker (multi-ticker run) we
+    require a ticker-specific parquet and refuse to fall back to a generic
+    *data_extraction* file — that file belongs to some other ticker and would
+    silently contaminate labels.
+    """
     if parquet_path is not None:
         candidates = [parquet_path]
     else:
-        candidates = _find_parquets_for_ticker(ticker, checkpoint_dir)
+        # Strict mode: multi-ticker runs must have a ticker-named parquet.
+        multi_ticker_run = known_tickers is not None and len(known_tickers) > 1
+        candidates = _find_parquets_for_ticker(
+            ticker, checkpoint_dir, strict=multi_ticker_run
+        )
 
     for path in candidates[:5]:  # try up to 5 candidates
         try:
@@ -477,6 +505,14 @@ def main(argv: Optional[list] = None) -> int:
                         help=f"Forward bars for price label (default: {_DEFAULT_HORIZON})")
     parser.add_argument("--output", default=str(_OUTPUT_PARQUET),
                         help=f"Output parquet path (default: {_OUTPUT_PARQUET})")
+    parser.add_argument(
+        "--allow-partial", action="store_true",
+        help=(
+            "Allow partial runs where some requested tickers have no parquet. "
+            "When set, missing tickers are skipped (status=missing_parquet in "
+            "ticker_results) instead of causing a hard failure (rc=1)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     tickers = [t.strip().upper() for t in args.ticker.split(",") if t.strip()]
@@ -510,11 +546,29 @@ def main(argv: Optional[list] = None) -> int:
 
     total_new = 0
     tickers_satisfied = 0
+    ticker_results: Dict[str, Dict[str, Any]] = {}
+    multi_ticker_run = len(tickers) > 1
+
     for ticker in tickers:
         parquet_path = Path(args.parquet) if args.parquet else None
-        price_df = _load_best_parquet(ticker, checkpoint_dir, parquet_path)
+        price_df = _load_best_parquet(
+            ticker, checkpoint_dir, parquet_path,
+            known_tickers=tickers if multi_ticker_run else None,
+        )
         if price_df is None:
-            logger.warning("Skipping %s — no usable parquet found", ticker)
+            # Determine why: ambiguous (multiple generic) vs simply missing
+            generic_candidates = list(checkpoint_dir.glob("*data_extraction*.parquet"))
+            ticker_named = list(checkpoint_dir.glob(f"*{ticker.upper()}*.parquet"))
+            if not ticker_named and len(generic_candidates) > 1:
+                selection_status = "ambiguous_parquet"
+            else:
+                selection_status = "missing_parquet"
+            logger.warning("Skipping %s — %s", ticker, selection_status)
+            ticker_results[ticker] = {
+                "status": selection_status,
+                "generated_rows": 0,
+                "new_rows_added": 0,
+            }
             continue
 
         rows = generate_labels(
@@ -528,8 +582,18 @@ def main(argv: Optional[list] = None) -> int:
         total_new += added
         if added > 0:
             tickers_satisfied += 1
+        ticker_results[ticker] = {
+            "status": "ok",
+            "generated_rows": len(rows),
+            "new_rows_added": added,
+        }
 
     summary = _write_summary(output_path, _SUMMARY_PATH)
+    summary["ticker_results"] = ticker_results
+    summary["requested_tickers"] = tickers
+    summary["allow_partial"] = bool(getattr(args, "allow_partial", False))
+    _SUMMARY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
     n_labeled = summary.get("n_labeled", 0)
     cold_start = summary.get("cold_start", True)
 
@@ -540,12 +604,22 @@ def main(argv: Optional[list] = None) -> int:
         f"new_rows_added={total_new}"
     )
 
+    # Hard fail when any ticker has a parquet problem and --allow-partial not set.
+    failed_tickers = [
+        t for t, r in ticker_results.items()
+        if r["status"] in ("missing_parquet", "ambiguous_parquet")
+    ]
+    if failed_tickers and not getattr(args, "allow_partial", False):
+        logger.error(
+            "Parquet selection failed for ticker(s) %s — use --allow-partial to skip. "
+            "Returning rc=1.",
+            failed_tickers,
+        )
+        return 1
+
     # Fail when every requested ticker produced 0 new rows and no prior dataset
     # exists.  Without this guard, callers receive rc=0 while training on stale
     # data from a previous run — silently misrepresenting coverage.
-    # If a prior dataset exists we return rc=0 because the existing data is still
-    # valid (operator may be re-running with same inputs).  cold_start=True is the
-    # canonical signal that no usable dataset exists.
     if total_new == 0 and not output_path.exists():
         logger.error(
             "No new rows added for any of the requested tickers (%s) and no prior "

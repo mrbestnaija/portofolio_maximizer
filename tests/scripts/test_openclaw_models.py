@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import pytest
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from scripts import openclaw_models as mod
 
@@ -75,3 +77,20 @@ def test_sync_explicit_agent_models_aligns_core_agents_to_primary() -> None:
     assert synced[1]["model"] == "ollama/qwen3:8b"
     assert synced[2]["model"] == "ollama/deepseek-r1:8b"
     assert synced[3]["model"] == "ollama/qwen3:8b"
+
+
+def test_update_openclaw_json_agents_list_accepts_utf8_bom(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / ".openclaw"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "openclaw.json"
+    config_path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"agents": {"list": []}}).encode("utf-8"))
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+
+    result = mod._update_openclaw_json_agents_list(
+        agents_list=[{"id": "ops", "model": "ollama/qwen3:8b"}],
+        dry_run=False,
+    )
+
+    assert result.ok is True
+    updated = json.loads(config_path.read_text(encoding="utf-8"))
+    assert updated["agents"]["list"] == [{"id": "ops", "model": "ollama/qwen3:8b"}]

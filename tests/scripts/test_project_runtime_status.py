@@ -21,6 +21,22 @@ def test_exec_env_check_flags_invalid_host(monkeypatch, tmp_path) -> None:
     assert check["signals"] == ["invalid_exec_host"]
 
 
+def test_exec_env_check_accepts_utf8_bom(monkeypatch, tmp_path) -> None:
+    cfg_path = tmp_path / ".openclaw" / "openclaw.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "tools": {"exec": {"host": "node"}},
+        "agents": {"defaults": {"sandbox": {"mode": "non-main"}}},
+        "acp": {"defaultAgent": "ops"},
+    }
+    cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+
+    check = mod._openclaw_exec_environment_check()
+    assert check["ok"] is True
+    assert check["signals"] == ["exec_env_valid"]
+
+
 def test_exec_env_check_flags_invalid_sandbox_mode(monkeypatch, tmp_path) -> None:
     _write_openclaw(
         tmp_path,
@@ -61,10 +77,52 @@ def test_exec_env_check_passes_with_valid_values(monkeypatch, tmp_path) -> None:
         },
     )
     monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: True)
 
     check = mod._openclaw_exec_environment_check()
     assert check["ok"] is True
     assert check["signals"] == ["exec_env_valid"]
+
+
+def test_exec_env_check_flags_invalid_agent_override(monkeypatch, tmp_path) -> None:
+    _write_openclaw(
+        tmp_path,
+        {
+            "tools": {"exec": {"host": "sandbox"}},
+            "agents": {
+                "defaults": {"sandbox": {"mode": "non-main"}},
+                "list": [
+                    {"id": "ops", "tools": {"profile": "full"}, "sandbox": {"mode": "off"}},
+                    {"id": "notifier", "tools": {"profile": "messaging", "deny": ["exec"]}},
+                ],
+            },
+            "acp": {"defaultAgent": "ops"},
+        },
+    )
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: True)
+
+    check = mod._openclaw_exec_environment_check()
+    assert check["ok"] is False
+    assert check["signals"] == ["invalid_sandbox_mode"]
+    assert "ops" in check["stderr"]
+
+
+def test_exec_env_check_flags_unavailable_docker_sandbox(monkeypatch, tmp_path) -> None:
+    _write_openclaw(
+        tmp_path,
+        {
+            "tools": {"exec": {"host": "sandbox"}},
+            "agents": {"defaults": {"sandbox": {"mode": "non-main"}}},
+            "acp": {"defaultAgent": "ops"},
+        },
+    )
+    monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: False)
+
+    check = mod._openclaw_exec_environment_check()
+    assert check["ok"] is False
+    assert check["signals"] == ["sandbox_runtime_unavailable"]
 
 
 def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monkeypatch, tmp_path) -> None:

@@ -22,6 +22,12 @@ code contract, not a guideline.
 2. Sandbox host compatibility is fixed:
 - when `tools.exec.host=sandbox`, `agents.defaults.sandbox.mode` must be
   `non-main` or `all`.
+- exec-capable agent entries in `agents.list` must not override sandbox back to
+  `off` or `main`, because that disables the sandbox runtime for embedded
+  WhatsApp/cron sessions even when defaults are valid.
+- when `tools.exec.host=sandbox`, the Docker-backed sandbox runtime must be
+  available on the host; otherwise enforcement must fall back to `node` or
+  `gateway` instead of leaving the config in a known-bad state.
 
 3. ACP default agent is required when ACP is configured:
 - `acp.defaultAgent` must be present and resolve to an agent id.
@@ -38,6 +44,7 @@ code contract, not a guideline.
   with explicit signals:
   - `invalid_exec_host`
   - `invalid_sandbox_mode`
+  - `sandbox_runtime_unavailable`
   - `missing_acp_default_agent`
   - `exec_env_valid`
 
@@ -47,7 +54,17 @@ code contract, not a guideline.
   - `scripts/project_runtime_status.py`
   - `scripts/verify_openclaw_config.py`
 
-7. Notification storm suppression is mandatory:
+7. OpenClaw config readers must tolerate UTF-8 BOM:
+- Scripts that read `~/.openclaw/openclaw.json` must accept BOM-prefixed JSON
+  (`utf-8-sig` or equivalent), because PowerShell/manual edits can introduce a
+  BOM even when the JSON content is otherwise valid.
+
+8. Cron-agent tool policy should avoid noisy profile expansion:
+- `trading` and `training` should prefer explicit `tools.allow` / `tools.deny`
+  policy over the built-in `coding` profile on affected OpenClaw builds, so
+  embedded runs do not emit false `apply_patch` unknown-entry warnings.
+
+9. Notification storm suppression is mandatory:
 - `utils/openclaw_cli.py` must keep persistent cross-process storm protection
   enabled by default via `OPENCLAW_STORM_GUARD_ENABLED`.
 - Repeated retryable transport failures must trigger adaptive cooldown using:

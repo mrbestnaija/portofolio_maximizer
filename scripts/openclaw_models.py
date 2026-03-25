@@ -162,7 +162,7 @@ def _update_openclaw_json_agents_list(
         return _CmdResult(ok=True, returncode=0, stdout="", stderr="")
 
     try:
-        raw = config_path.read_text(encoding="utf-8")
+        raw = config_path.read_text(encoding="utf-8-sig")
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return _CmdResult(False, 1, "", "openclaw.json root is not an object")

@@ -32,6 +32,66 @@ def _trim(text: str, max_chars: int = 1400) -> str:
     return raw[:max_chars] + "\n...[truncated]..."
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _agent_allows_exec(agent: dict[str, Any]) -> bool:
+    tools = _as_dict(agent.get("tools"))
+    deny = {str(item).strip().lower() for item in _as_list(tools.get("deny")) if str(item).strip()}
+    if "exec" in deny or "group:runtime" in deny:
+        return False
+
+    allow = {str(item).strip().lower() for item in _as_list(tools.get("allow")) if str(item).strip()}
+    if allow:
+        return "exec" in allow or "group:runtime" in allow
+
+    profile = str(tools.get("profile") or "").strip().lower()
+    return profile != "messaging"
+
+
+def _invalid_sandbox_override_agents(cfg: dict[str, Any]) -> list[str]:
+    tools = _as_dict(cfg.get("tools"))
+    exec_cfg = _as_dict(tools.get("exec"))
+    host = str(exec_cfg.get("host") or "").strip().lower()
+    if host != "sandbox":
+        return []
+
+    agents = _as_dict(cfg.get("agents"))
+    invalid: list[str] = []
+    for agent in _as_list(agents.get("list")):
+        if not isinstance(agent, dict) or not _agent_allows_exec(agent):
+            continue
+        sandbox = _as_dict(agent.get("sandbox"))
+        mode = str(sandbox.get("mode") or "").strip().lower()
+        if mode and mode not in VALID_SANDBOX_MODES_FOR_SANDBOX_HOST:
+            aid = str(agent.get("id") or "?").strip() or "?"
+            invalid.append(aid)
+    return invalid
+
+
+def _docker_sandbox_available(timeout_seconds: float = 5.0) -> bool:
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return int(proc.returncode) == 0
+
+
+def _read_openclaw_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    return payload if isinstance(payload, dict) else {}
+
+
 def _run_check(
     name: str,
     cmd: list[str],
@@ -104,12 +164,9 @@ def _openclaw_exec_environment_check() -> dict[str, Any]:
         check["stderr"] = f"openclaw config missing: {cfg_path}"
         return check
     try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg = _read_openclaw_json(cfg_path)
     except Exception as exc:
         check["stderr"] = f"openclaw config unreadable: {exc}"
-        return check
-    if not isinstance(cfg, dict):
-        check["stderr"] = "openclaw config is not a JSON object"
         return check
 
     tools = cfg.get("tools", {}) if isinstance(cfg.get("tools"), dict) else {}
@@ -129,6 +186,19 @@ def _openclaw_exec_environment_check() -> dict[str, Any]:
         check["stderr"] = "agents.defaults.sandbox.mode invalid for sandbox host"
         return check
 
+    if host == "sandbox" and not _docker_sandbox_available():
+        check["signals"] = ["sandbox_runtime_unavailable"]
+        check["stderr"] = "docker daemon unavailable for sandbox host"
+        return check
+
+    invalid_override_agents = _invalid_sandbox_override_agents(cfg)
+    if invalid_override_agents:
+        check["signals"] = ["invalid_sandbox_mode"]
+        check["stderr"] = (
+            "sandbox disabled by agent override(s): " + ",".join(sorted(invalid_override_agents))
+        )
+        return check
+
     acp = cfg.get("acp", {}) if isinstance(cfg.get("acp"), dict) else {}
     default_agent = str(acp.get("defaultAgent") or "").strip()
     if not default_agent:
@@ -139,7 +209,10 @@ def _openclaw_exec_environment_check() -> dict[str, Any]:
     check["ok"] = True
     check["returncode"] = 0
     check["signals"] = ["exec_env_valid"]
-    check["stdout"] = f"host={host} sandbox_mode={sandbox_mode or '<unset>'} acp.defaultAgent={default_agent}"
+    check["stdout"] = (
+        f"host={host} sandbox_mode={sandbox_mode or '<unset>'} "
+        f"acp.defaultAgent={default_agent} invalid_agent_overrides=0"
+    )
     return check
 
 

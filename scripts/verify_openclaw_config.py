@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,6 +35,41 @@ VALID_EXEC_HOSTS: frozenset = frozenset({"sandbox", "gateway", "node"})
 VALID_SANDBOX_MODES_FOR_SANDBOX_HOST: frozenset = frozenset({"non-main", "all"})
 
 
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else []
+
+
+def _agent_allows_exec(agent: dict) -> bool:
+    tools = _as_dict(agent.get("tools"))
+    deny = {str(item).strip().lower() for item in _as_list(tools.get("deny")) if str(item).strip()}
+    if "exec" in deny or "group:runtime" in deny:
+        return False
+
+    allow = {str(item).strip().lower() for item in _as_list(tools.get("allow")) if str(item).strip()}
+    if allow:
+        return "exec" in allow or "group:runtime" in allow
+
+    profile = str(tools.get("profile") or "").strip().lower()
+    return profile != "messaging"
+
+
+def _docker_sandbox_available(timeout_seconds: float = 5.0) -> bool:
+    try:
+        proc = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return int(proc.returncode) == 0
+
+
 def _env_enabled(raw: str | None, *, default: bool) -> bool:
     text = str(raw or "").strip().lower()
     if not text:
@@ -42,7 +78,16 @@ def _env_enabled(raw: str | None, *, default: bool) -> bool:
 
 
 def _load_cfg() -> dict:
-    return json.loads(OPENCLAW_JSON.read_text(encoding="utf-8"))
+    return json.loads(OPENCLAW_JSON.read_text(encoding="utf-8-sig"))
+
+
+def _describe_agent_tools_policy(agent_tools: dict) -> str:
+    profile = str(agent_tools.get("profile") or "").strip()
+    if profile:
+        return f"tools.profile={profile}"
+    if _as_list(agent_tools.get("allow")) or _as_list(agent_tools.get("deny")):
+        return "tools.policy=explicit"
+    return "tools.profile=<inherit>"
 
 
 def _load_env() -> dict:
@@ -323,6 +368,10 @@ def main() -> int:
     agent_list = cfg.get("agents", {}).get("list", [])
     bindings = cfg.get("bindings", [])
     tools_cfg = cfg.get("tools", {})
+    exec_host = str(cfg.get("tools", {}).get("exec", {}).get("host", "") or "").strip().lower()
+
+    if exec_host == "sandbox" and not _docker_sandbox_available():
+        issues.append("[ERROR] Docker daemon unavailable for tools.exec.host='sandbox'; use gateway/node fallback on this host")
 
     if not agent_list:
         warnings.append("No agents.list defined (single-agent mode, may cause session contention)")
@@ -367,9 +416,18 @@ def main() -> int:
 
             # Tool sandboxing
             agent_tools = agent.get("tools", {})
-            profile = agent_tools.get("profile", "full")
             deny = agent_tools.get("deny", [])
-            ok.append(f"  {aid}: tools.profile={profile}, deny={deny or '[]'}")
+            ok.append(f"  {aid}: {_describe_agent_tools_policy(agent_tools)}, deny={deny or '[]'}")
+
+            if exec_host == "sandbox" and _agent_allows_exec(agent):
+                agent_sandbox = _as_dict(agent.get("sandbox"))
+                agent_mode = str(agent_sandbox.get("mode") or "").strip().lower()
+                if agent_mode and agent_mode not in VALID_SANDBOX_MODES_FOR_SANDBOX_HOST:
+                    issues.append(
+                        f"[ERROR] Agent {aid} sandbox.mode={agent_mode!r} overrides sandbox host and disables exec sessions"
+                    )
+                else:
+                    ok.append(f"  {aid}: sandbox.mode = {agent_mode or '<inherit>'}")
 
         missing_agents = expected_agents - found_agents
         if missing_agents:

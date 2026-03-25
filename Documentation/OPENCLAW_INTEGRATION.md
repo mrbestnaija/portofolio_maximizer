@@ -55,6 +55,9 @@ the enforcement script before running OpenClaw maintenance flows:
 
 - Windows path: runs `scripts/enforce_openclaw_exec_environment.py` before maintenance.
 - WSL path: runs the same enforcement command inside WSL before invoking cron maintenance.
+- If `tools.exec.host=sandbox` is preferred but Docker is unavailable, the
+  enforcement step automatically falls back to `node` on that host so cron and
+  WhatsApp agent turns do not fail on sandbox-image inspection.
 
 Runtime health snapshot:
 
@@ -63,7 +66,10 @@ Runtime health snapshot:
 The runtime status payload now includes explicit `openclaw_exec_env` signals:
 
 - `invalid_exec_host` (`tools.exec.host` not in `sandbox|gateway|node`)
-- `invalid_sandbox_mode` (when host is `sandbox` but sandbox mode is not `non-main|all`)
+- `invalid_sandbox_mode` (when host is `sandbox` but defaults or exec-capable
+  agent overrides are not `non-main|all`)
+- `sandbox_runtime_unavailable` (when host is `sandbox` but the Docker-backed
+  sandbox runtime is not reachable)
 - `missing_acp_default_agent`
 - `exec_env_valid`
 
@@ -836,9 +842,14 @@ Reference: https://docs.openclaw.ai/concepts/multi-agent
 | Agent | Role | Tools Profile | Key Restrictions |
 |-------|------|---------------|------------------|
 | **ops** (default) | System health, cron jobs, general queries | `full` | None (full access) |
-| **trading** | PnL monitoring, signal quality, execution status | `coding` | No write/edit/messaging |
-| **training** | Model training, backtesting, heavy analysis | `coding` | No messaging/browser |
+| **trading** | PnL monitoring, signal quality, execution status | explicit allow/deny | No write/edit/messaging |
+| **training** | Model training, backtesting, heavy analysis | explicit allow/deny | No messaging/browser |
 | **notifier** | Alert delivery to WhatsApp/Telegram | `messaging` | No exec/write/edit/fs |
+
+`trading` and `training` intentionally avoid the built-in OpenClaw
+`coding` profile on current 2026.2.26 builds. PMX uses explicit allow/deny
+tool policy there instead, which preserves the same restrictions without the
+false `tools.profile (coding) ... unknown entries (apply_patch)` warning.
 
 ### Routing (Bindings)
 
