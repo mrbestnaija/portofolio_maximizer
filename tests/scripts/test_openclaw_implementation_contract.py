@@ -51,6 +51,8 @@ def test_guardian_enforces_exec_env_before_watch_launch() -> None:
     text = _read_repo_file("scripts/start_openclaw_guardian.ps1")
     assert '$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")' in text
     assert "& $pythonExe @execEnvArgs" in text
+    assert '[bool]$DisableBrokenChannels = $true' in text
+    assert '$args += "--disable-broken-channels"' in text
     assert "$proc = Start-Process" in text
     assert text.index("& $pythonExe @execEnvArgs") < text.index("$proc = Start-Process")
 

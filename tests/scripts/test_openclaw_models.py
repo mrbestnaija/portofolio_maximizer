@@ -18,7 +18,6 @@ def test_default_model_order_prefers_qwen35_when_available() -> None:
     assert "qwen3:8b" in order
 
 
-@pytest.mark.xfail(reason="qwen3.5:27b not yet in production model list")
 def test_promote_tool_primary_accepts_qwen35() -> None:
     promoted = mod._promote_tool_primary(["deepseek-r1:8b", "qwen3.5:27b", "qwen3:8b"])
     assert promoted[0] == "qwen3.5:27b"
@@ -57,8 +56,7 @@ def test_run_openclaw_forces_utf8_replace_on_windows_safe_output(monkeypatch) ->
     assert kwargs["errors"] == "replace"
 
 
-@pytest.mark.xfail(reason="_sync_explicit_agent_models not yet implemented in openclaw_models.py")
-def test_sync_explicit_agent_models_promotes_local_qwen_agents_to_primary() -> None:
+def test_sync_explicit_agent_models_aligns_core_agents_to_primary() -> None:
     agents = [
         {"id": "ops", "model": "ollama/qwen3:8b"},
         {"id": "training", "model": "ollama/qwen3.5:27b"},
@@ -68,12 +66,12 @@ def test_sync_explicit_agent_models_promotes_local_qwen_agents_to_primary() -> N
 
     synced, updated_ids, changed = mod._sync_explicit_agent_models(
         agents_list=agents,
-        primary="ollama/qwen3.5:27b",
+        primary="ollama/qwen3:8b",
     )
 
     assert changed is True
-    assert updated_ids == ["ops", "notifier"]
-    assert synced[0]["model"] == "ollama/qwen3.5:27b"
-    assert synced[1]["model"] == "ollama/qwen3.5:27b"
+    assert updated_ids == ["training", "notifier"]
+    assert synced[0]["model"] == "ollama/qwen3:8b"
+    assert synced[1]["model"] == "ollama/qwen3:8b"
     assert synced[2]["model"] == "ollama/deepseek-r1:8b"
-    assert synced[3]["model"] == "ollama/qwen3.5:27b"
+    assert synced[3]["model"] == "ollama/qwen3:8b"

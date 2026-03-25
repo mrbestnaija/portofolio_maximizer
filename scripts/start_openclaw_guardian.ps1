@@ -2,6 +2,7 @@ Param(
     [int]$WatchIntervalSeconds = 120,
     [int]$FastSupervisorIntervalSeconds = 5,
     [string]$PrimaryChannel = "whatsapp",
+    [bool]$DisableBrokenChannels = $true,
     [switch]$NoApply,
     [string]$OpenClawCommand = "",
     [string]$IntegrityUnlinkedCloseWhitelistIds = "",
@@ -145,6 +146,9 @@ $args = @(
 )
 if (-not $NoApply) {
     $args += "--apply"
+}
+if ($DisableBrokenChannels) {
+    $args += "--disable-broken-channels"
 }
 
 $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds

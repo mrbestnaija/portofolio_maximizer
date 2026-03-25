@@ -399,6 +399,36 @@
           </div>
         </div>
         <div class="card">
+          <h3>Operator Console</h3>
+          <div class="subtitle">OpenClaw wiring, production gate pressure, and recent operator activity/logs.</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Runtime</div>
+              <div class="value" id="operator-status">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Primary Lane</div>
+              <div class="value" id="operator-primary">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Wiring</div>
+              <div class="value" id="operator-wiring">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Gate</div>
+              <div class="value" id="operator-gate">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Activity</div>
+              <div class="value" id="operator-activity">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="operator-context" style="margin-top:8px;">Context: --</div>
+          <div class="audit-list" id="operator-issues">
+            <div class="audit-empty">No operator evidence loaded.</div>
+          </div>
+        </div>
+        <div class="card">
           <h3>Model Diagnostics</h3>
           <div class="subtitle">Performance + risk stats (latest performance_metrics row or derived)</div>
           <div class="diag-grid">
@@ -1643,6 +1673,87 @@
       });
     }
 
+    function renderOperatorConsole(data) {
+      const listEl = document.getElementById('operator-issues');
+      const statusEl = document.getElementById('operator-status');
+      const primaryEl = document.getElementById('operator-primary');
+      const wiringEl = document.getElementById('operator-wiring');
+      const gateEl = document.getElementById('operator-gate');
+      const activityEl = document.getElementById('operator-activity');
+      const contextEl = document.getElementById('operator-context');
+      if (!listEl || !statusEl || !primaryEl || !wiringEl || !gateEl || !activityEl || !contextEl) return;
+
+      const operator = data?.operator_console || {};
+      const maintenance = operator.maintenance || {};
+      const productionGate = operator.production_gate || {};
+      const activity = operator.activity || {};
+      const issues = Array.isArray(operator.issues) ? operator.issues : [];
+      const recentEvents = Array.isArray(activity.recent_events) ? activity.recent_events : [];
+      const status = String(operator.status || 'MISSING').toUpperCase();
+
+      statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
+      if (['ERROR', 'FAIL', 'FATAL'].includes(status)) {
+        statusEl.classList.add('status-error');
+      } else if (['WARN', 'DEGRADED', 'STALE'].includes(status)) {
+        statusEl.classList.add('status-warn');
+      } else if (['PASS', 'OK'].includes(status)) {
+        statusEl.classList.add('status-ok');
+      } else {
+        statusEl.classList.add('status-unknown');
+      }
+      statusEl.textContent = status;
+
+      const primaryChannel = maintenance.primary_channel || 'whatsapp';
+      const boundAgent = maintenance.bound_agent_id || '--';
+      primaryEl.textContent = `${primaryChannel} -> ${boundAgent}`;
+      wiringEl.textContent = `${maintenance.expected_model || '--'} / mismatch=${Number(maintenance.duplicate_wrong_agent_keys || 0)}`;
+      gateEl.textContent = `${productionGate.status || '--'} / proof=${productionGate.proof_status || '--'} / ${Number(productionGate.remaining_trading_days || 0)}d`;
+      activityEl.textContent = `${Number(activity.total_events || 0)} evt / fast=${Number(activity.short_circuit_events || 0)} / tools=${Number(activity.tool_calls || 0)}`;
+      contextEl.textContent =
+        `Context: maintenance=${maintenance.status || '--'} rpc=${maintenance.gateway_rpc_ok === true ? 'up' : maintenance.gateway_rpc_ok === false ? 'down' : '--'} `
+        + `| gate_age=${productionGate.age_minutes ?? '--'}m | activity_files=${activity.files_scanned ?? 0}`;
+
+      listEl.innerHTML = '';
+      const rows = [];
+      issues.forEach(issue => rows.push(issue));
+      recentEvents.slice(0, 4).forEach(event => {
+        const eventLabel = event.event_type || event.type || 'event';
+        const channelLabel = event.channel ? `${event.channel}: ` : '';
+        rows.push({
+          title: `${channelLabel}${eventLabel}`,
+          detail: `Recent operator activity at ${formatTimestamp(event.timestamp || '')}`,
+          severity: 'INFO',
+          focus: 'activity',
+          meta: `latency_ms=${event.latency_ms ?? '--'} session=${event.session_id || '--'}`,
+        });
+      });
+
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'audit-empty';
+        empty.textContent = 'No operator evidence loaded.';
+        listEl.appendChild(empty);
+        return;
+      }
+
+      rows.forEach(row => {
+        const item = document.createElement('div');
+        item.className = 'audit-item';
+        item.innerHTML = `
+          <div class="audit-main">
+            <div class="audit-title">${row.title || 'Operator event'}</div>
+            <div class="audit-detail">${row.detail || ''}</div>
+            <div class="audit-meta">${row.meta || `focus=${row.focus || 'runtime'}`}</div>
+          </div>
+          <div class="audit-badges">
+            <span class="sev ${String((row.severity || 'INFO')).toLowerCase()}">${row.severity || 'INFO'}</span>
+            <span class="sev info">${String(row.focus || 'runtime').toUpperCase()}</span>
+          </div>
+        `;
+        listEl.appendChild(item);
+      });
+    }
+
     function renderRobustness(data) {
       const statusEl = document.getElementById('robustness-status');
       const eligEl = document.getElementById('robustness-eligibility');
@@ -1886,6 +1997,7 @@
         renderRobustness(null);
         renderLiveDenominator(null);
         renderAuditConsole(null);
+        renderOperatorConsole(null);
         return;
       }
 
@@ -2060,6 +2172,7 @@
       renderRobustness(data);
       renderLiveDenominator(data);
       renderAuditConsole(data);
+      renderOperatorConsole(data);
     }
 
     let refreshBusy = false;

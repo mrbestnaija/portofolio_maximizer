@@ -56,6 +56,38 @@ class LLMActivityLogger:
             with open(self._today_file(), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
+    def _normalize_metadata_value(self, value: Any, *, depth: int = 0) -> Any:
+        if depth > 3:
+            return None
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:2000]
+        if isinstance(value, (list, tuple, set)):
+            items = []
+            for row in list(value)[:32]:
+                normalized = self._normalize_metadata_value(row, depth=depth + 1)
+                if normalized is not None:
+                    items.append(normalized)
+            return items
+        if isinstance(value, dict):
+            payload: dict[str, Any] = {}
+            for key, row in list(value.items())[:32]:
+                normalized = self._normalize_metadata_value(row, depth=depth + 1)
+                if normalized is not None:
+                    payload[str(key)[:120]] = normalized
+            return payload
+        return str(value)[:2000]
+
+    def _normalize_metadata(self, metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
+        raw = metadata if isinstance(metadata, dict) else {}
+        normalized = self._normalize_metadata_value(raw)
+        return normalized if isinstance(normalized, dict) else {}
+
     def log_request(
         self,
         model: str,
@@ -68,9 +100,10 @@ class LLMActivityLogger:
         task_type: str = "",
         success: bool = True,
         error: str = "",
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log a direct LLM inference request."""
-        self._write_entry({
+        entry = {
             "type": "llm_request",
             "model": model,
             "prompt_len": len(prompt),
@@ -84,7 +117,11 @@ class LLMActivityLogger:
             "task_type": task_type,
             "success": success,
             "error": error,
-        })
+        }
+        meta = self._normalize_metadata(metadata)
+        if meta:
+            entry["metadata"] = meta
+        self._write_entry(entry)
 
     def log_tool_call(
         self,
@@ -94,9 +131,10 @@ class LLMActivityLogger:
         result: str,
         latency_ms: float = 0,
         round_num: int = 0,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log a tool call dispatched by qwen3:8b orchestrator."""
-        self._write_entry({
+        entry = {
             "type": "tool_call",
             "orchestrator": orchestrator,
             "tool": tool,
@@ -105,7 +143,11 @@ class LLMActivityLogger:
             "result_preview": result[:300],
             "latency_ms": round(latency_ms, 1),
             "round_num": round_num,
-        })
+        }
+        meta = self._normalize_metadata(metadata)
+        if meta:
+            entry["metadata"] = meta
+        self._write_entry(entry)
 
     def log_orchestration(
         self,
@@ -115,9 +157,10 @@ class LLMActivityLogger:
         total_latency_ms: float,
         tools_called: list,
         success: bool = True,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log a complete orchestration session."""
-        self._write_entry({
+        entry = {
             "type": "orchestration",
             "prompt_preview": prompt[:200],
             "response_preview": final_response[:300],
@@ -125,7 +168,11 @@ class LLMActivityLogger:
             "total_latency_ms": round(total_latency_ms, 1),
             "tools_called": tools_called,
             "success": success,
-        })
+        }
+        meta = self._normalize_metadata(metadata)
+        if meta:
+            entry["metadata"] = meta
+        self._write_entry(entry)
 
     def log_openclaw_event(
         self,
@@ -134,16 +181,21 @@ class LLMActivityLogger:
         payload: Optional[dict] = None,
         model_used: str = "",
         latency_ms: float = 0,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log an OpenClaw gateway event (message send/receive, model routing)."""
-        self._write_entry({
+        entry = {
             "type": "openclaw_event",
             "channel": channel,
             "event_type": event_type,
             "model_used": model_used,
             "payload_keys": list((payload or {}).keys()),
             "latency_ms": round(latency_ms, 1),
-        })
+        }
+        meta = self._normalize_metadata(metadata)
+        if meta:
+            entry["metadata"] = meta
+        self._write_entry(entry)
 
     def log_self_improvement(
         self,
@@ -153,9 +205,11 @@ class LLMActivityLogger:
         diff_preview: str = "",
         approved: bool = False,
         applied: bool = False,
+        resolved: bool = False,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """Log a self-improvement action (code modification, config change)."""
-        self._write_entry({
+        entry = {
             "type": "self_improvement",
             "action": action,
             "target_file": target_file,
@@ -163,7 +217,12 @@ class LLMActivityLogger:
             "diff_preview": diff_preview[:500],
             "approved": approved,
             "applied": applied,
-        })
+            "resolved": resolved,
+        }
+        meta = self._normalize_metadata(metadata)
+        if meta:
+            entry["metadata"] = meta
+        self._write_entry(entry)
 
     def get_recent(self, hours: int = 24) -> list[dict]:
         """Get recent activity entries within the last N hours."""
@@ -190,6 +249,9 @@ class LLMActivityLogger:
         type_counts: dict[str, int] = {}
         model_counts: dict[str, int] = {}
         total_latency = 0.0
+        approved_self_improvements = 0
+        applied_self_improvements = 0
+        resolved_events = 0
         for e in recent:
             t = e.get("type", "unknown")
             type_counts[t] = type_counts.get(t, 0) + 1
@@ -197,6 +259,12 @@ class LLMActivityLogger:
             if m:
                 model_counts[m] = model_counts.get(m, 0) + 1
             total_latency += e.get("latency_ms", 0) or e.get("total_latency_ms", 0)
+            if bool(e.get("approved")):
+                approved_self_improvements += 1
+            if bool(e.get("applied")):
+                applied_self_improvements += 1
+            if bool(e.get("resolved")):
+                resolved_events += 1
 
         return {
             "period": "last_24h",
@@ -207,6 +275,9 @@ class LLMActivityLogger:
             "self_improvements": sum(
                 1 for e in recent if e.get("type") == "self_improvement"
             ),
+            "approved_self_improvements": approved_self_improvements,
+            "applied_self_improvements": applied_self_improvements,
+            "resolved_events": resolved_events,
         }
 
 

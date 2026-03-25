@@ -610,6 +610,59 @@ def test_cleanup_stale_session_locks_handles_sessions_glob_error(monkeypatch, tm
     assert any(str(x).startswith("scan_sessions_root_failed:") for x in out["errors"])
 
 
+def test_reconcile_bound_direct_sessions_resets_wrong_agent_and_stale_model(monkeypatch, tmp_path) -> None:
+    openclaw_root = tmp_path / ".openclaw"
+    (openclaw_root / "agents" / "ops" / "sessions").mkdir(parents=True)
+    (openclaw_root / "agents" / "trading" / "sessions").mkdir(parents=True)
+    (openclaw_root / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "acp": {"defaultAgent": "ops"},
+                "agents": {
+                    "list": [
+                        {"id": "ops", "model": "ollama/qwen3:8b"},
+                        {"id": "trading", "model": "ollama/qwen3:8b"},
+                    ]
+                },
+                "bindings": [
+                    {"agentId": "ops", "match": {"channel": "whatsapp", "accountId": "default"}}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ops_index = openclaw_root / "agents" / "ops" / "sessions" / "sessions.json"
+    trading_index = openclaw_root / "agents" / "trading" / "sessions" / "sessions.json"
+    ops_key = "agent:ops:whatsapp:direct:+2348061573767"
+    trading_key = "agent:trading:whatsapp:direct:+2348061573767"
+    ops_index.write_text(
+        json.dumps({ops_key: {"model": "ollama/qwen3.5:27b-pruned"}}),
+        encoding="utf-8",
+    )
+    trading_index.write_text(
+        json.dumps({trading_key: {"model": "ollama/qwen3.5:27b-pruned"}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(om.Path, "home", staticmethod(lambda: tmp_path))
+
+    preview = om._reconcile_bound_direct_sessions(primary_channel="whatsapp", apply=False)
+
+    assert preview["bound_agent_id"] == "ops"
+    assert preview["expected_model"] == "ollama/qwen3:8b"
+    assert preview["peers_with_conflicts"] == 1
+    assert preview["duplicate_wrong_agent_keys"] == 1
+    assert preview["refreshed_bound_keys"] == 1
+    assert preview["session_indexes_written"] == 0
+
+    out = om._reconcile_bound_direct_sessions(primary_channel="whatsapp", apply=True)
+
+    assert out["session_indexes_written"] == 2
+    assert out["updated_agents"] == ["ops", "trading"]
+    assert json.loads(ops_index.read_text(encoding="utf-8")) == {}
+    assert json.loads(trading_index.read_text(encoding="utf-8")) == {}
+
+
 def test_watch_mode_survives_cycle_exception(monkeypatch, tmp_path) -> None:
     report_file = tmp_path / "openclaw_maintenance_report.json"
     state_file = tmp_path / "openclaw_maintenance_state.json"
@@ -757,5 +810,47 @@ def test_fast_supervisor_tick_healthy_resets_failures(monkeypatch) -> None:
 
     assert out["ok"] is True
     assert out["action"] == "none"
+    assert out["consecutive_failures"] == 0
+    assert fast_state["consecutive_failures"] == 0
+
+
+def test_fast_supervisor_tick_softens_probe_timeout_when_gateway_is_healthy(monkeypatch) -> None:
+    state: dict[str, object] = {}
+    fast_state: dict[str, object] = {"consecutive_failures": 1}
+
+    def fake_run_openclaw_json(*, oc_base, args, timeout_seconds=20.0):
+        del oc_base, timeout_seconds
+        if args == ["channels", "status", "--probe"]:
+            return om._CmdResult(False, 124, ["openclaw", *args], "", "timeout"), None
+        if args == ["gateway", "status"]:
+            payload = {
+                "rpc": {"ok": True},
+                "service": {"runtime": {"status": "running", "state": "Running"}},
+            }
+            return om._CmdResult(True, 0, ["openclaw", *args], "", ""), payload
+        raise AssertionError(f"Unexpected json call args: {args}")
+
+    monkeypatch.setattr(om, "_run_openclaw_json", fake_run_openclaw_json)
+    monkeypatch.setattr(
+        om,
+        "_run_openclaw",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("restart should not be called for softened timeout")),
+    )
+
+    out = om._fast_supervisor_tick(
+        oc_base=["openclaw"],
+        primary_channel="whatsapp",
+        apply=True,
+        state_map=state,
+        fast_state=fast_state,
+        failure_threshold=2,
+        restart_cooldown_seconds=20.0,
+        probe_timeout_seconds=8.0,
+        post_restart_recheck_seconds=0.0,
+    )
+
+    assert out["ok"] is True
+    assert out["action"] == "soft_timeout_skip"
+    assert out["reason"] == "channels_status_timeout_softened"
     assert out["consecutive_failures"] == 0
     assert fast_state["consecutive_failures"] == 0

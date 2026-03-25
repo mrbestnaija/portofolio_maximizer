@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -35,8 +37,13 @@ DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "lates
 DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
 DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
 DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
+DEFAULT_OPENCLAW_MAINTENANCE_PATH = ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
+DEFAULT_PRODUCTION_GATE_PATH = ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
+DEFAULT_LLM_ACTIVITY_DIR = ROOT / "logs" / "llm_activity"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
 DEFAULT_POSITIONS_MAX_AGE_DAYS = 14
+DEFAULT_OPERATOR_ACTIVITY_DAYS = 7
+DEFAULT_OPERATOR_ACTIVITY_MAX_EVENTS = 8
 DASHBOARD_PAYLOAD_SCHEMA_VERSION = 2
 DASHBOARD_REQUIRED_TOP_LEVEL_KEYS = (
     "meta",
@@ -54,7 +61,17 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct script fallback
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+    try:
+        from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
+    except ModuleNotFoundError:
+        guardrails_path = ROOT / "integrity" / "sqlite_guardrails.py"
+        spec = importlib.util.spec_from_file_location("pmx_sqlite_guardrails", guardrails_path)
+        if spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        apply_sqlite_guardrails = module.apply_sqlite_guardrails
+        guarded_sqlite_connect = module.guarded_sqlite_connect
 
 def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
     if os.name != "posix":
@@ -1048,6 +1065,367 @@ def _quant_validation_payload() -> Dict[str, Any]:
         }
 
 
+def _operator_issue(
+    title: str,
+    detail: str,
+    severity: str,
+    focus: str,
+    *,
+    meta: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "title": str(title or "").strip(),
+        "detail": str(detail or "").strip(),
+        "severity": str(severity or "INFO").upper(),
+        "focus": str(focus or "runtime").strip().lower(),
+        "meta": str(meta or "").strip(),
+    }
+
+
+def _iter_recent_activity_files(activity_dir: Path, days: int) -> List[Path]:
+    if not activity_dir.exists():
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, int(days)))
+    files: List[Path] = []
+    for path in sorted(activity_dir.glob("*.jsonl")):
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            continue
+        if modified >= cutoff:
+            files.append(path)
+    return files
+
+
+def _recent_llm_activity_payload() -> Dict[str, Any]:
+    activity_dir = DEFAULT_LLM_ACTIVITY_DIR
+    days = int(os.getenv("PMX_OPERATOR_ACTIVITY_DAYS", str(DEFAULT_OPERATOR_ACTIVITY_DAYS)) or DEFAULT_OPERATOR_ACTIVITY_DAYS)
+    max_events = int(
+        os.getenv("PMX_OPERATOR_ACTIVITY_MAX_EVENTS", str(DEFAULT_OPERATOR_ACTIVITY_MAX_EVENTS))
+        or DEFAULT_OPERATOR_ACTIVITY_MAX_EVENTS
+    )
+    files = _iter_recent_activity_files(activity_dir, days=max(1, days))
+    if not files:
+        return {
+            "status": "MISSING",
+            "path": str(activity_dir),
+            "days": max(1, days),
+            "files_scanned": 0,
+            "total_events": 0,
+            "parse_errors": 0,
+            "counts_by_type": {},
+            "counts_by_channel": {},
+            "counts_by_event_type": {},
+            "short_circuit_events": 0,
+            "tool_calls": 0,
+            "recent_events": [],
+        }
+
+    by_type: Counter[str] = Counter()
+    by_channel: Counter[str] = Counter()
+    by_event_type: Counter[str] = Counter()
+    recent_events: List[Dict[str, Any]] = []
+    parse_errors = 0
+
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            parse_errors += 1
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                parse_errors += 1
+                continue
+            if not isinstance(payload, dict):
+                continue
+            entry_type = str(payload.get("type") or "unknown").strip() or "unknown"
+            by_type[entry_type] += 1
+            channel = str(payload.get("channel") or "").strip().lower()
+            if channel:
+                by_channel[channel] += 1
+            event_type = str(payload.get("event_type") or "").strip()
+            if event_type:
+                by_event_type[event_type] += 1
+            recent_events.append(
+                {
+                    "timestamp": str(payload.get("timestamp") or "").strip(),
+                    "type": entry_type,
+                    "channel": channel or None,
+                    "event_type": event_type or None,
+                    "latency_ms": payload.get("latency_ms"),
+                    "session_id": payload.get("session_id"),
+                }
+            )
+
+    def _event_sort_key(item: Dict[str, Any]) -> tuple[float, str]:
+        parsed = _parse_utc_datetime(item.get("timestamp"))
+        return ((parsed.timestamp() if parsed else 0.0), str(item.get("timestamp") or ""))
+
+    recent_events.sort(key=_event_sort_key, reverse=True)
+    short_circuit_events = sum(
+        count for name, count in by_event_type.items() if "fast_path" in name or "short_circuit" in name
+    )
+    tool_calls = int(by_type.get("tool_call", 0))
+    status = "OK" if recent_events else ("WARN" if files else "MISSING")
+    return {
+        "status": status,
+        "path": str(activity_dir),
+        "days": max(1, days),
+        "files_scanned": len(files),
+        "total_events": sum(by_type.values()),
+        "parse_errors": int(parse_errors),
+        "counts_by_type": dict(sorted(by_type.items())),
+        "counts_by_channel": dict(sorted(by_channel.items())),
+        "counts_by_event_type": dict(sorted(by_event_type.items())),
+        "short_circuit_events": int(short_circuit_events),
+        "tool_calls": tool_calls,
+        "recent_events": recent_events[: max(1, max_events)],
+    }
+
+
+def _operator_console_payload() -> Dict[str, Any]:
+    maintenance, maintenance_err = _load_sidecar_json(DEFAULT_OPENCLAW_MAINTENANCE_PATH)
+    production_gate, production_gate_err = _load_sidecar_json(DEFAULT_PRODUCTION_GATE_PATH)
+    activity = _recent_llm_activity_payload()
+
+    maintenance_step = maintenance.get("steps", {}) if isinstance(maintenance, dict) else {}
+    session_route = maintenance_step.get("session_route_reconcile", {}) if isinstance(maintenance_step, dict) else {}
+    gateway_health = maintenance_step.get("gateway_health", {}) if isinstance(maintenance_step, dict) else {}
+    broken_channel_disable = maintenance_step.get("broken_channel_disable", {}) if isinstance(maintenance_step, dict) else {}
+
+    profitability = production_gate.get("profitability_proof", {}) if isinstance(production_gate, dict) else {}
+    lift_gate = production_gate.get("lift_gate", {}) if isinstance(production_gate, dict) else {}
+    readiness = production_gate.get("readiness", {}) if isinstance(production_gate, dict) else {}
+    production_profitability_gate = (
+        production_gate.get("production_profitability_gate", {})
+        if isinstance(production_gate, dict)
+        else {}
+    )
+    repo_state = production_gate.get("repo_state", {}) if isinstance(production_gate, dict) else {}
+    repo_status = repo_state.get("status", {}) if isinstance(repo_state, dict) else {}
+
+    maintenance_age = _sidecar_age_minutes(DEFAULT_OPENCLAW_MAINTENANCE_PATH, maintenance) if isinstance(maintenance, dict) else None
+    gate_age = _sidecar_age_minutes(DEFAULT_PRODUCTION_GATE_PATH, production_gate) if isinstance(production_gate, dict) else None
+
+    maintenance_summary = {
+        "status": str(maintenance.get("status") or ("MISSING" if maintenance_err else "UNKNOWN")).upper(),
+        "warning_count": len(maintenance.get("warnings", []) if isinstance(maintenance, dict) else []),
+        "error_count": len(maintenance.get("errors", []) if isinstance(maintenance, dict) else []),
+        "warnings": [str(x) for x in (maintenance.get("warnings", []) if isinstance(maintenance, dict) else [])],
+        "errors": [str(x) for x in (maintenance.get("errors", []) if isinstance(maintenance, dict) else [])],
+        "age_minutes": round(maintenance_age, 2) if maintenance_age is not None else None,
+        "primary_channel": str(maintenance.get("primary_channel") or "whatsapp") if isinstance(maintenance, dict) else "whatsapp",
+        "bound_agent_id": str(session_route.get("bound_agent_id") or ""),
+        "expected_model": str(session_route.get("expected_model") or ""),
+        "duplicate_wrong_agent_keys": int(session_route.get("duplicate_wrong_agent_keys") or 0),
+        "refreshed_bound_keys": int(session_route.get("refreshed_bound_keys") or 0),
+        "updated_agents": [str(x) for x in session_route.get("updated_agents", [])] if isinstance(session_route, dict) else [],
+        "gateway_rpc_ok": gateway_health.get("rpc_ok"),
+        "gateway_service_status": gateway_health.get("service_status"),
+        "gateway_listener_pid": gateway_health.get("gateway_listener_pid"),
+        "broken_channels_disabled": [str(x) for x in broken_channel_disable.get("disabled", [])]
+        if isinstance(broken_channel_disable, dict)
+        else [],
+    }
+
+    evidence_progress = profitability.get("evidence_progress", {}) if isinstance(profitability, dict) else {}
+    production_summary = {
+        "status": str(production_profitability_gate.get("status") or ("MISSING" if production_gate_err else "UNKNOWN")).upper(),
+        "proof_status": str(profitability.get("status") or "UNKNOWN").upper(),
+        "lift_status": str(lift_gate.get("status") or "UNKNOWN").upper(),
+        "phase3_ready": bool(readiness.get("phase3_ready", production_gate.get("phase3_ready"))),
+        "phase3_reason": str(readiness.get("phase3_reason") or production_gate.get("phase3_reason") or ""),
+        "remaining_trading_days": int(evidence_progress.get("remaining_trading_days") or 0),
+        "remaining_closed_trades": int(evidence_progress.get("remaining_closed_trades") or 0),
+        "closed_trades": int(profitability.get("closed_trades") or 0),
+        "profit_factor": profitability.get("profit_factor"),
+        "lift_fraction": lift_gate.get("lift_fraction"),
+        "min_lift_fraction": lift_gate.get("min_lift_fraction"),
+        "warmup_expired": bool(production_gate.get("warmup_expired", False)),
+        "repo_dirty_tracked": int(repo_status.get("tracked_changed") or 0),
+        "repo_dirty_untracked": int(repo_status.get("untracked") or 0),
+        "age_minutes": round(gate_age, 2) if gate_age is not None else None,
+    }
+
+    issues: List[Dict[str, Any]] = []
+    if maintenance_err:
+        issues.append(
+            _operator_issue(
+                "OpenClaw maintenance artifact missing",
+                f"Unable to load {DEFAULT_OPENCLAW_MAINTENANCE_PATH.name} ({maintenance_err}).",
+                "WARN",
+                "runtime",
+            )
+        )
+    else:
+        if maintenance_summary["duplicate_wrong_agent_keys"] > 0:
+            issues.append(
+                _operator_issue(
+                    "Session route reconciliation corrected mismatched WhatsApp wiring",
+                    (
+                        f"duplicate_wrong_agent_keys={maintenance_summary['duplicate_wrong_agent_keys']} "
+                        f"for {maintenance_summary['primary_channel']} -> {maintenance_summary['bound_agent_id']}; "
+                        f"expected_model={maintenance_summary['expected_model'] or '--'}."
+                    ),
+                    "WARN",
+                    "wiring",
+                    meta="stale direct-session ownership was reset",
+                )
+            )
+        if maintenance_summary["refreshed_bound_keys"] > 0:
+            issues.append(
+                _operator_issue(
+                    "Bound sessions were refreshed due to stale model metadata",
+                    f"refreshed_bound_keys={maintenance_summary['refreshed_bound_keys']}.",
+                    "WARN",
+                    "wiring",
+                )
+            )
+        if maintenance_summary["warnings"]:
+            issues.append(
+                _operator_issue(
+                    "Maintenance completed with warnings",
+                    ", ".join(maintenance_summary["warnings"]),
+                    "WARN",
+                    "runtime",
+                )
+            )
+        if maintenance_summary["errors"]:
+            issues.append(
+                _operator_issue(
+                    "Maintenance recorded hard errors",
+                    ", ".join(maintenance_summary["errors"]),
+                    "ERROR",
+                    "runtime",
+                )
+            )
+        if gateway_health.get("rpc_ok") is False:
+            issues.append(
+                _operator_issue(
+                    "Gateway RPC is unavailable",
+                    "OpenClaw gateway did not respond to the maintenance probe.",
+                    "ERROR",
+                    "runtime",
+                )
+            )
+
+    if production_gate_err:
+        issues.append(
+            _operator_issue(
+                "Production gate artifact missing",
+                f"Unable to load {DEFAULT_PRODUCTION_GATE_PATH.name} ({production_gate_err}).",
+                "WARN",
+                "gate",
+            )
+        )
+    else:
+        if production_summary["status"] not in {"PASS", "OK"}:
+            issues.append(
+                _operator_issue(
+                    "Production gate remains fail-closed",
+                    (
+                        f"gate={production_summary['status']} proof={production_summary['proof_status']} "
+                        f"lift={production_summary['lift_status']} "
+                        f"remaining_days={production_summary['remaining_trading_days']}."
+                    ),
+                    "ERROR",
+                    "gate",
+                    meta=f"phase3_reason={production_summary['phase3_reason'] or '--'}",
+                )
+            )
+        elif not production_summary["phase3_ready"]:
+            issues.append(
+                _operator_issue(
+                    "Phase 3 is not yet ready",
+                    f"phase3_reason={production_summary['phase3_reason'] or '--'}.",
+                    "WARN",
+                    "gate",
+                )
+            )
+        if not production_summary["warmup_expired"] and production_summary["remaining_trading_days"] > 0:
+            issues.append(
+                _operator_issue(
+                    "Profitability proof is still in warm-up",
+                    (
+                        f"remaining_trading_days={production_summary['remaining_trading_days']} "
+                        f"and remaining_closed_trades={production_summary['remaining_closed_trades']}."
+                    ),
+                    "INFO",
+                    "gate",
+                    meta="fail-closed until proof window matures; this prevents threshold dodge",
+                )
+            )
+        if production_summary["repo_dirty_tracked"] or production_summary["repo_dirty_untracked"]:
+            issues.append(
+                _operator_issue(
+                    "Repo state is dirty during operator review",
+                    (
+                        f"tracked_changed={production_summary['repo_dirty_tracked']} "
+                        f"untracked={production_summary['repo_dirty_untracked']}."
+                    ),
+                    "INFO",
+                    "gate",
+                )
+            )
+
+    if activity["status"] == "MISSING":
+        issues.append(
+            _operator_issue(
+                "No recent LLM activity log files were found",
+                f"Expected JSONL activity under {activity['path']}.",
+                "WARN",
+                "activity",
+            )
+        )
+    else:
+        if activity["short_circuit_events"] > 0:
+            issues.append(
+                _operator_issue(
+                    "Bridge fast-path short-circuit is active",
+                    (
+                        f"short_circuit_events={activity['short_circuit_events']} "
+                        f"across total_events={activity['total_events']} in the last {activity['days']} day(s)."
+                    ),
+                    "INFO",
+                    "activity",
+                )
+            )
+        if activity["parse_errors"] > 0:
+            issues.append(
+                _operator_issue(
+                    "Recent activity logs had parse errors",
+                    f"parse_errors={activity['parse_errors']}.",
+                    "WARN",
+                    "activity",
+                )
+            )
+
+    severity_rank = {"INFO": 1, "WARN": 2, "ERROR": 3}
+    overall_status = "OK"
+    if any(severity_rank.get(str(issue.get("severity", "")).upper(), 0) >= 3 for issue in issues):
+        overall_status = "ERROR"
+    elif any(severity_rank.get(str(issue.get("severity", "")).upper(), 0) >= 2 for issue in issues):
+        overall_status = "WARN"
+    elif maintenance_err or production_gate_err or activity["status"] != "OK":
+        overall_status = "WARN"
+
+    issues.sort(key=lambda item: severity_rank.get(str(item.get("severity", "")).upper(), 0), reverse=True)
+    return {
+        "status": overall_status,
+        "generated_utc": _utc_now_iso(),
+        "maintenance": maintenance_summary,
+        "production_gate": production_summary,
+        "activity": activity,
+        "issues": issues[:12],
+    }
+
+
 def build_dashboard_payload(
     *,
     conn: sqlite3.Connection,
@@ -1167,6 +1545,7 @@ def build_dashboard_payload(
         "robustness": _robustness_payload(),
         "live_denominator": _live_denominator_payload(),
         "quant_validation": quant_validation,
+        "operator_console": _operator_console_payload(),
     }
     payload["meta"]["payload_digest"] = _payload_digest(payload)
     return payload

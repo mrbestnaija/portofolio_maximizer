@@ -604,6 +604,201 @@ def _archive_path(path: Path, suffix: str) -> Path:
     return path.with_name(f"{path.stem}.stale.{ts}.{suffix}")
 
 
+def _openclaw_home() -> Path:
+    return Path.home() / ".openclaw"
+
+
+def _openclaw_config_path() -> Path:
+    return _openclaw_home() / "openclaw.json"
+
+
+def _resolve_default_agent_id_from_config(cfg: dict[str, Any]) -> str:
+    acp = cfg.get("acp") if isinstance(cfg.get("acp"), dict) else {}
+    default_agent = str(acp.get("defaultAgent") or "").strip()
+    if default_agent:
+        return default_agent
+
+    agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    agent_list = agents.get("list") if isinstance(agents.get("list"), list) else []
+    for row in agent_list:
+        if not isinstance(row, dict):
+            continue
+        if bool(row.get("default")):
+            agent_id = str(row.get("id") or "").strip()
+            if agent_id:
+                return agent_id
+    return "ops"
+
+
+def _resolve_bound_agent_id(
+    cfg: dict[str, Any],
+    *,
+    channel: str,
+    account_id: str = "default",
+) -> str:
+    bindings = cfg.get("bindings") if isinstance(cfg.get("bindings"), list) else []
+    channel_text = str(channel or "").strip().lower()
+    account_text = str(account_id or "").strip()
+
+    for row in bindings:
+        if not isinstance(row, dict):
+            continue
+        match = row.get("match") if isinstance(row.get("match"), dict) else {}
+        match_channel = str(match.get("channel") or "").strip().lower()
+        match_account = str(match.get("accountId") or "").strip()
+        agent_id = str(row.get("agentId") or "").strip()
+        if agent_id and match_channel == channel_text and match_account == account_text:
+            return agent_id
+
+    for row in bindings:
+        if not isinstance(row, dict):
+            continue
+        match = row.get("match") if isinstance(row.get("match"), dict) else {}
+        match_channel = str(match.get("channel") or "").strip().lower()
+        agent_id = str(row.get("agentId") or "").strip()
+        if agent_id and match_channel == channel_text:
+            return agent_id
+
+    return _resolve_default_agent_id_from_config(cfg)
+
+
+def _session_index_path_for_agent(agent_id: str) -> Path:
+    return _openclaw_home() / "agents" / str(agent_id or "").strip() / "sessions" / "sessions.json"
+
+
+def _extract_direct_session_peer(session_key: str, *, agent_id: str, channel: str) -> Optional[str]:
+    prefix = f"agent:{str(agent_id or '').strip()}:{str(channel or '').strip().lower()}:direct:"
+    raw_key = str(session_key or "").strip()
+    if not raw_key.startswith(prefix):
+        return None
+    peer = raw_key[len(prefix) :].strip()
+    return peer or None
+
+
+def _reconcile_bound_direct_sessions(
+    *,
+    primary_channel: str,
+    apply: bool,
+) -> dict[str, Any]:
+    cfg = _safe_read_json(_openclaw_config_path())
+    result: dict[str, Any] = {
+        "config_path": str(_openclaw_config_path()),
+        "primary_channel": str(primary_channel or "whatsapp").strip().lower() or "whatsapp",
+        "bound_account_id": "default",
+        "bound_agent_id": "",
+        "expected_model": "",
+        "peers_scanned": 0,
+        "peers_with_conflicts": 0,
+        "duplicate_wrong_agent_keys": 0,
+        "refreshed_bound_keys": 0,
+        "session_indexes_written": 0,
+        "updated_agents": [],
+        "warnings": [],
+        "errors": [],
+    }
+    if not cfg:
+        _append_unique(result["warnings"], "openclaw_config_unavailable")
+        return result
+
+    channel = str(result["primary_channel"])
+    bound_agent_id = _resolve_bound_agent_id(cfg, channel=channel, account_id="default")
+    result["bound_agent_id"] = bound_agent_id
+
+    agents_cfg = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    agent_rows = agents_cfg.get("list") if isinstance(agents_cfg.get("list"), list) else []
+    agent_model_map: dict[str, str] = {}
+    agent_ids: list[str] = []
+    for row in agent_rows:
+        if not isinstance(row, dict):
+            continue
+        agent_id = str(row.get("id") or "").strip()
+        if not agent_id:
+            continue
+        agent_ids.append(agent_id)
+        agent_model_map[agent_id] = str(row.get("model") or "").strip()
+
+    if bound_agent_id and bound_agent_id not in agent_ids:
+        agent_ids.append(bound_agent_id)
+    expected_model = str(agent_model_map.get(bound_agent_id) or "").strip()
+    result["expected_model"] = expected_model
+
+    peer_entries: dict[str, list[dict[str, Any]]] = {}
+    session_indexes: dict[str, dict[str, Any]] = {}
+    for agent_id in agent_ids:
+        index_path = _session_index_path_for_agent(agent_id)
+        if not index_path.exists():
+            continue
+        payload = _safe_read_json(index_path)
+        if not isinstance(payload, dict) or not payload:
+            continue
+        session_indexes[agent_id] = {"path": index_path, "payload": payload}
+        for key, value in payload.items():
+            if not isinstance(value, dict):
+                continue
+            peer = _extract_direct_session_peer(str(key), agent_id=agent_id, channel=channel)
+            if not peer:
+                continue
+            peer_entries.setdefault(peer, []).append(
+                {
+                    "agent_id": agent_id,
+                    "key": str(key),
+                    "model": str(value.get("model") or "").strip(),
+                }
+            )
+
+    result["peers_scanned"] = len(peer_entries)
+    changed_agents: set[str] = set()
+
+    for peer, entries in peer_entries.items():
+        bound_entries = [row for row in entries if row.get("agent_id") == bound_agent_id]
+        wrong_entries = [row for row in entries if row.get("agent_id") != bound_agent_id]
+        refresh_bound = False
+        if bound_entries and expected_model:
+            refresh_bound = any(str(row.get("model") or "").strip() != expected_model for row in bound_entries)
+        if len(bound_entries) > 1:
+            refresh_bound = True
+
+        if not wrong_entries and not refresh_bound:
+            continue
+
+        result["peers_with_conflicts"] += 1
+        if wrong_entries:
+            result["duplicate_wrong_agent_keys"] += len(wrong_entries)
+        if refresh_bound:
+            result["refreshed_bound_keys"] += len(bound_entries)
+
+        if not apply:
+            continue
+
+        for entry in [*wrong_entries, *(bound_entries if refresh_bound else [])]:
+            agent_id = str(entry.get("agent_id") or "").strip()
+            key = str(entry.get("key") or "").strip()
+            session_idx = session_indexes.get(agent_id)
+            if not agent_id or not key or not isinstance(session_idx, dict):
+                continue
+            payload = session_idx.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if key in payload:
+                del payload[key]
+                changed_agents.add(agent_id)
+
+    if apply:
+        for agent_id in sorted(changed_agents):
+            session_idx = session_indexes.get(agent_id)
+            if not isinstance(session_idx, dict):
+                continue
+            path = session_idx.get("path")
+            payload = session_idx.get("payload")
+            if not isinstance(path, Path) or not isinstance(payload, dict):
+                continue
+            _safe_write_json(path, payload)
+            result["session_indexes_written"] += 1
+        result["updated_agents"] = sorted(changed_agents)
+
+    return result
+
+
 def _cleanup_stale_session_locks(
     *,
     apply: bool,
@@ -1466,6 +1661,36 @@ def _fast_supervisor_tick(
             out["ok"] = False
             out["reason"] = f"primary_issue:{issue}"
     else:
+        gateway_soft_ok = False
+        if status_res.returncode == 124 or status_res.ok:
+            gateway_res, gateway_payload = _run_openclaw_json(
+                oc_base=oc_base,
+                args=["gateway", "status"],
+                timeout_seconds=max(5.0, min(10.0, timeout_seconds)),
+            )
+            if isinstance(gateway_payload, dict):
+                rpc = gateway_payload.get("rpc") if isinstance(gateway_payload.get("rpc"), dict) else {}
+                service = gateway_payload.get("service") if isinstance(gateway_payload.get("service"), dict) else {}
+                runtime = service.get("runtime") if isinstance(service.get("runtime"), dict) else {}
+                rpc_ok = bool(rpc.get("ok"))
+                runtime_status = str(runtime.get("status") or "").strip().lower()
+                out["gateway_fallback"] = {
+                    "rpc_ok": rpc_ok,
+                    "runtime_status": runtime_status,
+                    "gateway_status_ok": bool(gateway_res.ok),
+                }
+                if rpc_ok or runtime_status == "running":
+                    gateway_soft_ok = True
+
+        if gateway_soft_ok:
+            fast_state["consecutive_failures"] = 0
+            out["consecutive_failures"] = 0
+            out["ok"] = True
+            out["action"] = "soft_timeout_skip"
+            out["reason"] = "channels_status_timeout_softened"
+            _append_unique(out["warnings"], "channels_status_timeout_softened_by_gateway_health")
+            return out
+
         out["ok"] = False
         if status_res.ok:
             out["reason"] = "channels_status_unavailable"
@@ -1787,6 +2012,12 @@ def main(argv: list[str]) -> int:
         )
         report["steps"]["stale_session_cleanup"] = lock_step
 
+        session_route_step = _reconcile_bound_direct_sessions(
+            primary_channel=str(report["primary_channel"]),
+            apply=bool(args.apply),
+        )
+        report["steps"]["session_route_reconcile"] = session_route_step
+
         _status_res, channels_payload = _run_openclaw_json(
             oc_base=oc_base,
             args=["channels", "status", "--probe"],
@@ -1840,6 +2071,10 @@ def main(argv: list[str]) -> int:
             report["warnings"].extend([str(x) for x in channel_step.get("warnings", [])])
         if lock_step.get("errors"):
             report["warnings"].extend([str(x) for x in lock_step.get("errors", [])])
+        if isinstance(session_route_step, dict) and session_route_step.get("errors"):
+            report["warnings"].extend([str(x) for x in session_route_step.get("errors", [])])
+        if isinstance(session_route_step, dict) and session_route_step.get("warnings"):
+            report["warnings"].extend([str(x) for x in session_route_step.get("warnings", [])])
 
         report["status"] = _derive_status([str(x) for x in report["errors"]])
         return report

@@ -41,6 +41,18 @@ _SECRET_PATTERNS = (
     re.compile(r"\bBearer\s+[A-Za-z0-9\-\._~\+/=]{16,}\b", re.IGNORECASE),
     re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b"),
 )
+_LABEL_FIELDS = (
+    "approved",
+    "applied",
+    "resolved",
+    "accepted",
+    "gate_name",
+    "artifact_path",
+    "incident_id",
+    "outcome_status",
+    "proposal_id",
+    "review_kind",
+)
 
 
 def _redact_text(text: str) -> str:
@@ -84,31 +96,84 @@ def _iter_recent_activity_files(activity_dir: Path, days: int) -> list[Path]:
 
 
 def _extract_record(entry: dict[str, Any]) -> dict[str, Any] | None:
+    def _extract_labels(row: dict[str, Any]) -> dict[str, Any]:
+        labels: dict[str, Any] = {}
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        for key in _LABEL_FIELDS:
+            value = row.get(key)
+            if value is None and isinstance(metadata, dict):
+                value = metadata.get(key)
+            if value is None or value == "":
+                continue
+            labels[key] = value
+        test_ids = row.get("test_ids")
+        if test_ids is None and isinstance(metadata, dict):
+            test_ids = metadata.get("test_ids")
+        if isinstance(test_ids, list) and test_ids:
+            labels["test_ids"] = [str(item) for item in test_ids[:16]]
+        return labels
+
+    def _attach_labels(record: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+        labels = _extract_labels(row)
+        if labels:
+            record["labels"] = labels
+        return record
+
     etype = str(entry.get("type") or "").strip().lower()
     if etype == "llm_request":
         instruction = _redact_text(entry.get("prompt_preview") or "")
         output = _redact_text(entry.get("response_preview") or "")
         if not instruction or not output:
             return None
-        return {
+        return _attach_labels({
             "instruction": instruction,
             "output": output,
             "source": "llm_request",
             "model": str(entry.get("model") or ""),
             "task_type": str(entry.get("task_type") or ""),
-        }
+        }, entry)
     if etype == "orchestration":
         instruction = _redact_text(entry.get("prompt_preview") or "")
         output = _redact_text(entry.get("response_preview") or "")
         if not instruction or not output:
             return None
-        return {
+        return _attach_labels({
             "instruction": instruction,
             "output": output,
             "source": "orchestration",
             "model": str(entry.get("orchestrator") or "qwen3:8b"),
             "task_type": "orchestration",
-        }
+        }, entry)
+    if etype == "tool_call":
+        tool_name = _redact_text(entry.get("tool") or "")
+        result = _redact_text(entry.get("result_preview") or "")
+        arguments = entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {}
+        if not tool_name or not result:
+            return None
+        instruction = f"Use tool {tool_name} with args {json.dumps(arguments, ensure_ascii=True, sort_keys=True)}"
+        return _attach_labels({
+            "instruction": instruction,
+            "output": result,
+            "source": "tool_call",
+            "model": str(entry.get("orchestrator") or "qwen3:8b"),
+            "task_type": f"tool_call:{tool_name}",
+        }, entry)
+    if etype == "self_improvement":
+        action = _redact_text(entry.get("action") or "")
+        target_file = _redact_text(entry.get("target_file") or "")
+        description = _redact_text(entry.get("description") or "")
+        diff_preview = _redact_text(entry.get("diff_preview") or "")
+        if not description and not diff_preview:
+            return None
+        instruction = f"Review self-improvement action {action} on {target_file}: {description}".strip()
+        output_parts = [part for part in (diff_preview, f"approved={bool(entry.get('approved'))}", f"applied={bool(entry.get('applied'))}", f"resolved={bool(entry.get('resolved'))}") if part]
+        return _attach_labels({
+            "instruction": instruction,
+            "output": " | ".join(output_parts),
+            "source": "self_improvement",
+            "model": "qwen3:8b",
+            "task_type": "self_improvement",
+        }, entry)
     return None
 
 
@@ -116,7 +181,9 @@ def _dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for row in records:
-        key_raw = f"{row.get('instruction','')}|{row.get('output','')}"
+        labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+        labels_key = json.dumps(labels, ensure_ascii=True, sort_keys=True) if labels else ""
+        key_raw = f"{row.get('source','')}|{row.get('instruction','')}|{row.get('output','')}|{labels_key}"
         key = hashlib.sha256(key_raw.encode("utf-8", errors="ignore")).hexdigest()
         if key in seen:
             continue

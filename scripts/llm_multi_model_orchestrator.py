@@ -55,6 +55,11 @@ from etl.secret_loader import bootstrap_dotenv
 bootstrap_dotenv()
 
 from ai_llm.llm_activity_logger import get_logger as _get_activity_logger
+from scripts.llm_operator_tools import (
+    review_changed_files as _review_changed_files_helper,
+    summarize_test_failure as _summarize_test_failure_helper,
+    triage_gate_failure as _triage_gate_failure_helper,
+)
 import yaml
 
 logger = logging.getLogger("pmx.orchestrator")
@@ -588,6 +593,56 @@ SOURCE_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
         "self-improvement",
     ),
 )
+REVIEW_CHANGED_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_REVIEW_CHANGED_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "review changes",
+        "review current changes",
+        "review diff",
+        "review my diff",
+        "review changed files",
+        "changed files",
+        "worktree review",
+        "working tree review",
+        "code review",
+    ),
+)
+REVIEW_CHANGED_FAST_PATH_BLOCKED_TOKENS = _csv_env_tokens(
+    "PMX_REVIEW_CHANGED_FAST_PATH_BLOCKED_TOKENS",
+    (
+        "github status",
+        "repo status",
+        "web search",
+        "gate failure",
+        "pytest",
+        "test failure",
+    ),
+)
+TEST_FAILURE_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_TEST_FAILURE_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "test failure",
+        "tests failed",
+        "failing test",
+        "pytest failed",
+        "pytest failure",
+        "failed tests",
+        "test log",
+        "failure log",
+    ),
+)
+GATE_TRIAGE_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
+    "PMX_GATE_TRIAGE_FAST_PATH_TRIGGER_TOKENS",
+    (
+        "gate failure",
+        "production gate failed",
+        "why did the gate fail",
+        "triage gate",
+        "decompose gate",
+        "gate decomposition",
+        "explain gate failure",
+    ),
+)
 WEB_SEARCH_FAST_PATH_TRIGGER_TOKENS = _csv_env_tokens(
     "PMX_WEB_SEARCH_FAST_PATH_TRIGGER_TOKENS",
     (
@@ -668,6 +723,7 @@ _TOOL_CACHEABLE = {
     "check_github_repo_status",
     "check_system_health",
     "run_sub_agent_batch",
+    "triage_gate_failure",
 }
 _tool_cache_lock = threading.Lock()
 _tool_cache: dict[str, tuple[float, str]] = {}
@@ -702,6 +758,9 @@ _TOOL_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "run_sub_agent_batch": ("tasks",),
     "check_system_health": (),
     "run_production_audit_gate": (),
+    "review_changed_files": (),
+    "summarize_test_failure": (),
+    "triage_gate_failure": (),
     "install_torch_runtime": (),
     "install_python_package": ("package",),
 }
@@ -716,9 +775,15 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
     "repo_status": "check_github_repo_status",
     "github_repo_status": "check_github_repo_status",
     "check_repo_status": "check_github_repo_status",
+    "review_diff": "review_changed_files",
+    "review_changes": "review_changed_files",
+    "review_pr": "review_changed_files",
     "check_quant_health": "check_quant_validation_headroom",
     "quant_validation_health": "check_quant_validation_headroom",
     "quant_health": "check_quant_validation_headroom",
+    "test_failure_summary": "summarize_test_failure",
+    "gate_failure_triage": "triage_gate_failure",
+    "gate_decomposition": "triage_gate_failure",
 }
 
 
@@ -1304,6 +1369,116 @@ REASONING_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "review_changed_files",
+            "description": (
+                "Review the current git worktree or a selected path set for code-review context. "
+                "Returns changed files, diff preview, and risk tags without modifying anything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "description": "Optional relative paths to narrow the review scope.",
+                        "items": {"type": "string"},
+                    },
+                    "base_ref": {
+                        "type": "string",
+                        "description": "Optional git ref to diff against (default current HEAD).",
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "Maximum changed files to include.",
+                    },
+                    "max_diff_chars": {
+                        "type": "integer",
+                        "description": "Maximum diff preview characters to return.",
+                    },
+                    "diff_context": {
+                        "type": "integer",
+                        "description": "Unified diff context lines per hunk.",
+                    },
+                    "include_untracked": {
+                        "type": "boolean",
+                        "description": "Include previews for untracked text files when available.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarize_test_failure",
+            "description": (
+                "Summarize pytest failures from inline output text or a log file path. "
+                "Use for operator triage and reviewer explanations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "log_path": {
+                        "type": "string",
+                        "description": "Optional path to a pytest log/output file.",
+                    },
+                    "output_text": {
+                        "type": "string",
+                        "description": "Optional inline pytest output text to summarize.",
+                    },
+                    "max_failures": {
+                        "type": "integer",
+                        "description": "Maximum failure records to include.",
+                    },
+                    "max_suspect_paths": {
+                        "type": "integer",
+                        "description": "Maximum traceback file paths to include.",
+                    },
+                    "max_error_types": {
+                        "type": "integer",
+                        "description": "Maximum distinct error types to include.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "triage_gate_failure",
+            "description": (
+                "Decompose the latest production gate artifact into blocker components and "
+                "reason-code breakdown for operator action planning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gate_artifact": {
+                        "type": "string",
+                        "description": "Optional production gate artifact path override.",
+                    },
+                    "summary_cache": {
+                        "type": "string",
+                        "description": "Optional forecast-audit summary cache path override.",
+                    },
+                    "output_json_path": {
+                        "type": "string",
+                        "description": "Optional output path for decomposition JSON.",
+                    },
+                    "output_md_path": {
+                        "type": "string",
+                        "description": "Optional output path for decomposition markdown.",
+                    },
+                    "force_refresh": {
+                        "type": "boolean",
+                        "description": "Force regeneration even when the decomposition report looks fresh.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_production_audit_gate",
             "description": (
                 "Safely run scripts/production_audit_gate.py without shell chaining. "
@@ -1595,6 +1770,18 @@ def execute_tool_call(
             result = _check_github_repo_status_tool(args, budget_seconds=budget_seconds)
             if cacheable:
                 _cache_set(cache_key, result, ttl_seconds=20.0)
+            return result
+
+        if safe_tool_name == "review_changed_files":
+            return _review_changed_files_tool(args, budget_seconds=budget_seconds)
+
+        if safe_tool_name == "summarize_test_failure":
+            return _summarize_test_failure_tool(args, budget_seconds=budget_seconds)
+
+        if safe_tool_name == "triage_gate_failure":
+            result = _triage_gate_failure_tool(args, budget_seconds=budget_seconds)
+            if cacheable:
+                _cache_set(cache_key, result, ttl_seconds=15.0)
             return result
 
         if safe_tool_name == "run_production_audit_gate":
@@ -2445,6 +2632,47 @@ def _check_github_repo_status_tool(arguments: dict[str, Any], *, budget_seconds:
     }
     if parsed_report is None and stdout_text:
         payload["raw_output"] = stdout_text[:4000]
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _review_changed_files_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    payload = _review_changed_files_helper(
+        project_root=PROJECT_ROOT,
+        paths=args.get("paths") if isinstance(args.get("paths"), list) else None,
+        base_ref=str(args.get("base_ref") or "").strip(),
+        max_files=max(1, min(40, _as_int(args.get("max_files"), 12))),
+        max_diff_chars=max(800, min(40000, _as_int(args.get("max_diff_chars"), 16000))),
+        diff_context=max(0, min(6, _as_int(args.get("diff_context"), 1))),
+        include_untracked=_as_bool(args.get("include_untracked"), True),
+        timeout_seconds=_bounded_timeout(25.0, budget_seconds),
+    )
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _summarize_test_failure_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    del budget_seconds
+    args = arguments if isinstance(arguments, dict) else {}
+    payload = _summarize_test_failure_helper(
+        log_path=str(args.get("log_path") or "").strip(),
+        output_text=str(args.get("output_text") or ""),
+        max_failures=max(1, min(25, _as_int(args.get("max_failures"), 10))),
+        max_suspect_paths=max(1, min(20, _as_int(args.get("max_suspect_paths"), 8))),
+        max_error_types=max(1, min(20, _as_int(args.get("max_error_types"), 8))),
+    )
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _triage_gate_failure_tool(arguments: dict[str, Any], *, budget_seconds: Optional[float] = None) -> str:
+    del budget_seconds
+    args = arguments if isinstance(arguments, dict) else {}
+    payload = _triage_gate_failure_helper(
+        gate_artifact=str(args.get("gate_artifact") or "").strip(),
+        summary_cache=str(args.get("summary_cache") or "").strip(),
+        output_json_path=str(args.get("output_json_path") or "").strip(),
+        output_md_path=str(args.get("output_md_path") or "").strip(),
+        force_refresh=_as_bool(args.get("force_refresh"), False),
+    )
     return json.dumps(payload, ensure_ascii=True)
 
 
@@ -3508,6 +3736,29 @@ def _extract_source_inspection_fast_path_request(message: str) -> Optional[tuple
     )
 
 
+def _extract_review_changed_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if _text_contains_any(low, REVIEW_CHANGED_FAST_PATH_BLOCKED_TOKENS):
+        return None
+    if not _text_contains_any(low, REVIEW_CHANGED_FAST_PATH_TRIGGER_TOKENS):
+        return None
+
+    args: dict[str, Any] = {
+        "include_untracked": True,
+    }
+    paths = _extract_source_fast_path_paths(text)
+    if paths:
+        args["paths"] = paths
+
+    ref_match = re.search(r"\b(?:against|vs\.?|versus|base)\s+([A-Za-z0-9._/\-]+)\b", text, flags=re.IGNORECASE)
+    if ref_match:
+        args["base_ref"] = ref_match.group(1).strip()
+    return ("review_changed_files", args)
+
+
 def _is_repo_status_prompt(message: str) -> bool:
     text = (message or "").strip().lower()
     if not text:
@@ -3563,6 +3814,58 @@ def _extract_quant_validation_fast_path_request(message: str) -> Optional[tuple[
         args["warn_gate_pct"] = 90.0
 
     return ("check_quant_validation_headroom", args)
+
+
+def _extract_test_log_path(message: str) -> str:
+    text = str(message or "")
+    candidates = re.findall(r"[A-Za-z0-9_./\\-]+\.(?:log|txt|out|xml)", text, flags=re.IGNORECASE)
+    for candidate in candidates:
+        cleaned = str(candidate).strip().strip("'\"")
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _extract_test_failure_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if not _text_contains_any(low, TEST_FAILURE_FAST_PATH_TRIGGER_TOKENS):
+        return None
+
+    args: dict[str, Any] = {}
+    log_path = _extract_test_log_path(text)
+    if log_path:
+        args["log_path"] = log_path
+    elif "failed " in low or "\n" in text or text.startswith("FAILED "):
+        args["output_text"] = text
+    else:
+        return None
+    return ("summarize_test_failure", args)
+
+
+def _extract_gate_triage_fast_path_request(message: str) -> Optional[tuple[str, dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    triggered = _text_contains_any(low, GATE_TRIAGE_FAST_PATH_TRIGGER_TOKENS) or (
+        "gate" in low and any(token in low for token in ("fail", "failed", "failure", "decompose", "triage"))
+    )
+    if not triggered:
+        return None
+
+    args: dict[str, Any] = {"force_refresh": False}
+    json_path = ""
+    for candidate in re.findall(r"[A-Za-z0-9_./\\-]+\.json", text, flags=re.IGNORECASE):
+        cleaned = str(candidate).strip().strip("'\"")
+        if "gate" in cleaned.lower() or "audit" in cleaned.lower():
+            json_path = cleaned
+            break
+    if json_path:
+        args["gate_artifact"] = json_path
+    return ("triage_gate_failure", args)
 
 
 def _infer_web_search_topic(message: str) -> str:
@@ -3852,6 +4155,37 @@ def _summarize_source_fast_path(_tool_name: str, raw_result: str) -> str:
     return _truncate_progress_text("\n".join(lines), 900)
 
 
+def _summarize_review_changed_fast_path(_tool_name: str, raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "change review: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status") or "UNKNOWN").upper()
+    state = str(parsed.get("worktree_state") or "unknown")
+    total = parsed.get("total_changed_files", "n/a")
+    files = parsed.get("changed_files") if isinstance(parsed.get("changed_files"), list) else []
+    tags = parsed.get("tag_counts") if isinstance(parsed.get("tag_counts"), dict) else {}
+
+    lines = [
+        f"change review: {status} | worktree={state} | files={total}",
+    ]
+    if files:
+        preview = ", ".join(str(row.get("path") or "?") for row in files[:4] if isinstance(row, dict))
+        if preview:
+            lines.append("paths: " + preview)
+    if tags:
+        top_tags = ", ".join(f"{k}:{v}" for k, v in list(tags.items())[:4])
+        if top_tags:
+            lines.append("tags: " + top_tags)
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
 def _summarize_repo_fast_path(_tool_name: str, raw_result: str) -> str:
     return _summarize_repo_status_tool_result(raw_result)
 
@@ -3864,6 +4198,50 @@ def _summarize_quant_validation_fast_path(_tool_name: str, raw_result: str) -> s
     return _summarize_quant_validation_tool_result(raw_result)
 
 
+def _summarize_test_failure_fast_path(_tool_name: str, raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "test failure: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status") or "UNKNOWN").upper()
+    total = parsed.get("total_failures", "n/a")
+    error_types = parsed.get("error_types") if isinstance(parsed.get("error_types"), list) else []
+    failures = parsed.get("failures") if isinstance(parsed.get("failures"), list) else []
+    lines = [f"test failure: {status} | failures={total}"]
+    if failures:
+        lines.append("nodes: " + ", ".join(str(row.get("nodeid") or "?") for row in failures[:3] if isinstance(row, dict)))
+    if error_types:
+        lines.append("errors: " + ", ".join(f"{row.get('type')}:{row.get('count')}" for row in error_types[:3] if isinstance(row, dict)))
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
+def _summarize_gate_triage_fast_path(_tool_name: str, raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return "gate triage: FAIL | empty result"
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_progress_text(text, 900)
+    if not isinstance(parsed, dict):
+        return _truncate_progress_text(text, 900)
+
+    status = str(parsed.get("status") or "UNKNOWN").upper()
+    gate_status = str(parsed.get("gate_status") or "UNKNOWN").upper()
+    reason = str(parsed.get("phase3_reason") or "unknown")
+    failed = parsed.get("failed_components") if isinstance(parsed.get("failed_components"), list) else []
+    lines = [f"gate triage: {status} | gate={gate_status} | reason={reason}"]
+    if failed:
+        lines.append("failed: " + ", ".join(str(x) for x in failed[:4]))
+    return _truncate_progress_text("\n".join(lines), 900)
+
+
 _BRIDGE_FAST_PATH_SPECS: tuple[BridgeFastPathSpec, ...] = (
     BridgeFastPathSpec(
         key="runtime",
@@ -3871,6 +4249,27 @@ _BRIDGE_FAST_PATH_SPECS: tuple[BridgeFastPathSpec, ...] = (
         summarizer=_summarize_runtime_fast_path,
         progress_label="runtime_fast_path",
         budget_seconds=1200.0,
+    ),
+    BridgeFastPathSpec(
+        key="change_review",
+        extractor=_extract_review_changed_fast_path_request,
+        summarizer=_summarize_review_changed_fast_path,
+        progress_label="change_review_fast_path",
+        budget_seconds=35.0,
+    ),
+    BridgeFastPathSpec(
+        key="gate_triage",
+        extractor=_extract_gate_triage_fast_path_request,
+        summarizer=_summarize_gate_triage_fast_path,
+        progress_label="gate_triage_fast_path",
+        budget_seconds=45.0,
+    ),
+    BridgeFastPathSpec(
+        key="test_failure",
+        extractor=_extract_test_failure_fast_path_request,
+        summarizer=_summarize_test_failure_fast_path,
+        progress_label="test_failure_fast_path",
+        budget_seconds=20.0,
     ),
     BridgeFastPathSpec(
         key="repo",
@@ -4096,6 +4495,7 @@ def _base_system_prompt() -> str:
         "You are Best-Anime, a quantitative portfolio optimization assistant for Bestman. "
         "You have access to reasoning tools (deepseek-r1 models) for chain-of-thought analysis, "
         "data tools for reading gate status/trade metrics and inspecting source code with citations, "
+        "review tools for changed-file review, pytest failure summarization, and production gate triage, "
         "quant validation health/headroom tools for fail-rate monitoring, "
         "robust web search (Tavily with free-provider fallback) for external lookups, "
         "notification tools for sending "

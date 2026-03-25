@@ -79,3 +79,23 @@ def test_live_dashboard_audit_console_and_polling_wiring() -> None:
     assert "const DEFAULT_REFRESH_MS = 15000;" in html
     assert "const REFRESH_MS = 5000;" not in html
     assert "auditConsoleState.focus = btn.dataset.focus || 'all';" in html
+
+
+def test_live_dashboard_operator_console_wiring() -> None:
+    html = Path("visualizations/live_dashboard.html").read_text(encoding="utf-8")
+
+    for element_id in (
+        "operator-status",
+        "operator-primary",
+        "operator-wiring",
+        "operator-gate",
+        "operator-activity",
+        "operator-context",
+        "operator-issues",
+    ):
+        assert f'id="{element_id}"' in html
+
+    assert "function renderOperatorConsole(data)" in html
+    assert "renderOperatorConsole(null);" in html
+    assert "renderOperatorConsole(data);" in html
+    assert "No operator evidence loaded." in html

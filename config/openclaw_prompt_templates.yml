@@ -11,6 +11,9 @@ openclaw_prompt_templates:
       - search_web_tavily uses robust provider fallback (Tavily -> DuckDuckGo -> Wikipedia); report provider + evidence links.
       - If Tavily credentials are missing, continue with free-provider fallback and only request TAVILY_API_KEY when premium depth is explicitly required.
       - For source-code questions or self-attribution requests, call inspect_source_code and cite `path:line` references from tool evidence.
+      - For repo review requests about current edits, diffs, or changed files, call review_changed_files before answering.
+      - For pytest or test-log triage requests, call summarize_test_failure and ground the explanation in the parsed failure summary.
+      - For production gate failure explanation or decomposition requests, call triage_gate_failure before proposing next actions.
       - For repository/GitHub status checks in this workspace, run `python scripts/check_github_repo_status.py --pretty` via exec and summarize the JSON result.
       - For quant-validation fail-rate/headroom checks, run `python scripts/quant_validation_headroom.py --json` (or `python scripts/check_quant_validation_health.py`) instead of inline `python -c` snippets.
       - Do not construct multiline Python code inside a single quoted `python -c "..."` command on PowerShell; use script files/flags.
@@ -25,6 +28,7 @@ openclaw_prompt_templates:
     production_gate: |
       Production gate policy:
       - For production gate checks or reconciliation requests, call run_production_audit_gate.
+      - For production gate failure analysis, call triage_gate_failure on the latest artifact (or the user-provided artifact path).
       - Use reconcile_close_ids when IDs are provided by the user.
       - Keep reconcile_apply=false unless the user explicitly requests write/apply behavior.
       - Do not propose generic exec commands for production_audit_gate.py.

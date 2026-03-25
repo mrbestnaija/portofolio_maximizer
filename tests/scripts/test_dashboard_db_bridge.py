@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import pytest
 import sqlite3
 
@@ -332,6 +333,121 @@ forecaster_monitoring:
     assert payload["pass_count"] == 1
     assert payload["fail_count"] == 1
     assert payload["path"] == str(quant_log)
+
+
+def test_operator_console_payload_surfaces_wiring_gate_and_activity(tmp_path, monkeypatch) -> None:
+    maintenance = tmp_path / "openclaw_maintenance_latest.json"
+    production_gate = tmp_path / "production_gate_latest.json"
+    activity_dir = tmp_path / "llm_activity"
+    activity_dir.mkdir()
+    activity_file = activity_dir / "2026-03-25.jsonl"
+
+    maintenance.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "primary_channel": "whatsapp",
+                "warnings": ["channels_status_unavailable"],
+                "errors": [],
+                "steps": {
+                    "session_route_reconcile": {
+                        "bound_agent_id": "ops",
+                        "expected_model": "ollama/qwen3:8b",
+                        "duplicate_wrong_agent_keys": 1,
+                        "refreshed_bound_keys": 0,
+                        "updated_agents": ["trading"],
+                    },
+                    "gateway_health": {
+                        "rpc_ok": True,
+                        "service_status": "running",
+                        "gateway_listener_pid": 13568,
+                    },
+                    "broken_channel_disable": {"disabled": []},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    production_gate.write_text(
+        json.dumps(
+            {
+                "phase3_ready": False,
+                "phase3_reason": "GATES_FAIL",
+                "warmup_expired": False,
+                "production_profitability_gate": {"status": "FAIL"},
+                "profitability_proof": {
+                    "status": "FAIL",
+                    "closed_trades": 42,
+                    "profit_factor": 0.59,
+                    "evidence_progress": {
+                        "remaining_trading_days": 9,
+                        "remaining_closed_trades": 0,
+                    },
+                },
+                "lift_gate": {
+                    "status": "INCONCLUSIVE",
+                    "lift_fraction": 0.0,
+                    "min_lift_fraction": 0.25,
+                },
+                "readiness": {"phase3_ready": False, "phase3_reason": "GATES_FAIL"},
+                "repo_state": {"status": {"tracked_changed": 2, "untracked": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    activity_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "openclaw_event",
+                        "channel": "whatsapp",
+                        "event_type": "bridge_status_fast_path_start",
+                        "timestamp": "2026-03-25T04:00:00Z",
+                        "latency_ms": 0,
+                        "session_id": "sess_1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "openclaw_event",
+                        "channel": "whatsapp",
+                        "event_type": "bridge_status_fast_path_complete",
+                        "timestamp": "2026-03-25T04:00:03Z",
+                        "latency_ms": 3,
+                        "session_id": "sess_1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_call",
+                        "channel": "whatsapp",
+                        "timestamp": "2026-03-25T04:00:04Z",
+                        "latency_ms": 12,
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "DEFAULT_OPENCLAW_MAINTENANCE_PATH", maintenance)
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_PATH", production_gate)
+    monkeypatch.setattr(mod, "DEFAULT_LLM_ACTIVITY_DIR", activity_dir)
+    monkeypatch.setenv("PMX_OPERATOR_ACTIVITY_DAYS", "7")
+    monkeypatch.setenv("PMX_OPERATOR_ACTIVITY_MAX_EVENTS", "5")
+
+    payload = mod._operator_console_payload()
+
+    assert payload["status"] == "ERROR"
+    assert payload["maintenance"]["bound_agent_id"] == "ops"
+    assert payload["maintenance"]["expected_model"] == "ollama/qwen3:8b"
+    assert payload["production_gate"]["status"] == "FAIL"
+    assert payload["production_gate"]["remaining_trading_days"] == 9
+    assert payload["activity"]["short_circuit_events"] == 2
+    assert payload["activity"]["tool_calls"] == 1
+    assert any(issue["focus"] == "wiring" for issue in payload["issues"])
+    assert any(issue["focus"] == "gate" for issue in payload["issues"])
 
 
 # ---------------------------------------------------------------------------

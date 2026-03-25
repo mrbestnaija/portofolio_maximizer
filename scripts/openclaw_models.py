@@ -152,6 +152,33 @@ def _oc_config_set_json(
     )
 
 
+def _update_openclaw_json_agents_list(
+    *,
+    agents_list: list[Any],
+    dry_run: bool,
+) -> _CmdResult:
+    config_path = Path.home() / ".openclaw" / "openclaw.json"
+    if dry_run:
+        return _CmdResult(ok=True, returncode=0, stdout="", stderr="")
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return _CmdResult(False, 1, "", "openclaw.json root is not an object")
+        agents = payload.get("agents")
+        if not isinstance(agents, dict):
+            agents = {}
+            payload["agents"] = agents
+        agents["list"] = list(agents_list)
+        config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        return _CmdResult(ok=True, returncode=0, stdout="", stderr="")
+    except FileNotFoundError as exc:
+        return _CmdResult(ok=False, returncode=127, stdout="", stderr=str(exc))
+    except Exception as exc:
+        return _CmdResult(ok=False, returncode=1, stdout="", stderr=str(exc))
+
+
 def _parse_csv(text: str) -> list[str]:
     raw = (text or "").strip()
     if not raw:
@@ -409,6 +436,49 @@ def _build_fallbacks(
         seen.add(x)
         out.append(x)
     return out
+
+
+def _sync_explicit_agent_models(
+    *,
+    agents_list: list[Any],
+    primary: str,
+) -> tuple[list[Any], list[str], bool]:
+    """
+    Align explicit per-agent model overrides with the configured primary model.
+
+    OpenClaw will prefer `agents.list[*].model` over `agents.defaults.model`.
+    If core PMX agents still carry stale qwen/deepseek overrides, channel-bound
+    sessions can silently keep using the wrong model even after defaults were
+    updated. We normalize the 4 expected PMX agents back to the primary model
+    while leaving custom/non-core agents untouched.
+    """
+    primary_ref = str(primary or "").strip()
+    synced: list[Any] = []
+    updated_ids: list[str] = []
+    changed = False
+    managed_agents = {"ops", "trading", "training", "notifier"}
+
+    for raw in agents_list:
+        row = dict(raw or {}) if isinstance(raw, dict) else {}
+        agent_id = str(row.get("id") or "").strip()
+        current_model = str(row.get("model") or "").strip()
+        should_manage = agent_id in managed_agents
+        should_update = False
+
+        if should_manage and primary_ref:
+            if current_model != primary_ref:
+                should_update = True
+        elif not current_model and primary_ref:
+            should_update = True
+
+        if should_update:
+            row["model"] = primary_ref
+            changed = True
+            if agent_id:
+                updated_ids.append(agent_id)
+        synced.append(row if isinstance(raw, dict) else raw)
+
+    return synced, updated_ids, changed
 
 
 def _restart_gateway(*, oc_base: list[str], dry_run: bool) -> _CmdResult:
@@ -750,6 +820,36 @@ def _cmd_apply(args) -> int:
             print(tail, file=sys.stderr)
         return 1
     print(f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}set agents.defaults.model primary={primary} fallbacks={len(fallbacks)}")
+
+    existing_agents = _oc_config_get_json(oc_base=oc_base, path="agents.list", timeout_seconds=10.0)
+    if isinstance(existing_agents, list):
+        synced_agents, updated_ids, changed_agents = _sync_explicit_agent_models(
+            agents_list=list(existing_agents),
+            primary=primary,
+        )
+        if changed_agents:
+            set_res = _oc_config_set_json(
+                oc_base=oc_base,
+                path="agents.list",
+                value=synced_agents,
+                timeout_seconds=20.0,
+                dry_run=dry_run,
+            )
+            used_file_fallback = False
+            if not set_res.ok:
+                set_res = _update_openclaw_json_agents_list(agents_list=synced_agents, dry_run=dry_run)
+                used_file_fallback = bool(set_res.ok)
+            if not set_res.ok:
+                print(f"[openclaw_models] FAILED setting agents.list model overrides (exit={set_res.returncode})", file=sys.stderr)
+                tail = "\n".join((set_res.stderr or "").splitlines()[-10:])
+                if tail:
+                    print(tail, file=sys.stderr)
+                return 1
+            print(
+                f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}aligned explicit agent models "
+                f"for {', '.join(updated_ids)}"
+                f"{' (file fallback)' if used_file_fallback else ''}"
+            )
 
     # Image model defaults: Qwen Vision, plus optional OpenAI image-capable model.
     if bool(args.set_image_defaults):
