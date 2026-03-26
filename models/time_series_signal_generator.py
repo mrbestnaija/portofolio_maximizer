@@ -2566,31 +2566,45 @@ class TimeSeriesSignalGenerator:
         _j_n = len(pairs_conf)
         _j_w = int(sum(pairs_win)) if pairs_win else 0
         _j_l = _j_n - _j_w
+        db_file = Path(
+            db_path
+            or os.getenv("PORTFOLIO_DB_PATH")
+            or "data/portfolio_maximizer.db"
+        )
         if _j_n < 30 or _j_w < 5 or _j_l < 5:
-            # 2. Ticker-local DB fallback — also triggers when JSONL is class-imbalanced.
-            db_file = Path(
-                db_path
-                or os.getenv("PORTFOLIO_DB_PATH")
-                or "data/portfolio_maximizer.db"
-            )
-            pairs_conf, pairs_win = self._load_realized_outcome_pairs(
-                db_file=db_file,
-                ticker=ticker,
-                limit=1200,
-            )
-            source = "db_local"
-
-            _db_n = len(pairs_conf)
-            _db_w = int(sum(pairs_win)) if pairs_win else 0
-            _db_l = _db_n - _db_w
-            if (_db_n < 30 or _db_w < 5 or _db_l < 5) and ticker:
-                # 3. Global DB fallback.
-                pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+            if _j_n >= 30 and _j_l < 5:
+                # JSONL has enough total pairs but is class-imbalanced (very few losses).
+                # AUGMENT with DB non-mechanical pairs instead of replacing — preserves
+                # the JSONL signal mass while adding the minority class from live trades.
+                # Replacing would discard 30+ valid JSONL pairs in favour of DB-only.
+                _aug_conf, _aug_win = self._load_realized_outcome_pairs(
                     db_file=db_file,
                     ticker="",
-                    limit=2000,
+                    limit=200,
                 )
-                source = "db_global"
+                pairs_conf = pairs_conf + _aug_conf
+                pairs_win = pairs_win + _aug_win
+                source = "jsonl+db_augmented"
+            else:
+                # 2. Ticker-local DB fallback — JSONL is too small.
+                pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                    db_file=db_file,
+                    ticker=ticker,
+                    limit=1200,
+                )
+                source = "db_local"
+
+                _db_n = len(pairs_conf)
+                _db_w = int(sum(pairs_win)) if pairs_win else 0
+                _db_l = _db_n - _db_w
+                if (_db_n < 30 or _db_w < 5 or _db_l < 5) and ticker:
+                    # 3. Global DB fallback.
+                    pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                        db_file=db_file,
+                        ticker="",
+                        limit=2000,
+                    )
+                    source = "db_global"
 
         n = len(pairs_conf)
         wins = int(sum(pairs_win))
@@ -2796,7 +2810,10 @@ class TimeSeriesSignalGenerator:
             "  AND COALESCE(is_synthetic, 0) = 0",
             # Exclude mechanical exits: stop_loss and max_holding exits are directionally
             # uninformative and poison the Platt logistic regression with irrelevant labels.
-            "  AND COALESCE(exit_reason, '') NOT IN ('stop_loss', 'max_holding', 'time_exit', 'forced_exit')",
+            # UPPER() required: DB stores uppercase ('STOP_LOSS', 'TIME_EXIT') but the
+            # original filter used lowercase — SQLite NOT IN is case-sensitive, so the
+            # filter was silently passing all mechanical exits through.
+            "  AND UPPER(COALESCE(exit_reason, '')) NOT IN ('STOP_LOSS', 'MAX_HOLDING', 'TIME_EXIT', 'FORCED_EXIT')",
         ]
         params: List[Any] = []
         ticker_norm = str(ticker or "").strip().upper()
