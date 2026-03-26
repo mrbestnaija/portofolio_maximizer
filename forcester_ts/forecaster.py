@@ -194,6 +194,8 @@ class TimeSeriesForecaster:
         self._instrumentation = ModelInstrumentation()
         self._sarimax_exog_last_row: Optional[pd.Series] = None
         self._sarimax_exog_columns: list[str] = []
+        self._sarimax_exog_policy: Dict[str, Any] = {}
+        self._sarimax_forecast_exog_policy: Dict[str, Any] = {}
         self._macro_context: Optional[pd.DataFrame] = None  # Signal Quality A
         self._last_price: Optional[float] = None
         self._last_timestamp: Optional[pd.Timestamp] = None
@@ -238,6 +240,35 @@ class TimeSeriesForecaster:
         "return",
     }
 
+    @staticmethod
+    def _clip_macro_context_to_price_window(
+        price_index: pd.Index,
+        macro_context: Optional[pd.DataFrame],
+    ) -> tuple[Optional[pd.DataFrame], Dict[str, Any]]:
+        policy: Dict[str, Any] = {
+            "macro_context_clipped_to_price_window": False,
+            "macro_context_rows_before_clip": 0,
+            "macro_context_rows_after_clip": 0,
+            "price_window_start": str(price_index.min()) if len(price_index) else None,
+            "price_window_end": str(price_index.max()) if len(price_index) else None,
+        }
+        if macro_context is None or macro_context.empty:
+            return macro_context, policy
+
+        clipped = macro_context.sort_index()
+        policy["macro_context_rows_before_clip"] = int(len(clipped))
+        try:
+            start = price_index.min()
+            end = price_index.max()
+            clipped = clipped.loc[(clipped.index >= start) & (clipped.index <= end)]
+            policy["macro_context_clipped_to_price_window"] = int(len(clipped)) != int(
+                policy["macro_context_rows_before_clip"]
+            )
+        except Exception:
+            pass
+        policy["macro_context_rows_after_clip"] = int(len(clipped))
+        return clipped, policy
+
     def _build_sarimax_exogenous(
         self,
         *,
@@ -255,7 +286,8 @@ class TimeSeriesForecaster:
           ["vix_level", "yield_spread_10y_2y", "sector_momentum_5d"]
 
         Macro columns absent from macro_context are silently omitted.
-        All values forward-filled then back-filled to handle business-day gaps.
+        Macro context is clipped to the observed price window, aligned with
+        forward-fill only, and leading gaps are zero-filled to avoid future leak.
         """
         returns = returns_series if returns_series is not None else price_series.pct_change()
         returns = returns.reindex(price_series.index)
@@ -278,34 +310,59 @@ class TimeSeriesForecaster:
             "ema_gap_10": ema_gap_10,
             "zscore_20": zscore_20,
         }
+        exog_policy: Dict[str, Any] = {
+            "fit_alignment": "ffill_only_zero_leading",
+            "forecast_mode": "last_observation_hold",
+            "macro_columns_requested": list(self._MACRO_EXOG_COLUMNS),
+            "macro_columns_used": [],
+            "leading_zero_fill_count": {},
+        }
 
         # Signal Quality A: merge optional macro context columns
-        if macro_context is not None and not macro_context.empty:
+        clipped_macro, macro_policy = self._clip_macro_context_to_price_window(
+            price_series.index,
+            macro_context,
+        )
+        exog_policy.update(macro_policy)
+        if clipped_macro is not None and not clipped_macro.empty:
             for col in self._MACRO_EXOG_COLUMNS:
-                if col in macro_context.columns:
-                    aligned = (
-                        macro_context[col]
-                        .reindex(price_series.index)
-                        .ffill()
-                        .bfill()
-                        .fillna(0.0)
-                    )
+                if col in clipped_macro.columns:
+                    aligned = clipped_macro[col].reindex(price_series.index)
+                    aligned = aligned.ffill()
+                    leading_zero_fill_count = int(aligned.isna().sum())
+                    aligned = aligned.fillna(0.0)
                     exog_dict[col] = aligned.astype(float)
+                    exog_policy["macro_columns_used"].append(col)
+                    exog_policy["leading_zero_fill_count"][col] = leading_zero_fill_count
 
         exog = pd.DataFrame(exog_dict, index=price_series.index)
         exog = exog.astype(float).replace([pd.NA, float("inf"), float("-inf")], 0.0).fillna(0.0)
         # Phase 8.4: drop multicollinear features (VIF > 10) before SARIMAX fit.
         exog = self._drop_high_vif_features(exog)
+        self._sarimax_exog_policy = exog_policy
         return exog
 
     def _build_sarimax_forecast_exogenous(self, horizon: int) -> Optional[pd.DataFrame]:
         if not self._sarimax_exog_columns or self._sarimax_exog_last_row is None:
+            self._sarimax_forecast_exog_policy = {
+                "mode": "disabled",
+                "reason": "no_fit_exogenous",
+            }
             return None
         horizon = int(horizon)
         if horizon <= 0:
+            self._sarimax_forecast_exog_policy = {
+                "mode": "disabled",
+                "reason": "non_positive_horizon",
+            }
             return None
         last = self._sarimax_exog_last_row.reindex(self._sarimax_exog_columns).astype(float)
         repeated = pd.DataFrame([last.to_dict()] * horizon, columns=self._sarimax_exog_columns)
+        self._sarimax_forecast_exog_policy = {
+            "mode": "last_observation_hold",
+            "horizon": horizon,
+            "columns": list(self._sarimax_exog_columns),
+        }
         return repeated
 
     def _drop_high_vif_features(
@@ -992,7 +1049,17 @@ class TimeSeriesForecaster:
                     self._sarimax_exog_last_row = exog.iloc[-1] if not exog.empty else None
                     self._instrumentation.record_artifact(
                         "sarimax_exogenous",
-                        {"columns": self._sarimax_exog_columns, "row_count": int(len(exog))},
+                        {
+                            "columns": self._sarimax_exog_columns,
+                            "row_count": int(len(exog)),
+                            "exog_policy": dict(self._sarimax_exog_policy),
+                        },
+                    )
+                    self._instrumentation.record_artifact("exog_policy", dict(self._sarimax_exog_policy))
+                    self._instrumentation.record_dataframe_snapshot(
+                        "sarimax_exogenous_frame",
+                        exog,
+                        columns=self._sarimax_exog_columns,
                     )
                     restored_from_snapshot = self._maybe_restore_snapshot(
                         component="sarimax",
@@ -1015,6 +1082,7 @@ class TimeSeriesForecaster:
                             ticker=ticker,
                             regime=_ol_regime,
                             forced_d=1 if _force_diff else None,
+                            stationarity_hint=self._series_diagnostics,
                         )
                         self._maybe_save_snapshot(
                             component="sarimax",
@@ -1050,6 +1118,8 @@ class TimeSeriesForecaster:
                 self._sarimax = None
                 self._sarimax_exog_columns = []
                 self._sarimax_exog_last_row = None
+                self._sarimax_exog_policy = {}
+                self._sarimax_forecast_exog_policy = {}
                 self._handle_model_failure("sarimax", "fit", exc)
 
         if self.config.samossa_enabled:
@@ -1142,6 +1212,7 @@ class TimeSeriesForecaster:
                     diagnostics = self._mssa.get_diagnostics()
                     meta["change_points"] = len(diagnostics.get("change_points", []))
                     meta["rank"] = diagnostics.get("rank")
+                    meta["rank_policy"] = diagnostics.get("rank_policy")
                 self._record_model_event(
                     "mssa_rl",
                     "fit_complete",
@@ -1264,6 +1335,10 @@ class TimeSeriesForecaster:
                 self._record_model_event("sarimax", "forecast_start", horizon=horizon)
                 with self._instrumentation.track("sarimax", "forecast", horizon=horizon) as meta:
                     exog = self._build_sarimax_forecast_exogenous(horizon)
+                    self._instrumentation.record_artifact(
+                        "forecast_exog_policy",
+                        dict(self._sarimax_forecast_exog_policy),
+                    )
                     results["sarimax_forecast"] = self._sarimax.forecast(
                         steps=horizon,
                         exogenous=exog,
@@ -1321,6 +1396,19 @@ class TimeSeriesForecaster:
                     results["mssa_rl_forecast"] = mssa_output
                     results["mssa_rl_diagnostics"] = diagnostics
                     meta["change_points"] = len(diagnostics.get("change_points", []))
+                    meta["active_rank"] = mssa_output.get("active_rank")
+                    meta["q_state"] = mssa_output.get("q_state")
+                    results["active_rank"] = mssa_output.get("active_rank")
+                    results["q_state"] = mssa_output.get("q_state")
+                    self._instrumentation.record_artifact(
+                        "mssa_policy",
+                        {
+                            "active_action": mssa_output.get("active_action"),
+                            "active_rank": mssa_output.get("active_rank"),
+                            "q_state": mssa_output.get("q_state"),
+                            "policy_version": mssa_output.get("policy_version"),
+                        },
+                    )
                 self._record_model_event("mssa_rl", "forecast_complete")
             except Exception as exc:
                 results["mssa_rl_forecast"] = None
@@ -1342,6 +1430,11 @@ class TimeSeriesForecaster:
                         "model_order": {"p": self._garch.p, "q": self._garch.q},
                         "aic": garch_result.get("aic"),
                         "bic": garch_result.get("bic"),
+                        "fallback_reason": garch_result.get("fallback_reason"),
+                        "persistence": garch_result.get("persistence"),
+                        "volatility_ratio_to_realized": garch_result.get(
+                            "volatility_ratio_to_realized"
+                        ),
                     }
                     results["volatility_forecast"] = volatility_payload
                     meta.update(volatility_payload)
@@ -1353,6 +1446,20 @@ class TimeSeriesForecaster:
         else:
             results["garch_forecast"] = None
             results["volatility_forecast"] = None
+
+        residual_diag_artifact: Dict[str, Any] = {}
+        for model_name, result_key in (
+            ("sarimax", "sarimax_forecast"),
+            ("samossa", "samossa_forecast"),
+            ("garch", "garch_forecast"),
+            ("mssa_rl", "mssa_rl_forecast"),
+        ):
+            payload = results.get(result_key) or {}
+            diagnostics = payload.get("residual_diagnostics") if isinstance(payload, dict) else None
+            if isinstance(diagnostics, dict) and diagnostics:
+                residual_diag_artifact[model_name] = dict(diagnostics)
+        results["residual_diagnostics"] = residual_diag_artifact
+        self._instrumentation.record_artifact("residual_diagnostics", residual_diag_artifact)
 
         self._model_summaries = self.get_component_summaries()
         with self._instrumentation.track("ensemble", "build", horizon=horizon) as ensemble_phase:
@@ -1380,9 +1487,13 @@ class TimeSeriesForecaster:
                     ),
                     "selection_score": ensemble_meta.get("selection_score"),
                     "primary_model": ensemble_meta.get("primary_model"),
+                    "default_model": ensemble_meta.get("default_model"),
                     "allow_as_default": ensemble_meta.get("allow_as_default"),
                     "ensemble_status": ensemble_meta.get("ensemble_status"),
                     "ensemble_decision_reason": ensemble_meta.get("ensemble_decision_reason"),
+                    "ensemble_index_mismatch": bool(
+                        ensemble_meta.get("ensemble_index_mismatch", False)
+                    ),
                 },
             )
             allow_as_default = bool(ensemble_meta.get("allow_as_default", True))
@@ -1410,6 +1521,9 @@ class TimeSeriesForecaster:
                 weights=ensemble_meta.get("weights"),
                 confidence=ensemble_meta.get("confidence"),
             )
+            if ensemble_meta.get("ensemble_index_mismatch"):
+                results["ensemble_index_mismatch"] = True
+                self._instrumentation.record_artifact("ensemble_index_mismatch", True)
         else:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
@@ -1451,16 +1565,32 @@ class TimeSeriesForecaster:
             results["regime_confidence"] = self._regime_result["confidence"]
             results["regime_features"] = self._regime_result["features"]
             results["regime_recommendations"] = self._regime_result["recommendations"]
+            results["regime_fallback"] = False
         else:
             results["regime"] = "STATIC"  # No regime detection or disabled
             results["regime_confidence"] = None
             results["regime_features"] = None
             results["regime_recommendations"] = None
+            # True when regime detection was enabled but failed at runtime (silent fallback).
+            # False when regime detection is simply disabled in config.
+            results["regime_fallback"] = (
+                self._regime_detector is not None and self.config.regime_detection_enabled
+            )
         # Phase 7.14-D: alias for DB persistence (database_manager reads 'detected_regime')
         results["detected_regime"] = results["regime"] if results["regime"] != "STATIC" else None
         self._instrumentation.set_dataset_metadata(detected_regime=results["detected_regime"])
+        results["effective_default_model"] = results.get("default_model")
+        if results.get("default_model") is not None:
+            self._instrumentation.record_artifact(
+                "effective_default_model",
+                results.get("default_model"),
+            )
 
         self._latest_results = results
+        if self._sarimax_exog_policy:
+            results["exog_policy"] = dict(self._sarimax_exog_policy)
+        if self._sarimax_forecast_exog_policy:
+            results["forecast_exog_policy"] = dict(self._sarimax_forecast_exog_policy)
         results["model_errors"] = dict(self._model_errors)
         results["model_events"] = list(self._model_events)
         results["instrumentation_report"] = self._instrumentation.export()
@@ -1882,7 +2012,20 @@ class TimeSeriesForecaster:
         preselection_gate = self._preselection_default_gate()
         metadata["preselection_gate"] = preselection_gate
         metadata["allow_as_default"] = bool(preselection_gate.get("allow_as_default", True))
-        if metadata["allow_as_default"]:
+        if metadata.get("ensemble_index_mismatch"):
+            metadata["allow_as_default"] = False
+            metadata["ensemble_status"] = "DISABLE_DEFAULT"
+            metadata["ensemble_decision_reason"] = (
+                "critical ensemble index mismatch; default path falls back to best single"
+            )
+            if primary_model:
+                metadata["default_model"] = primary_model
+            self._record_model_event(
+                "ensemble",
+                "index_mismatch_blocked_default",
+                primary_model=primary_model,
+            )
+        elif metadata["allow_as_default"]:
             metadata.setdefault("ensemble_status", "KEEP")
             metadata.setdefault("ensemble_decision_reason", "preselection gate passed")
         else:
@@ -2131,7 +2274,9 @@ class TimeSeriesForecaster:
             forecast_series = self._extract_series(payload)
             if forecast_series is None:
                 return
-            metrics = compute_regression_metrics(actual, forecast_series)
+            lower_ci = self._extract_series(payload, "lower_ci") if isinstance(payload, dict) else None
+            upper_ci = self._extract_series(payload, "upper_ci") if isinstance(payload, dict) else None
+            metrics = compute_regression_metrics(actual, forecast_series, lower_ci, upper_ci)
             if metrics:
                 metrics_map[name] = metrics
 
@@ -2218,7 +2363,10 @@ class TimeSeriesForecaster:
         metadata["best_model_rmse"] = best_rmse
         metadata["best_model"] = best_model
 
-        if ratio > max_ratio:
+        if metadata.get("ensemble_index_mismatch"):
+            decision = "DISABLE_DEFAULT"
+            reason = "critical ensemble index mismatch"
+        elif ratio > max_ratio:
             decision = "DISABLE_DEFAULT"
             reason = f"rmse regression (ratio={ratio:.3f} > {max_ratio:.3f})"
         elif disable_if_no_lift and required > 0 and effective_n >= required and lift_fraction < min_lift_fraction:
@@ -2245,6 +2393,15 @@ class TimeSeriesForecaster:
                 effective_audits=effective_n,
                 required_audits=required,
             )
+        self._latest_results["effective_default_model"] = self._latest_results.get("default_model")
+        if self._latest_results.get("effective_default_model") is not None:
+            self._instrumentation.record_artifact(
+                "effective_default_model",
+                self._latest_results.get("effective_default_model"),
+            )
+        if metadata.get("ensemble_index_mismatch"):
+            self._latest_results["ensemble_index_mismatch"] = True
+            self._instrumentation.record_artifact("ensemble_index_mismatch", True)
         self._instrumentation.record_artifact(
             "ensemble_policy_decision",
             {

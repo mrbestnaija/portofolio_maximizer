@@ -1004,6 +1004,12 @@ class DatabaseManager:
             self.cursor.execute(
                 "ALTER TABLE trade_executions ADD COLUMN is_forced_exit INTEGER DEFAULT 0"
             )
+        if "is_contaminated" not in trade_cols:
+            # INT-05: cross-mode contamination (live close against synthetic opener).
+            # Excluded from production_closed_trades view and canonical metrics.
+            self.cursor.execute(
+                "ALTER TABLE trade_executions ADD COLUMN is_contaminated INTEGER DEFAULT 0"
+            )
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -2168,6 +2174,7 @@ class DatabaseManager:
         bar_close: Optional[float] = None,
         ts_signal_id: Optional[str] = None,
         is_forced_exit: int = 0,
+        is_contaminated: int = 0,
     ) -> int:
         """Persist trade execution details."""
         try:
@@ -2224,6 +2231,7 @@ class DatabaseManager:
                     "bar_close",
                     "ts_signal_id",
                     "is_forced_exit",
+                    "is_contaminated",
                 ]
                 values = [
                     ticker,
@@ -2272,6 +2280,7 @@ class DatabaseManager:
                     float(bar_close) if bar_close is not None else None,
                     ts_signal_id,
                     int(is_forced_exit) if is_forced_exit else 0,
+                    int(is_contaminated) if is_contaminated else 0,
                 ]
                 placeholders = ", ".join(["?"] * len(columns))
                 sql = f"INSERT INTO trade_executions ({', '.join(columns)}) VALUES ({placeholders})"

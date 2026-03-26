@@ -523,10 +523,17 @@ class SAMOSSAForecaster:
                 directional_confidence = min(1.0, abs(slope_val) / noise_proxy)
                 directional_signal = float(np.sign(slope_val))
 
+        # Scale CI to grow with sqrt(step+1): uncertainty accumulates over the horizon.
+        # A flat ±noise_level CI based on in-sample reconstruction residuals is too
+        # narrow at step N and systematically inflates SNR for multi-step trades.
+        # sqrt(h) is the random-walk lower bound for uncertainty growth.
+        horizon_scale = np.sqrt(np.arange(1, steps + 1, dtype=float))
+        ci_band = pd.Series(noise_level * horizon_scale, index=future_index)
+
         return {
             "forecast": forecast_series,
-            "lower_ci": forecast_series - noise_level,
-            "upper_ci": forecast_series + noise_level,
+            "lower_ci": forecast_series - ci_band,
+            "upper_ci": forecast_series + ci_band,
             "explained_variance_ratio": self._explained_variance_ratio,
             "window_length_used": self.config.window_length,
             "n_components": self.config.n_components,

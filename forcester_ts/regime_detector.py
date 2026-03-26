@@ -178,10 +178,12 @@ class RegimeDetector:
             poly = np.polyfit(np.log(lags), np.log(tau_clamped), 1)
             hurst = float(poly[0])
             if not np.isfinite(hurst):
-                return 0.5
+                # All tau values were clamped to 1e-12 (near-constant series):
+                # treat as maximally mean-reverting, not random walk.
+                return 0.0 if np.std(prices) < 1e-5 else 0.5
             return float(np.clip(hurst, 0.0, 1.0))
         except (ValueError, np.linalg.LinAlgError):
-            return 0.5
+            return 0.0 if np.std(prices) < 1e-5 else 0.5
 
     def _adf_test(self, series: pd.Series) -> float:
         """

@@ -676,7 +676,15 @@ class TimeSeriesSignalGenerator:
             else:
                 volatility = self._to_scalar(volatility_forecast)
 
-            lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
+            # For 1-day signals, step-1 CI == terminal CI; they're identical.
+            # For multi-step signals, use terminal CI so SNR reflects full horizon uncertainty.
+            _forecast_horizon = getattr(self, "_forecast_horizon", None) or self.config.get(
+                "forecast_horizon", 30
+            ) if hasattr(self, "config") and isinstance(self.config, dict) else 30
+            if isinstance(_forecast_horizon, int) and _forecast_horizon <= 1:
+                lower_ci, upper_ci = self._extract_ci_bounds_step1(primary_forecast)
+            else:
+                lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
             snr = self._estimate_signal_to_noise(
                 current_price=current_price,
                 expected_return=expected_return,
@@ -1220,16 +1228,62 @@ class TimeSeriesSignalGenerator:
             "roundtrip_cost_fraction": default_bps / 1e4,
         }
 
-    def _extract_ci_bounds(self, forecast_payload: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[float]]:
+    def _extract_ci_bounds(
+        self,
+        forecast_payload: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[float], Optional[float]]:
         if not forecast_payload:
             return None, None
-        lower_ci = self._to_scalar(forecast_payload.get("lower_ci"))
-        upper_ci = self._to_scalar(forecast_payload.get("upper_ci"))
+        # Use the terminal CI step (iloc[-1]) not step-1 (iloc[0]).
+        # SNR must be evaluated at the actual trade horizon: a 5-day trade gated
+        # against a step-1 CI is structurally too narrow and inflates SNR.
+        raw_lower = forecast_payload.get("lower_ci")
+        raw_upper = forecast_payload.get("upper_ci")
+        lower_ci = self._to_scalar_terminal(raw_lower)
+        upper_ci = self._to_scalar_terminal(raw_upper)
         if lower_ci is None or upper_ci is None:
             return lower_ci, upper_ci
         if not np.isfinite(lower_ci) or not np.isfinite(upper_ci):
             return None, None
         return float(lower_ci), float(upper_ci)
+
+    def _extract_ci_bounds_step1(
+        self,
+        forecast_payload: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Return CI bounds at step-1 (iloc[0]) for single-bar / 1-day signals.
+
+        Use this only when forecast_horizon == 1; for multi-step trades always
+        use _extract_ci_bounds() (terminal step) so SNR reflects actual uncertainty.
+        """
+        if not forecast_payload:
+            return None, None
+        raw_lower = forecast_payload.get("lower_ci")
+        raw_upper = forecast_payload.get("upper_ci")
+        lower_ci = self._to_scalar(raw_lower)
+        upper_ci = self._to_scalar(raw_upper)
+        if lower_ci is None or upper_ci is None:
+            return lower_ci, upper_ci
+        if not np.isfinite(lower_ci) or not np.isfinite(upper_ci):
+            return None, None
+        return float(lower_ci), float(upper_ci)
+
+    def _to_scalar_terminal(self, value: Any) -> Optional[float]:
+        """Return the LAST element of a Series/array CI bound (terminal horizon step)."""
+        if value is None:
+            return None
+        if isinstance(value, pd.Series):
+            if value.empty:
+                return None
+            return float(value.iloc[-1])
+        if isinstance(value, (np.ndarray, list, tuple)):
+            if len(value) == 0:
+                return None
+            return float(value[-1])
+        # Scalar — already horizon-independent
+        if isinstance(value, (np.generic, float, int)):
+            return float(value)
+        return None
 
     @staticmethod
     def _estimate_signal_to_noise(
@@ -2541,7 +2595,10 @@ class TimeSeriesSignalGenerator:
         n = len(pairs_conf)
         wins = int(sum(pairs_win))
         losses = int(n - wins)
-        if n < 30 or wins < 5 or losses < 5:
+        # Minimum pairs raised to 43: 70/30 split gives 30 train + 13 holdout.
+        # At 30 pairs (old floor) we only get 9 holdout samples — insufficient
+        # to distinguish a miscalibrated model from random variation.
+        if n < 43 or wins < 5 or losses < 5:
             logger.debug(
                 "Outcome calibration skipped (n=%d wins=%d losses=%d source=%s); using raw.",
                 n, wins, losses, source,
@@ -2556,7 +2613,8 @@ class TimeSeriesSignalGenerator:
             # LEAK-01 fix: time-based 70/30 train/holdout split.
             # Pairs are chronologically ordered (DB: by rowid; JSONL: by file order).
             # Training uses only the first 70%; holdout validates calibration quality.
-            split_idx = max(int(len(x) * 0.70), 20)  # need at least 20 training pairs
+            # Floor at 30 train samples ensures the logistic regression is not noise-fit.
+            split_idx = max(int(len(x) * 0.70), 30)
             if split_idx >= len(x):
                 # Insufficient data for a meaningful split -- skip calibration
                 logger.debug(
@@ -2573,13 +2631,16 @@ class TimeSeriesSignalGenerator:
             clf.fit(x_train, y_train)
 
             # Evaluate on holdout to detect overfitting / poisoned training data.
-            if len(x_holdout) >= 5:
+            # Guard raised to 0.55 and minimum holdout size raised to 10:
+            # a 0.50 floor with n_holdout=9 allows effectively-random calibration
+            # to pass and corrupt the blended confidence.
+            if len(x_holdout) >= 10:
                 holdout_preds = clf.predict(x_holdout)
                 holdout_acc = float((holdout_preds == y_holdout).mean())
                 self._calibration_holdout_accuracy = holdout_acc
-                if holdout_acc < 0.50:
+                if holdout_acc < 0.55:
                     logger.warning(
-                        "Platt holdout accuracy %.2f below 0.50 (n_holdout=%d) -- "
+                        "Platt holdout accuracy %.2f below 0.55 (n_holdout=%d) -- "
                         "falling back to raw confidence to avoid miscalibration.",
                         holdout_acc, len(x_holdout),
                     )
@@ -2605,6 +2666,16 @@ class TimeSeriesSignalGenerator:
             except (TypeError, ValueError):
                 raw_weight = 0.80
             raw_weight = max(0.0, min(1.0, raw_weight))
+            # Dynamic raw_weight ramp: as pairs accumulate, reduce raw_weight so Platt
+            # has meaningful influence. At 43 pairs (minimum floor) Platt has 20% weight;
+            # at 100+ pairs it grows to 50%. Config raw_weight is the MAXIMUM (early-data cap).
+            # Formula: ramp = 0.80 - 0.30 * min(1.0, (n - 43) / 57)
+            #   n=43  → ramp=0.80 (20% Platt — same as before)
+            #   n=100 → ramp=0.50 (50% Platt — meaningful correction)
+            #   n=200 → ramp=0.50 (capped — prevent over-correction)
+            ramp_raw_weight = 0.80 - 0.30 * min(1.0, max(0.0, (n - 43) / 57.0))
+            # Apply ramp only when it is more restrictive than the config value
+            raw_weight = min(raw_weight, ramp_raw_weight)
             try:
                 max_downside = float(calibration_cfg.get("max_downside_adjustment", 0.15))
             except (TypeError, ValueError):
@@ -2683,6 +2754,13 @@ class TimeSeriesSignalGenerator:
             win_raw = outcome.get("win")
             if win_raw is None:
                 continue
+            # Exclude mechanical exits: stop-loss and time-based (max_holding) exits
+            # are directionally uninformative — the trade was terminated by a risk
+            # guard, not by the model's prediction being confirmed or refuted.
+            # Including them poisons the logistic regression with irrelevant labels.
+            exit_reason = str(outcome.get("exit_reason") or entry.get("exit_reason") or "").lower()
+            if exit_reason in {"stop_loss", "max_holding", "time_exit", "forced_exit"}:
+                continue
             try:
                 pairs_conf.append(float(conf_raw))
                 pairs_win.append(1.0 if win_raw else 0.0)
@@ -2716,6 +2794,9 @@ class TimeSeriesSignalGenerator:
             "  AND is_close = 1",
             "  AND COALESCE(is_diagnostic, 0) = 0",
             "  AND COALESCE(is_synthetic, 0) = 0",
+            # Exclude mechanical exits: stop_loss and max_holding exits are directionally
+            # uninformative and poison the Platt logistic regression with irrelevant labels.
+            "  AND COALESCE(exit_reason, '') NOT IN ('stop_loss', 'max_holding', 'time_exit', 'forced_exit')",
         ]
         params: List[Any] = []
         ticker_norm = str(ticker or "").strip().upper()

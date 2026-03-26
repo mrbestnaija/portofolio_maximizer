@@ -96,6 +96,35 @@ AUDIT_GATE_BOOTSTRAP_DATES = [
 _log_fh = None
 
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+def _sanitize_for_console(text: str, encoding: str | None = None) -> str:
+    """Best-effort console-safe text for Windows terminals with narrow code pages."""
+    console_encoding = encoding or getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(console_encoding, errors="replace").decode(
+            console_encoding, errors="replace"
+        )
+    except Exception:
+        return text.encode("ascii", errors="replace").decode("ascii", errors="replace")
+
+
+def _emit_console(text: str) -> None:
+    rendered = _sanitize_for_console(text)
+    sys.stdout.write(rendered + "\n")
+    sys.stdout.flush()
+
+
+def _bootstrap_target_met(matched_pairs: int, *, target_pairs: int = BOOTSTRAP_TARGET_PAIRS) -> bool:
+    """Return True when Platt bootstrap replay can short-circuit safely."""
+    return int(matched_pairs) >= int(target_pairs)
+
+
 def _open_log() -> None:
     global _log_fh
     _log_fh = open(LOG_PATH, "w", encoding="utf-8", buffering=1)
@@ -104,7 +133,7 @@ def _open_log() -> None:
 def log(msg: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
-    print(line)
+    _emit_console(line)
     if _log_fh:
         _log_fh.write(line + "\n")
 
@@ -112,7 +141,7 @@ def log(msg: str) -> None:
 def log_section(title: str) -> None:
     sep = "=" * 40
     for line in ("", sep, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {title}", sep):
-        print(line)
+        _emit_console(line)
         if _log_fh:
             _log_fh.write(line + "\n")
 
@@ -136,7 +165,7 @@ def run(cmd: list[str], *, allow_fail: bool = False) -> int:
     ) as proc:
         for line in proc.stdout:  # type: ignore[union-attr]
             line = line.rstrip("\n")
-            print(line)
+            _emit_console(line)
             if _log_fh:
                 _log_fh.write(line + "\n")
         proc.wait()
@@ -419,6 +448,7 @@ def main() -> int:
         # Bootstrap outcome guard baseline.
         _ts_closes_before = _count_ts_closes()
         _cumulative_matched = _count_jsonl_pairs()
+        _anchors_run = 0
         log(f"--- Bootstrap start: ts_* closes={_ts_closes_before}, matched_pairs={_cumulative_matched} (target {BOOTSTRAP_TARGET_PAIRS})")
 
         # Relaxed guard env vars for bootstrap only -- maximize close throughput.
@@ -432,10 +462,11 @@ def main() -> int:
 
         try:
             for anchor in BOOTSTRAP_ANCHOR_DATES:
-                if _cumulative_matched >= BOOTSTRAP_TARGET_PAIRS:
+                if _bootstrap_target_met(_cumulative_matched):
                     log(f"[STOP] Reached {_cumulative_matched} matched pairs (target {BOOTSTRAP_TARGET_PAIRS}) -- bootstrap complete early.")
                     break
 
+                _anchors_run += 1
                 ladder = _business_day_ladder(anchor, BOOTSTRAP_LADDER_DAYS)
                 log(f"--- Anchor {anchor}: ladder {ladder[0]} -> {ladder[-1]} ({len(ladder)} days)")
                 _opens_before = _count_ts_opens()
@@ -473,7 +504,12 @@ def main() -> int:
         # Bootstrap outcome guard: verify at least one new close was produced.
         _ts_closes_after = _count_ts_closes()
         _new_closes = _ts_closes_after - _ts_closes_before
-        if _new_closes == 0:
+        if _anchors_run == 0 and _bootstrap_target_met(_cumulative_matched):
+            log(
+                f"[OK] Bootstrap already satisfied before replay: {_cumulative_matched} "
+                f"matched pairs meet target {BOOTSTRAP_TARGET_PAIRS}."
+            )
+        elif _new_closes == 0:
             log(
                 "[FAIL] Bootstrap outcome guard: 0 new ts_* closed trades produced across all "
                 f"{len(BOOTSTRAP_ANCHOR_DATES)} anchor windows. "

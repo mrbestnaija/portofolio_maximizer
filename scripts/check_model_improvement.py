@@ -165,7 +165,10 @@ def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -
 
 def _load_layer1_regression_contract() -> tuple[str, float]:
     baseline_model = "BEST_SINGLE"
-    min_lift_rmse_ratio = 0.0
+    # Phase 7.14 production value is 0.02; use that as the hardened fallback so
+    # that a config-read failure does not silently degrade the gate to "any
+    # improvement counts" (0.0 → lift_threshold=1.0 is vacuously permissive).
+    min_lift_rmse_ratio = 0.02
     try:
         import yaml as _yaml_layer1_contract
 
@@ -182,9 +185,46 @@ def _load_layer1_regression_contract() -> tuple[str, float]:
                 regression_cfg.get("baseline_model", baseline_model) or baseline_model
             ).strip().upper() or "BEST_SINGLE"
             min_lift_rmse_ratio = float(regression_cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+    except Exception as _exc:
+        import logging as _logging_l1rc
+        _logging_l1rc.getLogger(__name__).warning(
+            "[LAYER1] Failed to load regression contract from config: %s — "
+            "falling back to min_lift_rmse_ratio=0.0 (lift_threshold=1.0, any improvement counts). "
+            "This weakens the gate; fix config/forecaster_monitoring.yml.",
+            _exc,
+        )
+    return baseline_model, 1.0 - min_lift_rmse_ratio
+
+
+def _load_layer1_lift_fractions() -> tuple[float, float]:
+    """Load warn/fail lift fraction thresholds from forecaster_monitoring.yml.
+
+    Returns (warn_lift_threshold, fail_lift_threshold).  warn_lift_threshold
+    aligns with check_forecast_audits.py min_lift_fraction so that Layer 1
+    WARN fires at the same population fraction where check_forecast_audits
+    recommends disbanding the ensemble.  fail_lift_threshold is a lower bound
+    that indicates the ensemble is structurally broken (not just weak).
+
+    Defaults: warn=0.25, fail=0.05 (matching yaml defaults).
+    """
+    warn_default = 0.25
+    fail_default = 0.05
+    try:
+        import yaml as _yaml_l1_lift
+
+        monitor_cfg_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if monitor_cfg_path.exists():
+            monitor_cfg = _yaml_l1_lift.safe_load(
+                monitor_cfg_path.read_text(encoding="utf-8")
+            ) or {}
+            regression_cfg = monitor_cfg.get("forecaster_monitoring", {}).get(
+                "regression_metrics", {}
+            )
+            warn_default = float(regression_cfg.get("min_lift_fraction", warn_default) or warn_default)
+            fail_default = float(regression_cfg.get("fail_lift_fraction", fail_default) or fail_default)
     except Exception:
         pass
-    return baseline_model, 1.0 - min_lift_rmse_ratio
+    return warn_default, fail_default
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +789,7 @@ def run_layer4_calibration(db_path: Path, jsonl_path: Path) -> LayerResult:
     # Extract Brier/ECE from calibration_quality finding
     brier: Optional[float] = None
     ece: Optional[float] = None
+    _layer4_parse_error: Optional[str] = None
     quality_finding = next((f for f in findings if f.check == "calibration_quality"), None)
     if quality_finding and quality_finding.status not in ("SKIP", "FAIL"):
         detail = quality_finding.detail
@@ -757,8 +798,15 @@ def run_layer4_calibration(db_path: Path, jsonl_path: Path) -> LayerResult:
                 ece = float(detail.split("ECE=")[1].split(" ")[0].rstrip(",)"))
             if "Brier=" in detail:
                 brier = float(detail.split("Brier=")[1].split(" ")[0].rstrip(",)"))
-        except (IndexError, ValueError):
-            pass
+        except (IndexError, ValueError) as _parse_exc:
+            _layer4_parse_error = str(_parse_exc)
+            log.warning(
+                "[LAYER4] Failed to parse Brier/ECE from calibration_quality detail: %r — %s. "
+                "Calibration metrics will be missing from Layer 4 output; "
+                "check platt_contract_audit detail format.",
+                detail,
+                _parse_exc,
+            )
 
     # FAIL override: inactive tier
     if tier == "inactive" and overall_status != "FAIL":
@@ -769,6 +817,7 @@ def run_layer4_calibration(db_path: Path, jsonl_path: Path) -> LayerResult:
         "calibration_active_tier": tier,
         "brier_score": brier,
         "ece": ece,
+        "parse_error": _layer4_parse_error,
     }
     summary = (
         f"{overall_status} | tier={tier!r} "
@@ -963,7 +1012,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         for layer in layers_to_run:
             if layer == 1:
-                results.append(run_layer1_forecast_quality(audit_dir))
+                # THR-01 fix: wire warn/fail lift thresholds to forecaster_monitoring.yml
+                # min_lift_fraction / fail_lift_fraction so Layer 1 agrees with
+                # check_forecast_audits.py (previously hardcoded 0.05 / 0.01).
+                _warn_lift, _fail_lift = _load_layer1_lift_fractions()
+                results.append(run_layer1_forecast_quality(
+                    audit_dir,
+                    warn_lift_threshold=_warn_lift,
+                    fail_lift_threshold=_fail_lift,
+                ))
             elif layer == 2:
                 results.append(run_layer2_gate_status())
             elif layer == 3:

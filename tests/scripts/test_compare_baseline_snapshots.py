@@ -18,6 +18,13 @@ def test_compare_baseline_snapshots_detects_changed_files_and_metric_delta(tmp_p
     _write_json(
         snap_a / "manifest.json",
         {
+            "provenance": {
+                "dataset_hash": "hash_a",
+                "db_max_ohlcv_date": "2024-01-31",
+                "config_hash": "cfg_a",
+                "git_commit": "commit_a",
+                "config_paths": ["config/a.yml"],
+            },
             "files": {
                 "configs": [
                     {
@@ -32,6 +39,13 @@ def test_compare_baseline_snapshots_detects_changed_files_and_metric_delta(tmp_p
     _write_json(
         snap_b / "manifest.json",
         {
+            "provenance": {
+                "dataset_hash": "hash_b",
+                "db_max_ohlcv_date": "2024-02-01",
+                "config_hash": "cfg_b",
+                "git_commit": "commit_b",
+                "config_paths": ["config/b.yml"],
+            },
             "files": {
                 "configs": [
                     {
@@ -58,3 +72,13 @@ def test_compare_baseline_snapshots_detects_changed_files_and_metric_delta(tmp_p
         compare_baseline_snapshots.extract_run_metrics(b.run_summary),
     )
     assert run_deltas["profitability.pnl_dollars"] == (0.0, 1.0, 1.0)
+    markdown = compare_baseline_snapshots.render_markdown(
+        snapshot_a=a,
+        snapshot_b=b,
+        file_diffs={"configs": diffs, "code": {"changed": [], "added": [], "removed": []}},
+        run_metric_diffs=run_deltas,
+        backtest_metric_diffs={},
+    )
+    assert "dataset_hash" in markdown
+    assert "cfg_a" in markdown
+    assert "cfg_b" in markdown

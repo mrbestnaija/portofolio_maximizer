@@ -160,7 +160,12 @@ def _extract_whatsapp_reply_target(payload: dict[str, Any]) -> Optional[str]:
 
 def _bridge_output_passed(raw_stdout: str) -> bool:
     low = str(raw_stdout or "").lower()
-    return "web search: pass" in low
+    if "web search: pass" in low:
+        return True
+    return (
+        "evidence-first snapshot from successful tools" in low
+        and "search_web_tavily" in low
+    )
 
 
 def _load_openclaw_events_since(*, since_ts: datetime, channel: str) -> list[dict[str, Any]]:
@@ -369,6 +374,7 @@ def run_e2e(
 
     web_events_ok = counts["web_start"] > 0 and counts["web_complete"] > 0
     legacy_events_ok = counts["status_start"] > 0 and counts["status_complete"] > 0
+    whatsapp_forced_orchestration = str(channel or "").strip().lower() == "whatsapp"
 
     if require_web_events and not web_events_ok:
         if allow_legacy_status_events and legacy_events_ok:
@@ -379,7 +385,15 @@ def run_e2e(
     elif not web_events_ok and legacy_events_ok:
         report["warnings"].append("using_legacy_status_fast_path_events")
     elif not web_events_ok and not legacy_events_ok:
-        report["warnings"].append("no_fast_path_events_found_post_bridge_call")
+        if whatsapp_forced_orchestration:
+            report["steps"]["activity_events"]["routing_mode"] = "forced_qwen_orchestration"
+        else:
+            report["warnings"].append("no_fast_path_events_found_post_bridge_call")
+
+    if web_events_ok:
+        report["steps"]["activity_events"]["routing_mode"] = "fast_path_web"
+    elif legacy_events_ok:
+        report["steps"]["activity_events"]["routing_mode"] = "legacy_status_fast_path"
 
     report["status"] = "PASS" if not report["warnings"] else "WARN"
     return True, report

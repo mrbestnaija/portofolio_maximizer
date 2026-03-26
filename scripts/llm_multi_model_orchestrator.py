@@ -387,6 +387,33 @@ CHAT_ROUND_TIMEOUT_CAP_SECONDS = float(
         ),
     )
 )
+WHATSAPP_BRIDGE_TURN_LOCK_TIMEOUT_SECONDS = float(
+    max(
+        10,
+        _int_env(
+            "PMX_OPENCLAW_WHATSAPP_TURN_LOCK_TIMEOUT_SECONDS",
+            _as_int(_profile_env_default("PMX_OPENCLAW_WHATSAPP_TURN_LOCK_TIMEOUT_SECONDS", 90), 90),
+        ),
+    )
+)
+WHATSAPP_BRIDGE_TURN_LOCK_STALE_SECONDS = float(
+    max(
+        60,
+        _int_env(
+            "PMX_OPENCLAW_WHATSAPP_TURN_LOCK_STALE_SECONDS",
+            _as_int(_profile_env_default("PMX_OPENCLAW_WHATSAPP_TURN_LOCK_STALE_SECONDS", 600), 600),
+        ),
+    )
+)
+WHATSAPP_BRIDGE_TURN_LOCK_POLL_SECONDS = float(
+    max(
+        0.05,
+        _float_env(
+            "PMX_OPENCLAW_WHATSAPP_TURN_LOCK_POLL_SECONDS",
+            _as_float(_profile_env_default("PMX_OPENCLAW_WHATSAPP_TURN_LOCK_POLL_SECONDS", 0.25), 0.25),
+        ),
+    )
+)
 PROGRESS_UPDATES_DEFAULT = _truthy_env(
     "PMX_QWEN_PROGRESS_UPDATES",
     _as_bool(_profile_env_default("PMX_QWEN_PROGRESS_UPDATES", True), True),
@@ -992,6 +1019,366 @@ def _tool_error_message(tool_result: str) -> str:
     return ""
 
 
+def _json_object_or_none(raw_text: str) -> Optional[dict[str, Any]]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _maybe_float(value: Any, *, allow_inf: bool = False) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if math.isnan(parsed):
+        return None
+    if math.isinf(parsed) and not allow_inf:
+        return None
+    return parsed
+
+
+def _maybe_ratio(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    scale = 1.0
+    if text.endswith("%"):
+        text = text[:-1].strip()
+        scale = 0.01
+    parsed = _maybe_float(text)
+    if parsed is None:
+        return None
+    return parsed * scale
+
+
+def _tool_status_json(
+    tool_name: str,
+    *,
+    status: str,
+    message: str,
+    action: str = "",
+    validation_code: str = "",
+    details: Optional[dict[str, Any]] = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "status": str(status or "FAIL").upper(),
+        "tool": str(tool_name or "unknown"),
+        "message": str(message or "").strip() or "tool status unavailable",
+    }
+    if action:
+        payload["action"] = action
+    if validation_code:
+        payload["validation_code"] = validation_code
+    if isinstance(details, dict) and details:
+        payload["details"] = details
+    return json.dumps(payload, ensure_ascii=True)
+
+
+def _validate_query_trade_metrics_result(arguments: dict[str, Any], raw_result: str) -> str:
+    metric = str(arguments.get("metric") or "summary").strip().lower() or "summary"
+    parsed = _json_object_or_none(raw_result)
+    if parsed is None or metric not in {"summary", "objective"}:
+        return raw_result
+
+    if metric == "summary":
+        total_trades = _maybe_int(parsed.get("total_trades"))
+        wins = _maybe_int(parsed.get("wins"))
+        losses = _maybe_int(parsed.get("losses"))
+        win_rate = _maybe_ratio(parsed.get("win_rate"))
+        profit_factor = _maybe_float(parsed.get("profit_factor"), allow_inf=True)
+        if total_trades is None or wins is None or losses is None:
+            return _tool_status_json(
+                "query_trade_metrics",
+                status="FAIL",
+                action="query_trade_metrics",
+                validation_code="trade_metrics_invalid_payload",
+                message="Trade metrics summary is missing required count fields.",
+                details={"metric": metric},
+            )
+        if (
+            total_trades < 0
+            or wins < 0
+            or losses < 0
+            or wins + losses > total_trades
+            or win_rate is None
+            or win_rate < 0.0
+            or win_rate > 1.0
+            or profit_factor is None
+            or profit_factor < 0.0
+        ):
+            return _tool_status_json(
+                "query_trade_metrics",
+                status="FAIL",
+                action="query_trade_metrics",
+                validation_code="trade_metrics_out_of_range",
+                message="Trade metrics summary contains out-of-range or internally inconsistent values.",
+                details={
+                    "metric": metric,
+                    "total_trades": total_trades,
+                    "wins": wins,
+                    "losses": losses,
+                    "win_rate": parsed.get("win_rate"),
+                    "profit_factor": parsed.get("profit_factor"),
+                },
+            )
+        updated = dict(parsed)
+        if total_trades == 0:
+            updated["status"] = "LIMITED"
+            updated["message"] = (
+                "No production round-trip trades were found; realized trade metrics are unavailable."
+            )
+            updated["no_data_reason"] = "no_round_trip_data"
+        else:
+            updated["status"] = "PASS"
+        return json.dumps(updated, ensure_ascii=True)
+
+    sample_size = _maybe_int(parsed.get("sample_size"))
+    objective_value = parsed.get("objective_value")
+    objective_float = None if objective_value in {None, ""} else _maybe_float(objective_value)
+    observed = parsed.get("observed") if isinstance(parsed.get("observed"), dict) else {}
+    bounds = parsed.get("confidence_bounds") if isinstance(parsed.get("confidence_bounds"), dict) else {}
+    wins = _maybe_int(observed.get("wins"))
+    losses = _maybe_int(observed.get("losses"))
+    observed_win_rate = _maybe_float(observed.get("win_rate"))
+    observed_error_rate = _maybe_float(observed.get("error_rate"))
+    wilson = _maybe_float(bounds.get("wilson_win_rate_lower"))
+    conservative = _maybe_float(bounds.get("conservative_error_rate_upper"))
+    p_value = _maybe_float(bounds.get("p_value"))
+    if sample_size is None or sample_size < 0:
+        return _tool_status_json(
+            "query_trade_metrics",
+            status="FAIL",
+            action="query_trade_metrics",
+            validation_code="trade_objective_invalid_payload",
+            message="Trade objective payload is missing a valid sample size.",
+            details={"metric": metric, "sample_size": parsed.get("sample_size")},
+        )
+    if sample_size == 0:
+        updated = dict(parsed)
+        updated["status"] = str(updated.get("status") or "LIMITED").upper()
+        updated.setdefault(
+            "message",
+            "No production round-trip trades were found; the trading objective cannot be evaluated yet.",
+        )
+        updated["no_data_reason"] = "no_round_trip_data"
+        return json.dumps(updated, ensure_ascii=True)
+    if (
+        wins is None
+        or losses is None
+        or wins < 0
+        or losses < 0
+        or wins + losses > sample_size
+        or observed_win_rate is None
+        or observed_win_rate < 0.0
+        or observed_win_rate > 1.0
+        or observed_error_rate is None
+        or observed_error_rate < 0.0
+        or observed_error_rate > 1.0
+        or wilson is None
+        or wilson < 0.0
+        or wilson > 1.0
+        or conservative is None
+        or conservative < 0.0
+        or conservative > 1.0
+        or p_value is None
+        or p_value < 0.0
+        or p_value > 1.0
+        or (objective_value not in {None, ""} and objective_float is None)
+    ):
+        return _tool_status_json(
+            "query_trade_metrics",
+            status="FAIL",
+            action="query_trade_metrics",
+            validation_code="trade_objective_out_of_range",
+            message="Trade objective payload contains out-of-range or internally inconsistent values.",
+            details={"metric": metric, "sample_size": sample_size},
+        )
+    updated = dict(parsed)
+    updated["status"] = str(updated.get("status") or "PASS").upper()
+    return json.dumps(updated, ensure_ascii=True)
+
+
+def _validate_quant_validation_headroom_result(arguments: dict[str, Any], raw_result: str) -> str:
+    del arguments
+    parsed = _json_object_or_none(raw_result)
+    if parsed is None:
+        return raw_result
+    status = str(parsed.get("status") or "").upper()
+    if status == "FAIL" and str(parsed.get("error") or "").strip():
+        return raw_result
+    summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+    if not summary:
+        return raw_result
+
+    total = _maybe_int(summary.get("total"))
+    fail_count = _maybe_int(summary.get("fail_count"))
+    fail_rate_pct = _maybe_float(summary.get("fail_rate_pct"))
+    red_gate_pct = _maybe_float(summary.get("red_gate_pct"))
+    warn_gate_pct = _maybe_float(summary.get("warn_gate_pct"))
+    headroom_pct = _maybe_float(summary.get("headroom_to_red_gate_pct"))
+    if (
+        total is None
+        or fail_count is None
+        or total < 0
+        or fail_count < 0
+        or fail_count > total
+        or fail_rate_pct is None
+        or fail_rate_pct < 0.0
+        or fail_rate_pct > 100.0
+        or red_gate_pct is None
+        or red_gate_pct <= 0.0
+        or red_gate_pct > 100.0
+        or warn_gate_pct is None
+        or warn_gate_pct < 0.0
+        or warn_gate_pct > red_gate_pct
+        or headroom_pct is None
+        or headroom_pct < -100.0
+        or headroom_pct > 100.0
+    ):
+        return _tool_status_json(
+            "check_quant_validation_headroom",
+            status="FAIL",
+            action="check_quant_validation_headroom",
+            validation_code="quant_validation_out_of_range",
+            message="Quant-validation summary contains out-of-range or internally inconsistent values.",
+            details={"summary": summary},
+        )
+    if total == 0:
+        updated = dict(parsed)
+        updated["status"] = "NO_DATA"
+        updated["message"] = "Quant-validation summary returned no usable entries."
+        updated["no_data_reason"] = "no_quant_validation_rows"
+        return json.dumps(updated, ensure_ascii=True)
+
+    per_ticker = summary.get("per_ticker") if isinstance(summary.get("per_ticker"), list) else []
+    for row in per_ticker:
+        if not isinstance(row, dict):
+            return _tool_status_json(
+                "check_quant_validation_headroom",
+                status="FAIL",
+                action="check_quant_validation_headroom",
+                validation_code="quant_validation_invalid_payload",
+                message="Quant-validation per-ticker rows must be structured objects.",
+            )
+        row_total = _maybe_int(row.get("total"))
+        row_fail = _maybe_int(row.get("fail_count"))
+        row_rate = _maybe_float(row.get("fail_rate_pct"))
+        if (
+            row_total is None
+            or row_fail is None
+            or row_total < 0
+            or row_fail < 0
+            or row_fail > row_total
+            or row_rate is None
+            or row_rate < 0.0
+            or row_rate > 100.0
+        ):
+            return _tool_status_json(
+                "check_quant_validation_headroom",
+                status="FAIL",
+                action="check_quant_validation_headroom",
+                validation_code="quant_validation_out_of_range",
+                message="Quant-validation per-ticker rows contain out-of-range or inconsistent values.",
+                details={"row": row},
+            )
+    return raw_result
+
+
+def _validate_search_web_tavily_result(arguments: dict[str, Any], raw_result: str) -> str:
+    del arguments
+    parsed = _json_object_or_none(raw_result)
+    if parsed is None:
+        return raw_result
+    latency_seconds = parsed.get("latency_seconds")
+    if latency_seconds not in {None, ""}:
+        latency = _maybe_float(latency_seconds)
+        if latency is None or latency < 0.0 or latency > 600.0:
+            return _tool_status_json(
+                "search_web_tavily",
+                status="FAIL",
+                action="search_web_tavily",
+                validation_code="search_latency_out_of_range",
+                message="Search result latency was out of expected range.",
+                details={"latency_seconds": latency_seconds},
+            )
+
+    status = str(parsed.get("status") or "").upper()
+    answer = str(parsed.get("answer") or "").strip()
+    results = parsed.get("results") if isinstance(parsed.get("results"), list) else []
+    if status == "PASS" and not answer and not results:
+        updated = dict(parsed)
+        updated["status"] = "NO_DATA"
+        updated["message"] = "Search completed but returned no answer or search results."
+        updated["no_data_reason"] = "empty_search_result"
+        return json.dumps(updated, ensure_ascii=True)
+    return raw_result
+
+
+def _validate_tool_result(tool_name: str, arguments: dict[str, Any], raw_result: str) -> str:
+    text = str(raw_result or "").strip()
+    if not text:
+        return _tool_status_json(
+            tool_name,
+            status="FAIL",
+            action=tool_name,
+            validation_code="empty_tool_result",
+            message="Tool returned no data or empty output.",
+        )
+
+    validators: dict[str, Callable[[dict[str, Any], str], str]] = {
+        "query_trade_metrics": _validate_query_trade_metrics_result,
+        "check_quant_validation_headroom": _validate_quant_validation_headroom_result,
+        "search_web_tavily": _validate_search_web_tavily_result,
+    }
+    validator = validators.get(str(tool_name or "").strip())
+    if validator is None:
+        return raw_result
+    try:
+        validated = validator(arguments, raw_result)
+    except Exception as exc:
+        return _tool_status_json(
+            tool_name,
+            status="FAIL",
+            action=tool_name,
+            validation_code="tool_result_validation_error",
+            message=f"Tool result validation failed: {exc}",
+        )
+    return str(validated or "").strip() or text
+
+
+def _tool_result_guidance_message(tool_result: str) -> str:
+    parsed = _json_object_or_none(tool_result)
+    if not parsed:
+        return ""
+    status = str(parsed.get("status") or "").upper()
+    validation_code = str(parsed.get("validation_code") or "").strip().lower()
+    if status in {"NO_DATA", "LIMITED"}:
+        return (
+            "Previous tool call returned limited or missing data. Do not infer unavailable values, "
+            "do not invent numbers, and state the limitation explicitly in the final answer."
+        )
+    if validation_code.endswith("out_of_range") or validation_code.endswith("invalid_payload"):
+        return (
+            "Previous tool call detected out-of-range or internally inconsistent data. Treat that source "
+            "as invalid, avoid numerical conclusions from it, and explain that the data needs repair or regeneration."
+        )
+    return ""
+
+
 def _sanitize_tool_arguments(tool_name: str, raw_arguments: Any) -> tuple[dict[str, Any], Optional[str]]:
     canonical_tool_name = _canonical_tool_name(tool_name)
     args: dict[str, Any]
@@ -1155,6 +1542,142 @@ def _system_degraded() -> bool:
         heavy_slow = bool(heavy and heavy.avg_latency_ms > SUBAGENT_DEEP_LATENCY_CUTOFF_MS)
         recent_errors = sum(1 for s in MODEL_REGISTRY.values() if s.error_count > 0 and s.success_count == 0)
     return cooldowns > 0 or heavy_slow or recent_errors >= 2
+
+
+@dataclass
+class _BridgeTurnLock:
+    path: Path
+    token: str
+    waited_seconds: float
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+def _bridge_turn_lock_path(channel: Optional[str]) -> Path:
+    channel_text = re.sub(r"[^a-z0-9_-]+", "_", str(channel or "unknown").strip().lower()) or "unknown"
+    return PROJECT_ROOT / "logs" / "automation" / f"openclaw_{channel_text}_bridge_turn.lock"
+
+
+def _bridge_requires_forced_orchestration(channel: Optional[str]) -> bool:
+    return str(channel or "").strip().lower() == "whatsapp"
+
+
+def _read_lock_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _process_is_running(pid: int) -> bool:
+    if int(pid) <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _lock_payload_can_be_reclaimed(payload: dict[str, Any], *, channel: Optional[str]) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return True
+
+    token = str(payload.get("token") or "").strip()
+    if not token:
+        return True
+
+    holder_channel = str(payload.get("channel") or "").strip().lower()
+    expected_channel = str(channel or "").strip().lower()
+    if holder_channel and expected_channel and holder_channel != expected_channel:
+        return True
+
+    holder_pid = payload.get("pid")
+    try:
+        parsed_pid = int(holder_pid)
+    except Exception:
+        parsed_pid = None
+    if parsed_pid is not None and parsed_pid > 0 and not _process_is_running(parsed_pid):
+        return True
+
+    return False
+
+
+def _acquire_bridge_turn_lock(
+    *,
+    channel: Optional[str],
+    session_id: Optional[str],
+    wait_seconds: float,
+    stale_seconds: float,
+    poll_seconds: float,
+) -> Optional[_BridgeTurnLock]:
+    lock_path = _bridge_turn_lock_path(channel)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    started = time.monotonic()
+
+    while True:
+        token = f"{os.getpid()}-{int(time.time() * 1000)}"
+        payload = {
+            "pid": int(os.getpid()),
+            "channel": str(channel or "").strip().lower() or "unknown",
+            "session_id": str(session_id or "").strip() or None,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "token": token,
+            "command": " ".join(sys.argv),
+        }
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, json.dumps(payload, indent=2).encode("utf-8"))
+            finally:
+                os.close(fd)
+            waited = max(0.0, time.monotonic() - started)
+            return _BridgeTurnLock(path=lock_path, token=token, waited_seconds=waited, payload=payload)
+        except FileExistsError:
+            holder = _read_lock_payload(lock_path)
+            if _lock_payload_can_be_reclaimed(holder, channel=channel):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    pass
+            try:
+                age_seconds = max(0.0, time.time() - float(lock_path.stat().st_mtime))
+            except Exception:
+                age_seconds = 0.0
+            if age_seconds >= max(60.0, float(stale_seconds)):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    pass
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(max(0.01, float(poll_seconds)))
+        except Exception:
+            return None
+
+
+def _release_bridge_turn_lock(lock: Optional[_BridgeTurnLock]) -> None:
+    if lock is None:
+        return
+    try:
+        holder = _read_lock_payload(lock.path)
+        if str(holder.get("token") or "") != str(lock.token):
+            return
+        lock.path.unlink(missing_ok=True)
+    except Exception:
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -1705,6 +2228,12 @@ def execute_tool_call(
         if cached is not None:
             return cached
 
+    def _finish(result: str, *, ttl_seconds: float = TOOL_CACHE_TTL_SECONDS) -> str:
+        validated = _validate_tool_result(safe_tool_name, args, result)
+        if cacheable:
+            _cache_set(cache_key, validated, ttl_seconds=ttl_seconds)
+        return validated
+
     try:
         if safe_tool_name == "fast_reasoning":
             model = get_best_model_for_role("reasoning") or "deepseek-r1:8b"
@@ -1715,9 +2244,7 @@ def execute_tool_call(
                 max_predict=360,
                 timeout_seconds=_bounded_timeout(80.0, budget_seconds),
             )
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=30.0)
-            return result
+            return _finish(result, ttl_seconds=30.0)
 
         if safe_tool_name == "deep_reasoning":
             model = get_best_model_for_role("heavy_reasoning") or "deepseek-r1:32b"
@@ -1732,87 +2259,67 @@ def execute_tool_call(
                 max_predict=560,
                 timeout_seconds=_bounded_timeout(default_timeout, budget_seconds),
             )
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=30.0)
-            return result
+            return _finish(result, ttl_seconds=30.0)
 
         if safe_tool_name == "read_gate_status":
             result = _read_gate_status(args.get("gate", "all"))
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=25.0)
-            return result
+            return _finish(result, ttl_seconds=25.0)
 
         if safe_tool_name == "query_trade_metrics":
             result = _query_trade_metrics(args.get("metric", "summary"))
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=15.0)
-            return result
+            return _finish(result, ttl_seconds=15.0)
 
         if safe_tool_name == "check_quant_validation_headroom":
             result = _check_quant_validation_headroom_tool(args, budget_seconds=budget_seconds)
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=15.0)
-            return result
+            return _finish(result, ttl_seconds=15.0)
 
         if safe_tool_name == "search_web_tavily":
             result = _search_web_tavily_tool(args, budget_seconds=budget_seconds)
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=20.0)
-            return result
+            return _finish(result, ttl_seconds=20.0)
 
         if safe_tool_name == "inspect_source_code":
             result = _inspect_source_code_tool(args, budget_seconds=budget_seconds)
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=20.0)
-            return result
+            return _finish(result, ttl_seconds=20.0)
 
         if safe_tool_name == "check_github_repo_status":
             result = _check_github_repo_status_tool(args, budget_seconds=budget_seconds)
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=20.0)
-            return result
+            return _finish(result, ttl_seconds=20.0)
 
         if safe_tool_name == "review_changed_files":
-            return _review_changed_files_tool(args, budget_seconds=budget_seconds)
+            return _finish(_review_changed_files_tool(args, budget_seconds=budget_seconds))
 
         if safe_tool_name == "summarize_test_failure":
-            return _summarize_test_failure_tool(args, budget_seconds=budget_seconds)
+            return _finish(_summarize_test_failure_tool(args, budget_seconds=budget_seconds))
 
         if safe_tool_name == "triage_gate_failure":
             result = _triage_gate_failure_tool(args, budget_seconds=budget_seconds)
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=15.0)
-            return result
+            return _finish(result, ttl_seconds=15.0)
 
         if safe_tool_name == "run_production_audit_gate":
-            return _run_production_audit_gate_tool(args, budget_seconds=budget_seconds)
+            return _finish(_run_production_audit_gate_tool(args, budget_seconds=budget_seconds))
 
         if safe_tool_name == "install_torch_runtime":
-            return _install_torch_runtime_tool(args, budget_seconds=budget_seconds)
+            return _finish(_install_torch_runtime_tool(args, budget_seconds=budget_seconds))
 
         if safe_tool_name == "install_python_package":
-            return _install_python_package_tool(args, budget_seconds=budget_seconds)
+            return _finish(_install_python_package_tool(args, budget_seconds=budget_seconds))
 
         if safe_tool_name == "send_notification":
-            return _send_notification(
+            return _finish(_send_notification(
                 channel=args.get("channel", "whatsapp"),
                 message=args.get("message", ""),
-            )
+            ))
 
         if safe_tool_name == "run_sub_agent_batch":
             result = _run_sub_agent_batch(
                 tasks=args.get("tasks", []),
                 default_context=args.get("default_context", ""),
             )
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=30.0)
-            return result
+            return _finish(result, ttl_seconds=30.0)
 
         if safe_tool_name == "check_system_health":
             result = _get_system_health_json()
-            if cacheable:
-                _cache_set(cache_key, result, ttl_seconds=10.0)
-            return result
+            return _finish(result, ttl_seconds=10.0)
 
         unknown = f"Unknown tool: {safe_tool_name}"
         _record_tool_failure(safe_tool_name, args, unknown)
@@ -1899,28 +2406,79 @@ def _run_reasoning_model(
 
 def _read_gate_status(gate: str) -> str:
     """Read latest audit gate logs."""
+    action = "read_gate_status"
     audit_dir = PROJECT_ROOT / "logs" / "audit_sprint"
     if not audit_dir.exists():
-        return json.dumps({"error": "No audit_sprint directory found"})
+        return json.dumps(
+            {
+                "status": "NO_DATA",
+                "action": action,
+                "gate": gate,
+                "message": "No audit_sprint directory found.",
+                "no_data_reason": "missing_audit_directory",
+            },
+            ensure_ascii=True,
+        )
 
     runs = sorted([d for d in audit_dir.iterdir() if d.is_dir()], reverse=True)
     if not runs:
-        return json.dumps({"error": "No audit runs found"})
+        return json.dumps(
+            {
+                "status": "NO_DATA",
+                "action": action,
+                "gate": gate,
+                "message": "No audit runs found.",
+                "no_data_reason": "missing_audit_runs",
+            },
+            ensure_ascii=True,
+        )
 
     latest = runs[0]
-    results = {}
+    results: dict[str, str] = {}
 
     if gate == "all":
         for f in sorted(latest.glob("gate_*.log")):
             results[f.stem] = f.read_text(encoding="utf-8", errors="replace")[:2000]
+        if not results:
+            return json.dumps(
+                {
+                    "status": "NO_DATA",
+                    "action": action,
+                    "gate": gate,
+                    "run_dir": str(latest),
+                    "message": "No gate logs were found in the latest audit run.",
+                    "no_data_reason": "missing_gate_logs",
+                },
+                ensure_ascii=True,
+            )
     else:
         target = latest / f"{gate}.log"
         if target.exists():
             results[gate] = target.read_text(encoding="utf-8", errors="replace")[:2000]
         else:
-            results["error"] = f"Gate log not found: {target}"
+            return json.dumps(
+                {
+                    "status": "NO_DATA",
+                    "action": action,
+                    "gate": gate,
+                    "run_dir": str(latest),
+                    "message": f"Gate log not found: {target}",
+                    "no_data_reason": "missing_gate_log",
+                },
+                ensure_ascii=True,
+            )
 
-    return json.dumps(results, indent=2)
+    return json.dumps(
+        {
+            "status": "PASS",
+            "action": action,
+            "gate": gate,
+            "run_dir": str(latest),
+            "results": results,
+        },
+        ensure_ascii=True,
+        indent=2,
+    )
 
 
 def _wilson_lower_bound(successes: int, total: int, z_score: float = 1.96) -> float:
@@ -4061,11 +4619,11 @@ def _summarize_web_search_tool_result(raw_result: str) -> str:
     attempts = parsed.get("attempts") if isinstance(parsed.get("attempts"), list) else []
     answer = str(parsed.get("answer") or "").strip()
     results = parsed.get("results") if isinstance(parsed.get("results"), list) else []
-    error = str(parsed.get("error") or "").strip()
+    reason = str(parsed.get("message") or parsed.get("error") or "").strip()
 
     lines = [f"web search: {status} | provider={provider} | attempts={len(attempts)}"]
     if status != "PASS":
-        lines.append(f"error: {error or 'unknown_error'}")
+        lines.append(f"reason: {reason or 'unknown_error'}")
         return _truncate_progress_text("\n".join(lines), 900)
 
     if answer:
@@ -4093,6 +4651,7 @@ def _summarize_quant_validation_tool_result(raw_result: str) -> str:
     status = str(parsed.get("status") or "UNKNOWN").upper()
     classification = str(parsed.get("classification") or "UNKNOWN").upper()
     summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+    message = str(parsed.get("message") or parsed.get("error") or "").strip()
     fail_count = summary.get("fail_count", "n/a")
     total = summary.get("total", "n/a")
     fail_rate = summary.get("fail_rate_pct", "n/a")
@@ -4103,6 +4662,8 @@ def _summarize_quant_validation_tool_result(raw_result: str) -> str:
         f"quant validation: {status} | class={classification}",
         f"fail={fail_count}/{total} ({fail_rate}%), headroom_to_{red_gate}%={headroom}%",
     ]
+    if message:
+        lines.append("note: " + _truncate_progress_text(message, 220))
     per_ticker = summary.get("per_ticker") if isinstance(summary.get("per_ticker"), list) else []
     if per_ticker:
         top = []
@@ -4660,6 +5221,109 @@ def _tool_result_status_line(tool_name: str, tool_result: str) -> str:
     return f"{tool_name}: PASS"
 
 
+def _tool_result_snapshot_line(tool_name: str, tool_result: str) -> str:
+    err = _tool_error_message(tool_result)
+    if err:
+        return f"{tool_name}: FAIL - {_truncate_progress_text(err, 160)}"
+
+    parsed = _json_object_or_none(tool_result)
+    if isinstance(parsed, dict):
+        answer = str(parsed.get("answer") or "").strip()
+        if answer:
+            return f"{tool_name}: {_truncate_progress_text(answer, 320)}"
+
+        preferred_keys = (
+            "status",
+            "message",
+            "provider",
+            "query",
+            "total_trades",
+            "win_rate",
+            "total_pnl",
+            "profit_factor",
+            "objective_value",
+            "sample_size",
+            "phase3_ready",
+            "gate_status",
+            "overall_passed",
+        )
+        compact: dict[str, Any] = {}
+        for key in preferred_keys:
+            value = parsed.get(key)
+            if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                compact[key] = value
+        if compact:
+            return f"{tool_name}: {json.dumps(compact, ensure_ascii=True)}"
+
+    text = " ".join(str(tool_result or "").split())
+    if not text:
+        return f"{tool_name}: NO_DATA"
+    return f"{tool_name}: {_truncate_progress_text(text, 320)}"
+
+
+def _tool_evidence_snapshot(successful_tool_results: list[tuple[str, str]], *, max_entries: int = 3, max_chars: int = 1400) -> str:
+    if not successful_tool_results:
+        return ""
+
+    lines: list[str] = []
+    for tool_name, tool_result in successful_tool_results[-max_entries:]:
+        line = _tool_result_snapshot_line(tool_name, tool_result).strip()
+        if line:
+            lines.append(f"- {line}")
+
+    return _truncate_progress_text("\n".join(lines).strip(), max_chars)
+
+
+def _content_needs_evidence_fallback(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return True
+    low = text.lower()
+    return text.startswith("[ERROR]") or "timed out" in low or "budget exhausted" in low
+
+
+def _finalize_orchestration_response(
+    *,
+    content: str,
+    progress: "_ProgressReporter",
+    reply_channel: Optional[str],
+    reply_to: Optional[str],
+    total_tool_calls: int,
+    started_at: float,
+    primed_context: str = "",
+    successful_tool_results: Optional[list[tuple[str, str]]] = None,
+) -> str:
+    final_content = str(content or "").strip()
+
+    if _content_needs_evidence_fallback(final_content):
+        compact = str(primed_context or "").strip()[:1400].strip()
+        if compact:
+            final_content = (
+                "Model inference timed out; returning evidence-first snapshot from tools.\n\n"
+                + compact
+            )
+        else:
+            snapshot = _tool_evidence_snapshot(successful_tool_results or [])
+            if snapshot:
+                final_content = (
+                    "Model inference timed out; returning evidence-first snapshot from successful tools.\n\n"
+                    + snapshot
+                )
+
+    if not final_content:
+        final_content = "(orchestration completed without final response)"
+
+    if reply_channel and reply_to and final_content:
+        progress.emit(
+            "orchestration_complete",
+            f"sending final response (tool_calls={total_tool_calls}, elapsed={time.time() - started_at:.1f}s)",
+            force=True,
+        )
+        _deliver_response(channel=reply_channel, to=reply_to, message=final_content)
+
+    return final_content
+
+
 class _ProgressReporter:
     def __init__(
         self,
@@ -4814,6 +5478,9 @@ def orchestrate(
         min_interval_seconds=PROGRESS_MIN_INTERVAL_SECONDS,
         start_time=t0_total,
     )
+    primed_context = ""
+    successful_tool_results: list[tuple[str, str]] = []
+    total_tool_calls = 0
 
     # Pick orchestrator model (prefer qwen3:8b, fallback to any tool-capable)
     orch_model = get_best_model_for_role("orchestrator")
@@ -4822,8 +5489,19 @@ def orchestrate(
         logger.warning("No orchestrator model available; falling back to direct reasoning")
         reasoning_model = get_best_model_for_role("reasoning")
         if reasoning_model:
-            return _run_reasoning_model(model=reasoning_model, task=prompt)
-        return "[ERROR] No LLM models available. Check Ollama: ollama list"
+            content = _run_reasoning_model(model=reasoning_model, task=prompt)
+        else:
+            content = "[ERROR] No LLM models available. Check Ollama: ollama list"
+        return _finalize_orchestration_response(
+            content=content,
+            progress=progress,
+            reply_channel=reply_channel,
+            reply_to=reply_to,
+            total_tool_calls=total_tool_calls,
+            started_at=t0_total,
+            primed_context=primed_context,
+            successful_tool_results=successful_tool_results,
+        )
 
     plan = _runtime_plan(
         prompt=prompt,
@@ -4867,7 +5545,6 @@ def orchestrate(
             }
         )
 
-    primed_context = ""
     if force_tool_primer:
         progress.emit("tool_primer", "building precomputed tool context")
         primed = _build_precomputed_tool_context(
@@ -4889,7 +5566,6 @@ def orchestrate(
             )
 
     content = ""
-    total_tool_calls = 0
     repeated_tool_signatures: dict[str, int] = {}
     consecutive_tool_error_rounds = 0
     for round_num in range(max_rounds):
@@ -4940,17 +5616,27 @@ def orchestrate(
                 logger.info("Falling back to direct reasoning with %s", fallback)
                 progress.emit("fallback_reasoning", f"switching to {fallback}", force=True)
                 remaining = max(8.0, float(timeout_seconds) - (time.time() - t0_total))
+                if successful_tool_results:
+                    progress.emit(
+                        "tool_evidence_fallback",
+                        "returning successful tool evidence after orchestrator timeout",
+                        force=True,
+                    )
+                    content = "[ERROR] Orchestration timed out after successful tool execution."
+                    break
                 if remaining <= 10.0:
                     content = content or f"[ERROR] Orchestration failed near timeout: {e}"
                     break
-                return _run_reasoning_model(
+                content = _run_reasoning_model(
                     model=fallback,
                     task=prompt,
                     max_predict=320,
                     timeout_seconds=min(12.0, remaining),
                     allow_fallback=False,
                 )
-            return f"[ERROR] Orchestration failed: {e}"
+                break
+            content = f"[ERROR] Orchestration failed: {e}"
+            break
 
         message = result.get("message", {})
         content = message.get("content", "")
@@ -5073,6 +5759,7 @@ def orchestrate(
             )
 
             err = _tool_error_message(tool_result)
+            guidance = _tool_result_guidance_message(tool_result)
             if err:
                 tool_errors_this_round += 1
                 messages.append(
@@ -5084,8 +5771,13 @@ def orchestrate(
                         ),
                     }
                 )
+                if guidance:
+                    messages.append({"role": "system", "content": guidance})
             else:
                 tool_success_this_round += 1
+                successful_tool_results.append((tool_name, tool_result))
+                if guidance:
+                    messages.append({"role": "system", "content": guidance})
 
             tool_message = {
                 "role": "tool",
@@ -5120,7 +5812,7 @@ def orchestrate(
                 )
             break
 
-    if not content.strip():
+    if not content.strip() and not successful_tool_results:
         fallback = get_best_model_for_role("reasoning") or "deepseek-r1:8b"
         remaining = max(8.0, float(timeout_seconds) - (time.time() - t0_total))
         if remaining > 10.0:
@@ -5134,13 +5826,6 @@ def orchestrate(
             )
         else:
             content = "[ERROR] Orchestration budget exhausted before final answer."
-
-    if ("[ERROR]" in content or "timed out" in content.lower()) and primed_context:
-        compact = primed_context[:1400].strip()
-        content = (
-            "Model inference timed out; returning evidence-first snapshot from tools.\n\n"
-            + compact
-        )
 
     if trading_critical:
         progress.emit("objective_guard", "evaluating trading objective constraints")
@@ -5165,16 +5850,16 @@ def orchestrate(
                     "Mode: advisory/evidence-first; apply conservative position sizing until objective is PASS."
                 )
 
-    # Deliver result via OpenClaw if requested
-    if reply_channel and reply_to and content:
-        progress.emit(
-            "orchestration_complete",
-            f"sending final response (tool_calls={total_tool_calls}, elapsed={time.time() - t0_total:.1f}s)",
-            force=True,
-        )
-        _deliver_response(channel=reply_channel, to=reply_to, message=content)
-
-    return content or "(orchestration completed without final response)"
+    return _finalize_orchestration_response(
+        content=content,
+        progress=progress,
+        reply_channel=reply_channel,
+        reply_to=reply_to,
+        total_tool_calls=total_tool_calls,
+        started_at=t0_total,
+        primed_context=primed_context,
+        successful_tool_results=successful_tool_results,
+    )
 
 
 def _deliver_response(channel: str, to: str, message: str) -> None:
@@ -5223,8 +5908,10 @@ def openclaw_bridge(
         Orchestrated response text.
     """
     activity = _get_activity_logger()
+    bridge_channel = str(channel or "").strip().lower() or None
+    force_orchestration = _bridge_requires_forced_orchestration(bridge_channel)
     activity.log_openclaw_event(
-        channel=channel or "unknown",
+        channel=bridge_channel or "unknown",
         event_type="bridge_incoming",
         payload={"message_preview": message[:100], "session_id": session_id},
     )
@@ -5235,46 +5922,8 @@ def openclaw_bridge(
             message="[progress 0.0s] request_received | analyzing request and selecting tools",
         )
 
-    for fast_path_spec in _BRIDGE_FAST_PATH_SPECS:
-        fast_path_response = _run_bridge_fast_path(
-            spec=fast_path_spec,
-            message=message,
-            channel=channel,
-            reply_to=reply_to,
-            activity=activity,
-        )
-        if fast_path_response is not None:
-            return fast_path_response
-
-    if _is_status_fast_path_prompt(message):
-        activity.log_openclaw_event(
-            channel=channel or "unknown",
-            event_type="bridge_status_fast_path_start",
-            payload={},
-        )
-        if channel and reply_to and PROGRESS_UPDATES_DEFAULT:
-            _deliver_response(
-                channel=channel,
-                to=reply_to,
-                message="[progress 0.1s] status_fast_path | checking system health",
-            )
-        health_raw = execute_tool_call("check_system_health", {}, allow_cache=True, budget_seconds=20.0)
-        response = _summarize_health_tool_result(health_raw)
-        if reply_to and channel:
-            _deliver_response(channel=channel, to=reply_to, message=response)
-        activity.log_openclaw_event(
-            channel=channel or "unknown",
-            event_type="bridge_status_fast_path_complete",
-            payload={"response_preview": response[:120]},
-        )
-        return response
-
-    # Determine if this needs tool orchestration or direct reasoning
-    routed_model = route_task(message)
-    routed_spec = MODEL_REGISTRY.get(routed_model)
-    trading_critical = _is_trading_critical_prompt(message)
     bridge_force_tool_primer = _bridge_force_tool_primer(message)
-    bridge_timeout = _bridge_timeout_seconds(message, channel)
+    bridge_timeout = _bridge_timeout_seconds(message, bridge_channel)
     bridge_max_rounds = max(1, min(MAX_ROUNDS_DEFAULT, 2))
     bridge_max_tool_calls = max(1, min(MAX_TOOL_CALLS_DEFAULT, 8))
     openclaw_template = _openclaw_prompt_template_for_message(message)
@@ -5282,26 +5931,104 @@ def openclaw_bridge(
     if openclaw_template:
         bridge_system_prompt = f"{bridge_system_prompt}\n\n{openclaw_template}"
 
-    # If the task routes to a tool-capable model, use full orchestration
-    if trading_critical or (routed_spec and routed_spec.supports_tools):
-        response = orchestrate(
-            prompt=message,
-            system_prompt=bridge_system_prompt,
-            reply_channel=channel,
-            reply_to=reply_to,
-            force_tool_primer=bridge_force_tool_primer,
-            max_rounds=bridge_max_rounds,
-            max_tool_calls=bridge_max_tool_calls,
-            timeout_seconds=bridge_timeout,
+    bridge_lock: Optional[_BridgeTurnLock] = None
+    if force_orchestration:
+        lock_timeout = max(float(bridge_timeout), float(WHATSAPP_BRIDGE_TURN_LOCK_TIMEOUT_SECONDS))
+        bridge_lock = _acquire_bridge_turn_lock(
+            channel=bridge_channel,
+            session_id=session_id,
+            wait_seconds=lock_timeout,
+            stale_seconds=WHATSAPP_BRIDGE_TURN_LOCK_STALE_SECONDS,
+            poll_seconds=WHATSAPP_BRIDGE_TURN_LOCK_POLL_SECONDS,
         )
-    else:
-        # For reasoning tasks, check if orchestration would add value
-        task_lower = message.lower()
-        needs_data = any(kw in task_lower for kw in [
-            "pnl", "gate", "metric", "trade", "status", "health", "check",
-        ])
-        if needs_data:
-            # Use orchestrator to access data tools
+        if bridge_lock is None:
+            response = (
+                "[ERROR] WhatsApp bridge busy: unable to acquire the exclusive qwen orchestration slot "
+                f"within {int(lock_timeout)}s."
+            )
+            activity.log_openclaw_event(
+                channel=bridge_channel or "unknown",
+                event_type="bridge_turn_lock_timeout",
+                payload={"wait_seconds": round(lock_timeout, 1)},
+            )
+            if channel and reply_to:
+                _deliver_response(channel=channel, to=reply_to, message=response)
+            return response
+        activity.log_openclaw_event(
+            channel=bridge_channel or "unknown",
+            event_type="bridge_turn_lock_acquired",
+            payload={"waited_seconds": round(float(bridge_lock.waited_seconds), 3)},
+        )
+        if channel and reply_to and bridge_lock.waited_seconds >= 1.0 and PROGRESS_UPDATES_DEFAULT:
+            _deliver_response(
+                channel=channel,
+                to=reply_to,
+                message=(
+                    "[progress 0.1s] whatsapp_turn_queue | "
+                    f"exclusive qwen slot acquired after {bridge_lock.waited_seconds:.1f}s"
+                ),
+            )
+
+    try:
+        if force_orchestration:
+            response = orchestrate(
+                prompt=message,
+                system_prompt=bridge_system_prompt,
+                reply_channel=channel,
+                reply_to=reply_to,
+                force_tool_primer=bridge_force_tool_primer,
+                max_rounds=bridge_max_rounds,
+                max_tool_calls=bridge_max_tool_calls,
+                timeout_seconds=bridge_timeout,
+            )
+            activity.log_openclaw_event(
+                channel=bridge_channel or "unknown",
+                event_type="bridge_response",
+                payload={"response_preview": response[:100]},
+            )
+            return response
+
+        for fast_path_spec in _BRIDGE_FAST_PATH_SPECS:
+            fast_path_response = _run_bridge_fast_path(
+                spec=fast_path_spec,
+                message=message,
+                channel=channel,
+                reply_to=reply_to,
+                activity=activity,
+            )
+            if fast_path_response is not None:
+                return fast_path_response
+
+        if _is_status_fast_path_prompt(message):
+            activity.log_openclaw_event(
+                channel=channel or "unknown",
+                event_type="bridge_status_fast_path_start",
+                payload={},
+            )
+            if channel and reply_to and PROGRESS_UPDATES_DEFAULT:
+                _deliver_response(
+                    channel=channel,
+                    to=reply_to,
+                    message="[progress 0.1s] status_fast_path | checking system health",
+                )
+            health_raw = execute_tool_call("check_system_health", {}, allow_cache=True, budget_seconds=20.0)
+            response = _summarize_health_tool_result(health_raw)
+            if reply_to and channel:
+                _deliver_response(channel=channel, to=reply_to, message=response)
+            activity.log_openclaw_event(
+                channel=channel or "unknown",
+                event_type="bridge_status_fast_path_complete",
+                payload={"response_preview": response[:120]},
+            )
+            return response
+
+        # Determine if this needs tool orchestration or direct reasoning
+        routed_model = route_task(message)
+        routed_spec = MODEL_REGISTRY.get(routed_model)
+        trading_critical = _is_trading_critical_prompt(message)
+
+        # If the task routes to a tool-capable model, use full orchestration
+        if trading_critical or (routed_spec and routed_spec.supports_tools):
             response = orchestrate(
                 prompt=message,
                 system_prompt=bridge_system_prompt,
@@ -5313,18 +6040,39 @@ def openclaw_bridge(
                 timeout_seconds=bridge_timeout,
             )
         else:
-            # Direct reasoning without orchestration overhead
-            response = _run_reasoning_model(model=routed_model, task=message)
-            if reply_to and channel:
-                _deliver_response(channel=channel, to=reply_to, message=response)
+            # For reasoning tasks, check if orchestration would add value
+            task_lower = message.lower()
+            needs_data = any(kw in task_lower for kw in [
+                "pnl", "gate", "metric", "trade", "status", "health", "check",
+            ])
+            if needs_data:
+                # Use orchestrator to access data tools
+                response = orchestrate(
+                    prompt=message,
+                    system_prompt=bridge_system_prompt,
+                    reply_channel=channel,
+                    reply_to=reply_to,
+                    force_tool_primer=bridge_force_tool_primer,
+                    max_rounds=bridge_max_rounds,
+                    max_tool_calls=bridge_max_tool_calls,
+                    timeout_seconds=bridge_timeout,
+                )
+            else:
+                # Direct reasoning without orchestration overhead
+                response = _run_reasoning_model(model=routed_model, task=message)
+                if reply_to and channel:
+                    _deliver_response(channel=channel, to=reply_to, message=response)
 
-    activity.log_openclaw_event(
-        channel=channel or "unknown",
-        event_type="bridge_response",
-        payload={"response_preview": response[:100]},
-    )
+        activity.log_openclaw_event(
+            channel=channel or "unknown",
+            event_type="bridge_response",
+            payload={"response_preview": response[:100]},
+        )
 
-    return response
+        return response
+    finally:
+        if bridge_lock is not None:
+            _release_bridge_turn_lock(bridge_lock)
 
 
 # ---------------------------------------------------------------------------

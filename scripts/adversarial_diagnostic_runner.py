@@ -612,7 +612,7 @@ def chk_macro_bfill_lookahead(src_feature: str) -> Finding:
         id="LEAK-02",
         severity="HIGH",
         category="leakage",
-        location="etl/time_series_feature_builder.py:221",
+        location="forcester_ts/forecaster.py:234",
         title="Macro context bfill() can fill past feature rows with future macro values",
         detail=(
             "Macro context columns (vix_level, yield_spread_10y_2y, sector_momentum_5d) "
@@ -632,7 +632,16 @@ def chk_macro_bfill_lookahead(src_feature: str) -> Finding:
     )
     has_bfill = ".bfill()" in src_feature or "bfill()" in src_feature
     has_macro = "macro_context" in src_feature or "MACRO_COLUMNS" in src_feature
-    has_clip = "clip" in src_feature and "macro" in src_feature.lower()
+    has_clip = any(
+        token in src_feature
+        for token in (
+            "macro_context.index <=",
+            "macro_context.index >=",
+            "macro_context.loc[(",
+            "macro_context.loc[",
+            "_clip_macro_context_to_price_window",
+        )
+    )
     if has_bfill and has_macro and not has_clip:
         f.passed = False
         f.detail += " CONFIRMED: bfill() used on macro context without date clipping."

@@ -516,3 +516,6 @@ class TestEnsembleIndexSync:
         assert fb.get("ensemble_index_mismatch") is True or meta.get("ensemble_index_mismatch") is True, (
             "ensemble_index_mismatch flag should be propagated into forecast_bundle or metadata"
         )
+        assert meta.get("allow_as_default") is False
+        assert meta.get("ensemble_status") == "DISABLE_DEFAULT"
+        assert meta.get("default_model") == "SAMOSSA"

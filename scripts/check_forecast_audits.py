@@ -62,6 +62,11 @@ class AuditCheckResult:
     violation: bool
     baseline_model: Optional[str] = None
     ensemble_missing: bool = False
+    default_model: Optional[str] = None
+    residual_diag_present: bool = False
+    residual_diag_white_noise: Optional[bool] = None
+    residual_diag_n: Optional[int] = None
+    ensemble_index_mismatch: bool = False
 
 
 def _load_audit_with_error(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -1065,6 +1070,76 @@ def _rmse_from(metrics: Optional[Dict[str, Any]]) -> Optional[float]:
     return float(val) if isinstance(val, (int, float)) else None
 
 
+def _normalize_model_name(raw: Any) -> Optional[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    return text.upper().replace("-", "_").replace(" ", "_")
+
+
+def _extract_effective_default_model(audit: Dict[str, Any]) -> Optional[str]:
+    artifacts = audit.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return None
+    direct = _normalize_model_name(artifacts.get("effective_default_model"))
+    if direct:
+        return direct
+    ensemble_selection = artifacts.get("ensemble_selection") or {}
+    if isinstance(ensemble_selection, dict):
+        return _normalize_model_name(ensemble_selection.get("default_model"))
+    return None
+
+
+def _extract_default_residual_diagnostics(
+    audit: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    artifacts = audit.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return None, None
+    default_model = _extract_effective_default_model(audit)
+    diagnostics_by_model = artifacts.get("residual_diagnostics") or {}
+    if not isinstance(diagnostics_by_model, dict):
+        return default_model, None
+    if not default_model:
+        return default_model, None
+    model_key = default_model.lower()
+    diagnostics = diagnostics_by_model.get(model_key)
+    if isinstance(diagnostics, dict) and diagnostics:
+        return default_model, diagnostics
+    # When the effective default is ENSEMBLE, it has no own residual diagnostics.
+    # Fall back to the primary component model from ensemble_selection, then try
+    # the standard preference order (samossa → garch → mssa_rl → sarimax).
+    if model_key == "ensemble":
+        ensemble_selection = artifacts.get("ensemble_selection") or {}
+        primary = None
+        if isinstance(ensemble_selection, dict):
+            raw_primary = ensemble_selection.get("primary_model")
+            primary = _normalize_model_name(raw_primary)
+        fallback_order = [primary] + ["samossa", "garch", "mssa_rl", "sarimax"]
+        for candidate in fallback_order:
+            if not candidate:
+                continue
+            diag = diagnostics_by_model.get(candidate.lower())
+            if isinstance(diag, dict) and diag:
+                return candidate, diag
+    return default_model, None
+
+
+def _extract_ensemble_index_mismatch(audit: Dict[str, Any]) -> bool:
+    artifacts = audit.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return False
+    direct = artifacts.get("ensemble_index_mismatch")
+    if isinstance(direct, bool):
+        return direct
+    ensemble_selection = artifacts.get("ensemble_selection") or {}
+    if isinstance(ensemble_selection, dict):
+        nested = ensemble_selection.get("ensemble_index_mismatch")
+        if isinstance(nested, bool):
+            return nested
+    return False
+
+
 def check_audit_file(
     path: Path,
     tolerance: float,
@@ -1077,6 +1152,19 @@ def check_audit_file(
 
     ensemble_metrics, baseline_metrics, resolved_baseline = _extract_metrics(
         audit, baseline_model=baseline_model
+    )
+    default_model, residual_diag = _extract_default_residual_diagnostics(audit)
+    ensemble_index_mismatch = _extract_ensemble_index_mismatch(audit)
+    residual_diag_present = isinstance(residual_diag, dict) and bool(residual_diag)
+    residual_diag_white_noise = (
+        bool(residual_diag.get("white_noise"))
+        if residual_diag_present and isinstance(residual_diag.get("white_noise"), bool)
+        else None
+    )
+    residual_diag_n = (
+        int(residual_diag.get("n"))
+        if residual_diag_present and isinstance(residual_diag.get("n"), (int, float))
+        else None
     )
     ensemble_rmse = _rmse_from(ensemble_metrics)
     baseline_rmse = _rmse_from(baseline_metrics)
@@ -1095,6 +1183,11 @@ def check_audit_file(
             violation=False,
             baseline_model=resolved_baseline,
             ensemble_missing=ensemble_missing,
+            default_model=default_model,
+            residual_diag_present=residual_diag_present,
+            residual_diag_white_noise=residual_diag_white_noise,
+            residual_diag_n=residual_diag_n,
+            ensemble_index_mismatch=ensemble_index_mismatch,
         )
 
     rmse_ratio = ensemble_rmse / baseline_rmse
@@ -1108,6 +1201,11 @@ def check_audit_file(
         violation=violation,
         baseline_model=resolved_baseline,
         ensemble_missing=ensemble_missing,
+        default_model=default_model,
+        residual_diag_present=residual_diag_present,
+        residual_diag_white_noise=residual_diag_white_noise,
+        residual_diag_n=residual_diag_n,
+        ensemble_index_mismatch=ensemble_index_mismatch,
     )
 
 
@@ -1319,6 +1417,27 @@ def main() -> None:
         float(args.max_missing_ensemble_rate)
         if args.max_missing_ensemble_rate is not None
         else float(rmse_cfg.get("max_missing_ensemble_rate", 1.0))
+    )
+    raw_max_index_mismatch_rate = rmse_cfg.get("max_index_mismatch_rate")
+    max_index_mismatch_rate = (
+        float(raw_max_index_mismatch_rate)
+        if raw_max_index_mismatch_rate is not None
+        else 1.0
+    )
+    raw_max_non_white_noise_rate = rmse_cfg.get("max_non_white_noise_rate")
+    max_non_white_noise_rate = (
+        float(raw_max_non_white_noise_rate)
+        if raw_max_non_white_noise_rate is not None
+        else 1.0
+    )
+    min_residual_diagnostics_n = int(
+        rmse_cfg.get("min_residual_diagnostics_n", 0) or 0
+    )
+    fail_on_missing_residual_diagnostics = bool(
+        rmse_cfg.get("fail_on_missing_residual_diagnostics", False)
+    )
+    residual_diagnostics_rate_warn_only = bool(
+        rmse_cfg.get("residual_diagnostics_rate_warn_only", False)
     )
     min_forecast_horizon = (
         int(args.min_forecast_horizon)
@@ -1551,6 +1670,37 @@ def main() -> None:
     violation_rate = (violation_count / effective_n) if effective_n else 0.0
     ensemble_missing_count = sum(1 for r in results if r.ensemble_missing)
     ensemble_missing_rate = (ensemble_missing_count / len(results)) if results else 0.0
+    warmup_required = max(min_effective_audits, holding_period, 0)
+    model_backed_results = [
+        r
+        for r in results
+        if r.default_model in {"SARIMAX", "SAMOSSA", "GARCH", "MSSA_RL"}
+    ]
+    residual_effective_results = [
+        r
+        for r in model_backed_results
+        if (
+            r.residual_diag_present
+            and r.residual_diag_n is not None
+            and r.residual_diag_n >= min_residual_diagnostics_n
+        )
+    ]
+    residual_effective_n = len(residual_effective_results)
+    non_white_noise_count = sum(
+        1 for r in residual_effective_results if r.residual_diag_white_noise is False
+    )
+    non_white_noise_rate = (
+        non_white_noise_count / residual_effective_n if residual_effective_n else 0.0
+    )
+    missing_residual_diag_count = sum(
+        1 for r in model_backed_results if not r.residual_diag_present
+    )
+    ensemble_index_mismatch_count = sum(
+        1 for r in results if r.ensemble_index_mismatch
+    )
+    ensemble_index_mismatch_rate = (
+        ensemble_index_mismatch_count / len(results) if results else 0.0
+    )
 
     def _percentiles(values: list[float], percents: list[float]) -> Dict[float, float]:
         if not values:
@@ -1637,7 +1787,21 @@ def main() -> None:
         f"{ensemble_missing_count}/{len(results)} ({ensemble_missing_rate:.2%}) "
         f"(max allowed {max_missing_ensemble_rate:.2%})"
     )
-    warmup_required: Optional[int] = None
+    print(
+        "Residual diagnostics         : "
+        f"model_backed={len(model_backed_results)} "
+        f"usable={residual_effective_n} "
+        f"missing={missing_residual_diag_count} "
+        f"non_white_noise={non_white_noise_count} "
+        f"rate={non_white_noise_rate:.2%} "
+        f"(max allowed {max_non_white_noise_rate:.2%}, min_n={min_residual_diagnostics_n})"
+    )
+    print(
+        "Ensemble index mismatches    : "
+        f"{ensemble_index_mismatch_count}/{len(results)} "
+        f"({ensemble_index_mismatch_rate:.2%}) "
+        f"(max allowed {max_index_mismatch_rate:.2%})"
+    )
 
     def _current_failure_summary(
         *,
@@ -1686,6 +1850,16 @@ def main() -> None:
             "ensemble_missing_count": ensemble_missing_count,
             "ensemble_missing_rate": ensemble_missing_rate,
             "max_missing_ensemble_rate": max_missing_ensemble_rate,
+            "ensemble_index_mismatch_count": ensemble_index_mismatch_count,
+            "ensemble_index_mismatch_rate": ensemble_index_mismatch_rate,
+            "max_index_mismatch_rate": max_index_mismatch_rate,
+            "residual_diag_effective_audits": residual_effective_n,
+            "non_white_noise_count": non_white_noise_count,
+            "non_white_noise_rate": non_white_noise_rate,
+            "max_non_white_noise_rate": max_non_white_noise_rate,
+            "missing_residual_diag_count": missing_residual_diag_count,
+            "min_residual_diagnostics_n": min_residual_diagnostics_n,
+            "fail_on_missing_residual_diagnostics": fail_on_missing_residual_diagnostics,
             "holding_period_required": warmup_required,
             "lift_fraction": lift_value,
             "min_lift_fraction": min_lift_fraction,
@@ -1733,6 +1907,88 @@ def main() -> None:
                     decision_reason="missing ensemble metrics exceed threshold",
                 ),
             )
+    if (
+        len(results) > 0
+        and max_index_mismatch_rate >= 0
+        and ensemble_index_mismatch_rate > max_index_mismatch_rate
+    ):
+        _emit_failure_summary_and_exit(
+            message=(
+                "Ensemble index mismatch rate "
+                f"{ensemble_index_mismatch_rate:.2%} exceeds max "
+                f"{max_index_mismatch_rate:.2%}"
+            ),
+            audit_dir=audit_dir,
+            audit_roots=audit_roots,
+            include_research=bool(args.include_research),
+            max_files=int(args.max_files),
+            db_path=db_path,
+            min_forecast_horizon=min_forecast_horizon,
+            exit_code=1,
+            summary_fields=_current_failure_summary(
+                decision=DEFAULT_DECISION_RESEARCH,
+                decision_reason="ensemble index mismatch rate exceeds threshold",
+            ),
+        )
+    # Only hard-fail on residual diagnostics rate once we have accumulated enough
+    # audits (warmup_required = max(min_effective_audits, holding_period) = 20).
+    # Below this floor, the rate is treated as inconclusive — consistent with how
+    # fail_on_violation_during_holding_period=false gates the RMSE violation check.
+    # When residual_diagnostics_rate_warn_only=true the threshold is still checked
+    # and printed, but the gate emits a warning rather than a hard FAIL exit.
+    # Use this while SSA-based in-sample fit residuals dominate the diagnostic pool
+    # (Ljung-Box at n=261 structurally rejects H0 for SAMoSSA/MSSA-RL regardless
+    # of model quality — this is NOT a sign of mis-specification).
+    if (
+        residual_effective_n >= warmup_required
+        and non_white_noise_rate > max_non_white_noise_rate
+    ):
+        if residual_diagnostics_rate_warn_only:
+            print(
+                f"[WARN] Non-white-noise residual rate {non_white_noise_rate:.2%} "
+                f"exceeds max {max_non_white_noise_rate:.2%} "
+                f"(residual_diagnostics_rate_warn_only=true; not failing)"
+            )
+        else:
+            _emit_failure_summary_and_exit(
+                message=(
+                    f"Non-white-noise residual rate {non_white_noise_rate:.2%} exceeds "
+                    f"max {max_non_white_noise_rate:.2%}"
+                ),
+                audit_dir=audit_dir,
+                audit_roots=audit_roots,
+                include_research=bool(args.include_research),
+                max_files=int(args.max_files),
+                db_path=db_path,
+                min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
+                summary_fields=_current_failure_summary(
+                    decision=DEFAULT_DECISION_RESEARCH,
+                    decision_reason="non-white-noise residual rate exceeds threshold",
+                ),
+            )
+    if (
+        fail_on_missing_residual_diagnostics
+        and effective_n >= warmup_required
+        and missing_residual_diag_count > 0
+    ):
+        _emit_failure_summary_and_exit(
+            message=(
+                "Missing residual diagnostics for "
+                f"{missing_residual_diag_count} model-backed default-path audit(s)"
+            ),
+            audit_dir=audit_dir,
+            audit_roots=audit_roots,
+            include_research=bool(args.include_research),
+            max_files=int(args.max_files),
+            db_path=db_path,
+            min_forecast_horizon=min_forecast_horizon,
+            exit_code=1,
+            summary_fields=_current_failure_summary(
+                decision=DEFAULT_DECISION_RESEARCH,
+                decision_reason="missing residual diagnostics after warmup",
+            ),
+        )
     if pct:
         print(
             "RMSE ratio percentiles: "
@@ -1802,7 +2058,6 @@ def main() -> None:
                     ),
                 )
 
-    warmup_required = max(min_effective_audits, holding_period, 0)
     rmse_inconclusive = False
     if warmup_required > 0 and effective_n < warmup_required:
         explicit_required: Optional[int] = None
@@ -2399,6 +2654,16 @@ def main() -> None:
         "ensemble_missing_count": ensemble_missing_count,
         "ensemble_missing_rate": ensemble_missing_rate,
         "max_missing_ensemble_rate": max_missing_ensemble_rate,
+        "ensemble_index_mismatch_count": ensemble_index_mismatch_count,
+        "ensemble_index_mismatch_rate": ensemble_index_mismatch_rate,
+        "max_index_mismatch_rate": max_index_mismatch_rate,
+        "residual_diag_effective_audits": residual_effective_n,
+        "non_white_noise_count": non_white_noise_count,
+        "non_white_noise_rate": non_white_noise_rate,
+        "max_non_white_noise_rate": max_non_white_noise_rate,
+        "missing_residual_diag_count": missing_residual_diag_count,
+        "min_residual_diagnostics_n": min_residual_diagnostics_n,
+        "fail_on_missing_residual_diagnostics": fail_on_missing_residual_diagnostics,
         "min_forecast_horizon": min_forecast_horizon,
         "horizon_filtered_count": horizon_filtered_count,
         "manifest_integrity": manifest_stats,

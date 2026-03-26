@@ -23,6 +23,9 @@ def _write_audit(
     regime: str | None = None,
     signal_context: dict | None = None,
     semantic_admission: dict | None = None,
+    residual_diagnostics: dict | None = None,
+    effective_default_model: str | None = None,
+    ensemble_index_mismatch: bool | None = None,
 ) -> None:
     payload = {
         "dataset": {
@@ -38,6 +41,12 @@ def _write_audit(
             "evaluation_metrics": eval_metrics,
         },
     }
+    if residual_diagnostics is not None:
+        payload["artifacts"]["residual_diagnostics"] = residual_diagnostics
+    if effective_default_model is not None:
+        payload["artifacts"]["effective_default_model"] = effective_default_model
+    if ensemble_index_mismatch is not None:
+        payload["artifacts"]["ensemble_index_mismatch"] = ensemble_index_mismatch
     if signal_context is not None:
         payload["signal_context"] = signal_context
     if semantic_admission is not None:
@@ -477,6 +486,259 @@ def test_check_audit_file_uses_requested_baseline(tmp_path: Path) -> None:
     assert res is not None
     assert res.baseline_model == "SAMOSSA"
     assert res.rmse_ratio == pytest.approx(1.5)
+
+
+def test_check_forecast_audits_fails_on_residual_diag_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, white_noise in enumerate([False, False, True], start=1):
+        _write_audit(
+            audit_dir / f"forecast_audit_{idx}.json",
+            start=f"2024-01-0{idx}",
+            end=f"2024-01-1{idx}",
+            length=180,
+            horizon=30,
+            ticker="AAPL",
+            weights={"samossa": 1.0},
+            eval_metrics={
+                "samossa": {"rmse": 2.0},
+                "ensemble": {"rmse": 2.0},
+            },
+            effective_default_model="SAMOSSA",
+            residual_diagnostics={
+                "samossa": {
+                    "white_noise": white_noise,
+                    "n": 30,
+                    "lb_pvalue": 0.50 if white_noise else 0.001,
+                    "jb_pvalue": 0.50 if white_noise else 0.001,
+                }
+            },
+        )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+                "    max_non_white_noise_rate: 0.50",
+                "    min_residual_diagnostics_n: 10",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 1
+
+
+def test_check_forecast_audits_ignores_residual_diag_below_min_n(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_small_n.json",
+        start="2024-01-01",
+        end="2024-01-31",
+        length=180,
+        horizon=30,
+        ticker="MSFT",
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+        effective_default_model="SAMOSSA",
+        residual_diagnostics={
+            "samossa": {
+                "white_noise": False,
+                "n": 5,
+                "lb_pvalue": 0.001,
+                "jb_pvalue": 0.001,
+            }
+        },
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+                "    max_non_white_noise_rate: 0.0",
+                "    min_residual_diagnostics_n: 10",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+
+def test_check_forecast_audits_fails_on_missing_residual_diag_after_warmup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_missing_resid.json",
+        start="2024-01-01",
+        end="2024-01-31",
+        length=180,
+        horizon=30,
+        ticker="NVDA",
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+        effective_default_model="SAMOSSA",
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    min_effective_audits: 1",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+                "    fail_on_missing_residual_diagnostics: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 1
+
+
+def test_check_forecast_audits_fails_on_index_mismatch_rate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        audit_dir / "forecast_audit_mismatch.json",
+        start="2024-01-01",
+        end="2024-01-31",
+        length=180,
+        horizon=30,
+        ticker="AMD",
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 2.0},
+            "ensemble": {"rmse": 2.0},
+        },
+        effective_default_model="SAMOSSA",
+        ensemble_index_mismatch=True,
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+                "    max_index_mismatch_rate: 0.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(audit_dir),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 1
 
 
 def test_outcome_join_happy_path_ts_signal_id(

@@ -47,8 +47,11 @@ class TestGARCHConvergenceHardening:
         except ImportError:
             pytest.skip("arch library not installed")
 
+        # Use 130 points to exceed the min_arch_sample_size=120 guard added in
+        # forecast-hardening; with 60 points the forecaster falls back to EWMA
+        # before arch_model is ever called, so the convergence patch is bypassed.
         forecaster = GARCHForecaster(auto_select=True, max_p=1, max_q=1)
-        returns = _make_returns(60)
+        returns = _make_returns(130)
 
         # Patch arch_model.fit to emit a convergence RuntimeWarning
         original_fit = None
@@ -197,3 +200,28 @@ class TestGARCHConvergenceHardening:
         assert "lower_ci" in result
         assert "upper_ci" in result
         assert all(result["upper_ci"] > result["lower_ci"])
+
+    def test_ewma_summary_exposes_guardrail_metadata(self):
+        forecaster = object.__new__(GARCHForecaster)
+        forecaster.backend = "ewma"
+        forecaster.fitted_model = True
+        forecaster.p = 1
+        forecaster.q = 1
+        forecaster.dist = "normal"
+        forecaster.mean = "AR"
+        forecaster._differenced = False
+        forecaster._fallback_state = {
+            "lambda": 0.94,
+            "n_obs": 60,
+            "fallback_reason": "convergence_failure",
+            "persistence": 0.995,
+            "volatility_ratio_to_realized": 4.8,
+        }
+
+        summary = forecaster.get_model_summary()
+
+        assert summary["backend"] == "ewma"
+        assert summary["fallback_reason"] == "convergence_failure"
+        assert summary["persistence"] == pytest.approx(0.995)
+        assert summary["volatility_ratio_to_realized"] == pytest.approx(4.8)
+        assert summary["fit_sample_size"] == 60

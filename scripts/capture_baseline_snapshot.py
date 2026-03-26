@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from scripts.provenance_utils import build_config_provenance
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -199,6 +201,14 @@ def capture_baseline_snapshot(
     config_paths = list(DEFAULT_CONFIG_PATHS)
     if extra_config_paths:
         config_paths.extend(extra_config_paths)
+    config_provenance = build_config_provenance(root / rel for rel in config_paths)
+    manifest["provenance"] = {
+        "dataset_hash": None,
+        "db_max_ohlcv_date": None,
+        "config_hash": config_provenance.get("config_hash"),
+        "git_commit": manifest["git"].get("commit") if isinstance(manifest.get("git"), dict) else None,
+        "config_paths": config_provenance.get("config_paths", []),
+    }
 
     for rel in config_paths:
         src = root / rel
@@ -315,6 +325,16 @@ def capture_baseline_snapshot(
             copied = _safe_copy(src, dst)
             if copied is not None:
                 manifest["files"]["artifacts"].append(copied)
+                try:
+                    backtest_payload = json.loads(src.read_text(encoding="utf-8"))
+                except Exception:
+                    backtest_payload = {}
+                if isinstance(backtest_payload, dict):
+                    provenance_payload = backtest_payload.get("provenance") or {}
+                    if isinstance(provenance_payload, dict):
+                        for key in ("dataset_hash", "db_max_ohlcv_date", "git_commit"):
+                            if provenance_payload.get(key) is not None:
+                                manifest["provenance"][key] = provenance_payload.get(key)
 
     # Optional per-run DB provenance payload.
     provenance = root / "logs" / "automation" / f"db_provenance_{resolved_run_id}.json"
@@ -323,6 +343,15 @@ def capture_baseline_snapshot(
         manifest["missing"]["artifacts"].append(str(provenance.relative_to(root)))
     else:
         manifest["files"]["artifacts"].append(copied)
+        try:
+            provenance_payload = json.loads(provenance.read_text(encoding="utf-8"))
+        except Exception:
+            provenance_payload = {}
+        if isinstance(provenance_payload, dict):
+            if manifest["provenance"].get("dataset_hash") is None and provenance_payload.get("dataset_hash") is not None:
+                manifest["provenance"]["dataset_hash"] = provenance_payload.get("dataset_hash")
+            if provenance_payload.get("db_max_ohlcv_date") is not None:
+                manifest["provenance"]["db_max_ohlcv_date"] = provenance_payload.get("db_max_ohlcv_date")
 
     manifest_path = snapshot_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

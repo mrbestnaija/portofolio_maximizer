@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 from check_model_improvement import (
     LAYER_REQUIRED_KEYS,
     LayerResult,
+    _load_layer1_lift_fractions,
     _resolve_layer1_audit_dir,
     compare_baseline,
     run_layer1_forecast_quality,
@@ -646,3 +647,130 @@ class TestLayer1AuditDirResolution:
 
         resolved = _resolve_layer1_audit_dir()
         assert resolved == production_dir
+
+
+# ---------------------------------------------------------------------------
+# THR-01: _load_layer1_lift_fractions reads from config (not hardcoded)
+# ---------------------------------------------------------------------------
+class TestLoadLayer1LiftFractions:
+    def test_reads_warn_and_fail_from_config(self, tmp_path, monkeypatch):
+        """min_lift_fraction / fail_lift_fraction from YAML are returned."""
+        import yaml
+        cfg = {
+            "forecaster_monitoring": {
+                "regression_metrics": {
+                    "min_lift_fraction": 0.30,
+                    "fail_lift_fraction": 0.07,
+                }
+            }
+        }
+        cfg_path = tmp_path / "config" / "forecaster_monitoring.yml"
+        cfg_path.parent.mkdir(parents=True)
+        cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        warn, fail = _load_layer1_lift_fractions()
+        assert warn == pytest.approx(0.30)
+        assert fail == pytest.approx(0.07)
+
+    def test_falls_back_to_defaults_when_config_missing(self, tmp_path, monkeypatch):
+        """Returns (0.25, 0.05) when config file is absent."""
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+        warn, fail = _load_layer1_lift_fractions()
+        assert warn == pytest.approx(0.25)
+        assert fail == pytest.approx(0.05)
+
+    def test_falls_back_to_defaults_when_keys_absent(self, tmp_path, monkeypatch):
+        """Returns (0.25, 0.05) when the yaml keys are missing."""
+        import yaml
+        cfg = {"forecaster_monitoring": {"regression_metrics": {}}}
+        cfg_path = tmp_path / "config" / "forecaster_monitoring.yml"
+        cfg_path.parent.mkdir(parents=True)
+        cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        warn, fail = _load_layer1_lift_fractions()
+        assert warn == pytest.approx(0.25)
+        assert fail == pytest.approx(0.05)
+
+    def test_production_config_returns_expected_values(self):
+        """The real forecaster_monitoring.yml must have min_lift_fraction=0.25, fail=0.05."""
+        warn, fail = _load_layer1_lift_fractions()
+        assert warn == pytest.approx(0.25), (
+            f"Production warn_lift_threshold={warn} != 0.25 — "
+            "check forecaster_monitoring.yml min_lift_fraction"
+        )
+        assert fail == pytest.approx(0.05), (
+            f"Production fail_lift_threshold={fail} != 0.05 — "
+            "check forecaster_monitoring.yml fail_lift_fraction"
+        )
+
+    def test_layer1_warn_uses_config_not_hardcoded(self, tmp_path, monkeypatch):
+        """Layer 1 WARN fires at config threshold (0.25), not the old hardcoded 0.05.
+
+        Creates 10 audit windows where lift_global = 0.10 (1 out of 10 windows has
+        ensemble_rmse < best_single_rmse * 0.98).  Old hardcoded warn=0.05 would PASS
+        (10% > 5%), but config-driven warn=0.25 must produce WARN (10% < 25%).
+        """
+        import json
+        import yaml
+
+        # Minimal config with min_lift_fraction=0.25
+        cfg = {
+            "forecaster_monitoring": {
+                "regression_metrics": {
+                    "baseline_model": "BEST_SINGLE",
+                    "min_lift_rmse_ratio": 0.02,
+                    "min_lift_fraction": 0.25,
+                    "fail_lift_fraction": 0.05,
+                }
+            }
+        }
+        cfg_path = tmp_path / "config" / "forecaster_monitoring.yml"
+        cfg_path.parent.mkdir(parents=True)
+        cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        # Fixture format matching extract_window_metrics in ensemble_health_audit.py.
+        # MODELS = ("garch", "samossa", "mssa_rl") + ensemble RMSE required.
+        # lift_threshold = 1.0 - 0.02 = 0.98 → lift when ensemble_rmse / best_single < 0.98
+        audit_dir = tmp_path / "audit"
+        audit_dir.mkdir()
+        for i in range(10):
+            # Only window 0 has lift: ensemble_rmse=0.95 vs best=1.0 → ratio=0.95 < 0.98
+            ensemble_rmse = 0.95 if i == 0 else 1.05
+            # Unique end date per window to prevent deduplication by fingerprint
+            end_date = f"2024-{(i + 1):02d}-01"
+            audit = {
+                "dataset": {"ticker": "AAPL", "start": "2024-01-01", "end": end_date,
+                            "length": 120, "forecast_horizon": 30},
+                "summary": {"forecast_horizon": 30},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":   {"rmse": 1.0, "directional_accuracy": 0.55},
+                        "samossa": {"rmse": 1.1, "directional_accuracy": 0.52},
+                        "mssa_rl": {"rmse": 1.2, "directional_accuracy": 0.50},
+                        "ensemble": {"rmse": ensemble_rmse, "directional_accuracy": 0.54},
+                    }
+                }
+            }
+            (audit_dir / f"forecast_audit_{i:04d}.json").write_text(json.dumps(audit), encoding="utf-8")
+
+        # Load the config-driven thresholds (simulates what run_check does at call site)
+        warn_lift, fail_lift = _load_layer1_lift_fractions()
+        assert warn_lift == pytest.approx(0.25), "Config-driven warn threshold must be 0.25"
+
+        result = run_layer1_forecast_quality(
+            audit_dir,
+            warn_lift_threshold=warn_lift,  # config-driven (0.25), not hardcoded (0.05)
+            fail_lift_threshold=fail_lift,
+            warn_coverage_threshold=0,       # disable coverage warn
+            warn_da_zero_pct=1.1,            # disable DA warn
+        )
+        # lift_global = 1/10 = 0.10. With config-driven warn=0.25: 0.10 < 0.25 → WARN.
+        # With old hardcoded warn=0.05: 0.10 > 0.05 → PASS (the bug we fixed).
+        assert result.status == "WARN", (
+            f"Expected WARN when lift_global=0.10 < warn=0.25, got {result.status}. "
+            "If this is PASS, the warn_lift_threshold is still hardcoded at 0.05."
+        )
+        assert result.metrics["lift_fraction_global"] == pytest.approx(0.10, abs=0.01)

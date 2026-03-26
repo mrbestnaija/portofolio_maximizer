@@ -32,6 +32,11 @@ if str(ROOT_PATH) not in sys.path:
 
 from backtesting.candidate_simulator import simulate_candidate
 from etl.database_manager import DatabaseManager
+from scripts.provenance_utils import (
+    build_config_provenance,
+    build_dataset_hash,
+    git_commit,
+)
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -101,6 +106,7 @@ def run_horizon_backtest(
     guardrails: Dict[str, Any],
     initial_capital: float,
     report_path: Path,
+    config_paths: Optional[List[Path]] = None,
 ) -> Dict[str, Any]:
     metrics = simulate_candidate(
         source_db=db_manager,
@@ -111,6 +117,23 @@ def run_horizon_backtest(
         guardrails=guardrails,
         initial_capital=initial_capital,
     )
+    resolved_config_paths = [Path(p).expanduser().resolve() for p in (config_paths or [])]
+    db_path = getattr(db_manager, "db_path", None)
+    db_max_date = _db_max_ohlcv_date(db_manager)
+    config_provenance = build_config_provenance(resolved_config_paths)
+    provenance = {
+        "dataset_hash": build_dataset_hash(
+            db_path=Path(db_path) if db_path is not None else None,
+            tickers=tickers,
+            start_date=window.start_date,
+            end_date=window.end_date,
+            db_max_ohlcv_date=db_max_date,
+        ),
+        "db_max_ohlcv_date": db_max_date,
+        "config_hash": config_provenance.get("config_hash"),
+        "git_commit": git_commit(ROOT_PATH),
+        "config_paths": config_provenance.get("config_paths", []),
+    }
 
     payload = {
         "run_id": datetime.now(UTC).strftime("%Y%m%d_%H%M%S"),
@@ -119,6 +142,7 @@ def run_horizon_backtest(
         "candidate_params": candidate_params,
         "guardrails": guardrails,
         "metrics": metrics,
+        "provenance": provenance,
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -244,6 +268,7 @@ def main(
             raise click.UsageError(f"candidate-json is not valid JSON: {exc}") from exc
 
     out_path = Path(report_path).expanduser() if report_path else _default_report_path()
+    resolved_signal_routing_config = (ROOT_PATH / signal_routing_config).resolve()
     payload = run_horizon_backtest(
         db_manager=db_manager,
         tickers=ticker_list,
@@ -252,6 +277,7 @@ def main(
         guardrails=guardrails,
         initial_capital=float(initial_capital),
         report_path=out_path,
+        config_paths=[resolved_signal_routing_config],
     )
 
     metrics = payload.get("metrics") or {}

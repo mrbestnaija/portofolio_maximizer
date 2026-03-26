@@ -53,6 +53,9 @@ class GARCHForecaster:
         max_q: int = 3,
         enforce_stationarity: bool = True,
         igarch_fallback: str = "gjr",
+        min_arch_sample_size: int = 120,
+        hard_igarch_threshold: float = 0.99,
+        max_volatility_ratio_to_realized: float = 4.0,
     ) -> None:
         self.p = p
         self.q = q
@@ -65,6 +68,9 @@ class GARCHForecaster:
         self.auto_select = bool(auto_select)
         self.max_p = int(max_p)
         self.max_q = int(max_q)
+        self.min_arch_sample_size = max(int(min_arch_sample_size), 20)
+        self.hard_igarch_threshold = float(hard_igarch_threshold)
+        self.max_volatility_ratio_to_realized = float(max_volatility_ratio_to_realized)
         if self.backend == "arch" and not ARCH_AVAILABLE:
             logger.warning("arch not installed; falling back to EWMA volatility model.")
             self.backend = "ewma"
@@ -80,6 +86,12 @@ class GARCHForecaster:
         self._convergence_ok: bool = True  # Phase 7.14-C: False when optimizer did not converge
         # Phase 8.2: residual diagnostics populated after fit() completes.
         self._residual_diagnostics: Dict[str, Any] = {}
+        self._fallback_reason: Optional[str] = None
+        self._last_persistence: Optional[float] = None
+        self._volatility_ratio_to_realized: Optional[float] = None
+        self._realized_volatility: Optional[float] = None
+        self._fit_sample_size: int = 0
+        self._training_returns_clean: Optional[pd.Series] = None
 
     def fit(
         self,
@@ -98,6 +110,14 @@ class GARCHForecaster:
         if returns_clean.empty:
             raise ValueError("Returns series required for GARCH is empty after dropna")
         returns_clean = returns_clean.astype(float)
+        self._convergence_ok = True
+        self._fallback_state = None
+        self._fallback_reason = None
+        self._last_persistence = None
+        self._volatility_ratio_to_realized = None
+        self._residual_diagnostics = {}
+        self._training_returns_clean = returns_clean.copy()
+        self._fit_sample_size = int(len(returns_clean))
 
         # Guard against numerical overflow by clipping extreme tails.
         abs_returns = returns_clean.abs()
@@ -112,6 +132,11 @@ class GARCHForecaster:
         cap = max(p995, med * 10.0) if med > 0 else p995
         if np.isfinite(cap) and cap > 0:
             returns_clean = returns_clean.clip(-cap, cap)
+        self._training_returns_clean = returns_clean.copy()
+        realized_volatility = float(returns_clean.std(ddof=0))
+        if not np.isfinite(realized_volatility) or realized_volatility <= 0.0:
+            realized_volatility = float(returns_clean.abs().mean())
+        self._realized_volatility = max(realized_volatility, 1e-12)
 
         backend = getattr(self, "backend", "arch")
         if backend != "arch":
@@ -138,6 +163,25 @@ class GARCHForecaster:
                         raise ValueError("Returns series empty after ADF-motivated differencing")
             except Exception as adf_exc:  # pragma: no cover
                 logger.debug("ADF stationarity check failed (%s); skipping.", adf_exc)
+
+        self._training_returns_clean = returns_clean.copy()
+        self._fit_sample_size = int(len(returns_clean))
+        realized_volatility = float(returns_clean.std(ddof=0))
+        if not np.isfinite(realized_volatility) or realized_volatility <= 0.0:
+            realized_volatility = float(returns_clean.abs().mean())
+        self._realized_volatility = max(realized_volatility, 1e-12)
+
+        if len(returns_clean) < self.min_arch_sample_size:
+            logger.warning(
+                "GARCH sample size %d below minimum %d; falling back to EWMA.",
+                len(returns_clean),
+                self.min_arch_sample_size,
+            )
+            self.backend = "ewma"
+            return self._fit_ewma(
+                returns_clean,
+                reason="insufficient_sample_size",
+            )
 
         # Scale returns to improve GARCH convergence (recommended by arch library).
         mean_abs = returns_clean.abs().mean()
@@ -276,14 +320,35 @@ class GARCHForecaster:
         # Try GJR-GARCH (asymmetric volatility; better for equity fat tails) first;
         # only fall back to EWMA if GJR also degenerates.
         persistence = self._garch_persistence()
+        self._last_persistence = persistence
+        volatility_ratio = self._conditional_volatility_ratio_to_realized()
+        self._volatility_ratio_to_realized = volatility_ratio
         convergence_failed = not getattr(self, "_convergence_ok", True)
-        if (persistence is not None and persistence >= 0.97) or convergence_failed:
+        ratio_exploded = (
+            volatility_ratio is not None
+            and volatility_ratio > self.max_volatility_ratio_to_realized
+        )
+        if (
+            (persistence is not None and persistence >= self.hard_igarch_threshold)
+            or convergence_failed
+            or ratio_exploded
+        ):
+            if persistence is not None and persistence >= self.hard_igarch_threshold:
+                guard_reason = "near_igarch"
+            elif convergence_failed:
+                guard_reason = "convergence_failure"
+            else:
+                guard_reason = "exploding_variance_ratio"
             igarch_fallback = str(getattr(self, "igarch_fallback", "gjr")).lower()
             if igarch_fallback == "gjr" and ARCH_AVAILABLE:
                 logger.warning(
-                    "GARCH(%s,%s) persistence %.4f >= 0.97 (near-IGARCH); "
-                    "attempting GJR-GARCH asymmetric model.",
-                    self.p, self.q, persistence,
+                    "GARCH(%s,%s) triggered stability guard (%s, persistence=%s, "
+                    "volatility_ratio=%s); attempting GJR-GARCH asymmetric model.",
+                    self.p,
+                    self.q,
+                    guard_reason,
+                    f"{persistence:.4f}" if persistence is not None else "n/a",
+                    f"{volatility_ratio:.4f}" if volatility_ratio is not None else "n/a",
                 )
                 try:
                     gjr_model = arch_model(
@@ -314,37 +379,60 @@ class GARCHForecaster:
                             "GJR-GARCH optimizer did not fully converge; "
                             "checking persistence to decide fallback."
                         )
+                    if hasattr(gjr_fit, "convergence_flag") and gjr_fit.convergence_flag != 0:
+                        _gjr_conv_failed = True
                     gjr_persistence = sum(
                         float(v) for k, v in gjr_fit.params.items()
                         if k.startswith(("alpha[", "beta[")) and np.isfinite(float(v))
                     )
-                    if gjr_persistence < 0.97:
+                    self._last_persistence = gjr_persistence
+                    gjr_volatility_ratio = self._conditional_volatility_ratio_to_realized(gjr_fit)
+                    self._volatility_ratio_to_realized = gjr_volatility_ratio
+                    if (
+                        not _gjr_conv_failed
+                        and gjr_persistence < self.hard_igarch_threshold
+                        and (
+                            gjr_volatility_ratio is None
+                            or gjr_volatility_ratio <= self.max_volatility_ratio_to_realized
+                        )
+                    ):
                         self.model = gjr_model
                         self.fitted_model = gjr_fit
                         self.vol = "GJR-GARCH"
                         logger.info(
-                            "GJR-GARCH fitted (persistence=%.4f); using asymmetric model.",
+                            "GJR-GARCH fitted (persistence=%.4f, volatility_ratio=%s); "
+                            "using asymmetric model.",
                             gjr_persistence,
+                            f"{gjr_volatility_ratio:.4f}"
+                            if gjr_volatility_ratio is not None
+                            else "n/a",
                         )
                         self._residual_diagnostics = self._capture_residual_diagnostics()
                         return self
                 except Exception as gjr_exc:
                     logger.debug("GJR-GARCH attempt failed (%s); falling back to EWMA.", gjr_exc)
             logger.warning(
-                "GARCH persistence %.4f >= 0.97; GJR unavailable or also degenerate; "
+                "GARCH stability guard triggered (%s); GJR unavailable or also unstable; "
                 "falling back to EWMA to avoid divergent variance forecasts.",
-                persistence,
+                guard_reason,
             )
             self.backend = "ewma"
-            return self._fit_ewma(returns_clean)
+            return self._fit_ewma(
+                returns_clean,
+                reason=guard_reason,
+                persistence=self._last_persistence,
+                volatility_ratio_to_realized=self._volatility_ratio_to_realized,
+            )
 
         logger.info(
-            "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s, persistence=%.4f)",
+            "GARCH(%s,%s) model fitted successfully (vol=%s, dist=%s, persistence=%.4f, "
+            "volatility_ratio=%s)",
             self.p,
             self.q,
             self.vol,
             self.dist,
             persistence if persistence is not None else 0.0,
+            f"{volatility_ratio:.4f}" if volatility_ratio is not None else "n/a",
         )
         self._residual_diagnostics = self._capture_residual_diagnostics()
         return self
@@ -394,7 +482,48 @@ class GARCHForecaster:
         except Exception:
             return None
 
-    def _fit_ewma(self, returns_clean: pd.Series) -> "GARCHForecaster":
+    def _conditional_volatility_ratio_to_realized(self, fitted_model: Any = None) -> Optional[float]:
+        realized = float(getattr(self, "_realized_volatility", 0.0) or 0.0)
+        if not np.isfinite(realized) or realized <= 0.0:
+            return None
+        model = fitted_model if fitted_model is not None else self.fitted_model
+        if model is None or model is True:
+            return None
+        try:
+            conditional = getattr(model, "conditional_volatility", None)
+            if conditional is None:
+                return None
+            values = pd.to_numeric(pd.Series(conditional), errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna()
+            if values.empty:
+                return None
+            return float(abs(values.iloc[-1])) / realized
+        except Exception:
+            return None
+
+    def _forecast_volatility_ratio_to_realized(self, volatility: Any) -> Optional[float]:
+        realized = float(getattr(self, "_realized_volatility", 0.0) or 0.0)
+        if not np.isfinite(realized) or realized <= 0.0:
+            return None
+        try:
+            values = pd.to_numeric(pd.Series(volatility), errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            ).dropna()
+            if values.empty:
+                return None
+            return float(values.max()) / realized
+        except Exception:
+            return None
+
+    def _fit_ewma(
+        self,
+        returns_clean: pd.Series,
+        *,
+        reason: str = "ewma_backend",
+        persistence: Optional[float] = None,
+        volatility_ratio_to_realized: Optional[float] = None,
+    ) -> "GARCHForecaster":
         lam = 0.94
         squared = np.square(returns_clean.to_numpy(dtype=float, copy=False))
         baseline_var = float(np.var(squared)) if squared.size else 0.0
@@ -413,13 +542,27 @@ class GARCHForecaster:
             "last_variance": ewma_var,
             "mean": float(returns_clean.mean()),
             "n_obs": int(len(returns_clean)),
+            "fallback_reason": reason,
+            "persistence": persistence if persistence is not None else self._last_persistence,
+            "volatility_ratio_to_realized": (
+                volatility_ratio_to_realized
+                if volatility_ratio_to_realized is not None
+                else self._volatility_ratio_to_realized
+            ),
+            "realized_volatility": self._realized_volatility,
         }
+        self._fallback_reason = reason
+        self._last_persistence = self._fallback_state.get("persistence")
+        self._volatility_ratio_to_realized = self._fallback_state.get(
+            "volatility_ratio_to_realized"
+        )
         # Sentinel so downstream callers treat the model as "fitted".
         self.fitted_model = True
         logger.info(
-            "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g)",
+            "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g, reason=%s)",
             lam,
             ewma_var,
+            reason,
         )
         return self
 
@@ -449,6 +592,9 @@ class GARCHForecaster:
                 "bic": None,
                 "convergence_ok": True,  # EWMA/GJR fallback is always "converged"
                 "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
+                "fallback_reason": state.get("fallback_reason"),
+                "persistence": state.get("persistence"),
+                "volatility_ratio_to_realized": state.get("volatility_ratio_to_realized"),
             }
             return self.forecast_results
 
@@ -464,6 +610,28 @@ class GARCHForecaster:
             mean = mean / scale_factor
 
         volatility = np.sqrt(variance)
+        forecast_volatility_ratio = self._forecast_volatility_ratio_to_realized(volatility)
+        self._volatility_ratio_to_realized = forecast_volatility_ratio
+        if (
+            forecast_volatility_ratio is not None
+            and forecast_volatility_ratio > self.max_volatility_ratio_to_realized
+            and isinstance(getattr(self, "_training_returns_clean", None), pd.Series)
+            and not getattr(self, "_training_returns_clean").empty
+        ):
+            logger.warning(
+                "GARCH forecast volatility ratio %.4f exceeds max %.4f; "
+                "falling back to EWMA forecast.",
+                forecast_volatility_ratio,
+                self.max_volatility_ratio_to_realized,
+            )
+            self.backend = "ewma"
+            self._fit_ewma(
+                self._training_returns_clean,
+                reason="exploding_variance_ratio",
+                persistence=self._last_persistence or self._garch_persistence(),
+                volatility_ratio_to_realized=forecast_volatility_ratio,
+            )
+            return self.forecast(steps)
 
         self.forecast_results = {
             "variance_forecast": variance,
@@ -481,6 +649,9 @@ class GARCHForecaster:
             "convergence_ok": bool(getattr(self, "_convergence_ok", True)),
             # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
             "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
+            "fallback_reason": getattr(self, "_fallback_reason", None),
+            "persistence": getattr(self, "_last_persistence", None) or self._garch_persistence(),
+            "volatility_ratio_to_realized": forecast_volatility_ratio,
         }
         return self.forecast_results
 
@@ -502,17 +673,24 @@ class GARCHForecaster:
                 "mean_model": getattr(self, "mean", "AR"),
                 "dist": self.dist,
                 "differenced": bool(getattr(self, "_differenced", False)),
+                "fallback_reason": state.get("fallback_reason"),
+                "persistence": state.get("persistence"),
+                "volatility_ratio_to_realized": state.get("volatility_ratio_to_realized"),
+                "fit_sample_size": state.get("n_obs"),
             }
         return {
             "params": self.fitted_model.params.to_dict(),
             "aic": float(self.fitted_model.aic),
             "bic": float(self.fitted_model.bic),
             "log_likelihood": float(self.fitted_model.loglikelihood),
-            "persistence": self._garch_persistence(),
+            "persistence": self._last_persistence or self._garch_persistence(),
             "backend": backend,
             "mean_model": getattr(self, "mean", "AR"),
             "dist": self.dist,
             "differenced": bool(getattr(self, "_differenced", False)),
+            "fallback_reason": self._fallback_reason,
+            "volatility_ratio_to_realized": self._volatility_ratio_to_realized,
+            "fit_sample_size": self._fit_sample_size,
         }
 
     def load_fitted(self, snapshot: Any) -> "GARCHForecaster":

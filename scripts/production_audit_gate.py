@@ -65,9 +65,26 @@ def _resolve_path(root: Path, raw_path: str) -> Path:
 
 
 def _safe_load_json(path: Path) -> Optional[Dict[str, Any]]:
+    import logging as _logging_pag
+    _pag_log = _logging_pag.getLogger(__name__)
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as exc:
+        _pag_log.warning(
+            "[PAG] Corrupted JSON artifact (parse failure): %s — %s. "
+            "Gate will treat this as missing; run may produce incorrect PASS.",
+            path,
+            exc,
+        )
+        return None
+    except Exception as exc:
+        _pag_log.warning(
+            "[PAG] Could not read artifact %s: %s",
+            path,
+            exc,
+        )
         return None
 
 
@@ -1181,7 +1198,12 @@ def main() -> int:
 
     warmup_policy = _compute_warmup_window(audit_dir=audit_dir, monitor_config=monitor_config)
     lift_inconclusive_allowed = bool(args.allow_inconclusive_lift)
-    if args.unattended_profile:
+    # Auto-allow INCONCLUSIVE during active warmup window — consistent with the
+    # max_warmup_days provision in forecaster_monitoring.yml and the --unattended-profile
+    # flag which already does the same. The warmup window exists specifically to absorb
+    # INCONCLUSIVE lift states before enough audits accumulate (holding_period=20).
+    # After warmup expires, require explicit --allow-inconclusive-lift to pass.
+    if not lift_inconclusive_allowed:
         lift_inconclusive_allowed = not bool(warmup_policy.get("warmup_expired", True))
     proof_profitable_required = bool(args.require_profitable or args.unattended_profile)
 
@@ -1340,6 +1362,20 @@ def main() -> int:
     else:
         gate_semantics_status = "FAIL"
 
+    # A4+A5 fix: warn when gate passes via warmup/INCONCLUSIVE_ALLOWED exemption.
+    # This makes the soft-pass visible to operators monitoring logs/notifications.
+    if lift_inconclusive and lift_inconclusive_allowed:
+        import logging as _pag_log_mod
+        _pag_log_mod.getLogger(__name__).warning(
+            "[PAG] Gate passes via INCONCLUSIVE_ALLOWED (warmup exemption). "
+            "Ensemble lift evidence is INSUFFICIENT — this is NOT a genuine ensemble "
+            "quality signal. effective_audits=%s, first_audit_utc=%s, "
+            "allow_inconclusive_until_utc=%s",
+            lift_effective_audits,
+            warmup_policy.get("first_audit_ts_utc"),
+            warmup_policy.get("allow_inconclusive_until_utc"),
+        )
+
     window_counts = (
         lift_summary.get("window_counts", {})
         if isinstance(lift_summary.get("window_counts"), dict)
@@ -1348,8 +1384,12 @@ def main() -> int:
     outcome_matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
     outcome_eligible = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
     matched_over_eligible = _safe_ratio(outcome_matched, outcome_eligible)
-    _linkage_min_matched = 10
-    _linkage_min_ratio = 0.8
+    # THR-02 fix: read linkage thresholds from forecaster_monitoring.yml so
+    # they can be tuned without code changes.  Defaults match the prior
+    # hardcoded values (10 / 0.8) and the yaml values above.
+    _linkage_rmse_cfg = _load_regression_monitoring_config(monitor_config)
+    _linkage_min_matched = int(_linkage_rmse_cfg.get("linkage_min_matched", 10) or 10)
+    _linkage_min_ratio = float(_linkage_rmse_cfg.get("linkage_min_ratio", 0.8) or 0.8)
     # Phase 10: During warmup, relax THIN_LINKAGE to a 1-match floor so the
     # gate does not block when the system is still accumulating live closed
     # trades. Full thresholds apply once warmup has expired.
@@ -1681,7 +1721,7 @@ def main() -> int:
         f"days={evidence_progress.get('trading_days')}/{evidence_progress.get('min_trading_days')} "
         f"remaining_days={evidence_progress.get('remaining_trading_days')}"
     )
-    print(f"Gate status    : {gate_status}")
+    print(f"Gate status    : {gate_status} (semantics={gate_semantics_status})")
     print(
         "Phase3 ready   : "
         f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "

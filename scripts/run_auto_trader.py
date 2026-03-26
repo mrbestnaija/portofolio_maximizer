@@ -180,6 +180,50 @@ def _normalize_reason_code(raw: Any) -> str:
     return normalized
 
 
+def _tagged_only_cross_mode_contamination(violations: List[Any], conn: Any) -> bool:
+    """Return True only when all HIGH/CRITICAL integrity violations are tagged contamination."""
+    if conn is None:
+        return False
+    blocking = [v for v in violations if getattr(v, "severity", None) in {"CRITICAL", "HIGH"}]
+    if not blocking:
+        return False
+    if any(getattr(v, "check_name", "") != "CROSS_MODE_CONTAMINATION" for v in blocking):
+        return False
+
+    affected_ids: list[int] = []
+    for violation in blocking:
+        for raw_id in getattr(violation, "affected_ids", []) or []:
+            try:
+                affected_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                return False
+    unique_ids = sorted(set(affected_ids))
+    if not unique_ids:
+        return False
+
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = conn.execute(
+        f"SELECT id, COALESCE(is_contaminated, 0) AS is_contaminated "
+        f"FROM trade_executions WHERE id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    if len(rows) != len(unique_ids):
+        return False
+
+    tagged_ids: set[int] = set()
+    for row in rows:
+        try:
+            row_id = int(row["id"])  # sqlite3.Row path
+            is_contaminated = int(row["is_contaminated"] or 0)
+        except Exception:
+            row_id = int(row[0])
+            is_contaminated = int(row[1] or 0)
+        if is_contaminated != 1:
+            return False
+        tagged_ids.add(row_id)
+    return tagged_ids == set(unique_ids)
+
+
 def _normalize_reason_codes(raw: Any, *, fallback_reason_code: Any = None) -> list[str]:
     out: list[str] = []
 
@@ -3303,6 +3347,10 @@ def main(
 
             # Run integrity audit
             violations = enforcer.run_full_integrity_audit()
+            tagged_contamination_only = _tagged_only_cross_mode_contamination(
+                violations,
+                getattr(trading_engine.db_manager, "conn", None),
+            )
 
             # Build integrity report
             integrity_report = {
@@ -3334,9 +3382,16 @@ def main(
                     }
                     for v in violations
                 },
-                "overall_status": "HEALTHY" if not any(
-                    v.severity in {"CRITICAL", "HIGH"} for v in violations
-                ) else "CRITICAL_FAIL",
+                "quarantined_integrity_state": {
+                    "tagged_cross_mode_contamination_only": tagged_contamination_only,
+                },
+                "overall_status": (
+                    "HEALTHY"
+                    if not any(v.severity in {"CRITICAL", "HIGH"} for v in violations)
+                    else "WARN_ONLY"
+                    if tagged_contamination_only
+                    else "CRITICAL_FAIL"
+                ),
             }
 
             # Write integrity report artifact
@@ -3364,6 +3419,11 @@ def main(
                 for v in violations:
                     status = "FAIL" if v.severity in {"CRITICAL", "HIGH"} else "WARN"
                     print(f"  [{status}] [{v.severity}] {v.check_name}: {v.count}")
+                if tagged_contamination_only:
+                    print(
+                        "  [WARN] Tagged-only cross-mode contamination is quarantined and "
+                        "excluded from canonical metrics."
+                    )
             else:
                 print()
                 print("[OK] All integrity checks passed")
@@ -3374,6 +3434,11 @@ def main(
             if integrity_report["overall_status"] == "CRITICAL_FAIL":
                 logger.error("CRITICAL integrity violations detected - review required")
                 sys.exit(1)
+            if tagged_contamination_only:
+                logger.warning(
+                    "Integrity audit found only tagged cross-mode contamination; "
+                    "these rows are already quarantined from canonical metrics, so the run continues."
+                )
 
     except ImportError:
         logger.warning("PnLIntegrityEnforcer not available - skipping integrity report")

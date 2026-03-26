@@ -139,15 +139,32 @@ Use this exact runbook for "web search ..." interactions over WhatsApp.
 
 4. Validate event evidence in activity logs:
 - `bridge_incoming`
-- `bridge_web_fast_path_start`
-- `bridge_web_fast_path_complete`
+- `bridge_turn_lock_acquired`
+- `tool_call` with `tool="search_web_tavily"`
+- `bridge_response`
 
 Compatibility note:
-- Older runs may show `bridge_status_fast_path_start/complete` for status-only flow.
-- Web-search fast-path validation should prefer `bridge_web_fast_path_*`.
+- WhatsApp now uses forced qwen orchestration instead of the old bridge web fast-path.
+- The validator reports this as `routing_mode="forced_qwen_orchestration"`.
+- A healthy degraded response may say `Model inference timed out; returning evidence-first snapshot from successful tools.` This is expected when the final model hop times out after a successful tool call.
+- Older runs may still show `bridge_web_fast_path_*` or `bridge_status_fast_path_*` events from pre-hardening behavior.
 
 5. One-command end-to-end validator (recommended):
-- `python scripts/openclaw_search_routing_e2e.py --json --require-web-events --allow-legacy-status-events`
+- `python scripts/openclaw_search_routing_e2e.py --json --allow-legacy-status-events`
+
+6. One-command live bridge health check:
+- `python scripts/openclaw_remote_workflow.py bridge-test --json`
+
+Expected current healthy output:
+- `status="OK"` from `bridge-test`
+- `status="PASS"` from `openclaw_search_routing_e2e.py`
+- either a normal qwen-written answer or an evidence-first tool snapshot backed by `search_web_tavily`
+
+WhatsApp robustness hardening (2026-03-26):
+- WhatsApp always goes through qwen orchestration; legacy direct reasoning and status fast-path shortcuts are bypassed on that channel.
+- Only one WhatsApp bridge turn runs at a time via an exclusive turn lock under `logs/automation/`.
+- Dead/abandoned lock holders are reclaimed immediately when the recorded process is no longer running.
+- If qwen times out after a successful tool call, PMX returns the successful tool evidence instead of a hard `[ERROR] All models failed for reasoning task`.
 
 Important corrections:
 - Do not use `python openclaw_agent.py restart` (not a project command).
