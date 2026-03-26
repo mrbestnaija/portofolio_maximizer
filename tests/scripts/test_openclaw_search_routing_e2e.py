@@ -57,6 +57,12 @@ def test_fast_path_event_counts_tracks_web_and_legacy_status() -> None:
 def test_bridge_output_passed_requires_web_search_pass_marker() -> None:
     raw = "[orchestrator]\n--- Response ---\nweb search: PASS | provider=tavily | attempts=1\n"
     assert e2e._bridge_output_passed(raw) is True
+    fallback_raw = (
+        "[orchestrator]\n--- Response ---\n"
+        "Model inference timed out; returning evidence-first snapshot from successful tools.\n\n"
+        "- search_web_tavily: The latest OpenClaw documentation is available at https://docs.openclaw.ai/\n"
+    )
+    assert e2e._bridge_output_passed(fallback_raw) is True
     assert e2e._bridge_output_passed("web search: FAIL | provider=none") is False
 
 

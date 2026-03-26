@@ -1569,6 +1569,49 @@ def _read_lock_payload(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _process_is_running(pid: int) -> bool:
+    if int(pid) <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _lock_payload_can_be_reclaimed(payload: dict[str, Any], *, channel: Optional[str]) -> bool:
+    if not isinstance(payload, dict) or not payload:
+        return True
+
+    token = str(payload.get("token") or "").strip()
+    if not token:
+        return True
+
+    holder_channel = str(payload.get("channel") or "").strip().lower()
+    expected_channel = str(channel or "").strip().lower()
+    if holder_channel and expected_channel and holder_channel != expected_channel:
+        return True
+
+    holder_pid = payload.get("pid")
+    try:
+        parsed_pid = int(holder_pid)
+    except Exception:
+        parsed_pid = None
+    if parsed_pid is not None and parsed_pid > 0 and not _process_is_running(parsed_pid):
+        return True
+
+    return False
+
+
 def _acquire_bridge_turn_lock(
     *,
     channel: Optional[str],
@@ -1601,6 +1644,13 @@ def _acquire_bridge_turn_lock(
             waited = max(0.0, time.monotonic() - started)
             return _BridgeTurnLock(path=lock_path, token=token, waited_seconds=waited, payload=payload)
         except FileExistsError:
+            holder = _read_lock_payload(lock_path)
+            if _lock_payload_can_be_reclaimed(holder, channel=channel):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                except Exception:
+                    pass
             try:
                 age_seconds = max(0.0, time.time() - float(lock_path.stat().st_mtime))
             except Exception:
@@ -5171,6 +5221,109 @@ def _tool_result_status_line(tool_name: str, tool_result: str) -> str:
     return f"{tool_name}: PASS"
 
 
+def _tool_result_snapshot_line(tool_name: str, tool_result: str) -> str:
+    err = _tool_error_message(tool_result)
+    if err:
+        return f"{tool_name}: FAIL - {_truncate_progress_text(err, 160)}"
+
+    parsed = _json_object_or_none(tool_result)
+    if isinstance(parsed, dict):
+        answer = str(parsed.get("answer") or "").strip()
+        if answer:
+            return f"{tool_name}: {_truncate_progress_text(answer, 320)}"
+
+        preferred_keys = (
+            "status",
+            "message",
+            "provider",
+            "query",
+            "total_trades",
+            "win_rate",
+            "total_pnl",
+            "profit_factor",
+            "objective_value",
+            "sample_size",
+            "phase3_ready",
+            "gate_status",
+            "overall_passed",
+        )
+        compact: dict[str, Any] = {}
+        for key in preferred_keys:
+            value = parsed.get(key)
+            if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                compact[key] = value
+        if compact:
+            return f"{tool_name}: {json.dumps(compact, ensure_ascii=True)}"
+
+    text = " ".join(str(tool_result or "").split())
+    if not text:
+        return f"{tool_name}: NO_DATA"
+    return f"{tool_name}: {_truncate_progress_text(text, 320)}"
+
+
+def _tool_evidence_snapshot(successful_tool_results: list[tuple[str, str]], *, max_entries: int = 3, max_chars: int = 1400) -> str:
+    if not successful_tool_results:
+        return ""
+
+    lines: list[str] = []
+    for tool_name, tool_result in successful_tool_results[-max_entries:]:
+        line = _tool_result_snapshot_line(tool_name, tool_result).strip()
+        if line:
+            lines.append(f"- {line}")
+
+    return _truncate_progress_text("\n".join(lines).strip(), max_chars)
+
+
+def _content_needs_evidence_fallback(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return True
+    low = text.lower()
+    return text.startswith("[ERROR]") or "timed out" in low or "budget exhausted" in low
+
+
+def _finalize_orchestration_response(
+    *,
+    content: str,
+    progress: "_ProgressReporter",
+    reply_channel: Optional[str],
+    reply_to: Optional[str],
+    total_tool_calls: int,
+    started_at: float,
+    primed_context: str = "",
+    successful_tool_results: Optional[list[tuple[str, str]]] = None,
+) -> str:
+    final_content = str(content or "").strip()
+
+    if _content_needs_evidence_fallback(final_content):
+        compact = str(primed_context or "").strip()[:1400].strip()
+        if compact:
+            final_content = (
+                "Model inference timed out; returning evidence-first snapshot from tools.\n\n"
+                + compact
+            )
+        else:
+            snapshot = _tool_evidence_snapshot(successful_tool_results or [])
+            if snapshot:
+                final_content = (
+                    "Model inference timed out; returning evidence-first snapshot from successful tools.\n\n"
+                    + snapshot
+                )
+
+    if not final_content:
+        final_content = "(orchestration completed without final response)"
+
+    if reply_channel and reply_to and final_content:
+        progress.emit(
+            "orchestration_complete",
+            f"sending final response (tool_calls={total_tool_calls}, elapsed={time.time() - started_at:.1f}s)",
+            force=True,
+        )
+        _deliver_response(channel=reply_channel, to=reply_to, message=final_content)
+
+    return final_content
+
+
 class _ProgressReporter:
     def __init__(
         self,
@@ -5325,6 +5478,9 @@ def orchestrate(
         min_interval_seconds=PROGRESS_MIN_INTERVAL_SECONDS,
         start_time=t0_total,
     )
+    primed_context = ""
+    successful_tool_results: list[tuple[str, str]] = []
+    total_tool_calls = 0
 
     # Pick orchestrator model (prefer qwen3:8b, fallback to any tool-capable)
     orch_model = get_best_model_for_role("orchestrator")
@@ -5333,8 +5489,19 @@ def orchestrate(
         logger.warning("No orchestrator model available; falling back to direct reasoning")
         reasoning_model = get_best_model_for_role("reasoning")
         if reasoning_model:
-            return _run_reasoning_model(model=reasoning_model, task=prompt)
-        return "[ERROR] No LLM models available. Check Ollama: ollama list"
+            content = _run_reasoning_model(model=reasoning_model, task=prompt)
+        else:
+            content = "[ERROR] No LLM models available. Check Ollama: ollama list"
+        return _finalize_orchestration_response(
+            content=content,
+            progress=progress,
+            reply_channel=reply_channel,
+            reply_to=reply_to,
+            total_tool_calls=total_tool_calls,
+            started_at=t0_total,
+            primed_context=primed_context,
+            successful_tool_results=successful_tool_results,
+        )
 
     plan = _runtime_plan(
         prompt=prompt,
@@ -5378,7 +5545,6 @@ def orchestrate(
             }
         )
 
-    primed_context = ""
     if force_tool_primer:
         progress.emit("tool_primer", "building precomputed tool context")
         primed = _build_precomputed_tool_context(
@@ -5400,7 +5566,6 @@ def orchestrate(
             )
 
     content = ""
-    total_tool_calls = 0
     repeated_tool_signatures: dict[str, int] = {}
     consecutive_tool_error_rounds = 0
     for round_num in range(max_rounds):
@@ -5451,17 +5616,27 @@ def orchestrate(
                 logger.info("Falling back to direct reasoning with %s", fallback)
                 progress.emit("fallback_reasoning", f"switching to {fallback}", force=True)
                 remaining = max(8.0, float(timeout_seconds) - (time.time() - t0_total))
+                if successful_tool_results:
+                    progress.emit(
+                        "tool_evidence_fallback",
+                        "returning successful tool evidence after orchestrator timeout",
+                        force=True,
+                    )
+                    content = "[ERROR] Orchestration timed out after successful tool execution."
+                    break
                 if remaining <= 10.0:
                     content = content or f"[ERROR] Orchestration failed near timeout: {e}"
                     break
-                return _run_reasoning_model(
+                content = _run_reasoning_model(
                     model=fallback,
                     task=prompt,
                     max_predict=320,
                     timeout_seconds=min(12.0, remaining),
                     allow_fallback=False,
                 )
-            return f"[ERROR] Orchestration failed: {e}"
+                break
+            content = f"[ERROR] Orchestration failed: {e}"
+            break
 
         message = result.get("message", {})
         content = message.get("content", "")
@@ -5600,6 +5775,7 @@ def orchestrate(
                     messages.append({"role": "system", "content": guidance})
             else:
                 tool_success_this_round += 1
+                successful_tool_results.append((tool_name, tool_result))
                 if guidance:
                     messages.append({"role": "system", "content": guidance})
 
@@ -5636,7 +5812,7 @@ def orchestrate(
                 )
             break
 
-    if not content.strip():
+    if not content.strip() and not successful_tool_results:
         fallback = get_best_model_for_role("reasoning") or "deepseek-r1:8b"
         remaining = max(8.0, float(timeout_seconds) - (time.time() - t0_total))
         if remaining > 10.0:
@@ -5650,13 +5826,6 @@ def orchestrate(
             )
         else:
             content = "[ERROR] Orchestration budget exhausted before final answer."
-
-    if ("[ERROR]" in content or "timed out" in content.lower()) and primed_context:
-        compact = primed_context[:1400].strip()
-        content = (
-            "Model inference timed out; returning evidence-first snapshot from tools.\n\n"
-            + compact
-        )
 
     if trading_critical:
         progress.emit("objective_guard", "evaluating trading objective constraints")
@@ -5681,16 +5850,16 @@ def orchestrate(
                     "Mode: advisory/evidence-first; apply conservative position sizing until objective is PASS."
                 )
 
-    # Deliver result via OpenClaw if requested
-    if reply_channel and reply_to and content:
-        progress.emit(
-            "orchestration_complete",
-            f"sending final response (tool_calls={total_tool_calls}, elapsed={time.time() - t0_total:.1f}s)",
-            force=True,
-        )
-        _deliver_response(channel=reply_channel, to=reply_to, message=content)
-
-    return content or "(orchestration completed without final response)"
+    return _finalize_orchestration_response(
+        content=content,
+        progress=progress,
+        reply_channel=reply_channel,
+        reply_to=reply_to,
+        total_tool_calls=total_tool_calls,
+        started_at=t0_total,
+        primed_context=primed_context,
+        successful_tool_results=successful_tool_results,
+    )
 
 
 def _deliver_response(channel: str, to: str, message: str) -> None:
