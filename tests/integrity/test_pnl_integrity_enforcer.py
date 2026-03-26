@@ -368,6 +368,32 @@ def test_cross_mode_contamination_excluded_from_canonical_metrics(tmp_path):
     assert metrics.contaminated_trades_excluded >= 1
 
 
+def test_cross_mode_contamination_whitelist_suppresses_known_ids(tmp_path):
+    """Whitelisted contaminated IDs (252, 255) do not raise CROSS_MODE_CONTAMINATION."""
+    db_path = tmp_path / "whitelist.db"
+    _create_contamination_db(db_path)
+    conn = sqlite3.connect(db_path)
+    # Simulate trades 252 and 255: both tagged is_contaminated=1, already excluded from metrics
+    for trade_id in (252, 255):
+        conn.execute(
+            "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+            "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+            "execution_mode) "
+            "VALUES (?,'MSFT','2026-03-04','BUY',1,100.0,1,-50.0,50.0,100.0,1,1,'live')",
+            (trade_id,),
+        )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        violations = enforcer.run_full_integrity_audit()
+
+    contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
+    assert contam == [], (
+        f"Whitelisted IDs 252/255 must not trigger CROSS_MODE_CONTAMINATION, got: {contam}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # INT-06: metrics drift detection
 # ---------------------------------------------------------------------------

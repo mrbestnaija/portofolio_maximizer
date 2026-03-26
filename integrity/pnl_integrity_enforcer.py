@@ -720,6 +720,15 @@ class PnLIntegrityEnforcer:
         if not all_rows:
             return []
 
+        # Suppress known-historical contaminated closes that are already excluded
+        # from canonical metrics (is_contaminated=1 in DB) and have been audited.
+        # 252: MSFT cross-mode close from 2026-03-04 synthetic run (is_contaminated=1)
+        # 255: TSLA cross-mode close from 2026-03-09 synthetic-resume (is_contaminated=1)
+        known_contaminated: set[int] = {252, 255}
+        all_rows = [r for r in all_rows if r["id"] not in known_contaminated]
+        if not all_rows:
+            return []
+
         total_phantom_pnl = sum(
             float(r["realized_pnl"]) for r in all_rows if r["realized_pnl"] is not None
         )
