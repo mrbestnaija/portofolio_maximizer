@@ -6,9 +6,10 @@
 - **Proof**: PASS — 40 closed trades, $+620.01 PnL, 40% WR, profit factor 1.73
 - **Proof runway**: days=10/21 (11 trading days remaining)
 - **PnL integrity**: ALL PASSED (CROSS_MODE_CONTAMINATION whitelisted 252+255)
-- **Last commit**: 87a3b53 (fix(gate): extend holding period to 30 + warn-only for missing residual diagnostics)
-- **Test count**: 2100 passed, 0 failed
+- **Last commit**: 243b029 (fix(gate): route synthetic auto_trader audits to research/ dir)
+- **Test count**: 2083 passed, 0 failed
 - **Bootstrap**: COMPLETE (2026-03-26 07:24, 9 tickers, 0 errors)
+- **Evidence hygiene**: CLEAN (invalid_context=0, missing_exec_meta=0, manifest verified=409)
 
 ## Active Cron Jobs (OpenClaw)
 
@@ -29,7 +30,7 @@
 | Residual non-WN rate | 100% | 75% | [WARN] (warn_only=true) |
 | Missing residual diagnostics | 10/54 | — | [WARN] (warn_only, pre-fix legacy files) |
 | Proof PnL | $+620.01 | profitable | PASS |
-| THIN_LINKAGE | matched=0/283 | warmup active | warmup exemption |
+| THIN_LINKAGE | matched=1/292 | warmup active | warmup exemption (threshold=1) |
 | Platt pairs | 40/43 | 43 | 3 short of activation |
 
 ## What Needs Data (before 2026-04-15 warmup expiry)
@@ -38,6 +39,15 @@
    rate naturally drops as SARIMAX-enabled ensemble data accumulates
 2. **Proof window days** (11 remaining) — live trading cycles
 3. **Platt pairs >= 43** — 40 current; 3 more needed for calibration activation
+
+## Evidence Hygiene Cleanup (2026-03-26)
+
+- Moved 139 no-context audit files from `production/` to `research/` (ETL/bootstrap contamination)
+- Rebuilt `forecast_audit_manifest.jsonl`: verified=409, missing=0, mismatch=0
+- Fixed `run_auto_trader.py`: `EXECUTION_MODE=synthetic` runs now route to `research/`
+  (synthetic ts_signal_ids never appear in `production_closed_trades`; routing to production was
+  inflating THIN_LINKAGE eligible count without matching closes)
+- Post-fix: `invalid_context=0`, `missing_exec_meta=0`, THIN_LINKAGE `matched=1/292` (warmup passes)
 
 ## Monitoring Config Changes This Session
 
