@@ -1198,7 +1198,12 @@ def main() -> int:
 
     warmup_policy = _compute_warmup_window(audit_dir=audit_dir, monitor_config=monitor_config)
     lift_inconclusive_allowed = bool(args.allow_inconclusive_lift)
-    if args.unattended_profile:
+    # Auto-allow INCONCLUSIVE during active warmup window — consistent with the
+    # max_warmup_days provision in forecaster_monitoring.yml and the --unattended-profile
+    # flag which already does the same. The warmup window exists specifically to absorb
+    # INCONCLUSIVE lift states before enough audits accumulate (holding_period=20).
+    # After warmup expires, require explicit --allow-inconclusive-lift to pass.
+    if not lift_inconclusive_allowed:
         lift_inconclusive_allowed = not bool(warmup_policy.get("warmup_expired", True))
     proof_profitable_required = bool(args.require_profitable or args.unattended_profile)
 
