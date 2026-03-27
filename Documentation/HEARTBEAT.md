@@ -85,15 +85,49 @@ touching any model knobs.
 - Evidence-first snapshot returned when qwen times out after successful tool call
 - `_bridge_output_passed()` now also passes on evidence-first responses
 
-## Next Phase (Data-Driven Decision after HOLD-reason counts)
+## Phase 7.15-F Fallback Fix (2026-03-27)
 
-Once 10+ live/synthetic cycles accumulate HOLD-reason data:
+Divide-and-conquer diagnosis found: both AAPL and MSFT failures trace to **SAMoSSA producing
+flat forecasts when DISABLE_DEFAULT forces it as fallback** (trend_strength=0.002 << 0.05 threshold).
 
-- **If SNR_GATE dominates** → investigate CI width (SAMoSSA slope window, GARCH convergence)
-- **If MIN_RETURN dominates** → test threshold relaxation in research mode (not production)
-- **If CONFIDENCE dominates** → focus on calibration quality (more Platt pairs, isotonic upgrade)
-- **If RISK_TOO_HIGH dominates** → inspect risk model (barbell_policy, regime classification)
-- **Phase 7.15-F (Factory)**: Signal generator factory consolidation (deferred from 7.14)
+**Root cause confirmed per ticker (from quant_validation.jsonl, live run 2026-03-27):**
+- AAPL (pmx_ts_20260327T064026Z): expected_return=0.0, SNR=0.0 → `SNR_GATE` — SAMoSSA flat reconstruction
+- MSFT (pmx_ts_20260327T064026Z): expected_return≈0, confidence=0.296 → `CONFIDENCE_BELOW_THRESHOLD` — same cause
+
+**Fix applied (commit 3f20101)**: `_select_disable_default_fallback()` in `forecaster.py`:
+- Tier 1 (cross-window holdout): use OOS RMSE from `_latest_metrics` (prior evaluate() call)
+- Tier 2 (flat-trend guard): SAMoSSA trend_strength < 0.05 → prefer MSSA_RL/GARCH/SARIMAX
+- Tier 3: original ensemble_meta primary_model behaviour
+
+**Partial-differencing verification plan (run separately per ticker):**
+```powershell
+# AAPL: verify fallback shifts to MSSA_RL and expected_return is non-zero
+.\simpleTrader_env\Scripts\python.exe scripts\run_auto_trader.py --tickers AAPL --cycles 1 --sleep-seconds 1 --no-resume
+
+# Then count AAPL-specific outcomes:
+.\simpleTrader_env\Scripts\python.exe -c "
+import json, pathlib
+entries = [json.loads(l) for l in pathlib.Path('logs/signals/quant_validation.jsonl').read_text(encoding='utf-8').splitlines() if l.strip()]
+recent = [e for e in entries if e.get('hold_reason') and e.get('ticker')=='AAPL'][-5:]
+for e in recent: print(e.get('hold_reason'), e.get('expected_return'), e.get('snr_gate_blocked'))
+"
+
+# MSFT: separate run to isolate MSFT-specific HOLD cause
+.\simpleTrader_env\Scripts\python.exe scripts\run_auto_trader.py --tickers MSFT --cycles 1 --sleep-seconds 1 --no-resume
+```
+
+**What to watch for:**
+- AAPL: `hold_reason=SNR_GATE` with `expected_return≠0.0` → flat-trend fix worked (CI still wide, next fix)
+- AAPL: `hold_reason=SNR_GATE` with `expected_return=0.0` still → tier 2 may not be triggering (check log)
+- MSFT: any BUY/SELL action → DISABLE_DEFAULT + flat-trend fix resolved confidence issue
+- Both: check `default_model` field in audit to confirm MSSA_RL is selected instead of SAMOSSA
+
+## Next Phase (Data-Driven, Per-Ticker)
+
+After partial-differencing verification runs:
+- **If AAPL SNR still 0**: CI width is the next target — MSSA_RL CI too wide for AAPL in range-bound market
+- **If MSFT confidence still < 0.55**: inspect MSSA_RL confidence score for MSFT, not SAMoSSA
+- **Phase 7.15-F Part 2**: CI horizon-scaling correction (MSSA_RL `±noise*sqrt(step+1)` may be over-widening)
 - **GARCH standardized residual diagnostics**: sigma-normalized residuals for white-noise gate
 - **holding_period_audits → 20**: revert once violation rate drops below 35% for 20+ windows
 
