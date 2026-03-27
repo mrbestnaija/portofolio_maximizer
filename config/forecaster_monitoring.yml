@@ -153,8 +153,15 @@ forecaster_monitoring:
     # Preselection hard gate (forecast-time): block ensemble from being the
     # default forecast source when recent ensemble/best-single RMSE ratio is
     # above this strict threshold.
+    # Phase 10c (2026-03-26): raised from 1.0 to 1.1.
+    # SAMoSSA dominates RMSE by SSA construction (EVR-optimal smooth trend fit).
+    # Any blend has ratio >= 1.09, creating a one-way ratchet: ensemble cannot
+    # prove lift without running, but gate blocks it from running. At 1.1, the
+    # ensemble runs when within 10% of best single — accepting a small RMSE penalty
+    # in exchange for accumulating directional diversity lift data.
+    # Revert to 1.0 once ensemble demonstrates consistent DA improvement over SAMoSSA.
     strict_preselection_gate_enabled: true
-    strict_preselection_max_rmse_ratio: 1.0
+    strict_preselection_max_rmse_ratio: 1.1
     strict_preselection_recent_window: 10
     strict_preselection_min_effective_audits: 5
   per_ticker:
