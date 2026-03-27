@@ -1501,7 +1501,20 @@ class TimeSeriesForecaster:
                 results["mean_forecast"] = ensemble["forecast_bundle"]
                 results["default_model"] = "ENSEMBLE"
             else:
-                preferred_default = ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
+                # Phase 7.15-F: when DISABLE_DEFAULT, pick the best single-model fallback
+                # using the previous window's OOS RMSE (cross-window holdout), not in-sample
+                # model_confidence which is dominated by SAMoSSA's EVR=1.0 construction.
+                #
+                # Two-tier selection:
+                # Tier 1: if _latest_metrics is populated from a prior evaluate() call,
+                #         use _best_single_from_metrics() — this is the OOS holdout estimate.
+                # Tier 2: if SAMoSSA trend_strength is near-zero (flat forecast), deprioritise
+                #         SAMoSSA even without prior OOS metrics — prevents expected_return=0.
+                # Fallback: original ensemble_meta primary_model (preserves previous behaviour).
+                preferred_default = self._select_disable_default_fallback(
+                    results,
+                    ensemble_meta=ensemble_meta,
+                )
                 default_model, default_payload = self._select_default_single_forecast(
                     results,
                     preferred_model=preferred_default,
@@ -2046,6 +2059,61 @@ class TimeSeriesForecaster:
                 effective_audits=preselection_gate.get("effective_n"),
             )
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
+
+    # Minimum SAMoSSA trend_strength to keep it as preferred fallback.
+    # Below this value the SSA reconstruction is flat (slope≈0), producing
+    # expected_return=0 → SNR_GATE → HOLD every cycle.  Empirical value from
+    # AAPL/MSFT runs: trend_strength=0.002 is clearly flat; 0.05 is a safe
+    # guard that leaves headroom for weak-but-real trends.
+    _SAMOSSA_FLAT_TREND_THRESHOLD: float = 0.05
+
+    def _select_disable_default_fallback(
+        self,
+        results: Dict[str, Any],
+        *,
+        ensemble_meta: Dict[str, Any],
+    ) -> Optional[str]:
+        """Choose the preferred single-model fallback when ensemble is DISABLE_DEFAULT.
+
+        Priority order (divide-and-conquer — each tier is a distinct hold-out):
+        1. Previous-window OOS RMSE (cross-window holdout): use `_latest_metrics`
+           from the most recent `evaluate()` call if available.  This is the most
+           reliable signal since it compares forecast to realised prices.
+        2. SAMoSSA flat-trend guard: if SAMoSSA's trend_strength < threshold, skip
+           it even without OOS data — a flat SSA reconstruction produces
+           expected_return≈0 which collapses SNR to zero every cycle.
+        3. Ensemble-meta primary_model: original behaviour (in-sample confidence).
+        """
+        # Tier 1: OOS holdout from prior evaluate() call.
+        if self._latest_metrics:
+            best_oos, best_rmse = self._best_single_from_metrics(self._latest_metrics)
+            if best_oos and best_rmse is not None:
+                logger.info(
+                    "DISABLE_DEFAULT fallback via OOS holdout: best_single=%s rmse=%.4f",
+                    best_oos, best_rmse,
+                )
+                return best_oos.upper()
+
+        # Tier 2: SAMoSSA flat-trend guard.
+        samossa_summary = (self._model_summaries or {}).get("samossa", {})
+        trend_strength = samossa_summary.get("trend_strength")
+        if isinstance(trend_strength, (int, float)) and trend_strength < self._SAMOSSA_FLAT_TREND_THRESHOLD:
+            # SAMoSSA reconstruction is flat.  Try MSSA_RL first (often captures
+            # momentum better in range-bound regimes), then GARCH, then SARIMAX.
+            logger.info(
+                "DISABLE_DEFAULT fallback: SAMoSSA trend_strength=%.4f < %.2f "
+                "(flat forecast); preferring MSSA_RL over SAMOSSA.",
+                trend_strength, self._SAMOSSA_FLAT_TREND_THRESHOLD,
+            )
+            if results.get("mssa_rl_forecast") is not None:
+                return "MSSA_RL"
+            if results.get("garch_forecast") is not None:
+                return "GARCH"
+            if results.get("sarimax_forecast") is not None:
+                return "SARIMAX"
+
+        # Tier 3: Original behaviour — ensemble_meta primary_model.
+        return ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
 
     def _select_default_single_forecast(
         self,

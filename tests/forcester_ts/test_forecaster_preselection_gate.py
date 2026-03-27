@@ -66,3 +66,101 @@ def test_preselection_gate_decision_from_recent_ratios(monkeypatch):
     )
     allowed = forecaster._preselection_default_gate()
     assert allowed["allow_as_default"] is True
+
+
+import pandas as pd
+
+
+def _make_dummy_forecast_series(start=100.0, steps=3):
+    idx = pd.date_range("2025-01-01", periods=steps, freq="B")
+    return pd.Series([start + float(i) for i in range(steps)], index=idx)
+
+
+def _make_results(available_models=("samossa", "mssa_rl", "garch")):
+    """Build a minimal results dict with dummy forecast payloads."""
+    results = {}
+    for m in available_models:
+        results[f"{m}_forecast"] = {"forecast": _make_dummy_forecast_series()}
+    return results
+
+
+class TestDisableDefaultFallbackSelection:
+    """Phase 7.15-F: _select_disable_default_fallback uses OOS holdout + flat-trend guard."""
+
+    def test_oos_holdout_tier1_selects_best_rmse_model(self):
+        """Tier 1: prior evaluate() OOS metrics → _best_single_from_metrics wins."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        # Simulate OOS metrics from previous evaluate() call:
+        # MSSA_RL has best (lowest) RMSE
+        forecaster._latest_metrics = {
+            "samossa": {"rmse": 20.0},
+            "mssa_rl": {"rmse": 12.0},  # best
+            "garch": {"rmse": 18.0},
+        }
+        forecaster._model_summaries = {}
+        results = _make_results()
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        assert preferred.upper() == "MSSA_RL"
+
+    def test_flat_trend_guard_tier2_skips_samossa(self):
+        """Tier 2: SAMoSSA trend_strength below threshold → prefer MSSA_RL."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}  # no prior OOS data
+        forecaster._model_summaries = {
+            "samossa": {"trend_strength": 0.002}  # flat: well below 0.05 threshold
+        }
+        results = _make_results()
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        assert preferred.upper() == "MSSA_RL"
+
+    def test_healthy_samossa_uses_tier3_original_behaviour(self):
+        """Tier 3: SAMoSSA has non-flat trend → use ensemble_meta primary_model."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}
+        forecaster._model_summaries = {
+            "samossa": {"trend_strength": 0.30}  # healthy trend
+        }
+        results = _make_results()
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        assert preferred.upper() == "SAMOSSA"
+
+    def test_tier1_overrides_flat_trend(self):
+        """OOS holdout (Tier 1) supersedes flat-trend guard even if SAMoSSA is flat."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {
+            "garch": {"rmse": 8.0},  # best OOS
+            "samossa": {"rmse": 25.0},
+        }
+        forecaster._model_summaries = {
+            "samossa": {"trend_strength": 0.001}  # flat
+        }
+        results = _make_results(available_models=("samossa", "garch"))
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        # Tier 1 wins: GARCH has best OOS RMSE
+        assert preferred.upper() == "GARCH"
+
+    def test_flat_trend_falls_through_to_garch_when_mssa_rl_absent(self):
+        """Tier 2: if MSSA_RL absent, next preference is GARCH."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}
+        forecaster._model_summaries = {
+            "samossa": {"trend_strength": 0.002}
+        }
+        results = _make_results(available_models=("samossa", "garch"))  # no mssa_rl
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        assert preferred.upper() == "GARCH"
