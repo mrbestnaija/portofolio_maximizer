@@ -750,7 +750,7 @@ class TimeSeriesSignalGenerator:
                     risk_score = min(1.0, risk_score + 0.10)
                     confidence = max(0.0, confidence - 0.05)
 
-            action = self._determine_action(
+            action, _hold_reason = self._determine_action(
                 expected_return=expected_return,
                 net_trade_return=net_trade_return,
                 confidence=confidence,
@@ -847,6 +847,20 @@ class TimeSeriesSignalGenerator:
                 provenance["snr_gate_blocked"] = True
                 provenance["snr_gate_threshold"] = self._min_signal_to_noise
 
+            # Structured HOLD reason — disambiguates why action='HOLD' was chosen.
+            # Allows aggregating HOLD causes across runs without parsing log strings.
+            # Codes: SNR_GATE | CONFIDENCE_BELOW_THRESHOLD | MIN_RETURN | RISK_TOO_HIGH
+            #        | ZERO_EXPECTED_RETURN | DIRECTIONAL_GATE | QUANT_VALIDATION_FAIL
+            if action == "HOLD":
+                if _snr_gate_blocked:
+                    provenance["hold_reason"] = "SNR_GATE"
+                elif _directional_gate_applied:
+                    provenance["hold_reason"] = "DIRECTIONAL_GATE"
+                elif _hold_reason is not None:
+                    provenance["hold_reason"] = _hold_reason
+                else:
+                    provenance["hold_reason"] = "UNKNOWN"
+
             provenance['decision_context'] = {
                 'expected_return': expected_return,
                 'expected_return_net': net_expected_return,
@@ -938,6 +952,7 @@ class TimeSeriesSignalGenerator:
                         )
                         action = "HOLD"
                         signal.action = "HOLD"
+                        signal.provenance["hold_reason"] = "QUANT_VALIDATION_FAIL"
 
                 self._log_quant_validation(
                     ticker=ticker,
@@ -1746,30 +1761,36 @@ class TimeSeriesSignalGenerator:
                          risk_score: float,
                          confidence_threshold: float,
                          min_expected_return: float,
-                         max_risk_score: float) -> str:
+                         max_risk_score: float) -> tuple:
         """
         Determine trading action based on forecast and risk metrics.
 
         Returns:
-            'BUY', 'SELL', or 'HOLD'
+            Tuple of (action: str, hold_reason: Optional[str]) where action is
+            'BUY', 'SELL', or 'HOLD'. hold_reason is None for non-HOLD actions
+            and one of the following structured codes for HOLD:
+              - 'CONFIDENCE_BELOW_THRESHOLD'
+              - 'MIN_RETURN'
+              - 'RISK_TOO_HIGH'
+              - 'ZERO_EXPECTED_RETURN'
         """
         # Must meet minimum thresholds
         if confidence < confidence_threshold:
-            return 'HOLD'
+            return 'HOLD', 'CONFIDENCE_BELOW_THRESHOLD'
 
         # net_trade_return is always non-negative and already clears estimated friction.
         if net_trade_return + 1e-12 < min_expected_return:
-            return 'HOLD'
+            return 'HOLD', 'MIN_RETURN'
 
         if risk_score > max_risk_score:
-            return 'HOLD'
+            return 'HOLD', 'RISK_TOO_HIGH'
 
         # Determine direction
         if expected_return > 0:
-            return 'BUY'
+            return 'BUY', None
         if expected_return < 0:
-            return 'SELL'
-        return 'HOLD'
+            return 'SELL', None
+        return 'HOLD', 'ZERO_EXPECTED_RETURN'
 
     def _compute_atr(self, market_data: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
         """Compute Average True Range (ATR) from OHLC bar data.
@@ -2640,6 +2661,19 @@ class TimeSeriesSignalGenerator:
             x_train, x_holdout = x[:split_idx], x[split_idx:]
             y_train, y_holdout = y[:split_idx], y[split_idx:]
 
+            # PLATT-BUG3: class-imbalance guard — chronological ordering means recent
+            # losses cluster in the holdout slice, leaving training single-class.
+            # sklearn LR raises ValueError on single-class input; guard prevents silent
+            # raw-conf fallback masking the root cause.
+            _train_classes = set(int(v) for v in y_train)
+            if len(_train_classes) < 2:
+                logger.warning(
+                    "Platt calibration skipped -- training slice is single-class "
+                    "(classes=%s, n_train=%d, n_total=%d source=%s); using raw.",
+                    _train_classes, len(y_train), n, source,
+                )
+                return float(max(0.05, min(0.95, raw_conf)))
+
             from sklearn.linear_model import LogisticRegression  # pylint: disable=import-outside-toplevel
             clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
             clf.fit(x_train, y_train)
@@ -2975,6 +3009,10 @@ class TimeSeriesSignalGenerator:
             ),
             'p_up': signal.p_up,
             'directional_gate_applied': signal.directional_gate_applied,
+            # Structured HOLD reason — enables aggregating HOLD causes without log parsing.
+            # Populated for all action='HOLD' signals. None for BUY/SELL.
+            'hold_reason': (signal.provenance or {}).get("hold_reason") if isinstance(signal.provenance, dict) else None,
+            'snr_gate_blocked': (signal.provenance or {}).get("snr_gate_blocked") if isinstance(signal.provenance, dict) else None,
         }
 
         try:
