@@ -11,6 +11,7 @@ execution into a single continuously running workflow.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import inspect
 import logging
 import os
@@ -40,8 +41,18 @@ except Exception:  # pragma: no cover - optional dependency
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 site.addsitedir(str(ROOT_PATH))
-if str(ROOT_PATH) not in sys.path:
-    sys.path.insert(0, str(ROOT_PATH))
+sys.path = [p for p in sys.path if p != str(ROOT_PATH)]
+sys.path.insert(0, str(ROOT_PATH))
+
+# Direct script entry can fail to resolve this dependency through the broader
+# execution package import chain unless it is imported after the repo root is
+# explicitly placed on sys.path.
+try:  # pragma: no cover - exercised by live CLI bootstrap
+    import integrity.sqlite_guardrails as _sqlite_guardrails_bootstrap  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover - defensive retry for direct CLI use
+    if str(ROOT_PATH) not in sys.path:
+        sys.path.insert(0, str(ROOT_PATH))
+    import integrity.sqlite_guardrails as _sqlite_guardrails_bootstrap  # noqa: F401
 
 from etl.data_source_manager import DataSourceManager
 from etl.data_validator import DataValidator
@@ -54,6 +65,7 @@ from etl.data_universe import resolve_ticker_universe
 from risk.barbell_policy import BarbellConfig
 from risk.barbell_promotion_gate import load_promotion_evidence
 from risk.barbell_sizing import apply_barbell_confidence
+from utils.evidence_io import atomic_write_json, build_manifest_entry, upsert_jsonl_record
 
 try:  # Optional Ollama dependency
     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -109,6 +121,570 @@ def _env_flag(name: str) -> Optional[bool]:
     if val in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def _stable_fingerprint(payload: Dict[str, Any]) -> str:
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_files(paths: List[Path]) -> Optional[str]:
+    pieces: list[str] = []
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            pieces.append(str(path.relative_to(ROOT_PATH)))
+        except Exception:
+            pieces.append(str(path))
+        pieces.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    if not pieces:
+        return None
+    return hashlib.sha256("|".join(pieces).encode("utf-8")).hexdigest()
+
+
+def _determine_evidence_routing_mode(audit_path: Path) -> str:
+    explicit_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
+    if explicit_audit_dir:
+        return "explicit_env"
+    parent_name = audit_path.parent.name.strip().lower()
+    if parent_name == "research":
+        return "explicit_research"
+    if parent_name == "production":
+        return "default_production"
+    return "ambiguous_root"
+
+
+def _resolve_audit_dir_path(raw_path: Any) -> Path:
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        path = ROOT_PATH / path
+    return path
+
+
+def _canonical_forecast_audit_dir() -> Path:
+    explicit_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
+    if explicit_audit_dir:
+        return _resolve_audit_dir_path(explicit_audit_dir)
+    return ROOT_PATH / "logs" / "forecast_audits"
+
+
+def _raw_forecast_audit_dir(*, ticker: str, canonical_dir: Optional[Path] = None) -> Path:
+    final_dir = canonical_dir or _canonical_forecast_audit_dir()
+    ticker_token = re.sub(r"[^A-Z0-9]+", "_", str(ticker or "UNKNOWN").upper()).strip("_") or "UNKNOWN"
+    return final_dir / "_raw_forecaster" / ticker_token
+
+
+def _build_cohort_identity(audit_path: Path) -> Dict[str, Any]:
+    production_labeled = audit_path.parent.name.strip().lower() == "production"
+    cohort_id = (
+        str(os.environ.get("PMX_EVIDENCE_COHORT_ID") or "").strip()
+        or ("production" if production_labeled else audit_path.parent.name)
+        or "default"
+    )
+    identity = {
+        "cohort_id": cohort_id,
+        "build_fingerprint": str(
+            os.environ.get("PMX_BUILD_FINGERPRINT")
+            or os.environ.get("GIT_COMMIT")
+            or ""
+        ).strip()
+        or None,
+        "contract_version": 2,
+        "routing_mode": _determine_evidence_routing_mode(audit_path),
+        "strategy_config_fingerprint": _fingerprint_files(
+            [
+                ROOT_PATH / "config" / "forecasting_config.yml",
+                ROOT_PATH / "config" / "signal_routing_config.yml",
+            ]
+        ),
+    }
+    identity["contract_fingerprint"] = _stable_fingerprint(identity)
+    return identity
+
+
+def _compute_expected_close_ts(entry_ts_raw: Any, forecast_horizon_raw: Any) -> Optional[str]:
+    try:
+        horizon = int(forecast_horizon_raw)
+    except (TypeError, ValueError):
+        return None
+    if horizon < 0:
+        return None
+    entry_ts = pd.to_datetime(entry_ts_raw, utc=True, errors="coerce")
+    if entry_ts is pd.NaT:
+        return None
+    return (entry_ts + pd.Timedelta(days=horizon)).isoformat()
+
+
+def build_trade_signal_context(
+    execution_report: Dict[str, Any],
+    ticker: str,
+    run_id: Optional[str],
+    signal_horizon: Optional[int],
+) -> Dict[str, Any]:
+    """Build a canonical producer-native signal_context payload."""
+    tsid_source = execution_report.get("ts_signal_id")
+    if not tsid_source and isinstance(execution_report.get("signal_id"), str):
+        tsid_source = execution_report.get("signal_id")
+    incoming_tsid = str(tsid_source or "").strip()
+    incoming_entry_ts = (
+        execution_report.get("signal_timestamp")
+        or execution_report.get("bar_timestamp")
+        or execution_report.get("timestamp")
+    )
+    execution_status = str(execution_report.get("status") or "").strip().upper() or None
+    executed = bool(execution_report.get("executed"))
+    return {
+        "context_type": "TRADE",
+        "event_type": "TRADE_FORECAST_AUDIT",
+        "producer_event_type": str(execution_report.get("event_type") or "").strip().upper() or None,
+        "ts_signal_id": incoming_tsid or None,
+        "ticker": ticker,
+        "run_id": run_id,
+        "entry_ts": incoming_entry_ts,
+        "expected_close_ts": _compute_expected_close_ts(incoming_entry_ts, signal_horizon),
+        "forecast_horizon": signal_horizon,
+        "signal_context_missing": not bool(incoming_tsid),
+        "execution_status": execution_status,
+        "executed": executed,
+    }
+
+
+def _build_semantic_admission(
+    *,
+    audit_path: Path,
+    signal_context: Dict[str, Any],
+    execution_report: Dict[str, Any],
+    audit_id: str,
+    cohort_identity: Dict[str, Any],
+) -> Dict[str, Any]:
+    context_type = str(signal_context.get("context_type") or "").strip().upper()
+    ts_signal_id = str(signal_context.get("ts_signal_id") or "").strip()
+    run_id = str(signal_context.get("run_id") or "").strip()
+    entry_ts = str(signal_context.get("entry_ts") or "").strip()
+    expected_close_ts = str(signal_context.get("expected_close_ts") or "").strip()
+    forecast_horizon = signal_context.get("forecast_horizon")
+    ticker = str(signal_context.get("ticker") or "").strip().upper()
+    event_type = str(signal_context.get("event_type") or "").strip().upper()
+    producer_event_type = str(
+        signal_context.get("producer_event_type") or execution_report.get("event_type") or ""
+    ).strip().upper()
+    routing_mode = str(cohort_identity.get("routing_mode") or "")
+    production_labeled = audit_path.parent.name.strip().lower() == "production"
+    executed = bool(signal_context.get("executed")) or bool(execution_report.get("executed"))
+    missing_execution_metadata_fields: list[str] = []
+    order_id = str(execution_report.get("order_id") or "").strip()
+    forecast_id = execution_report.get("forecast_id")
+    position_id = execution_report.get("position_id")
+    entry_trade_id = execution_report.get("entry_trade_id")
+    close_trade_id = execution_report.get("close_trade_id")
+
+    reason_codes: list[str] = []
+    if not executed:
+        reason_codes.append("NOT_EXECUTED")
+    if context_type != "TRADE":
+        reason_codes.append("NON_TRADE_CONTEXT")
+    if not audit_id:
+        reason_codes.append("MISSING_AUDIT_ID")
+    if not ticker:
+        reason_codes.append("MISSING_TICKER")
+    if not run_id:
+        reason_codes.append("MISSING_RUN_ID")
+        missing_execution_metadata_fields.append("run_id")
+    if not entry_ts:
+        reason_codes.append("MISSING_ENTRY_TS")
+        missing_execution_metadata_fields.append("entry_ts")
+    if not expected_close_ts:
+        reason_codes.append("MISSING_EXPECTED_CLOSE_TS")
+    if not ts_signal_id:
+        reason_codes.append("MISSING_SIGNAL_ID")
+    if forecast_horizon in (None, ""):
+        reason_codes.append("MISSING_FORECAST_HORIZON")
+    if not event_type:
+        reason_codes.append("MISSING_EVENT_TYPE")
+    if executed and not producer_event_type:
+        reason_codes.append("MISSING_PRODUCER_EVENT_TYPE")
+    if executed and forecast_id in (None, ""):
+        reason_codes.append("MISSING_FORECAST_ID")
+        missing_execution_metadata_fields.append("forecast_id")
+    if executed and not order_id:
+        reason_codes.append("MISSING_ORDER_ID")
+        missing_execution_metadata_fields.append("order_id")
+    if executed and position_id in (None, ""):
+        reason_codes.append("MISSING_POSITION_ID")
+        missing_execution_metadata_fields.append("position_id")
+    if executed and producer_event_type == "TRADE_ENTRY" and entry_trade_id in (None, ""):
+        reason_codes.append("MISSING_ENTRY_TRADE_ID")
+        missing_execution_metadata_fields.append("entry_trade_id")
+    if executed and producer_event_type == "TRADE_CLOSE" and entry_trade_id in (None, ""):
+        reason_codes.append("MISSING_ENTRY_TRADE_ID")
+        missing_execution_metadata_fields.append("entry_trade_id")
+    if executed and producer_event_type == "TRADE_CLOSE" and close_trade_id in (None, ""):
+        reason_codes.append("MISSING_CLOSE_TRADE_ID")
+        missing_execution_metadata_fields.append("close_trade_id")
+    if routing_mode == "ambiguous_root":
+        reason_codes.append("ROUTING_AMBIGUOUS")
+    if not production_labeled:
+        reason_codes.append("NOT_PRODUCTION_LABELED")
+
+    admissible = len(reason_codes) == 0
+    bucket = "ELIGIBLE" if admissible else "ACCEPTED_NONELIGIBLE"
+    return {
+        "admission_contract_version": 1,
+        "accepted_for_audit_history": True,
+        "admissible_for_readiness": admissible,
+        "gate_eligible": admissible,
+        "gate_bucket": bucket,
+        "reason_code": "READY" if admissible else ",".join(reason_codes),
+        "reason_codes": [] if admissible else list(reason_codes),
+        "production_labeled": production_labeled,
+        "not_quarantined": True,
+        "quarantined": False,
+        "superseded": False,
+        "duplicate_conflict": False,
+        "missing_execution_metadata": bool(missing_execution_metadata_fields),
+        "missing_execution_metadata_fields": missing_execution_metadata_fields,
+        "manifest_registered": None,
+        "source": "producer",
+        "source_classification": "producer-native",
+    }
+
+
+def _write_explicit_audit_failure(
+    *,
+    audit_dir: Path,
+    ticker: str,
+    run_id: Optional[str],
+    execution_report: Dict[str, Any],
+    failure_code: str,
+    failure_detail: Dict[str, Any],
+) -> Dict[str, Any]:
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    event_ts = datetime.now(UTC)
+    ticker_token = re.sub(r"[^A-Z0-9]+", "_", str(ticker or "UNKNOWN").upper()).strip("_") or "UNKNOWN"
+    artifact_path = audit_dir / f"audit_failure_{event_ts.strftime('%Y%m%d_%H%M%S')}_{ticker_token}.json"
+    cohort_identity = _build_cohort_identity(artifact_path)
+    payload = {
+        "timestamp_utc": event_ts.isoformat(),
+        "artifact_type": "AUDIT_PATCH_FAILURE",
+        "audit_failure_id": artifact_path.stem,
+        "ticker": str(ticker or "").upper() or None,
+        "run_id": run_id,
+        "event_type": "TRADE_AUDIT_PATCH_FAILURE",
+        "reconciliation_bucket": "EXPLICIT_FAILED",
+        "cohort_id": cohort_identity.get("cohort_id"),
+        "cohort_identity": cohort_identity,
+        "evidence_source": "producer",
+        "evidence_source_classification": "producer-native",
+        "failure_code": failure_code,
+        "failure_detail": failure_detail,
+        "execution_report": {
+            "ticker": execution_report.get("ticker"),
+            "status": execution_report.get("status"),
+            "executed": execution_report.get("executed"),
+            "signal_id": execution_report.get("signal_id"),
+            "ts_signal_id": execution_report.get("ts_signal_id"),
+            "forecast_id": execution_report.get("forecast_id"),
+            "order_id": execution_report.get("order_id"),
+            "position_id": execution_report.get("position_id"),
+            "entry_trade_id": execution_report.get("entry_trade_id"),
+            "close_trade_id": execution_report.get("close_trade_id"),
+            "signal_timestamp": execution_report.get("signal_timestamp"),
+            "bar_timestamp": execution_report.get("bar_timestamp"),
+        },
+        "semantic_admission": {
+            "admission_contract_version": 1,
+            "accepted_for_audit_history": True,
+            "admissible_for_readiness": False,
+            "gate_eligible": False,
+            "gate_bucket": "ACCEPTED_NONELIGIBLE",
+            "reason_code": failure_code,
+            "reason_codes": [failure_code],
+            "production_labeled": audit_dir.name.strip().lower() == "production",
+            "not_quarantined": True,
+            "quarantined": False,
+            "superseded": False,
+            "duplicate_conflict": False,
+            "missing_execution_metadata": False,
+            "missing_execution_metadata_fields": [],
+            "manifest_registered": None,
+            "source": "producer",
+            "source_classification": "producer-native",
+        },
+    }
+    atomic_write_json(artifact_path, payload)
+    manifest_entry = build_manifest_entry(
+        artifact_path,
+        source="scripts.run_auto_trader._write_explicit_audit_failure",
+        extra={
+            "artifact_type": payload.get("artifact_type"),
+            "ticker": payload.get("ticker"),
+            "run_id": payload.get("run_id"),
+            "failure_code": failure_code,
+            "cohort_id": payload.get("cohort_id"),
+            "reconciliation_bucket": payload.get("reconciliation_bucket"),
+            "evidence_source": payload.get("evidence_source"),
+            "evidence_source_classification": payload.get("evidence_source_classification"),
+        },
+    )
+    if manifest_entry:
+        upsert_jsonl_record(
+            audit_dir / "audit_failure_manifest.jsonl",
+            manifest_entry,
+            key_field="file",
+        )
+    return {
+        "ok": True,
+        "artifact_path": str(artifact_path),
+        "manifest_path": str(audit_dir / "audit_failure_manifest.jsonl"),
+        "failure_code": failure_code,
+    }
+
+
+def _load_json_dict(path: Path) -> Dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _raw_staging_path_matches_ticker(artifact_path: Optional[Path], ticker: str) -> bool:
+    if not isinstance(artifact_path, Path):
+        return False
+    expected = str(ticker or "").strip().upper()
+    if not expected:
+        return False
+    try:
+        parent_name = artifact_path.parent.name.strip().upper()
+        grandparent_name = artifact_path.parent.parent.name.strip().upper()
+    except Exception:
+        return False
+    return grandparent_name == "_RAW_FORECASTER" and parent_name == expected
+
+
+def _audit_payload_matches_ticker(
+    payload: Dict[str, Any],
+    ticker: str,
+    *,
+    artifact_path: Optional[Path] = None,
+) -> bool:
+    expected = str(ticker or "").strip().upper()
+    if not expected:
+        return False
+    dataset_ticker = str((payload.get("dataset") or {}).get("ticker") or "").strip().upper()
+    top_ticker = str(payload.get("ticker") or payload.get("symbol") or "").strip().upper()
+    if expected in {dataset_ticker, top_ticker}:
+        return True
+    events = (
+        ((payload.get("artifacts") or {}).get("component_summaries") or {}).get("events")
+        if isinstance((payload.get("artifacts") or {}).get("component_summaries"), dict)
+        else None
+    )
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_ticker = str(event.get("ticker") or event.get("symbol") or "").strip().upper()
+            if event_ticker == expected:
+                return True
+    if _raw_staging_path_matches_ticker(artifact_path, expected):
+        return True
+    return False
+
+
+def _collect_recent_ticker_matched_audits(
+    *,
+    search_dirs: List[Path],
+    ticker: str,
+    limit: int = 50,
+) -> List[Tuple[Path, Dict[str, Any]]]:
+    matches: List[Tuple[Path, Dict[str, Any]]] = []
+    seen_paths: set[str] = set()
+    for directory in search_dirs:
+        if not isinstance(directory, Path) or not directory.exists():
+            continue
+        for path in sorted(
+            directory.glob("forecast_audit_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:limit]:
+            path_key = str(path.resolve())
+            if path_key in seen_paths:
+                continue
+            payload = _load_json_dict(path)
+            if not payload or not _audit_payload_matches_ticker(payload, ticker, artifact_path=path):
+                continue
+            matches.append((path, payload))
+            seen_paths.add(path_key)
+    return matches
+
+
+def _resolve_forecast_audit_path(
+    forecast_bundle: Optional[Dict[str, Any]],
+    *,
+    audit_dir: Optional[Path],
+    ticker: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(forecast_bundle, dict):
+        return forecast_bundle
+
+    raw_path = forecast_bundle.get("forecast_audit_path")
+    if raw_path:
+        try:
+            direct_path = Path(str(raw_path))
+        except Exception:
+            direct_path = None
+        if direct_path is not None and direct_path.exists() and direct_path.is_file():
+            payload = _load_json_dict(direct_path)
+            if payload and _audit_payload_matches_ticker(payload, ticker, artifact_path=direct_path):
+                return forecast_bundle
+
+    raw_audit_dir = None
+    raw_audit_dir_raw = forecast_bundle.get("forecast_audit_raw_dir")
+    if raw_audit_dir_raw:
+        try:
+            raw_audit_dir = _resolve_audit_dir_path(raw_audit_dir_raw)
+        except Exception:
+            raw_audit_dir = None
+
+    if not isinstance(audit_dir, Path) or not audit_dir.exists():
+        if not isinstance(raw_audit_dir, Path) or not raw_audit_dir.exists():
+            return forecast_bundle
+    forecast_bundle.setdefault("forecast_audit_dir", str(audit_dir if isinstance(audit_dir, Path) else raw_audit_dir))
+
+    search_dirs: List[Path] = []
+    if isinstance(raw_audit_dir, Path):
+        search_dirs.append(raw_audit_dir)
+    if isinstance(audit_dir, Path):
+        search_dirs.append(audit_dir)
+
+    matching_paths = _collect_recent_ticker_matched_audits(
+        search_dirs=search_dirs,
+        ticker=ticker,
+        limit=50,
+    )
+
+    if not matching_paths:
+        return forecast_bundle
+
+    preferred_path, preferred_payload = next(
+        (
+            (path, payload)
+            for path, payload in matching_paths
+            if _raw_staging_path_matches_ticker(path, ticker)
+        ),
+        next(
+            (
+                (path, payload)
+                for path, payload in matching_paths
+                if payload.get("forecast_audit_copy_reason") != "collision_hardened"
+            ),
+            matching_paths[0],
+        ),
+    )
+    forecast_bundle["forecast_audit_path"] = str(preferred_path)
+    forecast_bundle["forecast_audit_resolution"] = (
+        "ticker_matched_raw_staging" if _raw_staging_path_matches_ticker(preferred_path, ticker) else "ticker_matched_content"
+    )
+    forecast_bundle["forecast_audit_dataset_ticker"] = (
+        (preferred_payload.get("dataset") or {}).get("ticker")
+        or preferred_payload.get("ticker")
+        or preferred_payload.get("symbol")
+    )
+    return forecast_bundle
+
+
+def _resolve_stabilization_source(
+    forecast_bundle: Dict[str, Any],
+    *,
+    ticker: str,
+) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    raw_path = forecast_bundle.get("forecast_audit_path")
+    if raw_path:
+        try:
+            source_path = Path(str(raw_path))
+        except Exception:
+            source_path = None
+        if source_path is not None and source_path.exists() and source_path.is_file():
+            payload = _load_json_dict(source_path)
+            if payload and _audit_payload_matches_ticker(payload, ticker, artifact_path=source_path):
+                return source_path, payload
+
+    raw_dir_raw = forecast_bundle.get("forecast_audit_raw_dir")
+    if raw_dir_raw:
+        try:
+            raw_dir = _resolve_audit_dir_path(raw_dir_raw)
+        except Exception:
+            raw_dir = None
+        if isinstance(raw_dir, Path) and raw_dir.exists():
+            matched_paths = _collect_recent_ticker_matched_audits(
+                search_dirs=[raw_dir],
+                ticker=ticker,
+                limit=20,
+            )
+            if matched_paths:
+                return matched_paths[0]
+
+    return None, None
+
+
+def _stabilize_forecast_audit_artifact(
+    forecast_bundle: Optional[Dict[str, Any]],
+    *,
+    ticker: str,
+) -> Optional[Dict[str, Any]]:
+    """Copy the newest forecast audit into a unique ticker-scoped path.
+
+    The forecaster currently writes audit files with second-level timestamps only,
+    which can collide when multiple symbols finish inside the same second. We keep
+    the original writer untouched here and snapshot the produced artifact into a
+    unique path before later symbols can overwrite it.
+    """
+    if not isinstance(forecast_bundle, dict):
+        return forecast_bundle
+    if forecast_bundle.get("forecast_audit_collision_hardened"):
+        return forecast_bundle
+
+    source_path, payload = _resolve_stabilization_source(forecast_bundle, ticker=ticker)
+    if source_path is None or not payload:
+        return forecast_bundle
+
+    target_dir = source_path.parent
+    final_dir_raw = forecast_bundle.get("forecast_audit_dir")
+    if final_dir_raw:
+        try:
+            candidate_dir = _resolve_audit_dir_path(final_dir_raw)
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            target_dir = candidate_dir
+        except Exception:
+            logger.debug("Unable to resolve canonical forecast_audit_dir=%r", final_dir_raw, exc_info=True)
+
+    event_ts = datetime.now(UTC)
+    ticker_token = re.sub(r"[^A-Z0-9]+", "_", str(ticker or "UNKNOWN").upper()).strip("_") or "UNKNOWN"
+    dataset = payload.get("dataset")
+    if isinstance(dataset, dict):
+        if not str(dataset.get("ticker") or dataset.get("symbol") or "").strip():
+            dataset["ticker"] = ticker_token
+    else:
+        payload["dataset"] = {"ticker": ticker_token}
+    payload.setdefault("forecast_audit_candidate_ticker", ticker_token)
+    unique_path = target_dir / (
+        f"{source_path.stem}_{ticker_token}_{event_ts.strftime('%Y%m%d_%H%M%S_%f')}.json"
+    )
+    payload["forecast_audit_source_path"] = str(source_path)
+    payload["forecast_audit_copy_reason"] = "collision_hardened"
+    payload["forecast_audit_copied_at_utc"] = event_ts.isoformat()
+    try:
+        atomic_write_json(unique_path, payload)
+    except Exception:
+        logger.debug("Unable to write collision-hardened audit copy for %s", ticker, exc_info=True)
+        return forecast_bundle
+
+    forecast_bundle["forecast_audit_source_path"] = str(source_path)
+    forecast_bundle["forecast_audit_path"] = str(unique_path)
+    forecast_bundle["forecast_audit_collision_hardened"] = True
+    return forecast_bundle
 
 
 def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
@@ -305,6 +881,13 @@ def _log_execution_event(run_id: str, cycle: int, record: Dict[str, Any]) -> Non
     payload.setdefault("run_id", run_id)
     payload.setdefault("cycle", cycle)
     payload.setdefault("logged_at", datetime.now(UTC).isoformat())
+    payload.setdefault("execution_status", payload.get("status"))
+    payload.setdefault("executed", bool(payload.get("executed")))
+    payload.setdefault("event_type", "TRADE_EXECUTION_EVENT")
+    payload.setdefault("evidence_source", "producer")
+    payload.setdefault("evidence_source_classification", "producer-native")
+    if not payload.get("position_id"):
+        payload["position_id"] = payload.get("entry_trade_id") or payload.get("close_trade_id")
     try:
         EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with EXECUTION_LOG_PATH.open("a", encoding="utf-8") as handle:
@@ -809,6 +1392,9 @@ def _generate_time_series_forecast(
         fcfg = _get_forecasting_config()
         ensemble_cfg = fcfg.get("ensemble", {})
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
+        canonical_audit_dir = _canonical_forecast_audit_dir()
+        raw_audit_dir = _raw_forecast_audit_dir(ticker=ticker, canonical_dir=canonical_audit_dir)
+        raw_audit_dir.mkdir(parents=True, exist_ok=True)
         regime_cfg = fcfg.get("regime_detection", {})
         regime_detection_enabled = regime_cfg.get("enabled", False)
         regime_detection_kwargs = {k: v for k, v in regime_cfg.items() if k != "enabled"}
@@ -849,21 +1435,23 @@ def _generate_time_series_forecast(
                 monte_carlo_config=monte_carlo_cfg,
             )
         )
+        forecaster._audit_dir = raw_audit_dir
         forecaster.fit(price_series=close_series, returns_series=returns_series, ticker=ticker)
         forecast_bundle = forecaster.forecast()
-        if isinstance(forecast_bundle, dict) and not forecast_bundle.get("forecast_audit_path"):
-            try:
-                audit_dir = getattr(forecaster, "_audit_dir", None)
-                if isinstance(audit_dir, Path) and audit_dir.exists():
-                    latest = max(
-                        audit_dir.glob("forecast_audit_*.json"),
-                        key=lambda p: p.stat().st_mtime,
-                        default=None,
-                    )
-                    if latest is not None:
-                        forecast_bundle["forecast_audit_path"] = str(latest)
-            except Exception:
-                logger.debug("Unable to infer forecast_audit_path for %s", ticker, exc_info=True)
+        audit_dir = getattr(forecaster, "_audit_dir", None)
+        if isinstance(forecast_bundle, dict):
+            forecast_bundle["forecast_audit_dir"] = str(canonical_audit_dir)
+            if isinstance(audit_dir, Path):
+                forecast_bundle["forecast_audit_raw_dir"] = str(audit_dir)
+        forecast_bundle = _resolve_forecast_audit_path(
+            forecast_bundle,
+            audit_dir=audit_dir if isinstance(audit_dir, Path) else None,
+            ticker=ticker,
+        )
+        forecast_bundle = _stabilize_forecast_audit_artifact(
+            forecast_bundle,
+            ticker=ticker,
+        )
     except Exception as exc:
         logger.error("Forecasting failed: %s", exc)
         return None, None
@@ -1138,6 +1726,10 @@ def _persist_forecast_snapshots(
         "MSSA_RL": "mssa_rl",
         "GARCH": "garch",
     }
+    saved_ids = forecast_bundle.setdefault("forecast_record_ids", {})
+    if not isinstance(saved_ids, dict):
+        saved_ids = {}
+        forecast_bundle["forecast_record_ids"] = saved_ids
 
     for model_type, payload in payloads.items():
         if not isinstance(payload, dict) or not payload:
@@ -1162,7 +1754,11 @@ def _persist_forecast_snapshots(
             else None,
         }
         try:
-            db_manager.save_forecast(ticker, forecast_date, forecast_data)
+            forecast_id = db_manager.save_forecast(ticker, forecast_date, forecast_data)
+            if isinstance(forecast_id, int) and forecast_id > 0:
+                saved_ids[model_type] = forecast_id
+                if model_type == "COMBINED":
+                    forecast_bundle["forecast_id"] = forecast_id
         except Exception:
             logger.debug("Failed to persist %s forecast snapshot for %s", model_type, ticker, exc_info=True)
 
@@ -1173,36 +1769,41 @@ def _attach_signal_context_to_forecast_audit(
     execution_report: Dict[str, Any],
     ticker: str,
     run_id: Optional[str],
-) -> None:
+) -> Dict[str, Any]:
     """
     Patch the just-written forecast_audit artifact with causal signal identity.
 
-    Keeps scope bounded to one write-path: forecast audit files gain a top-level
-    signal_context block carrying ts_signal_id and routing metadata.
+    Keeps scope bounded to one write-path: forecast audit files gain explicit
+    producer-native provenance, lineage fields, and semantic admission.
     """
     if not isinstance(forecast_bundle, dict) or not isinstance(execution_report, dict):
-        return
+        return {"patched": False, "audited_files": [], "explicit_failure": None, "failure_code": "INVALID_INPUT"}
 
-    tsid_source = execution_report.get("ts_signal_id")
-    if not tsid_source and isinstance(execution_report.get("signal_id"), str):
-        tsid_source = execution_report.get("signal_id")
-    incoming_tsid = str(tsid_source or "").strip()
-    incoming_entry_ts = (
-        execution_report.get("signal_timestamp")
-        or execution_report.get("bar_timestamp")
-        or execution_report.get("timestamp")
+    canonical_context = build_trade_signal_context(
+        execution_report=execution_report,
+        ticker=ticker,
+        run_id=run_id,
+        signal_horizon=forecast_bundle.get("horizon"),
     )
-    canonical_context = {
-        "ts_signal_id": incoming_tsid or None,
-        "ticker": ticker,
-        "run_id": run_id,
-        "entry_ts": incoming_entry_ts,
-        "forecast_horizon": forecast_bundle.get("horizon"),
-        "signal_context_missing": not bool(incoming_tsid),
-    }
     target_ticker = str(ticker or "").strip().upper()
 
     audit_dir = ROOT_PATH / "logs" / "forecast_audits"
+    fallback_audit_dir = forecast_bundle.get("forecast_audit_dir")
+    if fallback_audit_dir:
+        try:
+            candidate_dir = Path(str(fallback_audit_dir))
+            if not candidate_dir.is_absolute():
+                candidate_dir = ROOT_PATH / candidate_dir
+            audit_dir = candidate_dir
+        except Exception:
+            logger.debug("Failed to resolve forecast_audit_dir=%r", fallback_audit_dir, exc_info=True)
+    raw_audit_dir = None
+    raw_audit_dir_raw = forecast_bundle.get("forecast_audit_raw_dir")
+    if raw_audit_dir_raw:
+        try:
+            raw_audit_dir = _resolve_audit_dir_path(raw_audit_dir_raw)
+        except Exception:
+            raw_audit_dir = None
     candidate_paths: List[Path] = []
     raw_path = forecast_bundle.get("forecast_audit_path")
     if raw_path:
@@ -1210,26 +1811,34 @@ def _attach_signal_context_to_forecast_audit(
             direct_path = Path(str(raw_path))
             if not direct_path.is_absolute():
                 direct_path = ROOT_PATH / direct_path
+            audit_dir = direct_path.parent
             if direct_path.exists():
                 candidate_paths.append(direct_path)
-                audit_dir = direct_path.parent
         except Exception:
             logger.debug("Failed to resolve forecast_audit_path=%r", raw_path, exc_info=True)
 
-    cutoff_ts = time.time() - 180.0
-    try:
-        for path in sorted(
-            audit_dir.glob("forecast_audit_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:20]:
-            if path in candidate_paths:
-                continue
-            if path.stat().st_mtime < cutoff_ts:
-                continue
-            candidate_paths.append(path)
-    except Exception:
-        logger.debug("Unable to scan recent forecast audits in %s", audit_dir, exc_info=True)
+    if not candidate_paths:
+        cutoff_ts = time.time() - 180.0
+        scan_dirs: List[Path] = []
+        if isinstance(raw_audit_dir, Path):
+            scan_dirs.append(raw_audit_dir)
+        if isinstance(audit_dir, Path):
+            scan_dirs.append(audit_dir)
+        for directory in scan_dirs:
+            try:
+                for path in sorted(
+                    directory.glob("forecast_audit_*.json"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )[:20]:
+                    if path.stat().st_mtime < cutoff_ts:
+                        continue
+                    candidate_paths.append(path)
+            except Exception:
+                logger.debug("Unable to scan recent forecast audits in %s", directory, exc_info=True)
+
+    audited_files: list[str] = []
+    skip_reasons: list[Dict[str, Any]] = []
 
     for audit_path in candidate_paths:
         try:
@@ -1240,8 +1849,19 @@ def _attach_signal_context_to_forecast_audit(
                 audit_path,
                 exc_info=True,
             )
+            skip_reasons.append({"path": str(audit_path), "reason": "UNREADABLE_AUDIT_JSON"})
             continue
         if not isinstance(payload, dict):
+            skip_reasons.append({"path": str(audit_path), "reason": "AUDIT_PAYLOAD_NOT_OBJECT"})
+            continue
+        if not _audit_payload_matches_ticker(payload, target_ticker, artifact_path=audit_path):
+            skip_reasons.append(
+                {
+                    "path": str(audit_path),
+                    "reason": "UNRESOLVED_TICKER_MATCH",
+                    "target_ticker": target_ticker,
+                }
+            )
             continue
 
         dataset = payload.get("dataset")
@@ -1249,41 +1869,166 @@ def _attach_signal_context_to_forecast_audit(
         if isinstance(dataset, dict):
             dataset_ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper()
         if target_ticker and dataset_ticker and dataset_ticker != target_ticker:
+            skip_reasons.append(
+                {
+                    "path": str(audit_path),
+                    "reason": "DATASET_TICKER_MISMATCH",
+                    "dataset_ticker": dataset_ticker,
+                    "target_ticker": target_ticker,
+                }
+            )
             continue
 
         signal_context = payload.get("signal_context")
         if not isinstance(signal_context, dict):
             signal_context = {}
         existing_tsid = str(signal_context.get("ts_signal_id") or "").strip()
+        incoming_tsid = canonical_context.get("ts_signal_id") or ""
         if existing_tsid and incoming_tsid and existing_tsid != incoming_tsid:
+            skip_reasons.append(
+                {
+                    "path": str(audit_path),
+                    "reason": "TS_SIGNAL_ID_MISMATCH",
+                    "existing_tsid": existing_tsid,
+                    "incoming_tsid": incoming_tsid,
+                }
+            )
             continue
 
         merged = dict(signal_context)
         # Never clobber a valid existing linkage with missing incoming metadata.
+        merged["context_type"] = "TRADE"
         merged["ts_signal_id"] = incoming_tsid or (existing_tsid or None)
         merged["ticker"] = canonical_context.get("ticker") or merged.get("ticker")
         merged["run_id"] = canonical_context.get("run_id") or merged.get("run_id")
         merged["entry_ts"] = canonical_context.get("entry_ts") or merged.get("entry_ts")
 
-        incoming_horizon = canonical_context.get("forecast_horizon")
+        dataset_horizon = (
+            payload.get("dataset", {}).get("forecast_horizon")
+            if isinstance(payload.get("dataset"), dict)
+            else None
+        )
+        incoming_horizon = dataset_horizon or canonical_context.get("forecast_horizon")
         merged["forecast_horizon"] = (
             incoming_horizon if incoming_horizon is not None else merged.get("forecast_horizon")
         )
+        merged["event_type"] = canonical_context.get("event_type") or merged.get("event_type")
+        merged["producer_event_type"] = (
+            canonical_context.get("producer_event_type") or merged.get("producer_event_type")
+        )
+        merged["expected_close_ts"] = (
+            _compute_expected_close_ts(merged.get("entry_ts"), merged.get("forecast_horizon"))
+            or canonical_context.get("expected_close_ts")
+            or merged.get("expected_close_ts")
+        )
+        merged["execution_status"] = (
+            canonical_context.get("execution_status") or merged.get("execution_status")
+        )
+        merged["executed"] = bool(canonical_context.get("executed") or merged.get("executed"))
 
         merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
         payload["signal_context"] = merged
+        if merged.get("ticker") and isinstance(payload.get("dataset"), dict):
+            if not payload["dataset"].get("ticker") and not payload["dataset"].get("symbol"):
+                payload["dataset"]["ticker"] = str(merged["ticker"]).upper()
 
-        tmp_path = audit_path.with_suffix(audit_path.suffix + ".tmp")
+        audit_id = str(payload.get("audit_id") or audit_path.stem).strip() or audit_path.stem
+        cohort_identity = _build_cohort_identity(audit_path)
+        lineage_v2 = payload.get("lineage_v2")
+        if not isinstance(lineage_v2, dict):
+            lineage_v2 = {}
+        lineage_v2.update(
+            {
+                "run_id": merged.get("run_id"),
+                "forecast_id": forecast_bundle.get("forecast_id"),
+                "forecast_record_ids": forecast_bundle.get("forecast_record_ids"),
+                "signal_id": execution_report.get("signal_id"),
+                "order_id": execution_report.get("order_id"),
+                "position_id": execution_report.get("position_id"),
+                "entry_trade_id": execution_report.get("entry_trade_id"),
+                "close_trade_id": execution_report.get("close_trade_id"),
+                "audit_id": audit_id,
+                "context_type": merged.get("context_type"),
+                "ts_signal_id": merged.get("ts_signal_id"),
+                "event_type": merged.get("event_type"),
+                "producer_event_type": merged.get("producer_event_type"),
+                "expected_close_ts": merged.get("expected_close_ts"),
+                "execution_status": merged.get("execution_status"),
+                "executed": merged.get("executed"),
+            }
+        )
+        payload["audit_id"] = audit_id
+        payload["evidence_contract_version"] = 2
+        payload["cohort_id"] = cohort_identity.get("cohort_id")
+        payload["event_type"] = "TRADE_FORECAST_AUDIT"
+        payload["cohort_identity"] = cohort_identity
+        payload["lineage_v2"] = lineage_v2
+        payload["evidence_source"] = "producer"
+        payload["evidence_source_classification"] = "producer-native"
+        payload["semantic_admission"] = _build_semantic_admission(
+            audit_path=audit_path,
+            signal_context=merged,
+            execution_report=execution_report,
+            audit_id=audit_id,
+            cohort_identity=cohort_identity,
+        )
         try:
-            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(tmp_path, audit_path)
+            atomic_write_json(audit_path, payload)
+            manifest_entry = build_manifest_entry(
+                audit_path,
+                source="scripts.run_auto_trader._attach_signal_context_to_forecast_audit",
+                extra={
+                    "audit_id": audit_id,
+                    "cohort_id": payload.get("cohort_id"),
+                    "evidence_contract_version": 2,
+                    "event_type": payload.get("event_type"),
+                    "gate_bucket": (
+                        (payload.get("semantic_admission") or {}).get("gate_bucket")
+                        if isinstance(payload.get("semantic_admission"), dict)
+                        else None
+                    ),
+                    "evidence_source": payload.get("evidence_source"),
+                    "evidence_source_classification": payload.get("evidence_source_classification"),
+                },
+            )
+            if manifest_entry:
+                upsert_jsonl_record(
+                    audit_path.parent / "forecast_audit_manifest.jsonl",
+                    manifest_entry,
+                    key_field="file",
+                )
+            audited_files.append(str(audit_path))
         except Exception:
             logger.debug("Failed to patch signal_context into %s", audit_path, exc_info=True)
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
+            skip_reasons.append({"path": str(audit_path), "reason": "PATCH_WRITE_FAILED"})
+    if audited_files:
+        return {
+            "patched": True,
+            "audited_files": audited_files,
+            "explicit_failure": None,
+            "failure_code": None,
+            "skip_reasons": skip_reasons,
+        }
+    failure_code = "NO_AUDIT_CANDIDATE_FOUND" if not candidate_paths else "AUDIT_CANDIDATES_UNPATCHED"
+    explicit_failure = _write_explicit_audit_failure(
+        audit_dir=audit_dir,
+        ticker=ticker,
+        run_id=run_id,
+        execution_report=execution_report,
+        failure_code=failure_code,
+        failure_detail={
+            "candidate_count": len(candidate_paths),
+            "skip_reasons": skip_reasons,
+            "forecast_audit_path": raw_path,
+        },
+    )
+    return {
+        "patched": False,
+        "audited_files": [],
+        "explicit_failure": explicit_failure,
+        "failure_code": failure_code,
+        "skip_reasons": skip_reasons,
+    }
 
 
 def _backfill_forecast_regression_metrics(
@@ -1525,6 +2270,14 @@ def _execute_signal(
     )
 
     mid_px = mid_price if mid_price is not None else _compute_mid_price(market_data)
+    db_trade_id = getattr(result.trade, "db_trade_id", None) if result.trade else None
+    entry_trade_id = getattr(result.trade, "entry_trade_id", None) if result.trade else None
+    is_close_trade = bool(
+        result.trade
+        and entry_trade_id is not None
+        and db_trade_id is not None
+        and int(entry_trade_id) != int(db_trade_id)
+    )
     if result.status != "EXECUTED":
         return {
             "ticker": ticker,
@@ -1533,7 +2286,14 @@ def _execute_signal(
             "executed": False,
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
+            "forecast_id": forecast_bundle.get("forecast_id"),
+            "order_id": None,
+            "position_id": None,
+            "entry_trade_id": None,
+            "close_trade_id": None,
             "action": primary_payload.get("action"),
+            "event_type": "TRADE_SIGNAL_REJECTED",
+            "execution_status": result.status,
             "signal_source": primary.get("source", "TIME_SERIES"),
             "signal_confidence": primary.get("confidence"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
@@ -1541,9 +2301,13 @@ def _execute_signal(
             "warnings": result.validation_warnings,
             "quality": quality,
             "data_source": data_source,
+            "run_id": run_id,
+            "execution_mode": execution_mode,
             "mid_price": mid_px,
             "barbell_bucket": primary_payload.get("barbell_bucket"),
             "barbell_multiplier": primary_payload.get("barbell_multiplier"),
+            "evidence_source": "producer",
+            "evidence_source_classification": "producer-native",
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
@@ -1563,8 +2327,15 @@ def _execute_signal(
         "executed": True,
         "signal_id": primary_payload.get("signal_id"),
         "ts_signal_id": primary_payload.get("ts_signal_id"),
+        "forecast_id": forecast_bundle.get("forecast_id"),
+        "order_id": result.trade.trade_id if result.trade else None,
+        "position_id": entry_trade_id or db_trade_id,
+        "entry_trade_id": entry_trade_id,
+        "close_trade_id": db_trade_id if is_close_trade else None,
         "shares": result.trade.shares if result.trade else 0,
         "action": result.trade.action if result.trade else primary.get("action", "HOLD"),
+        "event_type": "TRADE_CLOSE" if is_close_trade else "TRADE_ENTRY",
+        "execution_status": result.status,
         "entry_price": entry_price,
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
@@ -1576,6 +2347,8 @@ def _execute_signal(
         "expected_return": primary.get("expected_return"),
         "quality": quality,
         "data_source": data_source,
+        "run_id": run_id,
+        "execution_mode": execution_mode,
         "timestamp": executed_at,
         "signal_timestamp": primary_payload.get("signal_timestamp"),
         "bar_timestamp": primary_payload.get("bar_timestamp"),
@@ -1583,6 +2356,8 @@ def _execute_signal(
         "realized_pnl_pct": realized_pnl_pct,
         "mid_price": mid_px,
         "mid_slippage_bp": mid_slippage_bp,
+        "evidence_source": "producer",
+        "evidence_source_classification": "producer-native",
     }
 
 
@@ -1771,6 +2546,7 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
 @click.command()
 @click.option(
     "--tickers",
+    "--symbols",
     default="AAPL,MSFT",
     show_default=True,
     help="Comma separated list of tickers to trade automatically.",
@@ -1877,6 +2653,7 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
 )
 @click.option(
     "--execution-mode",
+    "--mode",
     default=None,
     show_default=False,
     type=click.Choice(["live", "synthetic", "auto"], case_sensitive=False),
@@ -2502,12 +3279,28 @@ def main(
             )
 
             if execution_report:
-                _attach_signal_context_to_forecast_audit(
+                audit_result = _attach_signal_context_to_forecast_audit(
                     forecast_bundle=forecast_bundle,
                     execution_report=execution_report,
                     ticker=ticker,
                     run_id=run_id,
                 )
+                execution_report["audit_reconciliation"] = {
+                    "patched": bool(audit_result.get("patched")),
+                    "audited_files": list(audit_result.get("audited_files") or []),
+                    "failure_code": audit_result.get("failure_code"),
+                    "explicit_failure_path": (
+                        (audit_result.get("explicit_failure") or {}).get("artifact_path")
+                        if isinstance(audit_result.get("explicit_failure"), dict)
+                        else None
+                    ),
+                }
+                if not audit_result.get("patched"):
+                    logger.warning(
+                        "Audit reconciliation failed for %s: %s",
+                        ticker,
+                        audit_result.get("failure_code") or "UNKNOWN_FAILURE",
+                    )
                 execution_report["quality"] = quality
                 execution_report["data_source"] = data_source
                 if execution_report.get("mid_price") is None and mid_price is not None:

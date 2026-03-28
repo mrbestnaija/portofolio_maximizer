@@ -244,29 +244,240 @@ def _counts_toward_readiness_denominator(
     *,
     context_type: str,
     outcome_status: str,
+    gate_eligible: bool = True,
 ) -> bool:
     normalized_context = str(context_type or "TRADE").strip().upper() or "TRADE"
     normalized_status = str(outcome_status or "OUTCOMES_NOT_LOADED").strip().upper()
-    return normalized_context == "TRADE" and normalized_status not in {
-        "INVALID_CONTEXT",
-        "NON_TRADE_CONTEXT",
-        "OUTCOMES_NOT_LOADED",
-        "NOT_DUE",
-    }
+    return bool(gate_eligible) and (
+        normalized_context == "TRADE"
+        and normalized_status
+        not in {
+            "INVALID_CONTEXT",
+            "NON_TRADE_CONTEXT",
+            "OUTCOMES_NOT_LOADED",
+            "NOT_DUE",
+        }
+    )
+
+
+def _lift_threshold_rmse_ratio(min_lift_rmse_ratio: Optional[float]) -> Optional[float]:
+    if min_lift_rmse_ratio is None:
+        return None
+    try:
+        return 1.0 - float(min_lift_rmse_ratio)
+    except (TypeError, ValueError):
+        return None
 
 
 def _merge_summary_fields(summary: Dict[str, Any], summary_fields: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(summary_fields, dict):
         return summary
     for key, value in summary_fields.items():
-        if key in {"window_counts", "telemetry_contract", "outcome_join"} and isinstance(value, dict):
-            base = summary.get(key)
-            merged = dict(base) if isinstance(base, dict) else {}
+        if key == "window_counts" and isinstance(value, dict):
+            base = summary.get("window_counts")
+            if not isinstance(base, dict):
+                base = {}
+            merged = dict(base)
             merged.update(value)
-            summary[key] = merged
+            summary["window_counts"] = merged
+            continue
+        if key == "telemetry_contract" and isinstance(value, dict):
+            base = summary.get("telemetry_contract")
+            if not isinstance(base, dict):
+                base = {}
+            merged = dict(base)
+            merged.update(value)
+            summary["telemetry_contract"] = merged
             continue
         summary[key] = value
     return summary
+
+
+def _normalize_reason_codes(
+    reason_codes: Any,
+    *,
+    fallback_reason_code: Optional[str] = None,
+) -> List[str]:
+    if isinstance(reason_codes, list):
+        normalized = [str(item).strip().upper() for item in reason_codes if str(item).strip()]
+        if normalized:
+            return normalized
+    fallback = str(fallback_reason_code or "").strip().upper()
+    if not fallback or fallback == "READY":
+        return []
+    return [part.strip() for part in fallback.split(",") if part.strip()]
+
+
+def _summarize_admission_entries(dataset_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    bucket_counts = {
+        "ELIGIBLE": 0,
+        "ACCEPTED_NONELIGIBLE": 0,
+        "QUARANTINED": 0,
+    }
+    source_counts = {
+        "producer": 0,
+        "legacy_derived": 0,
+    }
+    for entry in dataset_entries:
+        bucket = str(entry.get("gate_bucket") or "").strip().upper()
+        if bucket in bucket_counts:
+            bucket_counts[bucket] += 1
+        source = str(entry.get("semantic_admission_source") or "").strip().lower()
+        if source in source_counts:
+            source_counts[source] += 1
+    return {
+        "accepted_records": sum(1 for entry in dataset_entries if bool(entry.get("accepted_for_audit_history"))),
+        "accepted_noneligible_records": bucket_counts["ACCEPTED_NONELIGIBLE"],
+        "eligible_records": sum(1 for entry in dataset_entries if bool(entry.get("gate_eligible"))),
+        "quarantined_records": bucket_counts["QUARANTINED"],
+        "duplicate_conflicts": sum(1 for entry in dataset_entries if bool(entry.get("duplicate_conflict"))),
+        "missing_execution_metadata_records": sum(
+            1 for entry in dataset_entries if bool(entry.get("missing_execution_metadata"))
+        ),
+        "bucket_counts": bucket_counts,
+        "source_counts": source_counts,
+    }
+
+
+def _derive_semantic_admission(
+    entry: Dict[str, Any],
+    *,
+    include_research: bool,
+) -> Dict[str, Any]:
+    semantic = entry.get("semantic_admission")
+    semantic = semantic if isinstance(semantic, dict) else {}
+    producer_present = any(
+        key in semantic
+        for key in (
+            "accepted_for_audit_history",
+            "admissible_for_readiness",
+            "gate_eligible",
+            "gate_bucket",
+            "reason_code",
+            "reason_codes",
+            "duplicate_conflict",
+            "quarantined",
+            "missing_execution_metadata",
+        )
+    )
+    context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
+    manifest_status = str(entry.get("manifest_verification_status") or "").strip().lower()
+    duplicate_conflict = bool(entry.get("duplicate_conflict")) or bool(semantic.get("duplicate_conflict"))
+    quarantined = bool(entry.get("quarantined")) or bool(semantic.get("quarantined"))
+    production_labeled = bool(
+        semantic.get("production_labeled")
+        if "production_labeled" in semantic
+        else (not include_research or str(entry.get("cohort_id") or "").strip().lower() == "production")
+    )
+    accepted_for_audit_history = bool(semantic.get("accepted_for_audit_history", True))
+
+    if producer_present:
+        explicit_admissible = semantic.get("admissible_for_readiness")
+        explicit_gate_eligible = semantic.get("gate_eligible")
+        if explicit_admissible is None:
+            admissible_for_readiness = bool(explicit_gate_eligible)
+        else:
+            admissible_for_readiness = bool(explicit_admissible)
+        gate_eligible = (
+            bool(explicit_gate_eligible)
+            if explicit_gate_eligible is not None
+            else bool(admissible_for_readiness)
+        )
+        gate_bucket = str(
+            semantic.get("gate_bucket")
+            or ("ELIGIBLE" if gate_eligible else "ACCEPTED_NONELIGIBLE")
+        ).strip().upper() or ("ELIGIBLE" if gate_eligible else "ACCEPTED_NONELIGIBLE")
+        reason_code = str(
+            semantic.get("reason_code")
+            or semantic.get("admission_reason_code")
+            or ("READY" if gate_eligible else "NON_ELIGIBLE")
+        ).strip().upper() or ("READY" if gate_eligible else "NON_ELIGIBLE")
+        missing_execution_metadata_fields = semantic.get("missing_execution_metadata_fields")
+        if isinstance(missing_execution_metadata_fields, list):
+            missing_execution_metadata_fields = [
+                str(item).strip()
+                for item in missing_execution_metadata_fields
+                if str(item).strip()
+            ]
+        else:
+            missing_execution_metadata_fields = []
+        missing_execution_metadata = bool(semantic.get("missing_execution_metadata"))
+        if missing_execution_metadata_fields:
+            missing_execution_metadata = True
+        if "duplicate_conflict" in semantic:
+            duplicate_conflict = bool(semantic.get("duplicate_conflict"))
+        if "quarantined" in semantic:
+            quarantined = bool(semantic.get("quarantined"))
+        elif "not_quarantined" in semantic:
+            quarantined = not bool(semantic.get("not_quarantined"))
+        return {
+            "accepted_for_audit_history": accepted_for_audit_history,
+            "admissible_for_readiness": admissible_for_readiness,
+            "gate_eligible": gate_eligible,
+            "gate_bucket": gate_bucket,
+            "admission_reason_code": reason_code,
+            "admission_reason_codes": _normalize_reason_codes(
+                semantic.get("reason_codes"),
+                fallback_reason_code=reason_code,
+            ),
+            "duplicate_conflict": duplicate_conflict,
+            "quarantined": quarantined,
+            "production_labeled": bool(semantic.get("production_labeled", production_labeled)),
+            "missing_execution_metadata": missing_execution_metadata,
+            "missing_execution_metadata_fields": missing_execution_metadata_fields,
+            "semantic_admission_source": "producer",
+            "semantic_admission_preserved": True,
+        }
+
+    reason_codes: list[str] = []
+    if not production_labeled:
+        reason_codes.append("NOT_PRODUCTION_LABELED")
+    if context_type != "TRADE":
+        reason_codes.append("NON_TRADE_CONTEXT")
+    if manifest_status and manifest_status != "verified":
+        reason_codes.append(f"MANIFEST_{manifest_status.upper()}")
+    if duplicate_conflict:
+        reason_codes.append("DUPLICATE_CONFLICT")
+    if quarantined:
+        reason_codes.append("QUARANTINED")
+
+    explicit_admissible = semantic.get("admissible_for_readiness")
+    if explicit_admissible is None:
+        admissible_for_readiness = accepted_for_audit_history and len(reason_codes) == 0
+    else:
+        admissible_for_readiness = bool(explicit_admissible) and len(reason_codes) == 0
+
+    if quarantined or duplicate_conflict:
+        gate_bucket = "QUARANTINED"
+    elif admissible_for_readiness:
+        gate_bucket = "ELIGIBLE"
+    else:
+        gate_bucket = "ACCEPTED_NONELIGIBLE"
+    missing_execution_metadata_fields: List[str] = []
+    if not str(entry.get("run_id") or "").strip():
+        missing_execution_metadata_fields.append("run_id")
+    if not str(entry.get("entry_ts") or "").strip():
+        missing_execution_metadata_fields.append("entry_ts")
+    missing_execution_metadata = (
+        str(entry.get("outcome_reason") or "").strip().upper() == "MISSING_EXECUTION_METADATA"
+        or bool(missing_execution_metadata_fields)
+    )
+
+    return {
+        "accepted_for_audit_history": accepted_for_audit_history,
+        "admissible_for_readiness": admissible_for_readiness,
+        "gate_eligible": admissible_for_readiness,
+        "gate_bucket": gate_bucket,
+        "admission_reason_code": "READY" if admissible_for_readiness else ",".join(reason_codes) or "NON_ELIGIBLE",
+        "admission_reason_codes": [] if admissible_for_readiness else reason_codes,
+        "duplicate_conflict": duplicate_conflict,
+        "quarantined": quarantined,
+        "production_labeled": production_labeled,
+        "missing_execution_metadata": missing_execution_metadata,
+        "missing_execution_metadata_fields": missing_execution_metadata_fields,
+        "semantic_admission_source": "legacy_derived",
+        "semantic_admission_preserved": False,
+    }
 
 
 def _write_summary_with_guard(path: Path, payload: Dict[str, Any]) -> None:
@@ -292,7 +503,7 @@ def _build_failure_dataset_snapshot(
     db_path: Optional[Path],
     min_forecast_horizon: Optional[int],
     generated_utc: str,
-) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool, bool, Optional[str]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, int], bool, Optional[str]]:
     files = _collect_audit_files(audit_roots=audit_roots, max_files=max_files)
 
     def _outcome_dedupe_key_from_audit(audit: Dict[str, Any]) -> Tuple[Any, ...]:
@@ -327,11 +538,9 @@ def _build_failure_dataset_snapshot(
             dedup_map[key] = (path, audit)
 
     outcomes_loaded = False
-    outcome_join_attempted = False
     outcome_join_error: Optional[str] = None
     closed_trade_counts: Dict[str, int] = {}
     if db_path is not None:
-        outcome_join_attempted = True
         outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(db_path)
 
     now = now_utc()
@@ -373,8 +582,10 @@ def _build_failure_dataset_snapshot(
 
         expected_close, expected_close_source = compute_expected_close(signal_context, ds)
         meta = _extract_window_metadata(audit or {})
+
         entry: Dict[str, Any] = {
             "file": path.name,
+            "audit_id": str((audit or {}).get("audit_id") or path.stem).strip() or path.stem,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
@@ -391,6 +602,10 @@ def _build_failure_dataset_snapshot(
             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
             "expected_close_ts": expected_close.isoformat() if expected_close else None,
             "expected_close_source": expected_close_source,
+            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
+            "cohort_id": (audit or {}).get("cohort_id"),
+            "cohort_identity": (audit or {}).get("cohort_identity"),
+            "semantic_admission": (audit or {}).get("semantic_admission"),
             "outcome_status": None,
             "outcome_reason": None,
         }
@@ -466,6 +681,7 @@ def _build_failure_dataset_snapshot(
                 outcome_windows_invalid_context += 1
 
         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
+        outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
         counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
         counts_toward_readiness = _counts_toward_readiness_denominator(
             context_type=context_type,
@@ -479,10 +695,16 @@ def _build_failure_dataset_snapshot(
         elif outcome_status in {"OUTCOME_MISSING", "OUTCOMES_NOT_LOADED"}:
             severity = "MEDIUM"
         entry.update(
+            _derive_semantic_admission(
+                entry,
+                include_research=False,
+            )
+        )
+        entry.update(
             normalize_telemetry_payload(
                 {
                     "status": _legacy_to_status(outcome_status),
-                    "reason_code": str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper(),
+                    "reason_code": outcome_reason,
                     "context_type": context_type,
                     "severity": severity,
                     "blocking": blocking,
@@ -522,7 +744,6 @@ def _build_failure_dataset_snapshot(
     window_counts = {
         "n_raw_windows": len(files),
         "n_parseable_windows": parseable_count,
-        "n_parse_errors": parse_error_count,
         "n_deduped_windows": len(dedup_map),
         "n_outcome_deduped_windows": len(dedup_map),
         "n_rmse_windows_processed": 0,
@@ -546,7 +767,7 @@ def _build_failure_dataset_snapshot(
         "n_horizon_filtered_windows": horizon_filtered_count,
     }
 
-    return dataset_entries, window_counts, outcomes_loaded, outcome_join_attempted, outcome_join_error
+    return dataset_entries, window_counts, outcomes_loaded, outcome_join_error
 
 
 def _emit_failure_summary_and_exit(
@@ -565,25 +786,27 @@ def _emit_failure_summary_and_exit(
     cache_dir = Path("logs/forecast_audits_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / "latest_summary.json"
-    dataset_entries, window_counts, outcomes_loaded, outcome_join_attempted, outcome_join_error = (
-        _build_failure_dataset_snapshot(
-            audit_roots=audit_roots,
-            max_files=int(max_files),
-            db_path=db_path,
-            min_forecast_horizon=min_forecast_horizon,
-            generated_utc=generated_utc,
-        )
+    dataset_entries, window_counts, outcomes_loaded, outcome_join_error = _build_failure_dataset_snapshot(
+        audit_roots=audit_roots,
+        max_files=int(max_files),
+        db_path=db_path,
+        min_forecast_horizon=min_forecast_horizon,
+        generated_utc=generated_utc,
     )
+    admission_summary = _summarize_admission_entries(dataset_entries)
     summary: Dict[str, Any] = {
         "audit_dir": str(audit_dir),
         "audit_roots": [str(root) for root in audit_roots],
         "generated_utc": generated_utc,
         "source_script": "scripts/check_forecast_audits.py",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
-        "max_files": int(max_files),
         "status": "PASS" if int(exit_code) == 0 else "FAIL",
         "exit_code": int(exit_code),
         "exit_reason": str(message).strip() or "UNSPECIFIED_FAILURE",
+        "max_files": int(max_files),
+        "measurement_contract_version": 1,
+        "baseline_model": None,
+        "lift_threshold_rmse_ratio": None,
         "effective_audits": None,
         "effective_outcome_audits": None,
         "total_unique_audits": window_counts.get("n_deduped_windows"),
@@ -593,9 +816,6 @@ def _emit_failure_summary_and_exit(
         "ensemble_missing_count": None,
         "ensemble_missing_rate": None,
         "max_missing_ensemble_rate": None,
-        "min_forecast_horizon": min_forecast_horizon,
-        "horizon_filtered_count": window_counts.get("n_horizon_filtered_windows"),
-        "manifest_integrity": {},
         "holding_period_required": None,
         "lift_fraction": None,
         "min_lift_fraction": None,
@@ -610,30 +830,20 @@ def _emit_failure_summary_and_exit(
         "recent_window_max_violation_rate": None,
         "recent_rmse_ratio_p90": None,
         "recent_window_max_p90_rmse_ratio": None,
-        "outcome_join": {
-            "db_path": str(db_path) if db_path is not None else None,
-            "error": outcome_join_error,
-            "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
-            "readiness_denominator_included": window_counts.get("n_readiness_denominator_included"),
-            "linkage_denominator_included": window_counts.get("n_linkage_denominator_included"),
-            "readiness_excluded_non_trade_context": window_counts.get("n_readiness_excluded_non_trade_context"),
-            "readiness_excluded_invalid_context": window_counts.get("n_readiness_excluded_invalid_context"),
-            "readiness_excluded_not_due": window_counts.get("n_readiness_excluded_not_due"),
-            "status_taxonomy": [
-                "MATCHED",
-                "OUTCOME_MISSING",
-                "NOT_DUE",
-                "INVALID_CONTEXT",
-                "NON_TRADE_CONTEXT",
-            ],
+        "scope": {
+            "include_research": bool(include_research),
+            "production_audit_only": not bool(include_research),
         },
+        "window_counts": window_counts,
+        "admission_summary": admission_summary,
+        "dataset_windows": dataset_entries,
         "telemetry_contract": normalize_telemetry_payload(
             {
                 "schema_version": TELEMETRY_SCHEMA_VERSION,
                 "rmse_inputs_present": False,
                 "outcomes_loaded": outcomes_loaded,
                 "execution_log_loaded": False,
-                "outcome_join_attempted": outcome_join_attempted,
+                "outcome_join_attempted": db_path is not None,
                 "status": "FAIL",
                 "reason_code": "FAILURE_SUMMARY_EXIT",
                 "context_type": "TRADE",
@@ -643,21 +853,11 @@ def _emit_failure_summary_and_exit(
                 "counts_toward_linkage_denominator": False,
                 "generated_utc": generated_utc,
                 "source_script": "scripts/check_forecast_audits.py",
+                "outcome_join_error": outcome_join_error,
             },
             source_script="scripts/check_forecast_audits.py",
             generated_utc=generated_utc,
         ),
-        "scope": {
-            "include_research": bool(include_research),
-            "production_audit_only": not bool(include_research),
-        },
-        "window_counts": window_counts,
-        "window_diversity": {
-            "regime_count": 0,
-            "healthy_ticker_count": 0,
-            "distinct_trading_days": 0,
-        },
-        "dataset_windows": dataset_entries,
         "cache_status": {"write_ok": True, "errors": []},
     }
     summary = _merge_summary_fields(summary, summary_fields)
@@ -1041,6 +1241,7 @@ def main() -> None:
         # logs/forecast_audits without production/research partitioning.
         audit_dir = DEFAULT_AUDIT_ROOT
     db_path = Path(args.db) if args.db else None
+    min_forecast_horizon: Optional[int] = None
     audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
     files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
     if not files:
@@ -1052,6 +1253,8 @@ def main() -> None:
             include_research=bool(args.include_research),
             max_files=int(args.max_files),
             db_path=db_path,
+            min_forecast_horizon=min_forecast_horizon,
+            exit_code=1,
         )
 
     monitoring_cfg = _load_monitoring_thresholds(
@@ -1298,13 +1501,17 @@ def main() -> None:
             )
             if not bool(manifest_stats.get("manifest_exists", False)):
                 _emit_failure_summary_and_exit(
-                    message=f"Manifest integrity mode=fail but manifest file is missing: {manifest_path}",
+                    message=(
+                        "Manifest integrity mode=fail but manifest file is missing: "
+                        f"{manifest_path}"
+                    ),
                     audit_dir=audit_dir,
                     audit_roots=audit_roots,
                     include_research=bool(args.include_research),
                     max_files=int(args.max_files),
                     db_path=db_path,
                     min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
             if unverified > 0:
                 _emit_failure_summary_and_exit(
@@ -1321,6 +1528,7 @@ def main() -> None:
                     max_files=int(args.max_files),
                     db_path=db_path,
                     min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                 )
 
     violation_count = sum(1 for r in results if r.violation)
@@ -1385,43 +1593,6 @@ def main() -> None:
         if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
     ]
     recent_pct = _percentiles(recent_ratios, [0.5, 0.9]) if recent_ratios else {}
-    ratios_filtered = [
-        (r.path.name, float(r.rmse_ratio))
-        for r in results
-        if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
-    ]
-    ratio_values = [val for _, val in ratios_filtered]
-    ratio_stats = {
-        "count": len(ratio_values),
-        "min": min(ratio_values) if ratio_values else None,
-        "max": max(ratio_values) if ratio_values else None,
-        "mean": (sum(ratio_values) / len(ratio_values)) if ratio_values else None,
-        "p10": pct.get(0.1) if pct else None,
-        "p50": pct.get(0.5) if pct else None,
-        "p90": pct.get(0.9) if pct else None,
-        "best": [
-            {"file": name, "ratio": val}
-            for name, val in sorted(ratios_filtered, key=lambda item: item[1])[:5]
-        ],
-        "worst": [
-            {"file": name, "ratio": val}
-            for name, val in sorted(ratios_filtered, key=lambda item: item[1], reverse=True)[:5]
-        ],
-    }
-    lift_fraction = 0.0
-    if effective_n:
-        lift_threshold = 1.0 - min_lift_rmse_ratio
-        lift_count = sum(
-            1
-            for r in results
-            if (
-                r.rmse_ratio is not None
-                and isinstance(r.rmse_ratio, (int, float))
-                and float(r.rmse_ratio) < float(lift_threshold)
-            )
-        )
-        lift_fraction = lift_count / effective_n
-    warmup_required = max(min_effective_audits, holding_period, 0)
     rmse_windows_usable = effective_n
     outcomes_loaded = False
     outcome_join_attempted = False
@@ -1437,51 +1608,6 @@ def main() -> None:
     outcome_windows_no_signal_id = 0
     outcome_windows_non_trade_context = 0
     outcome_windows_missing_execution_metadata = 0
-
-    def _current_failure_summary(
-        *,
-        decision: str = DEFAULT_DECISION_RESEARCH,
-        decision_reason: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        reason = str(decision_reason or "").strip() or decision
-        return {
-            "status": "FAIL",
-            "exit_code": 1,
-            "effective_audits": effective_n,
-            "violation_count": violation_count,
-            "violation_rate": violation_rate,
-            "max_violation_rate": max_violation_rate,
-            "ensemble_missing_count": ensemble_missing_count,
-            "ensemble_missing_rate": ensemble_missing_rate,
-            "max_missing_ensemble_rate": max_missing_ensemble_rate,
-            "holding_period_required": warmup_required,
-            "lift_fraction": lift_fraction,
-            "min_lift_fraction": min_lift_fraction,
-            "percentiles": {
-                "p10": pct.get(0.1) if pct else None,
-                "p50": pct.get(0.5) if pct else None,
-                "p90": pct.get(0.9) if pct else None,
-            },
-            "ratio_distribution": ratio_stats,
-            "decision": decision,
-            "decision_reason": reason,
-            "recent_window_audits": recent_window_audits,
-            "recent_effective_audits": recent_effective_n,
-            "recent_violation_count": recent_violation_count,
-            "recent_violation_rate": recent_violation_rate,
-            "recent_window_max_violation_rate": recent_window_max_violation_rate,
-            "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
-            "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
-            "window_counts": {
-                "n_rmse_windows_processed": rmse_windows_processed,
-                "n_rmse_windows_usable": rmse_windows_usable,
-            },
-            "telemetry_contract": {
-                "rmse_inputs_present": bool(results),
-                "status": "FAIL",
-                "reason_code": reason.upper().replace(" ", "_"),
-            },
-        }
 
     print(
         "RMSE coverage  : "
@@ -1505,6 +1631,79 @@ def main() -> None:
         f"{ensemble_missing_count}/{len(results)} ({ensemble_missing_rate:.2%}) "
         f"(max allowed {max_missing_ensemble_rate:.2%})"
     )
+    warmup_required: Optional[int] = None
+
+    def _current_failure_summary(
+        *,
+        decision: Optional[str] = None,
+        decision_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        lift_value = 0.0
+        if effective_n:
+            lift_threshold = 1.0 - min_lift_rmse_ratio
+            lift_count = sum(
+                1
+                for r in results
+                if (
+                    r.rmse_ratio is not None
+                    and isinstance(r.rmse_ratio, (int, float))
+                    and float(r.rmse_ratio) < float(lift_threshold)
+                )
+            )
+            lift_value = lift_count / effective_n
+
+        ratios_filtered = [
+            (r.path.name, float(r.rmse_ratio))
+            for r in results
+            if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
+        ]
+        ratio_values = [val for _, val in ratios_filtered]
+        ratio_stats = {
+            "count": len(ratio_values),
+            "min": min(ratio_values) if ratio_values else None,
+            "max": max(ratio_values) if ratio_values else None,
+            "mean": (sum(ratio_values) / len(ratio_values)) if ratio_values else None,
+            "p10": pct.get(0.1) if pct else None,
+            "p50": pct.get(0.5) if pct else None,
+            "p90": pct.get(0.9) if pct else None,
+        }
+        return {
+            "measurement_contract_version": 1,
+            "baseline_model": baseline_model,
+            "lift_threshold_rmse_ratio": _lift_threshold_rmse_ratio(min_lift_rmse_ratio),
+            "effective_audits": effective_n,
+            "effective_outcome_audits": None,
+            "total_unique_audits": len(results),
+            "violation_count": violation_count,
+            "violation_rate": violation_rate,
+            "max_violation_rate": max_violation_rate,
+            "ensemble_missing_count": ensemble_missing_count,
+            "ensemble_missing_rate": ensemble_missing_rate,
+            "max_missing_ensemble_rate": max_missing_ensemble_rate,
+            "holding_period_required": warmup_required,
+            "lift_fraction": lift_value,
+            "min_lift_fraction": min_lift_fraction,
+            "percentiles": {
+                "p10": pct.get(0.1) if pct else None,
+                "p50": pct.get(0.5) if pct else None,
+                "p90": pct.get(0.9) if pct else None,
+            },
+            "ratio_distribution": ratio_stats,
+            "decision": decision,
+            "decision_reason": decision_reason,
+            "recent_window_audits": recent_window_audits,
+            "recent_effective_audits": recent_effective_n,
+            "recent_violation_count": recent_violation_count,
+            "recent_violation_rate": recent_violation_rate,
+            "recent_window_max_violation_rate": recent_window_max_violation_rate,
+            "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
+            "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+            "window_counts": {
+                "n_rmse_windows_processed": rmse_windows_processed,
+                "n_rmse_windows_usable": effective_n,
+            },
+        }
+
     if (
         len(results) > 0
         and max_missing_ensemble_rate >= 0
@@ -1522,9 +1721,10 @@ def main() -> None:
                 max_files=int(args.max_files),
                 db_path=db_path,
                 min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
                 summary_fields=_current_failure_summary(
                     decision=DEFAULT_DECISION_RESEARCH,
-                    decision_reason="missing ensemble metric rate exceeds threshold",
+                    decision_reason="missing ensemble metrics exceed threshold",
                 ),
             )
     if pct:
@@ -1565,6 +1765,7 @@ def main() -> None:
                     max_files=int(args.max_files),
                     db_path=db_path,
                     min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                     summary_fields=_current_failure_summary(
                         decision=DEFAULT_DECISION_RESEARCH,
                         decision_reason="recent window violation rate exceeds threshold",
@@ -1588,12 +1789,14 @@ def main() -> None:
                     max_files=int(args.max_files),
                     db_path=db_path,
                     min_forecast_horizon=min_forecast_horizon,
+                    exit_code=1,
                     summary_fields=_current_failure_summary(
                         decision=DEFAULT_DECISION_RESEARCH,
                         decision_reason="recent window p90 rmse ratio exceeds threshold",
                     ),
                 )
 
+    warmup_required = max(min_effective_audits, holding_period, 0)
     rmse_inconclusive = False
     if warmup_required > 0 and effective_n < warmup_required:
         explicit_required: Optional[int] = None
@@ -1604,8 +1807,8 @@ def main() -> None:
         if explicit_required is not None and effective_n < explicit_required:
             _emit_failure_summary_and_exit(
                 message=(
-                    f"Insufficient effective audits for RMSE gating: effective_audits={effective_n} "
-                    f"< required_audits={explicit_required}"
+                    "Insufficient effective audits for RMSE gating: "
+                    f"effective_audits={effective_n} < required_audits={explicit_required}"
                 ),
                 audit_dir=audit_dir,
                 audit_roots=audit_roots,
@@ -1613,9 +1816,12 @@ def main() -> None:
                 max_files=int(args.max_files),
                 db_path=db_path,
                 min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
                 summary_fields=_current_failure_summary(
                     decision="INCONCLUSIVE",
-                    decision_reason=f"effective_audits={effective_n} < required_audits={explicit_required}",
+                    decision_reason=(
+                        f"effective_audits={effective_n} < required_audits={explicit_required}"
+                    ),
                 ),
             )
         if (
@@ -1635,9 +1841,12 @@ def main() -> None:
                 max_files=int(args.max_files),
                 db_path=db_path,
                 min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
                 summary_fields=_current_failure_summary(
                     decision=DEFAULT_DECISION_RESEARCH,
-                    decision_reason="violation rate exceeds threshold during holding period",
+                    decision_reason=(
+                        "violation rate exceeds threshold during holding period"
+                    ),
                 ),
             )
         print(
@@ -1671,6 +1880,20 @@ def main() -> None:
     decision = DEFAULT_DECISION_KEEP
     decision_reason = "ensemble within tolerance"
 
+    lift_fraction = 0.0
+    if effective_n:
+        lift_threshold = 1.0 - min_lift_rmse_ratio
+        lift_count = sum(
+            1
+            for r in results
+            if (
+                r.rmse_ratio is not None
+                and isinstance(r.rmse_ratio, (int, float))
+                and float(r.rmse_ratio) < float(lift_threshold)
+            )
+        )
+        lift_fraction = lift_count / effective_n
+
     if rmse_inconclusive:
         required = warmup_required if warmup_required > 0 else 1
         decision = "INCONCLUSIVE"
@@ -1698,6 +1921,7 @@ def main() -> None:
                         max_files=int(args.max_files),
                         db_path=db_path,
                         min_forecast_horizon=min_forecast_horizon,
+                        exit_code=1,
                         summary_fields=_current_failure_summary(
                             decision=DEFAULT_DECISION_DISABLE,
                             decision_reason="insufficient lift vs baseline",
@@ -1726,9 +1950,12 @@ def main() -> None:
                 max_files=int(args.max_files),
                 db_path=db_path,
                 min_forecast_horizon=min_forecast_horizon,
+                exit_code=1,
                 summary_fields=_current_failure_summary(
                     decision=DEFAULT_DECISION_RESEARCH,
-                    decision_reason=decision_reason,
+                    decision_reason=(
+                        f"violation rate {violation_rate:.2%} exceeds {max_violation_rate:.2%}"
+                    ),
                 ),
             )
 
@@ -1752,6 +1979,31 @@ def main() -> None:
 
     cache_dir = Path("logs/forecast_audits_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
+    ratios_filtered = [
+        (r.path.name, float(r.rmse_ratio))
+        for r in results
+        if r.rmse_ratio is not None and isinstance(r.rmse_ratio, (int, float))
+    ]
+    ratio_values = [val for _, val in ratios_filtered]
+    ratio_stats = {
+        "count": len(ratio_values),
+        "min": min(ratio_values) if ratio_values else None,
+        "max": max(ratio_values) if ratio_values else None,
+        "mean": (sum(ratio_values) / len(ratio_values)) if ratio_values else None,
+        "p10": pct.get(0.1) if pct else None,
+        "p50": pct.get(0.5) if pct else None,
+        "p90": pct.get(0.9) if pct else None,
+        "best": [
+            {"file": name, "ratio": val}
+            for name, val in sorted(ratios_filtered, key=lambda x: x[1])[:5]
+        ],
+        "worst": [
+            {"file": name, "ratio": val}
+            for name, val in sorted(ratios_filtered, key=lambda x: x[1], reverse=True)[
+                :5
+            ]
+        ],
+    }
     results_by_path = {r.path: r for r in results}
     dataset_entries = []
     rmse_usable_entries = []
@@ -1761,6 +2013,9 @@ def main() -> None:
         signal_context = (audit or {}).get("signal_context") or {}
         if not isinstance(signal_context, dict):
             signal_context = {}
+        semantic_admission = (audit or {}).get("semantic_admission") or {}
+        if not isinstance(semantic_admission, dict):
+            semantic_admission = {}
         raw_ts_signal_id = signal_context.get("ts_signal_id")
         ts_signal_id = str(raw_ts_signal_id).strip() if raw_ts_signal_id is not None else ""
         ts_signal_id = ts_signal_id or None
@@ -1770,8 +2025,17 @@ def main() -> None:
         if not context_type:
             context_type = "TRADE"
         meta = _extract_window_metadata(audit or {})
+        manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
+        audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
+        event_type = str(
+            (audit or {}).get("event_type")
+            or signal_context.get("event_type")
+            or "FORECAST_AUDIT"
+        ).strip().upper()
         entry = {
             "file": f.name,
+            "audit_id": audit_id,
+            "event_type": event_type,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
@@ -1788,6 +2052,12 @@ def main() -> None:
             "signal_forecast_horizon": signal_context.get("forecast_horizon"),
             "expected_close_ts": expected_close.isoformat() if expected_close else None,
             "expected_close_source": expected_close_source,
+            "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
+            "cohort_id": (audit or {}).get("cohort_id"),
+            "cohort_identity": (audit or {}).get("cohort_identity"),
+            "manifest_verification_status": manifest_status,
+            "semantic_admission": semantic_admission,
+            "payload_sha256": _sha256_file(f),
             "outcome_status": None,
             "outcome_reason": None,
         }
@@ -1804,6 +2074,20 @@ def main() -> None:
             ):
                 rmse_usable_entries.append(entry)
         dataset_entries.append(entry)
+
+    audit_fingerprints: Dict[str, Optional[str]] = {}
+    duplicate_conflict_ids: set[str] = set()
+    for entry in dataset_entries:
+        audit_id = str(entry.get("audit_id") or "").strip()
+        if not audit_id:
+            continue
+        payload_sha = str(entry.get("payload_sha256") or "").strip() or None
+        prior_sha = audit_fingerprints.get(audit_id)
+        if prior_sha is None:
+            audit_fingerprints[audit_id] = payload_sha
+            continue
+        if payload_sha != prior_sha:
+            duplicate_conflict_ids.add(audit_id)
 
     if db_path is not None:
         outcome_join_attempted = True
@@ -1917,15 +2201,30 @@ def main() -> None:
     for entry in dataset_entries:
         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
         outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
+        semantic_admission = entry.get("semantic_admission")
+        if (
+            str(entry.get("audit_id") or "").strip() in duplicate_conflict_ids
+            and not (isinstance(semantic_admission, dict) and "duplicate_conflict" in semantic_admission)
+        ):
+            entry["duplicate_conflict"] = True
+        admission = _derive_semantic_admission(
+            entry,
+            include_research=bool(args.include_research),
+        )
+        entry.update(admission)
         context_type = str(entry.get("context_type") or "TRADE").strip().upper() or "TRADE"
-        counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
+        counts_toward_linkage = bool(entry.get("gate_eligible")) and outcome_status in {"MATCHED", "OUTCOME_MISSING"}
         counts_toward_readiness = _counts_toward_readiness_denominator(
             context_type=context_type,
             outcome_status=outcome_status,
+            gate_eligible=bool(entry.get("gate_eligible")),
         )
         severity = "LOW"
         blocking = False
-        if outcome_status == "INVALID_CONTEXT":
+        if bool(entry.get("duplicate_conflict")) or bool(entry.get("quarantined")):
+            severity = "HIGH"
+            blocking = True
+        elif outcome_status == "INVALID_CONTEXT":
             severity = "HIGH"
             blocking = True
         elif outcome_status == "OUTCOME_MISSING":
@@ -1964,6 +2263,28 @@ def main() -> None:
     readiness_excluded_not_due = sum(
         1 for entry in dataset_entries if str(entry.get("outcome_status") or "").upper() == "NOT_DUE"
     )
+    admission_summary = _summarize_admission_entries(dataset_entries)
+    accepted_records = int(admission_summary["accepted_records"])
+    accepted_noneligible_records = int(admission_summary["accepted_noneligible_records"])
+    eligible_records = int(admission_summary["eligible_records"])
+    quarantined_records = int(admission_summary["quarantined_records"])
+    duplicate_conflicts = int(admission_summary["duplicate_conflicts"])
+    admission_missing_execution_metadata_records = int(
+        admission_summary["missing_execution_metadata_records"]
+    )
+    cohort_fingerprints = {
+        str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
+        for entry in dataset_entries
+        if isinstance(entry.get("cohort_identity"), dict)
+        and str((entry.get("cohort_identity") or {}).get("contract_fingerprint") or "").strip()
+    }
+    contract_versions = {
+        str(entry.get("evidence_contract_version")).strip()
+        for entry in dataset_entries
+        if entry.get("evidence_contract_version") is not None
+    }
+    contract_version_drift = len(contract_versions) > 1
+    cohort_fingerprint_drift = len(cohort_fingerprints) > 1
 
     if (
         (outcome_windows_eligible > 0 or outcome_windows_matched > 0)
@@ -1980,7 +2301,7 @@ def main() -> None:
             max_files=int(args.max_files),
             db_path=db_path,
             min_forecast_horizon=min_forecast_horizon,
-            summary_fields=_current_failure_summary(),
+            exit_code=1,
         )
 
     if outcome_join_attempted and outcome_join_error:
@@ -1989,16 +2310,23 @@ def main() -> None:
         "Outcome join   : "
         f"outcomes_loaded={int(outcomes_loaded)} "
         f"join_attempted={int(outcome_join_attempted)} "
-        f"eligible={outcome_windows_eligible} "
+        f"accepted={accepted_records} "
+        f"accepted_noneligible={accepted_noneligible_records} "
+        f"eligible={eligible_records} "
+        f"quarantined={quarantined_records} "
+        f"due_eligible={outcome_windows_eligible} "
         f"matched={outcome_windows_matched} "
         f"missing={outcome_windows_missing} "
         f"ambiguous={outcome_windows_ambiguous} "
         f"not_due={outcome_windows_not_due} "
         f"invalid_context={outcome_windows_invalid_context} "
         f"not_yet_eligible={outcome_windows_not_yet_eligible} "
+        f"duplicate_conflicts={duplicate_conflicts} "
+        f"contract_drift={int(contract_version_drift)} "
+        f"cohort_drift={int(cohort_fingerprint_drift)} "
         f"no_signal_id={outcome_windows_no_signal_id} "
         f"non_trade_context={outcome_windows_non_trade_context} "
-        f"missing_exec_meta={outcome_windows_missing_execution_metadata}"
+        f"missing_exec_meta={admission_missing_execution_metadata_records}"
     )
     print(
         "Denominators   : "
@@ -2047,6 +2375,9 @@ def main() -> None:
         "source_script": "scripts/check_forecast_audits.py",
         "schema_version": TELEMETRY_SCHEMA_VERSION,
         "max_files": int(args.max_files),
+        "measurement_contract_version": 1,
+        "baseline_model": baseline_model,
+        "lift_threshold_rmse_ratio": _lift_threshold_rmse_ratio(min_lift_rmse_ratio),
         "effective_audits": effective_n,
         "effective_outcome_audits": outcome_windows_matched,
         "total_unique_audits": len(results),
@@ -2077,10 +2408,19 @@ def main() -> None:
         "recent_window_max_violation_rate": recent_window_max_violation_rate,
         "recent_rmse_ratio_p90": recent_pct.get(0.9) if recent_pct else None,
         "recent_window_max_p90_rmse_ratio": recent_window_max_p90_rmse_ratio,
+        "admission_summary": admission_summary,
         "outcome_join": {
             "db_path": str(db_path) if db_path is not None else None,
             "error": outcome_join_error,
             "eligibility_buffer_minutes": int(OUTCOME_ELIGIBILITY_BUFFER.total_seconds() // 60),
+            "accepted_records": accepted_records,
+            "accepted_noneligible_records": accepted_noneligible_records,
+            "eligible_records": eligible_records,
+            "quarantined_records": quarantined_records,
+            "duplicate_conflicts": duplicate_conflicts,
+            "missing_execution_metadata_records": admission_missing_execution_metadata_records,
+            "contract_version_drift": contract_version_drift,
+            "cohort_fingerprint_drift": cohort_fingerprint_drift,
             "readiness_denominator_included": readiness_denominator_included,
             "linkage_denominator_included": linkage_denominator_included,
             "readiness_excluded_non_trade_context": readiness_excluded_non_trade,
@@ -2132,6 +2472,14 @@ def main() -> None:
             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
             "n_outcome_windows_missing_execution_metadata": outcome_windows_missing_execution_metadata,
+            "n_accepted_records": accepted_records,
+            "n_accepted_noneligible_records": accepted_noneligible_records,
+            "n_eligible_records": eligible_records,
+            "n_quarantined_records": quarantined_records,
+            "n_duplicate_conflicts": duplicate_conflicts,
+            "n_admission_missing_execution_metadata_records": admission_missing_execution_metadata_records,
+            "n_contract_versions": len(contract_versions),
+            "n_cohort_fingerprints": len(cohort_fingerprints),
             "n_readiness_denominator_included": readiness_denominator_included,
             "n_linkage_denominator_included": linkage_denominator_included,
             "n_readiness_excluded_non_trade_context": readiness_excluded_non_trade,

@@ -31,6 +31,7 @@ import datetime
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -77,6 +78,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
     1: {
+        "baseline_model",
+        "lift_threshold_rmse_ratio",
         "lift_fraction_global",
         "lift_fraction_recent",
         "samossa_da_zero_pct",
@@ -115,6 +118,56 @@ def _empty_metrics(layer: int, **overrides) -> dict:
     base = {k: None for k in LAYER_REQUIRED_KEYS[layer]}
     base.update(overrides)
     return base
+
+
+def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -> Path:
+    """Resolve Layer 1's audit universe from active production/cohort state."""
+    if explicit_audit_dir is not None:
+        explicit_raw = str(explicit_audit_dir).strip()
+        if explicit_raw:
+            return Path(explicit_raw)
+
+    env_audit_dir = str(os.environ.get("TS_FORECAST_AUDIT_DIR") or "").strip()
+    if env_audit_dir:
+        return Path(env_audit_dir)
+
+    cohort_id = str(os.environ.get("PMX_EVIDENCE_COHORT_ID") or "").strip()
+    if cohort_id:
+        cohort_production_dir = (
+            REPO_ROOT / "logs" / "forecast_audits" / "cohorts" / cohort_id / "production"
+        )
+        if cohort_production_dir.exists():
+            return cohort_production_dir
+
+    production_dir = REPO_ROOT / "logs" / "forecast_audits" / "production"
+    if production_dir.exists():
+        return production_dir
+
+    return REPO_ROOT / "logs" / "forecast_audits"
+
+
+def _load_layer1_regression_contract() -> tuple[str, float]:
+    baseline_model = "BEST_SINGLE"
+    min_lift_rmse_ratio = 0.0
+    try:
+        import yaml as _yaml_layer1_contract
+
+        monitor_cfg_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        if monitor_cfg_path.exists():
+            monitor_cfg = _yaml_layer1_contract.safe_load(
+                monitor_cfg_path.read_text(encoding="utf-8")
+            ) or {}
+            regression_cfg = monitor_cfg.get("forecaster_monitoring", {}).get(
+                "regression_metrics",
+                {},
+            )
+            baseline_model = str(
+                regression_cfg.get("baseline_model", baseline_model) or baseline_model
+            ).strip().upper() or "BEST_SINGLE"
+            min_lift_rmse_ratio = float(regression_cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+    except Exception:
+        pass
+    return baseline_model, 1.0 - min_lift_rmse_ratio
 
 
 # ---------------------------------------------------------------------------
@@ -262,20 +315,8 @@ def run_layer1_forecast_quality(
 
     # WIRE-01 fix: read min_lift_rmse_ratio from forecaster_monitoring.yml so Layer 1 lift
     # computation is aligned with check_forecast_audits.py (which also uses this value).
-    _min_lift_rmse_ratio = 0.0
-    try:
-        import yaml as _yaml_wire01
-        _fm_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
-        if _fm_path.exists():
-            _fm_cfg = _yaml_wire01.safe_load(_fm_path.read_text(encoding="utf-8")) or {}
-            _min_lift_rmse_ratio = float(
-                _fm_cfg.get("forecaster_monitoring", {})
-                .get("regression_metrics", {})
-                .get("min_lift_rmse_ratio", 0.0)
-            )
-    except Exception:
-        pass
-    _lift_threshold = 1.0 - _min_lift_rmse_ratio  # 1.0 when min_lift_rmse_ratio=0.0 (default)
+    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
+    _lift_threshold = lift_threshold_rmse_ratio
 
     # Lift fractions
     def _lift_frac(ws: list[dict]) -> float:
@@ -303,6 +344,8 @@ def run_layer1_forecast_quality(
 
     metrics = {
         **quality,
+        "baseline_model": baseline_model,
+        "lift_threshold_rmse_ratio": lift_threshold_rmse_ratio,
         "lift_fraction_global": lift_global,
         "lift_fraction_recent": lift_recent,
         "samossa_da_zero_pct": samossa_da_zero_pct,
@@ -351,17 +394,27 @@ def run_layer1_forecast_quality(
                 f"coverage_ratio={coverage_ratio:.1%} < 20% "
                 f"(only {n_used}/{n_total} files are post-Phase-7.15-F format)"
             )
-        # Phase 7.25: advisory WARN when CI spans zero (informational — does not override FAIL)
-        if not sig["insufficient_data"] and sig["ci_low"] <= 0.0 and n_used >= 20:
-            status = "WARN"
-            reasons.append(
-                f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
-                f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
-            )
+        # Phase 7.25/7.37: spans-zero CI → advisory WARN (only from PASS, requires ci_high >= 0)
+        if not sig["insufficient_data"] and n_used >= 20:
+            if sig["ci_low"] <= 0.0 and sig["ci_high"] >= 0.0:
+                status = "WARN"
+                reasons.append(
+                    f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] spans zero "
+                    f"(win_fraction={sig['lift_win_fraction']:.1%}) -- lift not statistically confirmed"
+                )
+
+    # Phase 7.37: definitively negative CI → hard FAIL (promotes WARN to FAIL; both bounds < 0)
+    if not sig["insufficient_data"] and n_used >= 20 and sig["ci_high"] < 0.0:
+        status = "FAIL"
+        reasons.append(
+            f"lift CI [{sig['ci_low']:.4f}, {sig['ci_high']:.4f}] definitively negative "
+            f"(win_fraction={sig['lift_win_fraction']:.1%}) -- ensemble consistently worse than best single"
+        )
 
     reason_str = " | " + "; ".join(reasons) if reasons else ""
     summary = (
-        f"{status} | lift_global={lift_global:.3f} lift_recent={lift_recent:.3f} "
+        f"{status} | baseline={baseline_model} lift_threshold={lift_threshold_rmse_ratio:.3f} "
+        f"lift_global={lift_global:.3f} lift_recent={lift_recent:.3f} "
         f"samossa_da_zero={samossa_da_zero_pct:.1%} n_used={n_used}{reason_str}"
     )
     return LayerResult(layer=1, name="Forecast Quality", status=status, metrics=metrics, summary=summary)
@@ -846,8 +899,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--audit-dir",
-        default=str(REPO_ROOT / "logs" / "forecast_audits"),
-        help="Directory containing forecast_audit_*.json files (Layer 1)",
+        default=None,
+        help=(
+            "Directory containing forecast_audit_*.json files (Layer 1). "
+            "Default resolution: TS_FORECAST_AUDIT_DIR -> active cohort production dir "
+            "-> logs/forecast_audits/production -> logs/forecast_audits"
+        ),
     )
     parser.add_argument(
         "--db",
@@ -872,7 +929,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     layers_to_run: list[int] = [1, 2, 3, 4] if args.layer == "all" else [int(args.layer)]
-    audit_dir = Path(args.audit_dir)
+    audit_dir = _resolve_layer1_audit_dir(args.audit_dir)
     db_path = Path(args.db)
     jsonl_path = Path(args.jsonl_path)
 

@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from check_model_improvement import (
     LAYER_REQUIRED_KEYS,
+    _resolve_layer1_audit_dir,
     LayerResult,
     compare_baseline,
     run_layer1_forecast_quality,
@@ -76,8 +77,11 @@ class TestLayer1ForecastQuality:
         # 2 of 3 fixtures have lift (healthy: 1.30<1.40, ensemble_lift: 1.60<1.85)
         # samossa_da_zero: ensemble 1.25 > best_single 1.10 -> no lift
         assert result.metrics["lift_fraction_global"] == pytest.approx(2 / 3, abs=0.02)
+        assert result.metrics["baseline_model"] == "BEST_SINGLE"
+        assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
         # Only 3 windows < warn_coverage_threshold=50 -> WARN
         assert result.status == "WARN"
+        assert "baseline=BEST_SINGLE" in result.summary
 
     def test_warns_when_samossa_da_zero_pct_exceeds_threshold(self, tmp_path):
         """All 3 fixture files replaced with copies having SAMOSSA DA=0.0."""
@@ -110,6 +114,65 @@ class TestLayer1ForecastQuality:
         assert result.metrics["n_used_windows"] == 3
         assert result.status == "WARN"
         assert "coverage_threshold" in result.summary or "n_used" in result.summary
+
+    def test_fails_when_ci_definitively_negative(self, tmp_path):
+        """25 windows where ensemble RMSE > best-single RMSE → CI fully below zero → FAIL."""
+        for i in range(25):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.2, "directional_accuracy": 0.5, "smape": 2.0},
+                        "samossa":  {"rmse": 1.3, "directional_accuracy": 0.5, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.4, "directional_accuracy": 0.4, "smape": 3.0},
+                        "ensemble": {"rmse": 1.6, "directional_accuracy": 0.4},
+                    },
+                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
+                },
+            }
+            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
+        # warn_coverage_threshold=25 so n_used=25 passes; min_windows_for_fail=100 so
+        # existing lift_global FAIL path doesn't fire — only the CI path should produce FAIL.
+        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
+        assert result.status == "FAIL"
+        assert "definitively negative" in result.summary
+
+    def test_warns_when_ci_spans_zero(self, tmp_path, monkeypatch):
+        """CI spanning zero (ci_low<0, ci_high>0) with sufficient windows → WARN, not FAIL."""
+        import ensemble_health_audit  # ensure module is in sys.modules for monkeypatching
+
+        for i in range(25):
+            audit = {
+                "dataset": {"ticker": f"T{i}", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
+                "summary": {"forecast_horizon": 5},
+                "artifacts": {
+                    "evaluation_metrics": {
+                        "garch":    {"rmse": 1.3, "directional_accuracy": 0.6, "smape": 2.0},
+                        "samossa":  {"rmse": 1.4, "directional_accuracy": 0.5, "smape": 2.5},
+                        "mssa_rl":  {"rmse": 1.5, "directional_accuracy": 0.4, "smape": 3.0},
+                        "ensemble": {"rmse": 1.2, "directional_accuracy": 0.5},
+                    },
+                    "ensemble_weights": {"garch": 0.33, "samossa": 0.34, "mssa_rl": 0.33},
+                },
+            }
+            (tmp_path / f"forecast_audit_{i:03d}.json").write_text(json.dumps(audit))
+        # Force CI to span zero: ci_low < 0 but ci_high > 0
+        monkeypatch.setattr(
+            ensemble_health_audit,
+            "compute_lift_significance",
+            lambda *a, **kw: {
+                "mean_lift": 0.02,
+                "ci_low": -0.04,
+                "ci_high": 0.08,
+                "lift_win_fraction": 0.60,
+                "insufficient_data": False,
+            },
+        )
+        result = run_layer1_forecast_quality(tmp_path, warn_coverage_threshold=25)
+        assert result.status == "WARN"
+        assert "spans zero" in result.summary
+        assert "definitively negative" not in result.summary
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +459,55 @@ class TestCLIExitCodes:
             "--db", str(tmp_path / "nonexistent.db"),
         ])
         assert exit_code == 1
+
+
+class TestLayer1AuditDirResolution:
+    def test_prefers_explicit_audit_dir_over_env_and_repo_defaults(self, tmp_path, monkeypatch):
+        explicit_dir = tmp_path / "explicit"
+        explicit_dir.mkdir()
+        env_dir = tmp_path / "env"
+        env_dir.mkdir()
+
+        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
+        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cohort_alpha")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir(explicit_dir)
+        assert resolved == explicit_dir
+
+    def test_prefers_ts_forecast_audit_dir_env_when_no_explicit_override(self, tmp_path, monkeypatch):
+        env_dir = tmp_path / "cohorts" / "env_active" / "production"
+        env_dir.mkdir(parents=True)
+
+        monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(env_dir))
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == env_dir
+
+    def test_uses_active_cohort_production_dir_before_shared_production_dir(self, tmp_path, monkeypatch):
+        cohort_dir = tmp_path / "logs" / "forecast_audits" / "cohorts" / "cleanroom_a" / "production"
+        cohort_dir.mkdir(parents=True)
+        fallback_production = tmp_path / "logs" / "forecast_audits" / "production"
+        fallback_production.mkdir(parents=True)
+
+        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
+        monkeypatch.setenv("PMX_EVIDENCE_COHORT_ID", "cleanroom_a")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == cohort_dir
+
+    def test_falls_back_to_shared_production_dir_when_no_env_or_cohort(self, tmp_path, monkeypatch):
+        production_dir = tmp_path / "logs" / "forecast_audits" / "production"
+        production_dir.mkdir(parents=True)
+
+        monkeypatch.delenv("TS_FORECAST_AUDIT_DIR", raising=False)
+        monkeypatch.delenv("PMX_EVIDENCE_COHORT_ID", raising=False)
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        resolved = _resolve_layer1_audit_dir()
+        assert resolved == production_dir
 
 
 # ---------------------------------------------------------------------------
