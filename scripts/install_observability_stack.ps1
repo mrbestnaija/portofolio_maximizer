@@ -13,6 +13,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $startupCmd = Join-Path $startupDir "PMX-Observability-Stack.cmd"
 $toolsRoot = Join-Path $repoRoot "tools\observability"
+$DefaultPrometheusZipUrl = "https://github.com/prometheus/prometheus/releases/download/v3.10.0/prometheus-3.10.0.windows-amd64.zip"
+$DefaultAlertmanagerZipUrl = "https://github.com/prometheus/alertmanager/releases/download/v0.31.1/alertmanager-0.31.1.windows-amd64.zip"
+$DefaultGrafanaZipUrl = "https://dl.grafana.com/oss/release/grafana-12.4.2.windows-amd64.zip"
 
 function Write-Status {
     param([string]$Message)
@@ -48,9 +51,18 @@ function Expand-OfficialZip {
     New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
     $tmpZip = Join-Path $env:TEMP ("pmx_" + $Name + ".zip")
     $tmpDir = Join-Path $env:TEMP ("pmx_" + $Name + "_extract")
-    if (Test-Path $tmpZip) { Remove-Item -Force $tmpZip }
     if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
-    Invoke-WebRequest -Uri $Url -OutFile $tmpZip
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        Write-Status ("downloading " + $Name + " via curl resume -> " + $tmpZip)
+        & curl.exe -L --fail --retry 5 --retry-delay 5 --retry-all-errors -C - $Url -o $tmpZip
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl download failed for $Name from $Url (exit $LASTEXITCODE)"
+        }
+    }
+    else {
+        Write-Status ("downloading " + $Name + " via Invoke-WebRequest -> " + $tmpZip)
+        Invoke-WebRequest -Uri $Url -OutFile $tmpZip -TimeoutSec 0
+    }
     Expand-Archive -LiteralPath $tmpZip -DestinationPath $tmpDir -Force
     $root = Get-ChildItem -Path $tmpDir | Select-Object -First 1
     if (-not $root) {
@@ -76,15 +88,22 @@ New-Item -ItemType Directory -Force -Path `
     $toolsRoot | Out-Null
 
 if ($DownloadOfficialBinaries) {
-    if ($PrometheusZipUrl) {
-        Expand-OfficialZip -Url $PrometheusZipUrl -Name "prometheus" -DestinationRoot $toolsRoot
+    if (-not $PrometheusZipUrl) {
+        $PrometheusZipUrl = $DefaultPrometheusZipUrl
+        Write-Status ("using_default_url prometheus " + $PrometheusZipUrl)
     }
-    if ($AlertmanagerZipUrl) {
-        Expand-OfficialZip -Url $AlertmanagerZipUrl -Name "alertmanager" -DestinationRoot $toolsRoot
+    if (-not $AlertmanagerZipUrl) {
+        $AlertmanagerZipUrl = $DefaultAlertmanagerZipUrl
+        Write-Status ("using_default_url alertmanager " + $AlertmanagerZipUrl)
     }
-    if ($GrafanaZipUrl) {
-        Expand-OfficialZip -Url $GrafanaZipUrl -Name "grafana" -DestinationRoot $toolsRoot
+    if (-not $GrafanaZipUrl) {
+        $GrafanaZipUrl = $DefaultGrafanaZipUrl
+        Write-Status ("using_default_url grafana " + $GrafanaZipUrl)
     }
+
+    Expand-OfficialZip -Url $PrometheusZipUrl -Name "prometheus" -DestinationRoot $toolsRoot
+    Expand-OfficialZip -Url $AlertmanagerZipUrl -Name "alertmanager" -DestinationRoot $toolsRoot
+    Expand-OfficialZip -Url $GrafanaZipUrl -Name "grafana" -DestinationRoot $toolsRoot
 }
 
 Install-StartupShortcut

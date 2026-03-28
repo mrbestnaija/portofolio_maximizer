@@ -103,9 +103,17 @@ Repo-owned startup/provisioning scripts:
 Installer behavior:
 
 - creates required repo-local data/log directories
-- optionally downloads official Windows zip archives when explicit URLs are supplied
+- downloads repo-pinned official Windows zip archives when `-DownloadOfficialBinaries` is supplied without placeholders
+- still allows explicit URL overrides for pinned/manual installs
 - installs a per-user Startup shortcut:
   - `PMX-Observability-Stack.cmd`
+
+Recommended install from PowerShell:
+
+```powershell
+Set-Location C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
+& .\scripts\install_observability_stack.ps1 -DownloadOfficialBinaries
+```
 
 ## Grafana Role
 

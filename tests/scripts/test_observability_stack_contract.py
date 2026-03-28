@@ -74,6 +74,10 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
 
     assert 'PMX-Observability-Stack.cmd' in install_text
     assert '[switch]$DownloadOfficialBinaries' in install_text
+    assert '$DefaultPrometheusZipUrl' in install_text
+    assert '$DefaultAlertmanagerZipUrl' in install_text
+    assert '$DefaultGrafanaZipUrl' in install_text
+    assert 'curl.exe -L --fail --retry 5 --retry-delay 5 --retry-all-errors -C -' in install_text
     assert 'start_observability_stack.ps1' in install_text
     assert 'start_pmx_observability_exporter.ps1' in stack_text
     assert 'start_pmx_alertmanager_bridge.ps1' in stack_text
