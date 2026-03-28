@@ -99,6 +99,7 @@ Repo-owned startup/provisioning scripts:
 - `scripts/start_grafana.ps1`
 - `scripts/start_observability_stack.ps1`
 - `scripts/stop_observability_stack.ps1`
+- `scripts/status_observability_stack.ps1`
 - `scripts/install_observability_stack.ps1`
 
 Installer behavior:
@@ -121,11 +122,13 @@ Operator controls:
 ```powershell
 & .\scripts\start_observability_stack.ps1
 & .\scripts\stop_observability_stack.ps1
+& .\scripts\status_observability_stack.ps1
 ```
 
 `start_observability_stack.ps1` is idempotent: healthy services are detected and skipped instead of starting duplicate processes.
 `stop_observability_stack.ps1` first requests localhost `/shutdown` for the Python sidecars, then falls back to process termination for any service still holding a port.
 If startup reports `already_healthy_legacy` for a Python sidecar, the service is healthy but was started from an older build that does not expose graceful `/shutdown` yet; the next clean restart will move it onto the current contract.
+`status_observability_stack.ps1 -Json` is the canonical way to see whether each service is `healthy`, whether a sidecar is `current` vs `legacy`, and which listener PIDs currently own the stack ports.
 
 ## Grafana Role
 

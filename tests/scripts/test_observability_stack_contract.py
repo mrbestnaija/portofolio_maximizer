@@ -67,6 +67,7 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     install_text = _read("scripts/install_observability_stack.ps1")
     stack_text = _read("scripts/start_observability_stack.ps1")
     stop_text = _read("scripts/stop_observability_stack.ps1")
+    status_text = _read("scripts/status_observability_stack.ps1")
     prometheus_text = _read("scripts/start_prometheus.ps1")
     alertmanager_text = _read("scripts/start_alertmanager.ps1")
     grafana_text = _read("scripts/start_grafana.ps1")
@@ -90,6 +91,7 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'start_grafana.ps1' in stack_text
     assert '[switch]$Foreground' in stack_text
     assert 'stop_observability_stack.ps1' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
+    assert 'status_observability_stack.ps1' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
     assert 'Stop-ObservedProcesses' in stop_text
     assert 'Request-LocalShutdown' in stop_text
     assert 'Wait-PortClosed' in stop_text
@@ -105,6 +107,11 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'function Get-ListeningProcessIdsByPort' in helper_text
     assert 'function Wait-PortClosed' in helper_text
     assert 'function Request-LocalShutdown' in helper_text
+    assert 'Get-ServiceStatusRow' in status_text
+    assert '[switch]$Json' in status_text
+    assert 'ConvertTo-Json -Depth 6' in status_text
+    assert 'already_healthy_legacy' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
+    assert 'mode = "legacy"' in status_text
     assert 'Normalize-PathCandidates @(' in prometheus_text
     assert 'Normalize-PathCandidates @(' in alertmanager_text
     assert 'Normalize-PathCandidates @(' in grafana_text
