@@ -1,5 +1,6 @@
 param(
-    [switch]$Json
+    [switch]$Json,
+    [switch]$RequireCurrent
 )
 
 Set-StrictMode -Version Latest
@@ -15,7 +16,7 @@ function Get-ServiceStatusRow {
         [switch]$RequireShutdownSupport
     )
 
-    $processIds = @(Get-ListeningProcessIdsByPort -Port $Port)
+    $processIds = @(Get-ListeningProcessIdsByPort -Port $Port | Sort-Object -Unique)
     $healthy = Test-HttpHealthy -Url $HealthUrl -TimeoutSec 5
     $healthPayload = Get-HttpJson -Url $HealthUrl -TimeoutSec 5
 
@@ -76,34 +77,55 @@ $services = @(
 $allHealthy = @($services | Where-Object { -not $_.healthy }).Count -eq 0
 $legacySidecars = @($services | Where-Object { $_.mode -eq "legacy" }).Count
 $summary = [ordered]@{
-    status = $(if ($allHealthy) { "ok" } else { "degraded" })
+    status = $(
+        if (-not $allHealthy) {
+            "degraded"
+        }
+        elseif ($legacySidecars -gt 0) {
+            "legacy"
+        }
+        else {
+            "ok"
+        }
+    )
     all_healthy = $allHealthy
     legacy_sidecar_count = $legacySidecars
+    require_current = [bool]$RequireCurrent
     services = $services
 }
 
 if ($Json) {
     $summary | ConvertTo-Json -Depth 6
-    exit 0
+}
+else {
+    foreach ($service in $services) {
+        $parts = @(
+            $service.label,
+            ("state=" + $service.state),
+            ("port=" + $service.port)
+        )
+        if ($service.mode -ne "n/a") {
+            $parts += ("mode=" + $service.mode)
+        }
+        if ($service.listener_pids.Count -gt 0) {
+            $parts += ("pid=" + ($service.listener_pids -join ","))
+        }
+        Write-Status ($parts -join " ")
+    }
+
+    $summaryLine = "status=" + $summary.status
+    if ($legacySidecars -gt 0) {
+        $summaryLine += " legacy_sidecar_count=" + $legacySidecars
+    }
+    Write-Status $summaryLine
 }
 
-foreach ($service in $services) {
-    $parts = @(
-        $service.label,
-        ("state=" + $service.state),
-        ("port=" + $service.port)
-    )
-    if ($service.mode -ne "n/a") {
-        $parts += ("mode=" + $service.mode)
-    }
-    if ($service.listener_pids.Count -gt 0) {
-        $parts += ("pid=" + ($service.listener_pids -join ","))
-    }
-    Write-Status ($parts -join " ")
+if (-not $allHealthy) {
+    exit 1
 }
 
-$summaryLine = "status=" + $summary.status
-if ($legacySidecars -gt 0) {
-    $summaryLine += " legacy_sidecar_count=" + $legacySidecars
+if ($RequireCurrent -and $legacySidecars -gt 0) {
+    exit 2
 }
-Write-Status $summaryLine
+
+exit 0

@@ -109,8 +109,14 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'function Request-LocalShutdown' in helper_text
     assert 'Get-ServiceStatusRow' in status_text
     assert '[switch]$Json' in status_text
+    assert '[switch]$RequireCurrent' in status_text
     assert 'ConvertTo-Json -Depth 6' in status_text
+    assert 'status = $(' in status_text
+    assert '"legacy"' in status_text
+    assert 'legacy_sidecar_count' in status_text
+    assert 'exit 2' in status_text
     assert 'already_healthy_legacy' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
+    assert '-RequireCurrent' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
     assert 'mode = "legacy"' in status_text
     assert 'Normalize-PathCandidates @(' in prometheus_text
     assert 'Normalize-PathCandidates @(' in alertmanager_text
