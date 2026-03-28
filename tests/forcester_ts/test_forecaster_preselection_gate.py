@@ -110,7 +110,7 @@ class TestDisableDefaultFallbackSelection:
         forecaster = TimeSeriesForecaster(forecast_horizon=3)
         forecaster._latest_metrics = {}  # no prior OOS data
         forecaster._model_summaries = {
-            "samossa": {"trend_strength": 0.002}  # flat: well below 0.05 threshold
+            "samossa": {"trend_strength": 0.002}  # flat: well below 0.10 threshold
         }
         results = _make_results()
 
@@ -150,6 +150,37 @@ class TestDisableDefaultFallbackSelection:
         )
         # Tier 1 wins: GARCH has best OOS RMSE
         assert preferred.upper() == "GARCH"
+
+    def test_near_flat_trend_msft_range_skips_samossa(self):
+        """Tier 2 fires for trend_strength in the 0.069-0.092 MSFT range.
+
+        Live observation (2026-03-28): MSFT SAMoSSA trend_strength=0.069-0.092
+        produced expected_return=0.0 despite being above the old 0.05 threshold.
+        Threshold raised to 0.10 to catch this near-flat regime.
+        """
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}
+        for ts in (0.069, 0.080, 0.092, 0.099):
+            forecaster._model_summaries = {"samossa": {"trend_strength": ts}}
+            preferred = forecaster._select_disable_default_fallback(
+                _make_results(), ensemble_meta={"primary_model": "SAMOSSA"}
+            )
+            assert preferred.upper() == "MSSA_RL", (
+                f"trend_strength={ts} should route to MSSA_RL (below 0.10 threshold)"
+            )
+
+    def test_above_new_threshold_stays_with_samossa(self):
+        """trend_strength >= 0.10 keeps SAMoSSA as Tier 3 default (not flat)."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}
+        for ts in (0.10, 0.15, 0.30):
+            forecaster._model_summaries = {"samossa": {"trend_strength": ts}}
+            preferred = forecaster._select_disable_default_fallback(
+                _make_results(), ensemble_meta={"primary_model": "SAMOSSA"}
+            )
+            assert preferred.upper() == "SAMOSSA", (
+                f"trend_strength={ts} should keep SAMOSSA (at or above 0.10 threshold)"
+            )
 
     def test_flat_trend_falls_through_to_garch_when_mssa_rl_absent(self):
         """Tier 2: if MSSA_RL absent, next preference is GARCH."""

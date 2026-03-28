@@ -678,10 +678,23 @@ class TimeSeriesSignalGenerator:
 
             # For 1-day signals, step-1 CI == terminal CI; they're identical.
             # For multi-step signals, use terminal CI so SNR reflects full horizon uncertainty.
+            # Exception: when MSSA_RL is the DISABLE_DEFAULT fallback, use step-1 CI.
+            # MSSA_RL's sqrt(step+1) growth over-widens CI for range-bound periods;
+            # the near-term directional call is the relevant signal edge in fallback mode.
             _forecast_horizon = getattr(self, "_forecast_horizon", None) or self.config.get(
                 "forecast_horizon", 30
             ) if hasattr(self, "config") and isinstance(self.config, dict) else 30
+            _effective_default = str(forecast_bundle.get("default_model") or "").strip().upper()
+            # Only trust default_model label when the resolver actually used mean_forecast.
+            # If mean_forecast was missing and the resolver fell through to another model
+            # payload, default_model is stale and applying MSSA_RL-specific logic would
+            # be a wiring mismatch (softer gate applied to a different model's CI).
+            _mssa_rl_fallback = (
+                _effective_default == "MSSA_RL" and forecast_source == "mean_forecast"
+            )
             if isinstance(_forecast_horizon, int) and _forecast_horizon <= 1:
+                lower_ci, upper_ci = self._extract_ci_bounds_step1(primary_forecast)
+            elif _mssa_rl_fallback:
                 lower_ci, upper_ci = self._extract_ci_bounds_step1(primary_forecast)
             else:
                 lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
@@ -691,16 +704,43 @@ class TimeSeriesSignalGenerator:
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
             )
+            # MSSA_RL fallback uses a softer SNR threshold capped at 1.0.
+            # min() prevents inversion if the global threshold is already below 1.0.
+            _snr_threshold = (
+                min(self._min_signal_to_noise, 1.0)
+                if _mssa_rl_fallback
+                else self._min_signal_to_noise
+            )
             _snr_gate_blocked = False
-            if snr is not None and self._min_signal_to_noise > 0 and snr < self._min_signal_to_noise:
+            if snr is not None and _snr_threshold > 0 and snr < _snr_threshold:
                 logger.info(
-                    "[SNR_GATE] %s: SNR %.3f < threshold %.3f — zeroing net return "
+                    "[SNR_GATE] %s: SNR %.3f < threshold %.3f (mssa_rl_fallback=%s) — zeroing net return "
                     "(CI too wide relative to expected return; signal suppressed)",
-                    ticker, snr, self._min_signal_to_noise,
+                    ticker, snr, _snr_threshold, _mssa_rl_fallback,
                 )
                 net_trade_return = 0.0
                 net_expected_return = 0.0
                 _snr_gate_blocked = True
+            elif _mssa_rl_fallback and snr is None:
+                # MSSA_RL's baseline_variance should always produce a finite CI.
+                # SNR=None here means zero-width or degenerate CI — block rather than
+                # silently pass, which would be a threshold dodge via missing data.
+                logger.warning(
+                    "[SNR_GATE] %s: MSSA_RL fallback has degenerate CI (SNR=None) — "
+                    "zeroing net return (baseline_variance likely zero)",
+                    ticker,
+                )
+                net_trade_return = 0.0
+                net_expected_return = 0.0
+                _snr_gate_blocked = True
+            elif snr is None and self._min_signal_to_noise > 0:
+                # Non-MSSA_RL path: CI unavailable, gate cannot fire, but log so the
+                # absence of SNR filtering is visible in diagnostics (not a silent pass).
+                logger.debug(
+                    "[SNR_GATE] %s: SNR unavailable (CI missing or degenerate) — "
+                    "gate skipped for model=%s",
+                    ticker, _effective_default or "unknown",
+                )
 
             model_agreement = self._check_model_agreement(forecast_bundle)
             diagnostics = self._evaluate_diagnostics_details(forecast_bundle)

@@ -1541,14 +1541,34 @@ class TimeSeriesForecaster:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
             # Prefer SAMOSSA as the default TS baseline when available,
-            # falling back to SARIMAX for backward compatibility.
-            if results.get("samossa_forecast") is not None:
-                results["mean_forecast"] = results.get("samossa_forecast")
-                results["default_model"] = "SAMOSSA"
+            # falling back to SARIMAX, MSSA_RL, then GARCH.
+            # Always set default_model to match whatever ends up in mean_forecast so
+            # downstream routing (MSSA_RL fallback gate, audit artifacts) is consistent.
+            _non_ensemble_order = [
+                ("samossa_forecast", "SAMOSSA"),
+                ("sarimax_forecast", "SARIMAX"),
+                ("mssa_rl_forecast", "MSSA_RL"),
+                ("garch_forecast", "GARCH"),
+            ]
+            _selected_payload = None
+            _selected_label = None
+            for _key, _label in _non_ensemble_order:
+                if results.get(_key) is not None:
+                    _selected_payload = results[_key]
+                    _selected_label = _label
+                    break
+            if _selected_payload is not None:
+                results["mean_forecast"] = _selected_payload
+                results["default_model"] = _selected_label
             else:
-                results["mean_forecast"] = results.get("sarimax_forecast")
-                if results["mean_forecast"] is not None:
-                    results["default_model"] = "SARIMAX"
+                # All model forecasts failed — leave mean_forecast unset so
+                # _resolve_primary_forecast returns None and the signal becomes HOLD.
+                logger.error(
+                    "No model forecast available in non-ensemble branch; "
+                    "signal will degrade to HOLD."
+                )
+                results["mean_forecast"] = None
+                results["default_model"] = None
 
         if mc_enabled_resolved:
             self._record_model_event("monte_carlo", "forecast_start", horizon=horizon)
@@ -2061,11 +2081,13 @@ class TimeSeriesForecaster:
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
 
     # Minimum SAMoSSA trend_strength to keep it as preferred fallback.
-    # Below this value the SSA reconstruction is flat (slope≈0), producing
-    # expected_return=0 → SNR_GATE → HOLD every cycle.  Empirical value from
-    # AAPL/MSFT runs: trend_strength=0.002 is clearly flat; 0.05 is a safe
-    # guard that leaves headroom for weak-but-real trends.
-    _SAMOSSA_FLAT_TREND_THRESHOLD: float = 0.05
+    # Below this value the SSA reconstruction is near-flat (slope≈0), producing
+    # expected_return≈0 → SNR_GATE → HOLD every cycle.  Raised from 0.05→0.10
+    # after empirical observation: AAPL trend_strength=0.002 (clearly flat) and
+    # MSFT trend_strength=0.069-0.092 both produced expected_return=0.0 in live
+    # runs despite trend_strength > 0.05.  0.10 captures the "near-flat" regime
+    # while leaving clearly-trending reconstructions (>0.10) with SAMoSSA.
+    _SAMOSSA_FLAT_TREND_THRESHOLD: float = 0.10
 
     def _select_disable_default_fallback(
         self,

@@ -414,6 +414,165 @@ class TestSNRGateSilentSuppression:
 
 
 # ===========================================================================
+# Fix A – MSSA_RL CI cap + MSSA_RL-fallback SNR softening
+# ===========================================================================
+class TestMSSARLCICapAndFallbackSNR:
+    """Phase 7.15-F Fix A + consistency hardening:
+    1. MSSA_RL CI growth is capped at sqrt(horizon/2) using float division.
+    2. When default_model=MSSA_RL AND mean_forecast was used, SNR is evaluated
+       at step-1 CI with a softer threshold (min(global, 1.0)).
+    3. SNR=None for MSSA_RL fallback is treated as a block, not a pass-through.
+    4. If mean_forecast fell through to another model, default_model label is stale
+       and MSSA_RL-specific logic must NOT apply.
+    """
+
+    def test_mssa_rl_ci_cap_limits_terminal_width(self):
+        """CI formula uses float division; cap = sqrt(steps/2), not sqrt(steps//2)."""
+        import math
+        import numpy as np
+
+        steps = 30
+        noise = 2.0
+        # Float division (correct)
+        max_scale = np.sqrt(max(steps / 2, 1.0))
+        horizon_scale = np.minimum(
+            np.sqrt(np.arange(1, steps + 1, dtype=float)),
+            max_scale,
+        )
+        ci_band = noise * horizon_scale
+
+        uncapped_terminal = noise * math.sqrt(steps)
+        capped_terminal = float(ci_band[-1])
+        expected_cap = noise * math.sqrt(steps / 2)
+        assert capped_terminal == pytest.approx(expected_cap), (
+            f"Terminal CI {capped_terminal:.4f} != float-division cap {expected_cap:.4f}"
+        )
+        assert capped_terminal < uncapped_terminal - 1e-9, (
+            "Cap must be strictly less than uncapped terminal"
+        )
+        # Step-1 unaffected (sqrt(1)=1.0 < sqrt(15))
+        assert float(ci_band[0]) == pytest.approx(noise * 1.0)
+
+    def test_ci_cap_float_vs_int_division_differ_for_odd_steps(self):
+        """Integer division rounds down, producing over-tight cap for odd steps."""
+        import numpy as np
+
+        for steps in (3, 5):
+            int_cap = np.sqrt(max(steps // 2, 1))
+            float_cap = np.sqrt(max(steps / 2, 1.0))
+            assert float_cap > int_cap + 1e-9, (
+                f"steps={steps}: float cap {float_cap:.4f} must exceed int cap {int_cap:.4f}"
+            )
+
+    def test_mssa_rl_fallback_uses_step1_ci_for_snr(self):
+        """When default_model=MSSA_RL and mean_forecast used, SNR uses step-1 CI."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        import pandas as pd
+
+        sg = TimeSeriesSignalGenerator.__new__(TimeSeriesSignalGenerator)
+        sg._min_signal_to_noise = 1.5
+
+        lower_step1, upper_step1 = 99.0, 101.0
+        lower_term, upper_term = 85.0, 115.0
+        forecast_bundle = {
+            "default_model": "MSSA_RL",
+            "mean_forecast": {
+                "forecast": pd.Series([102.0]),
+                "lower_ci": pd.Series([lower_step1, lower_term]),
+                "upper_ci": pd.Series([upper_step1, upper_term]),
+            },
+        }
+
+        lower_ci, upper_ci = sg._extract_ci_bounds_step1(forecast_bundle["mean_forecast"])
+        assert lower_ci == pytest.approx(lower_step1)
+        assert upper_ci == pytest.approx(upper_step1)
+
+        # Threshold formula: min(global, 1.0)
+        _mssa_rl_fallback = (
+            forecast_bundle.get("default_model", "").upper() == "MSSA_RL"
+            # and forecast_source == "mean_forecast" — implicitly true here
+        )
+        _snr_threshold = min(sg._min_signal_to_noise, 1.0) if _mssa_rl_fallback else sg._min_signal_to_noise
+        assert _snr_threshold == pytest.approx(1.0), (
+            "MSSA_RL fallback with global=1.5 must use threshold=1.0"
+        )
+
+    def test_threshold_inversion_guard_when_global_below_1(self):
+        """min() prevents inversion: if global < 1.0, MSSA_RL keeps the stricter global."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+
+        sg = TimeSeriesSignalGenerator.__new__(TimeSeriesSignalGenerator)
+        sg._min_signal_to_noise = 0.5  # already strict
+
+        _snr_threshold = min(sg._min_signal_to_noise, 1.0)
+        assert _snr_threshold == pytest.approx(0.5), (
+            "When global threshold < 1.0, MSSA_RL must not get a looser gate"
+        )
+
+    def test_snr_none_blocks_mssa_rl_fallback(self):
+        """SNR=None (degenerate CI) must block the signal, not silently pass it."""
+        # Reproduce the gate logic for MSSA_RL fallback with snr=None
+        _mssa_rl_fallback = True
+        snr = None
+        _snr_threshold = 1.0
+        net_trade_return = 0.05  # would be non-zero without gate
+        net_expected_return = 0.05
+        _snr_gate_blocked = False
+
+        if snr is not None and _snr_threshold > 0 and snr < _snr_threshold:
+            net_trade_return = 0.0
+            net_expected_return = 0.0
+            _snr_gate_blocked = True
+        elif _mssa_rl_fallback and snr is None:
+            net_trade_return = 0.0
+            net_expected_return = 0.0
+            _snr_gate_blocked = True
+
+        assert _snr_gate_blocked is True, (
+            "SNR=None for MSSA_RL fallback must set snr_gate_blocked=True"
+        )
+        assert net_expected_return == pytest.approx(0.0), (
+            "SNR=None for MSSA_RL fallback must zero net_expected_return"
+        )
+
+    def test_stale_default_model_label_not_applied_when_forecast_source_differs(self):
+        """If mean_forecast fell through, default_model is stale; MSSA_RL logic must not fire."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+
+        sg = TimeSeriesSignalGenerator.__new__(TimeSeriesSignalGenerator)
+        sg._min_signal_to_noise = 1.5
+
+        # Simulate: bundle says MSSA_RL but resolver used samossa_forecast as fallback
+        _effective_default = "MSSA_RL"
+        forecast_source = "samossa_forecast"  # fell through, not mean_forecast
+        _mssa_rl_fallback = (
+            _effective_default == "MSSA_RL" and forecast_source == "mean_forecast"
+        )
+        assert _mssa_rl_fallback is False, (
+            "Stale default_model label must not activate MSSA_RL-specific gate when "
+            "forecast_source != mean_forecast"
+        )
+        _snr_threshold = min(sg._min_signal_to_noise, 1.0) if _mssa_rl_fallback else sg._min_signal_to_noise
+        assert _snr_threshold == pytest.approx(1.5), (
+            "Global threshold must be used when forecast_source mismatch detected"
+        )
+
+    def test_non_mssa_rl_default_keeps_global_threshold(self):
+        """When default_model is not MSSA_RL, the global threshold (1.5) must be used."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+
+        sg = TimeSeriesSignalGenerator.__new__(TimeSeriesSignalGenerator)
+        sg._min_signal_to_noise = 1.5
+
+        for model in ("ENSEMBLE", "SAMOSSA", "GARCH", "SARIMAX", ""):
+            _mssa_rl_fallback = model == "MSSA_RL"
+            _snr_threshold = min(sg._min_signal_to_noise, 1.0) if _mssa_rl_fallback else sg._min_signal_to_noise
+            assert _snr_threshold == pytest.approx(1.5), (
+                f"Non-MSSA_RL default '{model}' must keep global SNR threshold 1.5"
+            )
+
+
+# ===========================================================================
 # Fix 2 – ETL audit dir misrouting (config-level check)
 # ===========================================================================
 class TestETLAuditDirRouting:

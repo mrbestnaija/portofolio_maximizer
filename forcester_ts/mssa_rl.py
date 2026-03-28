@@ -562,7 +562,15 @@ class MSSARLForecaster:
         # Scale CI to grow with sqrt(step+1): uncertainty accumulates over the horizon.
         # A flat ±noise CI based on in-sample baseline variance is too narrow at step N
         # and systematically inflates SNR for multi-step trades.
-        horizon_scale = np.sqrt(np.arange(1, steps + 1, dtype=float))
+        # Cap at sqrt(horizon/2) to prevent runaway width for range-bound, low-volatility
+        # periods where uncapped growth would push SNR below any practical threshold.
+        # Use float division (steps / 2) not integer (steps // 2): integer division
+        # rounds down, making the cap 1.0 for steps=3 instead of sqrt(1.5)=1.225.
+        max_scale = np.sqrt(max(steps / 2, 1.0))
+        horizon_scale = np.minimum(
+            np.sqrt(np.arange(1, steps + 1, dtype=float)),
+            max_scale,
+        )
         ci_band = pd.Series(noise * horizon_scale, index=future_index)
 
         return {
