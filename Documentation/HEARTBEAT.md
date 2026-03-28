@@ -1,17 +1,18 @@
 # HEARTBEAT.md
 
-## System Status (2026-03-28)
+## System Status (2026-03-28, commit 2df8b7d)
 
 - **Gate**: PASS (semantics=INCONCLUSIVE_ALLOWED, warmup expires 2026-04-15)
 - **Proof**: PASS — 40 closed trades, $+620.01 PnL, 40% WR, profit factor 1.73
 - **Proof runway**: days=10/21 (11 trading days remaining)
 - **PnL integrity**: ALL PASSED (CROSS_MODE_CONTAMINATION whitelisted 252+255)
-- **Last commit**: fbd2eb2 (fix(platt): fix pair counting bugs that blocked calibration activation)
-- **Test count**: 2090+ passed, 0 failed
+- **Last commit**: 2df8b7d (feat(gate+obs): EFFECTIVE_DEFAULT baseline, GARCH p95 guard, Platt synthetic filter, observability idempotency)
+- **Test count**: 916 passed (scripts/), 0 failed
 - **Bootstrap**: COMPLETE (2026-03-26 07:24, 9 tickers, 0 errors)
 - **Evidence hygiene**: CLEAN (invalid_context=0, missing_exec_meta=0, manifest verified=409+)
 - **Ensemble status**: DISABLE_DEFAULT (preselection ratio=1.091; threshold raised to 1.1 — will unblock on next run)
 - **Platt status**: ACTIVATION IMMINENT (bugs fixed; chronological split class guard now prevents silent LR failure)
+- **Layer 1 baseline**: EFFECTIVE_DEFAULT (causal) — lift_frac=43.3% vs 4.4% under oracle; mean_ratio=0.991
 
 ## Active Cron Jobs (OpenClaw)
 
