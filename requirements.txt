@@ -1,5 +1,6 @@
 # Supported Python runtime: >=3.10,<3.13 (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-03-16 (Security: PyJWT CVE-2026-32597; Dependabot batch: fsspec, multidict, packaging, platformdirs, statsmodels, pydantic, uvicorn)
+# Last updated: 2026-03-28 (Observability rollout: Prometheus/Alertmanager/Grafana remain external Windows binaries; exporter + alert bridge use stdlib only, so no new pip deps were added)
+# Observability note: provision Prometheus, Alertmanager, and Grafana under tools/observability or via scripts/install_observability_stack.ps1 rather than pip.
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0

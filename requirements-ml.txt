@@ -1,6 +1,7 @@
 # GPU extras validated on Python >=3.10,<3.13 under WSL `simpleTrader_env` (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-03-16 (Dependabot batch: cupy-cuda12x 14.0.0, nvidia-curand-cu12 10.3.10.19, nvidia-nvtx-cu12 12.9.79)
-# Optional ML/GPU extras (torch is also in requirements.txt for GPU-first defaults)
+# Last updated: 2026-03-28 (Observability rollout: Prometheus/Alertmanager/Grafana are external binaries and intentionally do not belong in ML extras)
+# Optional ML/GPU extras only (torch is also in requirements.txt for GPU-first defaults).
+# Observability note: keep this file GPU-focused; the Prometheus exporter + Alertmanager bridge use stdlib only and do not add ML/runtime pip requirements.
 cupy-cuda12x==14.0.0
 fastrlock==0.8.3
 nvidia-cublas-cu12==12.8.4.1

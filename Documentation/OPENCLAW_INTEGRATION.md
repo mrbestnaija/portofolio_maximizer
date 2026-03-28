@@ -592,9 +592,23 @@ Persistent gateway + WhatsApp watchdog (recommended on Windows):
 - If you intentionally need older one-shot schedulers kept, use: `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1 -KeepLegacyMaintenanceTask`
 - Remove later: `powershell -ExecutionPolicy Bypass -File scripts/install_whatsapp_watchdog.ps1 -Uninstall`
 
-The installer creates two idempotent tasks:
+The installer creates four idempotent tasks:
+- `PMX-OpenClaw-Guardian-Startup` (start guardian at Windows startup)
+- `PMX-OpenClaw-Guardian-Wake` (re-check and recover the lane after resume/wake)
 - `PMX-OpenClaw-Guardian-Logon` (start guardian on logon)
 - `PMX-OpenClaw-Guardian-KeepAlive` (re-run guardian launcher every few minutes)
+
+All four tasks invoke `start_openclaw_guardian.ps1 -EnsureFunctionalState`, so they
+do not stop at "a process exists". They run a real OpenClaw remote-workflow health
+check, attempt a gateway restart if the lane is in `FAIL`, and only force-restart the
+guardian when recovery does not succeed.
+
+If Windows denies `ONSTART` / `ONLOGON` task updates in a non-elevated shell, the
+installer also drops a per-user Startup-folder fallback:
+- `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\PMX-OpenClaw-Guardian-Startup.cmd`
+
+That fallback keeps post-boot/login recovery working without admin rights. The wake
+task still handles actual resume-from-sleep events.
 
 Important:
 - Do not run legacy `PMX-OpenClaw-Maintenance` and guardian watch mode in parallel unless you explicitly accept overlap risk.
@@ -613,9 +627,11 @@ Expected:
 - `PMX-OpenClaw-Guardian-Logon` may warn `Access is denied` in non-elevated shells; rerun elevated if task creation/update is required.
 
 2. Verify scheduler state:
-- `Get-ScheduledTask -TaskName 'PMX-OpenClaw-Guardian-KeepAlive','PMX-OpenClaw-Guardian-Logon','PMX-OpenClaw-Maintenance' | Select-Object TaskName,State,@{Name='Enabled';Expression={$_.Settings.Enabled}} | Format-Table -AutoSize`
+- `Get-ScheduledTask -TaskName 'PMX-OpenClaw-Guardian-Startup','PMX-OpenClaw-Guardian-Wake','PMX-OpenClaw-Guardian-KeepAlive','PMX-OpenClaw-Guardian-Logon','PMX-OpenClaw-Maintenance' | Select-Object TaskName,State,@{Name='Enabled';Expression={$_.Settings.Enabled}} | Format-Table -AutoSize`
 
 Expected:
+- `PMX-OpenClaw-Guardian-Startup`: `Ready`, `Enabled=True`
+- `PMX-OpenClaw-Guardian-Wake`: `Ready`, `Enabled=True`
 - `PMX-OpenClaw-Guardian-KeepAlive`: `Ready`, `Enabled=True`
 - `PMX-OpenClaw-Guardian-Logon`: `Ready`, `Enabled=True`
 - `PMX-OpenClaw-Maintenance`: `Disabled`, `Enabled=False`
