@@ -198,7 +198,14 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.startswith("/healthz"):
-            payload = json.dumps({"status": "ok", "shadow_mode": self.bridge.shadow_mode}).encode("utf-8")
+            payload = json.dumps(
+                {
+                    "status": "ok",
+                    "shadow_mode": self.bridge.shadow_mode,
+                    "shutdown_supported": True,
+                    "pid": os.getpid(),
+                }
+            ).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))

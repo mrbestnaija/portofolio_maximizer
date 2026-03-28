@@ -125,6 +125,7 @@ Operator controls:
 
 `start_observability_stack.ps1` is idempotent: healthy services are detected and skipped instead of starting duplicate processes.
 `stop_observability_stack.ps1` first requests localhost `/shutdown` for the Python sidecars, then falls back to process termination for any service still holding a port.
+If startup reports `already_healthy_legacy` for a Python sidecar, the service is healthy but was started from an older build that does not expose graceful `/shutdown` yet; the next clean restart will move it onto the current contract.
 
 ## Grafana Role
 

@@ -27,6 +27,7 @@ Ensure-RepoService `
     -StdOutPath $stdoutPath `
     -StdErrPath $stderrPath `
     -HealthUrl ("http://" + $Bind + ":" + $Port + "/healthz") `
+    -RequireShutdownSupport `
     -ExistingProcessIds $existingProcessIds `
     -StartupTimeoutSec 20 `
     -Foreground:$Foreground

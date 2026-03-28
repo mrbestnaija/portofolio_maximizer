@@ -73,6 +73,8 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     exporter_text = _read("scripts/start_pmx_observability_exporter.ps1")
     bridge_text = _read("scripts/start_pmx_alertmanager_bridge.ps1")
     helper_text = _read("scripts/observability_process_helpers.ps1")
+    exporter_py = _read("scripts/pmx_observability_exporter.py")
+    bridge_py = _read("scripts/pmx_alertmanager_bridge.py")
 
     assert 'PMX-Observability-Stack.cmd' in install_text
     assert '[switch]$DownloadOfficialBinaries' in install_text
@@ -97,6 +99,7 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'Get-ListeningProcessIdsByPort -Port 9766' in stop_text
     assert 'function Normalize-PathCandidates' in helper_text
     assert 'function Test-HttpHealthy' in helper_text
+    assert 'function Get-HttpJson' in helper_text
     assert 'function Ensure-RepoService' in helper_text
     assert 'function Stop-ObservedProcesses' in helper_text
     assert 'function Get-ListeningProcessIdsByPort' in helper_text
@@ -112,6 +115,8 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'Get-ListeningProcessIdsByPort -Port 3000' in grafana_text
     assert 'Ensure-RepoService' in exporter_text
     assert 'Ensure-RepoService' in bridge_text
+    assert '-RequireShutdownSupport' in exporter_text
+    assert '-RequireShutdownSupport' in bridge_text
     assert 'Ensure-RepoService' in prometheus_text
     assert 'Ensure-RepoService' in alertmanager_text
     assert 'Ensure-RepoService' in grafana_text
@@ -121,3 +126,7 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'PMX_GRAFANA_PROVISIONING_PATH' in grafana_text
     assert '--bind", $Bind, "--port", "$Port"' in exporter_text
     assert '--bind", $Bind, "--port", "$Port"' in bridge_text
+    assert '"shutdown_supported": True' in exporter_py
+    assert '"shutdown_supported": True' in bridge_py
+    assert '"pid": os.getpid()' in exporter_py
+    assert '"pid": os.getpid()' in bridge_py

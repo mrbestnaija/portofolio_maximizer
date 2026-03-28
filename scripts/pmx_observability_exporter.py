@@ -494,6 +494,8 @@ class ObservabilityExporter:
         healthy = bool(collectors)
         return {
             "status": "ok" if healthy else "starting",
+            "shutdown_supported": True,
+            "pid": os.getpid(),
             "timestamp_utc": snapshot.get("timestamp_utc"),
             "warning_count": len(snapshot.get("warnings", [])),
             "warnings": snapshot.get("warnings", []),

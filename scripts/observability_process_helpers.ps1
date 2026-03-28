@@ -76,6 +76,31 @@ function Test-HttpHealthy {
     }
 }
 
+function Get-HttpJson {
+    param(
+        [string]$Url,
+        [int]$TimeoutSec = 5
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $null
+    }
+
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec $TimeoutSec -Uri $Url
+        if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 300) {
+            return $null
+        }
+        if ([string]::IsNullOrWhiteSpace($response.Content)) {
+            return $null
+        }
+        return ($response.Content | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
 function Wait-HttpHealthy {
     param(
         [string]$Url,
@@ -225,6 +250,7 @@ function Ensure-RepoService {
         [Parameter(Mandatory = $true)][string]$StdOutPath,
         [Parameter(Mandatory = $true)][string]$StdErrPath,
         [string]$HealthUrl = "",
+        [switch]$RequireShutdownSupport,
         [AllowEmptyCollection()][int[]]$ExistingProcessIds = @(),
         [int]$StartupTimeoutSec = 20,
         [switch]$Foreground
@@ -244,11 +270,26 @@ function Ensure-RepoService {
     $processIds = @($ExistingProcessIds | Where-Object { $_ })
 
     if ($HealthUrl -and (Test-HttpHealthy -Url $HealthUrl)) {
+        $statusPrefix = "already_healthy"
+        if ($RequireShutdownSupport) {
+            $healthPayload = Get-HttpJson -Url $HealthUrl
+            $supportsShutdown = $false
+            if ($null -ne $healthPayload) {
+                $propertyNames = @($healthPayload.PSObject.Properties | Select-Object -ExpandProperty Name)
+                if ($propertyNames -contains "shutdown_supported") {
+                    $supportsShutdown = [bool]$healthPayload.shutdown_supported
+                }
+            }
+            if (-not $supportsShutdown) {
+                $statusPrefix = "already_healthy_legacy"
+            }
+        }
+
         if ($processIds.Count -gt 0) {
-            Write-Status ("already_healthy " + $Label + " pid=" + ($processIds -join ","))
+            Write-Status ($statusPrefix + " " + $Label + " pid=" + ($processIds -join ","))
         }
         else {
-            Write-Status ("already_healthy " + $Label)
+            Write-Status ($statusPrefix + " " + $Label)
         }
         return
     }
