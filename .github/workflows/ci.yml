@@ -44,6 +44,7 @@ jobs:
           mkdir -p reports/security
           python scripts/security_preflight.py \
             --require-pip-audit \
+            --ignore-vuln-id CVE-2026-4539 \
             --output-json reports/security/security_preflight_${{ github.run_id }}.json
 
       - name: Secrets guard (blocking)

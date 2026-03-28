@@ -1,7 +1,7 @@
 # Supported Python runtime: >=3.10,<3.13 (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-03-28 (Security: cryptography CVE-2026-34073 46.0.5->46.0.6; requests CVE-2026-25645 2.32.5->2.33.0; PyJWT drift corrected to 2.12.0)
+# Last updated: 2026-03-28 (Security: deepdiff 8.6.1->8.6.2 CVE-2026-33155; lxml-html-clean 0.4.3->0.4.4 CVE-2026-28348/28350; cryptography 46.0.5->46.0.6; requests 2.32.5->2.33.0)
 # Observability note: provision Prometheus, Alertmanager, and Grafana under tools/observability or via scripts/install_observability_stack.ps1 rather than pip.
-# Unfixed: pygments 2.19.2 CVE-2026-4539 (local-only ReDoS, no fix released); deepdiff/lxml-html-clean are transitive deps, not pinned here.
+# Unfixed: pygments 2.19.2 CVE-2026-4539 (local-only ReDoS, no fix released); ignored in CI via --ignore-vuln-id.
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
@@ -22,6 +22,7 @@ contourpy==1.3.3; python_version >= "3.11" and python_version < "3.13"
 curl_cffi==0.13.0
 cryptography==46.0.6
 cycler==0.12.1
+deepdiff==8.6.2
 distro==1.9.0
 docstring_parser==0.17.0
 fastapi==0.128.6
@@ -39,6 +40,7 @@ jiter==0.11.0
 joblib==1.5.2
 kiwisolver==1.4.9
 lxml==6.0.2
+lxml-html-clean==0.4.4
 MarkupSafe==3.0.3
 matplotlib==3.10.7
 mpmath==1.3.0
