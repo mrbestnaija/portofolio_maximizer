@@ -332,12 +332,22 @@ def run_layer1_forecast_quality(
     # and should not be silently treated as "no data" — they are structurally missing
     # the evaluation_metrics.ensemble key needed for lift calculations.
     coverage_ratio = n_used / n_total if n_total > 0 else 0.0
+
+    # Baseline resolution observability: track how often EFFECTIVE_DEFAULT actually
+    # resolved from audit data vs silently fell back to the oracle BEST_SINGLE.
+    n_ed_resolved = sum(1 for w in windows if w.get("baseline_mode") == "EFFECTIVE_DEFAULT")
+    n_ed_fallback = (n_used - n_ed_resolved) if baseline_model == "EFFECTIVE_DEFAULT" else 0
+    ed_fallback_rate = n_ed_fallback / n_used if n_used > 0 else 0.0
+
     quality: dict = {
         "n_total_files": n_total,
         "n_skipped_malformed": n_malformed,
         "n_skipped_missing_metrics": n_missing,
         "n_used_windows": n_used,
         "coverage_ratio": coverage_ratio,
+        "n_effective_default_resolved": n_ed_resolved,
+        "n_effective_default_fallback": n_ed_fallback,
+        "effective_default_fallback_rate": ed_fallback_rate,
     }
 
     if n_used == 0:

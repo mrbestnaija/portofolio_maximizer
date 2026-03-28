@@ -100,6 +100,22 @@ def load_audit_windows(audit_dir: Path, dedupe: bool = True) -> list[dict]:
 # Extract per-window metrics
 # ---------------------------------------------------------------------------
 
+def _load_baseline_mode() -> str:
+    """Read baseline_model from config/forecaster_monitoring.yml; default BEST_SINGLE."""
+    try:
+        cfg_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        return (
+            (cfg or {})
+            .get("forecaster_monitoring", {})
+            .get("regression_metrics", {})
+            .get("baseline_model", "BEST_SINGLE")
+        ).strip().upper()
+    except Exception:
+        return "BEST_SINGLE"
+
+
 def _get_regime(audit: dict) -> str | None:
     """Extract detected regime from runs list (first 'regime' model run)."""
     for run in audit.get("runs", []):
@@ -156,8 +172,10 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
         return None
     ensemble_rmse = float(ensemble_rmse)
 
-    # Deterministic best single: (rmse ASC, smape ASC, name ASC)
-    best_model = min(
+    # Oracle best single: always the ex-post minimum-RMSE model from the MODELS tuple.
+    # This field is independent of baseline_mode and is used by compute_per_model_summary
+    # to count times_best_single / pct_best_single for per-model health reporting.
+    oracle_best_model = min(
         MODELS,
         key=lambda m: (
             model_metrics[m]["rmse"],
@@ -165,14 +183,17 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
             m,
         ),
     )
-    best_rmse = model_metrics[best_model]["rmse"]
+    oracle_best_rmse = model_metrics[oracle_best_model]["rmse"]
 
-    # Resolve the baseline according to baseline_mode.
-    # EFFECTIVE_DEFAULT uses the primary model selected by the ensemble's own confidence
-    # scores — a causal comparison (does blending beat what the ensemble would have
-    # chosen anyway?). Falls back to BEST_SINGLE when the field is absent so that the
-    # return dict always has valid best_single_model / rmse_ratio values.
+    # Configured baseline: the model the ensemble is compared against for lift metrics.
+    # EFFECTIVE_DEFAULT = primary_model chosen by the ensemble's own confidence scores
+    #   (causal — measures "does blending add value over what we'd have picked anyway?").
+    # BEST_SINGLE = oracle minimum-RMSE across MODELS (hindsight, unachievable for blend).
+    # Falls back to oracle when EFFECTIVE_DEFAULT cannot be resolved from the audit payload.
     resolved_baseline_mode = "BEST_SINGLE"
+    baseline_model_name: str = oracle_best_model
+    baseline_rmse: float = oracle_best_rmse
+
     if baseline_mode == "EFFECTIVE_DEFAULT":
         ens_sel = artifacts.get("ensemble_selection") or {}
         raw_primary = str(ens_sel.get("primary_model", "") or "").lower().strip()
@@ -180,11 +201,11 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
             primary_data = eval_metrics.get(raw_primary)
             primary_rmse_val = primary_data.get("rmse") if isinstance(primary_data, dict) else None
             if primary_rmse_val is not None:
-                best_model = raw_primary
-                best_rmse = float(primary_rmse_val)
+                baseline_model_name = raw_primary
+                baseline_rmse = float(primary_rmse_val)
                 resolved_baseline_mode = "EFFECTIVE_DEFAULT"
 
-    rmse_ratio = ensemble_rmse / best_rmse if best_rmse > 0 else float("nan")
+    baseline_rmse_ratio = ensemble_rmse / baseline_rmse if baseline_rmse > 0 else float("nan")
 
     return {
         "window_id": window_id,
@@ -200,8 +221,15 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
         "ensemble_rmse": ensemble_rmse,
         "ensemble_da": float(ensemble_da) if ensemble_da is not None else float("nan"),
         "ensemble_weights": {k: float(v) for k, v in (ensemble_weights or {}).items()},
-        "best_single_model": best_model,
-        "rmse_ratio": rmse_ratio,
+        # Oracle fields — always reflect ex-post min-RMSE winner across MODELS.
+        "best_single_model": oracle_best_model,
+        "oracle_best_rmse": oracle_best_rmse,
+        # Configured-baseline fields — reflect the baseline_mode in effect.
+        "baseline_model_name": baseline_model_name,
+        "baseline_rmse": baseline_rmse,
+        "baseline_rmse_ratio": baseline_rmse_ratio,
+        # Backward-compat alias: downstream that reads rmse_ratio gets baseline-relative value.
+        "rmse_ratio": baseline_rmse_ratio,
         "baseline_mode": resolved_baseline_mode,
     }
 
@@ -780,9 +808,11 @@ def main(argv: list[str] | None = None) -> int:
         duplicate_count,
     )
 
+    baseline_mode = _load_baseline_mode()
+    log.info("Layer 1 baseline mode: %s", baseline_mode)
     windows: list[dict] = []
     for audit in all_deduped:
-        metrics = extract_window_metrics(audit)
+        metrics = extract_window_metrics(audit, baseline_mode=baseline_mode)
         if metrics is not None:
             windows.append(metrics)
     log.info("Extracted valid metrics from %d/%d windows", len(windows), len(all_deduped))
