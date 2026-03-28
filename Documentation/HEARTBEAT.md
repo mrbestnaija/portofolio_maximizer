@@ -1,12 +1,12 @@
 # HEARTBEAT.md
 
-## System Status (2026-03-27)
+## System Status (2026-03-28)
 
 - **Gate**: PASS (semantics=INCONCLUSIVE_ALLOWED, warmup expires 2026-04-15)
 - **Proof**: PASS — 40 closed trades, $+620.01 PnL, 40% WR, profit factor 1.73
 - **Proof runway**: days=10/21 (11 trading days remaining)
 - **PnL integrity**: ALL PASSED (CROSS_MODE_CONTAMINATION whitelisted 252+255)
-- **Last commit**: 0b652c4 (feat(signal): HOLD reason instrumentation + Platt single-class guard)
+- **Last commit**: fbd2eb2 (fix(platt): fix pair counting bugs that blocked calibration activation)
 - **Test count**: 2090+ passed, 0 failed
 - **Bootstrap**: COMPLETE (2026-03-26 07:24, 9 tickers, 0 errors)
 - **Evidence hygiene**: CLEAN (invalid_context=0, missing_exec_meta=0, manifest verified=409+)
@@ -22,6 +22,24 @@
 | [P1] Directional Classifier Health | Daily 8:45 AM | Running |
 | System Health Check | Every 6h | Running |
 | Weekly Session Cleanup | Sunday 3 AM | Silent |
+
+## Repo Hygiene (2026-03-28)
+
+- **Worktrees**: 2 active (main repo on `codex/observability-rollout-20260328`; `pmx_readiness_integration` on `integration/readiness-20260315`)
+- **Removed**: `pmx_master_worktree` (stale, 0 ahead), `pmx_main_worktree` (orphan), `pmx_master_replay_20260325` (content on master)
+- **Saved**: `integration/readiness-20260315` dirty work committed as `wip(readiness)` 0e40c2f — 17 files, 5374 ins; `clean_cohort_manager.py` extracted to `feat/clean-cohort-manager`
+- **Branches deleted**: `master_pipeline_hardening`, `fix/dependabot-security-deps-20260316`, `terminal-b/lift-semantics-20260317`, 4 codex/* branches 300+ behind master (all backed up on origin)
+- **Branches pushed to origin**: `codex/observability-rollout-20260328`, `codex/discord-token-audit-20260324`, `integration/readiness-20260315`, `feat/clean-cohort-manager`
+
+## Pending Review → Master (Integration Gate)
+
+| Branch | Size | Tests | Ready |
+|--------|------|-------|-------|
+| `feat/clean-cohort-manager` | 2 files, 892 ins | 6/6 | Yes |
+| `codex/observability-rollout-20260328` | 41 files, 3,509 ins | 22/22 | Yes |
+| `codex/whatsapp-robustness-20260326` | 59 files, 5,479 ins | 301/301 | Yes |
+| `codex/discord-token-audit-20260324` | 45 files | — | Postponed (21 behind master) |
+| `integration/readiness-20260315` | WIP | — | Needs rebase after master merges |
 
 ## Gate Metrics (2026-03-27 post-live-cycle)
 
@@ -130,6 +148,17 @@ After partial-differencing verification runs:
 - **Phase 7.15-F Part 2**: CI horizon-scaling correction (MSSA_RL `±noise*sqrt(step+1)` may be over-widening)
 - **GARCH standardized residual diagnostics**: sigma-normalized residuals for white-noise gate
 - **holding_period_audits → 20**: revert once violation rate drops below 35% for 20+ windows
+
+## Observability Sidecar (2026-03-28, branch codex/observability-rollout-20260328)
+
+Prometheus/Grafana sidecar deployed as opt-in. Not yet merged to master.
+
+- **Exporter**: `scripts/pmx_observability_exporter.py` — scrapes DB, manifests, quant_validation.jsonl → `/metrics` + `/health`
+- **Alertmanager bridge**: `scripts/pmx_alertmanager_bridge.py` — shadow mode default; live mode routes to OpenClaw + email
+- **Dashboards**: gate_state, openclaw_health, scheduler_health, artifact_freshness
+- **Install**: `scripts/install_observability_stack.ps1` — downloads Prometheus/Alertmanager/Grafana binaries to `tools/observability/`
+- **Launch**: `scripts/start_observability_stack.ps1`
+- **Watchdog upgrade**: `PMX-OpenClaw-Guardian-Startup` (ONSTART) + `PMX-OpenClaw-Guardian-Wake` (ONEVENT resume) tasks added; all tasks use `-EnsureFunctionalState` (health-check + gateway-restart before force-restart)
 
 ## Auth Providers
 
