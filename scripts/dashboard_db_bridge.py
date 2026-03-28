@@ -1550,6 +1550,7 @@ def build_dashboard_payload(
         "meta": {
             "run_id": str(run_id),
             "ts": ts,
+            "generated_utc": ts,
             "tickers": tickers,
             "cycles": None,
             "llm_enabled": None,

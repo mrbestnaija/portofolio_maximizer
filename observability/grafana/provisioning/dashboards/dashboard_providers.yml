@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: PMX Ops
+    orgId: 1
+    folder: PMX Ops
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: ${PMX_GRAFANA_DASHBOARDS_PATH}

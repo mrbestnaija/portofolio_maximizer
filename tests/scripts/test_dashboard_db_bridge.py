@@ -78,6 +78,7 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
     assert payload["meta"]["run_id"]
     assert payload["meta"]["payload_schema_version"] == 2
     assert payload["meta"]["payload_digest"]
+    assert payload["meta"]["generated_utc"] == payload["meta"]["ts"]
     assert payload["meta"]["storage"]["db_path"] == str(db_path)
     assert payload["meta"]["tickers"] == ["AAPL"]
     assert payload["meta"]["ticker_buckets"]["AAPL"] in {"safe", "core", "speculative", "other"}
