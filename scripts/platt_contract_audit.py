@@ -280,16 +280,18 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
             # pair count matches what LogisticRegression actually trains on.
             # Only closing legs (is_close=1) are eligible — opening legs have no
             # settled PnL outcome and were never part of calibration training data.
-            cur.execute(
-                "SELECT COUNT(*) FROM trade_executions "
-                "WHERE realized_pnl IS NOT NULL "
-                "  AND action IN ('BUY', 'SELL') "
-                "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) "
-                "      IS NOT NULL "
-                "  AND is_close = 1 "
-                "  AND COALESCE(is_diagnostic, 0) = 0 "
-                "  AND COALESCE(is_synthetic, 0) = 0"
-            )
+            cols = {row[1] for row in cur.execute("PRAGMA table_info(trade_executions)").fetchall()}
+            where = [
+                "realized_pnl IS NOT NULL",
+                "action IN ('BUY', 'SELL')",
+                "COALESCE(confidence_calibrated, effective_confidence, base_confidence) IS NOT NULL",
+                "is_close = 1",
+                "is_diagnostic = 0",
+                "is_synthetic = 0",
+            ]
+            if "is_contaminated" in cols:
+                where.append("is_contaminated = 0")
+            cur.execute("SELECT COUNT(*) FROM trade_executions WHERE " + " AND ".join(where))
             db_pairs = cur.fetchone()[0]
             conn.close()
         except Exception:

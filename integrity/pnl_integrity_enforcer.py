@@ -54,14 +54,14 @@ CREATE VIEW IF NOT EXISTS production_closed_trades AS
 SELECT t.*
 FROM   trade_executions t
 WHERE  t.is_close = 1
-  AND  COALESCE(t.is_diagnostic,   0) = 0
-  AND  COALESCE(t.is_synthetic,    0) = 0
-  AND  COALESCE(t.is_contaminated, 0) = 0
+  AND  t.is_diagnostic = 0
+  AND  t.is_synthetic = 0
+  AND  t.is_contaminated = 0
   AND  NOT EXISTS (
        SELECT 1
        FROM   trade_executions o
        WHERE  o.id = t.entry_trade_id
-         AND  COALESCE(o.is_synthetic, 0) = 1
+         AND  o.is_synthetic = 1
   )
 """
 
@@ -258,13 +258,13 @@ class PnLIntegrityEnforcer:
             "SELECT realized_pnl, realized_pnl_pct, holding_period_days "
             "FROM trade_executions t "
             "WHERE t.is_close = 1 "
-            "  AND COALESCE(t.is_diagnostic,   0) = 0 "
-            "  AND COALESCE(t.is_synthetic,    0) = 0 "
-            "  AND COALESCE(t.is_contaminated, 0) = 0 "
+            "  AND t.is_diagnostic = 0 "
+            "  AND t.is_synthetic = 0 "
+            "  AND t.is_contaminated = 0 "
             "  AND NOT EXISTS ("
             "      SELECT 1 FROM trade_executions o "
             "      WHERE o.id = t.entry_trade_id "
-            "        AND COALESCE(o.is_synthetic, 0) = 1) "
+            "        AND o.is_synthetic = 1) "
             "  AND t.realized_pnl IS NOT NULL"
         ).fetchall()
 
@@ -312,12 +312,13 @@ class PnLIntegrityEnforcer:
         metrics.contaminated_trades_excluded = self.conn.execute(
             "SELECT COUNT(*) FROM trade_executions t "
             "WHERE t.is_close = 1 "
-            "  AND COALESCE(t.is_contaminated, 0) = 0 "
-            "  AND COALESCE(t.is_synthetic, 0) = 0 "
+            "  AND t.is_diagnostic = 0 "
+            "  AND t.is_contaminated = 0 "
+            "  AND t.is_synthetic = 0 "
             "  AND EXISTS ("
             "      SELECT 1 FROM trade_executions o "
             "      WHERE o.id = t.entry_trade_id "
-            "        AND COALESCE(o.is_synthetic, 0) = 1)"
+            "        AND o.is_synthetic = 1)"
         ).fetchone()[0]
         # Add explicitly-tagged contaminated trades
         metrics.contaminated_trades_excluded += self.conn.execute(
@@ -340,6 +341,7 @@ class PnLIntegrityEnforcer:
         """Run all integrity checks and return violations found."""
         violations = []
         violations.extend(self._check_opening_legs_with_pnl())
+        violations.extend(self._check_null_production_flags())
         violations.extend(self._check_orphaned_positions())
         violations.extend(self._check_short_orphaned_positions())  # INT-04: SELL opens
         violations.extend(self._check_diagnostic_contamination())
@@ -369,6 +371,37 @@ class PnLIntegrityEnforcer:
                 "should carry realized_pnl."
             ),
             affected_ids=[r["id"] for r in rows],
+            count=len(rows),
+        )]
+
+    def _check_null_production_flags(self) -> List[IntegrityViolation]:
+        """CRITICAL: closing legs must not rely on unknown production flags."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(trade_executions)")}
+        nullable_flags = [
+            col for col in ("is_diagnostic", "is_synthetic", "is_contaminated")
+            if col in cols
+        ]
+        if not nullable_flags:
+            return []
+
+        rows = self.conn.execute(
+            "SELECT id FROM trade_executions "
+            "WHERE is_close = 1 "
+            f"  AND ({' OR '.join(f'{col} IS NULL' for col in nullable_flags)})"
+        ).fetchall()
+        if not rows:
+            return []
+
+        return [IntegrityViolation(
+            check_name="NULL_PRODUCTION_FLAGS",
+            severity="CRITICAL",
+            description=(
+                f"{len(rows)} closing legs have NULL production flags "
+                f"({', '.join(nullable_flags)}). Canonical production filters now reject "
+                "these rows fail-closed, but the missing flags indicate ingest or lifecycle "
+                "wiring drift that must be repaired."
+            ),
+            affected_ids=[int(r["id"]) for r in rows],
             count=len(rows),
         )]
 
@@ -415,8 +448,8 @@ class PnLIntegrityEnforcer:
             "SELECT id, ticker, trade_date, COALESCE(shares, 0.0) AS qty "
             "FROM trade_executions "
             "WHERE action = 'BUY' AND is_close = 0 "
-            "  AND COALESCE(is_diagnostic, 0) = 0 "
-            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "  AND is_diagnostic = 0 "
+            "  AND is_synthetic = 0 "
             "ORDER BY trade_date, id"
         ).fetchall()
         if not buy_rows:
@@ -427,8 +460,8 @@ class PnLIntegrityEnforcer:
             "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty "
             "FROM trade_executions "
             "WHERE action = 'SELL' AND is_close = 1 "
-            "  AND COALESCE(is_diagnostic, 0) = 0 "
-            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "  AND is_diagnostic = 0 "
+            "  AND is_synthetic = 0 "
             "ORDER BY trade_date, id"
         ).fetchall()
 
@@ -594,8 +627,8 @@ class PnLIntegrityEnforcer:
             "SELECT id, ticker, trade_date "
             "FROM trade_executions "
             "WHERE action = 'SELL' AND is_close = 0 "
-            "  AND COALESCE(is_diagnostic, 0) = 0 "
-            "  AND COALESCE(is_synthetic, 0) = 0 "
+            "  AND is_diagnostic = 0 "
+            "  AND is_synthetic = 0 "
             "ORDER BY trade_date, id"
         ).fetchall()
         if not sell_rows:
@@ -607,8 +640,8 @@ class PnLIntegrityEnforcer:
             "SELECT entry_trade_id FROM trade_executions "
             "WHERE action = 'BUY' AND is_close = 1 "
             "  AND entry_trade_id IS NOT NULL "
-            "  AND COALESCE(is_diagnostic, 0) = 0 "
-            "  AND COALESCE(is_synthetic, 0) = 0"
+            "  AND is_diagnostic = 0 "
+            "  AND is_synthetic = 0"
         ).fetchall()
         for row in buy_close_rows:
             if row["entry_trade_id"]:
@@ -711,9 +744,9 @@ class PnLIntegrityEnforcer:
             "FROM trade_executions t "
             "JOIN trade_executions o ON t.entry_trade_id = o.id "
             "WHERE t.is_close = 1 "
-            "  AND COALESCE(t.is_contaminated, 0) = 0 "
-            "  AND COALESCE(t.is_synthetic,    0) = 0 "
-            "  AND COALESCE(o.is_synthetic, 0) = 1"
+            "  AND t.is_contaminated = 0 "
+            "  AND t.is_synthetic = 0 "
+            "  AND o.is_synthetic = 1"
         ).fetchall()
 
         all_rows = list(tagged) + list(untagged)

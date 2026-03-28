@@ -123,6 +123,26 @@ class TestExtractWindowMetrics:
         w = extract_window_metrics(audit)
         assert w is None
 
+    def test_rejects_implausible_model_rmse(self):
+        audit = _make_audit(garch_rmse=0.0)
+        w = extract_window_metrics(audit)
+        assert w is None
+
+    def test_rejects_directional_accuracy_out_of_range(self):
+        audit = _make_audit(samossa_da=1.2)
+        w = extract_window_metrics(audit)
+        assert w is None
+
+    def test_rejects_implausible_ensemble_rmse_ratio(self):
+        audit = _make_audit(
+            garch_rmse=1.0,
+            samossa_rmse=1.2,
+            mssa_rl_rmse=1.1,
+            ensemble_rmse=3.5,
+        )
+        w = extract_window_metrics(audit)
+        assert w is None
+
     def test_best_single_deterministic_by_rmse_then_smape(self):
         # garch=1.0 rmse, smape=0.01 → should win
         audit = _make_audit(
@@ -237,9 +257,9 @@ class TestEffectiveDefaultBaseline:
 class TestPerModelSummary:
     def test_counts_best_single_correctly(self):
         windows = [
-            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0)),
-            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0)),
-            extract_window_metrics(_make_audit(garch_rmse=5.0, samossa_rmse=2.0, mssa_rl_rmse=0.5)),
+            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0, ensemble_rmse=1.4)),
+            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0, ensemble_rmse=1.4)),
+            extract_window_metrics(_make_audit(garch_rmse=5.0, samossa_rmse=2.0, mssa_rl_rmse=0.5, ensemble_rmse=1.2)),
         ]
         summary = compute_per_model_summary(windows)
         assert summary["garch"]["times_best_single"] == 2
@@ -324,7 +344,7 @@ class TestAdaptiveWeights:
         # One model much better → exp decay gives it >0.90 before guard
         windows = [
             extract_window_metrics(
-                _make_audit(garch_rmse=0.1, samossa_rmse=100.0, mssa_rl_rmse=100.0)
+                _make_audit(garch_rmse=0.1, samossa_rmse=100.0, mssa_rl_rmse=100.0, ensemble_rmse=0.25)
             )
             for _ in range(5)
         ]

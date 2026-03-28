@@ -394,6 +394,36 @@ def test_cross_mode_contamination_whitelist_suppresses_known_ids(tmp_path):
     )
 
 
+def test_canonical_metrics_reject_null_production_flags(tmp_path):
+    db_path = tmp_path / "null_flags.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (1, "AAPL", "2026-01-01", "BUY", 1.0, 100.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (2, "AAPL", "2026-01-02", "SELL", 1.0, 110.0, 1.0, 10.0, 0.10, 100.0, 110.0, 1.0, "TIME_EXIT", "live", 1, 1, None, None, 0.0),
+            (3, "MSFT", "2026-01-03", "SELL", 1.0, 220.0, 1.0, 20.0, 0.10, 200.0, 220.0, 2.0, "TIME_EXIT", "live", 1, 1, 0, 0, 0.0),
+        ],
+    )
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE trade_executions SET is_contaminated = NULL WHERE id = 2")
+    conn.execute("UPDATE trade_executions SET is_contaminated = 0 WHERE id = 3")
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        metrics = enforcer.get_canonical_metrics()
+        violations = enforcer.run_full_integrity_audit()
+
+    assert metrics.total_round_trips == 1
+    assert metrics.total_realized_pnl == 20.0
+    null_flag = [v for v in violations if v.check_name == "NULL_PRODUCTION_FLAGS"]
+    assert len(null_flag) == 1
+    assert null_flag[0].severity == "CRITICAL"
+    assert null_flag[0].affected_ids == [2]
+
+
 # ---------------------------------------------------------------------------
 # INT-06: metrics drift detection
 # ---------------------------------------------------------------------------

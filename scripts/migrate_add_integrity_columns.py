@@ -4,6 +4,7 @@
 New columns:
   - is_diagnostic  INTEGER DEFAULT 0  -- trade executed under DIAGNOSTIC_MODE
   - is_synthetic   INTEGER DEFAULT 0  -- trade from synthetic data source
+  - is_contaminated INTEGER DEFAULT 0 -- live close polluted by synthetic origin
   - confidence_calibrated REAL        -- calibrated confidence (future use)
   - entry_trade_id INTEGER            -- links closing leg to its opening leg
   - bar_open       REAL               -- OHLC of the bar used for fill price
@@ -46,6 +47,7 @@ def migrate(db_path: str = DB_PATH) -> None:
     new_columns = {
         "is_diagnostic": "INTEGER DEFAULT 0",
         "is_synthetic": "INTEGER DEFAULT 0",
+        "is_contaminated": "INTEGER DEFAULT 0",
         "confidence_calibrated": "REAL",
         "entry_trade_id": "INTEGER",
         "bar_open": "REAL",
@@ -69,11 +71,18 @@ def migrate(db_path: str = DB_PATH) -> None:
     conn.execute("DROP VIEW IF EXISTS production_closed_trades")
     conn.execute("""
         CREATE VIEW IF NOT EXISTS production_closed_trades AS
-        SELECT *
-        FROM   trade_executions
-        WHERE  is_close = 1
-          AND  COALESCE(is_diagnostic, 0) = 0
-          AND  COALESCE(is_synthetic, 0)  = 0
+        SELECT t.*
+        FROM   trade_executions t
+        WHERE  t.is_close = 1
+          AND  t.is_diagnostic = 0
+          AND  t.is_synthetic = 0
+          AND  t.is_contaminated = 0
+          AND  NOT EXISTS (
+               SELECT 1
+               FROM   trade_executions o
+               WHERE  o.id = t.entry_trade_id
+                 AND  o.is_synthetic = 1
+          )
     """)
     print("  [OK] Created view: production_closed_trades")
 

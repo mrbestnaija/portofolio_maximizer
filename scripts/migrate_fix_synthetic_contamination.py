@@ -48,14 +48,14 @@ CREATE VIEW production_closed_trades AS
 SELECT t.*
 FROM   trade_executions t
 WHERE  t.is_close = 1
-  AND  COALESCE(t.is_diagnostic,   0) = 0
-  AND  COALESCE(t.is_synthetic,    0) = 0
-  AND  COALESCE(t.is_contaminated, 0) = 0
+  AND  t.is_diagnostic = 0
+  AND  t.is_synthetic = 0
+  AND  t.is_contaminated = 0
   AND  NOT EXISTS (
        SELECT 1
        FROM   trade_executions o
        WHERE  o.id = t.entry_trade_id
-         AND  COALESCE(o.is_synthetic, 0) = 1
+         AND  o.is_synthetic = 1
   )"""
 
 

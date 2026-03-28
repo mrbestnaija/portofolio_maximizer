@@ -685,9 +685,11 @@ def _load_latest_live_cycle_binding(db_path: Path) -> Dict[str, Any]:
         if "execution_mode" in cols:
             where.append("LOWER(COALESCE(execution_mode, '')) = 'live'")
         if "is_synthetic" in cols:
-            where.append("COALESCE(is_synthetic, 0) = 0")
+            where.append("is_synthetic = 0")
         if "is_diagnostic" in cols:
-            where.append("COALESCE(is_diagnostic, 0) = 0")
+            where.append("is_diagnostic = 0")
+        if "is_contaminated" in cols:
+            where.append("is_contaminated = 0")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
         row = conn.execute(

@@ -358,17 +358,19 @@ class TestDbQueryIntegrity:
     def test_db_query_excludes_diagnostic_trades(self):
         """DB calibration query must filter out is_diagnostic=1 trades."""
         source = self._get_source()
-        assert "is_diagnostic" in source, (
+        assert "is_diagnostic = 0" in source, (
             "_load_realized_outcome_pairs missing is_diagnostic filter.\n"
-            "Diagnostic trades must not contaminate Platt calibration training data."
+            "Diagnostic trades must not contaminate Platt calibration training data.\n"
+            "Use explicit '= 0' so NULL flags fail closed instead of being treated as safe."
         )
 
     def test_db_query_excludes_synthetic_trades(self):
         """DB calibration query must filter out is_synthetic=1 trades."""
         source = self._get_source()
-        assert "is_synthetic" in source, (
+        assert "is_synthetic = 0" in source, (
             "_load_realized_outcome_pairs missing is_synthetic filter.\n"
-            "Synthetic bootstrap trades must not contaminate production calibration data."
+            "Synthetic bootstrap trades must not contaminate production calibration data.\n"
+            "Use explicit '= 0' so NULL flags fail closed instead of being treated as safe."
         )
 
 
@@ -677,13 +679,13 @@ class TestAuditFindings:
         """check_calibration_active_tier source must filter is_diagnostic and is_synthetic."""
         from scripts import platt_contract_audit
         source = inspect.getsource(platt_contract_audit.check_calibration_active_tier)
-        assert "is_diagnostic" in source, (
+        assert "is_diagnostic = 0" in source, (
             "check_calibration_active_tier does not filter diagnostic trades.\n"
-            "_load_realized_outcome_pairs excludes them — add COALESCE(is_diagnostic,0)=0."
+            "_load_realized_outcome_pairs excludes them — use explicit is_diagnostic = 0."
         )
-        assert "is_synthetic" in source, (
+        assert "is_synthetic = 0" in source, (
             "check_calibration_active_tier does not filter synthetic trades.\n"
-            "_load_realized_outcome_pairs excludes them — add COALESCE(is_synthetic,0)=0."
+            "_load_realized_outcome_pairs excludes them — use explicit is_synthetic = 0."
         )
 
     def test_tier_detection_does_not_overcount_opening_legs(self, tmp_path):

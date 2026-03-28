@@ -530,9 +530,11 @@ def _positions_from_executions(conn: sqlite3.Connection) -> Dict[str, Dict[str, 
         "action IS NOT NULL",
     ]
     if "is_diagnostic" in cols:
-        where_parts.append("COALESCE(is_diagnostic, 0) = 0")
+        where_parts.append("is_diagnostic = 0")
     if "is_synthetic" in cols:
-        where_parts.append("COALESCE(is_synthetic, 0) = 0")
+        where_parts.append("is_synthetic = 0")
+    if "is_contaminated" in cols:
+        where_parts.append("is_contaminated = 0")
     where_sql = " AND ".join(where_parts)
     query = f"""
         SELECT ticker, action, shares, price, trade_date, created_at

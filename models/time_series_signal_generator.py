@@ -2885,8 +2885,8 @@ class TimeSeriesSignalGenerator:
             "  AND action IN ('BUY', 'SELL')",
             "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) IS NOT NULL",
             "  AND is_close = 1",
-            "  AND COALESCE(is_diagnostic, 0) = 0",
-            "  AND COALESCE(is_synthetic, 0) = 0",
+            "  AND is_diagnostic = 0",
+            "  AND is_synthetic = 0",
             # Exclude mechanical exits: stop_loss and max_holding exits are directionally
             # uninformative and poison the Platt logistic regression with irrelevant labels.
             # UPPER() required: DB stores uppercase ('STOP_LOSS', 'TIME_EXIT') but the
@@ -2907,6 +2907,12 @@ class TimeSeriesSignalGenerator:
         try:
             conn = sqlite3.connect(str(db_file), timeout=2.0)
             cur = conn.cursor()
+            cols = {
+                row[1]
+                for row in cur.execute("PRAGMA table_info(trade_executions)").fetchall()
+            }
+            if "is_contaminated" in cols:
+                query.append("  AND is_contaminated = 0")
             cur.execute("\n".join(query), params)
             rows = cur.fetchall()
         except Exception as exc:

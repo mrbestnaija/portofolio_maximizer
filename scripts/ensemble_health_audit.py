@@ -124,6 +124,26 @@ def _get_regime(audit: dict) -> str | None:
     return None
 
 
+def _parse_plausible_float(
+    value: Any,
+    *,
+    lower: float | None = None,
+    upper: float | None = None,
+) -> float | None:
+    """Return a finite float inside the configured range, else None."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    if lower is not None and parsed < lower:
+        return None
+    if upper is not None and parsed > upper:
+        return None
+    return parsed
+
+
 def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> dict | None:
     """
     Extract per-window metrics from a forecast audit JSON.
@@ -151,26 +171,50 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
     model_metrics: dict[str, dict] = {}
     for m in MODELS:
         m_data = eval_metrics.get(m, {})
-        rmse = m_data.get("rmse")
+        rmse = _parse_plausible_float(m_data.get("rmse"), lower=1e-12, upper=100.0)
         if rmse is None:
             log.warning(
-                "Window %s: missing rmse for model %s — skipped", window_id, m
+                "Window %s: implausible or missing rmse for model %s — skipped",
+                window_id,
+                m,
             )
             return None
-        da = m_data.get("directional_accuracy")
+        da_raw = m_data.get("directional_accuracy")
+        da = (
+            float("nan")
+            if da_raw is None
+            else _parse_plausible_float(da_raw, lower=0.0, upper=1.0)
+        )
+        if da_raw is not None and da is None:
+            log.warning(
+                "Window %s: implausible directional_accuracy for model %s — skipped",
+                window_id,
+                m,
+            )
+            return None
+        smape = _parse_plausible_float(m_data.get("smape"), lower=0.0)
         model_metrics[m] = {
-            "rmse": float(rmse),
-            "da": float(da) if da is not None else float("nan"),
-            "smape": float(m_data.get("smape", float("nan"))),
+            "rmse": rmse,
+            "da": da if da_raw is not None else float("nan"),
+            "smape": smape if smape is not None else float("nan"),
         }
 
     ens_data = eval_metrics.get("ensemble", {})
-    ensemble_rmse = ens_data.get("rmse")
-    ensemble_da = ens_data.get("directional_accuracy")
+    ensemble_rmse = _parse_plausible_float(
+        ens_data.get("rmse"), lower=1e-12, upper=100.0
+    )
+    ensemble_da_raw = ens_data.get("directional_accuracy")
+    ensemble_da = (
+        float("nan")
+        if ensemble_da_raw is None
+        else _parse_plausible_float(ensemble_da_raw, lower=0.0, upper=1.0)
+    )
     if ensemble_rmse is None:
-        log.warning("Window %s: missing ensemble rmse — skipped", window_id)
+        log.warning("Window %s: implausible or missing ensemble rmse — skipped", window_id)
         return None
-    ensemble_rmse = float(ensemble_rmse)
+    if ensemble_da_raw is not None and ensemble_da is None:
+        log.warning("Window %s: implausible ensemble directional_accuracy — skipped", window_id)
+        return None
 
     # Oracle best single: always the ex-post minimum-RMSE model from the MODELS tuple.
     # This field is independent of baseline_mode and is used by compute_per_model_summary
@@ -184,6 +228,14 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
         ),
     )
     oracle_best_rmse = model_metrics[oracle_best_model]["rmse"]
+    if ensemble_rmse > 3.0 * oracle_best_rmse:
+        log.warning(
+            "Window %s: ensemble rmse %.4f exceeds 3x best-single rmse %.4f — skipped",
+            window_id,
+            ensemble_rmse,
+            oracle_best_rmse,
+        )
+        return None
 
     # Configured baseline: the model the ensemble is compared against for lift metrics.
     # EFFECTIVE_DEFAULT = primary_model chosen by the ensemble's own confidence scores
@@ -219,7 +271,7 @@ def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> d
         ),
         "model_metrics": model_metrics,
         "ensemble_rmse": ensemble_rmse,
-        "ensemble_da": float(ensemble_da) if ensemble_da is not None else float("nan"),
+        "ensemble_da": ensemble_da if ensemble_da_raw is not None else float("nan"),
         "ensemble_weights": {k: float(v) for k, v in (ensemble_weights or {}).items()},
         # Oracle fields — always reflect ex-post min-RMSE winner across MODELS.
         "best_single_model": oracle_best_model,

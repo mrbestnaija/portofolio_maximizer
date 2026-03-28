@@ -112,25 +112,22 @@ def _count_unlinked_closes(db_path: Path) -> dict[str, Any]:
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
+        where = [
+            "is_close = 1",
+            "entry_trade_id IS NULL",
+            "is_diagnostic = 0",
+        ]
+        if "is_synthetic" in cols:
+            where.append("is_synthetic = 0")
+        if "is_contaminated" in cols:
+            where.append("is_contaminated = 0")
+        where_sql = " AND ".join(where)
         row = conn.execute(
-            """
-            SELECT COUNT(*) AS n
-            FROM trade_executions
-            WHERE is_close = 1
-              AND entry_trade_id IS NULL
-              AND COALESCE(is_diagnostic, 0) = 0
-            """
+            "SELECT COUNT(*) AS n FROM trade_executions WHERE " + where_sql
         ).fetchone()
         sample_rows = conn.execute(
-            """
-            SELECT id
-            FROM trade_executions
-            WHERE is_close = 1
-              AND entry_trade_id IS NULL
-              AND COALESCE(is_diagnostic, 0) = 0
-            ORDER BY id
-            LIMIT 20
-            """
+            "SELECT id FROM trade_executions WHERE " + where_sql + " ORDER BY id LIMIT 20"
         ).fetchall()
         conn.close()
         return {
