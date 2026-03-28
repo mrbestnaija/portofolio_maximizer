@@ -45,6 +45,32 @@
 >   - `platt_contract_audit.py` remains standalone-runnable (no manual `PYTHONPATH`).
 >   - No shadow runtime duplicates (`Dockerfile (1)`, `execution/lob_simulator (1).py`).
 
+## Delta (2026-03-28) — GitHub Actions Version Policy
+
+> **GitHub Actions versions are pinned — do NOT invent or bump to non-existent versions.**
+>
+> Stable versions as of 2026-03-28 (verify before changing):
+>
+> | Action | Stable version |
+> |--------|---------------|
+> | `actions/checkout` | `@v4` |
+> | `actions/setup-python` | `@v5` |
+> | `actions/cache` | `@v4` |
+> | `actions/upload-artifact` | `@v4` |
+> | `actions/download-artifact` | `@v4` |
+>
+> **Root cause of 2026-03-28 CI outage**: all three workflow files (`ci.yml`, `dependency_recency.yml`,
+> `training_priority.yml`) had `checkout@v6`, `setup-python@v6`, `cache@v5`, `upload-artifact@v6`.
+> None of these versions exist. Every CI run (push + pull_request) failed at the Checkout step
+> before any Python code executed — completely silencing all test feedback.
+>
+> **Rule**: When writing or editing `.github/workflows/*.yml`:
+> 1. Never use a version higher than the stable versions listed above.
+> 2. If you don't know the current stable version, leave the existing version unchanged.
+> 3. Before committing workflow changes, grep for `uses: actions/` and verify each version
+>    against the table above: `grep -r "uses: actions/" .github/workflows/`
+> 4. The `add_to_project@v1.0.2` action uses a full semver pin — do not touch it.
+
 ## Delta (2026-01-18)
 
 - Live dashboard must not fabricate results: `visualizations/live_dashboard.html` only renders from `visualizations/dashboard_data.json` (polled every 5s) and shows empty states when missing.
