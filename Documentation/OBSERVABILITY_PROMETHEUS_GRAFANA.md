@@ -98,6 +98,7 @@ Repo-owned startup/provisioning scripts:
 - `scripts/start_alertmanager.ps1`
 - `scripts/start_grafana.ps1`
 - `scripts/start_observability_stack.ps1`
+- `scripts/stop_observability_stack.ps1`
 - `scripts/install_observability_stack.ps1`
 
 Installer behavior:
@@ -114,6 +115,16 @@ Recommended install from PowerShell:
 Set-Location C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
 & .\scripts\install_observability_stack.ps1 -DownloadOfficialBinaries
 ```
+
+Operator controls:
+
+```powershell
+& .\scripts\start_observability_stack.ps1
+& .\scripts\stop_observability_stack.ps1
+```
+
+`start_observability_stack.ps1` is idempotent: healthy services are detected and skipped instead of starting duplicate processes.
+`stop_observability_stack.ps1` first requests localhost `/shutdown` for the Python sidecars, then falls back to process termination for any service still holding a port.
 
 ## Grafana Role
 

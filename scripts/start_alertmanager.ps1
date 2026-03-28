@@ -9,11 +9,12 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "observability_process_helpers.ps1")
 
 $repoRoot = Resolve-RepoRoot
-$exe = Resolve-RequiredPath -Label "alertmanager.exe" -Candidates @(
+$exeCandidates = Normalize-PathCandidates @(
     $AlertmanagerExe,
     $env:PMX_ALERTMANAGER_EXE,
     (Join-Path $repoRoot "tools\observability\alertmanager\alertmanager.exe")
 )
+$exe = Resolve-RequiredPath -Label "alertmanager.exe" -Candidates $exeCandidates
 $configPath = Join-Path $repoRoot "observability\alertmanager\alertmanager.yml"
 $storagePath = Join-Path $repoRoot "data\alertmanager"
 $logDir = Join-Path $repoRoot "logs\observability"
@@ -25,11 +26,19 @@ $args = @(
     "--storage.path=$storagePath",
     "--web.listen-address=127.0.0.1:9093"
 )
+$existingProcessIds = @(
+    (Get-ObservedProcessIds -ExecutablePath $exe)
+    (Get-ListeningProcessIdsByPort -Port 9093)
+) | Sort-Object -Unique
 
-Start-RepoProcess `
+Ensure-RepoService `
+    -Label "alertmanager" `
     -FilePath $exe `
     -ArgumentList $args `
     -WorkingDirectory $repoRoot `
     -StdOutPath $stdoutPath `
     -StdErrPath $stderrPath `
+    -HealthUrl "http://127.0.0.1:9093/-/healthy" `
+    -ExistingProcessIds $existingProcessIds `
+    -StartupTimeoutSec 20 `
     -Foreground:$Foreground

@@ -16,11 +16,16 @@ $logDir = Join-Path $repoRoot "logs\observability"
 $stdoutPath = Join-Path $logDir "pmx_alertmanager_bridge.stdout.log"
 $stderrPath = Join-Path $logDir "pmx_alertmanager_bridge.stderr.log"
 $args = @($scriptPath, "--bind", $Bind, "--port", "$Port")
+$existingProcessIds = @(Get-ListeningProcessIdsByPort -Port $Port)
 
-Start-RepoProcess `
+Ensure-RepoService `
+    -Label "pmx_alertmanager_bridge" `
     -FilePath $pythonExe `
     -ArgumentList $args `
     -WorkingDirectory $repoRoot `
     -StdOutPath $stdoutPath `
     -StdErrPath $stderrPath `
+    -HealthUrl ("http://" + $Bind + ":" + $Port + "/healthz") `
+    -ExistingProcessIds $existingProcessIds `
+    -StartupTimeoutSec 20 `
     -Foreground:$Foreground

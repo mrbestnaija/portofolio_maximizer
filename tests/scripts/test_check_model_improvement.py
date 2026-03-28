@@ -78,11 +78,11 @@ class TestLayer1ForecastQuality:
         # 2 of 3 fixtures have lift (healthy: 0.929<0.98, ensemble_lift: 0.865<0.98)
         # samossa_da_zero: 1.136 >= 0.98 -> no lift (min_lift_rmse_ratio=0.02 from config)
         assert result.metrics["lift_fraction_global"] == pytest.approx(2 / 3, abs=0.02)
-        assert result.metrics["baseline_model"] == "BEST_SINGLE"
+        assert result.metrics["baseline_model"] == "EFFECTIVE_DEFAULT"
         assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(0.98)
         # Only 3 windows < warn_coverage_threshold=50 -> WARN
         assert result.status == "WARN"
-        assert "baseline=BEST_SINGLE" in result.summary
+        assert "baseline=EFFECTIVE_DEFAULT" in result.summary
 
     def test_warns_when_samossa_da_zero_pct_exceeds_threshold(self, tmp_path):
         """All 3 fixture files replaced with copies having SAMOSSA DA=0.0."""
@@ -127,7 +127,7 @@ class TestLayer1ForecastQuality:
         result = run_layer1_forecast_quality(tmp_path)
 
         assert result.status == "SKIP"
-        assert result.metrics["baseline_model"] == "BEST_SINGLE"
+        assert result.metrics["baseline_model"] == "EFFECTIVE_DEFAULT"
         assert result.metrics["lift_threshold_rmse_ratio"] == pytest.approx(0.98)
         assert result.metrics["lift_mean"] is None
         assert result.metrics["lift_ci_low"] is None

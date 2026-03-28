@@ -2830,6 +2830,11 @@ class TimeSeriesSignalGenerator:
             action = str(entry.get("action", "")).upper()
             if action and action not in {"BUY", "SELL"}:
                 continue
+            # Exclude synthetic execution entries — mirrors the DB tier's
+            # `is_synthetic=0` filter so both tiers train on production signals only.
+            exec_mode = str(entry.get("execution_mode") or "").lower()
+            if exec_mode == "synthetic":
+                continue
             # Prefer raw_confidence (pre-blend) so LR trains on the same distribution
             # that predict_proba is evaluated on.  Fall back to blended 'confidence'
             # for backward-compatible reads of older JSONL entries (Phase 7.16-C1).

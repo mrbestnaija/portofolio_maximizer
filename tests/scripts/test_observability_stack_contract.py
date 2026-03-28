@@ -66,11 +66,13 @@ def test_grafana_provisioning_disables_alerting_and_loads_four_dashboards() -> N
 def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() -> None:
     install_text = _read("scripts/install_observability_stack.ps1")
     stack_text = _read("scripts/start_observability_stack.ps1")
+    stop_text = _read("scripts/stop_observability_stack.ps1")
     prometheus_text = _read("scripts/start_prometheus.ps1")
     alertmanager_text = _read("scripts/start_alertmanager.ps1")
     grafana_text = _read("scripts/start_grafana.ps1")
     exporter_text = _read("scripts/start_pmx_observability_exporter.ps1")
     bridge_text = _read("scripts/start_pmx_alertmanager_bridge.ps1")
+    helper_text = _read("scripts/observability_process_helpers.ps1")
 
     assert 'PMX-Observability-Stack.cmd' in install_text
     assert '[switch]$DownloadOfficialBinaries' in install_text
@@ -84,6 +86,35 @@ def test_windows_startup_scripts_and_installer_reference_repo_owned_launchers() 
     assert 'start_prometheus.ps1' in stack_text
     assert 'start_alertmanager.ps1' in stack_text
     assert 'start_grafana.ps1' in stack_text
+    assert '[switch]$Foreground' in stack_text
+    assert 'stop_observability_stack.ps1' in _read("Documentation/OBSERVABILITY_PROMETHEUS_GRAFANA.md")
+    assert 'Stop-ObservedProcesses' in stop_text
+    assert 'Request-LocalShutdown' in stop_text
+    assert 'Wait-PortClosed' in stop_text
+    assert 'http://127.0.0.1:9765/shutdown' in stop_text
+    assert 'http://127.0.0.1:9766/shutdown' in stop_text
+    assert 'Get-ListeningProcessIdsByPort -Port 9765' in stop_text
+    assert 'Get-ListeningProcessIdsByPort -Port 9766' in stop_text
+    assert 'function Normalize-PathCandidates' in helper_text
+    assert 'function Test-HttpHealthy' in helper_text
+    assert 'function Ensure-RepoService' in helper_text
+    assert 'function Stop-ObservedProcesses' in helper_text
+    assert 'function Get-ListeningProcessIdsByPort' in helper_text
+    assert 'function Wait-PortClosed' in helper_text
+    assert 'function Request-LocalShutdown' in helper_text
+    assert 'Normalize-PathCandidates @(' in prometheus_text
+    assert 'Normalize-PathCandidates @(' in alertmanager_text
+    assert 'Normalize-PathCandidates @(' in grafana_text
+    assert 'Get-ListeningProcessIdsByPort -Port $Port' in exporter_text
+    assert 'Get-ListeningProcessIdsByPort -Port $Port' in bridge_text
+    assert 'Get-ListeningProcessIdsByPort -Port 9090' in prometheus_text
+    assert 'Get-ListeningProcessIdsByPort -Port 9093' in alertmanager_text
+    assert 'Get-ListeningProcessIdsByPort -Port 3000' in grafana_text
+    assert 'Ensure-RepoService' in exporter_text
+    assert 'Ensure-RepoService' in bridge_text
+    assert 'Ensure-RepoService' in prometheus_text
+    assert 'Ensure-RepoService' in alertmanager_text
+    assert 'Ensure-RepoService' in grafana_text
     assert '--storage.tsdb.retention.time=14d' in prometheus_text
     assert '--web.listen-address=127.0.0.1:9090' in prometheus_text
     assert '--web.listen-address=127.0.0.1:9093' in alertmanager_text

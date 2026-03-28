@@ -498,7 +498,9 @@ class GARCHForecaster:
             ).dropna()
             if values.empty:
                 return None
-            return float(abs(values.iloc[-1])) / realized
+            # Use p95 of |conditional_vol| rather than the terminal bar; a single
+            # tail spike at the last in-sample step should not trip the guard.
+            return float(np.percentile(values.abs(), 95)) / realized
         except Exception:
             return None
 
@@ -512,7 +514,10 @@ class GARCHForecaster:
             ).dropna()
             if values.empty:
                 return None
-            return float(values.max()) / realized
+            # Use p95 rather than max; forecast vol is monotone-increasing toward
+            # unconditional variance so max() always picks the worst step and is
+            # easily triggered by a single high-horizon step.
+            return float(np.percentile(values, 95)) / realized
         except Exception:
             return None
 

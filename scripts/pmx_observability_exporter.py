@@ -987,6 +987,21 @@ class _ExporterHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status":"not_found"}')
 
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path.startswith("/shutdown"):
+            payload = json.dumps({"status": "shutting_down"}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b'{"status":"not_found"}')
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return
 

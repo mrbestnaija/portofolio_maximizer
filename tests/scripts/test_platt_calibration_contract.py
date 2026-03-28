@@ -852,3 +852,102 @@ class TestAuditFindings:
         assert finding.status in {"PASS", "WARN"}, (
             f"Unexpected status {finding.status!r}: {finding.detail}"
         )
+
+
+# ===========================================================================
+# Synthetic filter parity: JSONL tier must exclude synthetic entries
+# ===========================================================================
+
+class TestJsonlSyntheticFilter:
+    """_load_jsonl_outcome_pairs must skip entries where execution_mode='synthetic',
+    mirroring the DB tier's COALESCE(is_synthetic,0)=0 WHERE clause."""
+
+    def _make_jsonl_tempfile(self, tmp_path, rows):
+        log_dir = tmp_path / "logs" / "signals"
+        log_dir.mkdir(parents=True)
+        log_file = log_dir / "quant_validation.jsonl"
+        log_file.write_text(
+            "\n".join(json.dumps(r) for r in rows), encoding="utf-8"
+        )
+        return log_dir
+
+    def _build_generator(self, log_dir: Path):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = object.__new__(TimeSeriesSignalGenerator)
+        # _load_jsonl_outcome_pairs reads self.quant_validation_config["logging"]
+        gen.quant_validation_config = {
+            "logging": {
+                "enabled": True,
+                "log_dir": str(log_dir),
+                "filename": "quant_validation.jsonl",
+            }
+        }
+        gen._min_platt_pairs = 1
+        return gen
+
+    def test_synthetic_entries_excluded(self, tmp_path):
+        """Entries with execution_mode='synthetic' must be dropped."""
+        rows = [
+            {
+                "action": "BUY",
+                "execution_mode": "synthetic",
+                "confidence": 0.70,
+                "outcome": {"win": True},
+            },
+            {
+                "action": "BUY",
+                "execution_mode": "synthetic",
+                "confidence": 0.60,
+                "outcome": {"win": False},
+            },
+        ]
+        log_dir = self._make_jsonl_tempfile(tmp_path, rows)
+        gen = self._build_generator(log_dir)
+        confs, wins = gen._load_jsonl_outcome_pairs(limit=100)
+        assert confs == [], "synthetic entries should be excluded from Platt training"
+        assert wins == []
+
+    def test_live_entries_included(self, tmp_path):
+        """Entries with execution_mode='live' (or absent) must be included."""
+        rows = [
+            {
+                "action": "BUY",
+                "execution_mode": "live",
+                "confidence": 0.75,
+                "outcome": {"win": True},
+            },
+            {
+                "action": "SELL",
+                "confidence": 0.65,
+                "outcome": {"win": False},
+            },
+        ]
+        log_dir = self._make_jsonl_tempfile(tmp_path, rows)
+        gen = self._build_generator(log_dir)
+        confs, wins = gen._load_jsonl_outcome_pairs(limit=100)
+        assert len(confs) == 2
+        assert 0.75 in confs
+        assert 0.65 in confs
+
+    def test_mixed_entries_only_live_pass(self, tmp_path):
+        """Mixed JSONL with 2 synthetic and 1 live: only live entry returned."""
+        rows = [
+            {"action": "BUY", "execution_mode": "synthetic", "confidence": 0.80, "outcome": {"win": True}},
+            {"action": "BUY", "execution_mode": "live", "confidence": 0.72, "outcome": {"win": True}},
+            {"action": "SELL", "execution_mode": "synthetic", "confidence": 0.55, "outcome": {"win": False}},
+        ]
+        log_dir = self._make_jsonl_tempfile(tmp_path, rows)
+        gen = self._build_generator(log_dir)
+        confs, wins = gen._load_jsonl_outcome_pairs(limit=100)
+        assert len(confs) == 1
+        assert confs[0] == pytest.approx(0.72)
+
+    def test_auto_mode_treated_as_non_synthetic(self, tmp_path):
+        """execution_mode='auto' is NOT synthetic — must not be filtered out."""
+        rows = [
+            {"action": "BUY", "execution_mode": "auto", "confidence": 0.68, "outcome": {"win": True}},
+        ]
+        log_dir = self._make_jsonl_tempfile(tmp_path, rows)
+        gen = self._build_generator(log_dir)
+        confs, wins = gen._load_jsonl_outcome_pairs(limit=100)
+        assert len(confs) == 1

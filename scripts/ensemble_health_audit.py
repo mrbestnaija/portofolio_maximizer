@@ -108,12 +108,18 @@ def _get_regime(audit: dict) -> str | None:
     return None
 
 
-def extract_window_metrics(audit: dict) -> dict | None:
+def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> dict | None:
     """
     Extract per-window metrics from a forecast audit JSON.
 
     Returns None (with a WARNING log) if core fields are missing.
     Deterministic tie-breaking for best_single_model: min RMSE, then min sMAPE, then name.
+
+    baseline_mode:
+      "BEST_SINGLE"      — oracle: ex-post minimum RMSE across all single models (default)
+      "EFFECTIVE_DEFAULT" — causal: the primary model chosen by the ensemble's own confidence
+                            scores (artifacts.ensemble_selection.primary_model). Falls back to
+                            BEST_SINGLE when the field is absent.
     """
     artifacts = audit.get("artifacts", {})
     eval_metrics = artifacts.get("evaluation_metrics", {})
@@ -160,6 +166,24 @@ def extract_window_metrics(audit: dict) -> dict | None:
         ),
     )
     best_rmse = model_metrics[best_model]["rmse"]
+
+    # Resolve the baseline according to baseline_mode.
+    # EFFECTIVE_DEFAULT uses the primary model selected by the ensemble's own confidence
+    # scores — a causal comparison (does blending beat what the ensemble would have
+    # chosen anyway?). Falls back to BEST_SINGLE when the field is absent so that the
+    # return dict always has valid best_single_model / rmse_ratio values.
+    resolved_baseline_mode = "BEST_SINGLE"
+    if baseline_mode == "EFFECTIVE_DEFAULT":
+        ens_sel = artifacts.get("ensemble_selection") or {}
+        raw_primary = str(ens_sel.get("primary_model", "") or "").lower().strip()
+        if raw_primary:
+            primary_data = eval_metrics.get(raw_primary)
+            primary_rmse_val = primary_data.get("rmse") if isinstance(primary_data, dict) else None
+            if primary_rmse_val is not None:
+                best_model = raw_primary
+                best_rmse = float(primary_rmse_val)
+                resolved_baseline_mode = "EFFECTIVE_DEFAULT"
+
     rmse_ratio = ensemble_rmse / best_rmse if best_rmse > 0 else float("nan")
 
     return {
@@ -178,6 +202,7 @@ def extract_window_metrics(audit: dict) -> dict | None:
         "ensemble_weights": {k: float(v) for k, v in (ensemble_weights or {}).items()},
         "best_single_model": best_model,
         "rmse_ratio": rmse_ratio,
+        "baseline_mode": resolved_baseline_mode,
     }
 
 

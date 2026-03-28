@@ -151,6 +151,96 @@ class TestExtractWindowMetrics:
         w = extract_window_metrics(audit)
         assert w["regime"] is None
 
+    def test_baseline_mode_key_present_in_result(self):
+        """Return dict must always include 'baseline_mode' key."""
+        audit = _make_audit()
+        w = extract_window_metrics(audit)
+        assert "baseline_mode" in w
+
+    def test_default_baseline_mode_is_best_single(self):
+        """Default (no argument) resolves to BEST_SINGLE."""
+        audit = _make_audit(garch_rmse=1.0, samossa_rmse=3.0, mssa_rl_rmse=2.5)
+        w = extract_window_metrics(audit)
+        assert w["baseline_mode"] == "BEST_SINGLE"
+        assert w["best_single_model"] == "garch"
+
+
+class TestEffectiveDefaultBaseline:
+    """Tests for baseline_mode='EFFECTIVE_DEFAULT'."""
+
+    def _make_audit_with_ens_sel(self, primary_model: str, primary_rmse: float | None = 1.5) -> dict:
+        """Build an audit with ensemble_selection.primary_model populated."""
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=3.0, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": primary_model}
+        if primary_model not in audit["artifacts"]["evaluation_metrics"] and primary_rmse is not None:
+            audit["artifacts"]["evaluation_metrics"][primary_model] = {
+                "rmse": primary_rmse,
+                "smape": 0.02,
+                "directional_accuracy": 0.55,
+            }
+        return audit
+
+    def test_uses_primary_model_when_present(self):
+        """EFFECTIVE_DEFAULT uses primary_model's RMSE, not the oracle best single."""
+        # samossa has RMSE 1.0 in eval_metrics but is NOT the primary_model;
+        # garch (RMSE 2.0) IS the primary_model — ratio should use 2.0.
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.0, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["evaluation_metrics"]["samossa"]["rmse"] = 1.0
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "garch"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "EFFECTIVE_DEFAULT"
+        assert w["best_single_model"] == "garch"
+        # ratio = ensemble_rmse / primary_rmse = 2.2 / 2.0 = 1.1
+        assert abs(w["rmse_ratio"] - 1.1) < 1e-6
+
+    def test_falls_back_to_best_single_when_primary_absent(self):
+        """When ensemble_selection is missing, fall back silently to BEST_SINGLE."""
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.0, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        # No ensemble_selection key at all
+        audit["artifacts"].pop("ensemble_selection", None)
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "BEST_SINGLE"
+        assert w["best_single_model"] == "samossa"  # oracle best
+
+    def test_falls_back_when_primary_model_has_no_rmse(self):
+        """When primary_model's eval_metrics entry lacks RMSE, fall back to BEST_SINGLE."""
+        # Use sarimax as primary (not in MODELS tuple, so MODELS early-exit won't trigger).
+        # Add sarimax entry but WITHOUT rmse — should fall back to oracle best-single.
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.5, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["evaluation_metrics"]["sarimax"] = {"smape": 0.02}  # no rmse key
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "sarimax"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "BEST_SINGLE"
+
+    def test_primary_model_can_be_sarimax_outside_models_tuple(self):
+        """EFFECTIVE_DEFAULT can resolve to sarimax even though it's not in MODELS tuple."""
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.5, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["evaluation_metrics"]["sarimax"] = {
+            "rmse": 1.8,
+            "smape": 0.019,
+            "directional_accuracy": 0.57,
+        }
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "sarimax"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "EFFECTIVE_DEFAULT"
+        assert w["best_single_model"] == "sarimax"
+        # ratio = 2.2 / 1.8
+        assert abs(w["rmse_ratio"] - 2.2 / 1.8) < 1e-6
+
+    def test_best_single_mode_unchanged_by_default(self):
+        """Passing baseline_mode='BEST_SINGLE' explicitly is identical to default."""
+        audit = _make_audit(garch_rmse=1.0, samossa_rmse=3.0, mssa_rl_rmse=2.5, ensemble_rmse=1.5)
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "samossa"}
+        w_default = extract_window_metrics(audit)
+        w_explicit = extract_window_metrics(audit, baseline_mode="BEST_SINGLE")
+        assert w_default["baseline_mode"] == "BEST_SINGLE"
+        assert w_explicit["baseline_mode"] == "BEST_SINGLE"
+        assert w_default["rmse_ratio"] == w_explicit["rmse_ratio"]
+
 
 class TestPerModelSummary:
     def test_counts_best_single_correctly(self):

@@ -17,11 +17,16 @@ $stdoutPath = Join-Path $logDir "pmx_observability_exporter.stdout.log"
 $stderrPath = Join-Path $logDir "pmx_observability_exporter.stderr.log"
 $statePath = Join-Path $logDir "exporter_state.json"
 $args = @($scriptPath, "--bind", $Bind, "--port", "$Port", "--state-path", $statePath)
+$existingProcessIds = @(Get-ListeningProcessIdsByPort -Port $Port)
 
-Start-RepoProcess `
+Ensure-RepoService `
+    -Label "pmx_observability_exporter" `
     -FilePath $pythonExe `
     -ArgumentList $args `
     -WorkingDirectory $repoRoot `
     -StdOutPath $stdoutPath `
     -StdErrPath $stderrPath `
+    -HealthUrl ("http://" + $Bind + ":" + $Port + "/healthz") `
+    -ExistingProcessIds $existingProcessIds `
+    -StartupTimeoutSec 20 `
     -Foreground:$Foreground

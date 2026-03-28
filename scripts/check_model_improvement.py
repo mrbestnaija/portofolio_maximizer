@@ -312,11 +312,15 @@ def run_layer1_forecast_quality(
         seen[fp] = audit
     deduped = list(seen.values())
 
+    # Load regression contract before extracting window metrics so baseline_mode
+    # is available for the per-window baseline selection.
+    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
+
     # Extract metrics, count skipped-missing
     n_missing = 0
     windows: list[dict] = []
     for raw in deduped:
-        w = extract_window_metrics(raw)
+        w = extract_window_metrics(raw, baseline_mode=baseline_model)
         if w is None:
             n_missing += 1
         else:
@@ -335,8 +339,6 @@ def run_layer1_forecast_quality(
         "n_used_windows": n_used,
         "coverage_ratio": coverage_ratio,
     }
-
-    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
 
     if n_used == 0:
         return LayerResult(

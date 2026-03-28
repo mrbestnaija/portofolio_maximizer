@@ -14,6 +14,7 @@ import os
 import smtplib
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -208,6 +209,15 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path.startswith("/shutdown"):
+            payload = json.dumps({"status": "shutting_down"}).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
         if not self.path.startswith("/alertmanager"):
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
