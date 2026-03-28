@@ -1127,3 +1127,80 @@ def test_linkage_fail_when_warmup_expired_and_below_threshold() -> None:
     assert linkage_pass is False, "matched=3 < 10 after warmup must fail linkage"
     assert _linkage_warmup_active is False
     assert _linkage_no_eligible is False
+
+
+def test_main_passes_effective_default_baseline_through_to_gate_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When lift summary reports baseline_model=EFFECTIVE_DEFAULT the gate output must
+    reflect EFFECTIVE_DEFAULT in lift_gate.baseline_model (pure passthrough check)."""
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 200.0, "profit_factor": 2.0, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 21}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    original_safe_load_json = mod._safe_load_json
+
+    def _fake_safe_load_json(path: Path):  # noqa: ANN001
+        if Path(path).name == "latest_summary.json":
+            # Override baseline_model to EFFECTIVE_DEFAULT — this is the new value
+            # introduced by the causal baseline recalibration.
+            return _make_lift_summary(audit_dir, baseline_model="EFFECTIVE_DEFAULT")
+        return original_safe_load_json(path)
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(mod, "_safe_load_json", _fake_safe_load_json)
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_load_latest_live_cycle_binding",
+        lambda _: {"available": False, "latest_live_cycle_ts_utc": None,
+                    "latest_live_run_id": None, "latest_live_trade_id": None,
+                    "query_error": "test_stubbed"},
+    )
+    monkeypatch.setattr(mod, "_evaluate_artifact_binding", lambda **kwargs: {"pass": True, "reason_codes": []})
+    monkeypatch.setattr(mod, "_count_masked_unlinked_closes", lambda _: (0, []))
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _: {"close_before_entry_count": 0,
+                   "closed_missing_exit_reason_count": 0, "query_error": None},
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["production_audit_gate.py", "--db", str(db_path),
+         "--proof-requirements", str(proof_cfg),
+         "--audit-dir", str(audit_dir),
+         "--monitor-config", str(monitor_cfg),
+         "--output-json", str(output_json)],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+    payload = original_safe_load_json(output_json)
+    assert payload["lift_gate"]["baseline_model"] == "EFFECTIVE_DEFAULT"
