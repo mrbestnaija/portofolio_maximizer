@@ -30,8 +30,9 @@ except ImportError:  # pragma: no cover - protective
 
 @pytest.fixture(scope="function")
 def price_series() -> pd.Series:
+    rng = np.random.default_rng(12345)
     dates = pd.date_range(datetime(2020, 1, 1), periods=240, freq="D")
-    returns = np.random.normal(0.001, 0.02, len(dates))
+    returns = rng.normal(0.001, 0.02, len(dates))
     prices = 100 * np.exp(np.cumsum(returns))
     return pd.Series(prices, index=dates, name="Close")
 
