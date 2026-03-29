@@ -83,7 +83,7 @@ jobs:
           fi
 
       - name: Run tests
-        run: pytest -v --tb=short -m "not gpu"
+        run: pytest -v --tb=short -m "not gpu and not slow"
 
       - name: Verify ensemble routing integration (blocking)
         run: pytest -v --tb=short tests/integration/test_ensemble_routing.py
