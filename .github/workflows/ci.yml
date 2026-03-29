@@ -83,7 +83,8 @@ jobs:
           fi
 
       - name: Run tests
-        run: pytest -v --tb=short -m "not gpu and not slow"
+        timeout-minutes: 10
+        run: pytest -v --tb=short -m "not gpu and not slow" --timeout=120
 
       - name: Verify ensemble routing integration (blocking)
         run: pytest -v --tb=short tests/integration/test_ensemble_routing.py

@@ -379,6 +379,7 @@ class TestDropHighVifFeatures:
         )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestForecasterIntegration:
     """Integration tests for forecasting."""

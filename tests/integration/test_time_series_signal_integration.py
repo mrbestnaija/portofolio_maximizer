@@ -127,6 +127,7 @@ def ts_signal_generator(ts_routing_config):
     )
 
 
+@pytest.mark.slow
 class TestTimeSeriesForecastingToSignalIntegration:
     """Test integration: Forecasting -> Signal Generation"""
 
