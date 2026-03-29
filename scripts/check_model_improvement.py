@@ -88,7 +88,7 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
         "n_skipped_missing_metrics",
         "n_total_files",
         "coverage_ratio",       # Phase 7.19: n_used / n_total; WARN when < 0.20
-        "lift_mean",            # Phase 7.25: bootstrap mean(delta), delta=best_single-ensemble
+        "lift_mean",            # Phase 7.25: bootstrap mean(delta), delta=baseline-ensemble
         "lift_ci_low",          # Phase 7.25: lower 95% bootstrap CI bound
         "lift_ci_high",         # Phase 7.25: upper 95% bootstrap CI bound
         "lift_win_fraction",    # Phase 7.25: fraction of windows with positive lift

@@ -749,3 +749,26 @@ class TestLiftSignificance:
         for key, val in result.items():
             if isinstance(val, float):
                 assert math.isfinite(val), f"Key '{key}' is non-finite: {val}"
+
+    def test_lift_significance_prefers_extracted_baseline_rmse_over_ratio_proxy(self):
+        """Integration contract: extracted EFFECTIVE_DEFAULT windows use baseline_rmse directly."""
+        ensembles = [1.8, 1.9, 2.1, 2.0, 1.7]
+        windows = []
+        for idx, ensemble_rmse in enumerate(ensembles):
+            audit = _make_audit(
+                garch_rmse=2.0,
+                samossa_rmse=1.0,
+                mssa_rl_rmse=2.5,
+                ensemble_rmse=ensemble_rmse,
+            )
+            audit["window_id"] = f"w_{idx}"
+            audit["artifacts"]["ensemble_selection"] = {"primary_model": "garch"}
+            window = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+            assert window is not None
+            windows.append(window)
+
+        result = compute_lift_significance(windows, min_windows=5, n_boot=200, seed=42)
+        assert not result["insufficient_data"]
+        assert result["n_windows"] == 5
+        assert result["mean_lift"] == pytest.approx(0.1, abs=1e-9)
+        assert result["lift_win_fraction"] == pytest.approx(0.6, abs=1e-9)

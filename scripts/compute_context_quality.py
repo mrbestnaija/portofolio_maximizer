@@ -26,6 +26,7 @@ from scripts.quality_pipeline_common import (
     connect_ro,
     first_existing_columns,
     has_production_closed_trades_view,
+    production_closed_trades_sql,
     sqlite_master_names,
     table_columns,
 )
@@ -162,12 +163,7 @@ def _load_context_rows(db_path: Path) -> tuple[list[dict[str, Any]], dict[str, A
                     te.realized_pnl AS realized_pnl,
                     {regime_expr} AS detected_regime,
                     {conf_expr} AS confidence
-                FROM trade_executions te
-                {join_clause}
-                WHERE te.is_close = 1
-                  AND te.realized_pnl IS NOT NULL
-                  AND COALESCE(te.is_diagnostic, 0) = 0
-                  AND COALESCE(te.is_synthetic, 0) = 0
+                {production_closed_trades_sql("te", te_cols, join_clause)}
             """
             raw = conn.execute(query, (_UNKNOWN_REGIME,)).fetchall()
 

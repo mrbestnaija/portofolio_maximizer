@@ -28,6 +28,7 @@ from scripts.quality_pipeline_common import (
     first_existing_columns,
     has_production_closed_trades_view,
     load_json_dict,
+    production_closed_trades_sql,
     table_columns,
 )
 from scripts.robustness_thresholds import threshold_map
@@ -128,11 +129,7 @@ def _build_trades_df(
             query = f"""
                 SELECT src.id, src.ticker, src.trade_date, src.action, src.price, src.exit_price, src.realized_pnl,
                        src.holding_period_days, src.exit_reason, {conf_expr} AS confidence, src.ts_signal_id
-                FROM trade_executions src
-                WHERE src.is_close = 1
-                  AND src.realized_pnl IS NOT NULL
-                  AND COALESCE(src.is_diagnostic, 0) = 0
-                  AND COALESCE(src.is_synthetic, 0) = 0
+                {production_closed_trades_sql("src", te_cols)}
                 ORDER BY src.trade_date ASC
             """
         df = pd.read_sql_query(query, conn)

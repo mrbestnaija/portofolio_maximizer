@@ -598,10 +598,17 @@ def compute_lift_significance(
     min_windows: int = 5,
     seed: int = 42,
 ) -> dict:
-    """Bootstrap confidence interval for ensemble lift over best-single-model RMSE.
+    """Bootstrap confidence interval for ensemble lift over the configured baseline RMSE.
 
-    Per-window lift delta_i = best_single_rmse_i - ensemble_rmse_i.
+    Per-window lift delta_i = baseline_rmse_i - ensemble_rmse_i.
     Positive delta means ensemble wins that window.
+
+    Preferred window fields:
+        baseline_rmse, ensemble_rmse
+
+    Backward-compatible legacy fields:
+        best_single_rmse, ensemble_rmse
+        rmse_ratio (proxy only when direct RMSE values are absent)
 
     Returns a dict with keys:
         mean_lift           -- mean(delta) over valid windows
@@ -619,7 +626,9 @@ def compute_lift_significance(
     # Extract per-window lift deltas; skip NaN/inf entries.
     deltas: list[float] = []
     for w in windows:
-        best = w.get("best_single_rmse")
+        best = w.get("baseline_rmse")
+        if best is None:
+            best = w.get("best_single_rmse")
         ens = w.get("ensemble_rmse")
         if best is None or ens is None:
             # Fall back to rmse_ratio if direct RMSE values missing.
