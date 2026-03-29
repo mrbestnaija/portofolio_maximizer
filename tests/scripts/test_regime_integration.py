@@ -13,12 +13,15 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from forcester_ts.forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
+
+pytestmark = pytest.mark.slow
 
 
 def generate_synthetic_data(regime_type: str, length: int = 200) -> pd.Series:

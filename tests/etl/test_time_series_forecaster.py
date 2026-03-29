@@ -68,6 +68,7 @@ class TestSAMOSSA:
         assert math.isclose(summary["normalized_std"], 1.0, rel_tol=1e-6)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestSARIMAX:
     def test_auto_select_fit(self, price_series: pd.Series) -> None:
@@ -129,6 +130,7 @@ class TestGARCH:
             forecaster.fit(returns_series)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestSARIMAXXInstrumentation:
     def test_exogenous_artifact_recorded(

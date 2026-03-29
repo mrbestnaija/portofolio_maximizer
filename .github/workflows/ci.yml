@@ -88,6 +88,10 @@ jobs:
       - name: Verify ensemble routing integration (blocking)
         run: pytest -v --tb=short tests/integration/test_ensemble_routing.py
 
+      - name: Verify SARIMAX + regime integration (blocking)
+        timeout-minutes: 15
+        run: pytest -v --tb=short -m "slow and not gpu" tests/etl/test_time_series_forecaster.py tests/scripts/test_regime_integration.py
+
       - name: Reset warning log for convergence budget gate
         run: |
           mkdir -p logs/warnings
