@@ -5,7 +5,7 @@ Phase 7.10b improvements:
   - AR(1) conditional mean model for directional signal (was 'Zero' / volatility only)
   - skewt distribution for fat tails + negative skew (was 'normal')
   - ADF stationarity test; auto-difference if unit root detected
-  - GJR-GARCH asymmetric vol fallback before EWMA when persistence >= 0.97
+  - GJR-GARCH asymmetric vol fallback before EWMA when persistence >= 0.97 (hard_igarch_threshold)
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class GARCHForecaster:
         enforce_stationarity: bool = True,
         igarch_fallback: str = "gjr",
         min_arch_sample_size: int = 120,
-        hard_igarch_threshold: float = 0.99,
+        hard_igarch_threshold: float = 0.97,  # P4 fix: align to documented 0.97 (was 0.99)
         max_volatility_ratio_to_realized: float = 4.0,
     ) -> None:
         self.p = p
@@ -183,15 +183,7 @@ class GARCHForecaster:
                 reason="insufficient_sample_size",
             )
 
-        # Scale returns to improve GARCH convergence (recommended by arch library).
-        mean_abs = returns_clean.abs().mean()
-        if mean_abs < 1.0 or mean_abs > 1000.0:
-            scale_factor = 100.0
-            returns_scaled = returns_clean * scale_factor
-            self._scale_factor = scale_factor
-        else:
-            self._scale_factor = 1.0
-            returns_scaled = returns_clean
+        returns_scaled, self._scale_factor = self._scale_returns_for_fit(returns_clean)
 
         best_model = None
         best_fit = None
@@ -436,6 +428,27 @@ class GARCHForecaster:
         )
         self._residual_diagnostics = self._capture_residual_diagnostics()
         return self
+
+    @staticmethod
+    def _scale_returns_for_fit(returns: pd.Series) -> tuple[pd.Series, float]:
+        """Scale fit inputs into a stable numeric band for the ARCH optimizer."""
+        values = returns.dropna().values
+        if values.size == 0:
+            return returns, 1.0
+
+        max_abs = float(np.nanmax(np.abs(values)))
+        if not np.isfinite(max_abs) or max_abs == 0.0:
+            return returns, 1.0
+
+        scale_factor = 1.0
+        if max_abs < 1.0:
+            scale_factor = min(1000.0, 1.0 / max_abs)
+        elif max_abs > 1000.0:
+            scale_factor = 1000.0 / max_abs
+
+        if scale_factor == 1.0:
+            return returns, 1.0
+        return returns * scale_factor, float(scale_factor)
 
     def _capture_residual_diagnostics(self) -> Dict[str, Any]:
         """Phase 8.2: run Ljung-Box + Jarque-Bera on GARCH standardized residuals."""

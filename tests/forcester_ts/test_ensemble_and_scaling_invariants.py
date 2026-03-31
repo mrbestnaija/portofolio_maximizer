@@ -498,7 +498,7 @@ class TestEnsembleIndexSync:
         monkeypatch.setattr(
             _ens_mod.EnsembleCoordinator,
             "select_weights",
-            lambda self, conf: ({"samossa": 1.0}, 0.8),
+            lambda self, conf, model_directional_accuracy=None: ({"samossa": 1.0}, 0.8),
         )
 
         forecaster = TimeSeriesForecaster()

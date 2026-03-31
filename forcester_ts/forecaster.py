@@ -1984,9 +1984,58 @@ class TimeSeriesForecaster:
                     )
 
             coordinator = EnsembleCoordinator(self._ensemble_config)
-            confidence = derive_model_confidence(self._model_summaries)
-            weights, score = coordinator.select_weights(confidence)
+            # P0 fix (2026-03-29): pass trailing OOS metrics so derive_model_confidence
+            # can build non-empty RMSE-rank and _score_from_metrics scores.
+            # Priority:
+            #   1. self._latest_metrics — populated by evaluate() on the same instance
+            #      (valid when the same forecaster is reused across forecast/evaluate cycles).
+            #   2. _load_trailing_oos_metrics() — reads the most recent audit file on disk
+            #      (valid for fresh-forecaster paths: run_etl_pipeline, run_auto_trader,
+            #       cross_validation — each builds a new instance per fold/run so
+            #       self._latest_metrics is always {} at selection time there).
+            _oos_for_selection: Optional[Dict[str, Dict[str, Any]]] = (
+                self._latest_metrics or self._load_trailing_oos_metrics() or None
+            )
+            confidence = derive_model_confidence(
+                self._model_summaries,
+                oos_metrics=_oos_for_selection,
+            )
+            # P0 fix: extract per-model directional accuracy from trailing OOS
+            # metrics and pass to select_weights so the DA-aware candidate path
+            # (ensemble.py:177-224) actually runs in production.
+            _oos_da: Optional[Dict[str, float]] = None
+            if _oos_for_selection:
+                # Extract per-model DA from the same source used for RMSE-rank.
+                # _oos_for_selection may contain "ensemble" or other non-component
+                # keys; the `model in _tracked` guard below filters them out.
+                _tracked = {"sarimax", "garch", "samossa", "mssa_rl"}
+                _raw_da = {
+                    model: float(m.get("directional_accuracy", 0.5))
+                    for model, m in _oos_for_selection.items()
+                    if isinstance(m, dict)
+                    and m.get("directional_accuracy") is not None
+                    and model in _tracked
+                }
+                if _raw_da:
+                    _oos_da = _raw_da
+                    logger.info(
+                        "[TS_MODEL] P0 OOS DA wired into select_weights: %s",
+                        {m: f"{v:.3f}" for m, v in _oos_da.items()},
+                    )
+            weights, score = coordinator.select_weights(confidence, model_directional_accuracy=_oos_da)
             weights = self._enforce_convexity(weights)
+            # P1a: apply accuracy ceiling AFTER selection so it does not collapse
+            # model discrimination at ranking time (Bug fixed 2026-03-29).
+            # Apply to BOTH the scalar selection_score AND the per-model confidence
+            # dict that goes into metadata/forecast_bundle — the signal generator
+            # reads ensemble_metadata["confidence"] for weighted position sizing
+            # (time_series_signal_generator.py:1673-1694) and must see the same cap.
+            _ENSEMBLE_SCORE_CAP = 0.65
+            score = float(min(score, _ENSEMBLE_SCORE_CAP))
+            confidence = {
+                model: float(min(val, _ENSEMBLE_SCORE_CAP))
+                for model, val in confidence.items()
+            }
         finally:
             # Restore original candidates after ensemble build
             self._ensemble_config.candidate_weights = original_candidates
@@ -2291,6 +2340,94 @@ class TimeSeriesForecaster:
             "lift_fraction": lift_fraction,
             "ratios": ratios,
         }
+
+    def _load_trailing_oos_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Return per-model OOS evaluation metrics from the most recent matching audit file.
+
+        This is the production fix for fresh-forecaster instances (run_etl_pipeline,
+        run_auto_trader, cross_validation) where self._latest_metrics is always empty
+        at selection time because evaluate() has never been called on this instance.
+
+        Scope: audit files are filtered to the current ticker and forecast horizon
+        before returning metrics, preventing cross-ticker/cross-horizon contamination
+        in multi-ticker runs where audit files from different assets share the same
+        audit directory.
+
+        Matching rules (all must pass when the value is known):
+          - ticker: audit dataset.ticker must equal current ticker (case-insensitive).
+            If either side is unknown/None, the check is skipped (fail-open).
+          - horizon: audit dataset.forecast_horizon must equal current horizon.
+            Horizon 0 / None on either side skips the check.
+
+        Returns {} when no audit directory is configured, no files match, or
+        no matching file has evaluation_metrics — all safe no-op cases.
+        """
+        if not self._audit_dir or not self._audit_dir.exists():
+            return {}
+
+        # Read current context from instrumentation metadata set during fit()/forecast().
+        _meta = self._instrumentation._dataset_meta
+        current_ticker: Optional[str] = (_meta.get("ticker") or None)
+        current_horizon: Optional[int] = (
+            int(_meta["forecast_horizon"])
+            if _meta.get("forecast_horizon") is not None
+            else None
+        )
+
+        try:
+            files = sorted(
+                self._audit_dir.glob("forecast_audit_*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            return {}
+
+        from forcester_ts.ensemble import TRACKED_MODELS  # local import avoids cycle
+
+        for path in files[:20]:  # scan recent files; most will match on first try
+            try:
+                audit = json.loads(path.read_text())
+            except Exception:
+                continue
+
+            # --- Ticker filter ---
+            dataset = audit.get("dataset") or {}
+            audit_ticker = dataset.get("ticker") or None
+            if current_ticker and audit_ticker:
+                if current_ticker.upper() != str(audit_ticker).upper():
+                    continue  # different asset — skip
+
+            # --- Horizon filter ---
+            audit_horizon = dataset.get("forecast_horizon")
+            if current_horizon and audit_horizon is not None:
+                try:
+                    if int(audit_horizon) != current_horizon:
+                        continue  # incompatible horizon — skip
+                except (TypeError, ValueError):
+                    pass  # non-numeric horizon field; skip check
+
+            artifacts = audit.get("artifacts") or {}
+            eval_metrics = artifacts.get("evaluation_metrics") or {}
+            if not isinstance(eval_metrics, dict) or not eval_metrics:
+                continue
+
+            component = {
+                k: v for k, v in eval_metrics.items()
+                if k in TRACKED_MODELS and isinstance(v, dict)
+            }
+            if component:
+                logger.info(
+                    "[TS_MODEL] Loaded trailing OOS metrics from audit %s "
+                    "(ticker=%s horizon=%s %d models)",
+                    path.name,
+                    audit_ticker or "unknown",
+                    audit_horizon,
+                    len(component),
+                )
+                return component
+
+        return {}
 
     def _preselection_default_gate(self) -> Dict[str, Any]:
         """
