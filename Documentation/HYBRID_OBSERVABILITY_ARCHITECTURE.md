@@ -159,7 +159,7 @@ or:
 .\launch_live_dashboard.bat
 ```
 
-This refreshes `visualizations/dashboard_data.json`, starts the bridge, local HTTP server, and Prometheus alert exporter, and opens the dashboard. The live watcher remains opt-in via `--ensure-live-watcher`.
+This refreshes `visualizations/dashboard_data.json`, forces a fresh `logs/audit_gate/production_gate_latest.json` once during launch, starts the bridge, local HTTP server, and Prometheus alert exporter, and opens the dashboard. The running bridge keeps the production gate artifact fresh when it becomes stale, and the live watcher remains opt-in via `--ensure-live-watcher`.
 
 Open:
 

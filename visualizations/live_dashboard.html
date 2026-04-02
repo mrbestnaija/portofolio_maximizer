@@ -1249,6 +1249,7 @@
       const evidence = data?.evidence || {};
       const gate = evidence.production_gate || {};
       const audit = evidence.dashboard_audit || {};
+      const refresh = evidence.production_gate_refresh || {};
       const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
 
       if (!data) {
@@ -1295,8 +1296,19 @@
       const auditAge = Number(audit.age_minutes);
       const gateFreshness = String(gate.freshness_status || 'UNKNOWN').toUpperCase();
       const auditFreshness = String(audit.freshness_status || 'UNKNOWN').toUpperCase();
+      const gateGenerated = gate.generated_utc ? formatTimestamp(gate.generated_utc) : '--';
+      const auditLatest = audit.latest_created_at ? formatTimestamp(audit.latest_created_at) : '--';
+      const refreshEnabled = refresh.enabled === true;
+      const refreshStatus = String(refresh.status || (refreshEnabled ? 'UNKNOWN' : 'DISABLED')).toUpperCase();
+      const refreshAttempted = refresh.attempted === true;
+      const refreshAttemptedAt = refresh.attempted_utc ? formatTimestamp(refresh.attempted_utc) : '--';
+      const refreshLabel = refreshEnabled
+        ? refreshAttempted
+          ? `gate_refresh=${refreshStatus.toLowerCase()}@${refreshAttemptedAt}`
+          : `gate_refresh=${String(refresh.reason || 'idle')}`
+        : 'gate_refresh=disabled';
       const latestRunOnly = evidence.latest_run_only !== false;
-      contextEl.textContent = `phase3_ready=${gate.phase3_ready ? 1 : 0} · latest_run_only=${latestRunOnly ? 1 : 0} · gate_age=${Number.isFinite(gateAge) ? gateAge.toFixed(1) + 'm' : '--'} (${gateFreshness}) · snapshot_age=${Number.isFinite(auditAge) ? auditAge.toFixed(1) + 'm' : '--'} (${auditFreshness})`;
+      contextEl.textContent = `phase3_ready=${gate.phase3_ready ? 1 : 0} · latest_run_only=${latestRunOnly ? 1 : 0} · gate_generated=${gateGenerated} · gate_age=${Number.isFinite(gateAge) ? gateAge.toFixed(1) + 'm' : '--'} (${gateFreshness}) · snapshot_created=${auditLatest} · snapshot_age=${Number.isFinite(auditAge) ? auditAge.toFixed(1) + 'm' : '--'} (${auditFreshness}) · ${refreshLabel}`;
 
       const gatePath = gate.path ? String(gate.path) : '--';
       const reason = gate.phase3_reason ? `reason=${gate.phase3_reason}` : 'reason=--';
@@ -1306,7 +1318,7 @@
         : gate.artifact_binding_pass === false
           ? `binding=${bindingReasons.length ? bindingReasons.join(',') : 'failed'}`
           : 'binding=unknown';
-      sourceEl.textContent = `Gate artifact: ${gatePath} · ${reason} · ${bindingDescriptor}`;
+      sourceEl.textContent = `Gate artifact: ${gatePath} · ${reason} · ${bindingDescriptor} · freshness=${gateFreshness.toLowerCase()}`;
 
       alertsEl.innerHTML = '';
       if (!alerts.length) {

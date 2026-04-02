@@ -45,7 +45,7 @@ export EXECUTION_MODE=live
 
 - `visualizations/live_dashboard.html` is a **real-time view of run artifacts** and must not ship with embedded demo/fake values.
 - The dashboard polls `visualizations/dashboard_data.json` every 5 seconds; if the file is missing, it shows empty states.
-- On Windows, the preferred human-facing launch path is `python scripts/windows_dashboard_manager.py launch` or `.\launch_live_dashboard.bat`; this refreshes the payload, starts the local bridge/server/exporter stack, opens the dashboard, and leaves the live watcher as an opt-in flag (`--ensure-live-watcher`).
+- On Windows, the preferred human-facing launch path is `python scripts/windows_dashboard_manager.py launch` or `.\launch_live_dashboard.bat`; this refreshes the payload, forces a fresh `production_gate_latest.json`, starts the local bridge/server/exporter stack, opens the dashboard, and leaves the live watcher as an opt-in flag (`--ensure-live-watcher`).
 - To view it reliably, serve the repo root over HTTP (avoids `file://` fetch restrictions):
 
 ```bash

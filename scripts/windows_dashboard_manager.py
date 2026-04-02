@@ -152,6 +152,9 @@ def _ensure_dashboard_stack(
     persist_snapshot: bool,
     require_bridge: bool,
     ensure_prometheus_exporter: bool,
+    refresh_production_gate: bool,
+    production_gate_refresh_timeout_seconds: float,
+    production_gate_refresh_min_interval_seconds: float,
     ensure_live_watcher: bool,
     watcher_tickers: str,
     watcher_cycles: int,
@@ -199,6 +202,16 @@ def _ensure_dashboard_stack(
                 "--db-path",
                 str(db_path),
             ]
+            if refresh_production_gate:
+                bridge_cmd_base.extend(
+                    [
+                        "--refresh-production-gate",
+                        "--production-gate-refresh-timeout-seconds",
+                        str(float(production_gate_refresh_timeout_seconds)),
+                        "--production-gate-refresh-min-interval-seconds",
+                        str(float(production_gate_refresh_min_interval_seconds)),
+                    ]
+                )
             bridge_cmd = list(bridge_cmd_base)
             if persist_snapshot:
                 bridge_cmd.append("--persist-snapshot")
@@ -353,12 +366,16 @@ def _refresh_dashboard_payload(
     python_bin: str,
     db_path: Path,
     persist_snapshot: bool,
+    refresh_production_gate: bool,
+    production_gate_refresh_timeout_seconds: float,
 ) -> Dict[str, Any]:
     bridge_script = root / "scripts" / "dashboard_db_bridge.py"
+    output_json = root / "visualizations" / "dashboard_data.json"
     refresh_status: Dict[str, Any] = {
         "attempted": True,
         "ok": False,
         "persist_snapshot": bool(persist_snapshot),
+        "refresh_production_gate": bool(refresh_production_gate),
         "retried_without_persist_snapshot": False,
         "returncode": None,
         "command": [],
@@ -379,6 +396,17 @@ def _refresh_dashboard_payload(
         "--db-path",
         str(db_path),
     ]
+    if refresh_production_gate:
+        cmd_base.extend(
+            [
+                "--refresh-production-gate",
+                "--force-production-gate-refresh",
+                "--production-gate-refresh-timeout-seconds",
+                str(float(production_gate_refresh_timeout_seconds)),
+                "--production-gate-refresh-min-interval-seconds",
+                "0",
+            ]
+        )
     cmd = list(cmd_base)
     if persist_snapshot:
         cmd.append("--persist-snapshot")
@@ -401,6 +429,20 @@ def _refresh_dashboard_payload(
     refresh_status["returncode"] = int(proc.returncode)
     if int(proc.returncode) == 0:
         refresh_status["ok"] = True
+        if output_json.exists():
+            try:
+                payload = json.loads(output_json.read_text(encoding="utf-8"))
+                evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
+                refresh_block = evidence.get("production_gate_refresh", {}) if isinstance(evidence, dict) else {}
+                if isinstance(refresh_block, dict) and refresh_block:
+                    refresh_status["production_gate_refresh"] = refresh_block
+                    if refresh_production_gate and refresh_block.get("ok") is False:
+                        detail = str(refresh_block.get("detail") or refresh_block.get("reason") or "unknown").strip()
+                        refresh_status["warnings"].append(
+                            f"production gate refresh completed with stale upstream evidence: {detail}"
+                        )
+            except Exception:
+                pass
         return refresh_status
 
     stderr_tail = [line.strip() for line in (proc.stderr or "").splitlines()[-4:] if line.strip()]
@@ -426,6 +468,20 @@ def _refresh_dashboard_payload(
         refresh_status["command"] = list(cmd_base)
         if int(retry.returncode) == 0:
             refresh_status["ok"] = True
+            if output_json.exists():
+                try:
+                    payload = json.loads(output_json.read_text(encoding="utf-8"))
+                    evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
+                    refresh_block = evidence.get("production_gate_refresh", {}) if isinstance(evidence, dict) else {}
+                    if isinstance(refresh_block, dict) and refresh_block:
+                        refresh_status["production_gate_refresh"] = refresh_block
+                        if refresh_production_gate and refresh_block.get("ok") is False:
+                            detail = str(refresh_block.get("detail") or refresh_block.get("reason") or "unknown").strip()
+                            refresh_status["warnings"].append(
+                                f"production gate refresh completed with stale upstream evidence: {detail}"
+                            )
+                except Exception:
+                    pass
             return refresh_status
         stderr_tail = [line.strip() for line in (retry.stderr or "").splitlines()[-4:] if line.strip()]
 
@@ -461,6 +517,13 @@ def _build_status_payload(
             "pid": result.bridge_pid,
             "running": result.bridge_running,
             "started_now": result.started_bridge,
+            "refresh_production_gate": bool(getattr(args, "refresh_production_gate", False)),
+            "production_gate_refresh_timeout_seconds": float(
+                getattr(args, "production_gate_refresh_timeout_seconds", 0.0) or 0.0
+            ),
+            "production_gate_refresh_min_interval_seconds": float(
+                getattr(args, "production_gate_refresh_min_interval_seconds", 0.0) or 0.0
+            ),
         },
         "http_server": {
             "pid": result.server_pid,
@@ -498,6 +561,14 @@ def _print_status(*, result: EnsureResult, status: Dict[str, Any], refresh_statu
             f"[DASHBOARD] refresh_ok={bool(refresh_status.get('ok'))} "
             f"rc={refresh_status.get('returncode')}"
         )
+        gate_refresh = refresh_status.get("production_gate_refresh")
+        if isinstance(gate_refresh, dict) and gate_refresh:
+            print(
+                "[DASHBOARD] production_gate_refresh="
+                f"{gate_refresh.get('status')} "
+                f"reason={gate_refresh.get('reason')} "
+                f"generated_utc={gate_refresh.get('generated_utc')}"
+            )
     print(
         f"[DASHBOARD] bridge_pid={result.bridge_pid} running={result.bridge_running} | "
         f"server_pid={result.server_pid} running={result.server_running} | "
@@ -533,6 +604,9 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
         persist_snapshot=bool(args.persist_snapshot),
         require_bridge=bool(args.require_bridge),
         ensure_prometheus_exporter=bool(args.ensure_prometheus_exporter),
+        refresh_production_gate=bool(args.refresh_production_gate),
+        production_gate_refresh_timeout_seconds=float(args.production_gate_refresh_timeout_seconds),
+        production_gate_refresh_min_interval_seconds=float(args.production_gate_refresh_min_interval_seconds),
         ensure_live_watcher=bool(args.ensure_live_watcher),
         watcher_tickers=str(args.watcher_tickers),
         watcher_cycles=int(args.watcher_cycles),
@@ -596,6 +670,8 @@ def _cmd_launch(args: argparse.Namespace) -> int:
             python_bin=python_bin,
             db_path=db_path,
             persist_snapshot=bool(args.persist_snapshot),
+            refresh_production_gate=bool(args.refresh_production_gate),
+            production_gate_refresh_timeout_seconds=float(args.production_gate_refresh_timeout_seconds),
         )
 
     result = _ensure_dashboard_stack(
@@ -607,6 +683,9 @@ def _cmd_launch(args: argparse.Namespace) -> int:
         persist_snapshot=bool(args.persist_snapshot),
         require_bridge=bool(args.require_bridge),
         ensure_prometheus_exporter=bool(args.ensure_prometheus_exporter),
+        refresh_production_gate=bool(args.refresh_production_gate),
+        production_gate_refresh_timeout_seconds=float(args.production_gate_refresh_timeout_seconds),
+        production_gate_refresh_min_interval_seconds=float(args.production_gate_refresh_min_interval_seconds),
         ensure_live_watcher=bool(args.ensure_live_watcher),
         watcher_tickers=str(args.watcher_tickers),
         watcher_cycles=int(args.watcher_cycles),
@@ -665,6 +744,10 @@ def main() -> int:
     p_ensure.add_argument("--require-bridge", action="store_true", help="Fail in strict mode when bridge is not running.")
     p_ensure.add_argument("--ensure-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_true", default=True, help="Ensure the localhost Prometheus alert exporter is running (default: on).")
     p_ensure.add_argument("--no-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_false", help="Do not manage the Prometheus alert exporter.")
+    p_ensure.add_argument("--refresh-production-gate", dest="refresh_production_gate", action="store_true", default=False, help="Also keep the production gate artifact fresh from the bridge (default: off for automation-safe ensure).")
+    p_ensure.add_argument("--no-refresh-production-gate", dest="refresh_production_gate", action="store_false", help="Do not refresh the production gate artifact from the bridge.")
+    p_ensure.add_argument("--production-gate-refresh-timeout-seconds", type=float, default=120.0, help="Timeout for a production gate refresh attempt (default: 120s).")
+    p_ensure.add_argument("--production-gate-refresh-min-interval-seconds", type=float, default=300.0, help="Backoff between production gate refresh attempts while the bridge runs (default: 300s).")
     p_ensure.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=True, help="Ensure the live denominator watcher is running (default: on).")
     p_ensure.add_argument("--no-live-watcher", dest="ensure_live_watcher", action="store_false", help="Do not manage the live denominator watcher.")
     p_ensure.add_argument("--watcher-tickers", default=",".join(DEFAULT_LIVE_WATCHER_TICKERS), help="Comma-separated live watcher ticker universe.")
@@ -689,6 +772,10 @@ def main() -> int:
     p_launch.add_argument("--require-bridge", action="store_true", default=True, help="Require the dashboard bridge to be running (default: on).")
     p_launch.add_argument("--ensure-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_true", default=True, help="Ensure the localhost Prometheus alert exporter is running (default: on).")
     p_launch.add_argument("--no-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_false", help="Do not manage the Prometheus alert exporter.")
+    p_launch.add_argument("--refresh-production-gate", dest="refresh_production_gate", action="store_true", default=True, help="Refresh and maintain the production gate artifact so the evidence view stays current (default: on).")
+    p_launch.add_argument("--no-refresh-production-gate", dest="refresh_production_gate", action="store_false", help="Do not refresh the production gate artifact from the dashboard launch flow.")
+    p_launch.add_argument("--production-gate-refresh-timeout-seconds", type=float, default=120.0, help="Timeout for a production gate refresh attempt (default: 120s).")
+    p_launch.add_argument("--production-gate-refresh-min-interval-seconds", type=float, default=300.0, help="Backoff between production gate refresh attempts while the bridge runs (default: 300s).")
     p_launch.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=False, help="Also ensure the live denominator watcher is running (default: off for human launch).")
     p_launch.add_argument("--no-live-watcher", dest="ensure_live_watcher", action="store_false", help="Do not manage the live denominator watcher.")
     p_launch.add_argument("--watcher-tickers", default=",".join(DEFAULT_LIVE_WATCHER_TICKERS), help="Comma-separated live watcher ticker universe.")

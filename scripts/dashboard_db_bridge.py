@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -35,6 +36,8 @@ DEFAULT_PRODUCTION_GATE_PATH = ROOT / "logs" / "audit_gate" / "production_gate_l
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
 DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES = 30
 DEFAULT_AUDIT_SNAPSHOT_MAX_AGE_MINUTES = 60
+DEFAULT_PRODUCTION_GATE_REFRESH_TIMEOUT_SECONDS = 120.0
+DEFAULT_PRODUCTION_GATE_REFRESH_MIN_INTERVAL_SECONDS = 300.0
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -121,6 +124,218 @@ def _freshness_from_age(
     if age_minutes > max_age_minutes:
         return "STALE", "AGE_EXCEEDED"
     return "FRESH", None
+
+
+def _production_gate_max_age_minutes() -> float:
+    try:
+        return float(
+            os.getenv(
+                "PMX_PRODUCTION_GATE_MAX_AGE_MINUTES",
+                str(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES),
+            )
+        )
+    except Exception:
+        return float(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES)
+
+
+def _production_gate_generated_utc(payload: Dict[str, Any]) -> Optional[str]:
+    generated_utc = payload.get("timestamp_utc") if isinstance(payload, dict) else None
+    if generated_utc is None and isinstance(payload, dict):
+        telemetry = payload.get("telemetry_contract", {})
+        if isinstance(telemetry, dict):
+            generated_utc = telemetry.get("generated_utc")
+    text = str(generated_utc or "").strip()
+    return text or None
+
+
+def _production_gate_artifact_state(path: Path) -> Dict[str, Any]:
+    payload, err = _load_sidecar_json(path)
+    generated_utc = _production_gate_generated_utc(payload)
+    age_minutes = (
+        _sidecar_age_minutes(path, {"generated_utc": generated_utc} if generated_utc else payload)
+        if err is None
+        else None
+    )
+    freshness_status, freshness_reason = _freshness_from_age(
+        age_minutes,
+        max_age_minutes=_production_gate_max_age_minutes(),
+    )
+    try:
+        mtime = path.stat().st_mtime
+    except Exception:
+        mtime = None
+    return {
+        "available": err is None,
+        "error": err,
+        "generated_utc": generated_utc,
+        "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+        "freshness_status": freshness_status,
+        "freshness_reason": freshness_reason,
+        "mtime": mtime,
+    }
+
+
+def _refresh_production_gate_artifact(
+    *,
+    db_path: Path,
+    artifact_path: Path,
+    timeout_seconds: float,
+    python_bin: str,
+) -> Dict[str, Any]:
+    script_path = ROOT / "scripts" / "production_audit_gate.py"
+    status: Dict[str, Any] = {
+        "enabled": True,
+        "attempted": True,
+        "ok": False,
+        "status": "ERROR",
+        "reason": "refresh_failed",
+        "attempted_utc": _utc_now_iso(),
+        "artifact_path": _relative_repo_path(artifact_path),
+        "returncode": None,
+        "artifact_refreshed": False,
+        "artifact_age_minutes": None,
+        "artifact_freshness_status": "UNKNOWN",
+        "artifact_freshness_reason": None,
+        "generated_utc": None,
+        "detail": None,
+    }
+    if not script_path.exists():
+        status["reason"] = "script_missing"
+        status["detail"] = f"production gate script missing: {script_path}"
+        return status
+    if not db_path.exists():
+        status["reason"] = "db_missing"
+        status["detail"] = f"dashboard DB missing: {db_path}"
+        return status
+
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    before = _production_gate_artifact_state(artifact_path)
+    cmd = [
+        python_bin,
+        "-m",
+        "scripts.production_audit_gate",
+        "--unattended-profile",
+        "--reconcile",
+        "--db",
+        str(db_path),
+        "--output-json",
+        str(artifact_path),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=max(10.0, float(timeout_seconds)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        status["returncode"] = 124
+        status["reason"] = "timeout"
+        status["detail"] = (
+            (exc.stderr or exc.stdout or f"timed out after {float(timeout_seconds):.1f}s")
+            .strip()
+            .splitlines()[-1]
+        )
+        return status
+    except Exception as exc:
+        status["returncode"] = 127
+        status["reason"] = "execution_error"
+        status["detail"] = str(exc)
+        return status
+
+    after = _production_gate_artifact_state(artifact_path)
+    status["returncode"] = int(proc.returncode)
+    status["artifact_age_minutes"] = after.get("age_minutes")
+    status["artifact_freshness_status"] = after.get("freshness_status")
+    status["artifact_freshness_reason"] = after.get("freshness_reason")
+    status["generated_utc"] = after.get("generated_utc")
+
+    refreshed = bool(after.get("available")) and (
+        before.get("available") is not True
+        or before.get("mtime") != after.get("mtime")
+        or before.get("generated_utc") != after.get("generated_utc")
+    )
+    status["artifact_refreshed"] = refreshed
+    if refreshed and int(proc.returncode) in {0, 1}:
+        status["ok"] = True
+        status["status"] = "OK"
+        status["reason"] = "artifact_refreshed"
+        return status
+
+    stderr_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    stdout_lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    status["detail"] = (stderr_lines or stdout_lines or ["production gate artifact was not refreshed"])[-1]
+    if after.get("available") is not True:
+        status["reason"] = "artifact_unavailable_after_refresh"
+    elif int(proc.returncode) not in {0, 1}:
+        status["reason"] = "refresh_command_failed"
+    else:
+        status["reason"] = "artifact_not_updated"
+    return status
+
+
+def _maybe_refresh_production_gate_artifact(
+    *,
+    db_path: Path,
+    artifact_path: Path,
+    timeout_seconds: float,
+    min_interval_seconds: float,
+    last_attempt_monotonic: Optional[float],
+    force: bool,
+    python_bin: str,
+) -> Tuple[Dict[str, Any], Optional[float]]:
+    state = _production_gate_artifact_state(artifact_path)
+    now_monotonic = time.monotonic()
+    status: Dict[str, Any] = {
+        "enabled": True,
+        "attempted": False,
+        "ok": None,
+        "status": "SKIPPED",
+        "reason": "fresh_artifact",
+        "attempted_utc": None,
+        "artifact_path": _relative_repo_path(artifact_path),
+        "returncode": None,
+        "artifact_refreshed": False,
+        "artifact_age_minutes": state.get("age_minutes"),
+        "artifact_freshness_status": state.get("freshness_status"),
+        "artifact_freshness_reason": state.get("freshness_reason"),
+        "generated_utc": state.get("generated_utc"),
+        "detail": None,
+    }
+
+    if force:
+        refreshed = _refresh_production_gate_artifact(
+            db_path=db_path,
+            artifact_path=artifact_path,
+            timeout_seconds=timeout_seconds,
+            python_bin=python_bin,
+        )
+        return refreshed, now_monotonic
+
+    if last_attempt_monotonic is not None and (now_monotonic - last_attempt_monotonic) < max(0.0, float(min_interval_seconds)):
+        status["reason"] = "refresh_backoff"
+        return status, last_attempt_monotonic
+
+    refresh_needed = state.get("error") is not None or state.get("freshness_status") == "STALE"
+    if refresh_needed:
+        refreshed = _refresh_production_gate_artifact(
+            db_path=db_path,
+            artifact_path=artifact_path,
+            timeout_seconds=timeout_seconds,
+            python_bin=python_bin,
+        )
+        if state.get("error") == "missing":
+            refreshed["reason"] = "artifact_missing" if refreshed.get("ok") else refreshed.get("reason")
+        elif state.get("error") is not None:
+            refreshed["reason"] = "artifact_unreadable" if refreshed.get("ok") else refreshed.get("reason")
+        elif state.get("freshness_status") == "STALE" and refreshed.get("ok"):
+            refreshed["reason"] = "stale_artifact"
+        return refreshed, now_monotonic
+
+    return status, last_attempt_monotonic
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -908,6 +1123,7 @@ def build_dashboard_payload(
     max_signals: int,
     max_trades: int,
     latest_run_only: bool = True,
+    production_gate_refresh: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     perf = _latest_performance(conn)
     run_id = _latest_run_id(conn) or "db_bridge"
@@ -922,6 +1138,17 @@ def build_dashboard_payload(
         "latest_run_only": bool(latest_run_only),
         "production_gate": _production_gate_summary(),
         "dashboard_audit": _dashboard_audit_summary(),
+        "production_gate_refresh": production_gate_refresh
+        if isinstance(production_gate_refresh, dict)
+        else {
+            "enabled": False,
+            "attempted": False,
+            "ok": None,
+            "status": "DISABLED",
+            "reason": "disabled",
+            "attempted_utc": None,
+            "artifact_path": _relative_repo_path(DEFAULT_PRODUCTION_GATE_PATH),
+        },
     }
 
     qual_records: List[Dict[str, Any]] = []
@@ -1303,22 +1530,13 @@ def _production_gate_summary() -> Dict[str, Any]:
         generated_utc = payload.get("timestamp_utc")
     if generated_utc is None and isinstance(telemetry, dict):
         generated_utc = telemetry.get("generated_utc")
-    try:
-        max_age_minutes = float(
-            os.getenv(
-                "PMX_PRODUCTION_GATE_MAX_AGE_MINUTES",
-                str(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES),
-            )
-        )
-    except Exception:
-        max_age_minutes = float(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES)
     age_minutes = _sidecar_age_minutes(
         path,
         {"generated_utc": generated_utc} if generated_utc else payload,
     )
     freshness_status, freshness_reason = _freshness_from_age(
         age_minutes,
-        max_age_minutes=max_age_minutes,
+        max_age_minutes=_production_gate_max_age_minutes(),
     )
     summary.update(
         {
@@ -1381,6 +1599,7 @@ def _operator_alerts(
     origin = str(provenance.get("origin") or "").strip().lower()
     gate = evidence.get("production_gate", {}) if isinstance(evidence, dict) else {}
     audit = evidence.get("dashboard_audit", {}) if isinstance(evidence, dict) else {}
+    gate_refresh = evidence.get("production_gate_refresh", {}) if isinstance(evidence, dict) else {}
     robustness_status = str(robustness.get("overall_status") or robustness.get("status") or "UNKNOWN").upper()
     gate_state = str(gate.get("status") or "UNKNOWN").upper()
     audit_state = str(audit.get("status") or "UNKNOWN").upper()
@@ -1400,6 +1619,11 @@ def _operator_alerts(
 
     if gate.get("freshness_status") == "STALE":
         alerts.append("Production gate artifact is stale relative to the alerting freshness policy.")
+
+    if gate_refresh.get("enabled") and gate_refresh.get("attempted") and gate_refresh.get("ok") is False:
+        detail = str(gate_refresh.get("detail") or gate_refresh.get("reason") or "unknown").strip()
+        suffix = f" ({detail})" if detail else ""
+        alerts.append(f"Production gate auto-refresh failed; dashboard may be showing older evidence{suffix}.")
 
     if gate.get("artifact_binding_pass") is False:
         reasons = gate.get("artifact_binding_reasons") or []
@@ -1571,6 +1795,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Render once and exit.")
     parser.add_argument("--persist-snapshot", action="store_true", help="Persist each snapshot into an audit SQLite DB.")
     parser.add_argument("--audit-db-path", default=str(DEFAULT_AUDIT_DB_PATH), help="Audit DB path for snapshots (default: data/dashboard_audit.db).")
+    parser.add_argument(
+        "--refresh-production-gate",
+        action="store_true",
+        help="Refresh logs/audit_gate/production_gate_latest.json when it is missing or stale.",
+    )
+    parser.add_argument(
+        "--force-production-gate-refresh",
+        action="store_true",
+        help="Force a production gate artifact refresh on the first loop iteration.",
+    )
+    parser.add_argument(
+        "--production-gate-refresh-timeout-seconds",
+        type=float,
+        default=DEFAULT_PRODUCTION_GATE_REFRESH_TIMEOUT_SECONDS,
+        help="Timeout for production gate refresh attempts (default: 120s).",
+    )
+    parser.add_argument(
+        "--production-gate-refresh-min-interval-seconds",
+        type=float,
+        default=DEFAULT_PRODUCTION_GATE_REFRESH_MIN_INTERVAL_SECONDS,
+        help="Backoff between production gate refresh attempts while looping (default: 300s).",
+    )
     runs_group = parser.add_mutually_exclusive_group()
     runs_group.add_argument(
         "--latest-run-only",
@@ -1593,6 +1839,17 @@ def main() -> None:
     db_path = Path(args.db_path).expanduser()
     out_path = Path(args.output).expanduser()
     mirror_path = _wsl_mirror_path(db_path)
+    force_production_gate_refresh = bool(args.force_production_gate_refresh)
+    last_gate_refresh_attempt_monotonic: Optional[float] = None
+    gate_refresh_status: Dict[str, Any] = {
+        "enabled": bool(args.refresh_production_gate),
+        "attempted": False,
+        "ok": None,
+        "status": "DISABLED" if not args.refresh_production_gate else "SKIPPED",
+        "reason": "disabled" if not args.refresh_production_gate else "fresh_artifact",
+        "attempted_utc": None,
+        "artifact_path": _relative_repo_path(DEFAULT_PRODUCTION_GATE_PATH),
+    }
 
     def _tickers(conn: sqlite3.Connection) -> List[str]:
         raw = str(args.tickers or "").strip()
@@ -1601,6 +1858,18 @@ def main() -> None:
         return _default_tickers(conn)
 
     while True:
+        if args.refresh_production_gate:
+            gate_refresh_status, last_gate_refresh_attempt_monotonic = _maybe_refresh_production_gate_artifact(
+                db_path=db_path,
+                artifact_path=DEFAULT_PRODUCTION_GATE_PATH,
+                timeout_seconds=float(args.production_gate_refresh_timeout_seconds),
+                min_interval_seconds=float(args.production_gate_refresh_min_interval_seconds),
+                last_attempt_monotonic=last_gate_refresh_attempt_monotonic,
+                force=force_production_gate_refresh,
+                python_bin=sys.executable,
+            )
+            force_production_gate_refresh = False
+
         conn = _connect_ro_with_fallback(db_path)
         try:
             try:
@@ -1612,6 +1881,7 @@ def main() -> None:
                     max_signals=int(args.max_signals),
                     max_trades=int(args.max_trades),
                     latest_run_only=bool(args.latest_run_only),
+                    production_gate_refresh=gate_refresh_status,
                 )
             except sqlite3.OperationalError as exc:
                 msg = str(exc).lower()
@@ -1633,6 +1903,8 @@ def main() -> None:
                             lookback_days=int(args.lookback_days),
                             max_signals=int(args.max_signals),
                             max_trades=int(args.max_trades),
+                            latest_run_only=bool(args.latest_run_only),
+                            production_gate_refresh=gate_refresh_status,
                         )
                     else:
                         raise

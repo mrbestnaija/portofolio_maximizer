@@ -150,6 +150,7 @@ def test_robustness_sidecars_merge_without_breaking_payload(tmp_path, monkeypatc
     monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
     monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
     monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+    monkeypatch.setenv("PMX_SIDECAR_MAX_AGE_MINUTES", "999999")
 
     robustness = mod._robustness_payload()
     assert robustness["status"] == "WARN"
@@ -173,6 +174,7 @@ def test_robustness_warns_when_chart_paths_missing(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(mod, "DEFAULT_ELIGIBILITY_PATH", elig)
     monkeypatch.setattr(mod, "DEFAULT_CONTEXT_QUALITY_PATH", ctx)
     monkeypatch.setattr(mod, "DEFAULT_PERFORMANCE_METRICS_PATH", perf)
+    monkeypatch.setenv("PMX_SIDECAR_MAX_AGE_MINUTES", "999999")
 
     robustness = mod._robustness_payload()
     assert robustness["status"] == "WARN"
@@ -318,6 +320,75 @@ def test_operator_alerts_surface_audit_db_error(tmp_path, monkeypatch) -> None:
     assert audit["status"] == "ERROR"
     assert any("cannot be queried cleanly" in alert for alert in alerts)
     assert all("no persisted snapshots yet" not in alert for alert in alerts)
+
+
+def test_operator_alerts_surface_production_gate_refresh_failures() -> None:
+    alerts = mod._operator_alerts(
+        provenance={"origin": "live"},
+        evidence={
+            "production_gate": {"status": "PASS", "phase3_ready": True, "freshness_status": "FRESH"},
+            "dashboard_audit": {"status": "OK"},
+            "production_gate_refresh": {
+                "enabled": True,
+                "attempted": True,
+                "ok": False,
+                "reason": "timeout",
+                "detail": "timed out after 120.0s",
+            },
+        },
+        robustness={"status": "OK"},
+        signal_count=1,
+        trade_count=1,
+        price_series_count=1,
+    )
+
+    assert any("auto-refresh failed" in alert for alert in alerts)
+
+
+def test_maybe_refresh_production_gate_artifact_triggers_on_stale_artifact(tmp_path, monkeypatch) -> None:
+    gate = tmp_path / "production_gate_latest.json"
+    gate.write_text(
+        json.dumps({"timestamp_utc": "2026-01-01T00:00:00Z", "production_profitability_gate": {"status": "PASS"}}),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setenv("PMX_PRODUCTION_GATE_MAX_AGE_MINUTES", "30")
+    monkeypatch.setattr(
+        mod,
+        "_refresh_production_gate_artifact",
+        lambda **kwargs: calls.append(dict(kwargs)) or {
+            "enabled": True,
+            "attempted": True,
+            "ok": True,
+            "status": "OK",
+            "reason": "stale_artifact",
+            "attempted_utc": "2026-04-02T07:15:00Z",
+            "artifact_path": gate.as_posix(),
+            "returncode": 1,
+            "artifact_refreshed": True,
+            "artifact_age_minutes": 0.1,
+            "artifact_freshness_status": "FRESH",
+            "artifact_freshness_reason": None,
+            "generated_utc": "2026-04-02T07:15:00Z",
+            "detail": None,
+        },
+    )
+
+    status, last_attempt = mod._maybe_refresh_production_gate_artifact(
+        db_path=tmp_path / "portfolio_maximizer.db",
+        artifact_path=gate,
+        timeout_seconds=120.0,
+        min_interval_seconds=300.0,
+        last_attempt_monotonic=None,
+        force=False,
+        python_bin="python",
+    )
+
+    assert calls
+    assert status["ok"] is True
+    assert status["reason"] == "stale_artifact"
+    assert last_attempt is not None
 
 
 def test_persist_snapshot_bootstraps_audit_db_schema(tmp_path) -> None:

@@ -42,6 +42,9 @@ def test_ensure_dashboard_stack_starts_live_watcher(tmp_path, monkeypatch) -> No
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
+        refresh_production_gate=False,
+        production_gate_refresh_timeout_seconds=120.0,
+        production_gate_refresh_min_interval_seconds=300.0,
         ensure_live_watcher=True,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
@@ -93,6 +96,9 @@ def test_ensure_dashboard_stack_retries_bridge_without_persist_snapshot(tmp_path
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
+        refresh_production_gate=False,
+        production_gate_refresh_timeout_seconds=120.0,
+        production_gate_refresh_min_interval_seconds=300.0,
         ensure_live_watcher=True,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
@@ -105,6 +111,51 @@ def test_ensure_dashboard_stack_retries_bridge_without_persist_snapshot(tmp_path
     assert "--persist-snapshot" not in started_cmds[1]
     assert started_cmds[3][:3] == ["python", "-m", "scripts.prometheus_alert_exporter"]
     assert any("retrying without audit snapshot persistence" in warning for warning in result.warnings)
+
+
+def test_ensure_dashboard_stack_enables_bridge_production_gate_refresh(tmp_path, monkeypatch) -> None:
+    root = tmp_path
+    (root / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "visualizations").mkdir(parents=True, exist_ok=True)
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    (root / "visualizations" / "live_dashboard.html").write_text("<html></html>", encoding="utf-8")
+    (root / "scripts" / "dashboard_db_bridge.py").write_text("# stub", encoding="utf-8")
+    (root / "scripts" / "prometheus_alert_exporter.py").write_text("# stub", encoding="utf-8")
+    (root / "data" / "portfolio_maximizer.db").write_text("db", encoding="utf-8")
+
+    started_cmds: list[list[str]] = []
+    pids = iter([101, 202, 303])
+
+    monkeypatch.setattr(mod, "_read_pidfile", lambda path: None)
+    monkeypatch.setattr(mod, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: True)
+    monkeypatch.setattr(mod, "_start_detached", lambda cmd, cwd: started_cmds.append(list(cmd)) or next(pids))
+
+    result = mod._ensure_dashboard_stack(
+        root=root,
+        python_bin="python",
+        port=8000,
+        prometheus_port=9108,
+        db_path=root / "data" / "portfolio_maximizer.db",
+        persist_snapshot=True,
+        require_bridge=True,
+        ensure_prometheus_exporter=True,
+        refresh_production_gate=True,
+        production_gate_refresh_timeout_seconds=90.0,
+        production_gate_refresh_min_interval_seconds=600.0,
+        ensure_live_watcher=False,
+        watcher_tickers="AAPL,MSFT",
+        watcher_cycles=30,
+        watcher_sleep_seconds=86400,
+    )
+
+    assert result.bridge_running is True
+    assert "--refresh-production-gate" in started_cmds[0]
+    assert "--production-gate-refresh-timeout-seconds" in started_cmds[0]
+    assert "90.0" in started_cmds[0]
+    assert "--production-gate-refresh-min-interval-seconds" in started_cmds[0]
+    assert "600.0" in started_cmds[0]
 
 
 def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -> None:
@@ -125,9 +176,18 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
             "attempted": True,
             "ok": True,
             "persist_snapshot": True,
+            "refresh_production_gate": True,
             "retried_without_persist_snapshot": False,
             "returncode": 0,
             "command": ["python", "-m", "scripts.dashboard_db_bridge", "--once"],
+            "production_gate_refresh": {
+                "enabled": True,
+                "attempted": True,
+                "ok": True,
+                "status": "OK",
+                "reason": "stale_artifact",
+                "generated_utc": "2026-04-02T07:12:00Z",
+            },
             "warnings": [],
         },
     )
@@ -163,6 +223,9 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
+        refresh_production_gate=True,
+        production_gate_refresh_timeout_seconds=120.0,
+        production_gate_refresh_min_interval_seconds=300.0,
         ensure_live_watcher=False,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
@@ -180,12 +243,16 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
     assert rc == 0
     assert refresh_calls
     assert refresh_calls[0]["persist_snapshot"] is True
+    assert refresh_calls[0]["refresh_production_gate"] is True
     assert ensure_calls
     assert ensure_calls[0]["ensure_prometheus_exporter"] is True
+    assert ensure_calls[0]["refresh_production_gate"] is True
     assert ensure_calls[0]["ensure_live_watcher"] is False
     assert browser_calls == ["http://127.0.0.1:8000/visualizations/live_dashboard.html"]
     payload = json.loads(status_json.read_text(encoding="utf-8"))
     assert payload["refresh"]["ok"] is True
+    assert payload["refresh"]["production_gate_refresh"]["status"] == "OK"
+    assert payload["bridge"]["refresh_production_gate"] is True
     assert payload["prometheus_exporter"]["running"] is True
 
 
@@ -201,6 +268,7 @@ def test_cmd_launch_fails_strict_when_refresh_fails(tmp_path, monkeypatch) -> No
             "attempted": True,
             "ok": False,
             "persist_snapshot": True,
+            "refresh_production_gate": True,
             "retried_without_persist_snapshot": True,
             "returncode": 1,
             "command": ["python", "-m", "scripts.dashboard_db_bridge", "--once"],
@@ -239,6 +307,9 @@ def test_cmd_launch_fails_strict_when_refresh_fails(tmp_path, monkeypatch) -> No
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
+        refresh_production_gate=True,
+        production_gate_refresh_timeout_seconds=120.0,
+        production_gate_refresh_min_interval_seconds=300.0,
         ensure_live_watcher=False,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
