@@ -66,7 +66,9 @@ except Exception:  # pragma: no cover - optional path
 
 logger = logging.getLogger(__name__)
 AI_COMPANION_CONFIG_PATH = ROOT_PATH / "config" / "ai_companion.yml"
+# Canonical dashboard output is bridge-owned only.
 DASHBOARD_DATA_PATH = ROOT_PATH / "visualizations" / "dashboard_data.json"
+RUN_AUTO_TRADER_ARTIFACT_PATH = ROOT_PATH / "logs" / "automation" / "run_auto_trader_latest.json"
 MIN_LOOKBACK_DAYS_DAILY = 365
 MIN_LOOKBACK_DAYS_INTRADAY = 30
 MIN_SERIES_POINTS = 120
@@ -2030,7 +2032,7 @@ def _emit_dashboard_json(
     forecaster_health: Optional[Dict[str, Any]] = None,
     quant_validation_health: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Persist the latest run snapshot for the HTML dashboard."""
+    """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
         """Recursively convert datetimes/pd.Timestamps to ISO strings for JSON dump."""
         from pandas import Timestamp  # lazy import to avoid circulars
@@ -2068,9 +2070,9 @@ def _emit_dashboard_json(
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(_json_safe(payload), handle, indent=2)
-        logger.info("Dashboard data emitted to %s", path)
+        logger.info("Auto-trader producer artifact emitted to %s", path)
     except Exception as exc:
-        logger.warning("Unable to emit dashboard data: %s", exc)
+        logger.warning("Unable to emit auto-trader producer artifact: %s", exc)
 
 
 def _emit_dashboard_png(path: Path, equity_points: list[Dict[str, Any]], pnl_pct: float) -> None:
@@ -3205,7 +3207,7 @@ def main(
         trade_events = []
 
     _emit_dashboard_json(
-        path=DASHBOARD_DATA_PATH,
+        path=RUN_AUTO_TRADER_ARTIFACT_PATH,
         meta=meta,
         summary=final_summary,
         routing_stats=signal_router.routing_stats,

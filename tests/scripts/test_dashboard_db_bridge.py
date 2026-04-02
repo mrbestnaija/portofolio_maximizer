@@ -87,8 +87,75 @@ def test_build_dashboard_payload_from_sqlite(tmp_path) -> None:
     assert payload["signals"] and payload["signals"][0]["ticker"] == "AAPL"
     assert payload["trade_events"] and payload["trade_events"][0]["ticker"] == "AAPL"
     assert payload["price_series"]["AAPL"] and payload["price_series"]["AAPL"][-1]["close"] == 101.0
+    assert payload["robustness"]["overall_status"]
+    assert payload["robustness"]["freshness_status"]
+    assert "live_denominator" in payload
     assert payload["positions"]["AAPL"]["shares"] == 10
     assert {e["event_type"] for e in payload["trade_events"]} == {"ENTRY", "EXIT_PROFIT"}
+
+
+def test_dashboard_contract_validator_flags_missing_sections_and_staleness() -> None:
+    report = mod.validate_dashboard_payload_contract(
+        {
+            "meta": {
+                "generated_utc": "2026-01-01T00:00:00Z",
+                "ts": "2026-01-01T00:00:00Z",
+                "payload_schema_version": 2,
+                "payload_required_sections": ["meta", "pnl", "signals"],
+            },
+            "pnl": {"absolute": 1.0, "pct": 0.01},
+            "signals": [],
+            "trade_events": [],
+            "price_series": {},
+            "robustness": {"overall_status": "OK", "freshness_status": "STALE"},
+            "live_denominator": {"status": "WAITING"},
+            "quant_validation": {},
+        },
+        now=datetime.datetime(2026, 1, 1, 1, 0, tzinfo=datetime.timezone.utc),
+        freshness_threshold_seconds=60,
+    )
+
+    assert report["ok"] is False
+    assert any("stale_dashboard_payload" in item for item in report["errors"])
+    assert any("robustness_not_fresh" in item for item in report["errors"])
+    assert any("meta.payload_required_sections_missing" in item for item in report["errors"])
+
+
+def test_bridge_merges_run_auto_trader_producer_artifact(tmp_path) -> None:
+    producer = tmp_path / "run_auto_trader_latest.json"
+    producer.write_text(
+        json.dumps(
+            {
+                "meta": {
+                    "cycles": 5,
+                    "llm_enabled": False,
+                    "strategy": {"name": "producer"},
+                },
+                "latency": {"ts_ms": 12.0, "llm_ms": 34.0},
+                "routing": {"ts_signals": 7, "llm_signals": 1, "fallback_used": 1},
+                "equity": [{"t": "start", "v": 100.0}, {"t": "end", "v": 101.0}],
+                "equity_realized": [{"t": "start", "v": 100.0}, {"t": "end", "v": 100.5}],
+                "forecaster_health": {"status": {"profit_factor_ok": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    merged = mod._merge_dashboard_producer_artifact(
+        {
+            "meta": {"run_id": "bridge"},
+            "latency": {"ts_ms": None, "llm_ms": None},
+            "routing": {"ts_signals": 0, "llm_signals": 0, "fallback_used": 0},
+            "equity": [],
+            "equity_realized": [],
+        },
+        producer_path=producer,
+    )
+
+    assert merged["meta"]["cycles"] == 5
+    assert merged["routing"]["ts_signals"] == 7
+    assert merged["equity"][-1]["v"] == 101.0
+    assert merged["forecaster_health"]["status"]["profit_factor_ok"] is True
 
 
 def test_positions_fallback_uses_average_cost(tmp_path) -> None:
@@ -476,6 +543,72 @@ def test_operator_console_payload_surfaces_wiring_gate_and_activity(tmp_path, mo
     assert any(issue["focus"] == "wiring" for issue in payload["issues"])
     assert any(issue["focus"] == "gate" for issue in payload["issues"])
     assert any("Control-plane recovery evidence captured" in issue["title"] for issue in payload["issues"])
+
+
+def test_operator_console_payload_uses_strict_phase3_contract(tmp_path, monkeypatch) -> None:
+    maintenance = tmp_path / "openclaw_maintenance_latest.json"
+    production_gate = tmp_path / "production_gate_latest.json"
+    maintenance.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "primary_channel": "whatsapp",
+                "warnings": [],
+                "errors": [],
+                "steps": {"channels_status_snapshot": {"channels": {"whatsapp": {"reconnectAttempts": 0}}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    production_gate.write_text(
+        json.dumps(
+            {
+                "phase3_ready": True,
+                "phase3_reason": "READY",
+                "phase3_strict_ready": False,
+                "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "warmup_expired": False,
+                "production_profitability_gate": {
+                    "status": "PASS",
+                    "pass": True,
+                    "strict_pass": False,
+                    "gate_semantics_status": "INCONCLUSIVE_ALLOWED",
+                },
+                "profitability_proof": {
+                    "status": "PASS",
+                    "closed_trades": 40,
+                    "profit_factor": 1.4,
+                    "evidence_progress": {
+                        "remaining_trading_days": 11,
+                        "remaining_closed_trades": 0,
+                    },
+                },
+                "lift_gate": {
+                    "status": "INCONCLUSIVE",
+                    "lift_fraction": 0.0,
+                    "min_lift_fraction": 0.25,
+                },
+                "readiness": {
+                    "phase3_ready": True,
+                    "phase3_reason": "READY",
+                    "phase3_strict_ready": False,
+                    "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                },
+                "repo_state": {"status": {"tracked_changed": 0, "untracked": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(mod, "DEFAULT_OPENCLAW_MAINTENANCE_PATH", maintenance)
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_PATH", production_gate)
+    monkeypatch.setattr(mod, "DEFAULT_LLM_ACTIVITY_DIR", tmp_path / "missing_activity")
+
+    payload = mod._operator_console_payload()
+
+    assert payload["production_gate"]["phase3_ready"] is False
+    assert payload["production_gate"]["phase3_legacy_ready"] is True
+    assert payload["production_gate"]["phase3_reason"].endswith("GATE_SEMANTICS_INCONCLUSIVE_ALLOWED")
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ def test_bar_aware_loop_skips_second_cycle(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(run_auto_trader, "EXECUTION_LOG_PATH", tmp_path / "execution_log.jsonl")
     monkeypatch.setattr(run_auto_trader, "RUN_SUMMARY_LOG_PATH", tmp_path / "run_summary.jsonl")
     monkeypatch.setattr(run_auto_trader, "DASHBOARD_DATA_PATH", tmp_path / "dashboard_data.json")
+    monkeypatch.setattr(run_auto_trader, "RUN_AUTO_TRADER_ARTIFACT_PATH", tmp_path / "run_auto_trader_latest.json")
     monkeypatch.setattr(run_auto_trader, "_emit_dashboard_png", lambda *args, **kwargs: None)
     monkeypatch.setattr(run_auto_trader.atexit, "register", lambda *_args, **_kwargs: None)
 

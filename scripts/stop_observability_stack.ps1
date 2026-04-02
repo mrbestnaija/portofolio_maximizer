@@ -28,6 +28,23 @@ $forceTargets = @(
         Port = 3000
     },
     @{
+        Label = "alloy"
+        ProcessIds = @(
+            (Get-ObservedProcessIds -ExecutablePathLike (Join-Path $env:ProgramFiles "GrafanaLabs\Alloy\alloy.exe"))
+            (Get-ObservedProcessIds -ExecutablePathLike (Join-Path $repoRoot "tools\observability\alloy\*.exe"))
+            (Get-ListeningProcessIdsByPort -Port 12345)
+        ) | Sort-Object -Unique
+        Port = 12345
+    },
+    @{
+        Label = "loki"
+        ProcessIds = @(
+            (Get-ObservedProcessIds -ExecutablePathLike (Join-Path $repoRoot "tools\observability\loki\*.exe"))
+            (Get-ListeningProcessIdsByPort -Port 3100)
+        ) | Sort-Object -Unique
+        Port = 3100
+    },
+    @{
         Label = "alertmanager"
         ProcessIds = @(
             (Get-ObservedProcessIds -ExecutablePathLike (Join-Path $repoRoot "tools\observability\alertmanager\*.exe"))

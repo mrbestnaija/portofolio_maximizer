@@ -163,7 +163,7 @@ class MSSARLForecaster:
         self._recon_matrix_by_action: Dict[int, np.ndarray] = {}
         self._reconstructions_by_action: Dict[int, pd.Series] = {}
         self._rank_by_action: Dict[int, int] = {}
-        self._policy_version = "bounded_rank_v1"
+        self._policy_version = "bounded_rank_v2"
         self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
         self._state_bins = np.array([0.8, 1.0, 1.2], dtype=float)
         self._last_q_state: Optional[int] = None
@@ -295,6 +295,7 @@ class MSSARLForecaster:
         variance_ratio: float,
         state: int,
         action: int,
+        next_state: Optional[int] = None,
         realized_return: Optional[float] = None,
     ) -> None:
         key = (state, action)
@@ -311,10 +312,12 @@ class MSSARLForecaster:
             # Legacy: variance reduction reward
             reward = 1.0 - variance_ratio
 
-        best_future = max(
-            (self._q_table.get((action, next_action), 0.0) for next_action in range(3)),
-            default=0.0,
-        )
+        best_future = 0.0
+        if next_state is not None:
+            best_future = max(
+                (self._q_table.get((int(next_state), next_action), 0.0) for next_action in range(3)),
+                default=0.0,
+            )
 
         new_q = current_q + self.config.q_learning_alpha * (
             reward + self.config.q_learning_gamma * best_future - current_q
@@ -341,6 +344,7 @@ class MSSARLForecaster:
     # ------------------------------------------------------------------
     def fit(self, series: pd.Series) -> "MSSARLForecaster":
         self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
+        self._q_table = {}
         cleaned = series.dropna()
         if len(cleaned) < self.config.window_length + 5:
             raise ValueError("Series length insufficient for mSSA analysis")
@@ -420,24 +424,33 @@ class MSSARLForecaster:
             self._recent_change_point_days = None
 
         # Tabular Q-learning over pseudo states (variance buckets)
+        baseline_variance = max(float(self._baseline_variance), 1e-12)
         variance_ratio = (
             residuals.rolling(window=self.config.window_length // 2, min_periods=5)
             .var()
-            .fillna(self._baseline_variance)
-            / self._baseline_variance
+            .fillna(baseline_variance)
+            / baseline_variance
         )
-        state_series = np.digitize(variance_ratio, bins=self._state_bins)
+        variance_ratio = variance_ratio.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+        state_series = np.digitize(variance_ratio.to_numpy(dtype=float), bins=self._state_bins)
 
         # Phase 7.10b: realized returns for directional PnL reward signal.
         # Derived from the input price series (1-period pct change).
-        realized_returns_arr = cleaned.pct_change().fillna(0.0).reindex(variance_ratio.index).fillna(0.0)
+        realized_returns_arr = (
+            cleaned.pct_change().fillna(0.0).reindex(variance_ratio.index).fillna(0.0).to_numpy(dtype=float)
+        )
 
-        for (state, ratio), realized_ret in zip(
-            zip(state_series, variance_ratio), realized_returns_arr
+        for idx, ((state, ratio), realized_ret) in enumerate(
+            zip(zip(state_series, variance_ratio.to_numpy(dtype=float)), realized_returns_arr)
         ):
             action = self._select_policy_action(int(state))
+            next_state = int(state_series[idx + 1]) if idx + 1 < len(state_series) else None
             self._update_q_table(
-                float(ratio), int(state), action, realized_return=float(realized_ret)
+                float(ratio),
+                int(state),
+                action,
+                next_state=next_state,
+                realized_return=float(realized_ret),
             )
 
         logger.info(

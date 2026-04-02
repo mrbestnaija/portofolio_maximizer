@@ -16,6 +16,21 @@ try:
 except Exception:
     _threshold_map = None
 
+try:
+    from scripts.production_gate_contract import (
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+except Exception:
+    from production_gate_contract import (  # type: ignore
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+
 
 DEFAULT_GATE_ARTIFACT = Path("logs") / "audit_gate" / "production_gate_latest.json"
 DEFAULT_OUT_JSON = Path("logs") / "audit_gate" / "production_gate_decomposition_latest.json"
@@ -461,8 +476,12 @@ def _build_decomposition(
         "source_artifact": str(artifact_path.resolve()),
         "source_timestamp_utc": payload.get("timestamp_utc"),
         "source_artifact_mtime_utc": _artifact_mtime_utc(artifact_path),
-        "phase3_ready": _safe_bool(payload.get("phase3_ready"), default=False),
-        "phase3_reason": payload.get("phase3_reason"),
+        "phase3_ready": bool(_phase3_strict_ready(payload)),
+        "phase3_reason": _phase3_strict_reason(payload),
+        "phase3_strict_ready": bool(_phase3_strict_ready(payload)),
+        "phase3_strict_reason": _phase3_strict_reason(payload),
+        "phase3_legacy_ready": bool(_legacy_phase3_ready(payload)),
+        "phase3_legacy_reason": _legacy_phase3_reason(payload),
         "components": components,
         "reason_breakdown": reason_breakdown,
         "visualization": visualization,
@@ -568,6 +587,12 @@ def _render_markdown(report: Dict[str, Any]) -> str:
     lines.append(f"- Source timestamp: `{report.get('source_timestamp_utc')}`")
     lines.append(f"- Phase3 reason: `{report.get('phase3_reason')}`")
     lines.append(f"- Phase3 ready: `{int(_safe_bool(report.get('phase3_ready')))}`")
+    if (
+        _safe_bool(report.get("phase3_legacy_ready")) != _safe_bool(report.get("phase3_ready"))
+        or str(report.get("phase3_legacy_reason") or "").strip() != str(report.get("phase3_reason") or "").strip()
+    ):
+        lines.append(f"- Phase3 legacy reason: `{report.get('phase3_legacy_reason')}`")
+        lines.append(f"- Phase3 legacy ready: `{int(_safe_bool(report.get('phase3_legacy_ready')))}`")
     lines.append("")
     lines.append("## Blockers")
     for component in ("PERFORMANCE_BLOCKER", "LINKAGE_BLOCKER", "HYGIENE_BLOCKER"):
@@ -624,6 +649,11 @@ def _print_report(report: Dict[str, Any]) -> None:
     print(f"Source timestamp: {report.get('source_timestamp_utc')}")
     print(f"Phase3 reason   : {report.get('phase3_reason')}")
     print(f"Phase3 ready    : {int(_safe_bool(report.get('phase3_ready')))}")
+    if (
+        _safe_bool(report.get("phase3_legacy_ready")) != _safe_bool(report.get("phase3_ready"))
+        or str(report.get("phase3_legacy_reason") or "").strip() != str(report.get("phase3_reason") or "").strip()
+    ):
+        print(f"Phase3 legacy   : {int(_safe_bool(report.get('phase3_legacy_ready')))} ({report.get('phase3_legacy_reason')})")
     print("")
     for component in ("PERFORMANCE_BLOCKER", "LINKAGE_BLOCKER", "HYGIENE_BLOCKER"):
         block = report.get("components", {}).get(component, {})

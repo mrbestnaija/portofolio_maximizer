@@ -36,6 +36,7 @@ DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
 DEFAULT_STATUS_JSON = ROOT / "logs" / "persistence_manager_status.json"
 DEFAULT_SUMMARY_JSON = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_WATCHER_JSON = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
+DEFAULT_STATUS_MAX_AGE_SECONDS = 172800
 DEFAULT_TASK_NAME = "PortfolioMaximizer_PersistenceManager"
 DEFAULT_TASK_WRAPPER = ROOT / "scripts" / "run_persistence_manager.bat"
 DEFAULT_RUN_REG_PATH = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -67,6 +68,20 @@ def _safe_read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _status_max_age_seconds() -> int:
+    raw = str(DEFAULT_STATUS_MAX_AGE_SECONDS)
+    try:
+        import os
+
+        raw = str(os.getenv("PMX_PERSISTENCE_STATUS_MAX_AGE_SECONDS", raw))
+    except Exception:
+        raw = str(DEFAULT_STATUS_MAX_AGE_SECONDS)
+    try:
+        return max(int(raw), 0)
+    except Exception:
+        return int(DEFAULT_STATUS_MAX_AGE_SECONDS)
 
 
 def _run_command(cmd: list[str], *, cwd: Path, timeout_seconds: float = 180.0) -> dict[str, Any]:
@@ -453,6 +468,15 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
 
     status = {
         "timestamp_utc": _utc_now(),
+        "status_contract": {
+            "schema_version": 1,
+            "max_age_seconds": _status_max_age_seconds(),
+            "reconciled_components": [
+                "dashboard.bridge",
+                "dashboard.http_server",
+                "dashboard.live_watcher",
+            ],
+        },
         "root": str(root),
         "db_path": str(db_path),
         "audit_dir": str(audit_dir),

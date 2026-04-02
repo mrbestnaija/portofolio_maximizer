@@ -110,6 +110,36 @@ def test_gate_truth_posture_detects_skip_policy_and_phase3_drift(tmp_path: Path)
     assert warnings == []
 
 
+def test_production_gate_snapshot_prefers_strict_phase3_fields(tmp_path: Path) -> None:
+    production_artifact = tmp_path / "production_gate_latest.json"
+    production_artifact.write_text(
+        json.dumps(
+            {
+                "timestamp_utc": "2026-03-14T17:30:28Z",
+                "pass_semantics_version": 3,
+                "warmup_expired": False,
+                "phase3_ready": True,
+                "phase3_reason": "READY",
+                "phase3_strict_ready": False,
+                "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "production_profitability_gate": {
+                    "pass": True,
+                    "strict_pass": False,
+                    "gate_semantics_status": "INCONCLUSIVE_ALLOWED",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = mod._production_gate_snapshot(production_artifact)
+
+    assert snapshot["phase3_ready"] is False
+    assert snapshot["phase3_reason"].endswith("GATE_SEMANTICS_INCONCLUSIVE_ALLOWED")
+    assert snapshot["phase3_legacy_ready"] is True
+    assert snapshot["gate_semantics_status"] == "INCONCLUSIVE_ALLOWED"
+
+
 def test_gate_decomposition_snapshot_refreshes_stale_report(tmp_path: Path) -> None:
     production_artifact = tmp_path / "production_gate_latest.json"
     _write_production_gate_artifact(production_artifact)

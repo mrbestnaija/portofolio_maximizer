@@ -913,11 +913,44 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
             effective_audits=7,
             decision="INCONCLUSIVE",
             decision_reason="effective_audits=7 < required_audits=20",
+            scope={"include_research": False, "production_audit_only": True},
         )
         if Path(path).name == "latest_summary.json"
         else original_safe_load_json(path),
     )
     monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_load_latest_live_cycle_binding",
+        lambda _db_path: {
+            "latest_live_cycle_ts_utc": "2026-03-15T11:59:00+00:00",
+            "latest_live_run_id": "20260315_115900",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_evaluate_artifact_binding",
+        lambda **kwargs: {
+            "pass": True,
+            "freshness_pass": True,
+            "run_id_present": True,
+            "commit_hash_present": True,
+            "reason_codes": [],
+            "summary_generated_utc": "2026-03-15T12:00:00+00:00",
+            "latest_live_cycle_ts_utc": "2026-03-15T11:59:00+00:00",
+            "latest_live_run_id": "20260315_115900",
+            "repo_head": "abc123",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _db_path: {
+            "close_before_entry_count": 0,
+            "closed_missing_exit_reason_count": 0,
+            "query_error": None,
+        },
+    )
     monkeypatch.setattr(
         mod,
         "_compute_warmup_window",
@@ -960,6 +993,144 @@ def test_unattended_profile_blocks_inconclusive_after_warmup(
     assert payload["lift_gate"]["inconclusive"] is True
     assert payload["lift_gate"]["pass"] is False
     assert payload["production_profitability_gate"]["gate_semantics_status"] == "INCONCLUSIVE_BLOCKED"
+    assert payload["production_profitability_gate"]["strict_pass"] is False
+    assert payload["phase3_strict_ready"] is False
+
+
+def test_inconclusive_allowed_emits_strict_false_even_when_legacy_phase3_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.production_audit_gate as mod
+
+    output_json = tmp_path / "production_gate.json"
+    monitor_cfg = tmp_path / "monitor.yml"
+    monitor_cfg.write_text("forecaster_monitoring: {}\n", encoding="utf-8")
+    proof_cfg = tmp_path / "proof.yml"
+    proof_cfg.write_text("profitability_proof_requirements: {}\n", encoding="utf-8")
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    db_path = tmp_path / "portfolio.db"
+    sqlite3.connect(str(db_path)).close()
+
+    def _fake_run_command(cmd: list[str], cwd: Path):  # noqa: ANN001
+        del cwd
+        joined = " ".join(cmd)
+        if "check_forecast_audits.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        "Effective audits with RMSE: 7",
+                        "Violations (ensemble worse than baseline beyond tolerance): 0",
+                        "Violation rate: 0.00% (max allowed 35.00%)",
+                        "RMSE gate inconclusive: effective_audits=7 < required_audits=20.",
+                    ]
+                ),
+                stderr="",
+            )
+        if "validate_profitability_proof.py" in joined:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"is_proof_valid": true, "is_profitable": true, "metrics": {"total_pnl": 10.0, "profit_factor": 1.5, "win_rate": 0.6, "winning_trades": 6, "losing_trades": 4, "trading_days": 30}}',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {joined}")
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    original_safe_load_json = mod._safe_load_json
+    monkeypatch.setattr(
+        mod,
+        "_safe_load_json",
+        lambda path: _make_lift_summary(
+            audit_dir,
+            effective_audits=7,
+            decision="INCONCLUSIVE",
+            decision_reason="effective_audits=7 < required_audits=20",
+            scope={"include_research": False, "production_audit_only": True},
+        )
+        if Path(path).name == "latest_summary.json"
+        else original_safe_load_json(path),
+    )
+    monkeypatch.setattr(mod, "_collect_git_state", lambda _repo_root: {"available": False})
+    monkeypatch.setattr(
+        mod,
+        "_load_latest_live_cycle_binding",
+        lambda _db_path: {
+            "latest_live_cycle_ts_utc": "2026-03-15T11:59:00+00:00",
+            "latest_live_run_id": "20260315_115900",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_evaluate_artifact_binding",
+        lambda **kwargs: {
+            "pass": True,
+            "freshness_pass": True,
+            "run_id_present": True,
+            "commit_hash_present": True,
+            "reason_codes": [],
+            "summary_generated_utc": "2026-03-15T12:00:00+00:00",
+            "latest_live_cycle_ts_utc": "2026-03-15T11:59:00+00:00",
+            "latest_live_run_id": "20260315_115900",
+            "repo_head": "abc123",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_compute_lifecycle_integrity",
+        lambda _db_path: {
+            "close_before_entry_count": 0,
+            "closed_missing_exit_reason_count": 0,
+            "query_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_compute_warmup_window",
+        lambda **kwargs: {
+            "max_warmup_days": 30,
+            "first_audit_ts_utc": "2026-01-01T00:00:00+00:00",
+            "allow_inconclusive_until_utc": "2026-01-31T00:00:00+00:00",
+            "warmup_expired": False,
+        },
+    )
+    monkeypatch.setenv("PMX_NOTIFY_OPENCLAW", "0")
+    monkeypatch.setenv("OPENCLAW_TARGETS", "")
+    monkeypatch.setenv("OPENCLAW_TO", "")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_audit_gate.py",
+            "--db",
+            str(db_path),
+            "--proof-requirements",
+            str(proof_cfg),
+            "--audit-dir",
+            str(audit_dir),
+            "--monitor-config",
+            str(monitor_cfg),
+            "--output-json",
+            str(output_json),
+            "--unattended-profile",
+        ],
+    )
+
+    rc = mod.main()
+    assert rc == 0
+    payload = mod._safe_load_json(output_json)
+    assert payload is not None
+    assert payload["production_profitability_gate"]["pass"] is True
+    assert payload["production_profitability_gate"]["strict_pass"] is False
+    assert payload["production_profitability_gate"]["gate_semantics_status"] == "INCONCLUSIVE_ALLOWED"
+    assert payload["phase3_ready"] is True
+    assert payload["phase3_strict_ready"] is False
+    assert payload["phase3_strict_reason"].endswith("GATE_SEMANTICS_INCONCLUSIVE_ALLOWED")
+    assert payload["readiness"]["phase3_ready"] is True
+    assert payload["readiness"]["phase3_strict_ready"] is False
 
 
 def test_compute_lifecycle_integrity_excludes_legacy_trades(tmp_path: Path) -> None:

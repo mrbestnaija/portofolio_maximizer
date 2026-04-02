@@ -1,0 +1,1138 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_pnl_absolute",
+          "refId": "A"
+        }
+      ],
+      "title": "Current PnL",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_pnl_pct",
+          "refId": "A"
+        }
+      ],
+      "title": "PnL %",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_win_rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Win Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_trade_count",
+          "refId": "A"
+        }
+      ],
+      "title": "Trade Count",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_open_positions_count",
+          "refId": "A"
+        }
+      ],
+      "title": "Open Positions",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "id": 6,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_position_net_notional",
+          "refId": "A"
+        }
+      ],
+      "title": "Net Exposure",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 5
+      },
+      "id": 7,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_production_gate_pass",
+          "refId": "A"
+        }
+      ],
+      "title": "Production Gate",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 5
+      },
+      "id": 8,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_proof_runway_closed_trades",
+          "refId": "A"
+        }
+      ],
+      "title": "Proof Closed Trades",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 5
+      },
+      "id": 9,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_proof_runway_remaining_days",
+          "refId": "A"
+        }
+      ],
+      "title": "Proof Days Remaining",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 5
+      },
+      "id": 10,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_forecaster_failed_checks",
+          "refId": "A"
+        }
+      ],
+      "title": "Forecaster Failed Checks",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 5
+      },
+      "id": 11,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_quant_validation_fail_fraction",
+          "refId": "A"
+        }
+      ],
+      "title": "Quant Fail Fraction",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 5
+      },
+      "id": 12,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_operator_console_status_code",
+          "refId": "A"
+        }
+      ],
+      "title": "Operator Status",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 10
+      },
+      "id": 13,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_position_gross_notional",
+          "refId": "A"
+        }
+      ],
+      "title": "Gross Exposure",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 10
+      },
+      "id": 14,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_signal_count",
+          "refId": "A"
+        }
+      ],
+      "title": "Signals",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 10
+      },
+      "id": 15,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_trade_event_count",
+          "refId": "A"
+        }
+      ],
+      "title": "Trade Events",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 10
+      },
+      "id": 16,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_latest_signal_confidence",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Signal Confidence",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 10
+      },
+      "id": 17,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_latest_signal_expected_return",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Expected Return",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 10
+      },
+      "id": 18,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "pmx_dashboard_latest_trade_slippage_bp",
+          "refId": "A"
+        }
+      ],
+      "title": "Latest Trade Slippage (bp)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 15
+      },
+      "id": 19,
+      "targets": [
+        {
+          "expr": "pmx_dashboard_equity_last",
+          "legendFormat": "equity",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_dashboard_equity_realized_last",
+          "legendFormat": "realized",
+          "refId": "B"
+        }
+      ],
+      "title": "Equity Snapshot Trend",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 15
+      },
+      "id": 20,
+      "targets": [
+        {
+          "expr": "pmx_dashboard_latency_ts_ms",
+          "legendFormat": "ts",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_dashboard_latency_llm_ms",
+          "legendFormat": "llm",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_openclaw_channels_status_latency_ms",
+          "legendFormat": "channels.status",
+          "refId": "C"
+        }
+      ],
+      "title": "Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "id": 21,
+      "targets": [
+        {
+          "expr": "pmx_dashboard_routing_ts_signals",
+          "legendFormat": "ts",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_dashboard_routing_llm_signals",
+          "legendFormat": "llm",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_dashboard_routing_fallback_used",
+          "legendFormat": "fallback",
+          "refId": "C"
+        }
+      ],
+      "title": "Signal Routing",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
+      "id": 22,
+      "targets": [
+        {
+          "expr": "pmx_forecaster_rmse_ratio",
+          "legendFormat": "rmse_ratio",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_forecaster_rmse_ratio_max",
+          "legendFormat": "ratio_max",
+          "refId": "B"
+        }
+      ],
+      "title": "Forecaster RMSE Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
+      "id": 23,
+      "targets": [
+        {
+          "expr": "pmx_forecaster_profit_factor",
+          "legendFormat": "profit_factor",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_forecaster_profit_factor_min",
+          "legendFormat": "pf_min",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_forecaster_win_rate",
+          "legendFormat": "win_rate",
+          "refId": "C"
+        },
+        {
+          "expr": "pmx_forecaster_win_rate_min",
+          "legendFormat": "wr_min",
+          "refId": "D"
+        }
+      ],
+      "title": "Forecaster Profit Factor And Win Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "id": 24,
+      "targets": [
+        {
+          "expr": "pmx_quant_validation_fail_fraction",
+          "legendFormat": "fail_fraction",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_quant_validation_negative_expected_profit_fraction",
+          "legendFormat": "negative_profit_fraction",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_quant_validation_max_fail_fraction",
+          "legendFormat": "max_fail_fraction",
+          "refId": "C"
+        },
+        {
+          "expr": "pmx_quant_validation_max_negative_expected_profit_fraction",
+          "legendFormat": "max_negative_profit_fraction",
+          "refId": "D"
+        }
+      ],
+      "title": "Quant Validation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 31
+      },
+      "id": 25,
+      "targets": [
+        {
+          "expr": "sum by (job) (count_over_time({job=~\"pmx_.*\"}[15m]))",
+          "legendFormat": "{{job}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Log Volume By Job (15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 31
+      },
+      "id": 26,
+      "targets": [
+        {
+          "expr": "sum by (job) (count_over_time({job=~\"pmx_(observability|run_audit|openclaw)\"} |~ \"(?i)(error|warn|fail|critical)\" [15m]))",
+          "legendFormat": "{{job}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Warnings / Errors By Job (15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 31
+      },
+      "id": 27,
+      "targets": [
+        {
+          "expr": "sum by (channel) (count_over_time({job=\"pmx_llm_activity\",channel=~\".+\"}[15m]))",
+          "legendFormat": "{{channel}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Interactive Channel Activity (15m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 39
+      },
+      "id": 28,
+      "targets": [
+        {
+          "expr": "pmx_operator_short_circuit_events",
+          "legendFormat": "short_circuit",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_operator_reconnect_attempts",
+          "legendFormat": "reconnects",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_operator_issue_count",
+          "legendFormat": "issues",
+          "refId": "C"
+        },
+        {
+          "expr": "pmx_operator_tool_calls_recent",
+          "legendFormat": "tool_calls",
+          "refId": "D"
+        }
+      ],
+      "title": "Operator Friction",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 39
+      },
+      "id": 29,
+      "targets": [
+        {
+          "expr": "pmx_dashboard_long_positions_count",
+          "legendFormat": "long",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_dashboard_short_positions_count",
+          "legendFormat": "short",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_dashboard_open_positions_count",
+          "legendFormat": "open_total",
+          "refId": "C"
+        }
+      ],
+      "title": "Position Mix",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 39
+      },
+      "id": 30,
+      "targets": [
+        {
+          "expr": "pmx_dashboard_quality_average",
+          "legendFormat": "quality_avg",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_dashboard_quality_minimum",
+          "legendFormat": "quality_min",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_dashboard_snapshot_age_seconds",
+          "legendFormat": "snapshot_age_s",
+          "refId": "C"
+        }
+      ],
+      "title": "Data Quality And Freshness",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 39
+      },
+      "id": 31,
+      "targets": [
+        {
+          "expr": "pmx_openclaw_gateway_up",
+          "legendFormat": "gateway_up",
+          "refId": "A"
+        },
+        {
+          "expr": "pmx_openclaw_primary_channel_up",
+          "legendFormat": "primary_channel_up",
+          "refId": "B"
+        },
+        {
+          "expr": "pmx_openclaw_recovery_events_total",
+          "legendFormat": "recovery_events",
+          "refId": "C"
+        }
+      ],
+      "title": "Gateway Recovery",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "id": 32,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=~\"pmx_(observability|run_audit|openclaw)\"} |~ \"(?i)(error|warn|fail|critical)\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Critical Ops Logs",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "id": 33,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=~\"pmx_(llm_activity|run_audit|openclaw)\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent PMX Activity Logs",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      },
+      "id": 34,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"pmx_llm_activity\",channel=~\".+\"}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Interactive Channel Events",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      },
+      "id": 35,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"pmx_run_audit\"} |~ \"(?i)(error|warn|fail|critical|gate|integrity|orphaned|contamination)\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Run Audit Anomalies",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "pmx",
+    "ops",
+    "unified",
+    "loki"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "title": "PMX Unified Ops",
+  "uid": "pmx-unified-ops",
+  "version": 3
+}

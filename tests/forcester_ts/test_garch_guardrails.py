@@ -81,6 +81,16 @@ def test_fit_falls_back_to_ewma_when_volatility_ratio_explodes(
     assert summary["volatility_ratio_to_realized"] > 4.0
 
 
+def test_scale_returns_for_fit_downscales_oversized_inputs() -> None:
+    returns = pd.Series([2500.0, -1500.0, 500.0], name="returns")
+
+    scaled, scale_factor = GARCHForecaster._scale_returns_for_fit(returns)
+
+    assert scale_factor == pytest.approx(0.4)
+    assert float(scaled.abs().max()) == pytest.approx(1000.0)
+    assert float(scaled.iloc[0]) == pytest.approx(1000.0)
+
+
 class TestVolatilityRatioP95Robustness:
     """Fit-time and forecast-time guards use p95, not last-bar or max."""
 

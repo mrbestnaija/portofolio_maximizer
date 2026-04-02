@@ -30,6 +30,7 @@ $env:PMX_GRAFANA_DASHBOARDS_PATH = $dashboardsPath
 $env:PMX_GRAFANA_DATA_PATH = $dataPath
 $env:PMX_GRAFANA_LOG_PATH = $grafanaLogPath
 $env:PMX_PROMETHEUS_URL = "http://127.0.0.1:9090"
+$env:PMX_LOKI_URL = "http://127.0.0.1:3100"
 
 $args = @("--config", $configPath, "--homepath", $homePath)
 $existingProcessIds = @(

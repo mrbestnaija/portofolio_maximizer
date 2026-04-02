@@ -21,6 +21,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+try:
+    from scripts.production_gate_contract import (
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from production_gate_contract import (  # type: ignore
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DASHBOARD_PATH = PROJECT_ROOT / "visualizations" / "dashboard_data.json"
@@ -28,6 +39,7 @@ DEFAULT_METRICS_SUMMARY_PATH = PROJECT_ROOT / "visualizations" / "performance" /
 DEFAULT_PRODUCTION_GATE_PATH = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
 DEFAULT_OPENCLAW_MAINTENANCE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
 DEFAULT_CRON_JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
+DEFAULT_REQUIRED_CRON_JOBS_PATH = PROJECT_ROOT / "config" / "observability_required_jobs.yml"
 DEFAULT_SQLITE_DB_PATH = PROJECT_ROOT / "data" / "portfolio_maximizer.db"
 DEFAULT_EXPORTER_STATE_PATH = PROJECT_ROOT / "logs" / "observability" / "exporter_state.json"
 
@@ -68,6 +80,21 @@ MODEL_STATUS_CODES = {
     "SKIP": 3,
     "ERROR": 4,
     "UNKNOWN": 4,
+}
+OPERATOR_CONSOLE_STATUS_CODES = {
+    "PASS": 0,
+    "OK": 0,
+    "WARN": 1,
+    "FAIL": 2,
+    "ERROR": 3,
+    "UNKNOWN": 4,
+}
+RECOVERY_MODE_CODES = {
+    "steady_state": 0,
+    "channels_status_timeout_softened": 1,
+    "gateway_restart_recovered": 2,
+    "whatsapp_handshake_recovered": 3,
+    "gateway_detached_listener_conflict": 4,
 }
 
 
@@ -144,6 +171,234 @@ def _json_best_effort(raw: str) -> Any:
         if arr_start >= 0 and arr_end > arr_start:
             return json.loads(text[arr_start : arr_end + 1])
         raise
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _latest_series_value(points: Any) -> Optional[float]:
+    if not isinstance(points, list) or not points:
+        return None
+    for point in reversed(points):
+        if not isinstance(point, dict):
+            continue
+        value = _safe_float(point.get("v"))
+        if value is not None:
+            return value
+    return None
+
+
+def _positions_summary(positions: Any) -> Dict[str, Optional[float]]:
+    if not isinstance(positions, dict):
+        return {
+            "count": None,
+            "long_count": None,
+            "short_count": None,
+            "gross_notional": None,
+            "net_notional": None,
+        }
+    count = 0
+    long_count = 0
+    short_count = 0
+    gross_notional = 0.0
+    net_notional = 0.0
+    for payload in positions.values():
+        if not isinstance(payload, dict):
+            continue
+        shares = _safe_float(payload.get("shares"))
+        if shares is None:
+            continue
+        count += 1
+        if shares > 0:
+            long_count += 1
+        elif shares < 0:
+            short_count += 1
+        entry_price = _safe_float(payload.get("entry_price"))
+        if entry_price is not None:
+            notional = shares * entry_price
+            gross_notional += abs(notional)
+            net_notional += notional
+    return {
+        "count": float(count),
+        "long_count": float(long_count),
+        "short_count": float(short_count),
+        "gross_notional": gross_notional,
+        "net_notional": net_notional,
+    }
+
+
+def _latest_signal_summary(signals: Any) -> Dict[str, Optional[float]]:
+    if not isinstance(signals, list) or not signals:
+        return {
+            "confidence": None,
+            "expected_return": None,
+            "shares": None,
+            "mid_slippage_bp": None,
+        }
+    for payload in reversed(signals):
+        if not isinstance(payload, dict):
+            continue
+        confidence = _safe_float(payload.get("effective_confidence"))
+        if confidence is None:
+            confidence = _safe_float(payload.get("signal_confidence"))
+        return {
+            "confidence": confidence,
+            "expected_return": _safe_float(payload.get("expected_return")),
+            "shares": _safe_float(payload.get("shares")),
+            "mid_slippage_bp": _safe_float(payload.get("mid_slippage_bp")),
+        }
+    return {
+        "confidence": None,
+        "expected_return": None,
+        "shares": None,
+        "mid_slippage_bp": None,
+    }
+
+
+def _latest_trade_event_summary(events: Any) -> Dict[str, Optional[float]]:
+    if not isinstance(events, list) or not events:
+        return {
+            "shares": None,
+            "slippage_bp": None,
+            "realized_pnl": None,
+            "realized_pnl_pct": None,
+        }
+    for payload in reversed(events):
+        if not isinstance(payload, dict):
+            continue
+        slippage_bp = _safe_float(payload.get("slippage_bp"))
+        if slippage_bp is None:
+            slippage = _safe_float(payload.get("slippage"))
+            if slippage is not None:
+                slippage_bp = slippage * 10000.0
+        return {
+            "shares": _safe_float(payload.get("shares")),
+            "slippage_bp": slippage_bp,
+            "realized_pnl": _safe_float(payload.get("realized_pnl")),
+            "realized_pnl_pct": _safe_float(payload.get("realized_pnl_pct")),
+        }
+    return {
+        "shares": None,
+        "slippage_bp": None,
+        "realized_pnl": None,
+        "realized_pnl_pct": None,
+    }
+
+
+def _dashboard_quant_validation_payload(payload: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    source = payload.get("quant_validation_health")
+    if not isinstance(source, dict):
+        source = payload.get("quant_validation") if isinstance(payload.get("quant_validation"), dict) else {}
+    return {
+        "total": _safe_float(source.get("total")),
+        "pass_count": _safe_float(source.get("pass_count")),
+        "fail_count": _safe_float(source.get("fail_count")),
+        "fail_fraction": _safe_float(source.get("fail_fraction")),
+        "negative_expected_profit_fraction": _safe_float(source.get("negative_expected_profit_fraction")),
+        "max_fail_fraction": _safe_float(source.get("max_fail_fraction")),
+        "max_negative_expected_profit_fraction": _safe_float(source.get("max_negative_expected_profit_fraction")),
+    }
+
+
+def _dashboard_summary(payload: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    pnl = payload.get("pnl") if isinstance(payload.get("pnl"), dict) else {}
+    latency = payload.get("latency") if isinstance(payload.get("latency"), dict) else {}
+    routing = payload.get("routing") if isinstance(payload.get("routing"), dict) else {}
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    forecaster = payload.get("forecaster_health") if isinstance(payload.get("forecaster_health"), dict) else {}
+    forecaster_metrics = forecaster.get("metrics") if isinstance(forecaster.get("metrics"), dict) else {}
+    forecaster_rmse = forecaster_metrics.get("rmse") if isinstance(forecaster_metrics.get("rmse"), dict) else {}
+    forecaster_thresholds = forecaster.get("thresholds") if isinstance(forecaster.get("thresholds"), dict) else {}
+    forecaster_status = forecaster.get("status") if isinstance(forecaster.get("status"), dict) else {}
+    operator_console = payload.get("operator_console") if isinstance(payload.get("operator_console"), dict) else {}
+    operator_maintenance = operator_console.get("maintenance") if isinstance(operator_console.get("maintenance"), dict) else {}
+    operator_activity = operator_console.get("activity") if isinstance(operator_console.get("activity"), dict) else {}
+    operator_issues = operator_console.get("issues") if isinstance(operator_console.get("issues"), list) else []
+    recovery_mode = str(operator_maintenance.get("recovery_mode") or "").strip()
+    position_summary = _positions_summary(payload.get("positions"))
+    latest_signal = _latest_signal_summary(payload.get("signals"))
+    latest_trade_event = _latest_trade_event_summary(payload.get("trade_events"))
+    quant_validation = _dashboard_quant_validation_payload(payload)
+
+    failed_checks = 0
+    for key in ("profit_factor_ok", "win_rate_ok", "rmse_ok"):
+        value = forecaster_status.get(key)
+        if value is False:
+            failed_checks += 1
+
+    return {
+        "pnl_absolute": _safe_float(pnl.get("absolute")),
+        "pnl_pct": _safe_float(pnl.get("pct")),
+        "win_rate": _safe_float(payload.get("win_rate")),
+        "trade_count": _safe_float(payload.get("trade_count")),
+        "latency_ts_ms": _safe_float(latency.get("ts_ms")),
+        "latency_llm_ms": _safe_float(latency.get("llm_ms")),
+        "routing_ts_signals": _safe_float(routing.get("ts_signals")),
+        "routing_llm_signals": _safe_float(routing.get("llm_signals")),
+        "routing_fallback_used": _safe_float(routing.get("fallback_used")),
+        "quality_average": _safe_float(quality.get("average")),
+        "quality_minimum": _safe_float(quality.get("minimum")),
+        "equity_last": _latest_series_value(payload.get("equity")),
+        "equity_realized_last": _latest_series_value(payload.get("equity_realized")),
+        "signal_count": float(len(payload.get("signals", []))) if isinstance(payload.get("signals"), list) else None,
+        "trade_event_count": float(len(payload.get("trade_events", []))) if isinstance(payload.get("trade_events"), list) else None,
+        "latest_signal_confidence": latest_signal["confidence"],
+        "latest_signal_expected_return": latest_signal["expected_return"],
+        "latest_signal_shares": latest_signal["shares"],
+        "latest_signal_mid_slippage_bp": latest_signal["mid_slippage_bp"],
+        "latest_trade_shares": latest_trade_event["shares"],
+        "latest_trade_slippage_bp": latest_trade_event["slippage_bp"],
+        "latest_trade_realized_pnl": latest_trade_event["realized_pnl"],
+        "latest_trade_realized_pnl_pct": latest_trade_event["realized_pnl_pct"],
+        "open_positions_count": position_summary["count"],
+        "long_positions_count": position_summary["long_count"],
+        "short_positions_count": position_summary["short_count"],
+        "position_gross_notional": position_summary["gross_notional"],
+        "position_net_notional": position_summary["net_notional"],
+        "forecaster_profit_factor": _safe_float(forecaster_metrics.get("profit_factor")),
+        "forecaster_win_rate": _safe_float(forecaster_metrics.get("win_rate")),
+        "forecaster_rmse_ensemble": _safe_float(forecaster_rmse.get("ensemble")),
+        "forecaster_rmse_baseline": _safe_float(forecaster_rmse.get("baseline")),
+        "forecaster_rmse_ratio": _safe_float(forecaster_rmse.get("ratio")),
+        "forecaster_profit_factor_min": _safe_float(forecaster_thresholds.get("profit_factor_min")),
+        "forecaster_win_rate_min": _safe_float(forecaster_thresholds.get("win_rate_min")),
+        "forecaster_rmse_ratio_max": _safe_float(forecaster_thresholds.get("rmse_ratio_max")),
+        "forecaster_profit_factor_ok": 1.0 if forecaster_status.get("profit_factor_ok") is True else (0.0 if forecaster_status.get("profit_factor_ok") is False else None),
+        "forecaster_win_rate_ok": 1.0 if forecaster_status.get("win_rate_ok") is True else (0.0 if forecaster_status.get("win_rate_ok") is False else None),
+        "forecaster_rmse_ok": 1.0 if forecaster_status.get("rmse_ok") is True else (0.0 if forecaster_status.get("rmse_ok") is False else None),
+        "forecaster_failed_checks": float(failed_checks) if forecaster_status else None,
+        "quant_validation_total": quant_validation["total"],
+        "quant_validation_pass_count": quant_validation["pass_count"],
+        "quant_validation_fail_count": quant_validation["fail_count"],
+        "quant_validation_fail_fraction": quant_validation["fail_fraction"],
+        "quant_validation_negative_expected_profit_fraction": quant_validation["negative_expected_profit_fraction"],
+        "quant_validation_max_fail_fraction": quant_validation["max_fail_fraction"],
+        "quant_validation_max_negative_expected_profit_fraction": quant_validation["max_negative_expected_profit_fraction"],
+        "operator_console_status_code": float(OPERATOR_CONSOLE_STATUS_CODES.get(str(operator_console.get("status") or "UNKNOWN").strip().upper(), 4))
+        if operator_console
+        else None,
+        "operator_short_circuit_events": _safe_float(operator_activity.get("short_circuit_events")),
+        "operator_tool_calls_recent": _safe_float(operator_activity.get("tool_calls")),
+        "operator_issue_count": float(len(operator_issues)) if operator_console else None,
+        "operator_reconnect_attempts": _safe_float(operator_maintenance.get("reconnect_attempts")),
+        "operator_recovery_mode_code": float(RECOVERY_MODE_CODES.get(recovery_mode, 5)) if operator_console and recovery_mode else (0.0 if operator_console else None),
+    }
 
 
 def _read_json_file(path: Path) -> Tuple[Dict[str, Any], Optional[str]]:
@@ -258,6 +513,44 @@ def _severity_for_job(name: str) -> str:
     return match.group(1) if match else "OTHER"
 
 
+def _load_required_cron_jobs_config(path: Path) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    warnings: List[str] = []
+    if not path.exists():
+        return {}, [f"missing:{path.name}"]
+    try:
+        import yaml  # type: ignore[import]
+    except Exception as exc:
+        return {}, [f"unavailable:{path.name}:{exc}"]
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return {}, [f"invalid:{path.name}:{exc}"]
+    jobs = raw.get("jobs")
+    if not isinstance(jobs, dict):
+        return {}, [f"invalid:{path.name}:jobs_not_mapping"]
+
+    parsed: Dict[str, Dict[str, Any]] = {}
+    for key, value in jobs.items():
+        if not isinstance(value, dict):
+            warnings.append(f"invalid:{path.name}:{key}:job_not_mapping")
+            continue
+        name = str(value.get("name") or key).strip()
+        if not name:
+            warnings.append(f"invalid:{path.name}:{key}:missing_name")
+            continue
+        expected_cadence_seconds = _safe_float(value.get("expected_cadence_seconds"))
+        if expected_cadence_seconds is None or expected_cadence_seconds <= 0:
+            warnings.append(f"invalid:{path.name}:{key}:expected_cadence_seconds")
+            continue
+        parsed[_slugify_job(name)] = {
+            "name": name,
+            "required_for_green": bool(value.get("required_for_green", False)),
+            "severity": str(value.get("severity") or _severity_for_job(name) or "OTHER").strip().upper() or "OTHER",
+            "expected_cadence_seconds": float(expected_cadence_seconds),
+        }
+    return parsed, warnings
+
+
 def _cron_interval_seconds(schedule: Dict[str, Any]) -> Optional[float]:
     if not isinstance(schedule, dict):
         return None
@@ -344,6 +637,7 @@ class ObservabilityExporter:
         production_gate_path: Path = DEFAULT_PRODUCTION_GATE_PATH,
         maintenance_path: Path = DEFAULT_OPENCLAW_MAINTENANCE_PATH,
         cron_jobs_path: Path = DEFAULT_CRON_JOBS_PATH,
+        required_cron_jobs_path: Path = DEFAULT_REQUIRED_CRON_JOBS_PATH,
         db_path: Path = DEFAULT_SQLITE_DB_PATH,
         state_path: Path = DEFAULT_EXPORTER_STATE_PATH,
         artifacts_interval_seconds: float = DEFAULT_ARTIFACT_INTERVAL_SECONDS,
@@ -361,6 +655,7 @@ class ObservabilityExporter:
         self.production_gate_path = Path(production_gate_path)
         self.maintenance_path = Path(maintenance_path)
         self.cron_jobs_path = Path(cron_jobs_path)
+        self.required_cron_jobs_path = Path(required_cron_jobs_path)
         self.db_path = Path(db_path)
         self.state_path = Path(state_path)
         self.artifacts_interval_seconds = float(artifacts_interval_seconds)
@@ -523,6 +818,7 @@ class ObservabilityExporter:
             ("meta", "generated_utc"),
             ("meta", "ts"),
         )
+        dashboard_summary = _dashboard_summary(dashboard_payload)
 
         metrics_payload, metrics_err = _read_json_file(self.metrics_summary_path)
         if metrics_err:
@@ -543,11 +839,12 @@ class ObservabilityExporter:
             ("timestamp_utc",),
             ("artifact_binding", "summary_generated_utc"),
         )
-        phase3_reason = str(
-            gate_payload.get("phase3_reason")
-            or gate_payload.get("status")
-            or ("READY" if gate_payload.get("phase3_ready") else "FAIL")
-        ).strip().upper() or "UNKNOWN"
+        phase3_ready = bool(_phase3_strict_ready(gate_payload))
+        phase3_reason = (
+            str(_phase3_strict_reason(gate_payload) or "").strip().upper()
+            or str(gate_payload.get("status") or "").strip().upper()
+            or ("READY" if phase3_ready else "FAIL")
+        )
         evidence_progress = (
             gate_payload.get("profitability_proof", {}).get("evidence_progress", {})
             if isinstance(gate_payload.get("profitability_proof"), dict)
@@ -579,6 +876,7 @@ class ObservabilityExporter:
             "dashboard": {
                 "generated_unixtime": _to_unixtime(dashboard_ts),
                 "age_seconds": _artifact_age_seconds(dashboard_ts),
+                **dashboard_summary,
             },
             "metrics_summary": {
                 "generated_unixtime": _to_unixtime(metrics_ts),
@@ -587,7 +885,7 @@ class ObservabilityExporter:
             },
             "production_gate": {
                 "generated_unixtime": _to_unixtime(gate_ts),
-                "pass": 1.0 if bool(gate_payload.get("phase3_ready")) else 0.0,
+                "pass": 1.0 if phase3_ready else 0.0,
                 "status_code": float(PRODUCTION_GATE_STATUS_CODES.get(phase3_reason, 3)),
                 "status_text": phase3_reason,
                 "closed_trades": float(evidence_progress.get("closed_trades") or 0.0),
@@ -703,6 +1001,11 @@ class ObservabilityExporter:
             warnings.append(err)
             return {"jobs": []}, warnings
 
+        required_jobs_config, config_warnings = _load_required_cron_jobs_config(self.required_cron_jobs_path)
+        warnings.extend(config_warnings)
+        if not required_jobs_config:
+            return {"jobs": []}, warnings
+
         jobs = payload.get("jobs", [])
         if not isinstance(jobs, list):
             warnings.append("invalid:jobs.json:jobs_not_list")
@@ -710,6 +1013,11 @@ class ObservabilityExporter:
 
         job_rows: List[Dict[str, Any]] = []
         cache = self._persisted_state.setdefault("cron_last_success_ms", {})
+        required_jobs = {
+            slug: cfg for slug, cfg in required_jobs_config.items()
+            if bool(cfg.get("required_for_green"))
+        }
+        seen_required_jobs: set[str] = set()
         now_ms = int(now.timestamp() * 1000)
         for job in jobs:
             if not isinstance(job, dict):
@@ -718,15 +1026,22 @@ class ObservabilityExporter:
             schedule = job.get("schedule", {}) if isinstance(job.get("schedule"), dict) else {}
             name = str(job.get("name") or job.get("id") or "job").strip()
             job_label = _slugify_job(name)
+            config = required_jobs_config.get(job_label)
+            if config is None or not bool(config.get("required_for_green")):
+                continue
             job_id = str(job.get("id") or job_label).strip()
-            severity = _severity_for_job(name)
-            enabled = 1.0 if bool(job.get("enabled", False)) else 0.0
+            required_for_green = bool(config.get("required_for_green"))
+            severity = str(config.get("severity") or _severity_for_job(name) or "OTHER").strip().upper() or "OTHER"
+            enabled = 1.0 if bool(job.get("enabled", False)) and required_for_green else 0.0
             last_run_ms = int(state.get("lastRunAtMs") or 0)
             last_status = str(state.get("lastStatus") or state.get("lastRunStatus") or "unknown").strip().lower()
             if last_status == "success" and last_run_ms > 0:
                 cache[job_id] = last_run_ms
-            last_success_ms = int(cache.get(job_id) or 0)
-            expected_interval_seconds = _cron_interval_seconds(schedule) or 0.0
+                cache[job_label] = last_run_ms
+            last_success_ms = int(cache.get(job_label) or cache.get(job_id) or 0)
+            expected_interval_seconds = float(
+                config.get("expected_cadence_seconds") or (_cron_interval_seconds(schedule) or 0.0)
+            )
             stale_threshold_seconds = expected_interval_seconds * 2.0 if expected_interval_seconds > 0 else 0.0
             freshness_lag_seconds = (
                 max(0.0, (now_ms - last_success_ms) / 1000.0) if last_success_ms > 0 else 0.0
@@ -742,6 +1057,31 @@ class ObservabilityExporter:
                     "consecutive_errors": float(state.get("consecutiveErrors") or 0.0),
                     "expected_interval_seconds": expected_interval_seconds,
                     "stale_threshold_seconds": stale_threshold_seconds,
+                    "freshness_lag_seconds": freshness_lag_seconds,
+                }
+            )
+            if required_for_green:
+                seen_required_jobs.add(job_label)
+
+        for job_label, config in required_jobs.items():
+            if job_label in seen_required_jobs:
+                continue
+            expected_interval_seconds = float(config.get("expected_cadence_seconds") or 0.0)
+            last_success_ms = int(cache.get(job_label) or 0)
+            freshness_lag_seconds = (
+                max(0.0, (now_ms - last_success_ms) / 1000.0) if last_success_ms > 0 else 0.0
+            )
+            job_rows.append(
+                {
+                    "job": job_label,
+                    "severity": str(config.get("severity") or "OTHER"),
+                    "enabled": 0.0,
+                    "last_run_unixtime": 0.0,
+                    "last_success_unixtime": last_success_ms / 1000.0 if last_success_ms > 0 else 0.0,
+                    "last_status_code": float(GENERIC_STATUS_CODES["MISSING"]),
+                    "consecutive_errors": 0.0,
+                    "expected_interval_seconds": expected_interval_seconds,
+                    "stale_threshold_seconds": expected_interval_seconds * 2.0 if expected_interval_seconds > 0 else 0.0,
                     "freshness_lag_seconds": freshness_lag_seconds,
                 }
             )
@@ -807,6 +1147,71 @@ class ObservabilityExporter:
                     "pmx_dashboard_snapshot_generated_unixtime",
                     float(dashboard["generated_unixtime"]),
                     help_text="Unix timestamp for the latest dashboard snapshot generation time.",
+                )
+            dashboard_metric_specs = [
+                ("pmx_dashboard_pnl_absolute", "Current PMX dashboard absolute PnL in account currency.", dashboard.get("pnl_absolute")),
+                ("pmx_dashboard_pnl_pct", "Current PMX dashboard PnL as a fraction of portfolio equity.", dashboard.get("pnl_pct")),
+                ("pmx_dashboard_win_rate", "Current PMX dashboard win rate.", dashboard.get("win_rate")),
+                ("pmx_dashboard_trade_count", "Current PMX dashboard trade count.", dashboard.get("trade_count")),
+                ("pmx_dashboard_signal_count", "Current PMX dashboard signal count.", dashboard.get("signal_count")),
+                ("pmx_dashboard_trade_event_count", "Current PMX dashboard trade event count.", dashboard.get("trade_event_count")),
+                ("pmx_dashboard_open_positions_count", "Current count of open positions in the PMX dashboard payload.", dashboard.get("open_positions_count")),
+                ("pmx_dashboard_long_positions_count", "Current count of long positions in the PMX dashboard payload.", dashboard.get("long_positions_count")),
+                ("pmx_dashboard_short_positions_count", "Current count of short positions in the PMX dashboard payload.", dashboard.get("short_positions_count")),
+                ("pmx_dashboard_position_gross_notional", "Current gross notional exposure inferred from dashboard positions.", dashboard.get("position_gross_notional")),
+                ("pmx_dashboard_position_net_notional", "Current net notional exposure inferred from dashboard positions.", dashboard.get("position_net_notional")),
+                ("pmx_dashboard_latency_ts_ms", "Latest time-series signal latency from dashboard_data.json in milliseconds.", dashboard.get("latency_ts_ms")),
+                ("pmx_dashboard_latency_llm_ms", "Latest LLM latency from dashboard_data.json in milliseconds.", dashboard.get("latency_llm_ms")),
+                ("pmx_dashboard_quality_average", "Average dashboard quality score across rendered quality records.", dashboard.get("quality_average")),
+                ("pmx_dashboard_quality_minimum", "Minimum dashboard quality score across rendered quality records.", dashboard.get("quality_minimum")),
+                ("pmx_dashboard_equity_last", "Latest total equity value from dashboard_data.json.", dashboard.get("equity_last")),
+                ("pmx_dashboard_equity_realized_last", "Latest realized equity value from dashboard_data.json.", dashboard.get("equity_realized_last")),
+                ("pmx_dashboard_signal_count", "Latest PMX signal count rendered into dashboard_data.json.", dashboard.get("signal_count")),
+                ("pmx_dashboard_trade_event_count", "Latest PMX trade-event count rendered into dashboard_data.json.", dashboard.get("trade_event_count")),
+                ("pmx_dashboard_latest_signal_confidence", "Latest effective signal confidence rendered into dashboard_data.json.", dashboard.get("latest_signal_confidence")),
+                ("pmx_dashboard_latest_signal_expected_return", "Latest expected return rendered into dashboard_data.json.", dashboard.get("latest_signal_expected_return")),
+                ("pmx_dashboard_latest_signal_shares", "Latest signal share quantity rendered into dashboard_data.json.", dashboard.get("latest_signal_shares")),
+                ("pmx_dashboard_latest_signal_mid_slippage_bp", "Latest signal mid-price slippage in basis points rendered into dashboard_data.json.", dashboard.get("latest_signal_mid_slippage_bp")),
+                ("pmx_dashboard_latest_trade_shares", "Latest trade-event share quantity rendered into dashboard_data.json.", dashboard.get("latest_trade_shares")),
+                ("pmx_dashboard_latest_trade_slippage_bp", "Latest trade-event slippage in basis points rendered into dashboard_data.json.", dashboard.get("latest_trade_slippage_bp")),
+                ("pmx_dashboard_latest_trade_realized_pnl", "Latest realized trade PnL rendered into dashboard_data.json.", dashboard.get("latest_trade_realized_pnl")),
+                ("pmx_dashboard_latest_trade_realized_pnl_pct", "Latest realized trade PnL percent rendered into dashboard_data.json.", dashboard.get("latest_trade_realized_pnl_pct")),
+                ("pmx_routing_ts_signals", "Latest routed time-series signal count from dashboard_data.json.", dashboard.get("routing_ts_signals")),
+                ("pmx_routing_llm_signals", "Latest routed LLM signal count from dashboard_data.json.", dashboard.get("routing_llm_signals")),
+                ("pmx_routing_fallback_used", "Latest fallback routing count from dashboard_data.json.", dashboard.get("routing_fallback_used")),
+                ("pmx_forecaster_profit_factor", "Latest PMX forecaster health profit factor metric.", dashboard.get("forecaster_profit_factor")),
+                ("pmx_forecaster_win_rate", "Latest PMX forecaster health win rate metric.", dashboard.get("forecaster_win_rate")),
+                ("pmx_forecaster_rmse_ensemble", "Latest PMX forecaster ensemble RMSE metric.", dashboard.get("forecaster_rmse_ensemble")),
+                ("pmx_forecaster_rmse_baseline", "Latest PMX forecaster baseline RMSE metric.", dashboard.get("forecaster_rmse_baseline")),
+                ("pmx_forecaster_rmse_ratio", "Latest PMX forecaster RMSE ratio metric.", dashboard.get("forecaster_rmse_ratio")),
+                ("pmx_forecaster_profit_factor_min", "Configured PMX forecaster profit factor minimum threshold.", dashboard.get("forecaster_profit_factor_min")),
+                ("pmx_forecaster_win_rate_min", "Configured PMX forecaster win rate minimum threshold.", dashboard.get("forecaster_win_rate_min")),
+                ("pmx_forecaster_rmse_ratio_max", "Configured PMX forecaster RMSE ratio maximum threshold.", dashboard.get("forecaster_rmse_ratio_max")),
+                ("pmx_forecaster_profit_factor_ok", "Whether the PMX forecaster profit factor threshold is currently satisfied (1=yes,0=no).", dashboard.get("forecaster_profit_factor_ok")),
+                ("pmx_forecaster_win_rate_ok", "Whether the PMX forecaster win-rate threshold is currently satisfied (1=yes,0=no).", dashboard.get("forecaster_win_rate_ok")),
+                ("pmx_forecaster_rmse_ok", "Whether the PMX forecaster RMSE threshold is currently satisfied (1=yes,0=no).", dashboard.get("forecaster_rmse_ok")),
+                ("pmx_forecaster_failed_checks", "Count of failed PMX forecaster threshold checks in the latest dashboard payload.", dashboard.get("forecaster_failed_checks")),
+                ("pmx_quant_validation_total", "Latest quant-validation total observation count from dashboard_data.json.", dashboard.get("quant_validation_total")),
+                ("pmx_quant_validation_pass_count", "Latest quant-validation pass count from dashboard_data.json.", dashboard.get("quant_validation_pass_count")),
+                ("pmx_quant_validation_fail_count", "Latest quant-validation fail count from dashboard_data.json.", dashboard.get("quant_validation_fail_count")),
+                ("pmx_quant_validation_fail_fraction", "Latest quant-validation fail fraction from dashboard_data.json.", dashboard.get("quant_validation_fail_fraction")),
+                ("pmx_quant_validation_negative_expected_profit_fraction", "Latest quant-validation negative expected-profit fraction from dashboard_data.json.", dashboard.get("quant_validation_negative_expected_profit_fraction")),
+                ("pmx_quant_validation_max_fail_fraction", "Configured quant-validation maximum fail fraction threshold.", dashboard.get("quant_validation_max_fail_fraction")),
+                ("pmx_quant_validation_max_negative_expected_profit_fraction", "Configured quant-validation maximum negative expected-profit fraction threshold.", dashboard.get("quant_validation_max_negative_expected_profit_fraction")),
+                ("pmx_operator_console_status_code", "Operator console status code from dashboard_data.json (0=PASS/OK,1=WARN,2=FAIL,3=ERROR,4=UNKNOWN).", dashboard.get("operator_console_status_code")),
+                ("pmx_operator_short_circuit_events", "Recent operator short-circuit or fast-path events surfaced through dashboard_data.json.", dashboard.get("operator_short_circuit_events")),
+                ("pmx_operator_tool_calls_recent", "Recent operator tool-call count surfaced through dashboard_data.json.", dashboard.get("operator_tool_calls_recent")),
+                ("pmx_operator_issue_count", "Current operator-console issue count surfaced through dashboard_data.json.", dashboard.get("operator_issue_count")),
+                ("pmx_operator_reconnect_attempts", "Current primary-channel reconnect attempts surfaced through dashboard_data.json.", dashboard.get("operator_reconnect_attempts")),
+                ("pmx_operator_recovery_mode_code", "Operator recovery mode code surfaced through dashboard_data.json.", dashboard.get("operator_recovery_mode_code")),
+            ]
+            for name, help_text, value in dashboard_metric_specs:
+                if value is None:
+                    continue
+                registry.add(
+                    name,
+                    float(value),
+                    help_text=help_text,
                 )
 
             metrics_summary = artifacts.get("metrics_summary", {}) if isinstance(artifacts.get("metrics_summary"), dict) else {}
@@ -1031,6 +1436,7 @@ def build_exporter_from_args(args: argparse.Namespace) -> ObservabilityExporter:
         production_gate_path=Path(args.production_gate_path),
         maintenance_path=Path(args.maintenance_path),
         cron_jobs_path=Path(args.cron_jobs_path),
+        required_cron_jobs_path=Path(args.required_cron_jobs_path),
         db_path=Path(args.db_path),
         state_path=Path(args.state_path),
         artifacts_interval_seconds=float(args.artifacts_interval_seconds),
@@ -1049,6 +1455,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--production-gate-path", default=str(DEFAULT_PRODUCTION_GATE_PATH))
     parser.add_argument("--maintenance-path", default=str(DEFAULT_OPENCLAW_MAINTENANCE_PATH))
     parser.add_argument("--cron-jobs-path", default=str(DEFAULT_CRON_JOBS_PATH))
+    parser.add_argument("--required-cron-jobs-path", default=str(DEFAULT_REQUIRED_CRON_JOBS_PATH))
     parser.add_argument("--db-path", default=str(DEFAULT_SQLITE_DB_PATH))
     parser.add_argument("--state-path", default=str(DEFAULT_EXPORTER_STATE_PATH))
     parser.add_argument("--artifacts-interval-seconds", type=float, default=DEFAULT_ARTIFACT_INTERVAL_SECONDS)

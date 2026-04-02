@@ -33,6 +33,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.production_gate_contract import (
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from production_gate_contract import (  # type: ignore
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+
 # BYP-01 fix: cap how many optional gates can be skipped before we force overall_passed=False.
 # With 3 optional gates, allowing only 1 skip means at least 2/3 must actually run.
 MAX_SKIPPED_OPTIONAL_GATES = 1
@@ -44,6 +61,8 @@ REQUIRED_PRODUCTION_PAYLOAD_KEYS = {
     "warmup_expired",
     "phase3_ready",
     "phase3_reason",
+    "phase3_strict_ready",
+    "phase3_strict_reason",
     "lift_gate",
     "profitability_proof",
     "production_profitability_gate",
@@ -56,10 +75,13 @@ REQUIRED_READINESS_KEYS = {
     "integrity_pass",
     "phase3_ready",
     "phase3_reason",
+    "phase3_strict_ready",
+    "phase3_strict_reason",
 }
 REQUIRED_GATE_BLOCK_KEYS = {
     "status",
     "pass",
+    "strict_pass",
     "gate_semantics_status",
 }
 
@@ -170,6 +192,10 @@ def _build_summary(
         if isinstance(production_gate_payload.get("production_profitability_gate"), dict)
         else {}
     )
+    strict_phase3_ready = _phase3_strict_ready(production_gate_payload)
+    strict_phase3_reason = _phase3_strict_reason(production_gate_payload)
+    legacy_phase3_ready = _legacy_phase3_ready(production_gate_payload)
+    legacy_phase3_reason = _legacy_phase3_reason(production_gate_payload)
     return {
         "phase": "institutional_unattended_hardening",
         "status_stage": stage,
@@ -182,9 +208,14 @@ def _build_summary(
         "lift_inconclusive_allowed": production_gate_payload.get("lift_inconclusive_allowed"),
         "proof_profitable_required": production_gate_payload.get("proof_profitable_required"),
         "warmup_expired": production_gate_payload.get("warmup_expired"),
-        "gate_semantics_status": gate_payload_block.get("gate_semantics_status"),
-        "phase3_ready": bool(production_gate_payload.get("phase3_ready", False)),
-        "phase3_reason": production_gate_payload.get("phase3_reason"),
+        "gate_semantics_status": _gate_semantics_status(production_gate_payload)
+        or gate_payload_block.get("gate_semantics_status"),
+        "phase3_ready": bool(strict_phase3_ready),
+        "phase3_reason": strict_phase3_reason,
+        "phase3_strict_ready": bool(strict_phase3_ready),
+        "phase3_strict_reason": strict_phase3_reason,
+        "phase3_legacy_ready": bool(legacy_phase3_ready),
+        "phase3_legacy_reason": legacy_phase3_reason,
         "production_gate_schema_ok": production_gate_schema_ok,
         "production_gate_schema_warnings": production_gate_schema_warnings,
         "readiness_components": {
@@ -308,6 +339,7 @@ def main() -> None:
         }
         results.append(schema_result)
         overall_pass = overall_pass and schema_ok
+        overall_pass = overall_pass and _phase3_strict_ready(production_gate_payload)
 
     # Publish a pre-institutional snapshot so institutional P4 validates current run
     # state instead of stale prior-run artifacts.

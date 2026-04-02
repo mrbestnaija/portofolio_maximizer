@@ -36,11 +36,13 @@ DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "me
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_LIVE_DENOMINATOR_PATH = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
 DEFAULT_QUANT_VALIDATION_LOG_PATH = ROOT / "logs" / "signals" / "quant_validation.jsonl"
+DEFAULT_RUN_AUTO_TRADER_ARTIFACT_PATH = ROOT / "logs" / "automation" / "run_auto_trader_latest.json"
 DEFAULT_MONITORING_CONFIG_PATH = ROOT / "config" / "forecaster_monitoring.yml"
 DEFAULT_OPENCLAW_MAINTENANCE_PATH = ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
 DEFAULT_PRODUCTION_GATE_PATH = ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
 DEFAULT_LLM_ACTIVITY_DIR = ROOT / "logs" / "llm_activity"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
+DEFAULT_DASHBOARD_EXPECTED_REFRESH_SECONDS = 60.0
 DEFAULT_POSITIONS_MAX_AGE_DAYS = 14
 DEFAULT_OPERATOR_ACTIVITY_DAYS = 7
 DEFAULT_OPERATOR_ACTIVITY_MAX_EVENTS = 8
@@ -72,6 +74,21 @@ except ModuleNotFoundError:  # pragma: no cover - direct script fallback
         spec.loader.exec_module(module)
         apply_sqlite_guardrails = module.apply_sqlite_guardrails
         guarded_sqlite_connect = module.guarded_sqlite_connect
+
+try:
+    from scripts.production_gate_contract import (
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+except ModuleNotFoundError:  # pragma: no cover - direct script fallback
+    from production_gate_contract import (  # type: ignore
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
 
 def _wsl_mirror_path(db_path: Path) -> Optional[Path]:
     if os.name != "posix":
@@ -1280,8 +1297,10 @@ def _operator_console_payload() -> Dict[str, Any]:
         "status": str(production_profitability_gate.get("status") or ("MISSING" if production_gate_err else "UNKNOWN")).upper(),
         "proof_status": str(profitability.get("status") or "UNKNOWN").upper(),
         "lift_status": str(lift_gate.get("status") or "UNKNOWN").upper(),
-        "phase3_ready": bool(readiness.get("phase3_ready", production_gate.get("phase3_ready"))),
-        "phase3_reason": str(readiness.get("phase3_reason") or production_gate.get("phase3_reason") or ""),
+        "gate_semantics_status": _gate_semantics_status(production_gate),
+        "phase3_ready": bool(_phase3_strict_ready(production_gate)),
+        "phase3_reason": _phase3_strict_reason(production_gate),
+        "phase3_legacy_ready": bool(_legacy_phase3_ready(production_gate)),
         "remaining_trading_days": int(evidence_progress.get("remaining_trading_days") or 0),
         "remaining_closed_trades": int(evidence_progress.get("remaining_closed_trades") or 0),
         "closed_trades": int(profitability.get("closed_trades") or 0),
@@ -1671,6 +1690,143 @@ def _sidecar_age_minutes(path: Path, payload: Dict[str, Any]) -> Optional[float]
     return age if age >= 0 else 0.0
 
 
+def _dashboard_snapshot_max_age_seconds() -> float:
+    raw = os.getenv("PMX_DASHBOARD_EXPECTED_REFRESH_SECONDS", str(DEFAULT_DASHBOARD_EXPECTED_REFRESH_SECONDS))
+    try:
+        expected_refresh_seconds = float(raw)
+    except Exception:
+        expected_refresh_seconds = float(DEFAULT_DASHBOARD_EXPECTED_REFRESH_SECONDS)
+    return max(expected_refresh_seconds * 2.0, 600.0)
+
+
+def validate_dashboard_payload_contract(
+    payload: Dict[str, Any],
+    *,
+    path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    freshness_threshold_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    errors: List[str] = []
+    missing_keys = [key for key in DASHBOARD_REQUIRED_TOP_LEVEL_KEYS if key not in payload]
+    if missing_keys:
+        errors.append("missing_top_level_keys:" + ",".join(missing_keys))
+
+    threshold_seconds = (
+        float(freshness_threshold_seconds)
+        if freshness_threshold_seconds is not None
+        else _dashboard_snapshot_max_age_seconds()
+    )
+    if threshold_seconds < 0:
+        threshold_seconds = 0.0
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    payload_schema_version = meta.get("payload_schema_version")
+    if payload_schema_version is not None:
+        try:
+            parsed_schema_version = int(payload_schema_version)
+        except Exception:
+            parsed_schema_version = None
+        if parsed_schema_version != DASHBOARD_PAYLOAD_SCHEMA_VERSION:
+            errors.append(f"unexpected_payload_schema_version:{payload_schema_version}")
+
+    required_sections = meta.get("payload_required_sections")
+    if isinstance(required_sections, list):
+        missing_declared = [
+            key for key in DASHBOARD_REQUIRED_TOP_LEVEL_KEYS if key not in {str(item) for item in required_sections}
+        ]
+        if missing_declared:
+            errors.append("meta.payload_required_sections_missing:" + ",".join(missing_declared))
+
+    generated = _parse_utc_datetime(meta.get("generated_utc")) or _parse_utc_datetime(meta.get("ts"))
+    if generated is None and path is not None and path.exists():
+        try:
+            generated = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except Exception:
+            generated = None
+    if generated is None:
+        errors.append("missing_dashboard_timestamp")
+
+    now_utc = now or datetime.now(timezone.utc)
+    age_seconds: Optional[float] = None
+    if generated is not None:
+        age_seconds = max(0.0, (now_utc - generated).total_seconds())
+        if age_seconds > threshold_seconds:
+            errors.append(
+                f"stale_dashboard_payload:age_seconds={age_seconds:.1f}:threshold_seconds={threshold_seconds:.1f}"
+            )
+
+    key_type_expectations = {
+        "meta": dict,
+        "pnl": dict,
+        "signals": list,
+        "trade_events": list,
+        "price_series": dict,
+        "robustness": dict,
+        "live_denominator": dict,
+        "quant_validation": dict,
+    }
+    for key, expected_type in key_type_expectations.items():
+        value = payload.get(key)
+        if key in payload and not isinstance(value, expected_type):
+            errors.append(f"invalid_type:{key}:{expected_type.__name__}")
+
+    robustness = payload.get("robustness") if isinstance(payload.get("robustness"), dict) else {}
+    overall_status = str(robustness.get("overall_status") or "").strip().upper()
+    freshness_status = str(robustness.get("freshness_status") or "").strip().upper()
+    if not overall_status:
+        errors.append("missing_robustness.overall_status")
+    if not freshness_status:
+        errors.append("missing_robustness.freshness_status")
+    elif freshness_status != "FRESH":
+        errors.append(f"robustness_not_fresh:{freshness_status}")
+
+    if "sidecar_age_minutes" in robustness and not isinstance(robustness.get("sidecar_age_minutes"), dict):
+        errors.append("invalid_type:robustness.sidecar_age_minutes:dict")
+
+    live_denominator = payload.get("live_denominator") if isinstance(payload.get("live_denominator"), dict) else {}
+    live_denominator_status = str(live_denominator.get("status") or "").strip().upper()
+    if not live_denominator_status:
+        errors.append("missing_live_denominator.status")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "missing_keys": missing_keys,
+        "generated_utc": generated.isoformat() if generated else None,
+        "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+        "freshness_threshold_seconds": round(threshold_seconds, 3),
+    }
+
+
+def validate_dashboard_payload_file(
+    path: Path = DEFAULT_OUTPUT_PATH,
+    *,
+    now: Optional[datetime] = None,
+    freshness_threshold_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    payload, err = _load_sidecar_json(path)
+    if err:
+        return {
+            "ok": False,
+            "errors": [f"dashboard_payload_{err}"],
+            "missing_keys": list(DASHBOARD_REQUIRED_TOP_LEVEL_KEYS),
+            "generated_utc": None,
+            "age_seconds": None,
+            "freshness_threshold_seconds": round(
+                float(freshness_threshold_seconds)
+                if freshness_threshold_seconds is not None
+                else _dashboard_snapshot_max_age_seconds(),
+                3,
+            ),
+        }
+    return validate_dashboard_payload_contract(
+        payload,
+        path=path,
+        now=now,
+        freshness_threshold_seconds=freshness_threshold_seconds,
+    )
+
+
 def _robustness_payload() -> Dict[str, Any]:
     load_warnings: List[str] = []
     semantic_warnings: List[str] = []
@@ -1866,19 +2022,36 @@ def _live_denominator_payload() -> Dict[str, Any]:
     }
 
 
-def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.exists():
+def _merge_dashboard_producer_artifact(
+    fresh: Dict[str, Any],
+    *,
+    producer_path: Path = DEFAULT_RUN_AUTO_TRADER_ARTIFACT_PATH,
+) -> Dict[str, Any]:
+    if not producer_path.exists():
         return fresh
     try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
+        existing = json.loads(producer_path.read_text(encoding="utf-8"))
     except Exception:
         return fresh
     if not isinstance(existing, dict):
         return fresh
-    # Preserve blocks the DB bridge doesn't own, if present.
-    for key in ("forecaster_health", "regime", "notes"):
-        if key in existing and key not in fresh:
-            fresh[key] = existing[key]
+    producer_meta = existing.get("meta") if isinstance(existing.get("meta"), dict) else {}
+    fresh_meta = fresh.get("meta") if isinstance(fresh.get("meta"), dict) else {}
+    for key in ("cycles", "llm_enabled", "strategy"):
+        if key in producer_meta and producer_meta.get(key) is not None:
+            fresh_meta[key] = producer_meta.get(key)
+    if fresh_meta:
+        fresh["meta"] = fresh_meta
+
+    # The bridge remains the canonical dashboard writer, but it still reads a
+    # few runtime-only fields from the latest auto-trader snapshot.
+    for key in ("latency", "routing", "equity", "equity_realized", "forecaster_health", "regime", "notes"):
+        value = existing.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)) and not value:
+            continue
+        fresh[key] = value
     return fresh
 
 
@@ -2074,7 +2247,7 @@ def main() -> None:
         finally:
             conn.close()
 
-        merged = _maybe_merge_with_existing(out_path, payload)
+        merged = _merge_dashboard_producer_artifact(payload)
         if isinstance(merged.get("meta"), dict):
             merged["meta"]["payload_digest"] = _payload_digest(merged)
         _atomic_write_json(out_path, merged)

@@ -50,6 +50,23 @@ from scripts import openclaw_regression_gate as regression_mod
 from scripts import project_runtime_status as runtime_mod
 from utils.repo_python import resolve_repo_python
 
+try:
+    from scripts.production_gate_contract import (
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+except Exception:  # pragma: no cover - script execution path fallback
+    from production_gate_contract import (  # type: ignore
+        gate_semantics_status as _gate_semantics_status,
+        legacy_phase3_ready as _legacy_phase3_ready,
+        legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_strict_ready as _phase3_strict_ready,
+        phase3_strict_reason as _phase3_strict_reason,
+    )
+
 
 FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
@@ -218,6 +235,8 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
         "overall_passed": None,
         "phase3_ready": None,
         "phase3_reason": "",
+        "phase3_legacy_ready": None,
+        "phase3_legacy_reason": "",
         "age_hours": None,
         "mtime_utc": _artifact_mtime_utc(path),
         "status_stage": "",
@@ -236,8 +255,10 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
     snapshot["age_hours"] = _artifact_age_hours(path)
     snapshot["timestamp_utc"] = payload.get("timestamp_utc")
     snapshot["overall_passed"] = payload.get("overall_passed")
-    snapshot["phase3_ready"] = payload.get("phase3_ready")
-    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
+    snapshot["phase3_ready"] = _phase3_strict_ready(payload)
+    snapshot["phase3_reason"] = _phase3_strict_reason(payload)
+    snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
+    snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
     snapshot["status_stage"] = str(payload.get("status_stage") or "")
     snapshot["skipped_optional_gates"] = payload.get("skipped_optional_gates")
     snapshot["max_skipped_optional_gates"] = payload.get("max_skipped_optional_gates")
@@ -253,6 +274,8 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
         "exists": path.exists(),
         "phase3_ready": None,
         "phase3_reason": "",
+        "phase3_legacy_ready": None,
+        "phase3_legacy_reason": "",
         "warmup_expired": None,
         "gate_semantics_status": "",
         "pass_semantics_version": None,
@@ -276,10 +299,12 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
     )
     snapshot["age_hours"] = _artifact_age_hours(path)
     snapshot["timestamp_utc"] = payload.get("timestamp_utc")
-    snapshot["phase3_ready"] = payload.get("phase3_ready")
-    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
+    snapshot["phase3_ready"] = _phase3_strict_ready(payload)
+    snapshot["phase3_reason"] = _phase3_strict_reason(payload)
+    snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
+    snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
     snapshot["warmup_expired"] = payload.get("warmup_expired")
-    snapshot["gate_semantics_status"] = str(gate_block.get("gate_semantics_status") or "")
+    snapshot["gate_semantics_status"] = _gate_semantics_status(payload) or str(gate_block.get("gate_semantics_status") or "")
     snapshot["pass_semantics_version"] = payload.get("pass_semantics_version")
     return snapshot
 
