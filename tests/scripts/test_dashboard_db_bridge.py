@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 import sqlite3
 
@@ -218,6 +219,105 @@ def test_robustness_marks_stale_when_sidecar_age_exceeds_policy(tmp_path, monkey
     assert robustness["status"] == "STALE"
     assert robustness["freshness_status"] == "STALE"
     assert robustness["freshness_reason"] == "STALE_SIDECAR"
+
+
+def test_evidence_payload_reads_production_gate_and_audit_snapshot(tmp_path, monkeypatch) -> None:
+    gate = tmp_path / "production_gate_latest.json"
+    gate.write_text(
+        json.dumps(
+            {
+                "timestamp_utc": "2026-03-15T18:22:13Z",
+                "phase3_ready": False,
+                "phase3_reason": "GATES_FAIL,ARTIFACT_STALE_OR_UNBOUND",
+                "artifact_binding": {
+                    "pass": False,
+                    "reason_codes": ["NO_LIVE_CYCLE_TIMESTAMP"],
+                },
+                "production_profitability_gate": {
+                    "status": "FAIL",
+                    "gate_semantics_status": "INCONCLUSIVE_BLOCKED",
+                },
+                "profitability_proof": {
+                    "status": "FAIL",
+                    "evidence_progress": {
+                        "remaining_closed_trades": 30,
+                        "remaining_trading_days": 21,
+                    },
+                },
+                "telemetry_contract": {
+                    "status": "INCONCLUSIVE_BLOCKED",
+                    "severity": "HIGH",
+                    "generated_utc": "2026-03-15T18:22:13Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    audit_db = tmp_path / "dashboard_audit.db"
+    conn = sqlite3.connect(audit_db)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE dashboard_snapshots(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                run_id TEXT,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO dashboard_snapshots(created_at, run_id, payload_json) VALUES (?,?,?)",
+            ("2026-03-15T18:21:51Z", "RID-1", "{}"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(mod, "DEFAULT_PRODUCTION_GATE_PATH", gate)
+    monkeypatch.setattr(mod, "DEFAULT_AUDIT_DB_PATH", audit_db)
+
+    evidence = {
+        "production_gate": mod._production_gate_summary(),
+        "dashboard_audit": mod._dashboard_audit_summary(),
+    }
+    alerts = mod._operator_alerts(
+        provenance={"origin": "mixed"},
+        evidence=evidence,
+        robustness={"status": "WARN"},
+        signal_count=0,
+        trade_count=0,
+        price_series_count=0,
+    )
+
+    assert evidence["production_gate"]["status"] == "FAIL"
+    assert evidence["production_gate"]["artifact_binding_pass"] is False
+    assert evidence["production_gate"]["remaining_closed_trades"] == 30
+    assert evidence["dashboard_audit"]["status"] == "OK"
+    assert evidence["dashboard_audit"]["snapshot_count"] == 1
+    assert any("Artifact binding failed" in alert for alert in alerts)
+    assert any("Data origin is not fully live" in alert for alert in alerts)
+
+
+def test_operator_alerts_surface_audit_db_error(tmp_path, monkeypatch) -> None:
+    audit_db = tmp_path / "dashboard_audit.db"
+    audit_db.write_text("not a sqlite database", encoding="utf-8")
+    monkeypatch.setattr(mod, "DEFAULT_AUDIT_DB_PATH", audit_db)
+
+    audit = mod._dashboard_audit_summary()
+    alerts = mod._operator_alerts(
+        provenance={"origin": "live"},
+        evidence={"dashboard_audit": audit, "production_gate": {"status": "PASS", "phase3_ready": True}},
+        robustness={"status": "OK"},
+        signal_count=1,
+        trade_count=1,
+        price_series_count=1,
+    )
+
+    assert audit["status"] == "ERROR"
+    assert any("cannot be queried cleanly" in alert for alert in alerts)
+    assert all("no persisted snapshots yet" not in alert for alert in alerts)
 
 
 # ---------------------------------------------------------------------------

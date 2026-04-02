@@ -31,7 +31,10 @@ DEFAULT_ELIGIBILITY_PATH = ROOT / "logs" / "ticker_eligibility.json"
 DEFAULT_CONTEXT_QUALITY_PATH = ROOT / "logs" / "context_quality_latest.json"
 DEFAULT_PERFORMANCE_METRICS_PATH = ROOT / "visualizations" / "performance" / "metrics_summary.json"
 DEFAULT_FORECAST_SUMMARY_PATH = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
+DEFAULT_PRODUCTION_GATE_PATH = ROOT / "logs" / "audit_gate" / "production_gate_latest.json"
 DEFAULT_SIDECAR_MAX_AGE_MINUTES = 120
+DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES = 30
+DEFAULT_AUDIT_SNAPSHOT_MAX_AGE_MINUTES = 60
 
 try:
     from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
@@ -99,6 +102,25 @@ def _connect_ro_with_fallback(db_path: Path) -> sqlite3.Connection:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _relative_repo_path(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except Exception:
+        return path.as_posix()
+
+
+def _freshness_from_age(
+    age_minutes: Optional[float],
+    *,
+    max_age_minutes: float,
+) -> Tuple[str, Optional[str]]:
+    if age_minutes is None:
+        return "UNKNOWN", None
+    if age_minutes > max_age_minutes:
+        return "STALE", "AGE_EXCEEDED"
+    return "FRESH", None
 
 
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
@@ -894,6 +916,13 @@ def build_dashboard_payload(
     model_params = _model_params(conn)
     checks = _data_checks(conn)
     provenance = _provenance_summary(conn)
+    robustness = _robustness_payload()
+    evidence = {
+        "canonical_view": "static_evidence_dashboard",
+        "latest_run_only": bool(latest_run_only),
+        "production_gate": _production_gate_summary(),
+        "dashboard_audit": _dashboard_audit_summary(),
+    }
 
     qual_records: List[Dict[str, Any]] = []
     for t in tickers:
@@ -912,6 +941,8 @@ def build_dashboard_payload(
             "cycles": None,
             "llm_enabled": None,
             "dashboard_version": "db_bridge_v1",
+            "canonical_view": evidence["canonical_view"],
+            "latest_run_only": bool(latest_run_only),
             "data_origin": provenance.get("origin"),
             "dataset_id": provenance.get("dataset_id"),
             "data_source": provenance.get("data_source"),
@@ -950,8 +981,17 @@ def build_dashboard_payload(
         "price_series": {t: _price_series(conn, t, lookback_days) for t in tickers},
         "model_params": model_params,
         "checks": checks,
-        "robustness": _robustness_payload(),
+        "robustness": robustness,
+        "evidence": evidence,
     }
+    payload["alerts"] = _operator_alerts(
+        provenance=provenance,
+        evidence=evidence,
+        robustness=robustness,
+        signal_count=len(payload["signals"]),
+        trade_count=len(payload["trade_events"]),
+        price_series_count=len(payload["price_series"]),
+    )
     return payload
 
 
@@ -1148,6 +1188,258 @@ def _robustness_payload() -> Dict[str, Any]:
         "chart_paths": chart_paths if isinstance(chart_paths, dict) else {},
         "warnings": all_warnings,
     }
+
+
+def _dashboard_audit_summary() -> Dict[str, Any]:
+    path = DEFAULT_AUDIT_DB_PATH
+    summary: Dict[str, Any] = {
+        "available": path.exists(),
+        "path": _relative_repo_path(path),
+        "status": "MISSING",
+        "snapshot_count": 0,
+        "latest_created_at": None,
+        "latest_run_id": None,
+        "age_minutes": None,
+        "freshness_status": "UNKNOWN",
+        "freshness_reason": None,
+        "error": None,
+    }
+    if not path.exists():
+        return summary
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = _connect_ro(path)
+        count_row = _safe_fetchone(conn, "SELECT COUNT(*) AS c FROM dashboard_snapshots")
+        latest_row = _safe_fetchone(
+            conn,
+            """
+            SELECT created_at, run_id
+            FROM dashboard_snapshots
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+        )
+        snapshot_count = int(count_row["c"] or 0) if count_row else 0
+        latest_created_at = str(latest_row["created_at"]) if latest_row and latest_row["created_at"] else None
+        latest_run_id = str(latest_row["run_id"]) if latest_row and latest_row["run_id"] else None
+        try:
+            max_age_minutes = float(
+                os.getenv(
+                    "PMX_AUDIT_SNAPSHOT_MAX_AGE_MINUTES",
+                    str(DEFAULT_AUDIT_SNAPSHOT_MAX_AGE_MINUTES),
+                )
+            )
+        except Exception:
+            max_age_minutes = float(DEFAULT_AUDIT_SNAPSHOT_MAX_AGE_MINUTES)
+        age_minutes = (
+            _sidecar_age_minutes(path, {"generated_utc": latest_created_at})
+            if latest_created_at
+            else None
+        )
+        freshness_status, freshness_reason = _freshness_from_age(
+            age_minutes,
+            max_age_minutes=max_age_minutes,
+        )
+        summary.update(
+            {
+                "status": "OK" if snapshot_count > 0 else "EMPTY",
+                "snapshot_count": snapshot_count,
+                "latest_created_at": latest_created_at,
+                "latest_run_id": latest_run_id,
+                "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+                "freshness_status": freshness_status,
+                "freshness_reason": freshness_reason,
+            }
+        )
+        return summary
+    except Exception as exc:
+        summary.update(
+            {
+                "status": "ERROR",
+                "error": str(exc),
+            }
+        )
+        return summary
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _production_gate_summary() -> Dict[str, Any]:
+    path = DEFAULT_PRODUCTION_GATE_PATH
+    payload, err = _load_sidecar_json(path)
+    summary: Dict[str, Any] = {
+        "available": err is None,
+        "path": _relative_repo_path(path),
+        "status": "MISSING" if err == "missing" else "ERROR" if err else "UNKNOWN",
+        "gate_semantics_status": None,
+        "phase3_ready": False,
+        "phase3_reason": None,
+        "artifact_binding_pass": None,
+        "artifact_binding_reasons": [],
+        "proof_status": None,
+        "remaining_closed_trades": None,
+        "remaining_trading_days": None,
+        "telemetry_status": None,
+        "telemetry_severity": None,
+        "generated_utc": None,
+        "age_minutes": None,
+        "freshness_status": "UNKNOWN",
+        "freshness_reason": None,
+        "error": None if err in (None, "missing") else err,
+    }
+    if err:
+        return summary
+
+    gate = payload.get("production_profitability_gate", {}) if isinstance(payload, dict) else {}
+    proof = payload.get("profitability_proof", {}) if isinstance(payload, dict) else {}
+    readiness = payload.get("readiness", {}) if isinstance(payload, dict) else {}
+    artifact_binding = payload.get("artifact_binding", {}) if isinstance(payload, dict) else {}
+    telemetry = payload.get("telemetry_contract", {}) if isinstance(payload, dict) else {}
+    evidence_progress = proof.get("evidence_progress", {}) if isinstance(proof, dict) else {}
+    generated_utc = None
+    if isinstance(payload, dict):
+        generated_utc = payload.get("timestamp_utc")
+    if generated_utc is None and isinstance(telemetry, dict):
+        generated_utc = telemetry.get("generated_utc")
+    try:
+        max_age_minutes = float(
+            os.getenv(
+                "PMX_PRODUCTION_GATE_MAX_AGE_MINUTES",
+                str(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES),
+            )
+        )
+    except Exception:
+        max_age_minutes = float(DEFAULT_PRODUCTION_GATE_MAX_AGE_MINUTES)
+    age_minutes = _sidecar_age_minutes(
+        path,
+        {"generated_utc": generated_utc} if generated_utc else payload,
+    )
+    freshness_status, freshness_reason = _freshness_from_age(
+        age_minutes,
+        max_age_minutes=max_age_minutes,
+    )
+    summary.update(
+        {
+            "status": str(gate.get("status") or "UNKNOWN").upper(),
+            "gate_semantics_status": gate.get("gate_semantics_status"),
+            "phase3_ready": bool(
+                payload.get("phase3_ready")
+                if isinstance(payload, dict) and payload.get("phase3_ready") is not None
+                else readiness.get("phase3_ready", False)
+            ),
+            "phase3_reason": (
+                payload.get("phase3_reason")
+                if isinstance(payload, dict) and payload.get("phase3_reason")
+                else readiness.get("phase3_reason")
+            ) or readiness.get("phase3_reason"),
+            "artifact_binding_pass": (
+                bool(artifact_binding.get("pass"))
+                if isinstance(artifact_binding, dict) and "pass" in artifact_binding
+                else None
+            ),
+            "artifact_binding_reasons": (
+                artifact_binding.get("reason_codes", [])
+                if isinstance(artifact_binding, dict)
+                else []
+            ),
+            "proof_status": proof.get("status") if isinstance(proof, dict) else None,
+            "remaining_closed_trades": (
+                int(evidence_progress.get("remaining_closed_trades"))
+                if isinstance(evidence_progress, dict)
+                and evidence_progress.get("remaining_closed_trades") is not None
+                else None
+            ),
+            "remaining_trading_days": (
+                int(evidence_progress.get("remaining_trading_days"))
+                if isinstance(evidence_progress, dict)
+                and evidence_progress.get("remaining_trading_days") is not None
+                else None
+            ),
+            "telemetry_status": telemetry.get("status") if isinstance(telemetry, dict) else None,
+            "telemetry_severity": telemetry.get("severity") if isinstance(telemetry, dict) else None,
+            "generated_utc": generated_utc,
+            "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+            "freshness_status": freshness_status,
+            "freshness_reason": freshness_reason,
+        }
+    )
+    return summary
+
+
+def _operator_alerts(
+    *,
+    provenance: Dict[str, Any],
+    evidence: Dict[str, Any],
+    robustness: Dict[str, Any],
+    signal_count: int,
+    trade_count: int,
+    price_series_count: int,
+) -> List[str]:
+    alerts: List[str] = []
+    origin = str(provenance.get("origin") or "").strip().lower()
+    gate = evidence.get("production_gate", {}) if isinstance(evidence, dict) else {}
+    audit = evidence.get("dashboard_audit", {}) if isinstance(evidence, dict) else {}
+    robustness_status = str(robustness.get("overall_status") or robustness.get("status") or "UNKNOWN").upper()
+    gate_state = str(gate.get("status") or "UNKNOWN").upper()
+    audit_state = str(audit.get("status") or "UNKNOWN").upper()
+
+    if origin in {"synthetic", "mixed"}:
+        alerts.append("Data origin is not fully live; treat the dashboard as evidence-in-progress.")
+
+    gate_status = gate_state
+    if gate_status in {"FAIL", "INCONCLUSIVE"}:
+        alerts.append(
+            f"Production gate is {gate_status}; phase3_ready={int(bool(gate.get('phase3_ready')))}."
+        )
+    elif gate_state == "ERROR":
+        alerts.append("Production gate artifact is unreadable or invalid.")
+    elif gate.get("available") is False:
+        alerts.append("Production gate artifact is missing.")
+
+    if gate.get("freshness_status") == "STALE":
+        alerts.append("Production gate artifact is stale relative to the alerting freshness policy.")
+
+    if gate.get("artifact_binding_pass") is False:
+        reasons = gate.get("artifact_binding_reasons") or []
+        suffix = f" ({', '.join(str(r) for r in reasons[:3])})" if reasons else ""
+        alerts.append(f"Artifact binding failed{suffix}.")
+
+    remaining_closed = gate.get("remaining_closed_trades")
+    remaining_days = gate.get("remaining_trading_days")
+    if (remaining_closed or 0) > 0 or (remaining_days or 0) > 0:
+        alerts.append(
+            "Profitability proof runway incomplete: "
+            f"{int(remaining_closed or 0)} closed trades and {int(remaining_days or 0)} trading days remaining."
+        )
+
+    if audit_state == "ERROR":
+        alerts.append("Dashboard audit snapshot DB exists but cannot be queried cleanly.")
+    elif audit.get("available") is False:
+        alerts.append("Dashboard audit snapshot DB is missing.")
+    elif audit_state == "EMPTY" or int(audit.get("snapshot_count") or 0) == 0:
+        alerts.append("Dashboard audit snapshot DB has no persisted snapshots yet.")
+    elif audit.get("freshness_status") == "STALE":
+        alerts.append("Dashboard audit snapshots exist but are stale.")
+
+    if robustness_status in {"WARN", "STALE", "MISSING"}:
+        alerts.append(f"Robustness sidecars are {robustness_status}.")
+
+    if trade_count == 0:
+        alerts.append("No trade events are present in the current canonical payload.")
+    if signal_count == 0:
+        alerts.append("No signals are present in the current canonical payload.")
+    if price_series_count == 0:
+        alerts.append("No price series are present in the current canonical payload.")
+
+    deduped: List[str] = []
+    seen = set()
+    for alert in alerts:
+        if alert not in seen:
+            seen.add(alert)
+            deduped.append(alert)
+    return deduped
 
 
 def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, Any]:

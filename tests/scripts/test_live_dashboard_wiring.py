@@ -27,6 +27,10 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
         "trade-pnl-chart",
         "trade-ticker",
         "signals-body",
+        "evidence-gate",
+        "evidence-binding",
+        "evidence-proof",
+        "evidence-audit",
         "robustness-status",
         "robustness-eligibility",
         "robustness-coverage",
@@ -35,6 +39,7 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
         assert f'id="{element_id}"' in html
 
     assert "No robustness data available." in html
+    assert "No operator alerts." in html
 
 
 def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
@@ -42,5 +47,7 @@ def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
 
     assert "const status = robustness.overall_status || robustness.status ||" in html
     assert "statusEl.textContent = suff.status ||" not in html
-    assert "statusEl.classList.add('status-warn');" in html
+    assert "function applyStatusTone(el, status)" in html
+    assert "applyStatusTone(statusEl, normalizedStatus);" in html
+    assert "binding=unknown" in html
     assert ".status-warn { color: var(--accent-2); }" in html

@@ -122,6 +122,20 @@ python -m pytest -m "not gpu and not slow" --tb=short -q
 
 ## 7) Dashboard Serving
 
+Windows manual launch:
+
+```powershell
+python scripts/windows_dashboard_manager.py launch
+```
+
+or:
+
+```powershell
+.\launch_live_dashboard.bat
+```
+
+This path refreshes `visualizations/dashboard_data.json` first, then ensures the bridge, localhost HTTP server, Prometheus exporter, and live watcher are running.
+
 Serve repository root over HTTP:
 
 ```bash

@@ -226,3 +226,43 @@ def test_run_ops_command_marks_gateway_recovery_completed(tmp_path, monkeypatch)
     assert verdict["overall_status"]["service_health"] == "healthy"
     assert verdict["overall_status"]["status"] == "WARN"
     assert Path(tmp_path / "openclaw_ops_control_plane_latest.json").exists()
+
+
+def test_recover_dashboard_like_uses_prometheus_managed_stack(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_ensure_dashboard_stack(**kwargs):
+        captured.update(kwargs)
+        return ops.dashboard_mod.EnsureResult(
+            url="http://127.0.0.1:8000/visualizations/live_dashboard.html",
+            bridge_pid=101,
+            server_pid=202,
+            watcher_pid=None,
+            started_bridge=False,
+            started_server=False,
+            started_watcher=False,
+            bridge_running=True,
+            server_running=True,
+            watcher_running=False,
+            warnings=[],
+            exporter_pid=404,
+            started_exporter=True,
+            exporter_running=True,
+            exporter_url="http://127.0.0.1:9108/metrics",
+        )
+
+    monkeypatch.setattr(ops.dashboard_mod, "_ensure_dashboard_stack", _fake_ensure_dashboard_stack)
+
+    result = ops._recover_dashboard_like(
+        ensure_live_watcher=False,
+        dashboard_port=8000,
+        db_path=tmp_path / "portfolio_maximizer.db",
+        watcher_tickers="AAPL,MSFT",
+        watcher_cycles=30,
+        watcher_sleep_seconds=86400,
+    )
+
+    assert captured["ensure_prometheus_exporter"] is True
+    assert captured["prometheus_port"] == ops.dashboard_mod.DEFAULT_PROMETHEUS_EXPORTER_PORT
+    assert result["ok"] is True
+    assert result["started_exporter"] is True

@@ -799,15 +799,22 @@ def _recover_dashboard_like(
         root=PROJECT_ROOT,
         python_bin=sys.executable,
         port=int(dashboard_port),
+        prometheus_port=int(dashboard_mod.DEFAULT_PROMETHEUS_EXPORTER_PORT),
         db_path=db_path,
         persist_snapshot=True,
         require_bridge=True,
+        ensure_prometheus_exporter=True,
         ensure_live_watcher=bool(ensure_live_watcher),
         watcher_tickers=str(watcher_tickers),
         watcher_cycles=int(watcher_cycles),
         watcher_sleep_seconds=int(watcher_sleep_seconds),
     )
-    ok = bool(result.bridge_running and result.server_running and (result.watcher_running or not ensure_live_watcher))
+    ok = bool(
+        result.bridge_running
+        and result.server_running
+        and result.exporter_running
+        and (result.watcher_running or not ensure_live_watcher)
+    )
     return {
         "target": label,
         "ok": ok,
@@ -820,6 +827,7 @@ def _recover_dashboard_like(
         "stderr_tail": list(result.warnings),
         "started_bridge": bool(result.started_bridge),
         "started_server": bool(result.started_server),
+        "started_exporter": bool(result.started_exporter),
         "started_watcher": bool(result.started_watcher),
     }
 

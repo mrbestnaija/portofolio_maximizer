@@ -303,13 +303,31 @@
           <div class="subtitle" id="payload-warning" style="margin-top:8px; color: var(--danger); display:none;">Missing price_series/trade_events; add them to dashboard_data.json.</div>
         </div>
         <div class="card">
-          <h3>Exit Readiness</h3>
-          <div class="subtitle">Cross-session persistence + exit logic are required to move from paper to real trading behavior.</div>
-          <div class="mini" style="margin-top:8px;">• Positions persist across sessions (resume closes positions over multiple runs).</div>
-          <div class="mini">• Exit checks run each cycle (stop/target/time) — see `[EXIT_CHECK]` logs.</div>
-          <div class="mini">• Fresh market data is required to trigger closes; rerun with new bars.</div>
-          <div class="mini">• Proof mode (`--proof-mode`) forces round trips for profitability validation.</div>
-          <div class="mini">• Reference: `Documentation/EXIT_ELIGIBILITY_AND_PROOF_MODE.md`</div>
+          <h3>Evidence Chain</h3>
+          <div class="subtitle">Canonical operator view: latest run, production gate, proof runway, and snapshot persistence.</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Gate</div>
+              <div class="value" id="evidence-gate">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Artifact Binding</div>
+              <div class="value" id="evidence-binding">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Proof Runway</div>
+              <div class="value" id="evidence-proof">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Audit Snapshots</div>
+              <div class="value" id="evidence-audit">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="evidence-context" style="margin-top:8px;">No evidence artifacts loaded.</div>
+          <div class="subtitle" id="evidence-source" style="margin-top:6px;">Gate artifact: --</div>
+          <div id="evidence-alerts" class="subtitle" style="margin-top:10px; display:flex; flex-direction:column; gap:6px;">
+            <span>No operator alerts.</span>
+          </div>
         </div>
         <div class="card">
           <h3>Model Diagnostics</h3>
@@ -1203,6 +1221,107 @@
       });
     }
 
+    function applyStatusTone(el, status) {
+      if (!el) return;
+      const normalized = String(status || 'UNKNOWN').toUpperCase();
+      el.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
+      if (['ERROR', 'FAIL', 'FATAL'].includes(normalized)) {
+        el.classList.add('status-error');
+      } else if (['WARN', 'STALE', 'DEGRADED', 'INCONCLUSIVE', 'INCONCLUSIVE_BLOCKED', 'EMPTY'].includes(normalized)) {
+        el.classList.add('status-warn');
+      } else if (['PASS', 'OK', 'FRESH', 'READY'].includes(normalized)) {
+        el.classList.add('status-ok');
+      } else {
+        el.classList.add('status-unknown');
+      }
+    }
+
+    function renderEvidence(data) {
+      const gateEl = document.getElementById('evidence-gate');
+      const bindingEl = document.getElementById('evidence-binding');
+      const proofEl = document.getElementById('evidence-proof');
+      const auditEl = document.getElementById('evidence-audit');
+      const contextEl = document.getElementById('evidence-context');
+      const sourceEl = document.getElementById('evidence-source');
+      const alertsEl = document.getElementById('evidence-alerts');
+      if (!gateEl || !bindingEl || !proofEl || !auditEl || !contextEl || !sourceEl || !alertsEl) return;
+
+      const evidence = data?.evidence || {};
+      const gate = evidence.production_gate || {};
+      const audit = evidence.dashboard_audit || {};
+      const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
+
+      if (!data) {
+        gateEl.textContent = '--';
+        bindingEl.textContent = '--';
+        proofEl.textContent = '--';
+        auditEl.textContent = '--';
+        applyStatusTone(gateEl, 'UNKNOWN');
+        applyStatusTone(bindingEl, 'UNKNOWN');
+        applyStatusTone(proofEl, 'UNKNOWN');
+        applyStatusTone(auditEl, 'UNKNOWN');
+        contextEl.textContent = 'No evidence artifacts loaded.';
+        sourceEl.textContent = 'Gate artifact: --';
+        alertsEl.innerHTML = '<span>No operator alerts.</span>';
+        return;
+      }
+
+      const gateStatus = String(gate.status || gate.gate_semantics_status || 'UNKNOWN').toUpperCase();
+      const bindingStatus = gate.artifact_binding_pass === true
+        ? 'PASS'
+        : gate.artifact_binding_pass === false
+          ? 'FAIL'
+          : 'UNKNOWN';
+      const remainingClosed = Number(gate.remaining_closed_trades || 0);
+      const remainingDays = Number(gate.remaining_trading_days || 0);
+      const proofStatus = gate.proof_status
+        ? `${String(gate.proof_status).toUpperCase()} · ${remainingClosed}/${remainingDays}`
+        : `${remainingClosed}/${remainingDays}`;
+      const auditStatus = String(audit.status || 'UNKNOWN').toUpperCase();
+
+      gateEl.textContent = gateStatus;
+      bindingEl.textContent = bindingStatus;
+      proofEl.textContent = proofStatus;
+      auditEl.textContent = auditStatus === 'OK'
+        ? `${auditStatus} · ${Number(audit.snapshot_count || 0)}`
+        : auditStatus;
+
+      applyStatusTone(gateEl, gateStatus);
+      applyStatusTone(bindingEl, bindingStatus);
+      applyStatusTone(proofEl, gate.proof_status || (remainingClosed > 0 || remainingDays > 0 ? 'WARN' : 'OK'));
+      applyStatusTone(auditEl, auditStatus);
+
+      const gateAge = Number(gate.age_minutes);
+      const auditAge = Number(audit.age_minutes);
+      const gateFreshness = String(gate.freshness_status || 'UNKNOWN').toUpperCase();
+      const auditFreshness = String(audit.freshness_status || 'UNKNOWN').toUpperCase();
+      const latestRunOnly = evidence.latest_run_only !== false;
+      contextEl.textContent = `phase3_ready=${gate.phase3_ready ? 1 : 0} · latest_run_only=${latestRunOnly ? 1 : 0} · gate_age=${Number.isFinite(gateAge) ? gateAge.toFixed(1) + 'm' : '--'} (${gateFreshness}) · snapshot_age=${Number.isFinite(auditAge) ? auditAge.toFixed(1) + 'm' : '--'} (${auditFreshness})`;
+
+      const gatePath = gate.path ? String(gate.path) : '--';
+      const reason = gate.phase3_reason ? `reason=${gate.phase3_reason}` : 'reason=--';
+      const bindingReasons = Array.isArray(gate.artifact_binding_reasons) ? gate.artifact_binding_reasons : [];
+      const bindingDescriptor = gate.artifact_binding_pass === true
+        ? 'binding=ok'
+        : gate.artifact_binding_pass === false
+          ? `binding=${bindingReasons.length ? bindingReasons.join(',') : 'failed'}`
+          : 'binding=unknown';
+      sourceEl.textContent = `Gate artifact: ${gatePath} · ${reason} · ${bindingDescriptor}`;
+
+      alertsEl.innerHTML = '';
+      if (!alerts.length) {
+        const span = document.createElement('span');
+        span.textContent = 'No operator alerts.';
+        alertsEl.appendChild(span);
+        return;
+      }
+      alerts.slice(0, 8).forEach(msg => {
+        const span = document.createElement('span');
+        span.textContent = `- ${msg}`;
+        alertsEl.appendChild(span);
+      });
+    }
+
     function renderRobustness(data) {
       const statusEl = document.getElementById('robustness-status');
       const eligEl = document.getElementById('robustness-eligibility');
@@ -1233,16 +1352,7 @@
       const freshnessStatus = String(robustness.freshness_status || 'UNKNOWN').toUpperCase();
       const freshnessReason = robustness.freshness_reason ? ` (${robustness.freshness_reason})` : '';
 
-      statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
-      if (['ERROR', 'FAIL', 'FATAL'].includes(normalizedStatus)) {
-        statusEl.classList.add('status-error');
-      } else if (['WARN', 'STALE', 'DEGRADED'].includes(normalizedStatus)) {
-        statusEl.classList.add('status-warn');
-      } else if (['PASS', 'SUFFICIENT', 'OK'].includes(normalizedStatus)) {
-        statusEl.classList.add('status-ok');
-      } else {
-        statusEl.classList.add('status-unknown');
-      }
+      applyStatusTone(statusEl, normalizedStatus);
       statusEl.textContent = normalizedStatus;
       eligEl.textContent = `H:${healthy} W:${weak} L:${lab}`;
       covEl.textContent = `${Number.isFinite(coverage) ? (coverage * 100).toFixed(1) + '%' : '--'} / ${Number.isFinite(lift) ? (lift * 100).toFixed(1) + '%' : '--'}`;
@@ -1369,6 +1479,7 @@
         renderSignals([]);
         renderEquity([], []);
         populateTradeTickerSelect({ price_series: {}, meta: { tickers: [] } });
+        renderEvidence(null);
         renderRobustness(null);
         return;
       }
@@ -1493,6 +1604,7 @@
       populateDiagTickerSelect(data, runChanged);
       renderModelParams(data);
       renderChecks(data);
+      renderEvidence(data);
       renderRobustness(data);
     }
 

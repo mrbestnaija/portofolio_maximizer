@@ -149,6 +149,7 @@ def _dashboard_status_from_result(
     db_path: Path,
     python_bin: str,
     port: int,
+    prometheus_port: int,
     watcher_tickers: str,
     watcher_sleep_seconds: int,
 ) -> dict[str, Any]:
@@ -172,6 +173,13 @@ def _dashboard_status_from_result(
             "running": result.server_running,
             "started_now": result.started_server,
             "port": int(port),
+        },
+        "prometheus_exporter": {
+            "pid": result.exporter_pid,
+            "running": result.exporter_running,
+            "started_now": result.started_exporter,
+            "port": int(prometheus_port),
+            "url": result.exporter_url,
         },
         "live_watcher": {
             "pid": result.watcher_pid,
@@ -400,9 +408,11 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
         root=root,
         python_bin=python_bin,
         port=int(args.dashboard_port),
+        prometheus_port=int(args.prometheus_port),
         db_path=db_path,
         persist_snapshot=True,
         require_bridge=True,
+        ensure_prometheus_exporter=True,
         ensure_live_watcher=True,
         watcher_tickers=str(args.watcher_tickers),
         watcher_cycles=int(args.watcher_cycles),
@@ -414,6 +424,7 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
         db_path=db_path,
         python_bin=python_bin,
         port=int(args.dashboard_port),
+        prometheus_port=int(args.prometheus_port),
         watcher_tickers=str(args.watcher_tickers),
         watcher_sleep_seconds=int(args.watcher_sleep_seconds),
     )
@@ -485,7 +496,8 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
     print(f"[PERSISTENCE] status_json={status_json}")
     print(
         f"[PERSISTENCE] dashboard watcher={dashboard_result.watcher_running} "
-        f"bridge={dashboard_result.bridge_running} server={dashboard_result.server_running}"
+        f"bridge={dashboard_result.bridge_running} server={dashboard_result.server_running} "
+        f"exporter={dashboard_result.exporter_running}"
     )
     print(
         f"[PERSISTENCE] reconcile before={before_unlinked.get('count')} "
@@ -505,7 +517,12 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
 
     hard_fail = False
     if bool(args.strict):
-        if not (dashboard_result.bridge_running and dashboard_result.server_running and dashboard_result.watcher_running):
+        if not (
+            dashboard_result.bridge_running
+            and dashboard_result.server_running
+            and dashboard_result.exporter_running
+            and dashboard_result.watcher_running
+        ):
             hard_fail = True
         if reconcile_result["returncode"] != 0:
             hard_fail = True
@@ -569,6 +586,7 @@ def main() -> int:
     p_ensure.add_argument("--audit-dir", default=str(DEFAULT_AUDIT_DIR), help="Forecast audit directory.")
     p_ensure.add_argument("--audit-max-files", type=int, default=500, help="Max files for audit refresh.")
     p_ensure.add_argument("--dashboard-port", type=int, default=8000, help="Local dashboard HTTP port.")
+    p_ensure.add_argument("--prometheus-port", type=int, default=dashboard_manager.DEFAULT_PROMETHEUS_EXPORTER_PORT, help="Local Prometheus exporter port.")
     p_ensure.add_argument("--watcher-tickers", default=",".join(dashboard_manager.DEFAULT_LIVE_WATCHER_TICKERS), help="Watcher ticker universe.")
     p_ensure.add_argument("--watcher-cycles", type=int, default=30, help="Watcher cycle budget.")
     p_ensure.add_argument("--watcher-sleep-seconds", type=int, default=86400, help="Watcher cadence.")

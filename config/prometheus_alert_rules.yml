@@ -1,0 +1,92 @@
+groups:
+  - name: pmx-evidence
+    rules:
+      - alert: PMXDashboardPayloadMissing
+        expr: pmx_alert_dashboard_payload_missing == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PMX canonical dashboard payload missing"
+          description: "visualizations/dashboard_data.json is missing or unreadable, so the canonical evidence view is unavailable."
+
+      - alert: PMXDashboardPayloadStale
+        expr: pmx_alert_dashboard_payload_stale == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PMX dashboard payload stale"
+          description: "dashboard_data.json has not been refreshed within the static dashboard freshness window."
+
+      - alert: PMXProductionGateFail
+        expr: pmx_alert_production_gate_fail == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PMX production gate not passing"
+          description: "production_gate_latest.json reports a non-PASS gate status; investigate proof runway, linkage, and artifact binding."
+
+      - alert: PMXProductionGateStale
+        expr: pmx_alert_production_gate_stale == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PMX production gate artifact stale"
+          description: "production_gate_latest.json is older than the canonical freshness policy and should not be trusted as current evidence."
+
+      - alert: PMXArtifactBindingFail
+        expr: pmx_alert_artifact_binding_fail == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PMX artifact binding failed"
+          description: "The production gate reports stale or unbound artifacts relative to the latest live cycle."
+
+      - alert: PMXProofRunwayIncomplete
+        expr: pmx_alert_proof_runway_incomplete == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PMX proof runway incomplete"
+          description: "The profitability proof runway still requires additional closed trades or trading days."
+
+      - alert: PMXDashboardAuditMissing
+        expr: pmx_alert_dashboard_audit_missing == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PMX dashboard audit snapshots missing"
+          description: "data/dashboard_audit.db is missing or contains zero persisted snapshots."
+
+      - alert: PMXDashboardAuditError
+        expr: pmx_alert_dashboard_audit_error == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PMX dashboard audit DB unreadable"
+          description: "data/dashboard_audit.db exists but cannot be queried cleanly; investigate schema/corruption issues."
+
+      - alert: PMXRobustnessDegraded
+        expr: pmx_alert_robustness_degraded == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PMX robustness sidecars degraded"
+          description: "The dashboard robustness block is not OK/PASS and needs operator review."
+
+      - alert: PMXNonLiveDataOrigin
+        expr: pmx_alert_data_origin_not_live == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PMX dashboard origin not live"
+          description: "The canonical dashboard payload is reporting synthetic or mixed origin rather than fully live data."

@@ -95,6 +95,10 @@ def test_cmd_ensure_writes_status_and_succeeds(tmp_path, monkeypatch) -> None:
             server_running=True,
             watcher_running=True,
             warnings=[],
+            exporter_pid=404,
+            started_exporter=False,
+            exporter_running=True,
+            exporter_url="http://127.0.0.1:9108/metrics",
         ),
     )
 
@@ -134,6 +138,7 @@ def test_cmd_ensure_writes_status_and_succeeds(tmp_path, monkeypatch) -> None:
         audit_dir=str(root / "logs" / "forecast_audits"),
         audit_max_files=500,
         dashboard_port=8000,
+        prometheus_port=9108,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
         watcher_sleep_seconds=86400,
@@ -147,6 +152,7 @@ def test_cmd_ensure_writes_status_and_succeeds(tmp_path, monkeypatch) -> None:
     assert rc == 0
 
     payload = json.loads(status_json.read_text(encoding="utf-8"))
+    assert payload["dashboard"]["prometheus_exporter"]["running"] is True
     assert payload["dashboard"]["live_watcher"]["running"] is True
     assert payload["reconciliation"]["before"]["count"] == 2
     assert payload["reconciliation"]["after"]["count"] == 0
@@ -175,6 +181,10 @@ def test_cmd_ensure_fails_strict_when_unlinked_remain(tmp_path, monkeypatch) -> 
             server_running=True,
             watcher_running=True,
             warnings=[],
+            exporter_pid=404,
+            started_exporter=False,
+            exporter_running=True,
+            exporter_url="http://127.0.0.1:9108/metrics",
         ),
     )
     monkeypatch.setattr(
@@ -211,6 +221,7 @@ def test_cmd_ensure_fails_strict_when_unlinked_remain(tmp_path, monkeypatch) -> 
         audit_dir=str(root / "logs" / "forecast_audits"),
         audit_max_files=500,
         dashboard_port=8000,
+        prometheus_port=9108,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
         watcher_sleep_seconds=86400,
