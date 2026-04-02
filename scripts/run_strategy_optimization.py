@@ -129,7 +129,7 @@ def main(
           config-driven hook into realized PnL/health metrics instead of
           hardcoding any specific risk model.
         """
-        from datetime import datetime, timedelta, UTC
+        from datetime import datetime, timedelta, timezone as _tz; UTC = _tz.utc  # noqa: E702
 
         regime_cfg = regimes_cfg.get(candidate.regime or regime, {})
         lookback_days = int(
