@@ -134,7 +134,7 @@ or:
 .\launch_live_dashboard.bat
 ```
 
-This path refreshes `visualizations/dashboard_data.json` first, then ensures the bridge, localhost HTTP server, Prometheus exporter, and live watcher are running.
+This path refreshes `visualizations/dashboard_data.json` first, then ensures the bridge, localhost HTTP server, and Prometheus exporter are running. The live watcher is available when explicitly requested with `--ensure-live-watcher`.
 
 Serve repository root over HTTP:
 

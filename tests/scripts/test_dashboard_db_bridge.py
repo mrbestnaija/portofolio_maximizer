@@ -320,6 +320,28 @@ def test_operator_alerts_surface_audit_db_error(tmp_path, monkeypatch) -> None:
     assert all("no persisted snapshots yet" not in alert for alert in alerts)
 
 
+def test_persist_snapshot_bootstraps_audit_db_schema(tmp_path) -> None:
+    audit_db = tmp_path / "dashboard_audit.db"
+
+    mod._persist_snapshot(
+        audit_db,
+        {
+            "meta": {"run_id": "RID-BOOTSTRAP"},
+            "signals": [],
+            "trade_events": [],
+        },
+    )
+
+    conn = sqlite3.connect(audit_db)
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM dashboard_snapshots").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert int(row[0]) == 1
+
+
 # ---------------------------------------------------------------------------
 # P0 guardrail smoke tests: verify both connect helpers harden connections
 # ---------------------------------------------------------------------------

@@ -689,7 +689,7 @@ def main() -> int:
     p_launch.add_argument("--require-bridge", action="store_true", default=True, help="Require the dashboard bridge to be running (default: on).")
     p_launch.add_argument("--ensure-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_true", default=True, help="Ensure the localhost Prometheus alert exporter is running (default: on).")
     p_launch.add_argument("--no-prometheus-exporter", dest="ensure_prometheus_exporter", action="store_false", help="Do not manage the Prometheus alert exporter.")
-    p_launch.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=True, help="Ensure the live denominator watcher is running (default: on).")
+    p_launch.add_argument("--ensure-live-watcher", dest="ensure_live_watcher", action="store_true", default=False, help="Also ensure the live denominator watcher is running (default: off for human launch).")
     p_launch.add_argument("--no-live-watcher", dest="ensure_live_watcher", action="store_false", help="Do not manage the live denominator watcher.")
     p_launch.add_argument("--watcher-tickers", default=",".join(DEFAULT_LIVE_WATCHER_TICKERS), help="Comma-separated live watcher ticker universe.")
     p_launch.add_argument("--watcher-cycles", type=int, default=30, help="Watcher cycles to schedule before exit.")

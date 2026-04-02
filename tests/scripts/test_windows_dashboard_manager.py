@@ -163,7 +163,7 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
-        ensure_live_watcher=True,
+        ensure_live_watcher=False,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
         watcher_sleep_seconds=86400,
@@ -182,7 +182,7 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
     assert refresh_calls[0]["persist_snapshot"] is True
     assert ensure_calls
     assert ensure_calls[0]["ensure_prometheus_exporter"] is True
-    assert ensure_calls[0]["ensure_live_watcher"] is True
+    assert ensure_calls[0]["ensure_live_watcher"] is False
     assert browser_calls == ["http://127.0.0.1:8000/visualizations/live_dashboard.html"]
     payload = json.loads(status_json.read_text(encoding="utf-8"))
     assert payload["refresh"]["ok"] is True
@@ -239,7 +239,7 @@ def test_cmd_launch_fails_strict_when_refresh_fails(tmp_path, monkeypatch) -> No
         persist_snapshot=True,
         require_bridge=True,
         ensure_prometheus_exporter=True,
-        ensure_live_watcher=True,
+        ensure_live_watcher=False,
         watcher_tickers="AAPL,MSFT",
         watcher_cycles=30,
         watcher_sleep_seconds=86400,

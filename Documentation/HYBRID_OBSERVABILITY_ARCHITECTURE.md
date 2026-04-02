@@ -147,7 +147,7 @@ python -m scripts.dashboard_db_bridge --persist-snapshot
 python -m http.server 8000 --bind 127.0.0.1 --directory .
 ```
 
-Windows one-step launch with refresh + full localhost stack:
+Windows one-step launch with refresh + the human-facing localhost dashboard stack:
 
 ```powershell
 python scripts/windows_dashboard_manager.py launch
@@ -158,6 +158,8 @@ or:
 ```powershell
 .\launch_live_dashboard.bat
 ```
+
+This refreshes `visualizations/dashboard_data.json`, starts the bridge, local HTTP server, and Prometheus alert exporter, and opens the dashboard. The live watcher remains opt-in via `--ensure-live-watcher`.
 
 Open:
 

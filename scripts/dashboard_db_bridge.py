@@ -135,7 +135,7 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _connect_rw(db_path: Path) -> sqlite3.Connection:
+def _connect_rw(db_path: Path, *, allow_schema_changes: bool = False) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # [SETUP-PHASE BYPASS] journal_mode=WAL is in BLOCKED_PRAGMAS and must be set before
     # guardrails lock the connection.  apply_sqlite_guardrails() MUST be the next call after
@@ -144,7 +144,7 @@ def _connect_rw(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")   # blocked once guardrails apply
     conn.execute("PRAGMA busy_timeout=5000")  # not blocked; set here for co-location clarity
-    apply_sqlite_guardrails(conn, allow_schema_changes=False)
+    apply_sqlite_guardrails(conn, allow_schema_changes=allow_schema_changes)
     return conn
 
 
@@ -1459,7 +1459,9 @@ def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, A
 
 
 def _persist_snapshot(audit_db: Path, payload: Dict[str, Any]) -> None:
-    conn = _connect_rw(audit_db)
+    # Snapshot persistence owns its small audit DB schema and needs CREATE TABLE
+    # during first-run bootstrap.
+    conn = _connect_rw(audit_db, allow_schema_changes=True)
     try:
         conn.execute(
             """
