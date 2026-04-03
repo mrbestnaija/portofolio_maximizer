@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+datetime.UTC = datetime.timezone.utc  # datetime.UTC added in 3.11; polyfill for 3.10
 import json
 import logging
 import math

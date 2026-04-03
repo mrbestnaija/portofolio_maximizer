@@ -866,6 +866,8 @@ class TestRunAllChecks:
         recognised by the detection check.  0 CRITICAL findings should be confirmed.
         """
         db_real = ROOT / "data" / "portfolio_maximizer.db"
+        if not db_real.exists():
+            pytest.skip("Production DB not present (CI environment) — DB-dependent findings skipped")
         audit_dir = ROOT / "logs" / "forecast_audits"
         findings = run_all_checks(db_real, audit_dir, None, None)
         critical_confirmed = [
