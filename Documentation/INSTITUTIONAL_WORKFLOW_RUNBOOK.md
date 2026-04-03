@@ -136,6 +136,8 @@ or:
 
 This path refreshes `visualizations/dashboard_data.json` first, forces a fresh `production_gate_latest.json` once, then ensures the bridge, localhost HTTP server, and Prometheus exporter are running. The bridge continues to refresh the gate artifact when it becomes stale. The live watcher is available when explicitly requested with `--ensure-live-watcher`.
 
+Once the artifact is fresh, the bridge will usually settle into `production_gate_refresh=SKIPPED reason=fresh_artifact`, while still preserving the last successful refresher metadata for the same artifact so the dashboard can show whether the launcher or the steady-state bridge performed that refresh.
+
 Serve repository root over HTTP:
 
 ```bash

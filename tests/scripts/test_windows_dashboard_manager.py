@@ -156,6 +156,8 @@ def test_ensure_dashboard_stack_enables_bridge_production_gate_refresh(tmp_path,
     assert "90.0" in started_cmds[0]
     assert "--production-gate-refresh-min-interval-seconds" in started_cmds[0]
     assert "600.0" in started_cmds[0]
+    assert "--production-gate-refresh-actor" in started_cmds[0]
+    assert "dashboard_bridge" in started_cmds[0]
 
 
 def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -> None:
@@ -187,6 +189,10 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
                 "status": "OK",
                 "reason": "stale_artifact",
                 "generated_utc": "2026-04-02T07:12:00Z",
+                "actor": "dashboard_launch",
+                "last_success_utc": "2026-04-02T07:12:01Z",
+                "last_success_actor": "dashboard_launch",
+                "last_success_generated_utc": "2026-04-02T07:12:00Z",
             },
             "warnings": [],
         },
@@ -252,6 +258,7 @@ def test_cmd_launch_refreshes_payload_and_opens_browser(tmp_path, monkeypatch) -
     payload = json.loads(status_json.read_text(encoding="utf-8"))
     assert payload["refresh"]["ok"] is True
     assert payload["refresh"]["production_gate_refresh"]["status"] == "OK"
+    assert payload["refresh"]["production_gate_refresh"]["actor"] == "dashboard_launch"
     assert payload["bridge"]["refresh_production_gate"] is True
     assert payload["prometheus_exporter"]["running"] is True
 

@@ -383,12 +383,70 @@ def test_maybe_refresh_production_gate_artifact_triggers_on_stale_artifact(tmp_p
         last_attempt_monotonic=None,
         force=False,
         python_bin="python",
+        actor="test_actor",
     )
 
     assert calls
     assert status["ok"] is True
     assert status["reason"] == "stale_artifact"
     assert last_attempt is not None
+
+
+def test_maybe_merge_with_existing_preserves_last_success_for_same_gate_artifact(tmp_path) -> None:
+    dashboard_json = tmp_path / "dashboard_data.json"
+    dashboard_json.write_text(
+        json.dumps(
+            {
+                "evidence": {
+                    "production_gate": {
+                        "generated_utc": "2026-04-02T12:12:49Z",
+                    },
+                    "production_gate_refresh": {
+                        "enabled": True,
+                        "attempted": True,
+                        "ok": True,
+                        "status": "OK",
+                        "reason": "artifact_refreshed",
+                        "attempted_utc": "2026-04-02T12:12:50Z",
+                        "generated_utc": "2026-04-02T12:12:49Z",
+                        "actor": "dashboard_launch",
+                        "last_success_utc": "2026-04-02T12:12:50Z",
+                        "last_success_reason": "artifact_refreshed",
+                        "last_success_generated_utc": "2026-04-02T12:12:49Z",
+                        "last_success_actor": "dashboard_launch",
+                        "last_success_status": "OK",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    merged = mod._maybe_merge_with_existing(
+        dashboard_json,
+        {
+            "evidence": {
+                "production_gate": {
+                    "generated_utc": "2026-04-02T12:12:49Z",
+                },
+                "production_gate_refresh": {
+                    "enabled": True,
+                    "attempted": False,
+                    "ok": None,
+                    "status": "SKIPPED",
+                    "reason": "fresh_artifact",
+                    "generated_utc": "2026-04-02T12:12:49Z",
+                    "actor": "dashboard_bridge",
+                },
+            }
+        },
+    )
+
+    refresh = merged["evidence"]["production_gate_refresh"]
+    assert refresh["status"] == "SKIPPED"
+    assert refresh["actor"] == "dashboard_bridge"
+    assert refresh["last_success_actor"] == "dashboard_launch"
+    assert refresh["last_success_generated_utc"] == "2026-04-02T12:12:49Z"
 
 
 def test_persist_snapshot_bootstraps_audit_db_schema(tmp_path) -> None:

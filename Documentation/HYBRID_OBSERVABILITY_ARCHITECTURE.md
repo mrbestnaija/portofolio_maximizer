@@ -161,6 +161,8 @@ or:
 
 This refreshes `visualizations/dashboard_data.json`, forces a fresh `logs/audit_gate/production_gate_latest.json` once during launch, starts the bridge, local HTTP server, and Prometheus alert exporter, and opens the dashboard. The running bridge keeps the production gate artifact fresh when it becomes stale, and the live watcher remains opt-in via `--ensure-live-watcher`.
 
+The steady-state payload preserves the last successful refresh actor and timestamp for the current gate artifact, so the Evidence Chain can show both `gate_refresh=skipped/fresh_artifact` and that `dashboard_launch` was the actor that most recently refreshed this exact artifact.
+
 Open:
 
 ```text

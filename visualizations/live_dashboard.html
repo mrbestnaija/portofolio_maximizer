@@ -1302,13 +1302,23 @@
       const refreshStatus = String(refresh.status || (refreshEnabled ? 'UNKNOWN' : 'DISABLED')).toUpperCase();
       const refreshAttempted = refresh.attempted === true;
       const refreshAttemptedAt = refresh.attempted_utc ? formatTimestamp(refresh.attempted_utc) : '--';
+      const refreshActor = refresh.actor ? String(refresh.actor) : '';
+      const lastSuccessAt = refresh.last_success_utc ? formatTimestamp(refresh.last_success_utc) : '--';
+      const lastSuccessActor = refresh.last_success_actor ? String(refresh.last_success_actor) : '';
+      const lastSuccessGeneratedUtc = refresh.last_success_generated_utc ? String(refresh.last_success_generated_utc) : '';
+      const sameArtifactAsLastSuccess = Boolean(
+        gate.generated_utc && lastSuccessGeneratedUtc && String(gate.generated_utc) === lastSuccessGeneratedUtc
+      );
       const refreshLabel = refreshEnabled
         ? refreshAttempted
-          ? `gate_refresh=${refreshStatus.toLowerCase()}@${refreshAttemptedAt}`
+          ? `gate_refresh=${refreshStatus.toLowerCase()}${refreshActor ? '/' + refreshActor : ''}@${refreshAttemptedAt}`
           : `gate_refresh=${String(refresh.reason || 'idle')}`
         : 'gate_refresh=disabled';
+      const refreshHistoryLabel = sameArtifactAsLastSuccess
+        ? ` · last_success=ok${lastSuccessActor ? '/' + lastSuccessActor : ''}@${lastSuccessAt}`
+        : '';
       const latestRunOnly = evidence.latest_run_only !== false;
-      contextEl.textContent = `phase3_ready=${gate.phase3_ready ? 1 : 0} · latest_run_only=${latestRunOnly ? 1 : 0} · gate_generated=${gateGenerated} · gate_age=${Number.isFinite(gateAge) ? gateAge.toFixed(1) + 'm' : '--'} (${gateFreshness}) · snapshot_created=${auditLatest} · snapshot_age=${Number.isFinite(auditAge) ? auditAge.toFixed(1) + 'm' : '--'} (${auditFreshness}) · ${refreshLabel}`;
+      contextEl.textContent = `phase3_ready=${gate.phase3_ready ? 1 : 0} · latest_run_only=${latestRunOnly ? 1 : 0} · gate_generated=${gateGenerated} · gate_age=${Number.isFinite(gateAge) ? gateAge.toFixed(1) + 'm' : '--'} (${gateFreshness}) · snapshot_created=${auditLatest} · snapshot_age=${Number.isFinite(auditAge) ? auditAge.toFixed(1) + 'm' : '--'} (${auditFreshness}) · ${refreshLabel}${refreshHistoryLabel}`;
 
       const gatePath = gate.path ? String(gate.path) : '--';
       const reason = gate.phase3_reason ? `reason=${gate.phase3_reason}` : 'reason=--';

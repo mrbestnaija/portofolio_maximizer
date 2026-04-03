@@ -175,12 +175,26 @@ def _production_gate_artifact_state(path: Path) -> Dict[str, Any]:
     }
 
 
+def _refresh_history_from_status(status: Dict[str, Any]) -> Dict[str, Any]:
+    generated_utc = status.get("generated_utc")
+    attempted_utc = status.get("attempted_utc")
+    actor = status.get("actor")
+    return {
+        "last_success_utc": attempted_utc,
+        "last_success_reason": status.get("reason"),
+        "last_success_generated_utc": generated_utc,
+        "last_success_actor": actor,
+        "last_success_status": status.get("status"),
+    }
+
+
 def _refresh_production_gate_artifact(
     *,
     db_path: Path,
     artifact_path: Path,
     timeout_seconds: float,
     python_bin: str,
+    actor: str,
 ) -> Dict[str, Any]:
     script_path = ROOT / "scripts" / "production_audit_gate.py"
     status: Dict[str, Any] = {
@@ -197,6 +211,7 @@ def _refresh_production_gate_artifact(
         "artifact_freshness_status": "UNKNOWN",
         "artifact_freshness_reason": None,
         "generated_utc": None,
+        "actor": str(actor or "dashboard_db_bridge"),
         "detail": None,
     }
     if not script_path.exists():
@@ -263,6 +278,7 @@ def _refresh_production_gate_artifact(
         status["ok"] = True
         status["status"] = "OK"
         status["reason"] = "artifact_refreshed"
+        status.update(_refresh_history_from_status(status))
         return status
 
     stderr_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
@@ -286,6 +302,7 @@ def _maybe_refresh_production_gate_artifact(
     last_attempt_monotonic: Optional[float],
     force: bool,
     python_bin: str,
+    actor: str,
 ) -> Tuple[Dict[str, Any], Optional[float]]:
     state = _production_gate_artifact_state(artifact_path)
     now_monotonic = time.monotonic()
@@ -303,6 +320,7 @@ def _maybe_refresh_production_gate_artifact(
         "artifact_freshness_status": state.get("freshness_status"),
         "artifact_freshness_reason": state.get("freshness_reason"),
         "generated_utc": state.get("generated_utc"),
+        "actor": str(actor or "dashboard_db_bridge"),
         "detail": None,
     }
 
@@ -312,6 +330,7 @@ def _maybe_refresh_production_gate_artifact(
             artifact_path=artifact_path,
             timeout_seconds=timeout_seconds,
             python_bin=python_bin,
+            actor=actor,
         )
         return refreshed, now_monotonic
 
@@ -326,6 +345,7 @@ def _maybe_refresh_production_gate_artifact(
             artifact_path=artifact_path,
             timeout_seconds=timeout_seconds,
             python_bin=python_bin,
+            actor=actor,
         )
         if state.get("error") == "missing":
             refreshed["reason"] = "artifact_missing" if refreshed.get("ok") else refreshed.get("reason")
@@ -1679,6 +1699,58 @@ def _maybe_merge_with_existing(path: Path, fresh: Dict[str, Any]) -> Dict[str, A
     for key in ("forecaster_health", "regime", "notes"):
         if key in existing and key not in fresh:
             fresh[key] = existing[key]
+    existing_evidence = existing.get("evidence", {}) if isinstance(existing.get("evidence"), dict) else {}
+    fresh_evidence = fresh.get("evidence", {}) if isinstance(fresh.get("evidence"), dict) else {}
+    existing_refresh = (
+        existing_evidence.get("production_gate_refresh", {})
+        if isinstance(existing_evidence.get("production_gate_refresh"), dict)
+        else {}
+    )
+    fresh_refresh = (
+        fresh_evidence.get("production_gate_refresh", {})
+        if isinstance(fresh_evidence.get("production_gate_refresh"), dict)
+        else {}
+    )
+    current_gate = (
+        fresh_evidence.get("production_gate", {})
+        if isinstance(fresh_evidence.get("production_gate"), dict)
+        else {}
+    )
+    current_generated_utc = str(current_gate.get("generated_utc") or "").strip() or None
+    if fresh_refresh:
+        merged_refresh = dict(fresh_refresh)
+        if merged_refresh.get("ok") is True:
+            merged_refresh.update(_refresh_history_from_status(merged_refresh))
+        else:
+            prior_generated_utc = str(
+                existing_refresh.get("last_success_generated_utc")
+                or (
+                    existing_refresh.get("generated_utc")
+                    if existing_refresh.get("ok") is True
+                    else ""
+                )
+                or ""
+            ).strip() or None
+            same_artifact = bool(
+                current_generated_utc
+                and prior_generated_utc
+                and current_generated_utc == prior_generated_utc
+            )
+            if same_artifact:
+                if existing_refresh.get("last_success_utc"):
+                    for key in (
+                        "last_success_utc",
+                        "last_success_reason",
+                        "last_success_generated_utc",
+                        "last_success_actor",
+                        "last_success_status",
+                    ):
+                        if key in existing_refresh and key not in merged_refresh:
+                            merged_refresh[key] = existing_refresh[key]
+                elif existing_refresh.get("ok") is True:
+                    merged_refresh.update(_refresh_history_from_status(existing_refresh))
+        fresh_evidence["production_gate_refresh"] = merged_refresh
+        fresh["evidence"] = fresh_evidence
     return fresh
 
 
@@ -1817,6 +1889,11 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_PRODUCTION_GATE_REFRESH_MIN_INTERVAL_SECONDS,
         help="Backoff between production gate refresh attempts while looping (default: 300s).",
     )
+    parser.add_argument(
+        "--production-gate-refresh-actor",
+        default="dashboard_db_bridge",
+        help="Actor label recorded in production_gate_refresh metadata.",
+    )
     runs_group = parser.add_mutually_exclusive_group()
     runs_group.add_argument(
         "--latest-run-only",
@@ -1867,6 +1944,7 @@ def main() -> None:
                 last_attempt_monotonic=last_gate_refresh_attempt_monotonic,
                 force=force_production_gate_refresh,
                 python_bin=sys.executable,
+                actor=str(args.production_gate_refresh_actor or "dashboard_db_bridge"),
             )
             force_production_gate_refresh = False
 

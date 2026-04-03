@@ -52,4 +52,5 @@ def test_live_dashboard_robustness_status_precedence_and_tone_wiring() -> None:
     assert "binding=unknown" in html
     assert "gate_generated=" in html
     assert "gate_refresh=" in html
+    assert "last_success=ok" in html
     assert ".status-warn { color: var(--accent-2); }" in html

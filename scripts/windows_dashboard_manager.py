@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCALHOST_BIND = "127.0.0.1"
 DEFAULT_PROMETHEUS_EXPORTER_PORT = 9108
 DEFAULT_LIVE_WATCHER_TICKERS = ["AAPL", "AMZN", "GOOG", "GS", "JPM", "META", "MSFT", "NVDA", "TSLA", "V"]
+PRODUCTION_GATE_REFRESH_ACTOR_LAUNCH = "dashboard_launch"
+PRODUCTION_GATE_REFRESH_ACTOR_BRIDGE = "dashboard_bridge"
 
 
 def _utc_now() -> str:
@@ -210,6 +212,8 @@ def _ensure_dashboard_stack(
                         str(float(production_gate_refresh_timeout_seconds)),
                         "--production-gate-refresh-min-interval-seconds",
                         str(float(production_gate_refresh_min_interval_seconds)),
+                        "--production-gate-refresh-actor",
+                        PRODUCTION_GATE_REFRESH_ACTOR_BRIDGE,
                     ]
                 )
             bridge_cmd = list(bridge_cmd_base)
@@ -405,6 +409,8 @@ def _refresh_dashboard_payload(
                 str(float(production_gate_refresh_timeout_seconds)),
                 "--production-gate-refresh-min-interval-seconds",
                 "0",
+                "--production-gate-refresh-actor",
+                PRODUCTION_GATE_REFRESH_ACTOR_LAUNCH,
             ]
         )
     cmd = list(cmd_base)
