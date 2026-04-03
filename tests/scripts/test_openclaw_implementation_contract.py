@@ -49,8 +49,15 @@ def test_maintenance_wrapper_enforces_exec_env_before_maintenance() -> None:
 
 def test_guardian_enforces_exec_env_before_watch_launch() -> None:
     text = _read_repo_file("scripts/start_openclaw_guardian.ps1")
-    assert '$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")' in text
+    assert '$remoteWorkflowScript = Join-Path $repoRoot "scripts\\openclaw_remote_workflow.py"' in text
+    assert '$execEnvScript = Join-Path $repoRoot "scripts\\enforce_openclaw_exec_environment.py"' in text
+    assert '$execEnvArgs = @($execEnvScript)' in text
     assert "& $pythonExe @execEnvArgs" in text
+    assert '[switch]$EnsureFunctionalState' in text
+    assert 'Invoke-FunctionalRecovery' in text
+    assert '$args = @($remoteWorkflowScript) + $Arguments' in text
+    assert 'health", "--json' in text
+    assert 'gateway-restart", "--json' in text
     assert '[bool]$DisableBrokenChannels = $true' in text
     assert '$args += "--disable-broken-channels"' in text
     assert 'OPENCLAW_FAST_SUPERVISOR_FAILURE_THRESHOLD' in text

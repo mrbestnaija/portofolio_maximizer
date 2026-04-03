@@ -2,6 +2,26 @@
 
 This repo is operated by automation (humans + coding agents + OpenClaw) without leaking credentials.
 
+## CRITICAL: GitHub Actions Version Rules (enforced 2026-03-28)
+
+All `.github/workflows/*.yml` files MUST use these exact action versions.
+**Using a higher (non-existent) version silently breaks every CI run.**
+
+| Action | Required version |
+|--------|-----------------|
+| `actions/checkout` | `@v4` |
+| `actions/setup-python` | `@v5` |
+| `actions/cache` | `@v4` |
+| `actions/upload-artifact` | `@v4` |
+| `actions/download-artifact` | `@v4` |
+
+Before committing any workflow file: `grep -r "uses: actions/" .github/workflows/`
+and verify every version matches the table. If unsure of a version, leave it unchanged.
+
+**Root cause of 2026-03-28 CI outage**: `checkout@v6`, `setup-python@v6`, `cache@v5`,
+`upload-artifact@v6` were used — none exist. All CI runs failed at checkout with zero
+Python code executed. Fixed in commit `ef3a123`.
+
 ## CRITICAL: Anti-Loop Rules
 
 **You are NOT a chatbot. You are an agent with tools. USE THEM.**

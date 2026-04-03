@@ -36,6 +36,7 @@ DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
 DEFAULT_STATUS_JSON = ROOT / "logs" / "persistence_manager_status.json"
 DEFAULT_SUMMARY_JSON = ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_WATCHER_JSON = ROOT / "logs" / "overnight_denominator" / "live_denominator_latest.json"
+DEFAULT_STATUS_MAX_AGE_SECONDS = 172800
 DEFAULT_TASK_NAME = "PortfolioMaximizer_PersistenceManager"
 DEFAULT_TASK_WRAPPER = ROOT / "scripts" / "run_persistence_manager.bat"
 DEFAULT_RUN_REG_PATH = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -67,6 +68,20 @@ def _safe_read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _status_max_age_seconds() -> int:
+    raw = str(DEFAULT_STATUS_MAX_AGE_SECONDS)
+    try:
+        import os
+
+        raw = str(os.getenv("PMX_PERSISTENCE_STATUS_MAX_AGE_SECONDS", raw))
+    except Exception:
+        raw = str(DEFAULT_STATUS_MAX_AGE_SECONDS)
+    try:
+        return max(int(raw), 0)
+    except Exception:
+        return int(DEFAULT_STATUS_MAX_AGE_SECONDS)
 
 
 def _run_command(cmd: list[str], *, cwd: Path, timeout_seconds: float = 180.0) -> dict[str, Any]:
@@ -112,25 +127,22 @@ def _count_unlinked_closes(db_path: Path) -> dict[str, Any]:
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
+        where = [
+            "is_close = 1",
+            "entry_trade_id IS NULL",
+            "is_diagnostic = 0",
+        ]
+        if "is_synthetic" in cols:
+            where.append("is_synthetic = 0")
+        if "is_contaminated" in cols:
+            where.append("is_contaminated = 0")
+        where_sql = " AND ".join(where)
         row = conn.execute(
-            """
-            SELECT COUNT(*) AS n
-            FROM trade_executions
-            WHERE is_close = 1
-              AND entry_trade_id IS NULL
-              AND COALESCE(is_diagnostic, 0) = 0
-            """
+            "SELECT COUNT(*) AS n FROM trade_executions WHERE " + where_sql
         ).fetchone()
         sample_rows = conn.execute(
-            """
-            SELECT id
-            FROM trade_executions
-            WHERE is_close = 1
-              AND entry_trade_id IS NULL
-              AND COALESCE(is_diagnostic, 0) = 0
-            ORDER BY id
-            LIMIT 20
-            """
+            "SELECT id FROM trade_executions WHERE " + where_sql + " ORDER BY id LIMIT 20"
         ).fetchall()
         conn.close()
         return {
@@ -456,6 +468,15 @@ def _cmd_ensure(args: argparse.Namespace) -> int:
 
     status = {
         "timestamp_utc": _utc_now(),
+        "status_contract": {
+            "schema_version": 1,
+            "max_age_seconds": _status_max_age_seconds(),
+            "reconciled_components": [
+                "dashboard.bridge",
+                "dashboard.http_server",
+                "dashboard.live_watcher",
+            ],
+        },
         "root": str(root),
         "db_path": str(db_path),
         "audit_dir": str(audit_dir),

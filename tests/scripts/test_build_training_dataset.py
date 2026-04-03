@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 
-def _make_db(tmp_path: Path, trades: list[dict]) -> Path:
+def _make_db(tmp_path: Path, trades: list[dict], *, create_view: bool = True) -> Path:
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
@@ -28,6 +28,7 @@ def _make_db(tmp_path: Path, trades: list[dict]) -> Path:
             is_close INTEGER DEFAULT 1,
             is_diagnostic INTEGER DEFAULT 0,
             is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
             base_confidence REAL DEFAULT NULL,
             confidence_calibrated REAL DEFAULT NULL,
             effective_confidence REAL DEFAULT NULL,
@@ -37,18 +38,31 @@ def _make_db(tmp_path: Path, trades: list[dict]) -> Path:
     )
     for trade in trades:
         conn.execute(
-            "INSERT INTO trade_executions(ticker, trade_date, realized_pnl, is_close) VALUES(?,?,?,1)",
-            (trade["ticker"], trade["date"], trade["pnl"]),
+            """
+            INSERT INTO trade_executions(
+                ticker, trade_date, realized_pnl, is_close, is_diagnostic, is_synthetic, is_contaminated
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                trade["ticker"],
+                trade["date"],
+                trade["pnl"],
+                1,
+                trade.get("is_diagnostic", 0),
+                trade.get("is_synthetic", 0),
+                trade.get("is_contaminated", 0),
+            ),
         )
-    conn.execute(
-        """
-        CREATE VIEW production_closed_trades AS
-        SELECT * FROM trade_executions
-        WHERE is_close = 1
-          AND COALESCE(is_diagnostic, 0) = 0
-          AND COALESCE(is_synthetic, 0) = 0
-        """
-    )
+    if create_view:
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT * FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+            """
+        )
     conn.commit()
     conn.close()
     return db
@@ -208,6 +222,29 @@ class TestBuildTrainingDataset:
         )
         assert result["status"] == "ERROR"
         assert "trades_write_failed" in result["errors"]
+
+    def test_fallback_excludes_rows_with_null_or_contaminated_flags(self, tmp_path):
+        pytest.importorskip("pandas")
+        from scripts.build_training_dataset import build_training_datasets
+
+        db = _make_db(
+            tmp_path,
+            [
+                {"ticker": "NVDA", "date": "2025-08-01", "pnl": 100.0, "is_diagnostic": None},
+                {"ticker": "AAPL", "date": "2025-08-02", "pnl": 50.0, "is_contaminated": 1},
+                {"ticker": "MSFT", "date": "2025-08-03", "pnl": 75.0},
+            ],
+            create_view=False,
+        )
+        result = build_training_datasets(
+            db_path=db,
+            audit_dir=tmp_path / "noaudits",
+            eligibility_path=tmp_path / "missing.json",
+            out_trades=tmp_path / "t.parquet",
+            out_audits=tmp_path / "a.parquet",
+            dry_run=True,
+        )
+        assert result["trades"]["n_filtered"] == 1
 
 
 class TestCLI:

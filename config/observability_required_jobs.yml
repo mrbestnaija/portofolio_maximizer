@@ -1,0 +1,36 @@
+jobs:
+  pnl_integrity_audit:
+    name: "[P0] PnL Integrity Audit"
+    required_for_green: true
+    severity: P0
+    expected_cadence_seconds: 14400
+
+  production_gate_check:
+    name: "[P0] Production Gate Check"
+    required_for_green: true
+    severity: P0
+    expected_cadence_seconds: 86400
+
+  quant_validation_health:
+    name: "[P0] Quant Validation Health"
+    required_for_green: true
+    severity: P0
+    expected_cadence_seconds: 86400
+
+  signal_linkage_monitor:
+    name: "[P1] Signal Linkage Monitor"
+    required_for_green: false
+    severity: P1
+    expected_cadence_seconds: 86400
+
+  ticker_health_monitor:
+    name: "[P1] Ticker Health Monitor"
+    required_for_green: false
+    severity: P1
+    expected_cadence_seconds: 86400
+
+  model_improvement_check:
+    name: "[P1] Model Improvement Check"
+    required_for_green: false
+    severity: P1
+    expected_cadence_seconds: 86400

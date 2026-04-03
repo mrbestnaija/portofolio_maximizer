@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+datetime.UTC = datetime.timezone.utc  # datetime.UTC added in 3.11; polyfill for 3.10
 import json
 import logging
 import math
@@ -88,7 +89,7 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
         "n_skipped_missing_metrics",
         "n_total_files",
         "coverage_ratio",       # Phase 7.19: n_used / n_total; WARN when < 0.20
-        "lift_mean",            # Phase 7.25: bootstrap mean(delta), delta=best_single-ensemble
+        "lift_mean",            # Phase 7.25: bootstrap mean(delta), delta=baseline-ensemble
         "lift_ci_low",          # Phase 7.25: lower 95% bootstrap CI bound
         "lift_ci_high",         # Phase 7.25: upper 95% bootstrap CI bound
         "lift_win_fraction",    # Phase 7.25: fraction of windows with positive lift
@@ -312,11 +313,15 @@ def run_layer1_forecast_quality(
         seen[fp] = audit
     deduped = list(seen.values())
 
+    # Load regression contract before extracting window metrics so baseline_mode
+    # is available for the per-window baseline selection.
+    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
+
     # Extract metrics, count skipped-missing
     n_missing = 0
     windows: list[dict] = []
     for raw in deduped:
-        w = extract_window_metrics(raw)
+        w = extract_window_metrics(raw, baseline_mode=baseline_model)
         if w is None:
             n_missing += 1
         else:
@@ -328,15 +333,23 @@ def run_layer1_forecast_quality(
     # and should not be silently treated as "no data" — they are structurally missing
     # the evaluation_metrics.ensemble key needed for lift calculations.
     coverage_ratio = n_used / n_total if n_total > 0 else 0.0
+
+    # Baseline resolution observability: track how often EFFECTIVE_DEFAULT actually
+    # resolved from audit data vs silently fell back to the oracle BEST_SINGLE.
+    n_ed_resolved = sum(1 for w in windows if w.get("baseline_mode") == "EFFECTIVE_DEFAULT")
+    n_ed_fallback = (n_used - n_ed_resolved) if baseline_model == "EFFECTIVE_DEFAULT" else 0
+    ed_fallback_rate = n_ed_fallback / n_used if n_used > 0 else 0.0
+
     quality: dict = {
         "n_total_files": n_total,
         "n_skipped_malformed": n_malformed,
         "n_skipped_missing_metrics": n_missing,
         "n_used_windows": n_used,
         "coverage_ratio": coverage_ratio,
+        "n_effective_default_resolved": n_ed_resolved,
+        "n_effective_default_fallback": n_ed_fallback,
+        "effective_default_fallback_rate": ed_fallback_rate,
     }
-
-    baseline_model, lift_threshold_rmse_ratio = _load_layer1_regression_contract()
 
     if n_used == 0:
         return LayerResult(

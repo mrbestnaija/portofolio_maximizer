@@ -64,15 +64,28 @@ def has_production_closed_trades_view(conn: sqlite3.Connection) -> bool:
     return "production_closed_trades" in sqlite_master_names(conn, "view")
 
 
-def production_closed_trades_sql(table_alias: str = "te") -> str:
-    return (
-        f"FROM trade_executions {table_alias} "
-        "WHERE "
-        f"{table_alias}.is_close = 1 "
-        f"AND {table_alias}.realized_pnl IS NOT NULL "
-        f"AND COALESCE({table_alias}.is_diagnostic, 0) = 0 "
-        f"AND COALESCE({table_alias}.is_synthetic, 0) = 0"
-    )
+def production_closed_trades_sql(
+    table_alias: str = "te",
+    available_columns: set[str] | None = None,
+    join_clause: str = "",
+) -> str:
+    filters = [
+        f"{table_alias}.is_close = 1",
+        f"{table_alias}.realized_pnl IS NOT NULL",
+        f"{table_alias}.is_diagnostic IS NOT NULL",
+        f"{table_alias}.is_diagnostic = 0",
+        f"{table_alias}.is_synthetic IS NOT NULL",
+        f"{table_alias}.is_synthetic = 0",
+    ]
+    if available_columns and "is_contaminated" in available_columns:
+        filters.extend(
+            [
+                f"{table_alias}.is_contaminated IS NOT NULL",
+                f"{table_alias}.is_contaminated = 0",
+            ]
+        )
+    join_sql = f" {join_clause.strip()}" if join_clause.strip() else ""
+    return f"FROM trade_executions {table_alias}{join_sql} WHERE " + " AND ".join(filters)
 
 
 def load_json_dict(path: Path) -> tuple[dict[str, Any] | None, str | None]:

@@ -378,13 +378,15 @@ def triage_gate_failure(
         if isinstance(value, dict) and not bool(value.get("pass"))
     ]
     reason_breakdown = report.get("reason_breakdown") if isinstance(report.get("reason_breakdown"), dict) else {}
+    phase3_ready = bool(report.get("phase3_strict_ready", report.get("phase3_ready")))
+    phase3_reason = str(report.get("phase3_strict_reason") or report.get("phase3_reason") or "")
 
     return {
         "action": "triage_gate_failure",
         "status": "PASS",
-        "gate_status": "PASS" if bool(report.get("phase3_ready")) else "FAIL",
-        "phase3_ready": bool(report.get("phase3_ready")),
-        "phase3_reason": str(report.get("phase3_reason") or ""),
+        "gate_status": "PASS" if phase3_ready else "FAIL",
+        "phase3_ready": phase3_ready,
+        "phase3_reason": phase3_reason,
         "artifact_path": str(artifact_path.resolve()),
         "output_json_path": str(decomp_json_path.resolve()),
         "output_md_path": str(decomp_md_path.resolve()),

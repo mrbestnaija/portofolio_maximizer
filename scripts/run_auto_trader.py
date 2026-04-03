@@ -66,7 +66,9 @@ except Exception:  # pragma: no cover - optional path
 
 logger = logging.getLogger(__name__)
 AI_COMPANION_CONFIG_PATH = ROOT_PATH / "config" / "ai_companion.yml"
+# Canonical dashboard output is bridge-owned only.
 DASHBOARD_DATA_PATH = ROOT_PATH / "visualizations" / "dashboard_data.json"
+RUN_AUTO_TRADER_ARTIFACT_PATH = ROOT_PATH / "logs" / "automation" / "run_auto_trader_latest.json"
 MIN_LOOKBACK_DAYS_DAILY = 365
 MIN_LOOKBACK_DAYS_INTRADAY = 30
 MIN_SERIES_POINTS = 120
@@ -1086,13 +1088,21 @@ def _generate_time_series_forecast(
         fcfg = _get_forecasting_config()
         ensemble_cfg = fcfg.get("ensemble", {})
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
-        # Explicitly route production forecasts to the production audit subdir.
-        # ETL/research pipelines use logs/forecast_audits/research/ instead.
-        # This prevents the forecaster's neutral default from causing silent
-        # misrouting when both subdirs exist (forecaster.py __init__).
+        # Route audit files: live runs → production/, synthetic/research runs → research/.
+        # Synthetic auto_trader runs produce audit files with ts_signal_ids that never
+        # appear in production_closed_trades (is_synthetic=1 excluded), so routing
+        # them to production/ contaminates the THIN_LINKAGE and EVIDENCE_HYGIENE gates.
+        _audit_execution_mode = str(
+            os.getenv("EXECUTION_MODE", "live")
+        ).strip().lower()
+        _audit_subdir = (
+            "research"
+            if _audit_execution_mode == "synthetic"
+            else "production"
+        )
         ensemble_kwargs.setdefault(
             "audit_log_dir",
-            str(Path("logs/forecast_audits/production").resolve()),
+            str(Path(f"logs/forecast_audits/{_audit_subdir}").resolve()),
         )
         regime_cfg = fcfg.get("regime_detection", {})
         regime_detection_enabled = regime_cfg.get("enabled", False)
@@ -2022,7 +2032,7 @@ def _emit_dashboard_json(
     forecaster_health: Optional[Dict[str, Any]] = None,
     quant_validation_health: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Persist the latest run snapshot for the HTML dashboard."""
+    """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
         """Recursively convert datetimes/pd.Timestamps to ISO strings for JSON dump."""
         from pandas import Timestamp  # lazy import to avoid circulars
@@ -2060,9 +2070,9 @@ def _emit_dashboard_json(
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(_json_safe(payload), handle, indent=2)
-        logger.info("Dashboard data emitted to %s", path)
+        logger.info("Auto-trader producer artifact emitted to %s", path)
     except Exception as exc:
-        logger.warning("Unable to emit dashboard data: %s", exc)
+        logger.warning("Unable to emit auto-trader producer artifact: %s", exc)
 
 
 def _emit_dashboard_png(path: Path, equity_points: list[Dict[str, Any]], pnl_pct: float) -> None:
@@ -3197,7 +3207,7 @@ def main(
         trade_events = []
 
     _emit_dashboard_json(
-        path=DASHBOARD_DATA_PATH,
+        path=RUN_AUTO_TRADER_ARTIFACT_PATH,
         meta=meta,
         summary=final_summary,
         routing_stats=signal_router.routing_stats,

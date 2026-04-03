@@ -66,10 +66,18 @@ class TestLayer1ForecastQuality:
         assert result.status == "SKIP"
 
     def test_computes_lift_and_data_quality_metrics_from_fixtures(self):
-        """Layer 1 with the 3 committed fixture files: healthy, samossa_da_zero, ensemble_lift."""
+        """Layer 1 with the 3 committed fixture files: healthy, samossa_da_zero, ensemble_lift.
+
+        Monkeypatches _load_layer1_regression_contract so the test is not coupled
+        to the current production config value of baseline_model.
+        """
         if not FIXTURES_DIR.exists():
             pytest.skip("Fixture directory not found")
-        result = run_layer1_forecast_quality(FIXTURES_DIR)
+        with patch(
+            "check_model_improvement._load_layer1_regression_contract",
+            return_value=("BEST_SINGLE", 0.98),
+        ):
+            result = run_layer1_forecast_quality(FIXTURES_DIR)
         # 3 files, all valid — no malformed, no missing
         assert result.metrics["n_total_files"] == 3
         assert result.metrics["n_used_windows"] == 3
@@ -117,6 +125,7 @@ class TestLayer1ForecastQuality:
         assert "coverage_threshold" in result.summary or "n_used" in result.summary
 
     def test_zero_usable_windows_preserve_contract_and_emit_finite_metrics(self, tmp_path):
+        """Monkeypatches _load_layer1_regression_contract to decouple from production config."""
         audit = {
             "dataset": {"ticker": "AAPL", "start": "2025-01-01", "end": "2025-01-30", "length": 100},
             "summary": {"forecast_horizon": 5},
@@ -124,7 +133,11 @@ class TestLayer1ForecastQuality:
         }
         (tmp_path / "forecast_audit_missing_metrics.json").write_text(json.dumps(audit), encoding="utf-8")
 
-        result = run_layer1_forecast_quality(tmp_path)
+        with patch(
+            "check_model_improvement._load_layer1_regression_contract",
+            return_value=("BEST_SINGLE", 0.98),
+        ):
+            result = run_layer1_forecast_quality(tmp_path)
 
         assert result.status == "SKIP"
         assert result.metrics["baseline_model"] == "BEST_SINGLE"

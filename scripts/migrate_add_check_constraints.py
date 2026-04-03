@@ -140,6 +140,7 @@ def create_constrained_table(conn: sqlite3.Connection):
             effective_confidence REAL,
             is_diagnostic INTEGER DEFAULT 0,
             is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
             confidence_calibrated REAL,
             entry_trade_id INTEGER,
             bar_open REAL,
@@ -175,9 +176,11 @@ def copy_data(conn: sqlite3.Connection):
     """Copy data from old table to new table with constraints.
 
     CRITICAL: Must use explicit column names to prevent misalignment.
-    The old table has created_at at position 37, new table at position 45.
+    The old table has created_at at position 37, new table at position 46.
     Using SELECT * would cause column misalignment and data corruption.
     """
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
+
     # Get column list from old table (excluding new integrity columns)
     old_columns = [
         'id', 'ticker', 'trade_date', 'action', 'shares', 'price', 'total_value',
@@ -188,15 +191,19 @@ def copy_data(conn: sqlite3.Connection):
         'is_close', 'bar_timestamp', 'exit_reason', 'asset_class', 'instrument_type',
         'underlying_ticker', 'strike', 'expiry', 'multiplier', 'barbell_bucket',
         'barbell_multiplier', 'base_confidence', 'effective_confidence', 'created_at',
-        'is_diagnostic', 'is_synthetic', 'confidence_calibrated', 'entry_trade_id',
+        'is_diagnostic', 'is_synthetic', 'is_contaminated', 'confidence_calibrated', 'entry_trade_id',
         'bar_open', 'bar_high', 'bar_low', 'bar_close'
     ]
 
     # Build INSERT with explicit column mapping
     col_list = ', '.join(old_columns)
+    select_list = ', '.join(
+        col if col in existing_cols else f"0 AS {col}"
+        for col in old_columns
+    )
     conn.execute(f"""
         INSERT INTO trade_executions_new ({col_list})
-        SELECT {col_list} FROM trade_executions
+        SELECT {select_list} FROM trade_executions
     """)
 
 
@@ -243,11 +250,18 @@ def recreate_views(conn: sqlite3.Connection):
     conn.execute("DROP VIEW IF EXISTS production_closed_trades")
     conn.execute("""
         CREATE VIEW production_closed_trades AS
-        SELECT *
-        FROM   trade_executions
-        WHERE  is_close = 1
-          AND  COALESCE(is_diagnostic, 0) = 0
-          AND  COALESCE(is_synthetic, 0)  = 0
+        SELECT t.*
+        FROM   trade_executions t
+        WHERE  t.is_close = 1
+          AND  t.is_diagnostic = 0
+          AND  t.is_synthetic = 0
+          AND  t.is_contaminated = 0
+          AND  NOT EXISTS (
+               SELECT 1
+               FROM   trade_executions o
+               WHERE  o.id = t.entry_trade_id
+                 AND  o.is_synthetic = 1
+          )
     """)
 
     conn.execute("DROP VIEW IF EXISTS round_trips")

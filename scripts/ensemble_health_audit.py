@@ -100,6 +100,22 @@ def load_audit_windows(audit_dir: Path, dedupe: bool = True) -> list[dict]:
 # Extract per-window metrics
 # ---------------------------------------------------------------------------
 
+def _load_baseline_mode() -> str:
+    """Read baseline_model from config/forecaster_monitoring.yml; default BEST_SINGLE."""
+    try:
+        cfg_path = REPO_ROOT / "config" / "forecaster_monitoring.yml"
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        return (
+            (cfg or {})
+            .get("forecaster_monitoring", {})
+            .get("regression_metrics", {})
+            .get("baseline_model", "BEST_SINGLE")
+        ).strip().upper()
+    except Exception:
+        return "BEST_SINGLE"
+
+
 def _get_regime(audit: dict) -> str | None:
     """Extract detected regime from runs list (first 'regime' model run)."""
     for run in audit.get("runs", []):
@@ -108,12 +124,38 @@ def _get_regime(audit: dict) -> str | None:
     return None
 
 
-def extract_window_metrics(audit: dict) -> dict | None:
+def _parse_plausible_float(
+    value: Any,
+    *,
+    lower: float | None = None,
+    upper: float | None = None,
+) -> float | None:
+    """Return a finite float inside the configured range, else None."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    if lower is not None and parsed < lower:
+        return None
+    if upper is not None and parsed > upper:
+        return None
+    return parsed
+
+
+def extract_window_metrics(audit: dict, baseline_mode: str = "BEST_SINGLE") -> dict | None:
     """
     Extract per-window metrics from a forecast audit JSON.
 
     Returns None (with a WARNING log) if core fields are missing.
     Deterministic tie-breaking for best_single_model: min RMSE, then min sMAPE, then name.
+
+    baseline_mode:
+      "BEST_SINGLE"      — oracle: ex-post minimum RMSE across all single models (default)
+      "EFFECTIVE_DEFAULT" — causal: the primary model chosen by the ensemble's own confidence
+                            scores (artifacts.ensemble_selection.primary_model). Falls back to
+                            BEST_SINGLE when the field is absent.
     """
     artifacts = audit.get("artifacts", {})
     eval_metrics = artifacts.get("evaluation_metrics", {})
@@ -129,29 +171,55 @@ def extract_window_metrics(audit: dict) -> dict | None:
     model_metrics: dict[str, dict] = {}
     for m in MODELS:
         m_data = eval_metrics.get(m, {})
-        rmse = m_data.get("rmse")
+        rmse = _parse_plausible_float(m_data.get("rmse"), lower=1e-12, upper=100.0)
         if rmse is None:
             log.warning(
-                "Window %s: missing rmse for model %s — skipped", window_id, m
+                "Window %s: implausible or missing rmse for model %s — skipped",
+                window_id,
+                m,
             )
             return None
-        da = m_data.get("directional_accuracy")
+        da_raw = m_data.get("directional_accuracy")
+        da = (
+            float("nan")
+            if da_raw is None
+            else _parse_plausible_float(da_raw, lower=0.0, upper=1.0)
+        )
+        if da_raw is not None and da is None:
+            log.warning(
+                "Window %s: implausible directional_accuracy for model %s — skipped",
+                window_id,
+                m,
+            )
+            return None
+        smape = _parse_plausible_float(m_data.get("smape"), lower=0.0)
         model_metrics[m] = {
-            "rmse": float(rmse),
-            "da": float(da) if da is not None else float("nan"),
-            "smape": float(m_data.get("smape", float("nan"))),
+            "rmse": rmse,
+            "da": da if da_raw is not None else float("nan"),
+            "smape": smape if smape is not None else float("nan"),
         }
 
     ens_data = eval_metrics.get("ensemble", {})
-    ensemble_rmse = ens_data.get("rmse")
-    ensemble_da = ens_data.get("directional_accuracy")
+    ensemble_rmse = _parse_plausible_float(
+        ens_data.get("rmse"), lower=1e-12, upper=100.0
+    )
+    ensemble_da_raw = ens_data.get("directional_accuracy")
+    ensemble_da = (
+        float("nan")
+        if ensemble_da_raw is None
+        else _parse_plausible_float(ensemble_da_raw, lower=0.0, upper=1.0)
+    )
     if ensemble_rmse is None:
-        log.warning("Window %s: missing ensemble rmse — skipped", window_id)
+        log.warning("Window %s: implausible or missing ensemble rmse — skipped", window_id)
         return None
-    ensemble_rmse = float(ensemble_rmse)
+    if ensemble_da_raw is not None and ensemble_da is None:
+        log.warning("Window %s: implausible ensemble directional_accuracy — skipped", window_id)
+        return None
 
-    # Deterministic best single: (rmse ASC, smape ASC, name ASC)
-    best_model = min(
+    # Oracle best single: always the ex-post minimum-RMSE model from the MODELS tuple.
+    # This field is independent of baseline_mode and is used by compute_per_model_summary
+    # to count times_best_single / pct_best_single for per-model health reporting.
+    oracle_best_model = min(
         MODELS,
         key=lambda m: (
             model_metrics[m]["rmse"],
@@ -159,8 +227,37 @@ def extract_window_metrics(audit: dict) -> dict | None:
             m,
         ),
     )
-    best_rmse = model_metrics[best_model]["rmse"]
-    rmse_ratio = ensemble_rmse / best_rmse if best_rmse > 0 else float("nan")
+    oracle_best_rmse = model_metrics[oracle_best_model]["rmse"]
+    if ensemble_rmse > 3.0 * oracle_best_rmse:
+        log.warning(
+            "Window %s: ensemble rmse %.4f exceeds 3x best-single rmse %.4f — skipped",
+            window_id,
+            ensemble_rmse,
+            oracle_best_rmse,
+        )
+        return None
+
+    # Configured baseline: the model the ensemble is compared against for lift metrics.
+    # EFFECTIVE_DEFAULT = primary_model chosen by the ensemble's own confidence scores
+    #   (causal — measures "does blending add value over what we'd have picked anyway?").
+    # BEST_SINGLE = oracle minimum-RMSE across MODELS (hindsight, unachievable for blend).
+    # Falls back to oracle when EFFECTIVE_DEFAULT cannot be resolved from the audit payload.
+    resolved_baseline_mode = "BEST_SINGLE"
+    baseline_model_name: str = oracle_best_model
+    baseline_rmse: float = oracle_best_rmse
+
+    if baseline_mode == "EFFECTIVE_DEFAULT":
+        ens_sel = artifacts.get("ensemble_selection") or {}
+        raw_primary = str(ens_sel.get("primary_model", "") or "").lower().strip()
+        if raw_primary:
+            primary_data = eval_metrics.get(raw_primary)
+            primary_rmse_val = primary_data.get("rmse") if isinstance(primary_data, dict) else None
+            if primary_rmse_val is not None:
+                baseline_model_name = raw_primary
+                baseline_rmse = float(primary_rmse_val)
+                resolved_baseline_mode = "EFFECTIVE_DEFAULT"
+
+    baseline_rmse_ratio = ensemble_rmse / baseline_rmse if baseline_rmse > 0 else float("nan")
 
     return {
         "window_id": window_id,
@@ -174,10 +271,18 @@ def extract_window_metrics(audit: dict) -> dict | None:
         ),
         "model_metrics": model_metrics,
         "ensemble_rmse": ensemble_rmse,
-        "ensemble_da": float(ensemble_da) if ensemble_da is not None else float("nan"),
+        "ensemble_da": ensemble_da if ensemble_da_raw is not None else float("nan"),
         "ensemble_weights": {k: float(v) for k, v in (ensemble_weights or {}).items()},
-        "best_single_model": best_model,
-        "rmse_ratio": rmse_ratio,
+        # Oracle fields — always reflect ex-post min-RMSE winner across MODELS.
+        "best_single_model": oracle_best_model,
+        "oracle_best_rmse": oracle_best_rmse,
+        # Configured-baseline fields — reflect the baseline_mode in effect.
+        "baseline_model_name": baseline_model_name,
+        "baseline_rmse": baseline_rmse,
+        "baseline_rmse_ratio": baseline_rmse_ratio,
+        # Backward-compat alias: downstream that reads rmse_ratio gets baseline-relative value.
+        "rmse_ratio": baseline_rmse_ratio,
+        "baseline_mode": resolved_baseline_mode,
     }
 
 
@@ -493,10 +598,17 @@ def compute_lift_significance(
     min_windows: int = 5,
     seed: int = 42,
 ) -> dict:
-    """Bootstrap confidence interval for ensemble lift over best-single-model RMSE.
+    """Bootstrap confidence interval for ensemble lift over the configured baseline RMSE.
 
-    Per-window lift delta_i = best_single_rmse_i - ensemble_rmse_i.
+    Per-window lift delta_i = baseline_rmse_i - ensemble_rmse_i.
     Positive delta means ensemble wins that window.
+
+    Preferred window fields:
+        baseline_rmse, ensemble_rmse
+
+    Backward-compatible legacy fields:
+        best_single_rmse, ensemble_rmse
+        rmse_ratio (proxy only when direct RMSE values are absent)
 
     Returns a dict with keys:
         mean_lift           -- mean(delta) over valid windows
@@ -514,7 +626,9 @@ def compute_lift_significance(
     # Extract per-window lift deltas; skip NaN/inf entries.
     deltas: list[float] = []
     for w in windows:
-        best = w.get("best_single_rmse")
+        best = w.get("baseline_rmse")
+        if best is None:
+            best = w.get("best_single_rmse")
         ens = w.get("ensemble_rmse")
         if best is None or ens is None:
             # Fall back to rmse_ratio if direct RMSE values missing.
@@ -755,9 +869,11 @@ def main(argv: list[str] | None = None) -> int:
         duplicate_count,
     )
 
+    baseline_mode = _load_baseline_mode()
+    log.info("Layer 1 baseline mode: %s", baseline_mode)
     windows: list[dict] = []
     for audit in all_deduped:
-        metrics = extract_window_metrics(audit)
+        metrics = extract_window_metrics(audit, baseline_mode=baseline_mode)
         if metrics is not None:
             windows.append(metrics)
     log.info("Extracted valid metrics from %d/%d windows", len(windows), len(all_deduped))

@@ -991,6 +991,9 @@ def _extract_metrics(
     Baseline selection:
     - BEST_SINGLE: choose the available single-model entry with the smallest RMSE.
       Candidate set includes SARIMAX, GARCH, SAMOSSA, and MSSA_RL.
+    - EFFECTIVE_DEFAULT: use artifacts.ensemble_selection.primary_model (causal — the model
+      the ensemble's own confidence scores selected at forecast time). Falls back to
+      BEST_SINGLE when the field is absent.
     - SAMOSSA: use samossa when present; else fall back to BEST_SINGLE.
     - GARCH: use garch when present; else fall back to BEST_SINGLE.
     - SARIMAX: use sarimax when present; else fall back to BEST_SINGLE.
@@ -1055,6 +1058,20 @@ def _extract_metrics(
         if isinstance(sarimax, dict):
             baseline_metrics = sarimax
             resolved_baseline = "SARIMAX"
+        else:
+            baseline_metrics, resolved_baseline = _best_single()
+    elif baseline_model == "EFFECTIVE_DEFAULT":
+        # Causal baseline: use the primary model that the ensemble's own confidence
+        # scores selected at forecast time (artifacts.ensemble_selection.primary_model).
+        # This measures "does blending add value over what we would have picked anyway?"
+        # rather than comparing to an ex-post oracle. Falls back to BEST_SINGLE when
+        # ensemble_selection.primary_model is absent from the audit payload.
+        ens_sel = (artifacts.get("ensemble_selection") or {})
+        raw_primary = str(ens_sel.get("primary_model", "") or "").lower().strip()
+        primary_metrics = eval_metrics.get(raw_primary) if raw_primary else None
+        if isinstance(primary_metrics, dict) and _rmse_from(primary_metrics) is not None:
+            baseline_metrics = primary_metrics
+            resolved_baseline = raw_primary.upper()
         else:
             baseline_metrics, resolved_baseline = _best_single()
     else:

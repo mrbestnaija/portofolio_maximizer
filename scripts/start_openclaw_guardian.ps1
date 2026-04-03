@@ -3,6 +3,7 @@ Param(
     [int]$FastSupervisorIntervalSeconds = 60,
     [string]$PrimaryChannel = "whatsapp",
     [bool]$DisableBrokenChannels = $true,
+    [switch]$EnsureFunctionalState,
     [switch]$NoApply,
     [string]$OpenClawCommand = "",
     [string]$IntegrityUnlinkedCloseWhitelistIds = "",
@@ -18,6 +19,8 @@ $pythonExe = if ($env:PMX_PYTHON_BIN -and (Test-Path $env:PMX_PYTHON_BIN)) {
     $venv = Join-Path $repoRoot "simpleTrader_env\Scripts\python.exe"
     if (Test-Path $venv) { $venv } else { "python" }
 }
+$remoteWorkflowScript = Join-Path $repoRoot "scripts\openclaw_remote_workflow.py"
+$execEnvScript = Join-Path $repoRoot "scripts\enforce_openclaw_exec_environment.py"
 
 $logDir = Join-Path $repoRoot "logs\automation"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -74,6 +77,53 @@ function Test-GuardianPid {
     }
 }
 
+function Invoke-RemoteWorkflowCommand {
+    Param(
+        [string[]]$Arguments,
+        [int]$SuccessCode = 0,
+        [int[]]$AcceptCodes = @()
+    )
+    $args = @($remoteWorkflowScript) + $Arguments
+    & $pythonExe @args | Out-Null
+    $rc = [int]$LASTEXITCODE
+    if ($AcceptCodes -contains $rc) {
+        return [pscustomobject]@{
+            ReturnCode = $rc
+            Success = $true
+        }
+    }
+    return [pscustomobject]@{
+        ReturnCode = $rc
+        Success = ($rc -eq $SuccessCode)
+    }
+}
+
+function Test-FunctionalState {
+    $result = Invoke-RemoteWorkflowCommand -Arguments @("health", "--json") -AcceptCodes @(0, 1)
+    return $result
+}
+
+function Invoke-FunctionalRecovery {
+    $health = Test-FunctionalState
+    if ($health.Success) {
+        return [pscustomobject]@{
+            Healthy = $true
+            ReturnCode = $health.ReturnCode
+            RestartedGateway = $false
+        }
+    }
+
+    Write-Host "[openclaw_guardian] health_check_failed rc=$($health.ReturnCode); attempting gateway recovery"
+    $restart = Invoke-RemoteWorkflowCommand -Arguments @("gateway-restart", "--json")
+    Start-Sleep -Seconds 5
+    $postHealth = Test-FunctionalState
+    return [pscustomobject]@{
+        Healthy = [bool]$postHealth.Success
+        ReturnCode = $postHealth.ReturnCode
+        RestartedGateway = [bool]$restart.Success
+    }
+}
+
 function Get-OpenClawWatchProcesses {
     $rows = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -match "^python" -and
@@ -118,6 +168,15 @@ if (Test-Path $pidFile) {
 }
 
 if ($existingPid -gt 0 -and (Test-GuardianPid -ProcessId $existingPid)) {
+    if ($EnsureFunctionalState -and -not $ForceRestart) {
+        $recovery = Invoke-FunctionalRecovery
+        if ($recovery.Healthy) {
+            Write-Host "[openclaw_guardian] already_running pid=$existingPid functional_state=ok"
+            exit 0
+        }
+        Write-Host "[openclaw_guardian] forcing restart for existing pid=$existingPid functional_state=fail rc=$($recovery.ReturnCode)"
+        $ForceRestart = $true
+    }
     if (-not $ForceRestart) {
         Write-Host "[openclaw_guardian] already_running pid=$existingPid"
         exit 0
@@ -132,9 +191,18 @@ $watchProcs = Get-OpenClawWatchProcesses
 if ($watchProcs.Count -gt 0 -and -not $ForceRestart) {
     $live = $watchProcs | Sort-Object ProcessId | Select-Object -First 1
     $livePid = [int]($live.ProcessId)
-    Write-GuardianPidFile -ProcessId $livePid -PythonPath ([string]($live.ExecutablePath))
-    Write-Host "[openclaw_guardian] already_running pid=$livePid (discovered by process scan)"
-    exit 0
+    if ($EnsureFunctionalState) {
+        $recovery = Invoke-FunctionalRecovery
+        if (-not $recovery.Healthy) {
+            Write-Host "[openclaw_guardian] forcing restart for discovered pid=$livePid functional_state=fail rc=$($recovery.ReturnCode)"
+            $ForceRestart = $true
+        }
+    }
+    if (-not $ForceRestart) {
+        Write-GuardianPidFile -ProcessId $livePid -PythonPath ([string]($live.ExecutablePath))
+        Write-Host "[openclaw_guardian] already_running pid=$livePid (discovered by process scan)"
+        exit 0
+    }
 }
 
 if ($watchProcs.Count -gt 0 -and $ForceRestart) {
@@ -182,7 +250,7 @@ if ($DisableBrokenChannels) {
 
 $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
 
-$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")
+$execEnvArgs = @($execEnvScript)
 & $pythonExe @execEnvArgs
 
 $proc = Start-Process `
@@ -200,3 +268,13 @@ Write-Host "[openclaw_guardian] started pid=$($proc.Id)"
 Write-Host "[openclaw_guardian] pid_file=$pidFile"
 Write-Host "[openclaw_guardian] stdout_log=$stdoutLog"
 Write-Host "[openclaw_guardian] stderr_log=$stderrLog"
+
+if ($EnsureFunctionalState) {
+    Start-Sleep -Seconds 8
+    $recovery = Invoke-FunctionalRecovery
+    if (-not $recovery.Healthy) {
+        Write-Error "[openclaw_guardian] functional_state_check_failed rc=$($recovery.ReturnCode)"
+        exit 1
+    }
+    Write-Host "[openclaw_guardian] functional_state=ok"
+}

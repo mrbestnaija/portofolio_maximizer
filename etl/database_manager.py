@@ -1311,11 +1311,18 @@ class DatabaseManager:
         # Canonical integrity views (Phase 7.9+)
         self.cursor.execute("""
             CREATE VIEW IF NOT EXISTS production_closed_trades AS
-            SELECT *
-            FROM   trade_executions
-            WHERE  is_close = 1
-              AND  COALESCE(is_diagnostic, 0) = 0
-              AND  COALESCE(is_synthetic, 0)  = 0
+            SELECT t.*
+            FROM   trade_executions t
+            WHERE  t.is_close = 1
+              AND  t.is_diagnostic = 0
+              AND  t.is_synthetic = 0
+              AND  t.is_contaminated = 0
+              AND  NOT EXISTS (
+                   SELECT 1
+                   FROM   trade_executions o
+                   WHERE  o.id = t.entry_trade_id
+                     AND  o.is_synthetic = 1
+              )
         """)
         self.cursor.execute("""
             CREATE VIEW IF NOT EXISTS round_trips AS

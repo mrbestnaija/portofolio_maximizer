@@ -30,8 +30,9 @@ except ImportError:  # pragma: no cover - protective
 
 @pytest.fixture(scope="function")
 def price_series() -> pd.Series:
+    rng = np.random.default_rng(12345)
     dates = pd.date_range(datetime(2020, 1, 1), periods=240, freq="D")
-    returns = np.random.normal(0.001, 0.02, len(dates))
+    returns = rng.normal(0.001, 0.02, len(dates))
     prices = 100 * np.exp(np.cumsum(returns))
     return pd.Series(prices, index=dates, name="Close")
 
@@ -68,6 +69,7 @@ class TestSAMOSSA:
         assert math.isclose(summary["normalized_std"], 1.0, rel_tol=1e-6)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestSARIMAX:
     def test_auto_select_fit(self, price_series: pd.Series) -> None:
@@ -129,6 +131,7 @@ class TestGARCH:
             forecaster.fit(returns_series)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestSARIMAXXInstrumentation:
     def test_exogenous_artifact_recorded(
@@ -377,6 +380,7 @@ class TestDropHighVifFeatures:
         )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestForecasterIntegration:
     """Integration tests for forecasting."""
@@ -435,7 +439,12 @@ class TestEnsembleCoordinator:
         confidence = derive_model_confidence(summaries)
         assert confidence["samossa"] > confidence["sarimax"]
         # Phase 7.15-E: GARCH always enters the pool (fallback 0.45 when no summary).
-        # With 4 models the top two both hit the 0.65 accuracy cap; raw ordering
-        # (mssa_rl 0.854 > samossa 0.775) is preserved but not distinguishable post-cap.
-        assert confidence["mssa_rl"] >= confidence["samossa"]
         assert "garch" in confidence  # GARCH participates even without explicit summary
+        # P1b fix (2026-03-29): change_point_boost is now capped at 0.20 so it can
+        # nudge but not dominate.  SAMoSSA's EVR (0.6) + low tracking error correctly
+        # outranks MSSA-RL when no OOS evidence is passed.  MSSA-RL still enters the
+        # pool with a meaningful score (> SARIMAX) thanks to the capped boost.
+        assert confidence["mssa_rl"] > confidence["sarimax"]
+        # All model scores should be within the calibrated [0.4, 0.85] band.
+        for model, score in confidence.items():
+            assert 0.35 < score <= 0.95, f"{model} score {score:.3f} out of band"

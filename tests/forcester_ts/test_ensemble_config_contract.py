@@ -837,3 +837,45 @@ class TestPhase10RmseRankHybrid:
         for model, score in conf.items():
             assert np.isfinite(score), f"{model} confidence is non-finite: {score}"
             assert 0.0 <= score <= 1.0, f"{model} confidence out of [0,1]: {score}"
+
+    def test_oos_metrics_ensemble_key_excluded_from_rmse_rank(self) -> None:
+        from forcester_ts.ensemble import derive_model_confidence
+        """Wiring fix (2026-03-29): _latest_metrics includes an 'ensemble' key.
+        Passing it directly as oos_metrics must NOT skew the RMSE-rank normalization
+        range.  The 'ensemble' model should be silently filtered out; component rank
+        scores must be identical to a call with the ensemble key absent.
+        """
+        base_summaries = {
+            "samossa": {"explained_variance_ratio": 0.95},
+            "mssa_rl": {"baseline_variance": 0.5},
+            "garch": {"aic": 200.0, "bic": 210.0},
+        }
+        # Simulate _latest_metrics with ensemble key (as produced by evaluate())
+        oos_with_ensemble = {
+            "samossa": {"rmse": 9.77, "directional_accuracy": 0.55, "n_observations": 50},
+            "mssa_rl": {"rmse": 16.53, "directional_accuracy": 0.48, "n_observations": 50},
+            "garch": {"rmse": 12.10, "directional_accuracy": 0.51, "n_observations": 50},
+            "sarimax": {"rmse": 14.00, "directional_accuracy": 0.50, "n_observations": 50},
+            # "ensemble" key — must be filtered out, not used in component ranking
+            "ensemble": {"rmse": 11.00, "directional_accuracy": 0.52, "n_observations": 50},
+        }
+        oos_without_ensemble = {k: v for k, v in oos_with_ensemble.items() if k != "ensemble"}
+
+        conf_with = derive_model_confidence(base_summaries, oos_metrics=oos_with_ensemble)
+        conf_without = derive_model_confidence(base_summaries, oos_metrics=oos_without_ensemble)
+
+        # Rank ordering must be identical regardless of ensemble key presence
+        ranked_with = sorted(conf_with.items(), key=lambda kv: kv[1], reverse=True)
+        ranked_without = sorted(conf_without.items(), key=lambda kv: kv[1], reverse=True)
+        models_with = [m for m, _ in ranked_with if m != "ensemble"]
+        models_without = [m for m, _ in ranked_without if m != "ensemble"]
+        assert models_with == models_without, (
+            f"Ensemble key in oos_metrics changed rank ordering: "
+            f"with={models_with} vs without={models_without}"
+        )
+        # "ensemble" must not appear in the output confidence dict
+        assert "ensemble" not in conf_with, "ensemble key leaked into confidence scores"
+        # SAMoSSA has lowest OOS RMSE — must rank highest
+        assert conf_with.get("samossa", 0) >= conf_with.get("mssa_rl", 1), (
+            "SAMoSSA (RMSE=9.77) should outrank MSSA-RL (RMSE=16.53)"
+        )

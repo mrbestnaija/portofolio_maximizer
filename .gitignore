@@ -62,6 +62,7 @@ nul
 *.sqlite
 *.sqlite3
 *.json
+!observability/grafana/dashboards/*.json
 # Ignore local database files
 local_database.db
 *.db.*
@@ -141,6 +142,10 @@ visualizations/*.png
 visualizations/training/*.png
 visualizations/quant_validation/
 visualizations/ensemble_diagnostics/
+visualizations/performance/
+
+# Observability stack binaries (downloaded at install time, not committed)
+tools/observability/
 
 # Test visualization artifacts
 tests/visualizations/
@@ -225,6 +230,13 @@ logs/forecast_audits_cache/
 logs/overnight_denominator/
 logs/forecast_audits/*.tmp
 logs/forecast_audits/**/*.tmp
+# Runtime state files in logs/ (catch-all for new subdirs not listed above)
+logs/*.json
+logs/*.pid
+logs/**/*.json
+logs/observability/
+logs/errors/
+logs/errors/*
 
 # Email artifacts (can contain sensitive content)
 *.eml

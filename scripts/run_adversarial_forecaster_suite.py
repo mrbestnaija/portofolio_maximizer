@@ -18,7 +18,8 @@ import math
 import os
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, UTC
+from datetime import datetime, timezone as _tz
+UTC = _tz.utc  # datetime.UTC added in 3.11; timezone.utc for 3.10 compat
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 

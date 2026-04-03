@@ -91,17 +91,21 @@ def _load_outcome_map(db_path: Path) -> Tuple[Dict[str, float], str]:
         return {}, "db_missing"
     try:
         conn = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_executions)").fetchall()}
+        where = [
+            "is_close = 1",
+            "is_diagnostic = 0",
+            "is_synthetic = 0",
+            "ts_signal_id IS NOT NULL",
+            "ts_signal_id NOT LIKE 'legacy_%'",
+            "realized_pnl IS NOT NULL",
+        ]
+        if "is_contaminated" in cols:
+            where.append("is_contaminated = 0")
         rows = conn.execute(
-            """
-            SELECT ts_signal_id, realized_pnl
-            FROM trade_executions
-            WHERE is_close = 1
-              AND COALESCE(is_diagnostic, 0) = 0
-              AND COALESCE(is_synthetic, 0) = 0
-              AND ts_signal_id IS NOT NULL
-              AND ts_signal_id NOT LIKE 'legacy_%'
-              AND realized_pnl IS NOT NULL
-            """
+            "SELECT ts_signal_id, realized_pnl "
+            "FROM trade_executions "
+            "WHERE " + " AND ".join(where)
         ).fetchall()
         conn.close()
         return {r[0]: float(r[1]) for r in rows}, "ok"

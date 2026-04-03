@@ -1,0 +1,19 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: pmx-shadow-webhook
+  group_by:
+    - alertname
+    - component
+    - channel
+    - job
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: pmx-shadow-webhook
+    webhook_configs:
+      - url: http://127.0.0.1:9766/alertmanager
+        send_resolved: true

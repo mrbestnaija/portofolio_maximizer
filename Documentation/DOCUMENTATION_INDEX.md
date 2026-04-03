@@ -18,6 +18,7 @@ Operational procedures for running the system in production/unattended modes.
 | [PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md](PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md) | Security posture, adversarial checks, and profitability proof requirements |
 | [CRON_AUTOMATION.md](CRON_AUTOMATION.md) | OpenClaw cron job definitions, schedules, and anomaly-announce rules |
 | [OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md](OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md) | Sanitized Discord token audit, runtime evidence, and remediation steps for OpenClaw |
+| [OBSERVABILITY_PROMETHEUS_GRAFANA.md](OBSERVABILITY_PROMETHEUS_GRAFANA.md) | Read-only Prometheus exporter, Alertmanager shadow routing, Loki/Alloy logs, Grafana ops dashboards, and Windows startup/provisioning |
 
 ---
 
@@ -147,6 +148,7 @@ cleanup pass after all referencing systems have been updated.
 - [HEARTBEAT.md](HEARTBEAT.md) — System status / active sessions
 - [OPENCLAW_INTEGRATION.md](OPENCLAW_INTEGRATION.md) — OpenClaw cron + LLM orchestration
 - [OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md](OPENCLAW_DISCORD_TOKEN_AUDIT_2026-03-24.md) — Discord token troubleshooting and March 24 audit record
+- [OBSERVABILITY_PROMETHEUS_GRAFANA.md](OBSERVABILITY_PROMETHEUS_GRAFANA.md) — Prometheus exporter, Alertmanager bridge, Loki/Alloy logs, Grafana ops dashboards, and Windows rollout contract
 - [GIT_WORKFLOW.md](GIT_WORKFLOW.md) — Branching, commit, and PR workflow
 
 ### Metrics and Evaluation

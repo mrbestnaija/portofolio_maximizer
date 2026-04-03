@@ -2312,3 +2312,66 @@ def test_check_forecast_audits_min_forecast_horizon_cli_override(
     with pytest.raises(SystemExit) as excinfo:
         mod.main()
     assert excinfo.value.code != 0
+
+
+def test_effective_default_baseline_uses_ensemble_selection_primary_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_extract_metrics resolves EFFECTIVE_DEFAULT via ensemble_selection.primary_model.
+
+    Audit has garch RMSE=2.0 (oracle best single) and samossa RMSE=3.0.
+    ensemble_selection.primary_model=samossa → baseline = samossa (RMSE 3.0).
+    ensemble RMSE=3.3 → ratio = 3.3/3.0 = 1.1 → VIOLATION (threshold 1.05).
+    Under BEST_SINGLE the ratio would be 3.3/2.0 = 1.65, also a violation, but
+    the resolved_baseline logged should be "SAMOSSA", not "GARCH".
+    """
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "dataset": {
+            "start": "2024-01-01",
+            "end": "2024-06-01",
+            "length": 150,
+            "forecast_horizon": 30,
+            "ticker": "AAPL",
+        },
+        "artifacts": {
+            "ensemble_weights": {"garch": 0.5, "samossa": 0.5},
+            "evaluation_metrics": {
+                "garch":   {"rmse": 2.0, "directional_accuracy": 0.55},
+                "samossa": {"rmse": 3.0, "directional_accuracy": 0.50},
+                "ensemble": {"rmse": 3.3, "directional_accuracy": 0.52},
+            },
+            "ensemble_selection": {"primary_model": "samossa"},
+        },
+    }
+    (audit_dir / "forecast_audit_20240101.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: EFFECTIVE_DEFAULT",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.05",
+                "    max_violation_rate: 0.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    # Directly test _extract_metrics to verify resolved_baseline is "SAMOSSA".
+    import scripts.check_forecast_audits as mod
+    ensemble_m, baseline_m, resolved = mod._extract_metrics(payload, baseline_model="EFFECTIVE_DEFAULT")
+    assert resolved == "SAMOSSA", f"Expected SAMOSSA, got {resolved}"
+    assert baseline_m is not None
+    assert abs(baseline_m["rmse"] - 3.0) < 1e-9
+
+    # Also verify that BEST_SINGLE resolves to "GARCH" (oracle min).
+    _, baseline_bs, resolved_bs = mod._extract_metrics(payload, baseline_model="BEST_SINGLE")
+    assert resolved_bs == "GARCH"
+    assert abs(baseline_bs["rmse"] - 2.0) < 1e-9

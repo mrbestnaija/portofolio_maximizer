@@ -1501,7 +1501,20 @@ class TimeSeriesForecaster:
                 results["mean_forecast"] = ensemble["forecast_bundle"]
                 results["default_model"] = "ENSEMBLE"
             else:
-                preferred_default = ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
+                # Phase 7.15-F: when DISABLE_DEFAULT, pick the best single-model fallback
+                # using the previous window's OOS RMSE (cross-window holdout), not in-sample
+                # model_confidence which is dominated by SAMoSSA's EVR=1.0 construction.
+                #
+                # Two-tier selection:
+                # Tier 1: if _latest_metrics is populated from a prior evaluate() call,
+                #         use _best_single_from_metrics() — this is the OOS holdout estimate.
+                # Tier 2: if SAMoSSA trend_strength is near-zero (flat forecast), deprioritise
+                #         SAMoSSA even without prior OOS metrics — prevents expected_return=0.
+                # Fallback: original ensemble_meta primary_model (preserves previous behaviour).
+                preferred_default = self._select_disable_default_fallback(
+                    results,
+                    ensemble_meta=ensemble_meta,
+                )
                 default_model, default_payload = self._select_default_single_forecast(
                     results,
                     preferred_model=preferred_default,
@@ -1528,14 +1541,34 @@ class TimeSeriesForecaster:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
             # Prefer SAMOSSA as the default TS baseline when available,
-            # falling back to SARIMAX for backward compatibility.
-            if results.get("samossa_forecast") is not None:
-                results["mean_forecast"] = results.get("samossa_forecast")
-                results["default_model"] = "SAMOSSA"
+            # falling back to SARIMAX, MSSA_RL, then GARCH.
+            # Always set default_model to match whatever ends up in mean_forecast so
+            # downstream routing (MSSA_RL fallback gate, audit artifacts) is consistent.
+            _non_ensemble_order = [
+                ("samossa_forecast", "SAMOSSA"),
+                ("sarimax_forecast", "SARIMAX"),
+                ("mssa_rl_forecast", "MSSA_RL"),
+                ("garch_forecast", "GARCH"),
+            ]
+            _selected_payload = None
+            _selected_label = None
+            for _key, _label in _non_ensemble_order:
+                if results.get(_key) is not None:
+                    _selected_payload = results[_key]
+                    _selected_label = _label
+                    break
+            if _selected_payload is not None:
+                results["mean_forecast"] = _selected_payload
+                results["default_model"] = _selected_label
             else:
-                results["mean_forecast"] = results.get("sarimax_forecast")
-                if results["mean_forecast"] is not None:
-                    results["default_model"] = "SARIMAX"
+                # All model forecasts failed — leave mean_forecast unset so
+                # _resolve_primary_forecast returns None and the signal becomes HOLD.
+                logger.error(
+                    "No model forecast available in non-ensemble branch; "
+                    "signal will degrade to HOLD."
+                )
+                results["mean_forecast"] = None
+                results["default_model"] = None
 
         if mc_enabled_resolved:
             self._record_model_event("monte_carlo", "forecast_start", horizon=horizon)
@@ -1951,9 +1984,58 @@ class TimeSeriesForecaster:
                     )
 
             coordinator = EnsembleCoordinator(self._ensemble_config)
-            confidence = derive_model_confidence(self._model_summaries)
-            weights, score = coordinator.select_weights(confidence)
+            # P0 fix (2026-03-29): pass trailing OOS metrics so derive_model_confidence
+            # can build non-empty RMSE-rank and _score_from_metrics scores.
+            # Priority:
+            #   1. self._latest_metrics — populated by evaluate() on the same instance
+            #      (valid when the same forecaster is reused across forecast/evaluate cycles).
+            #   2. _load_trailing_oos_metrics() — reads the most recent audit file on disk
+            #      (valid for fresh-forecaster paths: run_etl_pipeline, run_auto_trader,
+            #       cross_validation — each builds a new instance per fold/run so
+            #       self._latest_metrics is always {} at selection time there).
+            _oos_for_selection: Optional[Dict[str, Dict[str, Any]]] = (
+                self._latest_metrics or self._load_trailing_oos_metrics() or None
+            )
+            confidence = derive_model_confidence(
+                self._model_summaries,
+                oos_metrics=_oos_for_selection,
+            )
+            # P0 fix: extract per-model directional accuracy from trailing OOS
+            # metrics and pass to select_weights so the DA-aware candidate path
+            # (ensemble.py:177-224) actually runs in production.
+            _oos_da: Optional[Dict[str, float]] = None
+            if _oos_for_selection:
+                # Extract per-model DA from the same source used for RMSE-rank.
+                # _oos_for_selection may contain "ensemble" or other non-component
+                # keys; the `model in _tracked` guard below filters them out.
+                _tracked = {"sarimax", "garch", "samossa", "mssa_rl"}
+                _raw_da = {
+                    model: float(m.get("directional_accuracy", 0.5))
+                    for model, m in _oos_for_selection.items()
+                    if isinstance(m, dict)
+                    and m.get("directional_accuracy") is not None
+                    and model in _tracked
+                }
+                if _raw_da:
+                    _oos_da = _raw_da
+                    logger.info(
+                        "[TS_MODEL] P0 OOS DA wired into select_weights: %s",
+                        {m: f"{v:.3f}" for m, v in _oos_da.items()},
+                    )
+            weights, score = coordinator.select_weights(confidence, model_directional_accuracy=_oos_da)
             weights = self._enforce_convexity(weights)
+            # P1a: apply accuracy ceiling AFTER selection so it does not collapse
+            # model discrimination at ranking time (Bug fixed 2026-03-29).
+            # Apply to BOTH the scalar selection_score AND the per-model confidence
+            # dict that goes into metadata/forecast_bundle — the signal generator
+            # reads ensemble_metadata["confidence"] for weighted position sizing
+            # (time_series_signal_generator.py:1673-1694) and must see the same cap.
+            _ENSEMBLE_SCORE_CAP = 0.65
+            score = float(min(score, _ENSEMBLE_SCORE_CAP))
+            confidence = {
+                model: float(min(val, _ENSEMBLE_SCORE_CAP))
+                for model, val in confidence.items()
+            }
         finally:
             # Restore original candidates after ensemble build
             self._ensemble_config.candidate_weights = original_candidates
@@ -2046,6 +2128,63 @@ class TimeSeriesForecaster:
                 effective_audits=preselection_gate.get("effective_n"),
             )
         return {"forecast_bundle": forecast_bundle, "metadata": metadata}
+
+    # Minimum SAMoSSA trend_strength to keep it as preferred fallback.
+    # Below this value the SSA reconstruction is near-flat (slope≈0), producing
+    # expected_return≈0 → SNR_GATE → HOLD every cycle.  Raised from 0.05→0.10
+    # after empirical observation: AAPL trend_strength=0.002 (clearly flat) and
+    # MSFT trend_strength=0.069-0.092 both produced expected_return=0.0 in live
+    # runs despite trend_strength > 0.05.  0.10 captures the "near-flat" regime
+    # while leaving clearly-trending reconstructions (>0.10) with SAMoSSA.
+    _SAMOSSA_FLAT_TREND_THRESHOLD: float = 0.10
+
+    def _select_disable_default_fallback(
+        self,
+        results: Dict[str, Any],
+        *,
+        ensemble_meta: Dict[str, Any],
+    ) -> Optional[str]:
+        """Choose the preferred single-model fallback when ensemble is DISABLE_DEFAULT.
+
+        Priority order (divide-and-conquer — each tier is a distinct hold-out):
+        1. Previous-window OOS RMSE (cross-window holdout): use `_latest_metrics`
+           from the most recent `evaluate()` call if available.  This is the most
+           reliable signal since it compares forecast to realised prices.
+        2. SAMoSSA flat-trend guard: if SAMoSSA's trend_strength < threshold, skip
+           it even without OOS data — a flat SSA reconstruction produces
+           expected_return≈0 which collapses SNR to zero every cycle.
+        3. Ensemble-meta primary_model: original behaviour (in-sample confidence).
+        """
+        # Tier 1: OOS holdout from prior evaluate() call.
+        if self._latest_metrics:
+            best_oos, best_rmse = self._best_single_from_metrics(self._latest_metrics)
+            if best_oos and best_rmse is not None:
+                logger.info(
+                    "DISABLE_DEFAULT fallback via OOS holdout: best_single=%s rmse=%.4f",
+                    best_oos, best_rmse,
+                )
+                return best_oos.upper()
+
+        # Tier 2: SAMoSSA flat-trend guard.
+        samossa_summary = (self._model_summaries or {}).get("samossa", {})
+        trend_strength = samossa_summary.get("trend_strength")
+        if isinstance(trend_strength, (int, float)) and trend_strength < self._SAMOSSA_FLAT_TREND_THRESHOLD:
+            # SAMoSSA reconstruction is flat.  Try MSSA_RL first (often captures
+            # momentum better in range-bound regimes), then GARCH, then SARIMAX.
+            logger.info(
+                "DISABLE_DEFAULT fallback: SAMoSSA trend_strength=%.4f < %.2f "
+                "(flat forecast); preferring MSSA_RL over SAMOSSA.",
+                trend_strength, self._SAMOSSA_FLAT_TREND_THRESHOLD,
+            )
+            if results.get("mssa_rl_forecast") is not None:
+                return "MSSA_RL"
+            if results.get("garch_forecast") is not None:
+                return "GARCH"
+            if results.get("sarimax_forecast") is not None:
+                return "SARIMAX"
+
+        # Tier 3: Original behaviour — ensemble_meta primary_model.
+        return ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
 
     def _select_default_single_forecast(
         self,
@@ -2201,6 +2340,94 @@ class TimeSeriesForecaster:
             "lift_fraction": lift_fraction,
             "ratios": ratios,
         }
+
+    def _load_trailing_oos_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Return per-model OOS evaluation metrics from the most recent matching audit file.
+
+        This is the production fix for fresh-forecaster instances (run_etl_pipeline,
+        run_auto_trader, cross_validation) where self._latest_metrics is always empty
+        at selection time because evaluate() has never been called on this instance.
+
+        Scope: audit files are filtered to the current ticker and forecast horizon
+        before returning metrics, preventing cross-ticker/cross-horizon contamination
+        in multi-ticker runs where audit files from different assets share the same
+        audit directory.
+
+        Matching rules (all must pass when the value is known):
+          - ticker: audit dataset.ticker must equal current ticker (case-insensitive).
+            If either side is unknown/None, the check is skipped (fail-open).
+          - horizon: audit dataset.forecast_horizon must equal current horizon.
+            Horizon 0 / None on either side skips the check.
+
+        Returns {} when no audit directory is configured, no files match, or
+        no matching file has evaluation_metrics — all safe no-op cases.
+        """
+        if not self._audit_dir or not self._audit_dir.exists():
+            return {}
+
+        # Read current context from instrumentation metadata set during fit()/forecast().
+        _meta = self._instrumentation._dataset_meta
+        current_ticker: Optional[str] = (_meta.get("ticker") or None)
+        current_horizon: Optional[int] = (
+            int(_meta["forecast_horizon"])
+            if _meta.get("forecast_horizon") is not None
+            else None
+        )
+
+        try:
+            files = sorted(
+                self._audit_dir.glob("forecast_audit_*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            return {}
+
+        from forcester_ts.ensemble import TRACKED_MODELS  # local import avoids cycle
+
+        for path in files[:20]:  # scan recent files; most will match on first try
+            try:
+                audit = json.loads(path.read_text())
+            except Exception:
+                continue
+
+            # --- Ticker filter ---
+            dataset = audit.get("dataset") or {}
+            audit_ticker = dataset.get("ticker") or None
+            if current_ticker and audit_ticker:
+                if current_ticker.upper() != str(audit_ticker).upper():
+                    continue  # different asset — skip
+
+            # --- Horizon filter ---
+            audit_horizon = dataset.get("forecast_horizon")
+            if current_horizon and audit_horizon is not None:
+                try:
+                    if int(audit_horizon) != current_horizon:
+                        continue  # incompatible horizon — skip
+                except (TypeError, ValueError):
+                    pass  # non-numeric horizon field; skip check
+
+            artifacts = audit.get("artifacts") or {}
+            eval_metrics = artifacts.get("evaluation_metrics") or {}
+            if not isinstance(eval_metrics, dict) or not eval_metrics:
+                continue
+
+            component = {
+                k: v for k, v in eval_metrics.items()
+                if k in TRACKED_MODELS and isinstance(v, dict)
+            }
+            if component:
+                logger.info(
+                    "[TS_MODEL] Loaded trailing OOS metrics from audit %s "
+                    "(ticker=%s horizon=%s %d models)",
+                    path.name,
+                    audit_ticker or "unknown",
+                    audit_horizon,
+                    len(component),
+                )
+                return component
+
+        return {}
 
     def _preselection_default_gate(self) -> Dict[str, Any]:
         """

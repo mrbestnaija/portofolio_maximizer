@@ -1474,3 +1474,63 @@ class TestDirectionalGate:
         assert "recent_vol_ratio" in features
         assert math.isnan(features["recent_return_5d"])
         assert math.isnan(features["recent_vol_ratio"])
+
+class TestHoldReasonCodes:
+    """Verify _determine_action returns structured hold reason codes.
+
+    Phase 10c: HOLD reason instrumentation makes the policy layer observable —
+    enables aggregating HOLD causes across runs without parsing log strings.
+    """
+
+    def setup_method(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        self.gen = TimeSeriesSignalGenerator()
+
+    def _call(self, **kwargs):
+        defaults = dict(
+            expected_return=0.01,
+            net_trade_return=0.01,
+            confidence=0.70,
+            risk_score=0.30,
+            confidence_threshold=0.55,
+            min_expected_return=0.002,
+            max_risk_score=0.70,
+        )
+        defaults.update(kwargs)
+        return self.gen._determine_action(**defaults)
+
+    def test_buy_returns_none_reason(self):
+        action, reason = self._call(expected_return=0.05)
+        assert action == "BUY"
+        assert reason is None
+
+    def test_sell_returns_none_reason(self):
+        action, reason = self._call(expected_return=-0.05)
+        assert action == "SELL"
+        assert reason is None
+
+    def test_confidence_below_threshold_reason(self):
+        action, reason = self._call(confidence=0.30, confidence_threshold=0.55)
+        assert action == "HOLD"
+        assert reason == "CONFIDENCE_BELOW_THRESHOLD"
+
+    def test_min_return_reason(self):
+        action, reason = self._call(net_trade_return=0.0001, min_expected_return=0.002)
+        assert action == "HOLD"
+        assert reason == "MIN_RETURN"
+
+    def test_risk_too_high_reason(self):
+        action, reason = self._call(risk_score=0.90, max_risk_score=0.70)
+        assert action == "HOLD"
+        assert reason == "RISK_TOO_HIGH"
+
+    def test_zero_expected_return_reason(self):
+        action, reason = self._call(expected_return=0.0)
+        assert action == "HOLD"
+        assert reason == "ZERO_EXPECTED_RETURN"
+
+    def test_confidence_gate_takes_priority_over_return(self):
+        # Both confidence and return fail — confidence checked first
+        action, reason = self._call(confidence=0.10, net_trade_return=0.0001)
+        assert action == "HOLD"
+        assert reason == "CONFIDENCE_BELOW_THRESHOLD"

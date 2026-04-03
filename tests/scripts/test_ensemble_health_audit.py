@@ -123,6 +123,26 @@ class TestExtractWindowMetrics:
         w = extract_window_metrics(audit)
         assert w is None
 
+    def test_rejects_implausible_model_rmse(self):
+        audit = _make_audit(garch_rmse=0.0)
+        w = extract_window_metrics(audit)
+        assert w is None
+
+    def test_rejects_directional_accuracy_out_of_range(self):
+        audit = _make_audit(samossa_da=1.2)
+        w = extract_window_metrics(audit)
+        assert w is None
+
+    def test_rejects_implausible_ensemble_rmse_ratio(self):
+        audit = _make_audit(
+            garch_rmse=1.0,
+            samossa_rmse=1.2,
+            mssa_rl_rmse=1.1,
+            ensemble_rmse=3.5,
+        )
+        w = extract_window_metrics(audit)
+        assert w is None
+
     def test_best_single_deterministic_by_rmse_then_smape(self):
         # garch=1.0 rmse, smape=0.01 → should win
         audit = _make_audit(
@@ -151,13 +171,95 @@ class TestExtractWindowMetrics:
         w = extract_window_metrics(audit)
         assert w["regime"] is None
 
+    def test_baseline_mode_key_present_in_result(self):
+        """Return dict must always include 'baseline_mode' key."""
+        audit = _make_audit()
+        w = extract_window_metrics(audit)
+        assert "baseline_mode" in w
+
+    def test_default_baseline_mode_is_best_single(self):
+        """Default (no argument) resolves to BEST_SINGLE."""
+        audit = _make_audit(garch_rmse=1.0, samossa_rmse=3.0, mssa_rl_rmse=2.5)
+        w = extract_window_metrics(audit)
+        assert w["baseline_mode"] == "BEST_SINGLE"
+        assert w["best_single_model"] == "garch"
+
+
+class TestEffectiveDefaultBaseline:
+    """Tests for baseline_mode='EFFECTIVE_DEFAULT' and the oracle/baseline field contract."""
+
+    def test_uses_primary_model_when_present(self):
+        """EFFECTIVE_DEFAULT uses primary_model's RMSE, not the oracle best single."""
+        # samossa has RMSE 1.0 (oracle best); garch (RMSE 2.0) is the primary_model.
+        # baseline_rmse_ratio = 2.2/2.0 = 1.1; oracle best_single_model stays "samossa".
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.0, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "garch"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "EFFECTIVE_DEFAULT"
+        # Baseline fields reflect the causal primary model
+        assert w["baseline_model_name"] == "garch"
+        assert abs(w["baseline_rmse"] - 2.0) < 1e-9
+        assert abs(w["baseline_rmse_ratio"] - 1.1) < 1e-6
+        assert abs(w["rmse_ratio"] - 1.1) < 1e-6  # compat alias
+        # Oracle fields stay as ex-post best (samossa, RMSE 1.0)
+        assert w["best_single_model"] == "samossa"
+        assert abs(w["oracle_best_rmse"] - 1.0) < 1e-9
+
+    def test_falls_back_to_best_single_when_primary_absent(self):
+        """When ensemble_selection is missing, fall back silently to BEST_SINGLE."""
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.0, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"].pop("ensemble_selection", None)
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "BEST_SINGLE"
+        # When fallen back, baseline == oracle
+        assert w["baseline_model_name"] == w["best_single_model"] == "samossa"
+        assert abs(w["baseline_rmse"] - w["oracle_best_rmse"]) < 1e-9
+
+    def test_falls_back_when_primary_model_has_no_rmse(self):
+        """When primary_model's eval_metrics entry lacks RMSE, fall back to BEST_SINGLE."""
+        # sarimax not in MODELS tuple — use it as primary with no rmse key
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.5, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["evaluation_metrics"]["sarimax"] = {"smape": 0.02}  # no rmse
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "sarimax"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "BEST_SINGLE"
+
+    def test_primary_model_can_be_sarimax_outside_models_tuple(self):
+        """EFFECTIVE_DEFAULT can resolve to sarimax even though it's not in MODELS tuple."""
+        audit = _make_audit(garch_rmse=2.0, samossa_rmse=1.5, mssa_rl_rmse=2.5, ensemble_rmse=2.2)
+        audit["artifacts"]["evaluation_metrics"]["sarimax"] = {
+            "rmse": 1.8, "smape": 0.019, "directional_accuracy": 0.57,
+        }
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "sarimax"}
+        w = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+        assert w is not None
+        assert w["baseline_mode"] == "EFFECTIVE_DEFAULT"
+        assert w["baseline_model_name"] == "sarimax"
+        assert abs(w["baseline_rmse_ratio"] - 2.2 / 1.8) < 1e-6
+        # Oracle best_single_model is still from MODELS tuple (samossa at 1.5)
+        assert w["best_single_model"] == "samossa"
+        assert abs(w["oracle_best_rmse"] - 1.5) < 1e-9
+
+    def test_best_single_mode_oracle_and_baseline_fields_identical(self):
+        """Under BEST_SINGLE, baseline fields and oracle fields agree."""
+        audit = _make_audit(garch_rmse=1.0, samossa_rmse=3.0, mssa_rl_rmse=2.5, ensemble_rmse=1.5)
+        audit["artifacts"]["ensemble_selection"] = {"primary_model": "samossa"}
+        w = extract_window_metrics(audit, baseline_mode="BEST_SINGLE")
+        assert w["baseline_mode"] == "BEST_SINGLE"
+        assert w["best_single_model"] == w["baseline_model_name"] == "garch"
+        assert abs(w["oracle_best_rmse"] - w["baseline_rmse"]) < 1e-9
+        assert abs(w["rmse_ratio"] - w["baseline_rmse_ratio"]) < 1e-9
+
 
 class TestPerModelSummary:
     def test_counts_best_single_correctly(self):
         windows = [
-            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0)),
-            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0)),
-            extract_window_metrics(_make_audit(garch_rmse=5.0, samossa_rmse=2.0, mssa_rl_rmse=0.5)),
+            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0, ensemble_rmse=1.4)),
+            extract_window_metrics(_make_audit(garch_rmse=1.0, samossa_rmse=2.0, mssa_rl_rmse=3.0, ensemble_rmse=1.4)),
+            extract_window_metrics(_make_audit(garch_rmse=5.0, samossa_rmse=2.0, mssa_rl_rmse=0.5, ensemble_rmse=1.2)),
         ]
         summary = compute_per_model_summary(windows)
         assert summary["garch"]["times_best_single"] == 2
@@ -242,7 +344,7 @@ class TestAdaptiveWeights:
         # One model much better → exp decay gives it >0.90 before guard
         windows = [
             extract_window_metrics(
-                _make_audit(garch_rmse=0.1, samossa_rmse=100.0, mssa_rl_rmse=100.0)
+                _make_audit(garch_rmse=0.1, samossa_rmse=100.0, mssa_rl_rmse=100.0, ensemble_rmse=0.25)
             )
             for _ in range(5)
         ]
@@ -647,3 +749,26 @@ class TestLiftSignificance:
         for key, val in result.items():
             if isinstance(val, float):
                 assert math.isfinite(val), f"Key '{key}' is non-finite: {val}"
+
+    def test_lift_significance_prefers_extracted_baseline_rmse_over_ratio_proxy(self):
+        """Integration contract: extracted EFFECTIVE_DEFAULT windows use baseline_rmse directly."""
+        ensembles = [1.8, 1.9, 2.1, 2.0, 1.7]
+        windows = []
+        for idx, ensemble_rmse in enumerate(ensembles):
+            audit = _make_audit(
+                garch_rmse=2.0,
+                samossa_rmse=1.0,
+                mssa_rl_rmse=2.5,
+                ensemble_rmse=ensemble_rmse,
+            )
+            audit["window_id"] = f"w_{idx}"
+            audit["artifacts"]["ensemble_selection"] = {"primary_model": "garch"}
+            window = extract_window_metrics(audit, baseline_mode="EFFECTIVE_DEFAULT")
+            assert window is not None
+            windows.append(window)
+
+        result = compute_lift_significance(windows, min_windows=5, n_boot=200, seed=42)
+        assert not result["insufficient_data"]
+        assert result["n_windows"] == 5
+        assert result["mean_lift"] == pytest.approx(0.1, abs=1e-9)
+        assert result["lift_win_fraction"] == pytest.approx(0.6, abs=1e-9)

@@ -685,9 +685,11 @@ def _load_latest_live_cycle_binding(db_path: Path) -> Dict[str, Any]:
         if "execution_mode" in cols:
             where.append("LOWER(COALESCE(execution_mode, '')) = 'live'")
         if "is_synthetic" in cols:
-            where.append("COALESCE(is_synthetic, 0) = 0")
+            where.append("is_synthetic = 0")
         if "is_diagnostic" in cols:
-            where.append("COALESCE(is_diagnostic, 0) = 0")
+            where.append("is_diagnostic = 0")
+        if "is_contaminated" in cols:
+            where.append("is_contaminated = 0")
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
         row = conn.execute(
@@ -1500,6 +1502,14 @@ def main() -> int:
     if not artifact_binding_pass:
         phase3_fail_reasons.append("ARTIFACT_STALE_OR_UNBOUND")
     phase3_reason = "READY" if phase3_ready else ",".join(phase3_fail_reasons)
+    strict_gate_pass = bool(gate_pass and gate_semantics_status == "PASS")
+    strict_phase3_ready = bool(phase3_ready and strict_gate_pass)
+    strict_phase3_reason = phase3_reason
+    if not strict_phase3_ready and gate_pass and gate_semantics_status != "PASS":
+        strict_reason_code = f"GATE_SEMANTICS_{gate_semantics_status}"
+        strict_phase3_reason = (
+            f"{phase3_reason},{strict_reason_code}" if phase3_reason else strict_reason_code
+        )
 
     thresholds = _collect_thresholds(
         monitor_config=monitor_config,
@@ -1525,6 +1535,8 @@ def main() -> int:
         "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
         "phase3_ready": bool(phase3_ready),
         "phase3_reason": phase3_reason,
+        "phase3_strict_ready": bool(strict_phase3_ready),
+        "phase3_strict_reason": strict_phase3_reason,
         "repo_state": repo_state,
         "inputs": {
             "db": str(db_path),
@@ -1589,6 +1601,7 @@ def main() -> int:
         "production_profitability_gate": {
             "status": gate_status,
             "pass": gate_pass,
+            "strict_pass": bool(strict_gate_pass),
             "reconcile_pass": reconcile_pass,
             "gate_semantics_status": gate_semantics_status,
             "first_audit_ts_utc": warmup_policy.get("first_audit_ts_utc"),
@@ -1598,6 +1611,8 @@ def main() -> int:
         "readiness": {
             "phase3_ready": bool(phase3_ready),
             "phase3_reason": phase3_reason,
+            "phase3_strict_ready": bool(strict_phase3_ready),
+            "phase3_strict_reason": strict_phase3_reason,
             "gates_pass": bool(gates_pass),
             "linkage_pass": bool(linkage_pass),
             "evidence_hygiene_pass": bool(evidence_hygiene_pass),
@@ -1624,6 +1639,7 @@ def main() -> int:
         },
         "readiness_v2": {
             "overall_ready": bool(phase3_ready),
+            "strict_overall_ready": bool(strict_phase3_ready),
             "evidence_chain_ready": bool(
                 linkage_pass
                 and evidence_hygiene_pass
@@ -1635,6 +1651,7 @@ def main() -> int:
             "economic_ready": bool(gates_pass),
             "operational_ready": bool(integrity_pass and artifact_binding_pass and summary_invocation_match),
             "reason_code": phase3_reason,
+            "strict_reason_code": strict_phase3_reason,
             "accepted_records": accepted_records,
             "accepted_noneligible_records": accepted_noneligible_records,
             "eligible_records": eligible_records,
@@ -1726,6 +1743,10 @@ def main() -> int:
         "Phase3 ready   : "
         f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "
         f"integrity_high={high_integrity_violation_count})"
+    )
+    print(
+        "Phase3 strict  : "
+        f"{int(strict_phase3_ready)} (reason={strict_phase3_reason})"
     )
     print(
         "Artifact bind  : "

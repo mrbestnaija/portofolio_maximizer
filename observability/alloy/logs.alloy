@@ -1,0 +1,196 @@
+local.file_match "pmx_observability" {
+  path_targets = [
+    {
+      "__path__" = string.format("%s\\logs\\observability\\*.log", sys.env("PMX_REPO_ROOT")),
+      "job"      = "pmx_observability",
+      "component" = "observability",
+    },
+  ]
+}
+
+local.file_match "pmx_run_audit" {
+  path_targets = [
+    {
+      "__path__" = string.format("%s\\logs\\run_audit\\*.log", sys.env("PMX_REPO_ROOT")),
+      "job"      = "pmx_run_audit",
+      "component" = "run_audit",
+    },
+    {
+      "__path__" = string.format("%s\\logs\\run_audit\\*.txt", sys.env("PMX_REPO_ROOT")),
+      "job"      = "pmx_run_audit",
+      "component" = "run_audit",
+    },
+  ]
+}
+
+local.file_match "pmx_llm_activity" {
+  path_targets = [
+    {
+      "__path__" = string.format("%s\\logs\\llm_activity\\*.jsonl", sys.env("PMX_REPO_ROOT")),
+      "job"      = "pmx_llm_activity",
+      "component" = "llm_activity",
+    },
+  ]
+}
+
+local.file_match "pmx_openclaw_json" {
+  path_targets = [
+    {
+      "__path__" = string.format("%s\\.openclaw\\logs\\*.jsonl", sys.env("USERPROFILE")),
+      "job"      = "pmx_openclaw",
+      "component" = "openclaw",
+    },
+  ]
+}
+
+local.file_match "pmx_openclaw_plain" {
+  path_targets = [
+    {
+      "__path__" = string.format("%s\\.openclaw\\logs\\*.log", sys.env("USERPROFILE")),
+      "job"      = "pmx_openclaw",
+      "component" = "openclaw",
+    },
+  ]
+}
+
+loki.source.file "pmx_observability" {
+  targets       = local.file_match.pmx_observability.targets
+  forward_to    = [loki.process.pmx_observability.receiver]
+  tail_from_end = true
+}
+
+loki.process "pmx_observability" {
+  stage.regex {
+    expression = "(?i).*level=(?P<parsed_severity>info|warn|error|debug|fatal).*"
+  }
+
+  stage.labels {
+    values = {
+      severity = "parsed_severity",
+    }
+  }
+
+  stage.regex {
+    expression = "(?i).*component=(?P<parsed_component>[A-Za-z0-9_./-]+).*"
+  }
+
+  stage.labels {
+    values = {
+      component = "parsed_component",
+    }
+  }
+
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.source.file "pmx_run_audit" {
+  targets       = local.file_match.pmx_run_audit.targets
+  forward_to    = [loki.process.pmx_run_audit.receiver]
+  tail_from_end = false
+}
+
+loki.process "pmx_run_audit" {
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.source.file "pmx_llm_activity" {
+  targets       = local.file_match.pmx_llm_activity.targets
+  forward_to    = [loki.process.pmx_llm_activity.receiver]
+  tail_from_end = false
+}
+
+loki.process "pmx_llm_activity" {
+  stage.truncate {
+    rule {
+      source_type = "line"
+      limit       = "240KiB"
+      suffix      = " ...[truncated]"
+    }
+  }
+
+  stage.json {
+    expressions = {
+      channel   = "channel",
+      type      = "type",
+      event_type = "event_type",
+      model_used = "model_used",
+      latency_ms = "latency_ms",
+    }
+  }
+
+  stage.labels {
+    values = {
+      channel = "channel",
+    }
+  }
+
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.source.file "pmx_openclaw_json" {
+  targets       = local.file_match.pmx_openclaw_json.targets
+  forward_to    = [loki.process.pmx_openclaw_json.receiver]
+  tail_from_end = false
+}
+
+loki.process "pmx_openclaw_json" {
+  stage.truncate {
+    rule {
+      source_type = "line"
+      limit       = "240KiB"
+      suffix      = " ...[truncated]"
+    }
+  }
+
+  stage.json {
+    expressions = {
+      parsed_component = "source",
+      event            = "event",
+      result           = "result",
+    }
+  }
+
+  stage.labels {
+    values = {
+      component = "parsed_component",
+    }
+  }
+
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.source.file "pmx_openclaw_plain" {
+  targets       = local.file_match.pmx_openclaw_plain.targets
+  forward_to    = [loki.process.pmx_openclaw_plain.receiver]
+  tail_from_end = true
+}
+
+loki.process "pmx_openclaw_plain" {
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = string.format("%s/loki/api/v1/push", sys.env("PMX_LOKI_URL"))
+  }
+}

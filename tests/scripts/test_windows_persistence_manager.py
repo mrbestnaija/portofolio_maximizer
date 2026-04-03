@@ -147,6 +147,8 @@ def test_cmd_ensure_writes_status_and_succeeds(tmp_path, monkeypatch) -> None:
     assert rc == 0
 
     payload = json.loads(status_json.read_text(encoding="utf-8"))
+    assert payload["status_contract"]["schema_version"] == 1
+    assert payload["status_contract"]["max_age_seconds"] > 0
     assert payload["dashboard"]["live_watcher"]["running"] is True
     assert payload["reconciliation"]["before"]["count"] == 2
     assert payload["reconciliation"]["after"]["count"] == 0

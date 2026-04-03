@@ -977,6 +977,14 @@ class TestEnsembleConfigRegression:
 # PART 9: ORDER MANAGER CONTRACT
 # ===================================================================
 
+import os as _os
+_HAS_CTRADER_CREDS = all(
+    _os.environ.get(k)
+    for k in ("USERNAME_CTRADER", "PASSWORD_CTRADER", "APPLICATION_NAME_CTRADER")
+)
+
+
+@pytest.mark.skipif(not _HAS_CTRADER_CREDS, reason="cTrader credentials not configured in this environment")
 class TestOrderManagerContract:
     """OrderManager must be constructable in demo mode without live credentials."""
 

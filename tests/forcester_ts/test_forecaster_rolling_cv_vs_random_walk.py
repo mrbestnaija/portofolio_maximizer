@@ -145,6 +145,7 @@ def series_random_walk() -> pd.Series:
     return pd.Series(prices, index=index, name="Close")
 
 
+@pytest.mark.slow
 @pytest.mark.integration
 def test_rolling_cv_ensemble_beats_random_walk_on_trending_series(series_trending: pd.Series) -> None:
     cv = _CVConfig()
@@ -171,6 +172,7 @@ def test_rolling_cv_ensemble_beats_random_walk_on_trending_series(series_trendin
     assert ens_smape <= base_smape * 0.98, f"ensemble sMAPE={ens_smape:.4f} baseline={base_smape:.4f} report={report}"
 
 
+@pytest.mark.slow
 @pytest.mark.integration
 def test_rolling_cv_models_not_catastrophic_on_random_walk(series_random_walk: pd.Series) -> None:
     cv = _CVConfig(max_folds=2)  # keep runtime bounded for this hard case

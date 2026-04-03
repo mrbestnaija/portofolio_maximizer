@@ -3,11 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from scripts import dashboard_db_bridge as bridge_mod
+from scripts import run_auto_trader
 from scripts.run_auto_trader import _emit_dashboard_json
 
 
 def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
-    path = tmp_path / "dashboard_data.json"
+    path = tmp_path / "run_auto_trader_latest.json"
 
     meta = {
         "run_id": "test_run",
@@ -103,3 +105,8 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
     assert payload["routing"]["llm_signals"] == routing_stats["llm_fallback_signals"]
     assert "forecaster_health" in payload and payload["forecaster_health"]
     assert "quant_validation_health" in payload and payload["quant_validation_health"]
+
+
+def test_run_auto_trader_snapshot_path_is_separate_from_canonical_dashboard() -> None:
+    assert run_auto_trader.RUN_AUTO_TRADER_ARTIFACT_PATH != bridge_mod.DEFAULT_OUTPUT_PATH
+    assert run_auto_trader.RUN_AUTO_TRADER_ARTIFACT_PATH.name == "run_auto_trader_latest.json"

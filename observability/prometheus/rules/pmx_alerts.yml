@@ -1,0 +1,57 @@
+groups:
+  - name: pmx_v1_infra_alerts
+    interval: 15s
+    rules:
+      - alert: PMXOpenClawGatewayDown
+        expr: pmx_openclaw_gateway_up{component="openclaw"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: openclaw
+        annotations:
+          summary: OpenClaw gateway is down for more than 2 minutes.
+
+      - alert: PMXPrimaryChannelDown
+        expr: pmx_openclaw_primary_channel_up == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: openclaw
+        annotations:
+          summary: Primary OpenClaw channel is down for more than 2 minutes.
+
+      - alert: PMXCronJobStale
+        expr: pmx_cron_job_enabled{severity=~"P0|P1"} == 1 and pmx_cron_job_stale_threshold_seconds{severity=~"P0|P1"} > 0 and (time() - pmx_cron_job_last_success_unixtime{severity=~"P0|P1"}) > pmx_cron_job_stale_threshold_seconds{severity=~"P0|P1"}
+        for: 0m
+        labels:
+          severity: warning
+          component: scheduler
+        annotations:
+          summary: P0/P1 cron job freshness exceeded 2x expected cadence.
+
+      - alert: PMXDashboardSnapshotStale
+        expr: pmx_dashboard_snapshot_age_seconds > clamp_min(pmx_dashboard_snapshot_expected_refresh_seconds * 2, 600)
+        for: 0m
+        labels:
+          severity: warning
+          component: dashboard
+        annotations:
+          summary: Dashboard snapshot age exceeded the allowed freshness window.
+
+      - alert: PMXChannelsStatusLatencyHigh
+        expr: pmx_openclaw_channels_status_latency_ms > 5000
+        for: 10m
+        labels:
+          severity: warning
+          component: openclaw
+        annotations:
+          summary: OpenClaw channels.status latency is above 5000 ms.
+
+      - alert: PMXProductionGateFail
+        expr: pmx_production_gate_pass == 0 and (time() - pmx_production_gate_generated_unixtime) < 3600
+        for: 0m
+        labels:
+          severity: critical
+          component: gates
+        annotations:
+          summary: Latest production gate artifact is failing.

@@ -18,6 +18,7 @@ def _make_db(
     add_regime_col: bool = True,
     add_tsf_table: bool = True,
     include_tsf_join_col: bool = True,
+    create_view: bool = True,
 ) -> Path:
     db = tmp_path / "ctx.db"
     conn = sqlite3.connect(str(db))
@@ -32,6 +33,7 @@ def _make_db(
             is_close INTEGER DEFAULT 1,
             is_diagnostic INTEGER DEFAULT 0,
             is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
             ts_signal_id TEXT
             {"," if conf_defs else ""}
             {conf_defs}
@@ -62,18 +64,33 @@ def _make_db(
 
     for idx, trade in enumerate(trades, start=1):
         ts_id = trade.get("ts_signal_id", f"ts_{trade['ticker']}_{idx}")
-        values = [trade["ticker"], trade["pnl"], ts_id]
+        values = [
+            trade["ticker"],
+            trade["pnl"],
+            trade.get("is_diagnostic", 0),
+            trade.get("is_synthetic", 0),
+            trade.get("is_contaminated", 0),
+            ts_id,
+        ]
         if confidence_cols:
             for name in confidence_cols:
                 values.append(trade.get(name))
-            placeholders = ", ".join(["?"] * (3 + len(confidence_cols)))
+            placeholders = ", ".join(["?"] * (6 + len(confidence_cols)))
             conn.execute(
-                f"INSERT INTO trade_executions(ticker, realized_pnl, ts_signal_id, {conf_insert_cols}) VALUES ({placeholders})",
+                f"""
+                INSERT INTO trade_executions(
+                    ticker, realized_pnl, is_diagnostic, is_synthetic, is_contaminated, ts_signal_id, {conf_insert_cols}
+                ) VALUES ({placeholders})
+                """,
                 values,
             )
         else:
             conn.execute(
-                "INSERT INTO trade_executions(ticker, realized_pnl, ts_signal_id) VALUES (?, ?, ?)",
+                """
+                INSERT INTO trade_executions(
+                    ticker, realized_pnl, is_diagnostic, is_synthetic, is_contaminated, ts_signal_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
                 values,
             )
         if add_tsf_table and add_regime_col and trade.get("regime"):
@@ -88,15 +105,16 @@ def _make_db(
                     (trade["regime"],),
                 )
 
-    conn.execute(
-        """
-        CREATE VIEW production_closed_trades AS
-        SELECT * FROM trade_executions
-        WHERE is_close = 1
-          AND COALESCE(is_diagnostic, 0) = 0
-          AND COALESCE(is_synthetic, 0) = 0
-        """
-    )
+    if create_view:
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT * FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+            """
+        )
     conn.commit()
     conn.close()
     return db
@@ -207,6 +225,21 @@ class TestContextQuality:
             "partial_data",
             "warnings",
         }
+
+    def test_fallback_excludes_null_and_contaminated_rows(self, tmp_path):
+        from scripts.compute_context_quality import compute_context_quality
+
+        db = _make_db(
+            tmp_path,
+            [
+                {"ticker": "X", "pnl": 50.0, "base_confidence": 0.60, "regime": "TRENDING", "is_diagnostic": None},
+                {"ticker": "Y", "pnl": 25.0, "base_confidence": 0.62, "regime": "TRENDING", "is_contaminated": 1},
+                {"ticker": "Z", "pnl": 75.0, "base_confidence": 0.64, "regime": "TRENDING"},
+            ],
+            create_view=False,
+        )
+        result = compute_context_quality(db_path=db)
+        assert result["n_total_trades"] == 1
 
 
 class TestCLI:

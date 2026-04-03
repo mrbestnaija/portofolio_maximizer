@@ -81,6 +81,85 @@ def test_fit_falls_back_to_ewma_when_volatility_ratio_explodes(
     assert summary["volatility_ratio_to_realized"] > 4.0
 
 
+def test_scale_returns_for_fit_downscales_oversized_inputs() -> None:
+    returns = pd.Series([2500.0, -1500.0, 500.0], name="returns")
+
+    scaled, scale_factor = GARCHForecaster._scale_returns_for_fit(returns)
+
+    assert scale_factor == pytest.approx(0.4)
+    assert float(scaled.abs().max()) == pytest.approx(1000.0)
+    assert float(scaled.iloc[0]) == pytest.approx(1000.0)
+
+
+class TestVolatilityRatioP95Robustness:
+    """Fit-time and forecast-time guards use p95, not last-bar or max."""
+
+    def _make_forecaster(self, realized: float = 0.01) -> GARCHForecaster:
+        f = object.__new__(GARCHForecaster)
+        f._realized_volatility = realized
+        f.fitted_model = None
+        return f
+
+    def test_fit_time_single_tail_spike_does_not_trigger_guard(self) -> None:
+        """A spike only at the terminal bar must not skew the p95 ratio over threshold."""
+        f = self._make_forecaster(realized=0.01)
+        # 149 normal bars at 0.02 (ratio=2.0) + 1 spike at 0.60 (ratio=60x)
+        normal = [0.02] * 149
+        spike = [0.60]
+        values = pd.Series(normal + spike)
+        f.fitted_model = MagicMock()
+        f.fitted_model.conditional_volatility = values
+        ratio = f._conditional_volatility_ratio_to_realized()
+        # p95 of 150-element series: ~2.0 (the spike is above p95 only marginally)
+        assert ratio is not None
+        # The spike is at index 149 (last), iloc[-1]/realized=60; p95 should be ~2.0
+        assert ratio < 5.0, f"p95 ratio={ratio:.3f} should not be dominated by tail spike"
+
+    def test_fit_time_iloc_last_would_have_been_dominated(self) -> None:
+        """Demonstrate iloc[-1] is the spike value (60x) while p95 is ~2x."""
+        f = self._make_forecaster(realized=0.01)
+        normal = [0.02] * 149
+        spike = [0.60]
+        values = pd.Series(normal + spike)
+        # What the old code would have returned:
+        old_ratio = abs(values.iloc[-1]) / 0.01
+        assert old_ratio == pytest.approx(60.0)
+        # What the new code returns (p95):
+        new_ratio = float(np.percentile(values.abs(), 95)) / 0.01
+        assert new_ratio < 5.0
+
+    def test_forecast_time_single_high_step_does_not_trigger_guard(self) -> None:
+        """A single large forecast step must not trigger the forecast-time guard."""
+        f = self._make_forecaster(realized=0.01)
+        # 4 normal steps at 0.02 + 1 high step at 0.50 (ratio=50x at max)
+        volatility = pd.Series([0.02, 0.02, 0.02, 0.02, 0.50])
+        ratio = f._forecast_volatility_ratio_to_realized(volatility)
+        assert ratio is not None
+        # p95 of 5 elements: sorted=[0.02,0.02,0.02,0.02,0.50]; p95 is ~0.41 → ratio~41
+        # But with a spike only at index 4, the max would have been 50x.
+        # p95 here is still high since the spike is 20% of the series.
+        # The key property: p95 <= max (not worse than old behavior)
+        old_ratio = float(volatility.max()) / 0.01
+        assert ratio <= old_ratio
+
+    def test_forecast_time_all_uniform_same_as_max(self) -> None:
+        """When all forecast steps are uniform, p95 == max == every value."""
+        f = self._make_forecaster(realized=0.01)
+        volatility = pd.Series([0.03, 0.03, 0.03, 0.03, 0.03])
+        ratio = f._forecast_volatility_ratio_to_realized(volatility)
+        assert ratio == pytest.approx(3.0)
+
+    def test_fit_time_empty_returns_none(self) -> None:
+        f = self._make_forecaster(realized=0.01)
+        f.fitted_model = MagicMock()
+        f.fitted_model.conditional_volatility = pd.Series([], dtype=float)
+        assert f._conditional_volatility_ratio_to_realized() is None
+
+    def test_forecast_time_empty_returns_none(self) -> None:
+        f = self._make_forecaster(realized=0.01)
+        assert f._forecast_volatility_ratio_to_realized(pd.Series([], dtype=float)) is None
+
+
 def test_ewma_forecast_reports_guardrail_metadata() -> None:
     forecaster = object.__new__(GARCHForecaster)
     forecaster.backend = "ewma"

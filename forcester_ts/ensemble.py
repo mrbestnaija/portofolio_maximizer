@@ -388,12 +388,20 @@ def canonical_model_key(key: str) -> str:
 
 def derive_model_confidence(
     summaries: Dict[str, Dict[str, Any]],
+    oos_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, float]:
     """
     Convert per-model diagnostics into comparable confidence scores.
     Scores blend information criteria, realised regression metrics,
     and one-sided F-tests (variance ratio) similar to Diebold-Mariano style
     screening used in production quant stacks.
+
+    Args:
+        summaries: Per-model in-sample diagnostic summaries (component_summaries).
+        oos_metrics: Optional trailing out-of-sample evaluation metrics from the
+            previous forecast window (self._latest_metrics).  When provided,
+            the RMSE-rank hybrid (Phase 10) uses these OOS values instead of the
+            always-empty in-sample regression_metrics, making the ranking live.
     """
 
     confidence: Dict[str, float] = {}
@@ -431,15 +439,45 @@ def derive_model_confidence(
     rmse_candidates = [m.get("rmse") for m in metrics_map.values() if m.get("rmse") is not None]
     baseline_rmse = float(min(rmse_candidates)) if rmse_candidates else None
     baseline_te = baseline_metrics.get("tracking_error")
+    # Wiring fix (2026-03-29): metrics_map is always {} in production because
+    # get_component_summaries() rebuilds _model_summaries from in-sample fit
+    # diagnostics on every forecast() call, overwriting the regression_metrics
+    # that evaluate() wrote in the prior window.  _score_from_metrics,
+    # _relative_rmse_score, _relative_te_score, and _variance_test_score are
+    # therefore all dead code at selection time unless we supply OOS values.
+    # When _oos_component_metrics is available use it to override per-model
+    # metrics and the baseline values so those scoring functions actually fire.
 
     # Phase 10: Hybrid RMSE-rank component — rank-normalized RMSE across available models.
     # EVR (SAMoSSA) is always ~1.0 by SSA construction; this counterbalances it with realized
     # forecast accuracy, preventing confidence_scaling from over-weighting near-flat forecasts.
+    #
+    # P0 fix (2026-03-29): Use trailing OOS metrics when provided.  metrics_map reads
+    # component_summaries["regression_metrics"] which is always {} in production because
+    # evaluate() writes those values AFTER this function returns (forecaster.py:2391).
+    # oos_metrics (self._latest_metrics from the prior evaluate() call) contains real
+    # OOS RMSE values so the RMSE-rank scores are non-trivial on every production run.
+    #
+    # Wiring fix (2026-03-29): _latest_metrics also contains an "ensemble" key alongside
+    # the four component models.  Filter oos_metrics to TRACKED_MODELS only so the
+    # ensemble's RMSE does not shift _min_rmse/_max_rmse and distort component rankings.
+    _oos_component_metrics: Optional[Dict[str, Dict[str, Any]]] = None
+    if oos_metrics:
+        _oos_component_metrics = {
+            model: m
+            for model, m in oos_metrics.items()
+            if model in TRACKED_MODELS
+        }
+    _rmse_source = _oos_component_metrics if (_oos_component_metrics and any(
+        (m or {}).get("rmse") is not None for m in _oos_component_metrics.values()
+    )) else metrics_map
     _rmse_values = {
         model: float(m.get("rmse"))
-        for model, m in metrics_map.items()
-        if m.get("rmse") is not None and np.isfinite(float(m.get("rmse")))
+        for model, m in _rmse_source.items()
+        if (m or {}).get("rmse") is not None and np.isfinite(float(m.get("rmse")))
     }
+    if _rmse_source is _oos_component_metrics and _rmse_values:
+        logger.info("Phase 10 RMSE-rank: using trailing OOS metrics (%d models)", len(_rmse_values))
     if len(_rmse_values) >= 2:
         _min_rmse = min(_rmse_values.values())
         _max_rmse = max(_rmse_values.values())
@@ -453,6 +491,36 @@ def derive_model_confidence(
         logger.info("Phase 10 RMSE-rank scores: %s", {m: f"{v:.3f}" for m, v in _rmse_rank_scores.items()})
     else:
         _rmse_rank_scores: Dict[str, float] = {}
+
+    # Wiring fix cont. (2026-03-29): if OOS component metrics are available,
+    # override baseline_rmse, baseline_te, baseline_metrics, and the per-model
+    # *_metrics variables so _score_from_metrics and _variance_test_score fire.
+    # These are currently dead because metrics_map / *_metrics come from in-sample
+    # summaries (always {} at selection time — see comment above).
+    if _oos_component_metrics:
+        # Baseline consistency fix (2026-03-29): use a SINGLE reference model for
+        # all three baseline values so _relative_rmse_score, _relative_te_score, and
+        # _variance_test_score all compare against the same denominator.
+        # Previous code set baseline_rmse = min(all_models) but baseline_te from
+        # SAMoSSA/SARIMAX — a scoring-contract mismatch.
+        # Priority: SAMoSSA OOS (primary TS baseline), then SARIMAX OOS fallback.
+        _oos_samossa = _oos_component_metrics.get("samossa") or {}
+        _oos_sarimax = _oos_component_metrics.get("sarimax") or {}
+        _oos_baseline = _oos_samossa if _oos_samossa.get("rmse") is not None else _oos_sarimax
+        if _oos_baseline:
+            baseline_metrics = _oos_baseline
+            _bl_rmse = _oos_baseline.get("rmse")
+            if _bl_rmse is not None and np.isfinite(float(_bl_rmse)):
+                baseline_rmse = float(_bl_rmse)
+            _bl_te = _oos_baseline.get("tracking_error")
+            if _bl_te is not None and np.isfinite(float(_bl_te)):
+                baseline_te = float(_bl_te)
+        logger.info(
+            "OOS baseline override: model=%s baseline_rmse=%.4f baseline_te=%s",
+            "samossa" if _oos_samossa.get("rmse") is not None else "sarimax",
+            baseline_rmse if baseline_rmse is not None else float("nan"),
+            f"{baseline_te:.4f}" if baseline_te is not None else "None",
+        )
 
     def _combine_scores(*scores: Optional[float]) -> Optional[float]:
         valid = [
@@ -600,6 +668,11 @@ def derive_model_confidence(
             return float(np.clip(0.2 * density * 10.0, 0.0, 0.6))
         return None
 
+    # Per-model regression_metrics override: prefer OOS values when available.
+    # In-sample summaries always have empty regression_metrics at selection time
+    # (get_component_summaries() rebuilds them without OOS data each forecast call).
+    _per_model_oos: Dict[str, Dict[str, Any]] = _oos_component_metrics or {}
+
     aic = sarimax_summary.get("aic")
     bic = sarimax_summary.get("bic")
     sarimax_score = None
@@ -607,7 +680,11 @@ def derive_model_confidence(
         sarimax_score = np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6))
         if not np.isfinite(sarimax_score):
             sarimax_score = None
-    sarimax_metrics = sarimax_summary.get("regression_metrics", {}) or {}
+    sarimax_metrics = (
+        _per_model_oos.get("sarimax")
+        or sarimax_summary.get("regression_metrics", {})
+        or {}
+    )
     sarimax_score = _combine_scores(
         sarimax_score,
         _score_from_metrics(sarimax_metrics),
@@ -680,7 +757,11 @@ def derive_model_confidence(
     )
 
     # Blend domain-normalized score with regression metrics when available.
-    garch_metrics = garch_summary.get("regression_metrics", {}) or {}
+    garch_metrics = (
+        _per_model_oos.get("garch")
+        or garch_summary.get("regression_metrics", {})
+        or {}
+    )
     garch_score = _combine_scores(
         garch_normalized,
         _score_from_metrics(garch_metrics),
@@ -698,7 +779,11 @@ def derive_model_confidence(
     samossa_score = None
     if evr is not None:
         samossa_score = float(np.clip(evr, 0.0, 1.0))
-    samossa_metrics = samossa_summary.get("regression_metrics", {}) or {}
+    samossa_metrics = (
+        _per_model_oos.get("samossa")
+        or samossa_summary.get("regression_metrics", {})
+        or {}
+    )
     samossa_score = _combine_scores(
         samossa_score,
         _score_from_metrics(samossa_metrics),
@@ -717,21 +802,34 @@ def derive_model_confidence(
         # when variance is large.  Previous formula 1/(1+var) gave ~0.09 for
         # var=10; log-scale gives ~0.30 which is fairer relative to other models.
         mssa_score = 1.0 / (1.0 + max(0.0, float(np.log1p(baseline_var))))
-    mssa_metrics = mssa_summary.get("regression_metrics", {}) or {}
+    mssa_metrics = (
+        _per_model_oos.get("mssa_rl")
+        or mssa_summary.get("regression_metrics", {})
+        or {}
+    )
+    # P1b fix (2026-03-29): cap change_point_boost before passing to _combine_scores.
+    # When recent_change_point_days=0, the unguarded formula returns 1.0 (maximum),
+    # which entered _combine_scores with equal weight to EVR and RMSE-rank, flipping
+    # candidate selection even when OOS RMSE strongly favours another model.
+    # Cap at 0.20 so it can provide a small nudge without overriding quality signals.
+    _cpb = _change_point_boost(mssa_summary)
+    _cpb_capped = float(np.clip(_cpb, 0.0, 0.20)) if _cpb is not None else None
     mssa_score = _combine_scores(
         mssa_score,
         _score_from_metrics(mssa_metrics),
         _variance_test_score(mssa_metrics, baseline_metrics)
         if baseline_metrics
         else None,
-        _change_point_boost(mssa_summary),
+        _cpb_capped,
         _rmse_rank_scores.get("mssa_rl"),  # Phase 10: RMSE-rank hybrid
     )
-    # Phase 7.10: MSSA-RL floor -- adversarial audit shows MSSA-RL is best single
-    # model 60% of the time but receives only 8.7% weight.  Ensure minimum score.
-    # Raised from 0.30 to 0.40 to match narrowed calibration range (0.4-0.85).
-    if mssa_score is not None:
-        mssa_score = max(mssa_score, 0.40)
+    # P1c fix (2026-03-29): MSSA-RL hard floor removed from selection path.
+    # The floor (0.40) was added when the selector had no OOS signal and MSSA-RL
+    # appeared under-weighted.  With P0 wiring OOS RMSE-rank into selection,
+    # the floor artificially props MSSA-RL above models with better OOS RMSE,
+    # re-introducing the same distortion in the opposite direction.
+    # If OOS evidence shows MSSA-RL is best, the RMSE-rank score will reflect
+    # that naturally; no floor needed.
     if mssa_score is not None:
         confidence["mssa_rl"] = mssa_score
 
@@ -783,16 +881,13 @@ def derive_model_confidence(
             uniform_score = 0.625  # Middle of 0.4-0.85 range
             calibrated_confidence = {model: uniform_score for model in floored_confidence.keys()}
 
-        # Phase 7.10: Cap confidence at empirical accuracy ceiling AFTER ranking.
-        # Adversarial audit: 0.9+ confidence with 41% win rate.  Downstream
-        # position sizing treats confidence as probability-of-profit, so cap at
-        # 0.65 (generous vs 41% actual) until backtested accuracy improves.
-        # Applied post-ranking to preserve relative ordering between models.
-        CONFIDENCE_ACCURACY_CAP = 0.65
-        calibrated_confidence = {
-            model: float(min(score, CONFIDENCE_ACCURACY_CAP))
-            for model, score in calibrated_confidence.items()
-        }
+        # P1a fix (2026-03-29): CONFIDENCE_ACCURACY_CAP removed from candidate
+        # scoring.  Applying a flat 0.65 cap here collapsed discrimination between
+        # SAMoSSA (RMSE=9.77) and MSSA-RL (RMSE=16.53) to the same value, making
+        # select_weights() insertion-order dependent rather than quality-dependent.
+        # The cap now lives at the call site (forecaster.py) and is applied only to
+        # the *ensemble* output confidence surfaced for position sizing — not to the
+        # per-model scores used to pick which candidate to run.
 
         logger.info(
             "Calibrated confidence (Phase 7.4 quantile-based): raw=%s calibrated=%s",

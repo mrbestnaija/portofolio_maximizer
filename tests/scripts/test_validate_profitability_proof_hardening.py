@@ -47,6 +47,7 @@ CREATE TABLE trade_executions (
     is_close INTEGER DEFAULT 0,
     is_diagnostic INTEGER DEFAULT 0,
     is_synthetic INTEGER DEFAULT 0,
+    is_contaminated INTEGER DEFAULT 0,
     entry_trade_id INTEGER,
     data_source TEXT
 );
@@ -54,10 +55,16 @@ CREATE TABLE trade_executions (
 
 _VIEW = """
 CREATE VIEW production_closed_trades AS
-    SELECT * FROM trade_executions
-    WHERE is_close = 1
-      AND COALESCE(is_diagnostic, 0) = 0
-      AND COALESCE(is_synthetic, 0) = 0;
+    SELECT t.* FROM trade_executions t
+    WHERE t.is_close = 1
+      AND t.is_diagnostic = 0
+      AND t.is_synthetic = 0
+      AND t.is_contaminated = 0
+      AND NOT EXISTS (
+          SELECT 1 FROM trade_executions o
+          WHERE o.id = t.entry_trade_id
+            AND o.is_synthetic = 1
+      );
 """
 
 
@@ -74,10 +81,11 @@ def _make_db(tmp_path: Path, with_view: bool = True) -> Path:
 
 def _insert(db: Path, rows: list[tuple]) -> None:
     """rows: (id, ticker, trade_date, action, realized_pnl, entry_price, exit_price,
-              is_close, is_diagnostic, is_synthetic, entry_trade_id, data_source)"""
+              is_close, is_diagnostic, is_synthetic, is_contaminated, entry_trade_id,
+              data_source)"""
     con = sqlite3.connect(db)
     con.executemany(
-        "INSERT INTO trade_executions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO trade_executions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
     con.commit()
@@ -98,9 +106,9 @@ class TestGetTradeStatsFromCanonicalView:
         db = _make_db(tmp_path)
         _insert(db, [
             # production winner
-            (1, "AAPL", "2026-01-10", "SELL", 100.0, 100.0, 110.0, 1, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-10", "SELL", 100.0, 100.0, 110.0, 1, 0, 0, 0, None, "live"),
             # synthetic with huge profit -- must be excluded
-            (2, "SYN1", "2026-01-11", "SELL", 9999.0, 1.0, 9999.0, 1, 0, 1, None, "synthetic"),
+            (2, "SYN1", "2026-01-11", "SELL", 9999.0, 1.0, 9999.0, 1, 0, 1, 0, None, "synthetic"),
         ])
         cur = _cursor(db)
         stats = get_trade_stats(cur)
@@ -110,8 +118,8 @@ class TestGetTradeStatsFromCanonicalView:
     def test_excludes_diagnostic_trades(self, tmp_path):
         db = _make_db(tmp_path)
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "SELL", 50.0, 100.0, 105.0, 1, 0, 0, None, "live"),
-            (2, "AAPL", "2026-01-11", "SELL", 500.0, 100.0, 150.0, 1, 1, 0, None, "diagnostic"),
+            (1, "AAPL", "2026-01-10", "SELL", 50.0, 100.0, 105.0, 1, 0, 0, 0, None, "live"),
+            (2, "AAPL", "2026-01-11", "SELL", 500.0, 100.0, 150.0, 1, 1, 0, 0, None, "diagnostic"),
         ])
         cur = _cursor(db)
         stats = get_trade_stats(cur)
@@ -122,9 +130,9 @@ class TestGetTradeStatsFromCanonicalView:
         db = _make_db(tmp_path)
         _insert(db, [
             # opening leg with stray PnL (integrity violation, but we must exclude it)
-            (1, "AAPL", "2026-01-09", "BUY",  200.0, 100.0, None, 0, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-09", "BUY",  200.0, 100.0, None, 0, 0, 0, 0, None, "live"),
             # proper closing leg
-            (2, "AAPL", "2026-01-10", "SELL",  50.0, 100.0, 105.0, 1, 0, 0, 1, "live"),
+            (2, "AAPL", "2026-01-10", "SELL",  50.0, 100.0, 105.0, 1, 0, 0, 0, 1, "live"),
         ])
         cur = _cursor(db)
         stats = get_trade_stats(cur)
@@ -134,10 +142,10 @@ class TestGetTradeStatsFromCanonicalView:
     def test_profit_factor_computed_from_canonical_only(self, tmp_path):
         db = _make_db(tmp_path)
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "SELL",  100.0, 100.0, 110.0, 1, 0, 0, None, "live"),
-            (2, "AAPL", "2026-01-11", "SELL",  -40.0, 110.0, 106.0, 1, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-10", "SELL",  100.0, 100.0, 110.0, 1, 0, 0, 0, None, "live"),
+            (2, "AAPL", "2026-01-11", "SELL",  -40.0, 110.0, 106.0, 1, 0, 0, 0, None, "live"),
             # synthetic loss -- must not reduce production profit factor
-            (3, "SYN0", "2026-01-12", "SELL", -500.0, 50.0, 1.0, 1, 0, 1, None, "synthetic"),
+            (3, "SYN0", "2026-01-12", "SELL", -500.0, 50.0, 1.0, 1, 0, 1, 0, None, "synthetic"),
         ])
         cur = _cursor(db)
         stats = get_trade_stats(cur)
@@ -148,8 +156,8 @@ class TestGetTradeStatsFromCanonicalView:
     def test_fallback_filter_when_view_absent(self, tmp_path):
         db = _make_db(tmp_path, with_view=False)  # no view
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "SELL",  80.0, 100.0, 108.0, 1, 0, 0, None, "live"),
-            (2, "SYN1", "2026-01-11", "SELL", 999.0, 1.0, 999.0, 1, 0, 1, None, "synthetic"),
+            (1, "AAPL", "2026-01-10", "SELL",  80.0, 100.0, 108.0, 1, 0, 0, 0, None, "live"),
+            (2, "SYN1", "2026-01-11", "SELL", 999.0, 1.0, 999.0, 1, 0, 1, 0, None, "synthetic"),
         ])
         cur = _cursor(db)
         # Should not raise; fallback filter applies is_close + diagnostic + synthetic
@@ -163,12 +171,12 @@ class TestCalculateWinRateFromCanonicalView:
         db = _make_db(tmp_path)
         _insert(db, [
             # 1 real win
-            (1, "AAPL", "2026-01-10", "SELL",  30.0, 100.0, 103.0, 1, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-10", "SELL",  30.0, 100.0, 103.0, 1, 0, 0, 0, None, "live"),
             # 1 real loss
-            (2, "AAPL", "2026-01-11", "SELL", -10.0, 103.0, 102.0, 1, 0, 0, None, "live"),
+            (2, "AAPL", "2026-01-11", "SELL", -10.0, 103.0, 102.0, 1, 0, 0, 0, None, "live"),
             # synthetic wins (100%) -- must be excluded
-            (3, "SYN0", "2026-01-12", "SELL", 999.0, 1.0, 999.0, 1, 0, 1, None, "synthetic"),
-            (4, "SYN1", "2026-01-13", "SELL", 888.0, 1.0, 888.0, 1, 0, 1, None, "synthetic"),
+            (3, "SYN0", "2026-01-12", "SELL", 999.0, 1.0, 999.0, 1, 0, 1, 0, None, "synthetic"),
+            (4, "SYN1", "2026-01-13", "SELL", 888.0, 1.0, 888.0, 1, 0, 1, 0, None, "synthetic"),
         ])
         cur = _cursor(db)
         win_rate = calculate_win_rate(cur)
@@ -179,7 +187,7 @@ class TestCalculateWinRateFromCanonicalView:
     def test_returns_none_when_no_production_closed_trades(self, tmp_path):
         db = _make_db(tmp_path)
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "BUY", None, 100.0, None, 0, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-10", "BUY", None, 100.0, None, 0, 0, 0, 0, None, "live"),
         ])
         cur = _cursor(db)
         win_rate = calculate_win_rate(cur)
@@ -208,8 +216,8 @@ class TestValidateProfitabilityProofIntegration:
             pytest.skip("guarded_sqlite_connect unavailable in this environment")
 
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "BUY",  None,  100.0, None, 0, 0, 0, None, "live"),
-            (2, "AAPL", "2026-01-11", "SELL",  50.0, 100.0, 105.0, 1, 0, 0, 1, "live"),
+            (1, "AAPL", "2026-01-10", "BUY",  None,  100.0, None, 0, 0, 0, 0, None, "live"),
+            (2, "AAPL", "2026-01-11", "SELL",  50.0, 100.0, 105.0, 1, 0, 0, 0, 1, "live"),
         ])
         result = validate_profitability_proof(str(db))
         assert result["metrics"].get("data_source") == "production_closed_trades", (
@@ -228,7 +236,7 @@ class TestValidateProfitabilityProofIntegration:
         for i in range(35):
             rows.append((
                 i + 1, f"SYN{i}", f"2026-01-{(i % 28) + 1:02d}", "SELL",
-                100.0, 10.0, 20.0, 1, 0, 1, None, "synthetic"
+                100.0, 10.0, 20.0, 1, 0, 1, 0, None, "synthetic"
             ))
         _insert(db, rows)
 
@@ -250,7 +258,7 @@ class TestValidateProfitabilityProofIntegration:
         for i in range(35):
             rows.append((
                 i + 1, "AAPL", f"2026-01-{(i % 28) + 1:02d}", "SELL",
-                200.0, 100.0, 120.0, 1, 1, 0, None, "diagnostic"
+                200.0, 100.0, 120.0, 1, 1, 0, 0, None, "diagnostic"
             ))
         _insert(db, rows)
 
@@ -274,7 +282,7 @@ class TestImportPathCollision:
 
         db = _make_db(tmp_path)
         _insert(db, [
-            (1, "AAPL", "2026-01-10", "SELL", 80.0, 100.0, 108.0, 1, 0, 0, None, "live"),
+            (1, "AAPL", "2026-01-10", "SELL", 80.0, 100.0, 108.0, 1, 0, 0, 0, None, "live"),
         ])
 
         real_import = builtins.__import__
@@ -306,7 +314,7 @@ class TestImportPathCollision:
                 i + 1, "AAPL", f"2026-01-{(i % 28) + 1:02d}", "SELL",
                 50.0 if i % 2 == 0 else -20.0,
                 100.0, 110.0 if i % 2 == 0 else 98.0,
-                1, 0, 0, None, "live",
+                1, 0, 0, 0, None, "live",
             ))
         _insert(db, rows)
 
@@ -323,6 +331,18 @@ class TestImportPathCollision:
         for v in result["violations"]:
             assert "import" not in v.lower(), f"Wiring error leaked into violations: {v}"
             assert "sqlite_guardrails" not in v.lower()
+
+    def test_fallback_rejects_null_flags_and_contaminated_rows(self, tmp_path):
+        db = _make_db(tmp_path, with_view=False)
+        _insert(db, [
+            (1, "AAPL", "2026-01-10", "SELL", 40.0, 100.0, 104.0, 1, None, None, 0, None, "live"),
+            (2, "MSFT", "2026-01-11", "SELL", 60.0, 200.0, 206.0, 1, 0, 0, 1, None, "live"),
+            (3, "NVDA", "2026-01-12", "SELL", 30.0, 300.0, 303.0, 1, 0, 0, 0, None, "live"),
+        ])
+        cur = _cursor(db)
+        stats = get_trade_stats(cur)
+        assert stats["total_trades"] == 1
+        assert stats["total_pnl"] == pytest.approx(30.0)
 
 
 # ---------------------------------------------------------------------------

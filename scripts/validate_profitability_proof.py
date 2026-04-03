@@ -73,6 +73,32 @@ def _view_exists(cursor) -> bool:
     return cursor.fetchone()[0] > 0
 
 
+def _trade_execution_columns(cursor) -> set[str]:
+    """Return trade_executions column names for strict fallback filtering."""
+    cursor.execute("PRAGMA table_info(trade_executions)")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def _fallback_closed_trade_source(cursor) -> str:
+    """Strict fail-closed fallback for pre-view databases."""
+    cols = _trade_execution_columns(cursor)
+    where = ["t.is_close = 1"]
+    if "is_diagnostic" in cols:
+        where.append("t.is_diagnostic = 0")
+    if "is_synthetic" in cols:
+        where.append("t.is_synthetic = 0")
+    if "is_contaminated" in cols:
+        where.append("t.is_contaminated = 0")
+    if "entry_trade_id" in cols and "is_synthetic" in cols:
+        where.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM trade_executions o "
+            "WHERE o.id = t.entry_trade_id "
+            "AND o.is_synthetic = 1)"
+        )
+    return "(SELECT * FROM trade_executions t WHERE " + " AND ".join(where) + ")"
+
+
 # ---------------------------------------------------------------------------
 # Data-quality audits (still read trade_executions for completeness; these
 # findings are informational and do NOT influence is_proof_valid).
@@ -129,13 +155,7 @@ def get_trade_stats(cursor) -> Dict[str, Any]:
     if _view_exists(cursor):
         table = "production_closed_trades"
     else:
-        # Fallback for databases where migration has not yet run.
-        table = (
-            "(SELECT * FROM trade_executions "
-            "WHERE is_close=1 "
-            "AND COALESCE(is_diagnostic,0)=0 "
-            "AND COALESCE(is_synthetic,0)=0)"
-        )
+        table = _fallback_closed_trade_source(cursor)
 
     cursor.execute(f"""
         SELECT
@@ -174,12 +194,7 @@ def calculate_win_rate(cursor) -> Optional[float]:
     if _view_exists(cursor):
         table = "production_closed_trades"
     else:
-        table = (
-            "(SELECT * FROM trade_executions "
-            "WHERE is_close=1 "
-            "AND COALESCE(is_diagnostic,0)=0 "
-            "AND COALESCE(is_synthetic,0)=0)"
-        )
+        table = _fallback_closed_trade_source(cursor)
 
     cursor.execute(f"""
         SELECT

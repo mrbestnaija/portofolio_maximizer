@@ -678,10 +678,23 @@ class TimeSeriesSignalGenerator:
 
             # For 1-day signals, step-1 CI == terminal CI; they're identical.
             # For multi-step signals, use terminal CI so SNR reflects full horizon uncertainty.
+            # Exception: when MSSA_RL is the DISABLE_DEFAULT fallback, use step-1 CI.
+            # MSSA_RL's sqrt(step+1) growth over-widens CI for range-bound periods;
+            # the near-term directional call is the relevant signal edge in fallback mode.
             _forecast_horizon = getattr(self, "_forecast_horizon", None) or self.config.get(
                 "forecast_horizon", 30
             ) if hasattr(self, "config") and isinstance(self.config, dict) else 30
+            _effective_default = str(forecast_bundle.get("default_model") or "").strip().upper()
+            # Only trust default_model label when the resolver actually used mean_forecast.
+            # If mean_forecast was missing and the resolver fell through to another model
+            # payload, default_model is stale and applying MSSA_RL-specific logic would
+            # be a wiring mismatch (softer gate applied to a different model's CI).
+            _mssa_rl_fallback = (
+                _effective_default == "MSSA_RL" and forecast_source == "mean_forecast"
+            )
             if isinstance(_forecast_horizon, int) and _forecast_horizon <= 1:
+                lower_ci, upper_ci = self._extract_ci_bounds_step1(primary_forecast)
+            elif _mssa_rl_fallback:
                 lower_ci, upper_ci = self._extract_ci_bounds_step1(primary_forecast)
             else:
                 lower_ci, upper_ci = self._extract_ci_bounds(primary_forecast)
@@ -691,16 +704,43 @@ class TimeSeriesSignalGenerator:
                 lower_ci=lower_ci,
                 upper_ci=upper_ci,
             )
+            # MSSA_RL fallback uses a softer SNR threshold capped at 1.0.
+            # min() prevents inversion if the global threshold is already below 1.0.
+            _snr_threshold = (
+                min(self._min_signal_to_noise, 1.0)
+                if _mssa_rl_fallback
+                else self._min_signal_to_noise
+            )
             _snr_gate_blocked = False
-            if snr is not None and self._min_signal_to_noise > 0 and snr < self._min_signal_to_noise:
+            if snr is not None and _snr_threshold > 0 and snr < _snr_threshold:
                 logger.info(
-                    "[SNR_GATE] %s: SNR %.3f < threshold %.3f — zeroing net return "
+                    "[SNR_GATE] %s: SNR %.3f < threshold %.3f (mssa_rl_fallback=%s) — zeroing net return "
                     "(CI too wide relative to expected return; signal suppressed)",
-                    ticker, snr, self._min_signal_to_noise,
+                    ticker, snr, _snr_threshold, _mssa_rl_fallback,
                 )
                 net_trade_return = 0.0
                 net_expected_return = 0.0
                 _snr_gate_blocked = True
+            elif _mssa_rl_fallback and snr is None:
+                # MSSA_RL's baseline_variance should always produce a finite CI.
+                # SNR=None here means zero-width or degenerate CI — block rather than
+                # silently pass, which would be a threshold dodge via missing data.
+                logger.warning(
+                    "[SNR_GATE] %s: MSSA_RL fallback has degenerate CI (SNR=None) — "
+                    "zeroing net return (baseline_variance likely zero)",
+                    ticker,
+                )
+                net_trade_return = 0.0
+                net_expected_return = 0.0
+                _snr_gate_blocked = True
+            elif snr is None and self._min_signal_to_noise > 0:
+                # Non-MSSA_RL path: CI unavailable, gate cannot fire, but log so the
+                # absence of SNR filtering is visible in diagnostics (not a silent pass).
+                logger.debug(
+                    "[SNR_GATE] %s: SNR unavailable (CI missing or degenerate) — "
+                    "gate skipped for model=%s",
+                    ticker, _effective_default or "unknown",
+                )
 
             model_agreement = self._check_model_agreement(forecast_bundle)
             diagnostics = self._evaluate_diagnostics_details(forecast_bundle)
@@ -750,7 +790,7 @@ class TimeSeriesSignalGenerator:
                     risk_score = min(1.0, risk_score + 0.10)
                     confidence = max(0.0, confidence - 0.05)
 
-            action = self._determine_action(
+            action, _hold_reason = self._determine_action(
                 expected_return=expected_return,
                 net_trade_return=net_trade_return,
                 confidence=confidence,
@@ -847,6 +887,20 @@ class TimeSeriesSignalGenerator:
                 provenance["snr_gate_blocked"] = True
                 provenance["snr_gate_threshold"] = self._min_signal_to_noise
 
+            # Structured HOLD reason — disambiguates why action='HOLD' was chosen.
+            # Allows aggregating HOLD causes across runs without parsing log strings.
+            # Codes: SNR_GATE | CONFIDENCE_BELOW_THRESHOLD | MIN_RETURN | RISK_TOO_HIGH
+            #        | ZERO_EXPECTED_RETURN | DIRECTIONAL_GATE | QUANT_VALIDATION_FAIL
+            if action == "HOLD":
+                if _snr_gate_blocked:
+                    provenance["hold_reason"] = "SNR_GATE"
+                elif _directional_gate_applied:
+                    provenance["hold_reason"] = "DIRECTIONAL_GATE"
+                elif _hold_reason is not None:
+                    provenance["hold_reason"] = _hold_reason
+                else:
+                    provenance["hold_reason"] = "UNKNOWN"
+
             provenance['decision_context'] = {
                 'expected_return': expected_return,
                 'expected_return_net': net_expected_return,
@@ -938,6 +992,7 @@ class TimeSeriesSignalGenerator:
                         )
                         action = "HOLD"
                         signal.action = "HOLD"
+                        signal.provenance["hold_reason"] = "QUANT_VALIDATION_FAIL"
 
                 self._log_quant_validation(
                     ticker=ticker,
@@ -1746,30 +1801,36 @@ class TimeSeriesSignalGenerator:
                          risk_score: float,
                          confidence_threshold: float,
                          min_expected_return: float,
-                         max_risk_score: float) -> str:
+                         max_risk_score: float) -> tuple:
         """
         Determine trading action based on forecast and risk metrics.
 
         Returns:
-            'BUY', 'SELL', or 'HOLD'
+            Tuple of (action: str, hold_reason: Optional[str]) where action is
+            'BUY', 'SELL', or 'HOLD'. hold_reason is None for non-HOLD actions
+            and one of the following structured codes for HOLD:
+              - 'CONFIDENCE_BELOW_THRESHOLD'
+              - 'MIN_RETURN'
+              - 'RISK_TOO_HIGH'
+              - 'ZERO_EXPECTED_RETURN'
         """
         # Must meet minimum thresholds
         if confidence < confidence_threshold:
-            return 'HOLD'
+            return 'HOLD', 'CONFIDENCE_BELOW_THRESHOLD'
 
         # net_trade_return is always non-negative and already clears estimated friction.
         if net_trade_return + 1e-12 < min_expected_return:
-            return 'HOLD'
+            return 'HOLD', 'MIN_RETURN'
 
         if risk_score > max_risk_score:
-            return 'HOLD'
+            return 'HOLD', 'RISK_TOO_HIGH'
 
         # Determine direction
         if expected_return > 0:
-            return 'BUY'
+            return 'BUY', None
         if expected_return < 0:
-            return 'SELL'
-        return 'HOLD'
+            return 'SELL', None
+        return 'HOLD', 'ZERO_EXPECTED_RETURN'
 
     def _compute_atr(self, market_data: Optional[pd.DataFrame], period: int = 14) -> Optional[float]:
         """Compute Average True Range (ATR) from OHLC bar data.
@@ -2566,31 +2627,45 @@ class TimeSeriesSignalGenerator:
         _j_n = len(pairs_conf)
         _j_w = int(sum(pairs_win)) if pairs_win else 0
         _j_l = _j_n - _j_w
+        db_file = Path(
+            db_path
+            or os.getenv("PORTFOLIO_DB_PATH")
+            or "data/portfolio_maximizer.db"
+        )
         if _j_n < 30 or _j_w < 5 or _j_l < 5:
-            # 2. Ticker-local DB fallback — also triggers when JSONL is class-imbalanced.
-            db_file = Path(
-                db_path
-                or os.getenv("PORTFOLIO_DB_PATH")
-                or "data/portfolio_maximizer.db"
-            )
-            pairs_conf, pairs_win = self._load_realized_outcome_pairs(
-                db_file=db_file,
-                ticker=ticker,
-                limit=1200,
-            )
-            source = "db_local"
-
-            _db_n = len(pairs_conf)
-            _db_w = int(sum(pairs_win)) if pairs_win else 0
-            _db_l = _db_n - _db_w
-            if (_db_n < 30 or _db_w < 5 or _db_l < 5) and ticker:
-                # 3. Global DB fallback.
-                pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+            if _j_n >= 30 and _j_l < 5:
+                # JSONL has enough total pairs but is class-imbalanced (very few losses).
+                # AUGMENT with DB non-mechanical pairs instead of replacing — preserves
+                # the JSONL signal mass while adding the minority class from live trades.
+                # Replacing would discard 30+ valid JSONL pairs in favour of DB-only.
+                _aug_conf, _aug_win = self._load_realized_outcome_pairs(
                     db_file=db_file,
                     ticker="",
-                    limit=2000,
+                    limit=200,
                 )
-                source = "db_global"
+                pairs_conf = pairs_conf + _aug_conf
+                pairs_win = pairs_win + _aug_win
+                source = "jsonl+db_augmented"
+            else:
+                # 2. Ticker-local DB fallback — JSONL is too small.
+                pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                    db_file=db_file,
+                    ticker=ticker,
+                    limit=1200,
+                )
+                source = "db_local"
+
+                _db_n = len(pairs_conf)
+                _db_w = int(sum(pairs_win)) if pairs_win else 0
+                _db_l = _db_n - _db_w
+                if (_db_n < 30 or _db_w < 5 or _db_l < 5) and ticker:
+                    # 3. Global DB fallback.
+                    pairs_conf, pairs_win = self._load_realized_outcome_pairs(
+                        db_file=db_file,
+                        ticker="",
+                        limit=2000,
+                    )
+                    source = "db_global"
 
         n = len(pairs_conf)
         wins = int(sum(pairs_win))
@@ -2625,6 +2700,19 @@ class TimeSeriesSignalGenerator:
 
             x_train, x_holdout = x[:split_idx], x[split_idx:]
             y_train, y_holdout = y[:split_idx], y[split_idx:]
+
+            # PLATT-BUG3: class-imbalance guard — chronological ordering means recent
+            # losses cluster in the holdout slice, leaving training single-class.
+            # sklearn LR raises ValueError on single-class input; guard prevents silent
+            # raw-conf fallback masking the root cause.
+            _train_classes = set(int(v) for v in y_train)
+            if len(_train_classes) < 2:
+                logger.warning(
+                    "Platt calibration skipped -- training slice is single-class "
+                    "(classes=%s, n_train=%d, n_total=%d source=%s); using raw.",
+                    _train_classes, len(y_train), n, source,
+                )
+                return float(max(0.05, min(0.95, raw_conf)))
 
             from sklearn.linear_model import LogisticRegression  # pylint: disable=import-outside-toplevel
             clf = LogisticRegression(max_iter=500, C=1.0, solver="lbfgs")
@@ -2742,6 +2830,11 @@ class TimeSeriesSignalGenerator:
             action = str(entry.get("action", "")).upper()
             if action and action not in {"BUY", "SELL"}:
                 continue
+            # Exclude synthetic execution entries — mirrors the DB tier's
+            # `is_synthetic=0` filter so both tiers train on production signals only.
+            exec_mode = str(entry.get("execution_mode") or "").lower()
+            if exec_mode == "synthetic":
+                continue
             # Prefer raw_confidence (pre-blend) so LR trains on the same distribution
             # that predict_proba is evaluated on.  Fall back to blended 'confidence'
             # for backward-compatible reads of older JSONL entries (Phase 7.16-C1).
@@ -2792,11 +2885,14 @@ class TimeSeriesSignalGenerator:
             "  AND action IN ('BUY', 'SELL')",
             "  AND COALESCE(confidence_calibrated, effective_confidence, base_confidence) IS NOT NULL",
             "  AND is_close = 1",
-            "  AND COALESCE(is_diagnostic, 0) = 0",
-            "  AND COALESCE(is_synthetic, 0) = 0",
+            "  AND is_diagnostic = 0",
+            "  AND is_synthetic = 0",
             # Exclude mechanical exits: stop_loss and max_holding exits are directionally
             # uninformative and poison the Platt logistic regression with irrelevant labels.
-            "  AND COALESCE(exit_reason, '') NOT IN ('stop_loss', 'max_holding', 'time_exit', 'forced_exit')",
+            # UPPER() required: DB stores uppercase ('STOP_LOSS', 'TIME_EXIT') but the
+            # original filter used lowercase — SQLite NOT IN is case-sensitive, so the
+            # filter was silently passing all mechanical exits through.
+            "  AND UPPER(COALESCE(exit_reason, '')) NOT IN ('STOP_LOSS', 'MAX_HOLDING', 'TIME_EXIT', 'FORCED_EXIT')",
         ]
         params: List[Any] = []
         ticker_norm = str(ticker or "").strip().upper()
@@ -2811,6 +2907,12 @@ class TimeSeriesSignalGenerator:
         try:
             conn = sqlite3.connect(str(db_file), timeout=2.0)
             cur = conn.cursor()
+            cols = {
+                row[1]
+                for row in cur.execute("PRAGMA table_info(trade_executions)").fetchall()
+            }
+            if "is_contaminated" in cols:
+                query.append("  AND is_contaminated = 0")
             cur.execute("\n".join(query), params)
             rows = cur.fetchall()
         except Exception as exc:
@@ -2958,6 +3060,10 @@ class TimeSeriesSignalGenerator:
             ),
             'p_up': signal.p_up,
             'directional_gate_applied': signal.directional_gate_applied,
+            # Structured HOLD reason — enables aggregating HOLD causes without log parsing.
+            # Populated for all action='HOLD' signals. None for BUY/SELL.
+            'hold_reason': (signal.provenance or {}).get("hold_reason") if isinstance(signal.provenance, dict) else None,
+            'snr_gate_blocked': (signal.provenance or {}).get("snr_gate_blocked") if isinstance(signal.provenance, dict) else None,
         }
 
         try:
