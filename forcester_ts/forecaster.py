@@ -2374,6 +2374,18 @@ class TimeSeriesForecaster:
             else None
         )
 
+        # Fail closed when the current ticker is unknown: without a ticker we cannot
+        # scope audit files to this asset, so any match would be a cross-ticker
+        # contamination of OOS metrics (AAPL metrics used to select MSFT weights).
+        # _resolve_ticker() returns "" when the series name is absent or generic;
+        # that stores as None in dataset metadata → fail closed here rather than
+        # falling through the filter with both sides unknown.
+        if not current_ticker:
+            logger.debug(
+                "[TS_MODEL] _load_trailing_oos_metrics: skipping — current ticker unknown"
+            )
+            return {}
+
         try:
             files = sorted(
                 self._audit_dir.glob("forecast_audit_*.json"),
@@ -2394,9 +2406,8 @@ class TimeSeriesForecaster:
             # --- Ticker filter ---
             dataset = audit.get("dataset") or {}
             audit_ticker = dataset.get("ticker") or None
-            if current_ticker and audit_ticker:
-                if current_ticker.upper() != str(audit_ticker).upper():
-                    continue  # different asset — skip
+            if audit_ticker and current_ticker.upper() != str(audit_ticker).upper():
+                continue  # different asset — skip
 
             # --- Horizon filter ---
             audit_horizon = dataset.get("forecast_horizon")

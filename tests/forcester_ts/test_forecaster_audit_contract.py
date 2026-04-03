@@ -452,3 +452,37 @@ def test_build_ensemble_prefers_same_instance_latest_metrics_over_disk_metrics(
         "samossa": 0.61,
         "garch": 0.56,
     }
+
+
+def test_load_trailing_oos_metrics_fails_closed_when_ticker_unknown(monkeypatch, tmp_path: Path) -> None:
+    """Regression: when current ticker is unknown (empty series name), must return {}
+    rather than loading the newest audit file regardless of ticker.
+
+    _resolve_ticker() returns '' when price_series.name is absent or a generic column
+    name; the dataset metadata stores that as None. Without this guard, a tickerless
+    forecaster (e.g. run from a bare pd.Series) would consume OOS metrics from an
+    unrelated asset's audit file, silently poisoning weight selection.
+    """
+    audit_dir = tmp_path / "forecast_audits"
+    audit_dir.mkdir()
+    _write_audit(audit_dir, "forecast_audit_msft.json", "MSFT", 30)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(audit_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    # Fit with a series whose name is absent → ticker resolves to ""
+    series = pd.Series(list(range(60)), dtype=float, index=index)
+    series.name = None
+    forecaster.fit(series, ticker="")  # explicitly tickerless
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    # current_ticker is None in metadata — must fail closed, not load MSFT metrics
+    result = forecaster._load_trailing_oos_metrics()
+    assert result == {}, (
+        f"Tickerless forecaster must not load unrelated audit metrics; got {result}"
+    )
