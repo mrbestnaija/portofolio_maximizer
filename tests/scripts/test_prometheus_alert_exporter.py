@@ -31,6 +31,22 @@ def test_collect_metrics_snapshot_reads_canonical_artifacts(tmp_path) -> None:
             "price_series": {"AAPL": [{"date": "2026-04-02", "close": 100.0}]},
             "robustness": {"status": "WARN"},
             "alerts": ["Artifact binding failed."],
+            "evidence": {
+                "production_gate": {
+                    "generated_utc": "2026-04-02T05:58:00Z",
+                },
+                "production_gate_refresh": {
+                    "enabled": True,
+                    "attempted": False,
+                    "ok": None,
+                    "status": "SKIPPED",
+                    "reason": "fresh_artifact",
+                    "actor": "dashboard_bridge",
+                    "last_success_utc": "2026-04-02T05:59:10Z",
+                    "last_success_actor": "dashboard_launch",
+                    "last_success_generated_utc": "2026-04-02T05:58:00Z",
+                },
+            },
         },
     )
     _write_json(
@@ -83,6 +99,11 @@ def test_collect_metrics_snapshot_reads_canonical_artifacts(tmp_path) -> None:
     assert snapshot["gate"]["status"] == "FAIL"
     assert snapshot["gate"]["artifact_binding_pass"] == 0
     assert snapshot["gate"]["remaining_closed_trades"] == 12
+    assert snapshot["gate_refresh"]["enabled"] == 1
+    assert snapshot["gate_refresh"]["status"] == "SKIPPED"
+    assert snapshot["gate_refresh"]["actor"] == "dashboard_bridge"
+    assert snapshot["gate_refresh"]["last_success_actor"] == "dashboard_launch"
+    assert snapshot["gate_refresh"]["last_success_same_artifact"] == 1
     assert snapshot["audit"]["snapshot_count"] == 1
     assert snapshot["alerts"]["production_gate_fail"] == 1
     assert snapshot["alerts"]["data_origin_not_live"] == 1
@@ -110,6 +131,59 @@ def test_render_metrics_emits_expected_alert_gauges(tmp_path) -> None:
     assert 'pmx_dashboard_origin_state{state="unknown"} 1' not in text
     assert 'pmx_dashboard_origin_state{state="live"}' not in text
     assert 'pmx_dashboard_origin_state{origin="unknown"} 1' in text
+
+
+def test_render_metrics_emits_refresh_provenance_gauges(tmp_path) -> None:
+    dashboard = tmp_path / "dashboard_data.json"
+    production_gate = tmp_path / "production_gate_latest.json"
+    _write_json(
+        dashboard,
+        {
+            "meta": {"ts": "2026-04-02T05:59:30Z", "data_origin": "live"},
+            "trade_events": [],
+            "signals": [],
+            "price_series": {},
+            "evidence": {
+                "production_gate": {
+                    "generated_utc": "2026-04-02T05:58:00Z",
+                    "status": "FAIL",
+                },
+                "production_gate_refresh": {
+                    "enabled": True,
+                    "attempted": False,
+                    "ok": None,
+                    "status": "SKIPPED",
+                    "reason": "fresh_artifact",
+                    "actor": "dashboard_bridge",
+                    "last_success_utc": "2026-04-02T05:59:10Z",
+                    "last_success_actor": "dashboard_launch",
+                    "last_success_generated_utc": "2026-04-02T05:58:00Z",
+                },
+            },
+        },
+    )
+    _write_json(
+        production_gate,
+        {
+            "timestamp_utc": "2026-04-02T05:58:00Z",
+            "production_profitability_gate": {"status": "FAIL"},
+        },
+    )
+
+    snapshot = mod.collect_metrics_snapshot(
+        dashboard_json=dashboard,
+        production_gate_json=production_gate,
+        audit_db=tmp_path / "missing_audit.db",
+        now=datetime(2026, 4, 2, 6, 0, 0, tzinfo=timezone.utc),
+    )
+    text = mod.render_metrics(snapshot)
+
+    assert "pmx_production_gate_refresh_enabled 1" in text
+    assert "pmx_production_gate_refresh_attempted 0" in text
+    assert "pmx_production_gate_refresh_last_success_same_artifact 1" in text
+    assert 'pmx_production_gate_refresh_status{status="skipped"} 1' in text
+    assert 'pmx_production_gate_refresh_actor{actor="dashboard_bridge"} 1' in text
+    assert 'pmx_production_gate_refresh_last_success_actor{actor="dashboard_launch"} 1' in text
 
 
 def test_collect_metrics_snapshot_flags_stale_gate_using_bridge_policy(tmp_path, monkeypatch) -> None:

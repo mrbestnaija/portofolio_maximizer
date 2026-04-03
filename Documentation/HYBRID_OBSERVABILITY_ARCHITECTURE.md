@@ -127,6 +127,7 @@ It does **not** compute business truth independently.
 - Prometheus scrape target on `127.0.0.1:9108`
 - Alert rules driven by artifact freshness and gate status
 - Prometheus freshness thresholds reuse the same env-driven policies as the canonical dashboard bridge
+- Prometheus exporter also surfaces production-gate refresh provenance, including current actor/status and the last successful refresh for the current artifact
 
 ### Later
 

@@ -181,6 +181,7 @@ def collect_metrics_snapshot(
     evidence = dashboard.get("evidence", {}) if isinstance(dashboard, dict) else {}
     robustness = dashboard.get("robustness", {}) if isinstance(dashboard, dict) else {}
     gate_from_dashboard = evidence.get("production_gate", {}) if isinstance(evidence, dict) else {}
+    gate_refresh = evidence.get("production_gate_refresh", {}) if isinstance(evidence, dict) else {}
 
     gate = gate_payload.get("production_profitability_gate", {}) if isinstance(gate_payload, dict) else {}
     proof = gate_payload.get("profitability_proof", {}) if isinstance(gate_payload, dict) else {}
@@ -214,6 +215,26 @@ def collect_metrics_snapshot(
     remaining_days = int(
         (((proof.get("evidence_progress", {}) or {}).get("remaining_trading_days")) or 0)
     ) if isinstance(proof, dict) else 0
+    gate_generated_utc = (
+        str(gate_from_dashboard.get("generated_utc") or gate_payload.get("timestamp_utc") or "").strip()
+        or None
+    )
+    refresh_last_success_generated_utc = str(
+        gate_refresh.get("last_success_generated_utc") or ""
+    ).strip() or None
+    refresh_last_success_age_seconds = _age_seconds(
+        dashboard_json,
+        payload={"generated_utc": gate_refresh.get("last_success_utc")},
+        now=now,
+    ) if isinstance(gate_refresh, dict) and gate_refresh.get("last_success_utc") else None
+    refresh_status = str(
+        gate_refresh.get("status")
+        or ("DISABLED" if gate_refresh.get("enabled") is False else "UNKNOWN")
+    ).upper()
+    refresh_actor = str(gate_refresh.get("actor") or "unknown").strip().lower() or "unknown"
+    refresh_last_success_actor = (
+        str(gate_refresh.get("last_success_actor") or "unknown").strip().lower() or "unknown"
+    )
 
     alert_flags = {
         "dashboard_payload_missing": 1 if dash_err is not None else 0,
@@ -252,6 +273,22 @@ def collect_metrics_snapshot(
             "remaining_closed_trades": remaining_closed,
             "remaining_trading_days": remaining_days,
         },
+        "gate_refresh": {
+            "enabled": 1 if bool(gate_refresh.get("enabled")) else 0,
+            "attempted": 1 if bool(gate_refresh.get("attempted")) else 0,
+            "ok": 1 if gate_refresh.get("ok") is True else 0,
+            "status": refresh_status,
+            "actor": refresh_actor,
+            "last_success_actor": refresh_last_success_actor,
+            "last_success_age_seconds": refresh_last_success_age_seconds,
+            "last_success_same_artifact": 1
+            if (
+                gate_generated_utc is not None
+                and refresh_last_success_generated_utc is not None
+                and gate_generated_utc == refresh_last_success_generated_utc
+            )
+            else 0,
+        },
         "audit": audit,
         "policies": {
             "production_gate_stale_seconds": production_gate_stale_seconds,
@@ -286,6 +323,7 @@ def _enum_metric_lines(
 def render_metrics(snapshot: Dict[str, Any]) -> str:
     dashboard = snapshot.get("dashboard", {})
     gate = snapshot.get("gate", {})
+    gate_refresh = snapshot.get("gate_refresh", {})
     audit = snapshot.get("audit", {})
     policies = snapshot.get("policies", {})
     alerts = snapshot.get("alerts", {})
@@ -330,6 +368,21 @@ def render_metrics(snapshot: Dict[str, Any]) -> str:
         "# HELP pmx_proof_remaining_trading_days Remaining trading days required for proof runway.",
         "# TYPE pmx_proof_remaining_trading_days gauge",
         _metric_line("pmx_proof_remaining_trading_days", gate.get("remaining_trading_days", 0)),
+        "# HELP pmx_production_gate_refresh_enabled 1 when the canonical payload includes production gate refresh metadata.",
+        "# TYPE pmx_production_gate_refresh_enabled gauge",
+        _metric_line("pmx_production_gate_refresh_enabled", gate_refresh.get("enabled", 0)),
+        "# HELP pmx_production_gate_refresh_attempted 1 when the current refresh state reflects an active attempt.",
+        "# TYPE pmx_production_gate_refresh_attempted gauge",
+        _metric_line("pmx_production_gate_refresh_attempted", gate_refresh.get("attempted", 0)),
+        "# HELP pmx_production_gate_refresh_ok 1 when the current refresh state is a successful attempt.",
+        "# TYPE pmx_production_gate_refresh_ok gauge",
+        _metric_line("pmx_production_gate_refresh_ok", gate_refresh.get("ok", 0)),
+        "# HELP pmx_production_gate_refresh_last_success_age_seconds Age of the last successful production gate refresh recorded in the canonical payload.",
+        "# TYPE pmx_production_gate_refresh_last_success_age_seconds gauge",
+        _metric_line("pmx_production_gate_refresh_last_success_age_seconds", gate_refresh.get("last_success_age_seconds", 0)),
+        "# HELP pmx_production_gate_refresh_last_success_same_artifact 1 when the last successful refresh matches the current gate artifact timestamp.",
+        "# TYPE pmx_production_gate_refresh_last_success_same_artifact gauge",
+        _metric_line("pmx_production_gate_refresh_last_success_same_artifact", gate_refresh.get("last_success_same_artifact", 0)),
         "# HELP pmx_dashboard_audit_db_present 1 when data/dashboard_audit.db exists.",
         "# TYPE pmx_dashboard_audit_db_present gauge",
         _metric_line("pmx_dashboard_audit_db_present", audit.get("present", 0)),
@@ -405,6 +458,30 @@ def render_metrics(snapshot: Dict[str, Any]) -> str:
             str(gate.get("status") or "UNKNOWN").lower(),
             ("pass", "fail", "inconclusive", "inconclusive_blocked", "unknown"),
             label_name="status",
+        )
+    )
+    lines.extend(
+        _enum_metric_lines(
+            "pmx_production_gate_refresh_status",
+            str(gate_refresh.get("status") or "UNKNOWN").lower(),
+            ("ok", "error", "skipped", "disabled", "unknown"),
+            label_name="status",
+        )
+    )
+    lines.extend(
+        _enum_metric_lines(
+            "pmx_production_gate_refresh_actor",
+            str(gate_refresh.get("actor") or "unknown").lower(),
+            ("dashboard_launch", "dashboard_bridge", "unknown"),
+            label_name="actor",
+        )
+    )
+    lines.extend(
+        _enum_metric_lines(
+            "pmx_production_gate_refresh_last_success_actor",
+            str(gate_refresh.get("last_success_actor") or "unknown").lower(),
+            ("dashboard_launch", "dashboard_bridge", "unknown"),
+            label_name="actor",
         )
     )
     return "\n".join(lines) + "\n"
