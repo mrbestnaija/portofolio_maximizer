@@ -622,7 +622,10 @@ class PaperTradingEngine:
             effective_confidence=signal.get("confidence"),
             confidence_calibrated=signal.get("confidence_calibrated"),
             is_diagnostic=1 if diag_mode else 0,
-            is_synthetic=1 if data_source and "synthetic" in str(data_source).lower() else 0,
+            is_synthetic=1 if (
+                (data_source and "synthetic" in str(data_source).lower())
+                or str(execution_mode or "").lower() == "synthetic"
+            ) else 0,
             is_forced_exit=1 if bool(signal.get("forced_exit")) else 0,
         )
         mid_price_hint = signal.get("mid_price_hint")

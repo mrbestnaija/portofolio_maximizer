@@ -515,3 +515,98 @@ def test_metrics_drift_skipped_with_insufficient_history(tmp_path, monkeypatch):
 
     drift = [v for v in violations if v.check_name == "METRICS_DRIFT"]
     assert drift == [], "Insufficient history must not trigger drift check"
+
+
+def test_orphan_fifo_respects_entry_trade_id_linkage(tmp_path, monkeypatch):
+    """Regression: FIFO must use entry_trade_id for direct consumption rather than
+    blind date-order consumption. Without this fix, a close leg arriving after other
+    close legs has already consumed earlier BUY legs from the queue, leaving the
+    explicitly-linked BUY leg stranded with residual qty and falsely flagged ORPHANED.
+
+    Scenario mirrors the production bug where ids 31/33 were flagged despite having
+    matching close legs 32/35 with correct entry_trade_id linkage.
+    """
+    import os
+    db_path = tmp_path / "fifo_entry_trade_id.db"
+    _create_trade_db(db_path)
+    # Two early BUY opens (ids 1, 2) will be consumed by their own closes (ids 3, 4).
+    # Then a third BUY (id 5) is explicitly closed by id 6 via entry_trade_id=5.
+    # Without entry_trade_id-aware FIFO, close id 6 might consume BUY id 5 correctly
+    # only if it arrives after ids 3/4 have cleared ids 1/2. This test verifies that
+    # even when a BUY is preceded by other BUY legs, the correct close leg reaches it.
+    _insert_rows(
+        db_path,
+        [
+            # BUY opens (is_close=0)
+            (1, "AAPL", "2024-01-01", "BUY", 9.0, 150.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (2, "AAPL", "2024-01-02", "BUY", 8.0, 151.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (3, "AAPL", "2024-01-03", "BUY", 5.0, 152.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            # SELL closes — ids 10 and 11 close ids 1 and 2 via entry_trade_id
+            (10, "AAPL", "2024-01-05", "SELL", 9.0, 155.0, 9.0, 27.0, 0.02, 150.0, 155.0, 4.0, "TIME_EXIT", "live", 1, 1, 0, 0, 0.0),
+            (11, "AAPL", "2024-01-06", "SELL", 8.0, 156.0, 8.0, 40.0, 0.03, 151.0, 156.0, 4.0, "TIME_EXIT", "live", 1, 2, 0, 0, 0.0),
+            # id 12 closes id 3 — arrives last but is explicitly linked
+            (12, "AAPL", "2024-01-10", "SELL", 5.0, 160.0, 5.0, 40.0, 0.05, 152.0, 160.0, 7.0, "TIME_EXIT", "live", 1, 3, 0, 0, 0.0),
+        ],
+    )
+
+    monkeypatch.setenv("INTEGRITY_MAX_OPEN_POSITION_AGE_DAYS", "0")
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_orphaned_positions()
+
+    orphan = [v for v in violations if v.check_name == "ORPHANED_POSITION"]
+    assert orphan == [], (
+        f"All BUY legs have matching close legs via entry_trade_id; none should be orphaned. "
+        f"Got: {orphan}"
+    )
+
+
+def test_is_synthetic_set_from_execution_mode(tmp_path):
+    """Regression: PaperTradingEngine must set is_synthetic=1 when execution_mode='synthetic',
+    even if data_source does not contain 'synthetic'. This ensures historical as-of-date runs
+    (which use yfinance data_source but are tagged execution_mode='synthetic') are excluded from
+    the orphan check's is_synthetic=0 filter.
+    """
+    import unittest.mock as mock
+    from execution.paper_trading_engine import PaperTradingEngine
+    import pandas as pd
+    import numpy as np
+
+    db_path = tmp_path / "pte_synthetic_mode.db"
+    engine = PaperTradingEngine(db_path=str(db_path), initial_capital=100_000.0)
+
+    market_data = pd.DataFrame(
+        {
+            "Open": [150.0, 151.0],
+            "High": [152.0, 153.0],
+            "Low": [149.0, 150.0],
+            "Close": [151.0, 152.0],
+            "Volume": [1_000_000, 1_000_000],
+        },
+        index=pd.date_range("2024-01-02", periods=2, freq="D"),
+    )
+    signal = {
+        "ticker": "AAPL",
+        "action": "BUY",
+        "confidence": 0.70,
+        "reasoning": "test",
+        "execution_mode": "synthetic",   # execution_mode is synthetic
+        "data_source": "yfinance",        # data_source is NOT synthetic
+        "run_id": "test_run",
+    }
+
+    recorded_trade = None
+    original_record = engine.db_manager.save_trade_execution
+
+    def capture_trade(**kwargs):
+        nonlocal recorded_trade
+        recorded_trade = kwargs
+        return 1
+
+    with mock.patch.object(engine.db_manager, "save_trade_execution", side_effect=capture_trade):
+        engine.execute_signal(signal, market_data)
+
+    assert recorded_trade is not None, "save_trade_execution must have been called"
+    assert recorded_trade.get("is_synthetic") == 1, (
+        f"execution_mode='synthetic' must set is_synthetic=1 regardless of data_source. "
+        f"Got is_synthetic={recorded_trade.get('is_synthetic')}"
+    )

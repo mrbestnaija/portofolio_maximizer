@@ -455,9 +455,15 @@ class PnLIntegrityEnforcer:
         if not buy_rows:
             return []
 
-        # Closing SELL legs consume BUY inventory in FIFO order.
+        # Closing SELL legs consume BUY inventory.
+        # entry_trade_id-aware: when a close leg is explicitly linked to a BUY via
+        # entry_trade_id, consume directly from that BUY leg rather than the FIFO
+        # queue front. Pure FIFO (no entry_trade_id) falls back to date-order queue.
+        # This prevents blind FIFO mismatches where an early close leg consumes the
+        # wrong BUY leg, leaving a linked-but-later BUY stranded in the queue.
         close_rows = self.conn.execute(
-            "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty "
+            "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty, "
+            "       entry_trade_id "
             "FROM trade_executions "
             "WHERE action = 'SELL' AND is_close = 1 "
             "  AND is_diagnostic = 0 "
@@ -465,7 +471,7 @@ class PnLIntegrityEnforcer:
             "ORDER BY trade_date, id"
         ).fetchall()
 
-        # Track BUY inventory remaining after FIFO close consumption.
+        # Track BUY inventory remaining after close consumption.
         fifo_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
         buy_by_id: Dict[int, Dict[str, Any]] = {}
         for row in buy_rows:
@@ -483,20 +489,35 @@ class PnLIntegrityEnforcer:
 
         for row in close_rows:
             symbol = str(row["ticker"])
-            remaining_close = float(row["qty"] or 0.0)
-            if remaining_close <= 0:
+            close_qty = float(row["qty"] or 0.0)
+            if close_qty <= 0:
                 continue
-            queue = fifo_by_ticker.get(symbol) or []
-            idx = 0
-            while remaining_close > 1e-9 and idx < len(queue):
-                buy_leg = queue[idx]
-                consume = min(remaining_close, float(buy_leg["remaining_qty"]))
-                buy_leg["remaining_qty"] = float(buy_leg["remaining_qty"]) - consume
-                remaining_close -= consume
-                if float(buy_leg["remaining_qty"]) <= 1e-9:
-                    idx += 1
-            if idx > 0:
-                fifo_by_ticker[symbol] = queue[idx:]
+            linked_id = row["entry_trade_id"]
+            if linked_id is not None:
+                linked_int = int(linked_id)
+                if linked_int in buy_by_id:
+                    # Direct linkage: consume from the specifically-linked BUY leg.
+                    buy_leg = buy_by_id[linked_int]
+                    consume = min(close_qty, float(buy_leg["remaining_qty"]))
+                    buy_leg["remaining_qty"] = float(buy_leg["remaining_qty"]) - consume
+                # else: the linked BUY was filtered out (synthetic/diagnostic) —
+                # cross-mode contamination handled by _check_cross_mode_contamination.
+                # Do NOT fall through to FIFO: consuming unrelated BUY legs here would
+                # mask genuine orphans by shrinking their remaining_qty incorrectly.
+            else:
+                # No explicit link: fall back to FIFO by date order.
+                remaining_close = close_qty
+                queue = fifo_by_ticker.get(symbol) or []
+                idx = 0
+                while remaining_close > 1e-9 and idx < len(queue):
+                    buy_leg = queue[idx]
+                    consume = min(remaining_close, float(buy_leg["remaining_qty"]))
+                    buy_leg["remaining_qty"] = float(buy_leg["remaining_qty"]) - consume
+                    remaining_close -= consume
+                    if float(buy_leg["remaining_qty"]) <= 1e-9:
+                        idx += 1
+                if idx > 0:
+                    fifo_by_ticker[symbol] = queue[idx:]
 
         # Optional portfolio-level reconciliation: if portfolio_positions exists
         # and reports open shares, treat those as expected active inventory first.

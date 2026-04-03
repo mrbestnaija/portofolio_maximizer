@@ -2637,6 +2637,10 @@ def main(
         active_source = data_source_manager.get_active_source()
         synthetic_only = str(os.getenv("SYNTHETIC_ONLY") or "").strip() == "1"
         effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
+        # Historical as-of-date runs replay past market windows; always tag synthetic
+        # so trades are excluded from production_closed_trades and orphan checks.
+        if resolved_as_of_date is not None:
+            effective_execution_mode = "synthetic"
         last_dataset_id = window_dataset_id or last_dataset_id
         last_generator_version = window_generator_version or last_generator_version
         last_execution_mode = effective_execution_mode
