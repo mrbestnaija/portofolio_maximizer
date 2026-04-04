@@ -101,16 +101,25 @@ def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _safe_read_json(path: Path) -> dict[str, Any]:
+def _read_json_dict_with_status(path: Path) -> tuple[dict[str, Any], str]:
     try:
         raw = path.read_text(encoding="utf-8")
     except Exception:
-        return {}
+        return {}, "read_error"
+    if not raw.strip():
+        return {}, "empty"
     try:
         payload = json.loads(raw)
     except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        return {}, "invalid"
+    if not isinstance(payload, dict):
+        return {}, "non_dict"
+    return payload, "ok"
+
+
+def _safe_read_json(path: Path) -> dict[str, Any]:
+    payload, _status = _read_json_dict_with_status(path)
+    return payload
 
 
 def _append_unique(items: list[str], value: str) -> None:
@@ -511,6 +520,13 @@ def _state_seconds_since(value: Any) -> Optional[float]:
     return max(0.0, (_utc_now() - ts).total_seconds())
 
 
+def _path_age_seconds(path: Path) -> Optional[float]:
+    try:
+        return max(0.0, time.time() - float(path.stat().st_mtime))
+    except Exception:
+        return None
+
+
 def _load_runtime_state(path: Path) -> dict[str, Any]:
     payload = _safe_read_json(path)
     state = payload if isinstance(payload, dict) else {}
@@ -557,18 +573,24 @@ def _acquire_run_lock(
                 reason="acquired",
             )
         except FileExistsError:
-            holder = _safe_read_json(lock_path)
+            holder, holder_status = _read_json_dict_with_status(lock_path)
             holder_pid = 0
             try:
                 holder_pid = int(holder.get("pid") or 0)
             except Exception:
                 holder_pid = 0
             holder_age = _state_seconds_since(holder.get("created_at_utc"))
+            holder_file_age = _path_age_seconds(lock_path)
             stale = False
             if holder_pid > 0 and not _lock_holder_matches_process(holder):
                 stale = True
             elif holder_pid <= 0 and holder_age is not None and holder_age >= max(60, int(stale_seconds)):
                 stale = True
+            elif holder_status in {"empty", "invalid", "non_dict"}:
+                invalid_lock_grace_seconds = 10.0
+                effective_age = holder_age if holder_age is not None else holder_file_age
+                if effective_age is not None and effective_age >= invalid_lock_grace_seconds:
+                    stale = True
 
             if stale:
                 try:

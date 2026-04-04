@@ -54,6 +54,7 @@ def test_guardian_enforces_exec_env_before_watch_launch() -> None:
     assert '$execEnvArgs = @($execEnvScript)' in text
     assert "& $pythonExe @execEnvArgs" in text
     assert '[switch]$EnsureFunctionalState' in text
+    assert '[switch]$Quiet' in text
     assert 'Invoke-FunctionalRecovery' in text
     assert '$args = @($remoteWorkflowScript) + $Arguments' in text
     assert 'health", "--json' in text

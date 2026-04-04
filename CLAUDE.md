@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Phase 10c Complete (Gate PASS + OOS Selector Wiring + Violation Rate <35%)
-**Completed Phases**: 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
-**Last Updated**: 2026-03-30
+**Current Phase**: Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven)
+**Completed Phases**: P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
+**Last Updated**: 2026-04-04
 
 ---
 
@@ -998,7 +998,58 @@ every production run. DA was never passed to `select_weights()` — DA-aware can
 ### Remaining Open Items (P2, P4)
 
 - **P2**: Ticker in RMSE dedupe key — governance decision, changes gate contract, deferred
-- **P4**: MSSA-RL Q-table stub cleanup, GARCH `lam=0.94` externalization, signal vol-band smoothing
+- **P4**: MSSA-RL Q-table stub cleanup, GARCH `lam=0.94` externalization — OPEN
+- **P4 COMPLETE**: signal vol-band smoothing — piecewise-linear replacing discrete steps (commit b44ea4e)
+
+### Post-P4 Adversarial Remediation (2026-04-04, commit b44ea4e)
+
+Adversarial second pass after P4 merge identified five actionable items. Status:
+
+| Item | Description | Status |
+|------|-------------|--------|
+| 1 | Remove stale xfail(strict=False) from `test_signal_scaling_invariant_under_price_rescale` | **DONE** |
+| 2 | Add `mssa_real_artifact_env` fixture + 3 trained-artifact contract tests | **DONE** |
+| 3 | Evidence generation: run 5 `--as-of-date` windows ×2 to grow recent-window effective ≥10 | **PENDING** (data) |
+| 4 | Vol-band piecewise-linear replacing discrete step function | **DONE** |
+| 5 | Ticker in dedup key (gate-contract change) | **DEFERRED** (governance) |
+
+**Item 2 detail**: `mssa_real_artifact_env` fixture (tests/conftest.py) loads `models/mssa_rl_policy.v1.json`
+directly. Three new tests in `tests/forcester_ts/test_mssa_rl_policy_contract.py`:
+- `test_trained_artifact_loads_and_reaches_ready_status` — verifies 7-step gate passes, 4 states, min_support≥5
+- `test_trained_artifact_action_not_uniform_across_states` — verifies action diversity (states 0-2: best_action=0,
+  state 3: best_action=1); fixture artifact always returns best_action=1, masking this divergence
+- `test_trained_artifact_stale_when_threshold_mismatched` — change_point_threshold=99.0 vs artifact 4.0 → stale
+
+**Item 4 detail**: `models/time_series_signal_generator.py:_calculate_confidence()` vol-bands now piecewise-linear:
+- 0.40-0.60: linear 0.75→0.60 (was flat 0.75 — 15pp cliff at 0.60 eliminated)
+- 0.15-0.25: linear 1.05→1.00 (smooth bonus zone)
+- `TestVolBandContinuity`: conf(0.599)≈conf(0.601) within 2%; conf(0.41)>conf(0.50)>conf(0.59)
+
+**Gate state (2026-04-04)**:
+
+| Metric | Value | Threshold | Status |
+|--------|-------|-----------|--------|
+| overall_passed | True | — | ALL 5 GATES PASS |
+| Violation rate | 32.35% (11/34) | ≤35% | PASS — 2 violations of margin |
+| Lift fraction | 58.82% | ≥25% | PASS |
+| Lift decision | KEEP | — | lift demonstrated |
+| Recent window | 3/10 effective | need 10 | INCONCLUSIVE (data only) |
+| Recent violation rate | 0/3 = 0.00% | — | clean recent runs |
+| Recent median RMSE ratio | 0.875 | <1.0 | ensemble beating baseline |
+| Warmup | active until 2026-04-15 | — | 11 days remaining |
+
+**PnL (integrity-enforced, 2026-04-04)**:
+
+| Metric | Value |
+|--------|-------|
+| Round-trips | 40 |
+| Total PnL | +$620.01 |
+| Win rate | 40.0% |
+| Profit factor | 1.73 |
+| Avg holding | 1.1 days |
+| Integrity | ALL PASSED |
+
+**Test baseline**: 2165 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane, not slow/gpu/integration)
 
 ---
 

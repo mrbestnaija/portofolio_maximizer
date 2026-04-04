@@ -4,6 +4,7 @@ Param(
     [string]$PrimaryChannel = "whatsapp",
     [bool]$DisableBrokenChannels = $true,
     [switch]$EnsureFunctionalState,
+    [switch]$Quiet,
     [switch]$NoApply,
     [string]$OpenClawCommand = "",
     [string]$IntegrityUnlinkedCloseWhitelistIds = "",
@@ -11,6 +12,9 @@ Param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $PSBoundParameters.ContainsKey("Quiet")) {
+    $Quiet = $true
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pythonExe = if ($env:PMX_PYTHON_BIN -and (Test-Path $env:PMX_PYTHON_BIN)) {
@@ -41,6 +45,13 @@ if (-not $OpenClawCommand) {
     $OpenClawCommand = if ($env:OPENCLAW_COMMAND) { $env:OPENCLAW_COMMAND } else { "openclaw" }
 }
 if ($FastSupervisorIntervalSeconds -lt 1) { $FastSupervisorIntervalSeconds = 1 }
+
+function Write-GuardianInfo {
+    Param([string]$Message)
+    if (-not $Quiet) {
+        Write-Host $Message
+    }
+}
 
 function Get-EnvInt {
     Param(
@@ -113,7 +124,7 @@ function Invoke-FunctionalRecovery {
         }
     }
 
-    Write-Host "[openclaw_guardian] health_check_failed rc=$($health.ReturnCode); attempting gateway recovery"
+    Write-GuardianInfo "[openclaw_guardian] health_check_failed rc=$($health.ReturnCode); attempting gateway recovery"
     $restart = Invoke-RemoteWorkflowCommand -Arguments @("gateway-restart", "--json")
     Start-Sleep -Seconds 5
     $postHealth = Test-FunctionalState
@@ -171,14 +182,14 @@ if ($existingPid -gt 0 -and (Test-GuardianPid -ProcessId $existingPid)) {
     if ($EnsureFunctionalState -and -not $ForceRestart) {
         $recovery = Invoke-FunctionalRecovery
         if ($recovery.Healthy) {
-            Write-Host "[openclaw_guardian] already_running pid=$existingPid functional_state=ok"
+            Write-GuardianInfo "[openclaw_guardian] already_running pid=$existingPid functional_state=ok"
             exit 0
         }
-        Write-Host "[openclaw_guardian] forcing restart for existing pid=$existingPid functional_state=fail rc=$($recovery.ReturnCode)"
+        Write-GuardianInfo "[openclaw_guardian] forcing restart for existing pid=$existingPid functional_state=fail rc=$($recovery.ReturnCode)"
         $ForceRestart = $true
     }
     if (-not $ForceRestart) {
-        Write-Host "[openclaw_guardian] already_running pid=$existingPid"
+        Write-GuardianInfo "[openclaw_guardian] already_running pid=$existingPid"
         exit 0
     }
     try {
@@ -194,13 +205,13 @@ if ($watchProcs.Count -gt 0 -and -not $ForceRestart) {
     if ($EnsureFunctionalState) {
         $recovery = Invoke-FunctionalRecovery
         if (-not $recovery.Healthy) {
-            Write-Host "[openclaw_guardian] forcing restart for discovered pid=$livePid functional_state=fail rc=$($recovery.ReturnCode)"
+            Write-GuardianInfo "[openclaw_guardian] forcing restart for discovered pid=$livePid functional_state=fail rc=$($recovery.ReturnCode)"
             $ForceRestart = $true
         }
     }
     if (-not $ForceRestart) {
         Write-GuardianPidFile -ProcessId $livePid -PythonPath ([string]($live.ExecutablePath))
-        Write-Host "[openclaw_guardian] already_running pid=$livePid (discovered by process scan)"
+        Write-GuardianInfo "[openclaw_guardian] already_running pid=$livePid (discovered by process scan)"
         exit 0
     }
 }
@@ -251,7 +262,28 @@ if ($DisableBrokenChannels) {
 $env:INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS = $IntegrityUnlinkedCloseWhitelistIds
 
 $execEnvArgs = @($execEnvScript)
-& $pythonExe @execEnvArgs
+$execEnvOutput = & $pythonExe @execEnvArgs 2>&1
+$execEnvRc = [int]$LASTEXITCODE
+if ($execEnvRc -ne 0) {
+    $hadOutput = $false
+    foreach ($line in @($execEnvOutput)) {
+        $text = [string]$line
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $hadOutput = $true
+        Write-Error $text
+    }
+    if (-not $hadOutput) {
+        Write-Error "[enforce_openclaw_exec_environment] failed rc=$execEnvRc"
+    }
+    exit $execEnvRc
+}
+if (-not $Quiet) {
+    foreach ($line in @($execEnvOutput)) {
+        $text = [string]$line
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        Write-Host $text
+    }
+}
 
 $proc = Start-Process `
     -FilePath $pythonExe `
@@ -264,10 +296,10 @@ $proc = Start-Process `
 
 Write-GuardianPidFile -ProcessId ([int]$proc.Id) -PythonPath $pythonExe
 
-Write-Host "[openclaw_guardian] started pid=$($proc.Id)"
-Write-Host "[openclaw_guardian] pid_file=$pidFile"
-Write-Host "[openclaw_guardian] stdout_log=$stdoutLog"
-Write-Host "[openclaw_guardian] stderr_log=$stderrLog"
+Write-GuardianInfo "[openclaw_guardian] started pid=$($proc.Id)"
+Write-GuardianInfo "[openclaw_guardian] pid_file=$pidFile"
+Write-GuardianInfo "[openclaw_guardian] stdout_log=$stdoutLog"
+Write-GuardianInfo "[openclaw_guardian] stderr_log=$stderrLog"
 
 if ($EnsureFunctionalState) {
     Start-Sleep -Seconds 8
@@ -276,5 +308,5 @@ if ($EnsureFunctionalState) {
         Write-Error "[openclaw_guardian] functional_state_check_failed rc=$($recovery.ReturnCode)"
         exit 1
     }
-    Write-Host "[openclaw_guardian] functional_state=ok"
+    Write-GuardianInfo "[openclaw_guardian] functional_state=ok"
 }

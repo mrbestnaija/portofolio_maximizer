@@ -20,6 +20,9 @@ $keepAliveTask = "PMX-OpenClaw-Guardian-KeepAlive"
 $legacyTask = "PMX-OpenClaw-Maintenance"
 $startupFolder = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $startupFallback = Join-Path $startupFolder "PMX-OpenClaw-Guardian-Startup.cmd"
+$legacyStartupFallback = Join-Path $startupFolder "PMX-OpenClaw-Guardian.cmd"
+$launcherDir = Join-Path $env:LOCALAPPDATA "PMX\OpenClawGuardian"
+$taskLauncher = Join-Path $launcherDir "launch_openclaw_guardian.cmd"
 
 if (-not (Test-Path $guardianScript)) {
     throw "Missing guardian launcher: $guardianScript"
@@ -62,19 +65,40 @@ function Remove-TaskIfPresent {
     Write-Host "[watchdog] task_removed $TaskName"
 }
 
+function Test-TaskPresent {
+    Param([string]$TaskName)
+    $query = Invoke-Schtasks @("/Query", "/TN", $TaskName)
+    return ($query.ReturnCode -eq 0)
+}
+
+function Write-GuardianLauncherStub {
+    $content = @(
+        "@echo off",
+        "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$guardianScript`" -WatchIntervalSeconds $WatchIntervalSeconds -PrimaryChannel `"$PrimaryChannel`" -EnsureFunctionalState -Quiet",
+        "exit /b %ERRORLEVEL%"
+    ) -join [Environment]::NewLine
+    New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+    Set-Content -Path $taskLauncher -Value $content -Encoding ASCII
+    Write-Host "[watchdog] launcher_stub_ready $taskLauncher"
+    return $taskLauncher
+}
+
+function Remove-GuardianLauncherStub {
+    if (Test-Path $taskLauncher) {
+        Remove-Item -Path $taskLauncher -Force
+        Write-Host "[watchdog] launcher_stub_removed $taskLauncher"
+    } else {
+        Write-Host "[watchdog] launcher_stub_missing $taskLauncher"
+    }
+}
+
 function Register-GuardianTask {
     Param(
         [string]$TaskName,
         [string[]]$ScheduleArgs
     )
 
-    $taskCommand = (
-        'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $guardianScript + '"' +
-        ' -WatchIntervalSeconds ' + $WatchIntervalSeconds +
-        ' -PrimaryChannel "' + $PrimaryChannel + '"' +
-        ' -EnsureFunctionalState'
-    )
-
+    $taskCommand = 'cmd.exe /d /s /c ""' + $taskLauncher + '""'
     $args = @(
         "/Create",
         "/TN", $TaskName,
@@ -116,7 +140,8 @@ function Disable-LegacyMaintenanceTask {
 function Install-StartupFolderFallback {
     $content = @(
         "@echo off",
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$guardianScript`" -WatchIntervalSeconds $WatchIntervalSeconds -PrimaryChannel `"$PrimaryChannel`" -EnsureFunctionalState"
+        "call `"$taskLauncher`"",
+        "exit /b %ERRORLEVEL%"
     ) -join [Environment]::NewLine
     New-Item -ItemType Directory -Path $startupFolder -Force | Out-Null
     Set-Content -Path $startupFallback -Value $content -Encoding ASCII
@@ -125,11 +150,13 @@ function Install-StartupFolderFallback {
 }
 
 function Remove-StartupFolderFallback {
-    if (Test-Path $startupFallback) {
-        Remove-Item -Path $startupFallback -Force
-        Write-Host "[watchdog] startup_fallback_removed $startupFallback"
-    } else {
-        Write-Host "[watchdog] startup_fallback_missing $startupFallback"
+    foreach ($path in @($startupFallback, $legacyStartupFallback)) {
+        if (Test-Path $path) {
+            Remove-Item -Path $path -Force
+            Write-Host "[watchdog] startup_fallback_removed $path"
+        } else {
+            Write-Host "[watchdog] startup_fallback_missing $path"
+        }
     }
 }
 
@@ -139,9 +166,13 @@ if ($Uninstall) {
     Remove-TaskIfPresent -TaskName $wakeTask
     Remove-TaskIfPresent -TaskName $keepAliveTask
     Remove-StartupFolderFallback
+    Remove-GuardianLauncherStub
     exit 0
 }
 
+$null = Write-GuardianLauncherStub
+
+$logonTaskPresent = Test-TaskPresent -TaskName $logonTask
 $logonReady = Register-GuardianTask -TaskName $logonTask -ScheduleArgs @("/SC", "ONLOGON")
 $startupReady = Register-GuardianTask -TaskName $startupTask -ScheduleArgs @("/SC", "ONSTART")
 $wakeReady = Register-GuardianTask -TaskName $wakeTask -ScheduleArgs @(
@@ -151,18 +182,20 @@ $wakeReady = Register-GuardianTask -TaskName $wakeTask -ScheduleArgs @(
 )
 $keepAliveReady = Register-GuardianTask -TaskName $keepAliveTask -ScheduleArgs @("/SC", "MINUTE", "/MO", "$EnsureIntervalMinutes")
 $legacyReady = Disable-LegacyMaintenanceTask
-$startupFallbackReady = $true
-if (-not ($logonReady -and $startupReady)) {
+$startupFallbackReady = $false
+if (-not ($logonReady -or $logonTaskPresent)) {
     $startupFallbackReady = Install-StartupFolderFallback
+} else {
+    Remove-StartupFolderFallback
 }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $guardianScript -WatchIntervalSeconds $WatchIntervalSeconds -PrimaryChannel $PrimaryChannel -EnsureFunctionalState
+& cmd.exe /d /s /c "`"$taskLauncher`""
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
 Write-Host "[watchdog] install_complete startup=$startupTask wake=$wakeTask logon=$logonTask keepalive=$keepAliveTask interval_minutes=$EnsureIntervalMinutes"
-if (-not ((($logonReady -and $startupReady) -or $startupFallbackReady) -and $wakeReady -and $keepAliveReady -and $legacyReady)) {
+if (-not (($logonReady -or $logonTaskPresent -or $startupFallbackReady) -and $wakeReady -and $keepAliveReady -and $legacyReady)) {
     Write-Warning "[watchdog] partial_install guardian_started=true scheduler_tasks_may_require_elevation"
     exit 1
 }

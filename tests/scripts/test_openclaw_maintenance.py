@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 
 from scripts import openclaw_maintenance as om
 
@@ -589,6 +591,24 @@ def test_acquire_run_lock_preserves_live_matching_watch_holder(monkeypatch, tmp_
 
     assert attempt.acquired is False
     assert attempt.reason == "held"
+
+
+def test_acquire_run_lock_reclaims_invalid_stale_lock_file(tmp_path) -> None:
+    lock_path = tmp_path / "openclaw_maintenance.lock.json"
+    lock_path.write_bytes(b"\x00" * 128)
+    stale_at = time.time() - 120
+    os.utime(lock_path, (stale_at, stale_at))
+
+    attempt = om._acquire_run_lock(
+        lock_path=lock_path,
+        mode="watch",
+        wait_seconds=0.0,
+        stale_seconds=60,
+    )
+
+    assert attempt.acquired is True
+    assert attempt.lock is not None
+    assert attempt.reason == "acquired"
 
 
 def test_cleanup_stale_session_locks_handles_sessions_glob_error(monkeypatch, tmp_path) -> None:

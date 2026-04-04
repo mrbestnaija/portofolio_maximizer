@@ -45,3 +45,16 @@ def test_watchdog_installer_registers_startup_and_wake_triggers_with_functional_
     assert '-EnsureFunctionalState' in text
     assert 'PMX-OpenClaw-Guardian-Startup.cmd' in text
     assert 'Install-StartupFolderFallback' in text
+
+
+def test_watchdog_installer_runs_guardian_quietly_and_cleans_up_redundant_fallback() -> None:
+    text = _script_text()
+    assert '-WindowStyle Hidden' in text
+    assert '-EnsureFunctionalState -Quiet' in text
+    assert 'Test-TaskPresent' in text
+    assert '$logonTaskPresent = Test-TaskPresent -TaskName $logonTask' in text
+    assert 'if (-not ($logonReady -or $logonTaskPresent)) {' in text
+    assert 'Remove-StartupFolderFallback' in text
+    assert 'PMX-OpenClaw-Guardian.cmd' in text
+    assert 'launch_openclaw_guardian.cmd' in text
+    assert 'cmd.exe /d /s /c' in text
