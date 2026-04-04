@@ -105,6 +105,13 @@ class TestConfigLoadPath:
         assert "regime_detection" in forecasting_config, \
             "forecasting_config.yml must contain a 'regime_detection' section"
 
+    def test_garch_config_exposes_valid_ewma_lambda(self, forecasting_config):
+        garch_cfg = forecasting_config.get("garch", {})
+        assert "ewma_lambda" in garch_cfg, \
+            "forecasting_config.yml garch section must expose ewma_lambda"
+        assert 0.0 < float(garch_cfg["ewma_lambda"]) < 1.0, \
+            f"garch.ewma_lambda must satisfy 0 < lambda < 1, got {garch_cfg['ewma_lambda']}"
+
     def test_sarimax_enabled_by_default(self, forecasting_config):
         sarimax_cfg = forecasting_config.get("sarimax", {})
         assert sarimax_cfg.get("enabled") is True, \
@@ -372,6 +379,87 @@ class TestRegimeCandidateWeights:
             assert "sarimax" not in models, \
                 f"regime_model_preferences[{regime}] lists disabled 'sarimax'"
 
+    def test_regime_candidates_keep_mssa_contained(self, regime_section):
+        rcw = regime_section.get("regime_candidate_weights", {})
+        if not rcw:
+            pytest.skip("No regime_candidate_weights in config")
+        for regime, candidates in rcw.items():
+            for i, candidate in enumerate(candidates):
+                mssa_weight = float(candidate.get("mssa_rl", 0.0) or 0.0)
+                if mssa_weight <= 0.0:
+                    continue
+                assert mssa_weight <= 0.20, (
+                    f"regime_candidate_weights[{regime}][{i}] over-promotes MSSA_RL "
+                    f"with weight={mssa_weight:.2f}"
+                )
+                strongest_weight = max(float(weight) for weight in candidate.values())
+                assert mssa_weight < strongest_weight, (
+                    f"regime_candidate_weights[{regime}][{i}] makes MSSA_RL dominant "
+                    f"before it clears governance"
+                )
+
+    def test_regime_model_preferences_keep_mssa_last(self, regime_section):
+        prefs = regime_section.get("regime_model_preferences", {})
+        if not prefs:
+            pytest.skip("No regime_model_preferences in config")
+        for regime, pref in prefs.items():
+            models = list(pref.get("preferred_models", []))
+            if "mssa_rl" not in models or len(models) <= 1:
+                continue
+            assert models[-1] == "mssa_rl", (
+                f"regime_model_preferences[{regime}] must keep MSSA_RL as the "
+                f"last-resort preference, got {models}"
+            )
+
+    def test_moderate_mixed_regime_does_not_make_ready_mssa_dominant(self, regime_section):
+        from forcester_ts.ensemble import derive_model_confidence
+
+        candidates = regime_section.get("regime_candidate_weights", {}).get("MODERATE_MIXED", [])
+        assert candidates, "MODERATE_MIXED candidates missing from config"
+
+        summaries = {
+            "sarimax": {
+                "regression_metrics": {"rmse": 1.2, "aic": 10.0, "bic": 11.0},
+                "residual_diagnostics": {"white_noise": True, "n": 30},
+            },
+            "garch": {
+                "regression_metrics": {"rmse": 1.0, "aic": 9.0, "bic": 9.5},
+                "backend": "arch",
+                "fallback_mode": "none",
+            },
+            "samossa": {
+                "regression_metrics": {"rmse": 0.95, "aic": 8.5, "bic": 9.0},
+                "residual_diagnostics": {"white_noise": True, "n": 30},
+            },
+            "mssa_rl": {
+                "policy_status": "ready",
+                "policy_support": 9,
+                "action_value_margin": 0.18,
+                "baseline_variance": 0.03,
+                "change_point_density": 0.01,
+                "recent_change_point_days": 40,
+                "residual_diagnostics": {"white_noise": True, "n": 30},
+                "regression_metrics": {"rmse": 0.9, "aic": 8.0, "bic": 8.5},
+            },
+        }
+
+        config = EnsembleConfig(candidate_weights=list(candidates))
+        coordinator = EnsembleCoordinator(config)
+        confidence = derive_model_confidence(summaries)
+        weights, _ = coordinator.select_weights(confidence)
+
+        assert weights, "expected a selected candidate weight map"
+        mssa_weight = float(weights.get("mssa_rl", 0.0) or 0.0)
+        strongest_non_mssa = max(
+            float(weight)
+            for model, weight in weights.items()
+            if model != "mssa_rl"
+        )
+        assert mssa_weight <= 0.20
+        assert mssa_weight < strongest_non_mssa, (
+            f"MODERATE_MIXED still over-promotes MSSA_RL with weights={weights}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 9. Auto-Trader Config Loader Integration
@@ -488,9 +576,9 @@ class TestConfigDriftDetection:
     """Detect unexpected changes to critical config sections."""
 
     def test_ensemble_candidate_count_stable(self, candidate_weights_from_config):
-        """Alert if candidate count changes unexpectedly (Phase 10: 15 sets with SARIMAX)."""
-        assert len(candidate_weights_from_config) == 15, \
-            f"Expected 15 candidate weight sets (Phase 10), got {len(candidate_weights_from_config)}. " \
+        """Alert if candidate count changes unexpectedly after MSSA containment hardening."""
+        assert len(candidate_weights_from_config) == 10, \
+            f"Expected 10 candidate weight sets after containment hardening, got {len(candidate_weights_from_config)}. " \
             "Update this test if intentional."
 
     def test_sarimax_default_enabled(self):
@@ -737,6 +825,21 @@ class TestPhase10RmseRankHybrid:
     near-flat forecasts from dominating via EVR alone.
     """
 
+    def test_garch_fallback_mode_penalties_order_degraded_paths(self):
+        """Explicit EWMA should score above literal near-IGARCH fallback."""
+        from forcester_ts.ensemble import derive_model_confidence
+
+        explicit_conf = derive_model_confidence(
+            {"garch": {"aic": None, "bic": None, "fallback_mode": "explicit_ewma_backend"}}
+        )
+        near_igarch_conf = derive_model_confidence(
+            {"garch": {"aic": None, "bic": None, "fallback_mode": "near_igarch"}}
+        )
+
+        assert explicit_conf["garch"] > near_igarch_conf["garch"], (
+            "explicit_ewma_backend should remain degraded but outrank literal near_igarch"
+        )
+
     def test_best_rmse_model_gets_higher_confidence(self):
         """Model with lowest RMSE should receive higher confidence than model with highest."""
         from forcester_ts.ensemble import derive_model_confidence
@@ -875,7 +978,7 @@ class TestPhase10RmseRankHybrid:
         )
         # "ensemble" must not appear in the output confidence dict
         assert "ensemble" not in conf_with, "ensemble key leaked into confidence scores"
-        # SAMoSSA has lowest OOS RMSE — must rank highest
-        assert conf_with.get("samossa", 0) >= conf_with.get("mssa_rl", 1), (
-            "SAMoSSA (RMSE=9.77) should outrank MSSA-RL (RMSE=16.53)"
-        )
+        # MSSA-RL is containment-only unless offline-policy readiness is proven.
+        assert "mssa_rl" not in conf_with
+        # SAMoSSA still has the strongest score among the remaining component models.
+        assert conf_with.get("samossa", 0) >= conf_with.get("garch", 1)

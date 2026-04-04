@@ -110,26 +110,17 @@ class EnsembleConfig:
     diversity_tolerance: float = 0.35
     candidate_weights: List[Dict[str, float]] = field(
         default_factory=lambda: [
-            # Phase 10: SARIMAX-anchored (model-class diversity vs spectral/RL/GARCH)
+            # Default candidates keep MSSA-RL containment-only until it earns
+            # promotion with fresh evidence. No pure/dominant MSSA paths here.
             {"sarimax": 0.50, "garch": 0.30, "mssa_rl": 0.20},
-            {"sarimax": 0.40, "mssa_rl": 0.35, "garch": 0.25},
-            # Phase 10: MSSA-RL elevated to positions 3-4 (was buried at 6-7)
-            {"mssa_rl": 0.55, "garch": 0.30, "samossa": 0.15},
-            {"mssa_rl": 0.50, "sarimax": 0.30, "garch": 0.20},
-            # GARCH-heavy blends (retained from Phase 7.9)
+            {"sarimax": 0.45, "samossa": 0.35, "garch": 0.20},
             {"garch": 0.85, "samossa": 0.10, "mssa_rl": 0.05},
             {"garch": 0.70, "samossa": 0.20, "mssa_rl": 0.10},
             {"garch": 0.60, "samossa": 0.25, "mssa_rl": 0.15},
-            # SAMoSSA-anchored
-            {"samossa": 0.60, "mssa_rl": 0.40},
+            {"samossa": 0.60, "garch": 0.40},
             {"samossa": 0.45, "garch": 0.35, "mssa_rl": 0.20},
-            # MSSA-RL dominant (Phase 7.9)
-            {"mssa_rl": 0.70, "garch": 0.30},
-            {"mssa_rl": 0.70, "samossa": 0.30},
-            # Single-model anchors
             {"garch": 1.0},
             {"samossa": 1.0},
-            {"mssa_rl": 1.0},
             {"sarimax": 1.0},
         ]
     )
@@ -203,17 +194,24 @@ class EnsembleCoordinator:
                 )
 
         scored_candidates: List[Tuple[Dict[str, float], float]] = []
+        eligible_models = {
+            model
+            for model, score in model_confidence.items()
+            if isinstance(score, (int, float)) and np.isfinite(float(score)) and float(score) > 0.0
+        }
 
         for candidate in candidate_list:
             # Strip meta-keys like 'auto_directional' before normalizing
             candidate = {k: v for k, v in candidate.items() if k != "auto_directional"}
+            if eligible_models:
+                candidate = {model: weight for model, weight in candidate.items() if model in eligible_models}
             normalized = self._normalize(candidate)
             if not normalized:
                 continue
 
             if self.config.confidence_scaling:
                 scaled = {
-                    model: weight * model_confidence.get(model, 0.5)
+                    model: weight * model_confidence.get(model, 0.0)
                     for model, weight in normalized.items()
                 }
                 normalized = self._normalize(scaled)
@@ -240,7 +238,7 @@ class EnsembleCoordinator:
             # `confidence_scaling` controls whether candidate *weights* are
             # scaled, not whether selection quality should ignore confidence.
             score = sum(
-                normalized.get(model, 0.0) * model_confidence.get(model, 0.5)
+                normalized.get(model, 0.0) * model_confidence.get(model, 0.0)
                 for model in normalized.keys()
             )
 
@@ -425,6 +423,22 @@ def derive_model_confidence(
     garch_summary = summaries.get("garch", {})
     samossa_summary = summaries.get("samossa", {})
     mssa_summary = summaries.get("mssa_rl", {})
+
+    def _mssa_is_eligible(summary: Dict[str, Any]) -> bool:
+        if not isinstance(summary, dict):
+            return False
+        policy_status = str(summary.get("policy_status") or "").strip().lower()
+        if policy_status != "ready":
+            return False
+        try:
+            if int(summary.get("policy_support") or 0) <= 0:
+                return False
+        except Exception:
+            return False
+        residual = summary.get("residual_diagnostics") or {}
+        if not isinstance(residual, dict):
+            return False
+        return residual.get("white_noise") is True
 
     # Treat SAMOSSA as the primary TS baseline for variance tests when
     # available; fall back to SARIMAX metrics otherwise.
@@ -698,7 +712,7 @@ def derive_model_confidence(
 
     def _garch_domain_normalize(
         raw_aic_bic_score: Optional[float],
-        igarch_fallback: bool,
+        fallback_mode: Optional[str],
     ) -> float:
         """
         Map GARCH's volatility-domain AIC/BIC score to the price-domain
@@ -720,10 +734,16 @@ def derive_model_confidence(
         dead-code block where `{}` (falsy) prevented GARCH from ever getting a
         fallback score, causing permanent 2-model collapse.
         """
-        if igarch_fallback:
-            # IGARCH/EWMA degrades to exponential smoothing -- lower information
-            # content than converged GARCH; keep below the neutral midpoint.
+        mode = str(fallback_mode or "none").strip().lower()
+        if mode == "near_igarch":
+            # Literal near-IGARCH fallback is the least trustworthy degraded path.
             return 0.28
+        if mode in {"convergence_failure", "exploding_variance_ratio"}:
+            return 0.32
+        if mode == "insufficient_sample_size":
+            return 0.38
+        if mode == "explicit_ewma_backend":
+            return 0.40
         if raw_aic_bic_score is None:
             # GARCH fit converged but produced no information criteria; assign a
             # neutral participation score just above the MSSA-RL floor (0.40).
@@ -742,18 +762,17 @@ def derive_model_confidence(
     # participates in the 3-model pool and blend candidates can clear diversity gate.
     aic = garch_summary.get("aic")
     bic = garch_summary.get("bic")
+    garch_fallback_mode = str(garch_summary.get("fallback_mode") or "none").strip().lower()
     _raw_garch_aic_bic: Optional[float] = None
     if aic is not None and bic is not None:
         _raw_garch_aic_bic = float(np.exp(-0.5 * (aic + bic) / max(abs(aic) + abs(bic), 1e-6)))
 
-    garch_normalized = _garch_domain_normalize(
-        _raw_garch_aic_bic, bool(garch_summary.get("igarch_fallback"))
-    )
+    garch_normalized = _garch_domain_normalize(_raw_garch_aic_bic, garch_fallback_mode)
     logger.info(
-        "GARCH domain normalization: raw_aic_bic_score=%.4f normalized=%.4f igarch=%s",
+        "GARCH domain normalization: raw_aic_bic_score=%.4f normalized=%.4f fallback_mode=%s",
         _raw_garch_aic_bic if _raw_garch_aic_bic is not None else float("nan"),
         garch_normalized,
-        garch_summary.get("igarch_fallback", False),
+        garch_fallback_mode,
     )
 
     # Blend domain-normalized score with regression metrics when available.
@@ -795,43 +814,42 @@ def derive_model_confidence(
     if samossa_score is not None:
         confidence["samossa"] = samossa_score
 
-    baseline_var = mssa_summary.get("baseline_variance")
-    mssa_score = None
-    if baseline_var is not None:
-        # Phase 7.10: Use log-scaled baseline_variance to avoid crushing score
-        # when variance is large.  Previous formula 1/(1+var) gave ~0.09 for
-        # var=10; log-scale gives ~0.30 which is fairer relative to other models.
-        mssa_score = 1.0 / (1.0 + max(0.0, float(np.log1p(baseline_var))))
-    mssa_metrics = (
-        _per_model_oos.get("mssa_rl")
-        or mssa_summary.get("regression_metrics", {})
-        or {}
-    )
-    # P1b fix (2026-03-29): cap change_point_boost before passing to _combine_scores.
-    # When recent_change_point_days=0, the unguarded formula returns 1.0 (maximum),
-    # which entered _combine_scores with equal weight to EVR and RMSE-rank, flipping
-    # candidate selection even when OOS RMSE strongly favours another model.
-    # Cap at 0.20 so it can provide a small nudge without overriding quality signals.
-    _cpb = _change_point_boost(mssa_summary)
-    _cpb_capped = float(np.clip(_cpb, 0.0, 0.20)) if _cpb is not None else None
-    mssa_score = _combine_scores(
-        mssa_score,
-        _score_from_metrics(mssa_metrics),
-        _variance_test_score(mssa_metrics, baseline_metrics)
-        if baseline_metrics
-        else None,
-        _cpb_capped,
-        _rmse_rank_scores.get("mssa_rl"),  # Phase 10: RMSE-rank hybrid
-    )
-    # P1c fix (2026-03-29): MSSA-RL hard floor removed from selection path.
-    # The floor (0.40) was added when the selector had no OOS signal and MSSA-RL
-    # appeared under-weighted.  With P0 wiring OOS RMSE-rank into selection,
-    # the floor artificially props MSSA-RL above models with better OOS RMSE,
-    # re-introducing the same distortion in the opposite direction.
-    # If OOS evidence shows MSSA-RL is best, the RMSE-rank score will reflect
-    # that naturally; no floor needed.
-    if mssa_score is not None:
-        confidence["mssa_rl"] = mssa_score
+    if _mssa_is_eligible(mssa_summary):
+        baseline_var = mssa_summary.get("baseline_variance")
+        mssa_score = None
+        if baseline_var is not None:
+            # Phase 7.10: Use log-scaled baseline_variance to avoid crushing score
+            # when variance is large.  Previous formula 1/(1+var) gave ~0.09 for
+            # var=10; log-scale gives ~0.30 which is fairer relative to other models.
+            mssa_score = 1.0 / (1.0 + max(0.0, float(np.log1p(baseline_var))))
+        mssa_metrics = (
+            _per_model_oos.get("mssa_rl")
+            or mssa_summary.get("regression_metrics", {})
+            or {}
+        )
+        _cpb = _change_point_boost(mssa_summary)
+        _cpb_capped = float(np.clip(_cpb, 0.0, 0.20)) if _cpb is not None else None
+        mssa_score = _combine_scores(
+            mssa_score,
+            _score_from_metrics(mssa_metrics),
+            _variance_test_score(mssa_metrics, baseline_metrics)
+            if baseline_metrics
+            else None,
+            _cpb_capped,
+            _rmse_rank_scores.get("mssa_rl"),
+        )
+        if mssa_score is not None:
+            confidence["mssa_rl"] = mssa_score
+    else:
+        logger.info(
+            "Excluding MSSA-RL from ensemble confidence: policy_status=%s "
+            "policy_support=%s white_noise=%s",
+            mssa_summary.get("policy_status"),
+            mssa_summary.get("policy_support"),
+            (mssa_summary.get("residual_diagnostics") or {}).get("white_noise")
+            if isinstance(mssa_summary.get("residual_diagnostics"), dict)
+            else None,
+        )
 
     # If SAMOSSA has strictly lower residual variance than SARIMAX but
     # ended up with a lower raw score (e.g. due to information-criteria

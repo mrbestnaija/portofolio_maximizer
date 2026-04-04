@@ -277,6 +277,7 @@ pipeline:
       mean: "AR"                 # Phase 7.10b: AR(1) conditional mean for directional signal
       enforce_stationarity: true
       igarch_fallback: "gjr"     # Phase 7.10b: GJR asymmetric fallback before EWMA
+      ewma_lambda: 0.94
 
     samossa:
       enabled: true
@@ -300,15 +301,15 @@ pipeline:
         1: 0.9
         2: 1.0
       policy_seed: 7
-      change_point_threshold: 4.0  # Phase 7.10b: raised from 3.5 (reduces false change-points)
-      q_learning_alpha: 0.3
-      q_learning_gamma: 0.85
-      q_learning_epsilon: 0.1
+      change_point_threshold: 10.0  # Offline-policy contract: shared with artifact validation
       use_gpu: true
       min_series_length: 150
       max_forecast_steps: 30
       use_q_strategy_selection: true
-      reward_mode: "directional_pnl"
+      policy_artifact_path: "models/mssa_rl_policy.v1.json"
+      policy_fail_closed: true
+      min_policy_state_support: 5
+      reward_horizon: 5
 
     combined:
       enabled: true
@@ -326,26 +327,15 @@ pipeline:
       confidence_scaling: false
       diversity_tolerance: 0.15  # Phase 7.9: lowered from default to reduce blend dilution
       candidate_weights:
-        # Phase 10: SARIMAX-anchored (model-class diversity vs spectral/RL/GARCH)
         - {sarimax: 0.50, garch: 0.30, mssa_rl: 0.20}
-        - {sarimax: 0.40, mssa_rl: 0.35, garch: 0.25}
-        # Phase 10: MSSA-RL elevated to positions 3-4 (was buried at 6-7)
-        - {mssa_rl: 0.55, garch: 0.30, samossa: 0.15}
-        - {mssa_rl: 0.50, sarimax: 0.30, garch: 0.20}
-        # GARCH-heavy blends (retained from Phase 7.9)
+        - {sarimax: 0.45, samossa: 0.35, garch: 0.20}
         - {garch: 0.85, samossa: 0.10, mssa_rl: 0.05}
         - {garch: 0.70, samossa: 0.20, mssa_rl: 0.10}
         - {garch: 0.60, samossa: 0.25, mssa_rl: 0.15}
-        # SAMoSSA-anchored
-        - {samossa: 0.60, mssa_rl: 0.40}
+        - {samossa: 0.60, garch: 0.40}
         - {samossa: 0.45, garch: 0.35, mssa_rl: 0.20}
-        # MSSA-RL dominant (Phase 7.9)
-        - {mssa_rl: 0.70, garch: 0.30}
-        - {mssa_rl: 0.70, samossa: 0.30}
-        # Single-model anchors
         - {garch: 1.0}
         - {samossa: 1.0}
-        - {mssa_rl: 1.0}
         - {sarimax: 1.0}
       minimum_component_weight: 0.05
 
@@ -369,10 +359,10 @@ pipeline:
           - {sarimax: 0.45, garch: 0.40, mssa_rl: 0.15}
           - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
         MODERATE_MIXED:
-          - {garch: 0.45, samossa: 0.35, mssa_rl: 0.20}
-          - {garch: 0.55, samossa: 0.30, mssa_rl: 0.15}
+          - {garch: 0.50, samossa: 0.35, mssa_rl: 0.15}
+          - {garch: 0.45, samossa: 0.40, mssa_rl: 0.15}
         MODERATE_TRENDING:
-          - {sarimax: 0.35, garch: 0.40, mssa_rl: 0.25}
+          - {sarimax: 0.35, garch: 0.50, mssa_rl: 0.15}
           - {garch: 0.40, samossa: 0.45, mssa_rl: 0.15}
         HIGH_VOL_TRENDING:
           - {garch: 0.45, samossa: 0.40, mssa_rl: 0.15}
@@ -393,7 +383,7 @@ pipeline:
           description: "Clear trend with moderate volatility"
 
         HIGH_VOL_TRENDING:
-          preferred_models: ['samossa', 'mssa_rl', 'garch']
+          preferred_models: ['samossa', 'garch', 'mssa_rl']
           description: "Volatile directional moves, complex patterns"
 
         CRISIS:

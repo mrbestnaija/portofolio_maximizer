@@ -108,6 +108,7 @@ class SAMOSSAForecaster:
         # Phase 8.2: residual diagnostics populated after fit() completes.
         self._residual_diagnostics: Dict[str, Any] = {}
         self._last_observed: Optional[float] = None
+        self._strictly_positive_training_series: bool = False
 
     # ------------------------------------------------------------------
     # Helpers
@@ -356,6 +357,7 @@ class SAMOSSAForecaster:
         cleaned = cleaned.dropna()
         if len(cleaned) < self.config.min_series_length:
             raise ValueError("Insufficient non-NaN observations for SAMOSSA")
+        self._strictly_positive_training_series = bool((cleaned > 0).all())
 
         self._last_index = cleaned.index[-1]
         self._target_freq = normalize_freq(
@@ -526,13 +528,21 @@ class SAMOSSAForecaster:
         # Scale CI to grow with sqrt(step+1): uncertainty accumulates over the horizon.
         # A flat ±noise_level CI based on in-sample reconstruction residuals is too
         # narrow at step N and systematically inflates SNR for multi-step trades.
-        # sqrt(h) is the random-walk lower bound for uncertainty growth.
-        horizon_scale = np.sqrt(np.arange(1, steps + 1, dtype=float))
+        # Cap at sqrt(horizon/2) to keep long-horizon intervals from exploding on
+        # range-bound, low-price series where uncapped growth can dominate the signal.
+        max_scale = np.sqrt(max(steps / 2, 1.0))
+        horizon_scale = np.minimum(
+            np.sqrt(np.arange(1, steps + 1, dtype=float)),
+            max_scale,
+        )
         ci_band = pd.Series(noise_level * horizon_scale, index=future_index)
+        lower_ci = forecast_series - ci_band
+        if getattr(self, "_strictly_positive_training_series", False):
+            lower_ci = lower_ci.clip(lower=0.0)
 
         return {
             "forecast": forecast_series,
-            "lower_ci": forecast_series - ci_band,
+            "lower_ci": lower_ci,
             "upper_ci": forecast_series + ci_band,
             "explained_variance_ratio": self._explained_variance_ratio,
             "window_length_used": self.config.window_length,
@@ -585,6 +595,9 @@ class SAMOSSAForecaster:
             self._target_freq = snapshot.get("target_freq", "D")
             self._last_observed = snapshot.get("last_observed")
             self._normalized_stats = snapshot.get("normalized_stats", {"mean": 0.0, "std": 1.0})
+            self._strictly_positive_training_series = bool(
+                snapshot.get("strictly_positive_training_series", False)
+            )
             if snapshot.get("config_window_length") is not None:
                 self.config.window_length = int(snapshot.get("config_window_length"))
             if snapshot.get("config_n_components") is not None:

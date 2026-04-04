@@ -27,6 +27,7 @@ forecasting:
     mean: AR
     enforce_stationarity: true
     igarch_fallback: gjr
+    ewma_lambda: 0.94
   samossa:
     enabled: true
     window_length: null
@@ -55,15 +56,15 @@ forecasting:
       1: 0.9
       2: 1.0
     policy_seed: 7
-    change_point_threshold: 4.0
-    q_learning_alpha: 0.3
-    q_learning_gamma: 0.85
-    q_learning_epsilon: 0.1
+    change_point_threshold: 10.0
     use_gpu: true
     min_series_length: 150
     max_forecast_steps: 30
     use_q_strategy_selection: true
-    reward_mode: directional_pnl
+    policy_artifact_path: models/mssa_rl_policy.v1.json
+    policy_fail_closed: true
+    min_policy_state_support: 5
+    reward_horizon: 5
   combined:
     enabled: true
     use_sarimax_mean: true
@@ -79,14 +80,8 @@ forecasting:
     - sarimax: 0.5
       garch: 0.3
       mssa_rl: 0.2
-    - sarimax: 0.4
-      mssa_rl: 0.35
-      garch: 0.25
-    - mssa_rl: 0.55
-      garch: 0.3
-      samossa: 0.15
-    - mssa_rl: 0.5
-      sarimax: 0.3
+    - sarimax: 0.45
+      samossa: 0.35
       garch: 0.2
     - garch: 0.85
       samossa: 0.1
@@ -98,17 +93,12 @@ forecasting:
       samossa: 0.25
       mssa_rl: 0.15
     - samossa: 0.6
-      mssa_rl: 0.4
+      garch: 0.4
     - samossa: 0.45
       garch: 0.35
       mssa_rl: 0.2
-    - mssa_rl: 0.7
-      garch: 0.3
-    - mssa_rl: 0.7
-      samossa: 0.3
     - garch: 1.0
     - samossa: 1.0
-    - mssa_rl: 1.0
     - sarimax: 1.0
     minimum_component_weight: 0.05
     da_floor: 0.1
@@ -129,16 +119,16 @@ forecasting:
         samossa: 0.35
         mssa_rl: 0.15
       MODERATE_MIXED:
-      - mssa_rl: 0.55
-        garch: 0.3
-        samossa: 0.15
-      - garch: 0.45
+      - garch: 0.5
         samossa: 0.35
-        mssa_rl: 0.2
+        mssa_rl: 0.15
+      - garch: 0.45
+        samossa: 0.4
+        mssa_rl: 0.15
       MODERATE_TRENDING:
       - sarimax: 0.35
-        garch: 0.4
-        mssa_rl: 0.25
+        garch: 0.5
+        mssa_rl: 0.15
       - garch: 0.4
         samossa: 0.45
         mssa_rl: 0.15
@@ -171,8 +161,8 @@ forecasting:
       HIGH_VOL_TRENDING:
         preferred_models:
         - samossa
-        - mssa_rl
         - garch
+        - mssa_rl
         description: Volatile directional moves, complex patterns
       CRISIS:
         preferred_models:

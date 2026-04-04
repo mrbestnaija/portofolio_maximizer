@@ -21,6 +21,94 @@ def _minimal_forecaster() -> TimeSeriesForecaster:
     return TimeSeriesForecaster(config=config)
 
 
+def test_forecast_propagates_garch_fallback_mode_into_volatility_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
+    forecaster = _minimal_forecaster()
+    index = pd.date_range("2024-01-01", periods=8, freq="D")
+    price_series = pd.Series(
+        [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0],
+        index=index,
+        name="Close",
+    )
+    forecaster.fit(price_series, ticker="AAPL")
+
+    class _DummyGarch:
+        p = 1
+        q = 1
+
+        def forecast(self, steps: int) -> Dict[str, Any]:
+            idx = pd.Index(range(1, steps + 1), name="horizon")
+            variance = pd.Series([0.0004] * steps, index=idx)
+            mean = pd.Series([0.001] * steps, index=idx)
+            return {
+                "variance_forecast": variance,
+                "mean_forecast": mean,
+                "volatility": variance.pow(0.5),
+                "steps": steps,
+                "aic": None,
+                "bic": None,
+                "convergence_ok": True,
+                "residual_diagnostics": {},
+                "residual_diagnostics_status": "unavailable",
+                "residual_diagnostics_reason": "ewma_fallback",
+                "ewma_lambda": 0.94,
+                "fallback_mode": "explicit_ewma_backend",
+                "persistence": None,
+                "volatility_ratio_to_realized": 1.8,
+            }
+
+        def get_model_summary(self) -> Dict[str, Any]:
+            return {
+                "backend": "ewma",
+                "ewma_lambda": 0.94,
+                "residual_diagnostics_status": "unavailable",
+                "residual_diagnostics_reason": "ewma_fallback",
+                "fallback_mode": "explicit_ewma_backend",
+                "aic": None,
+                "bic": None,
+            }
+
+    forecaster._garch = _DummyGarch()
+
+    result = forecaster.forecast(steps=3)
+
+    assert result["volatility_forecast"]["fallback_mode"] == "explicit_ewma_backend"
+    assert result["volatility_forecast"]["ewma_lambda"] == 0.94
+    assert result["volatility_forecast"]["residual_diagnostics_status"] == "unavailable"
+    assert result["volatility_forecast"]["residual_diagnostics_reason"] == "ewma_fallback"
+    garch_runs = [
+        run
+        for run in result["instrumentation_report"]["runs"]
+        if run.get("model") == "garch" and run.get("phase") == "forecast"
+    ]
+    assert garch_runs, "expected at least one tracked garch forecast run"
+    assert garch_runs[-1]["metadata"]["fallback_mode"] == "explicit_ewma_backend"
+    assert garch_runs[-1]["metadata"]["ewma_lambda"] == 0.94
+
+
+def test_forecaster_rmse_monitor_config_falls_closed_when_config_missing(monkeypatch, tmp_path: Path) -> None:
+    missing_cfg = tmp_path / "missing.yml"
+    monkeypatch.setenv("TS_FORECAST_MONITOR_CONFIG", str(missing_cfg))
+
+    forecaster = _minimal_forecaster()
+
+    assert forecaster._rmse_monitor_cfg["min_lift_rmse_ratio"] == 0.02
+    assert forecaster._rmse_monitor_cfg["strict_preselection_max_rmse_ratio"] == 1.1
+    assert forecaster._rmse_monitor_cfg["baseline_model"] == "EFFECTIVE_DEFAULT"
+
+
+def test_forecaster_rmse_monitor_config_falls_closed_when_yaml_invalid(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = tmp_path / "forecaster_monitoring.yml"
+    cfg_path.write_text("forecaster_monitoring: [\n", encoding="utf-8")
+    monkeypatch.setenv("TS_FORECAST_MONITOR_CONFIG", str(cfg_path))
+
+    forecaster = _minimal_forecaster()
+
+    assert forecaster._rmse_monitor_cfg["min_lift_rmse_ratio"] == 0.02
+    assert forecaster._rmse_monitor_cfg["strict_preselection_max_rmse_ratio"] == 1.1
+    assert forecaster._rmse_monitor_cfg["baseline_model"] == "EFFECTIVE_DEFAULT"
+
+
 def test_fit_records_dataset_ticker_metadata(monkeypatch) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
     forecaster = _minimal_forecaster()

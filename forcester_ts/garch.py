@@ -35,6 +35,33 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+GARCH_FALLBACK_MODE_NONE = "none"
+_GARCH_FALLBACK_MODE_ALIASES = {
+    "ewma_backend": "explicit_ewma_backend",
+}
+VALID_GARCH_FALLBACK_MODES = {
+    GARCH_FALLBACK_MODE_NONE,
+    "explicit_ewma_backend",
+    "insufficient_sample_size",
+    "near_igarch",
+    "convergence_failure",
+    "exploding_variance_ratio",
+}
+
+
+def _coerce_garch_fallback_mode(
+    value: Any,
+    *,
+    default: str = GARCH_FALLBACK_MODE_NONE,
+) -> str:
+    if value is None:
+        return default
+    mode = _GARCH_FALLBACK_MODE_ALIASES.get(str(value).strip().lower(), str(value).strip().lower())
+    if mode in VALID_GARCH_FALLBACK_MODES:
+        return mode
+    logger.debug("Unknown GARCH fallback mode '%s'; using default '%s'.", value, default)
+    return default
+
 
 class GARCHForecaster:
     """Wrapper around `arch` to produce volatility forecasts."""
@@ -53,6 +80,7 @@ class GARCHForecaster:
         max_q: int = 3,
         enforce_stationarity: bool = True,
         igarch_fallback: str = "gjr",
+        ewma_lambda: float = 0.94,
         min_arch_sample_size: int = 120,
         hard_igarch_threshold: float = 0.97,  # P4 fix: align to documented 0.97 (was 0.99)
         max_volatility_ratio_to_realized: float = 4.0,
@@ -64,6 +92,7 @@ class GARCHForecaster:
         self.mean = mean  # Phase 7.10b: AR(1) mean model for directional signal
         self.enforce_stationarity = bool(enforce_stationarity)  # ADF pre-check
         self.igarch_fallback = str(igarch_fallback).lower()  # 'gjr' or 'ewma'
+        self.ewma_lambda = float(ewma_lambda)
         self.backend = (backend or ("arch" if ARCH_AVAILABLE else "ewma")).lower()
         self.auto_select = bool(auto_select)
         self.max_p = int(max_p)
@@ -71,6 +100,10 @@ class GARCHForecaster:
         self.min_arch_sample_size = max(int(min_arch_sample_size), 20)
         self.hard_igarch_threshold = float(hard_igarch_threshold)
         self.max_volatility_ratio_to_realized = float(max_volatility_ratio_to_realized)
+        if not 0.0 < self.ewma_lambda < 1.0:
+            raise ValueError(
+                f"Invalid ewma_lambda={self.ewma_lambda!r}; expected 0 < ewma_lambda < 1."
+            )
         if self.backend == "arch" and not ARCH_AVAILABLE:
             logger.warning("arch not installed; falling back to EWMA volatility model.")
             self.backend = "ewma"
@@ -86,7 +119,7 @@ class GARCHForecaster:
         self._convergence_ok: bool = True  # Phase 7.14-C: False when optimizer did not converge
         # Phase 8.2: residual diagnostics populated after fit() completes.
         self._residual_diagnostics: Dict[str, Any] = {}
-        self._fallback_reason: Optional[str] = None
+        self._fallback_mode: str = GARCH_FALLBACK_MODE_NONE
         self._last_persistence: Optional[float] = None
         self._volatility_ratio_to_realized: Optional[float] = None
         self._realized_volatility: Optional[float] = None
@@ -112,7 +145,7 @@ class GARCHForecaster:
         returns_clean = returns_clean.astype(float)
         self._convergence_ok = True
         self._fallback_state = None
-        self._fallback_reason = None
+        self._fallback_mode = GARCH_FALLBACK_MODE_NONE
         self._last_persistence = None
         self._volatility_ratio_to_realized = None
         self._residual_diagnostics = {}
@@ -538,11 +571,12 @@ class GARCHForecaster:
         self,
         returns_clean: pd.Series,
         *,
-        reason: str = "ewma_backend",
+        reason: str = "explicit_ewma_backend",
         persistence: Optional[float] = None,
         volatility_ratio_to_realized: Optional[float] = None,
     ) -> "GARCHForecaster":
-        lam = 0.94
+        fallback_mode = _coerce_garch_fallback_mode(reason, default="explicit_ewma_backend")
+        lam = float(getattr(self, "ewma_lambda", 0.94))
         squared = np.square(returns_clean.to_numpy(dtype=float, copy=False))
         baseline_var = float(np.var(squared)) if squared.size else 0.0
         variance = float(np.var(returns_clean.to_numpy(dtype=float, copy=False), ddof=0))
@@ -560,7 +594,7 @@ class GARCHForecaster:
             "last_variance": ewma_var,
             "mean": float(returns_clean.mean()),
             "n_obs": int(len(returns_clean)),
-            "fallback_reason": reason,
+            "fallback_mode": fallback_mode,
             "persistence": persistence if persistence is not None else self._last_persistence,
             "volatility_ratio_to_realized": (
                 volatility_ratio_to_realized
@@ -569,7 +603,7 @@ class GARCHForecaster:
             ),
             "realized_volatility": self._realized_volatility,
         }
-        self._fallback_reason = reason
+        self._fallback_mode = fallback_mode
         self._last_persistence = self._fallback_state.get("persistence")
         self._volatility_ratio_to_realized = self._fallback_state.get(
             "volatility_ratio_to_realized"
@@ -577,12 +611,21 @@ class GARCHForecaster:
         # Sentinel so downstream callers treat the model as "fitted".
         self.fitted_model = True
         logger.info(
-            "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g, reason=%s)",
+            "EWMA volatility model fitted successfully (lambda=%.3f, var=%.6g, fallback_mode=%s)",
             lam,
             ewma_var,
-            reason,
+            fallback_mode,
         )
         return self
+
+    def _current_fallback_mode(self) -> str:
+        return _coerce_garch_fallback_mode(getattr(self, "_fallback_mode", None))
+
+    def _state_fallback_mode(self, state: Optional[Dict[str, Any]]) -> str:
+        payload = state or {}
+        return _coerce_garch_fallback_mode(
+            payload.get("fallback_mode", payload.get("fallback_reason")),
+        )
 
     def forecast(self, steps: int) -> Dict[str, Any]:
         if self.fitted_model is None:
@@ -591,6 +634,7 @@ class GARCHForecaster:
         backend = getattr(self, "backend", "arch")
         if backend != "arch":
             state = self._fallback_state or {}
+            fallback_mode = self._state_fallback_mode(state)
             last_var = float(state.get("last_variance") or 0.0)
             last_var = float(max(last_var, 1e-12))
             idx = pd.Index(range(1, int(steps) + 1), name="horizon")
@@ -609,8 +653,11 @@ class GARCHForecaster:
                 "aic": None,
                 "bic": None,
                 "convergence_ok": True,  # EWMA/GJR fallback is always "converged"
-                "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
-                "fallback_reason": state.get("fallback_reason"),
+                "residual_diagnostics": {},
+                "residual_diagnostics_status": "unavailable",
+                "residual_diagnostics_reason": "ewma_fallback",
+                "ewma_lambda": state.get("lambda"),
+                "fallback_mode": fallback_mode,
                 "persistence": state.get("persistence"),
                 "volatility_ratio_to_realized": state.get("volatility_ratio_to_realized"),
             }
@@ -667,7 +714,10 @@ class GARCHForecaster:
             "convergence_ok": bool(getattr(self, "_convergence_ok", True)),
             # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
             "residual_diagnostics": getattr(self, "_residual_diagnostics", {}),
-            "fallback_reason": getattr(self, "_fallback_reason", None),
+            "residual_diagnostics_status": "available",
+            "residual_diagnostics_reason": None,
+            "ewma_lambda": None,
+            "fallback_mode": self._current_fallback_mode(),
             "persistence": getattr(self, "_last_persistence", None) or self._garch_persistence(),
             "volatility_ratio_to_realized": forecast_volatility_ratio,
         }
@@ -685,13 +735,15 @@ class GARCHForecaster:
                 "bic": None,
                 "log_likelihood": None,
                 "backend": backend,
-                "igarch_fallback": True,
                 # Mirror the arch-path keys so callers have a consistent contract
                 "vol_model": "ewma",
                 "mean_model": getattr(self, "mean", "AR"),
                 "dist": self.dist,
                 "differenced": bool(getattr(self, "_differenced", False)),
-                "fallback_reason": state.get("fallback_reason"),
+                "ewma_lambda": state.get("lambda"),
+                "residual_diagnostics_status": "unavailable",
+                "residual_diagnostics_reason": "ewma_fallback",
+                "fallback_mode": self._state_fallback_mode(state),
                 "persistence": state.get("persistence"),
                 "volatility_ratio_to_realized": state.get("volatility_ratio_to_realized"),
                 "fit_sample_size": state.get("n_obs"),
@@ -706,7 +758,10 @@ class GARCHForecaster:
             "mean_model": getattr(self, "mean", "AR"),
             "dist": self.dist,
             "differenced": bool(getattr(self, "_differenced", False)),
-            "fallback_reason": self._fallback_reason,
+            "ewma_lambda": None,
+            "residual_diagnostics_status": "available",
+            "residual_diagnostics_reason": None,
+            "fallback_mode": self._current_fallback_mode(),
             "volatility_ratio_to_realized": self._volatility_ratio_to_realized,
             "fit_sample_size": self._fit_sample_size,
         }

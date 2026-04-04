@@ -49,7 +49,36 @@ def test_fit_falls_back_to_ewma_when_sample_too_short(monkeypatch: pytest.Monkey
 
     mock_arch.assert_not_called()
     assert forecaster.backend == "ewma"
-    assert forecaster.get_model_summary()["fallback_reason"] == "insufficient_sample_size"
+    summary = forecaster.get_model_summary()
+    assert summary["fallback_mode"] == "insufficient_sample_size"
+    assert summary["ewma_lambda"] == pytest.approx(0.94)
+    assert summary["residual_diagnostics_status"] == "unavailable"
+    assert summary["residual_diagnostics_reason"] == "ewma_fallback"
+    assert "fallback_reason" not in summary
+    assert "igarch_fallback" not in summary
+
+
+def test_fit_uses_explicit_ewma_backend_fallback_mode() -> None:
+    forecaster = GARCHForecaster(
+        backend="ewma",
+        auto_select=True,
+        max_p=1,
+        max_q=1,
+    )
+
+    forecaster.fit(_returns(n=150))
+
+    summary = forecaster.get_model_summary()
+    assert forecaster.backend == "ewma"
+    assert summary["fallback_mode"] == "explicit_ewma_backend"
+    assert summary["ewma_lambda"] == pytest.approx(0.94)
+    assert summary["residual_diagnostics_status"] == "unavailable"
+    assert "fallback_reason" not in summary
+
+
+def test_invalid_ewma_lambda_rejected() -> None:
+    with pytest.raises(ValueError, match="ewma_lambda"):
+        GARCHForecaster(backend="ewma", ewma_lambda=1.0)
 
 
 def test_fit_falls_back_to_ewma_when_volatility_ratio_explodes(
@@ -77,7 +106,9 @@ def test_fit_falls_back_to_ewma_when_volatility_ratio_explodes(
 
     assert forecaster.backend == "ewma"
     summary = forecaster.get_model_summary()
-    assert summary["fallback_reason"] == "exploding_variance_ratio"
+    assert summary["fallback_mode"] == "exploding_variance_ratio"
+    assert summary["ewma_lambda"] == pytest.approx(0.94)
+    assert "fallback_reason" not in summary
     assert summary["volatility_ratio_to_realized"] > 4.0
 
 
@@ -170,15 +201,20 @@ def test_ewma_forecast_reports_guardrail_metadata() -> None:
     forecaster.dist = "normal"
     forecaster._residual_diagnostics = {}
     forecaster._fallback_state = {
+        "lambda": 0.94,
         "last_variance": 0.0004,
         "mean": 0.001,
-        "fallback_reason": "near_igarch",
+        "fallback_mode": "near_igarch",
         "persistence": 0.995,
         "volatility_ratio_to_realized": 4.5,
     }
 
     result = forecaster.forecast(steps=3)
 
-    assert result["fallback_reason"] == "near_igarch"
+    assert result["fallback_mode"] == "near_igarch"
+    assert result["ewma_lambda"] == pytest.approx(0.94)
+    assert result["residual_diagnostics_status"] == "unavailable"
+    assert result["residual_diagnostics_reason"] == "ewma_fallback"
+    assert "fallback_reason" not in result
     assert result["persistence"] == pytest.approx(0.995)
     assert result["volatility_ratio_to_realized"] == pytest.approx(4.5)

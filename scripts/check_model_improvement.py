@@ -165,7 +165,7 @@ def _resolve_layer1_audit_dir(explicit_audit_dir: Optional[str | Path] = None) -
 
 
 def _load_layer1_regression_contract() -> tuple[str, float]:
-    baseline_model = "BEST_SINGLE"
+    baseline_model = "EFFECTIVE_DEFAULT"
     # Phase 7.14 production value is 0.02; use that as the hardened fallback so
     # that a config-read failure does not silently degrade the gate to "any
     # improvement counts" (0.0 → lift_threshold=1.0 is vacuously permissive).
@@ -184,15 +184,20 @@ def _load_layer1_regression_contract() -> tuple[str, float]:
             )
             baseline_model = str(
                 regression_cfg.get("baseline_model", baseline_model) or baseline_model
-            ).strip().upper() or "BEST_SINGLE"
-            min_lift_rmse_ratio = float(regression_cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+            ).strip().upper() or "EFFECTIVE_DEFAULT"
+            min_lift_rmse_ratio = float(
+                regression_cfg.get("min_lift_rmse_ratio", min_lift_rmse_ratio) or min_lift_rmse_ratio
+            )
     except Exception as _exc:
         import logging as _logging_l1rc
         _logging_l1rc.getLogger(__name__).warning(
             "[LAYER1] Failed to load regression contract from config: %s — "
-            "falling back to min_lift_rmse_ratio=0.0 (lift_threshold=1.0, any improvement counts). "
-            "This weakens the gate; fix config/forecaster_monitoring.yml.",
+            "using hardened defaults baseline_model=%s min_lift_rmse_ratio=%.2f "
+            "(lift_threshold=%.2f). Fix config/forecaster_monitoring.yml.",
             _exc,
+            baseline_model,
+            min_lift_rmse_ratio,
+            1.0 - min_lift_rmse_ratio,
         )
     return baseline_model, 1.0 - min_lift_rmse_ratio
 
