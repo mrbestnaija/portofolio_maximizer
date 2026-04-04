@@ -1,5 +1,5 @@
 # Supported Python runtime: >=3.10,<3.13 (see Documentation/RUNTIME_GUARDRAILS.md)
-# Last updated: 2026-04-02 (Security: aiohttp 3.13.3->3.13.4 CVE-2026-34513/34514/34515/34516/34517/34518/34519/34520/34525/22815)
+# Last updated: 2026-04-04 (Security: curl-cffi 0.13.0->0.15.0 CVE-2026-33752 SSRF)
 # Observability note: provision Prometheus, Alertmanager, Grafana, Loki, and Alloy under tools/observability or via scripts/install_observability_stack.ps1 rather than pip.
 # Unfixed: pygments 2.19.2 CVE-2026-4539 (local-only ReDoS, no fix released); ignored in CI via --ignore-vuln-id.
 aiohappyeyeballs==2.6.1
@@ -19,7 +19,7 @@ click==8.3.0
 colorama==0.4.6
 contourpy==1.3.2; python_version < "3.11"
 contourpy==1.3.3; python_version >= "3.11" and python_version < "3.13"
-curl_cffi==0.13.0
+curl_cffi==0.15.0
 cryptography==46.0.6
 cycler==0.12.1
 deepdiff==8.6.2

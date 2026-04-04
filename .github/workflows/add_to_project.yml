@@ -16,21 +16,18 @@ permissions:
 
 jobs:
   add_to_project:
-    # Do not fail PRs/Issues when PROJECTS_TOKEN is not configured (common for forks or fresh repos).
-    if: >-
-      ${{
-        secrets.PROJECTS_TOKEN != '' &&
-        (
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.fork == false
-        )
-      }}
+    # Skip fork PRs (no access to secrets from fork workflows).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
+    env:
+      # Map secret to env so it can be checked in a step-level if (secrets context
+      # is not available in job-level if expressions).
+      PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
     steps:
       - name: Add item to GitHub Project 7
+        # Skip silently when PROJECTS_TOKEN is not configured (fresh repos / forks).
+        if: env.PROJECTS_TOKEN != ''
         uses: actions/add-to-project@v1.0.2
         with:
           project-url: https://github.com/users/mrbestnaija/projects/7
           github-token: ${{ secrets.PROJECTS_TOKEN }}
-
-
