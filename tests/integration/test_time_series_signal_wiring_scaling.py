@@ -28,8 +28,8 @@ def sample_price_series_daily() -> pd.Series:
     return pd.Series(prices, index=index, name="Close")
 
 
-@pytest.fixture(scope="session")
-def fast_all_model_config() -> dict:
+@pytest.fixture(scope="function")
+def fast_all_model_config(mssa_ready_policy_env) -> dict:
     # Keep the search grids compact so the integration suite stays bounded.
     return {
         "sarimax_config": {
@@ -59,6 +59,8 @@ def fast_all_model_config() -> dict:
             "window_length": 30,
             "forecast_horizon": 6,
             "use_gpu": False,
+            "policy_artifact_path": str(mssa_ready_policy_env),
+            "min_policy_state_support": 5,
         },
         "garch_config": {
             "enabled": True,
@@ -73,7 +75,7 @@ def fast_all_model_config() -> dict:
     }
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def forecast_bundle_all_models(sample_price_series_daily: pd.Series, fast_all_model_config: dict) -> dict:
     # Pop the env var so the forecaster resolves the real audit dir (logs/forecast_audits).
     # This allows the preselection gate to engage with actual audit data, which is

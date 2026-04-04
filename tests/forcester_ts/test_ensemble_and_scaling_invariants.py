@@ -361,14 +361,16 @@ def test_model_confidence_variance_screening_does_not_reward_higher_variance():
             "regression_metrics": {"tracking_error": 0.1, "n_observations": 100},
         },
         # Tracking error worse than baseline, but baseline variance term is strong.
-        # Variance screening should not let this dominate confidence.
+        # Variance screening should not let this dominate confidence, and MSSA-RL
+        # should be excluded entirely unless readiness is proven.
         "mssa_rl": {
             "baseline_variance": 0.05,
             "regression_metrics": {"tracking_error": 0.2, "n_observations": 100},
         },
     }
     confidence = derive_model_confidence(summaries)
-    assert confidence["mssa_rl"] < confidence["samossa"]
+    assert confidence["samossa"] > 0.0
+    assert "mssa_rl" not in confidence
 
 
 # ---------------------------------------------------------------------------

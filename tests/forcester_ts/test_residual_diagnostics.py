@@ -85,7 +85,7 @@ class TestRunResidualDiagnostics:
 # ---------------------------------------------------------------------------
 
 class TestMSSARLResidualDiagnostics:
-    def test_forecast_includes_residual_diagnostics(self):
+    def test_forecast_includes_residual_diagnostics(self, mssa_ready_policy_env):
         from forcester_ts.mssa_rl import MSSARLForecaster
         np.random.seed(7)
         n = 150
@@ -104,6 +104,7 @@ class TestMSSARLResidualDiagnostics:
         assert "active_rank" in result
         assert "q_state" in result
         assert "policy_version" in result
+        assert result["policy_status"] == "ready"
 
     def test_fit_populates_residual_diagnostics_attr(self):
         from forcester_ts.mssa_rl import MSSARLForecaster
@@ -164,6 +165,11 @@ class TestGARCHResidualDiagnostics:
         # Must not raise; residual_diagnostics should be present (empty dict is fine)
         assert "residual_diagnostics" in result
         assert isinstance(result["residual_diagnostics"], dict)
+        assert result["fallback_mode"] == "none"
+        assert result["ewma_lambda"] is None
+        assert result["residual_diagnostics_status"] == "available"
+        assert result["residual_diagnostics_reason"] is None
+        assert "fallback_reason" not in result
 
     def test_ewma_fallback_forecast_preserves_guardrail_fields(self):
         from forcester_ts.garch import GARCHForecaster
@@ -177,16 +183,21 @@ class TestGARCHResidualDiagnostics:
         forecaster.dist = "normal"
         forecaster._residual_diagnostics = {}
         forecaster._fallback_state = {
+            "lambda": 0.94,
             "last_variance": 0.0001,
             "mean": 0.001,
-            "fallback_reason": "convergence_failure",
+            "fallback_mode": "convergence_failure",
             "persistence": 0.992,
             "volatility_ratio_to_realized": 4.2,
         }
 
         result = forecaster.forecast(steps=2)
 
-        assert result["fallback_reason"] == "convergence_failure"
+        assert result["fallback_mode"] == "convergence_failure"
+        assert result["ewma_lambda"] == pytest.approx(0.94)
+        assert result["residual_diagnostics_status"] == "unavailable"
+        assert result["residual_diagnostics_reason"] == "ewma_fallback"
+        assert "fallback_reason" not in result
         assert result["persistence"] == pytest.approx(0.992)
         assert result["volatility_ratio_to_realized"] == pytest.approx(4.2)
 

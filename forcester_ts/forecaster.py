@@ -50,6 +50,16 @@ from .metrics import compute_regression_metrics
 
 logger = logging.getLogger(__name__)
 
+_HARDENED_RMSE_MONITOR_DEFAULTS: Dict[str, Any] = {
+    "baseline_model": "EFFECTIVE_DEFAULT",
+    "max_rmse_ratio_vs_baseline": 1.1,
+    "min_lift_rmse_ratio": 0.02,
+    "strict_preselection_gate_enabled": True,
+    "strict_preselection_max_rmse_ratio": 1.1,
+    "strict_preselection_recent_window": 5,
+    "strict_preselection_min_effective_audits": 1,
+}
+
 
 @dataclass
 class TimeSeriesForecasterConfig:
@@ -1169,6 +1179,9 @@ class TimeSeriesForecaster:
                                 "target_freq": getattr(self._samossa, "_target_freq", None),
                                 "last_observed": getattr(self._samossa, "_last_observed", None),
                                 "normalized_stats": dict(getattr(self._samossa, "_normalized_stats", {})),
+                                "strictly_positive_training_series": bool(
+                                    getattr(self._samossa, "_strictly_positive_training_series", False)
+                                ),
                                 "config_window_length": getattr(self._samossa.config, "window_length", None),
                                 "config_n_components": getattr(self._samossa.config, "n_components", None),
                                 "learned_ar_lag": getattr(self._samossa, "_learned_ar_lag", None),
@@ -1206,13 +1219,18 @@ class TimeSeriesForecaster:
             )
             try:
                 with self._instrumentation.track("mssa_rl", "fit", points=len(price_series)) as meta:
-                    mssa_config = MSSARLConfig(**self.config.mssa_rl_kwargs)
+                    mssa_config = self._construct_with_filtered_kwargs(
+                        MSSARLConfig,
+                        self.config.mssa_rl_kwargs,
+                    )
                     self._mssa = MSSARLForecaster(config=mssa_config)
                     self._mssa.fit(price_series)
                     diagnostics = self._mssa.get_diagnostics()
                     meta["change_points"] = len(diagnostics.get("change_points", []))
                     meta["rank"] = diagnostics.get("rank")
                     meta["rank_policy"] = diagnostics.get("rank_policy")
+                    meta["policy_status"] = diagnostics.get("policy_status")
+                    meta["policy_support"] = diagnostics.get("policy_support")
                 self._record_model_event(
                     "mssa_rl",
                     "fit_complete",
@@ -1398,6 +1416,8 @@ class TimeSeriesForecaster:
                     meta["change_points"] = len(diagnostics.get("change_points", []))
                     meta["active_rank"] = mssa_output.get("active_rank")
                     meta["q_state"] = mssa_output.get("q_state")
+                    meta["policy_status"] = diagnostics.get("policy_status")
+                    meta["policy_support"] = diagnostics.get("policy_support")
                     results["active_rank"] = mssa_output.get("active_rank")
                     results["q_state"] = mssa_output.get("q_state")
                     self._instrumentation.record_artifact(
@@ -1407,6 +1427,9 @@ class TimeSeriesForecaster:
                             "active_rank": mssa_output.get("active_rank"),
                             "q_state": mssa_output.get("q_state"),
                             "policy_version": mssa_output.get("policy_version"),
+                            "policy_status": diagnostics.get("policy_status"),
+                            "policy_support": diagnostics.get("policy_support"),
+                            "action_value_margin": diagnostics.get("action_value_margin"),
                         },
                     )
                 self._record_model_event("mssa_rl", "forecast_complete")
@@ -1430,7 +1453,14 @@ class TimeSeriesForecaster:
                         "model_order": {"p": self._garch.p, "q": self._garch.q},
                         "aic": garch_result.get("aic"),
                         "bic": garch_result.get("bic"),
-                        "fallback_reason": garch_result.get("fallback_reason"),
+                        "ewma_lambda": garch_result.get("ewma_lambda"),
+                        "fallback_mode": garch_result.get("fallback_mode", "none"),
+                        "residual_diagnostics_status": garch_result.get(
+                            "residual_diagnostics_status", "available"
+                        ),
+                        "residual_diagnostics_reason": garch_result.get(
+                            "residual_diagnostics_reason"
+                        ),
                         "persistence": garch_result.get("persistence"),
                         "volatility_ratio_to_realized": garch_result.get(
                             "volatility_ratio_to_realized"
@@ -1540,26 +1570,13 @@ class TimeSeriesForecaster:
         else:
             results["ensemble_forecast"] = None
             results["ensemble_metadata"] = {}
-            # Prefer SAMOSSA as the default TS baseline when available,
-            # falling back to SARIMAX, MSSA_RL, then GARCH.
-            # Always set default_model to match whatever ends up in mean_forecast so
-            # downstream routing (MSSA_RL fallback gate, audit artifacts) is consistent.
-            _non_ensemble_order = [
-                ("samossa_forecast", "SAMOSSA"),
-                ("sarimax_forecast", "SARIMAX"),
-                ("mssa_rl_forecast", "MSSA_RL"),
-                ("garch_forecast", "GARCH"),
-            ]
-            _selected_payload = None
-            _selected_label = None
-            for _key, _label in _non_ensemble_order:
-                if results.get(_key) is not None:
-                    _selected_payload = results[_key]
-                    _selected_label = _label
-                    break
-            if _selected_payload is not None:
-                results["mean_forecast"] = _selected_payload
-                results["default_model"] = _selected_label
+            # Reuse the same single-model order as DISABLE_DEFAULT fallback so
+            # MSSA_RL stays containment-only rather than becoming the implicit
+            # default path in non-ensemble runs.
+            default_model, default_payload = self._select_default_single_forecast(results)
+            if default_payload is not None:
+                results["mean_forecast"] = default_payload
+                results["default_model"] = default_model
             else:
                 # All model forecasts failed — leave mean_forecast unset so
                 # _resolve_primary_forecast returns None and the signal becomes HOLD.
@@ -2169,19 +2186,19 @@ class TimeSeriesForecaster:
         samossa_summary = (self._model_summaries or {}).get("samossa", {})
         trend_strength = samossa_summary.get("trend_strength")
         if isinstance(trend_strength, (int, float)) and trend_strength < self._SAMOSSA_FLAT_TREND_THRESHOLD:
-            # SAMoSSA reconstruction is flat.  Try MSSA_RL first (often captures
-            # momentum better in range-bound regimes), then GARCH, then SARIMAX.
+            # SAMoSSA reconstruction is flat. Prefer the more stable fallback
+            # paths first while MSSA_RL remains containment-only.
             logger.info(
                 "DISABLE_DEFAULT fallback: SAMoSSA trend_strength=%.4f < %.2f "
-                "(flat forecast); preferring MSSA_RL over SAMOSSA.",
+                "(flat forecast); preferring GARCH/SARIMAX ahead of MSSA_RL.",
                 trend_strength, self._SAMOSSA_FLAT_TREND_THRESHOLD,
             )
-            if results.get("mssa_rl_forecast") is not None:
-                return "MSSA_RL"
             if results.get("garch_forecast") is not None:
                 return "GARCH"
             if results.get("sarimax_forecast") is not None:
                 return "SARIMAX"
+            if results.get("mssa_rl_forecast") is not None:
+                return "MSSA_RL"
 
         # Tier 3: Original behaviour — ensemble_meta primary_model.
         return ensemble_meta.get("default_model") or ensemble_meta.get("primary_model")
@@ -2193,8 +2210,17 @@ class TimeSeriesForecaster:
         preferred_model: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
         order: list[str] = []
+        normalized_preferred: Optional[str] = None
         if isinstance(preferred_model, str) and preferred_model.strip():
-            order.append(preferred_model.strip().lower())
+            normalized_preferred = preferred_model.strip().lower()
+        if normalized_preferred == "mssa_rl":
+            logger.info(
+                "Default single-model fallback containment: deprioritising MSSA_RL "
+                "until its baseline issues are resolved."
+            )
+            normalized_preferred = None
+        if normalized_preferred:
+            order.append(normalized_preferred)
         for model in ("samossa", "sarimax", "garch", "mssa_rl"):
             if model not in order:
                 order.append(model)
@@ -2250,18 +2276,39 @@ class TimeSeriesForecaster:
 
     @staticmethod
     def _load_rmse_monitoring_config(path: Path) -> Dict[str, Any]:
+        defaults = dict(_HARDENED_RMSE_MONITOR_DEFAULTS)
         if not path.exists():
-            return {}
+            logger.warning(
+                "RMSE monitor config %s missing; using hardened defaults %s.",
+                path,
+                defaults,
+            )
+            return defaults
         try:
             import yaml  # type: ignore
-        except Exception:
-            return {}
+        except Exception as exc:
+            logger.warning(
+                "PyYAML unavailable while loading %s; using hardened defaults %s (%s).",
+                path,
+                defaults,
+                exc,
+            )
+            return defaults
         try:
             raw = yaml.safe_load(path.read_text()) or {}
             fm = raw.get("forecaster_monitoring") or {}
-            return fm.get("regression_metrics") or {}
-        except Exception:
-            return {}
+            regression_cfg = fm.get("regression_metrics") or {}
+            if not isinstance(regression_cfg, dict):
+                return defaults
+            return {**defaults, **regression_cfg}
+        except Exception as exc:
+            logger.warning(
+                "Failed to parse RMSE monitor config %s; using hardened defaults %s (%s).",
+                path,
+                defaults,
+                exc,
+            )
+            return defaults
 
     def _audit_history_stats(
         self,
@@ -2270,9 +2317,12 @@ class TimeSeriesForecaster:
     ) -> Dict[str, Any]:
         """Summarize recent audit performance for holdout-based model selection."""
         ratios: list[float] = []
-        cfg = self._rmse_monitor_cfg or {}
+        cfg = {**_HARDENED_RMSE_MONITOR_DEFAULTS, **(self._rmse_monitor_cfg or {})}
         max_ratio = float(cfg.get("max_rmse_ratio_vs_baseline", 1.1))
-        min_lift_rmse_ratio = float(cfg.get("min_lift_rmse_ratio", 0.0) or 0.0)
+        min_lift_rmse_ratio = float(
+            cfg.get("min_lift_rmse_ratio", _HARDENED_RMSE_MONITOR_DEFAULTS["min_lift_rmse_ratio"])
+            or _HARDENED_RMSE_MONITOR_DEFAULTS["min_lift_rmse_ratio"]
+        )
 
         def _append_from_metrics(metrics_map: Dict[str, Dict[str, Any]]) -> None:
             ensemble_rmse = self._rmse_from_metrics(metrics_map.get("ensemble"))
@@ -2449,9 +2499,14 @@ class TimeSeriesForecaster:
         ensemble vs best single model is above threshold, the ensemble remains
         available for diagnostics but is not allowed as the default source.
         """
-        cfg = self._rmse_monitor_cfg or {}
+        cfg = {**_HARDENED_RMSE_MONITOR_DEFAULTS, **(self._rmse_monitor_cfg or {})}
         enabled = bool(cfg.get("strict_preselection_gate_enabled", True))
-        threshold = float(cfg.get("strict_preselection_max_rmse_ratio", 1.0))
+        threshold = float(
+            cfg.get(
+                "strict_preselection_max_rmse_ratio",
+                _HARDENED_RMSE_MONITOR_DEFAULTS["strict_preselection_max_rmse_ratio"],
+            )
+        )
         recent_window = max(1, int(cfg.get("strict_preselection_recent_window", 5) or 5))
         min_effective = max(1, int(cfg.get("strict_preselection_min_effective_audits", 1) or 1))
 
@@ -2527,7 +2582,7 @@ class TimeSeriesForecaster:
         if isinstance(ensemble_payload, dict):
             _evaluate_model("ensemble", ensemble_payload)
 
-        rmse_cfg = self._rmse_monitor_cfg or {}
+        rmse_cfg = {**_HARDENED_RMSE_MONITOR_DEFAULTS, **(self._rmse_monitor_cfg or {})}
         history_stats = self._audit_history_stats(metrics_map)
         # Keep evaluate() read-only: changing ensemble weights using realized
         # labels in this method is post-hoc leakage and contaminates gate data.

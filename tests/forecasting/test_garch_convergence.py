@@ -213,7 +213,7 @@ class TestGARCHConvergenceHardening:
         forecaster._fallback_state = {
             "lambda": 0.94,
             "n_obs": 60,
-            "fallback_reason": "convergence_failure",
+            "fallback_mode": "convergence_failure",
             "persistence": 0.995,
             "volatility_ratio_to_realized": 4.8,
         }
@@ -221,7 +221,12 @@ class TestGARCHConvergenceHardening:
         summary = forecaster.get_model_summary()
 
         assert summary["backend"] == "ewma"
-        assert summary["fallback_reason"] == "convergence_failure"
+        assert summary["fallback_mode"] == "convergence_failure"
+        assert summary["ewma_lambda"] == pytest.approx(0.94)
+        assert summary["residual_diagnostics_status"] == "unavailable"
+        assert summary["residual_diagnostics_reason"] == "ewma_fallback"
+        assert "fallback_reason" not in summary
+        assert "igarch_fallback" not in summary
         assert summary["persistence"] == pytest.approx(0.995)
         assert summary["volatility_ratio_to_realized"] == pytest.approx(4.8)
         assert summary["fit_sample_size"] == 60

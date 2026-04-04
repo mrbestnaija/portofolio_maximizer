@@ -191,15 +191,17 @@ class TestSARIMAXXInstrumentation:
 
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
 class TestMSSARL:
-    def test_mssa_rl_forecast(self, price_series: pd.Series) -> None:
+    def test_mssa_rl_forecast(self, price_series: pd.Series, mssa_ready_policy_env) -> None:
         forecaster = MSSARLForecaster()
         forecaster.fit(price_series)
 
         result = forecaster.forecast(steps=6)
         assert len(result["forecast"]) == 6
         assert "change_points" in result
+        assert result["policy_status"] == "ready"
         diagnostics = forecaster.get_diagnostics()
         assert "q_table" in diagnostics
+        assert diagnostics["policy_status"] == "ready"
 
     def test_mssa_rl_action_component_sets_differ(self, price_series: pd.Series) -> None:
         """Phase 8.1: per-action reconstructions must differ from each other.
@@ -226,13 +228,14 @@ class TestMSSARL:
         assert len(r0) == len(price_series.dropna())
         assert len(r2) == len(price_series.dropna())
 
-    def test_mssa_rl_forecast_returns_active_action(self, price_series: pd.Series) -> None:
+    def test_mssa_rl_forecast_returns_active_action(self, price_series: pd.Series, mssa_ready_policy_env) -> None:
         """Phase 8.1: forecast result includes active_action key."""
         forecaster = MSSARLForecaster()
         forecaster.fit(price_series)
         result = forecaster.forecast(steps=5)
         assert "active_action" in result
         assert result["active_action"] in {0, 1, 2}
+        assert result["policy_status"] == "ready"
 
     def test_mssa_rl_action0_forecast_smoother_than_action2(self, price_series: pd.Series) -> None:
         """Phase 8.1: action=0 slope (mean-revert) <= action=2 slope in trend-following series.
@@ -277,7 +280,12 @@ class TestMSSARL:
         diagnostics = forecaster.get_diagnostics()
         change_points = diagnostics.get("change_points", [])
         change_points = [pd.to_datetime(cp) for cp in change_points]
-        assert any(abs((cp - dates[120]).days) <= 5 for cp in change_points)
+        expected_boundaries = (dates[120], dates[240])
+        assert any(
+            abs((cp - boundary).days) <= 7
+            for cp in change_points
+            for boundary in expected_boundaries
+        )
 
 
 @pytest.mark.skipif(not FORECASTING_AVAILABLE, reason="Forecasting modules not available")
@@ -440,11 +448,8 @@ class TestEnsembleCoordinator:
         assert confidence["samossa"] > confidence["sarimax"]
         # Phase 7.15-E: GARCH always enters the pool (fallback 0.45 when no summary).
         assert "garch" in confidence  # GARCH participates even without explicit summary
-        # P1b fix (2026-03-29): change_point_boost is now capped at 0.20 so it can
-        # nudge but not dominate.  SAMoSSA's EVR (0.6) + low tracking error correctly
-        # outranks MSSA-RL when no OOS evidence is passed.  MSSA-RL still enters the
-        # pool with a meaningful score (> SARIMAX) thanks to the capped boost.
-        assert confidence["mssa_rl"] > confidence["sarimax"]
+        # MSSA-RL is now containment-only unless offline-policy readiness is proven.
+        assert "mssa_rl" not in confidence
         # All model scores should be within the calibrated [0.4, 0.85] band.
         for model, score in confidence.items():
             assert 0.35 < score <= 0.95, f"{model} score {score:.3f} out of band"

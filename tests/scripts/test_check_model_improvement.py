@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 from check_model_improvement import (
     LAYER_REQUIRED_KEYS,
     LayerResult,
+    _load_layer1_regression_contract,
     _load_layer1_lift_fractions,
     _resolve_layer1_audit_dir,
     compare_baseline,
@@ -717,6 +718,27 @@ class TestLoadLayer1LiftFractions:
             f"Production fail_lift_threshold={fail} != 0.05 — "
             "check forecaster_monitoring.yml fail_lift_fraction"
         )
+
+
+class TestLoadLayer1RegressionContract:
+    def test_falls_closed_when_config_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        baseline_model, lift_threshold = _load_layer1_regression_contract()
+
+        assert baseline_model == "EFFECTIVE_DEFAULT"
+        assert lift_threshold == pytest.approx(0.98)
+
+    def test_falls_closed_when_config_is_invalid_yaml(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "config" / "forecaster_monitoring.yml"
+        cfg_path.parent.mkdir(parents=True)
+        cfg_path.write_text("forecaster_monitoring: [\n", encoding="utf-8")
+        monkeypatch.setattr("check_model_improvement.REPO_ROOT", tmp_path)
+
+        baseline_model, lift_threshold = _load_layer1_regression_contract()
+
+        assert baseline_model == "EFFECTIVE_DEFAULT"
+        assert lift_threshold == pytest.approx(0.98)
 
     def test_layer1_warn_uses_config_not_hardcoded(self, tmp_path, monkeypatch):
         """Layer 1 WARN fires at config threshold (0.25), not the old hardcoded 0.05.

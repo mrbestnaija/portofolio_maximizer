@@ -63,6 +63,7 @@ nul
 *.sqlite3
 *.json
 !observability/grafana/dashboards/*.json
+!models/mssa_rl_policy.v1.json
 # Ignore local database files
 local_database.db
 *.db.*

@@ -8,12 +8,15 @@ diagnostics that can replace LLM-driven analytics in monitoring dashboards.
 
 from __future__ import annotations
 
+import json
 import logging
 import importlib.util
+import os
 import sys
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,6 +24,7 @@ from numpy.linalg import svd
 from pandas.tseries.frequencies import to_offset
 
 from ._freq_compat import normalize_freq
+from .metrics import compute_regression_metrics
 
 cp = None
 _CUPY_AVAILABLE = False
@@ -109,35 +113,367 @@ def _load_cupy() -> bool:
     return _CUPY_AVAILABLE
 
 logger = logging.getLogger(__name__)
+DEFAULT_MSSA_POLICY_PATH = "models/mssa_rl_policy.v1.json"
+MSSA_POLICY_SCHEMA_VERSION = 1
+MSSA_POLICY_VERSION = "offline_policy_v1"
 
 
 @dataclass
 class MSSARLConfig:
     window_length: int = 30
     rank: Optional[int] = None
-    change_point_threshold: float = 4.0   # Phase 7.10b: raised from 3.5 (was 2.5); reduces false change-points
-    q_learning_alpha: float = 0.3
-    q_learning_gamma: float = 0.85
-    q_learning_epsilon: float = 0.1
+    change_point_threshold: float = 4.0   # Phase 7.10b value: 4.0 σ; reverted from 10.0 (2026-04-04)
     forecast_horizon: int = 10
     use_gpu: bool = False
     # PHASE 7.3 FIX: Accept additional params from YAML config
     min_series_length: int = 150
     max_forecast_steps: int = 30
-    # Phase 7.10b: Q-strategy selection wires Q-values into forecast direction
+    # Phase 8.3: action selection is driven by a frozen offline policy artifact.
     use_q_strategy_selection: bool = True
-    reward_mode: str = "directional_pnl"  # 'variance_reduction' (legacy) or 'directional_pnl'
     rank_policy: str = "action_cutoffs"
     action_rank_cutoffs: Dict[int, float] = None  # type: ignore[assignment]
     policy_seed: int = 7
+    policy_artifact_path: str = DEFAULT_MSSA_POLICY_PATH
+    # MSSA-RL is always fail-closed: forecast() raises ValueError when policy_status != "ready".
+    # There is no graceful-degradation path — containment is the design intent.
+    min_policy_state_support: int = 5
+    reward_horizon: int = 5
+    # Deprecated compatibility placeholders kept so older config/scripts do not crash.
+    reward_mode: Optional[str] = None
+    q_learning_alpha: float = 0.3
+    q_learning_gamma: float = 0.85
+    q_learning_epsilon: float = 0.1
+    n_training_epochs: int = 15
+    epsilon_start: float = 0.5
+
+
+@dataclass(frozen=True)
+class MSSAOfflinePolicyTrainingConfig:
+    reward_horizon: int = 5
+    min_train_size: int = 150
+    step_size: int = 5
+    max_windows_per_series: Optional[int] = None
+    reward_clip: float = 1.0
+    policy_source: str = "offline_trainer"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def resolve_mssa_policy_path(path_value: Optional[str]) -> Path:
+    env_override = os.environ.get("PMX_MSSA_POLICY_ARTIFACT_PATH", "").strip()
+    raw = (env_override or path_value or DEFAULT_MSSA_POLICY_PATH).strip()
+    path = Path(raw)
+    if not path.is_absolute():
+        path = _repo_root() / path
+    return path
+
+
+def _state_key(state: int) -> str:
+    return str(int(state))
+
+
+def _action_key(action: int) -> str:
+    return str(int(action))
+
+
+def _flatten_policy_action_values(
+    action_values_by_state: Dict[int, Dict[int, float]],
+) -> Dict[Tuple[int, int], float]:
+    flattened: Dict[Tuple[int, int], float] = {}
+    for state, values in action_values_by_state.items():
+        for action, score in values.items():
+            flattened[(int(state), int(action))] = float(score)
+    return flattened
+
+
+def _coerce_policy_artifact(raw: Dict[str, Any]) -> Dict[str, Any]:
+    required_top_level = {
+        "schema_version",
+        "policy_version",
+        "trained_at_utc",
+        "policy_source",
+        "config",
+        "states",
+        "training_metadata",
+        "validation_metrics",
+    }
+    missing = sorted(required_top_level.difference(raw))
+    if missing:
+        raise ValueError(f"missing policy artifact keys: {missing}")
+
+    config = raw.get("config")
+    states = raw.get("states")
+    if not isinstance(config, dict) or not isinstance(states, dict):
+        raise ValueError("policy artifact config/states must be dicts")
+
+    parsed_states: Dict[int, Dict[str, Any]] = {}
+    for state_key, state_payload in states.items():
+        try:
+            state_int = int(state_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(f"invalid state key {state_key!r}") from exc
+        if not isinstance(state_payload, dict):
+            raise ValueError(f"state payload for {state_key!r} must be a dict")
+
+        action_values = state_payload.get("action_values")
+        support = state_payload.get("support")
+        best_action = state_payload.get("best_action")
+        margin = state_payload.get("action_value_margin")
+        if not isinstance(action_values, dict) or not isinstance(support, dict):
+            raise ValueError(f"state {state_key!r} missing action_values/support dicts")
+
+        parsed_action_values = {
+            int(action): float(score)
+            for action, score in action_values.items()
+        }
+        parsed_support = {
+            int(action): int(count)
+            for action, count in support.items()
+        }
+        parsed_states[state_int] = {
+            "action_values": parsed_action_values,
+            "support": parsed_support,
+            "best_action": int(best_action),
+            "action_value_margin": None if margin is None else float(margin),
+        }
+
+    return {
+        "schema_version": int(raw["schema_version"]),
+        "policy_version": str(raw["policy_version"]),
+        "trained_at_utc": str(raw["trained_at_utc"]),
+        "policy_source": str(raw["policy_source"]),
+        "config": {
+            "window_length": int(config["window_length"]),
+            "change_point_threshold": float(config["change_point_threshold"]),
+            "reward_horizon": int(config["reward_horizon"]),
+            "state_bins": [float(v) for v in config["state_bins"]],
+            "action_rank_cutoffs": {
+                int(action): float(cutoff)
+                for action, cutoff in (config.get("action_rank_cutoffs") or {}).items()
+            },
+        },
+        "states": parsed_states,
+        "training_metadata": dict(raw["training_metadata"]),
+        "validation_metrics": dict(raw["validation_metrics"]),
+    }
+
+
+def build_mssa_offline_policy_artifact(
+    series_collection: Iterable[pd.Series],
+    *,
+    model_config: Optional[MSSARLConfig] = None,
+    training_config: Optional[MSSAOfflinePolicyTrainingConfig] = None,
+) -> Dict[str, Any]:
+    cfg = model_config or MSSARLConfig()
+    train_cfg = training_config or MSSAOfflinePolicyTrainingConfig(
+        reward_horizon=int(cfg.reward_horizon or 5)
+    )
+    reward_horizon = max(1, int(train_cfg.reward_horizon or cfg.reward_horizon or 5))
+
+    rewards: Dict[int, Dict[int, List[float]]] = {
+        state: {action: [] for action in range(3)}
+        for state in range(len(np.asarray([0, *MSSARLForecaster(cfg)._state_bins], dtype=float)))
+    }
+    directional_hits: Dict[int, Dict[int, List[float]]] = {
+        state: {action: [] for action in range(3)}
+        for state in rewards
+    }
+    rmse_rows: Dict[int, Dict[int, List[float]]] = {
+        state: {action: [] for action in range(3)}
+        for state in rewards
+    }
+    baseline_rows: List[float] = []
+    used_windows = 0
+    used_series = 0
+
+    for series in series_collection:
+        cleaned = series.dropna()
+        if len(cleaned) < max(int(train_cfg.min_train_size), reward_horizon + cfg.window_length):
+            continue
+        used_series += 1
+        windows_seen = 0
+        start = int(train_cfg.min_train_size)
+        stop = len(cleaned) - reward_horizon + 1
+        for train_end in range(start, stop, max(1, int(train_cfg.step_size))):
+            if train_cfg.max_windows_per_series is not None and windows_seen >= train_cfg.max_windows_per_series:
+                break
+            train = cleaned.iloc[:train_end]
+            holdout = cleaned.iloc[train_end : train_end + reward_horizon]
+            if len(holdout) != reward_horizon:
+                continue
+
+            trainer_model = MSSARLForecaster(
+                MSSARLConfig(
+                    window_length=int(cfg.window_length),
+                    rank=cfg.rank,
+                    change_point_threshold=float(cfg.change_point_threshold),
+                    forecast_horizon=int(cfg.forecast_horizon),
+                    use_gpu=False,
+                    min_series_length=int(cfg.min_series_length),
+                    max_forecast_steps=int(cfg.max_forecast_steps),
+                    use_q_strategy_selection=False,
+                    rank_policy=str(cfg.rank_policy),
+                    action_rank_cutoffs=dict(cfg.action_rank_cutoffs or {}),
+                    policy_seed=int(cfg.policy_seed),
+                    policy_artifact_path="",
+                    min_policy_state_support=int(cfg.min_policy_state_support),
+                    reward_horizon=reward_horizon,
+                )
+            )
+            trainer_model.fit(train)
+            state = trainer_model._current_state
+            if state is None:
+                continue
+
+            baseline = pd.Series(float(train.iloc[-1]), index=holdout.index, name="rw_baseline")
+            baseline_metrics = compute_regression_metrics(holdout, baseline) or {}
+            baseline_rmse = baseline_metrics.get("rmse")
+            if baseline_rmse is None or not np.isfinite(float(baseline_rmse)) or float(baseline_rmse) <= 0.0:
+                continue
+            baseline_rmse = float(baseline_rmse)
+            baseline_rows.append(baseline_rmse)
+
+            windows_seen += 1
+            used_windows += 1
+            for action in range(3):
+                forecast_payload = trainer_model._build_action_forecast(action, reward_horizon)
+                metrics = compute_regression_metrics(holdout, forecast_payload["forecast"]) or {}
+                rmse = metrics.get("rmse")
+                if rmse is None or not np.isfinite(float(rmse)):
+                    continue
+                reward = (baseline_rmse - float(rmse)) / baseline_rmse
+                reward = float(np.clip(reward, -abs(train_cfg.reward_clip), abs(train_cfg.reward_clip)))
+                rewards[state][action].append(reward)
+                rmse_rows[state][action].append(float(rmse))
+                da = metrics.get("directional_accuracy")
+                if da is not None and np.isfinite(float(da)):
+                    directional_hits[state][action].append(float(da))
+
+    state_payload: Dict[str, Any] = {}
+    all_rewards: List[float] = []
+    for state in sorted(rewards):
+        action_values = {
+            action: float(np.mean(values)) if values else -1.0
+            for action, values in rewards[state].items()
+        }
+        support = {
+            action: int(len(values))
+            for action, values in rewards[state].items()
+        }
+        ranked_actions = sorted(action_values.items(), key=lambda item: item[1], reverse=True)
+        best_action = int(ranked_actions[0][0])
+        second_best = float(ranked_actions[1][1]) if len(ranked_actions) > 1 else float(ranked_actions[0][1])
+        margin = float(ranked_actions[0][1] - second_best)
+        all_rewards.extend(value for value in rewards[state][best_action] if np.isfinite(value))
+        state_payload[_state_key(state)] = {
+            "action_values": {
+                _action_key(action): float(score)
+                for action, score in action_values.items()
+            },
+            "support": {
+                _action_key(action): int(count)
+                for action, count in support.items()
+            },
+            "best_action": best_action,
+            "action_value_margin": margin,
+            "mean_rmse": {
+                _action_key(action): (
+                    float(np.mean(rmse_rows[state][action]))
+                    if rmse_rows[state][action]
+                    else None
+                )
+                for action in range(3)
+            },
+            "mean_directional_accuracy": {
+                _action_key(action): (
+                    float(np.mean(directional_hits[state][action]))
+                    if directional_hits[state][action]
+                    else None
+                )
+                for action in range(3)
+            },
+        }
+
+    return {
+        "schema_version": MSSA_POLICY_SCHEMA_VERSION,
+        "policy_version": MSSA_POLICY_VERSION,
+        "trained_at_utc": datetime.now(UTC).isoformat(),
+        "policy_source": train_cfg.policy_source,
+        "config": {
+            "window_length": int(cfg.window_length),
+            "change_point_threshold": float(cfg.change_point_threshold),
+            "reward_horizon": reward_horizon,
+            "state_bins": [float(v) for v in MSSARLForecaster(cfg)._state_bins],
+            "action_rank_cutoffs": {
+                _action_key(action): float(cutoff)
+                for action, cutoff in (cfg.action_rank_cutoffs or {}).items()
+            },
+        },
+        "states": state_payload,
+        "training_metadata": {
+            "baseline_model": "random_walk",
+            "reward_definition": "clipped_relative_rmse_improvement_vs_random_walk",
+            "aggregation": "mean_reward_per_state_action",
+            "series_count": used_series,
+            "window_count": used_windows,
+            "min_train_size": int(train_cfg.min_train_size),
+            "step_size": int(train_cfg.step_size),
+        },
+        "validation_metrics": {
+            "overall": {
+                "mean_reward": float(np.mean(all_rewards)) if all_rewards else 0.0,
+                "mean_baseline_rmse": float(np.mean(baseline_rows)) if baseline_rows else 0.0,
+            }
+        },
+    }
+
+
+def generate_mssa_policy_synthetic_curriculum() -> List[pd.Series]:
+    """Deterministic curriculum for the bundled MSSA offline policy artifact."""
+    curriculum: List[pd.Series] = []
+
+    rng = np.random.default_rng(20260113)
+    periods = 260
+    idx = pd.date_range("2023-01-01", periods=periods, freq="D")
+    t = np.arange(periods, dtype=float)
+    structured = 100.0 + 0.6 * t + 3.0 * np.sin(2.0 * np.pi * t / 14.0) + rng.normal(0.0, 0.35, size=periods)
+    curriculum.append(pd.Series(structured, index=idx, name="synthetic_structured"))
+
+    for seed in (20260120, 20260133):
+        walk_rng = np.random.default_rng(seed)
+        returns = walk_rng.normal(0.0, 0.01, size=periods)
+        prices = 100.0 * np.exp(np.cumsum(returns))
+        curriculum.append(pd.Series(prices, index=idx, name=f"synthetic_random_walk_{seed}"))
+
+    regime_rng = np.random.default_rng(7)
+    n = 400
+    regime_idx = pd.date_range("2020-01-01", periods=n, freq="D")
+    q = n // 4
+    seg1 = 100.0 + np.linspace(0.0, 8.0, q) + regime_rng.normal(0.0, 0.25, q)
+    seg2 = seg1[-1] + regime_rng.normal(0.0, 4.5, q)
+    seg3 = seg2[-1] + np.linspace(0.0, -6.0, q) + regime_rng.normal(0.0, 0.20, q)
+    seg4 = seg3[-1] + regime_rng.normal(0.0, 5.0, n - 3 * q)
+    curriculum.append(
+        pd.Series(
+            np.concatenate([seg1, seg2, seg3, seg4]),
+            index=regime_idx,
+            name="synthetic_regime_curriculum",
+        )
+    )
+
+    return curriculum
 
 
 class MSSARLForecaster:
     """
-    Applies mSSA decomposition, simple CUSUM change-point detection, and a
-    tabular Q-learning loop that rewards variance reduction. The reward signal
-    is deliberately simple but provides a deterministic alternative to LLM
-    reasoning for regime detection.
+    Applies mSSA decomposition, change-point detection, and an offline action
+    policy artifact.
+
+    Live inference does not learn online. `fit()` computes reconstructions,
+    diagnostics, and the current state. `forecast()` is only allowed when a
+    valid offline policy artifact is loaded and the policy is ready.
     """
 
     def __init__(self, config: Optional[MSSARLConfig] = None) -> None:
@@ -145,6 +481,10 @@ class MSSARLForecaster:
         if self.config.action_rank_cutoffs is None:
             self.config.action_rank_cutoffs = {0: 0.25, 1: 0.90, 2: 1.00}
         self._fitted = False
+        self._action_values_by_state: Dict[int, Dict[int, float]] = {}
+        self._support_by_state: Dict[int, Dict[int, int]] = {}
+        self._best_action_by_state: Dict[int, int] = {}
+        self._action_margin_by_state: Dict[int, float] = {}
         self._q_table: Dict[Tuple[int, int], float] = {}
         self._baseline_variance: float = 0.0
         self._last_index: Optional[pd.Timestamp] = None
@@ -155,6 +495,7 @@ class MSSARLForecaster:
         self._freq_hint: Optional[str] = None
         self._last_observed_value: Optional[float] = None
         self._last_reconstruction_error: Optional[float] = None
+        self._residual_diagnostics: Dict[str, Any] = {}
         self._use_gpu = bool(self.config.use_gpu and _load_cupy())
         if self.config.use_gpu and not self._use_gpu:
             # CuPy is optional; when unavailable we fall back to CPU silently.
@@ -163,12 +504,18 @@ class MSSARLForecaster:
         self._recon_matrix_by_action: Dict[int, np.ndarray] = {}
         self._reconstructions_by_action: Dict[int, pd.Series] = {}
         self._rank_by_action: Dict[int, int] = {}
-        self._policy_version = "bounded_rank_v2"
+        self._policy_version = MSSA_POLICY_VERSION
         self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
         self._state_bins = np.array([0.8, 1.0, 1.2], dtype=float)
+        self._current_state: Optional[int] = None
         self._last_q_state: Optional[int] = None
         self._last_active_action: Optional[int] = None
         self._last_active_rank: Optional[int] = None
+        self._policy_status: str = "uninitialized"
+        self._policy_source: Optional[str] = None
+        self._policy_support: int = 0
+        self._action_value_margin: Optional[float] = None
+        self._policy_validation_metrics: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -236,7 +583,9 @@ class MSSARLForecaster:
         rank_25 = _rank_for_cutoff(cutoffs.get(0, 0.25))
         rank_90 = rank if rank_policy == "fixed_primary" else _rank_for_cutoff(cutoffs.get(1, 0.90))
         rank_all = _rank_for_cutoff(cutoffs.get(2, 1.00))
-        rank_90 = max(rank_25, min(rank_90, rank_all))
+        # Enforce strict separation so actions 0 and 1 produce materially different
+        # reconstructions (audit finding: rank_by_action={0:1,1:1,2:30} degeneracy).
+        rank_90 = min(max(rank_25 + 1, rank_90), rank_all)
         self.config.rank = rank_90
 
         def _recon_for_rank(r: int) -> np.ndarray:
@@ -290,61 +639,262 @@ class MSSARLForecaster:
 
         return pd.DatetimeIndex(change_points)
 
-    def _update_q_table(
-        self,
-        variance_ratio: float,
-        state: int,
-        action: int,
-        next_state: Optional[int] = None,
-        realized_return: Optional[float] = None,
-    ) -> None:
-        key = (state, action)
-        current_q = self._q_table.get(key, 0.0)
+    def _build_q_table_alias(self) -> Dict[Tuple[int, int], float]:
+        return _flatten_policy_action_values(self._action_values_by_state)
 
-        reward_mode = str(getattr(self.config, "reward_mode", "directional_pnl")).lower()
-        if reward_mode == "directional_pnl" and realized_return is not None:
-            # Phase 7.10b: reward = sign(forecast_direction) * realized_return.
-            # action 0=mean_revert, 1=hold, 2=trend_follow
-            action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
-            forecast_sign = action_to_sign.get(action, 0.0)
-            reward = forecast_sign * float(realized_return)
-        else:
-            # Legacy: variance reduction reward
-            reward = 1.0 - variance_ratio
+    def _compute_state_series(self, residuals: pd.Series) -> np.ndarray:
+        baseline_variance = max(float(self._baseline_variance), 1e-12)
+        variance_ratio = (
+            residuals.rolling(window=self.config.window_length // 2, min_periods=5)
+            .var()
+            .fillna(baseline_variance)
+            / baseline_variance
+        )
+        variance_ratio = variance_ratio.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+        state_series = np.digitize(variance_ratio.to_numpy(dtype=float), bins=self._state_bins)
+        self._current_state = int(state_series[-1]) if len(state_series) else None
+        return state_series
 
-        best_future = 0.0
-        if next_state is not None:
-            best_future = max(
-                (self._q_table.get((int(next_state), next_action), 0.0) for next_action in range(3)),
-                default=0.0,
+    def _load_policy_artifact(self) -> None:
+        self._action_values_by_state = {}
+        self._support_by_state = {}
+        self._best_action_by_state = {}
+        self._action_margin_by_state = {}
+        self._policy_support = 0
+        self._action_value_margin = None
+        self._policy_validation_metrics = {}
+        self._q_table = {}
+
+        if not getattr(self.config, "use_q_strategy_selection", True):
+            self._policy_status = "disabled"
+            self._policy_source = "disabled_by_config"
+            return
+
+        policy_path = resolve_mssa_policy_path(self.config.policy_artifact_path)
+        self._policy_source = str(policy_path)
+        if not policy_path.exists():
+            self._policy_status = "missing_artifact"
+            return
+
+        try:
+            raw = json.loads(policy_path.read_text(encoding="utf-8"))
+            artifact = _coerce_policy_artifact(raw)
+        except Exception as exc:
+            logger.warning("MSSA-RL policy artifact invalid at %s: %s", policy_path, exc)
+            self._policy_status = "invalid_artifact"
+            return
+
+        cfg = artifact["config"]
+        expected_cutoffs = {
+            int(action): float(cutoff)
+            for action, cutoff in (self.config.action_rank_cutoffs or {}).items()
+        }
+        stale_reasons: List[str] = []
+        if int(artifact["schema_version"]) != MSSA_POLICY_SCHEMA_VERSION:
+            stale_reasons.append("schema_version")
+        if str(artifact["policy_version"]) != MSSA_POLICY_VERSION:
+            stale_reasons.append("policy_version")
+        if int(cfg["window_length"]) != int(self.config.window_length):
+            stale_reasons.append("window_length")
+        if abs(float(cfg["change_point_threshold"]) - float(self.config.change_point_threshold)) > 1e-9:
+            stale_reasons.append("change_point_threshold")
+        if int(cfg["reward_horizon"]) != int(self.config.reward_horizon or 5):
+            stale_reasons.append("reward_horizon")
+        if [float(v) for v in cfg["state_bins"]] != [float(v) for v in self._state_bins]:
+            stale_reasons.append("state_bins")
+        if {
+            int(action): float(cutoff)
+            for action, cutoff in cfg["action_rank_cutoffs"].items()
+        } != expected_cutoffs:
+            stale_reasons.append("action_rank_cutoffs")
+        if stale_reasons:
+            logger.warning(
+                "MSSA-RL policy artifact at %s is stale for current config (%s).",
+                policy_path,
+                ", ".join(stale_reasons),
+            )
+            self._policy_status = "stale_artifact"
+            return
+
+        self._action_values_by_state = {
+            int(state): {
+                int(action): float(score)
+                for action, score in payload["action_values"].items()
+            }
+            for state, payload in artifact["states"].items()
+        }
+        self._support_by_state = {
+            int(state): {
+                int(action): int(count)
+                for action, count in payload["support"].items()
+            }
+            for state, payload in artifact["states"].items()
+        }
+        self._best_action_by_state = {
+            int(state): int(payload["best_action"])
+            for state, payload in artifact["states"].items()
+        }
+        self._action_margin_by_state = {
+            int(state): (
+                None if payload["action_value_margin"] is None else float(payload["action_value_margin"])
+            )
+            for state, payload in artifact["states"].items()
+        }
+        self._policy_validation_metrics = dict(artifact.get("validation_metrics") or {})
+        self._q_table = self._build_q_table_alias()
+
+        if self._current_state is None:
+            self._policy_status = "missing_state"
+            return
+        if self._current_state not in self._best_action_by_state:
+            self._policy_status = "unsupported_state"
+            return
+
+        selected_action = int(self._best_action_by_state[self._current_state])
+        selected_support = int(
+            self._support_by_state.get(self._current_state, {}).get(selected_action, 0)
+        )
+        self._policy_support = selected_support
+        self._action_value_margin = self._action_margin_by_state.get(self._current_state)
+        if selected_support < int(self.config.min_policy_state_support):
+            self._policy_status = "insufficient_support"
+            return
+
+        if not isinstance(getattr(self, "_residual_diagnostics", None), dict):
+            self._policy_status = "degraded_residual_diagnostics"
+            return
+        for required_key in ("white_noise", "lb_pvalue", "jb_pvalue", "n"):
+            if required_key not in self._residual_diagnostics:
+                self._policy_status = "degraded_residual_diagnostics"
+                return
+        if self._residual_diagnostics.get("white_noise") is not True:
+            self._policy_status = "degraded_residual_diagnostics"
+            return
+
+        self._policy_status = "ready"
+
+    def _resolve_active_action(self) -> int:
+        if not getattr(self.config, "use_q_strategy_selection", True):
+            self._policy_status = "disabled"
+            self._policy_source = "disabled_by_config"
+            self._policy_support = 0
+            self._action_value_margin = None
+            raise ValueError(
+                "MSSA-RL offline policy not ready (disabled_by_config)"
             )
 
-        new_q = current_q + self.config.q_learning_alpha * (
-            reward + self.config.q_learning_gamma * best_future - current_q
+        if self._policy_status != "ready":
+            # Always fail-closed: no graceful-degradation path exists for a degraded policy.
+            raise ValueError(
+                f"MSSA-RL offline policy not ready ({self._policy_status})"
+            )
+
+        assert self._current_state is not None  # guarded by _load_policy_artifact
+        return int(self._best_action_by_state[self._current_state])
+
+    def _build_action_forecast(self, action: int, steps: int) -> Dict[str, Any]:
+        if self._reconstruction is None:
+            raise ValueError("Model must be fitted before forecasting")
+
+        action = int(action)
+        active_recon = self._reconstructions_by_action.get(action)
+        if active_recon is None or active_recon.empty:
+            raise ValueError(f"No reconstruction available for action={action}")
+
+        last_recon = float(active_recon.iloc[-1])
+        last_obs = self._last_observed_value
+        base_value = last_obs if last_obs is not None else last_recon
+        recon_arr = active_recon.to_numpy(dtype=float)
+
+        slope = 0.0
+        if len(recon_arr) >= 3:
+            k = min(self.config.window_length, len(recon_arr))
+            slope_arr = recon_arr[-k:]
+            if k >= 2:
+                slope = float(np.polyfit(np.arange(k), slope_arr, deg=1)[0])
+
+        effective_slope = slope
+        if base_value != 0 and steps > 0:
+            max_total_drift = abs(base_value) * 0.05
+            max_slope_abs = max_total_drift / steps
+            effective_slope = float(np.clip(effective_slope, -max_slope_abs, max_slope_abs))
+
+        baseline_forecast = base_value + effective_slope * np.arange(1, steps + 1)
+
+        if self._change_points is not None and len(self._change_points) > 0:
+            apply_decay = False
+            if self._recent_change_point_days is not None:
+                if self._recent_change_point_days <= max(1, self.config.window_length // 4):
+                    apply_decay = True
+            if self._change_point_density < 0.1:
+                apply_decay = False
+            if apply_decay:
+                decay = np.linspace(0.998, 0.99, num=steps)
+                baseline_forecast = baseline_forecast * decay
+
+        freq = (
+            self._freq_hint
+            or getattr(self._reconstruction.index, "freqstr", None)
+            or getattr(self._reconstruction.index, "inferred_freq", None)
+            or "D"
         )
-        self._q_table[key] = new_q
+        if self._last_index is not None:
+            try:
+                offset = to_offset(freq)
+                start = self._last_index + offset
+                future_index = pd.date_range(start=start, periods=steps, freq=freq)
+            except Exception:
+                future_index = pd.RangeIndex(start=0, stop=steps, step=1)
+        else:
+            future_index = pd.RangeIndex(start=0, stop=steps, step=1)
 
-    @staticmethod
-    def _default_action_for_state(state: int) -> int:
-        return min(2, max(0, int(state)))
+        forecast_series = pd.Series(baseline_forecast, index=future_index)
+        noise = np.sqrt(self._baseline_variance)
+        max_scale = np.sqrt(max(steps / 2, 1.0))
+        horizon_scale = np.minimum(
+            np.sqrt(np.arange(1, steps + 1, dtype=float)),
+            max_scale,
+        )
+        ci_band = pd.Series(noise * horizon_scale, index=future_index)
+        active_rank = self._rank_by_action.get(action, self.config.rank or len(recon_arr))
+        q_state = self._current_state
+        self._last_q_state = q_state
+        self._last_active_action = action
+        self._last_active_rank = active_rank
 
-    def _select_policy_action(self, state: int) -> int:
-        if not getattr(self.config, "use_q_strategy_selection", True):
-            return 1
-        epsilon = float(np.clip(self.config.q_learning_epsilon, 0.0, 1.0))
-        if epsilon > 0.0 and float(self._policy_rng.random()) < epsilon:
-            return int(self._policy_rng.integers(0, 3))
-        q_vals = {a: self._q_table.get((state, a), 0.0) for a in range(3)}
-        if len(set(q_vals.values())) == 1:
-            return self._default_action_for_state(state)
-        return max(q_vals, key=q_vals.__getitem__)
+        return {
+            "forecast": forecast_series,
+            "lower_ci": forecast_series - ci_band,
+            "upper_ci": forecast_series + ci_band,
+            "change_points": self._change_points,
+            "q_table_size": len(self._q_table),
+            "baseline_variance": self._baseline_variance,
+            "active_action": action,
+            "active_rank": active_rank,
+            "q_state": q_state,
+            "policy_version": self._policy_version,
+            "policy_status": self._policy_status,
+            "policy_source": self._policy_source,
+            "policy_support": self._policy_support,
+            "action_value_margin": self._action_value_margin,
+            "residual_diagnostics": self._residual_diagnostics,
+        }
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def fit(self, series: pd.Series) -> "MSSARLForecaster":
         self._policy_rng = np.random.default_rng(int(self.config.policy_seed))
+        self._action_values_by_state = {}
+        self._support_by_state = {}
+        self._best_action_by_state = {}
+        self._action_margin_by_state = {}
         self._q_table = {}
+        self._policy_status = "fitting"
+        self._policy_source = None
+        self._policy_support = 0
+        self._action_value_margin = None
+        self._current_state = None
         cleaned = series.dropna()
         if len(cleaned) < self.config.window_length + 5:
             raise ValueError("Series length insufficient for mSSA analysis")
@@ -423,41 +973,18 @@ class MSSARLForecaster:
         else:
             self._recent_change_point_days = None
 
-        # Tabular Q-learning over pseudo states (variance buckets)
-        baseline_variance = max(float(self._baseline_variance), 1e-12)
-        variance_ratio = (
-            residuals.rolling(window=self.config.window_length // 2, min_periods=5)
-            .var()
-            .fillna(baseline_variance)
-            / baseline_variance
-        )
-        variance_ratio = variance_ratio.replace([np.inf, -np.inf], np.nan).fillna(1.0)
-        state_series = np.digitize(variance_ratio.to_numpy(dtype=float), bins=self._state_bins)
-
-        # Phase 7.10b: realized returns for directional PnL reward signal.
-        # Derived from the input price series (1-period pct change).
-        realized_returns_arr = (
-            cleaned.pct_change().fillna(0.0).reindex(variance_ratio.index).fillna(0.0).to_numpy(dtype=float)
-        )
-
-        for idx, ((state, ratio), realized_ret) in enumerate(
-            zip(zip(state_series, variance_ratio.to_numpy(dtype=float)), realized_returns_arr)
-        ):
-            action = self._select_policy_action(int(state))
-            next_state = int(state_series[idx + 1]) if idx + 1 < len(state_series) else None
-            self._update_q_table(
-                float(ratio),
-                int(state),
-                action,
-                next_state=next_state,
-                realized_return=float(realized_ret),
-            )
+        self._compute_state_series(residuals)
+        self._load_policy_artifact()
 
         logger.info(
-            "MSSARL fit complete (window=%s, rank=%s, change_points=%s)",
+            "MSSARL fit complete (window=%s, rank=%s, change_points=%s, "
+            "policy_status=%s, q_state=%s, policy_support=%s)",
             self.config.window_length,
             self.config.rank,
             len(change_points),
+            self._policy_status,
+            self._current_state,
+            self._policy_support,
         )
         self._fitted = True
         return self
@@ -465,142 +992,8 @@ class MSSARLForecaster:
     def forecast(self, steps: int) -> Dict[str, Any]:
         if not self._fitted or self._reconstruction is None:
             raise ValueError("Model must be fitted before forecasting")
-
-        last_recon = float(self._reconstruction.iloc[-1])
-        last_obs = self._last_observed_value
-        base_value = last_obs if last_obs is not None else last_recon
-
-        if (
-            self._last_reconstruction_error is not None
-            and self._baseline_variance is not None
-            and np.isfinite(self._baseline_variance)
-            and self._change_point_density < 0.005
-        ):
-            scale = float(np.sqrt(max(self._baseline_variance, 0.0)))
-            if scale > 0 and self._last_reconstruction_error <= 1.5 * scale:
-                base_value = 0.85 * base_value + 0.15 * last_recon
-
-        # Phase 7.10b: Replace naive constant forecast with trend-adjusted forecast.
-        # Compute slope from last window_length bars of reconstructed series.
-        recon_arr = self._reconstruction.values if self._reconstruction is not None else np.array([base_value])
-
-        # Phase 8.1: Q-strategy selection now controls component set (not just slope sign).
-        # States: {0=low_vol, 1=normal_vol, 2=high_vol}
-        # Actions: {0=mean_revert, 1=hold, 2=trend_follow}
-        best_action = 1  # default: standard 90%-variance components
-        q_direction_weight = 0.0
-        if getattr(self.config, "use_q_strategy_selection", True) and self._q_table:
-            try:
-                recent_var = float(np.var(recon_arr[-min(10, len(recon_arr)):]))
-                var_ratio = recent_var / max(self._baseline_variance, 1e-12)
-                current_state = int(np.digitize([var_ratio], bins=self._state_bins)[0])
-                best_action = self._select_policy_action(current_state)
-                # Legacy slope-direction signal (retained; blended at 0.5 weight below).
-                action_to_sign = {0: -1.0, 1: 0.0, 2: 1.0}
-                q_direction_weight = action_to_sign[best_action]
-            except Exception as qe:
-                logger.debug("Q-strategy selection error: %s", qe)
-                current_state = None
-        else:
-            current_state = None
-
-        # Phase 8.1: select the reconstruction that matches the Q-table action.
-        # action=0 -> low-frequency components (25% variance) -> smoothed mean-revert signal
-        # action=1 -> standard components (90% variance)      -> current behaviour
-        # action=2 -> all components (100% variance)          -> high-fidelity trend signal
-        active_recon = getattr(self, "_reconstructions_by_action", {}).get(best_action)
-        if active_recon is not None and len(active_recon) > 0:
-            recon_arr = active_recon.values
-            logger.debug(
-                "MSSARL forecast: action=%d selected reconstruction "
-                "(n_components via variance cutoff), len=%d",
-                best_action, len(recon_arr),
-            )
-
-        slope = 0.0
-        if len(recon_arr) >= 3:
-            k = min(self.config.window_length, len(recon_arr))
-            slope_arr = recon_arr[-k:]
-            if k >= 2:
-                slope = float(np.polyfit(np.arange(k), slope_arr, deg=1)[0])
-
-        # Blend slope from reconstruction with Q-direction signal (legacy 0.5-weight).
-        # When Q-table has no data (new model), q_direction_weight == 0 -> pure slope.
-        effective_slope = slope + q_direction_weight * abs(slope) * 0.5
-
-        # Slope magnitude cap: cumulative drift over `steps` bars capped at 5% of base_value.
-        # Prevents divergent long-horizon forecasts when slope is large (e.g. sharp trends).
-        if base_value != 0 and steps > 0:
-            max_total_drift = abs(base_value) * 0.05  # 5% max cumulative drift
-            max_slope_abs = max_total_drift / steps
-            effective_slope = float(np.clip(effective_slope, -max_slope_abs, max_slope_abs))
-
-        baseline_forecast = base_value + effective_slope * np.arange(1, steps + 1)
-
-        if self._change_points is not None and len(self._change_points) > 0:
-            apply_decay = False
-            if self._recent_change_point_days is not None:
-                if self._recent_change_point_days <= max(1, self.config.window_length // 4):
-                    apply_decay = True
-            if self._change_point_density < 0.1:
-                apply_decay = False
-            if apply_decay:
-                decay = np.linspace(0.998, 0.99, num=steps)
-                baseline_forecast = baseline_forecast * decay
-
-        freq = (
-            self._freq_hint
-            or getattr(self._reconstruction.index, "freqstr", None)
-            or getattr(self._reconstruction.index, "inferred_freq", None)
-            or "D"
-        )
-        if self._last_index is not None:
-            try:
-                offset = to_offset(freq)
-                start = self._last_index + offset
-                future_index = pd.date_range(start=start, periods=steps, freq=freq)
-            except Exception:
-                future_index = pd.RangeIndex(start=0, stop=steps, step=1)
-        else:
-            future_index = pd.RangeIndex(start=0, stop=steps, step=1)
-
-        forecast_series = pd.Series(baseline_forecast, index=future_index)
-        noise = np.sqrt(self._baseline_variance)
-        active_rank = self._rank_by_action.get(best_action, self.config.rank or len(recon_arr))
-        q_state = current_state
-        self._last_q_state = q_state
-        self._last_active_action = best_action
-        self._last_active_rank = active_rank
-
-        # Scale CI to grow with sqrt(step+1): uncertainty accumulates over the horizon.
-        # A flat ±noise CI based on in-sample baseline variance is too narrow at step N
-        # and systematically inflates SNR for multi-step trades.
-        # Cap at sqrt(horizon/2) to prevent runaway width for range-bound, low-volatility
-        # periods where uncapped growth would push SNR below any practical threshold.
-        # Use float division (steps / 2) not integer (steps // 2): integer division
-        # rounds down, making the cap 1.0 for steps=3 instead of sqrt(1.5)=1.225.
-        max_scale = np.sqrt(max(steps / 2, 1.0))
-        horizon_scale = np.minimum(
-            np.sqrt(np.arange(1, steps + 1, dtype=float)),
-            max_scale,
-        )
-        ci_band = pd.Series(noise * horizon_scale, index=future_index)
-
-        return {
-            "forecast": forecast_series,
-            "lower_ci": forecast_series - ci_band,
-            "upper_ci": forecast_series + ci_band,
-            "change_points": self._change_points,
-            "q_table_size": len(self._q_table),
-            "baseline_variance": self._baseline_variance,
-            # Phase 8.1: which component set was used (0=mean_revert, 1=hold, 2=trend_follow)
-            "active_action": best_action,
-            "active_rank": active_rank,
-            "q_state": q_state,
-            "policy_version": self._policy_version,
-            # Phase 8.2: residual diagnostics (Ljung-Box + Jarque-Bera)
-            "residual_diagnostics": self._residual_diagnostics,
-        }
+        best_action = self._resolve_active_action()
+        return self._build_action_forecast(best_action, steps)
 
     def get_diagnostics(self) -> Dict[str, Any]:
         return {
@@ -621,7 +1014,26 @@ class MSSARLForecaster:
             "rank_by_action": dict(self._rank_by_action),
             "policy_seed": int(self.config.policy_seed),
             "policy_version": self._policy_version,
+            "policy_status": self._policy_status,
+            "policy_source": self._policy_source,
+            "policy_support": self._policy_support,
+            "action_value_margin": self._action_value_margin,
+            "action_values_by_state": {
+                int(state): {
+                    int(action): float(score)
+                    for action, score in values.items()
+                }
+                for state, values in self._action_values_by_state.items()
+            },
+            "support_by_state": {
+                int(state): {
+                    int(action): int(count)
+                    for action, count in values.items()
+                }
+                for state, values in self._support_by_state.items()
+            },
             "q_state": self._last_q_state,
             "active_action": self._last_active_action,
             "active_rank": self._last_active_rank,
+            "residual_diagnostics": dict(getattr(self, "_residual_diagnostics", {})),
         }

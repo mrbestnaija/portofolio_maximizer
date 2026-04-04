@@ -33,6 +33,9 @@ def test_confidence_includes_all_models_and_is_monotonic():
             }
         },
         "mssa_rl": {
+            "policy_status": "ready",
+            "policy_support": 9,
+            "residual_diagnostics": {"white_noise": True},
             "regression_metrics": {
                 "rmse": 1.0,
                 "smape": 0.11,

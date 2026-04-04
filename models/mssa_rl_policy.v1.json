@@ -1,0 +1,134 @@
+{
+  "config": {
+    "action_rank_cutoffs": {
+      "0": 0.25,
+      "1": 0.9,
+      "2": 1.0
+    },
+    "change_point_threshold": 4.0,
+    "reward_horizon": 5,
+    "state_bins": [
+      0.8,
+      1.0,
+      1.2
+    ],
+    "window_length": 30
+  },
+  "policy_source": "offline_trainer",
+  "policy_version": "offline_policy_v1",
+  "schema_version": 1,
+  "states": {
+    "0": {
+      "action_value_margin": 0.031171089478386926,
+      "action_values": {
+        "0": -0.1043403278163677,
+        "1": -0.15135549580725977,
+        "2": -0.13551141729475463
+      },
+      "best_action": 0,
+      "mean_directional_accuracy": {
+        "0": 0.5851063829787234,
+        "1": 0.6170212765957447,
+        "2": 0.6170212765957447
+      },
+      "mean_rmse": {
+        "0": 1.74017662570089,
+        "1": 1.8306392448092734,
+        "2": 1.8317553650754128
+      },
+      "support": {
+        "0": 47,
+        "1": 47,
+        "2": 47
+      }
+    },
+    "1": {
+      "action_value_margin": 0.02651408648923996,
+      "action_values": {
+        "0": -0.07919863407253763,
+        "1": -0.10571272056177759,
+        "2": -0.1293772985849868
+      },
+      "best_action": 0,
+      "mean_directional_accuracy": {
+        "0": 0.5416666666666666,
+        "1": 0.5416666666666666,
+        "2": 0.5416666666666666
+      },
+      "mean_rmse": {
+        "0": 1.5432246540126524,
+        "1": 1.6362629377138889,
+        "2": 1.6696581797768018
+      },
+      "support": {
+        "0": 12,
+        "1": 12,
+        "2": 12
+      }
+    },
+    "2": {
+      "action_value_margin": 0.02250982037686597,
+      "action_values": {
+        "0": -0.1565366956525253,
+        "1": -0.22972050200464594,
+        "2": -0.17904651602939126
+      },
+      "best_action": 0,
+      "mean_directional_accuracy": {
+        "0": 0.5,
+        "1": 0.5357142857142857,
+        "2": 0.5
+      },
+      "mean_rmse": {
+        "0": 2.055875926058974,
+        "1": 2.1836651947703745,
+        "2": 2.1728148382186943
+      },
+      "support": {
+        "0": 14,
+        "1": 14,
+        "2": 14
+      }
+    },
+    "3": {
+      "action_value_margin": 0.006663570745038816,
+      "action_values": {
+        "0": -0.14950456339385748,
+        "1": -0.14284099264881867,
+        "2": -0.16531967015435026
+      },
+      "best_action": 1,
+      "mean_directional_accuracy": {
+        "0": 0.5232558139534884,
+        "1": 0.5465116279069767,
+        "2": 0.5232558139534884
+      },
+      "mean_rmse": {
+        "0": 3.9033361813052974,
+        "1": 3.930455476825887,
+        "2": 3.9635057614522013
+      },
+      "support": {
+        "0": 43,
+        "1": 43,
+        "2": 43
+      }
+    }
+  },
+  "trained_at_utc": "2026-04-04T08:05:32.683673+00:00",
+  "training_metadata": {
+    "aggregation": "mean_reward_per_state_action",
+    "baseline_model": "random_walk",
+    "min_train_size": 150,
+    "reward_definition": "clipped_relative_rmse_improvement_vs_random_walk",
+    "series_count": 4,
+    "step_size": 5,
+    "window_count": 116
+  },
+  "validation_metrics": {
+    "overall": {
+      "mean_baseline_rmse": 2.554243840450233,
+      "mean_reward": -0.12231082275236456
+    }
+  }
+}

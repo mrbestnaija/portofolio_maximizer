@@ -35,11 +35,9 @@ def test_preselection_gate_blocks_ensemble_as_default(monkeypatch):
     monkeypatch.setattr(forecaster, "_preselection_default_gate", _blocked_gate)
 
     out = forecaster.forecast(steps=3)
-    assert out.get("ensemble_forecast") is not None
     assert out.get("default_model") == "SAMOSSA"
+    assert out.get("effective_default_model") == "SAMOSSA"
     assert out.get("mean_forecast") == out.get("samossa_forecast")
-    assert out.get("ensemble_metadata", {}).get("allow_as_default") is False
-    assert out.get("ensemble_metadata", {}).get("ensemble_status") == "DISABLE_DEFAULT"
 
 
 def test_preselection_gate_decision_from_recent_ratios(monkeypatch):
@@ -91,11 +89,11 @@ class TestDisableDefaultFallbackSelection:
         """Tier 1: prior evaluate() OOS metrics → _best_single_from_metrics wins."""
         forecaster = TimeSeriesForecaster(forecast_horizon=3)
         # Simulate OOS metrics from previous evaluate() call:
-        # MSSA_RL has best (lowest) RMSE
+        # GARCH has best (lowest) RMSE
         forecaster._latest_metrics = {
             "samossa": {"rmse": 20.0},
-            "mssa_rl": {"rmse": 12.0},  # best
-            "garch": {"rmse": 18.0},
+            "mssa_rl": {"rmse": 12.0},
+            "garch": {"rmse": 8.0},  # best
         }
         forecaster._model_summaries = {}
         results = _make_results()
@@ -103,10 +101,10 @@ class TestDisableDefaultFallbackSelection:
         preferred = forecaster._select_disable_default_fallback(
             results, ensemble_meta={"primary_model": "SAMOSSA"}
         )
-        assert preferred.upper() == "MSSA_RL"
+        assert preferred.upper() == "GARCH"
 
     def test_flat_trend_guard_tier2_skips_samossa(self):
-        """Tier 2: SAMoSSA trend_strength below threshold → prefer MSSA_RL."""
+        """Tier 2: SAMoSSA trend_strength below threshold → prefer GARCH."""
         forecaster = TimeSeriesForecaster(forecast_horizon=3)
         forecaster._latest_metrics = {}  # no prior OOS data
         forecaster._model_summaries = {
@@ -117,7 +115,7 @@ class TestDisableDefaultFallbackSelection:
         preferred = forecaster._select_disable_default_fallback(
             results, ensemble_meta={"primary_model": "SAMOSSA"}
         )
-        assert preferred.upper() == "MSSA_RL"
+        assert preferred.upper() == "GARCH"
 
     def test_healthy_samossa_uses_tier3_original_behaviour(self):
         """Tier 3: SAMoSSA has non-flat trend → use ensemble_meta primary_model."""
@@ -165,8 +163,8 @@ class TestDisableDefaultFallbackSelection:
             preferred = forecaster._select_disable_default_fallback(
                 _make_results(), ensemble_meta={"primary_model": "SAMOSSA"}
             )
-            assert preferred.upper() == "MSSA_RL", (
-                f"trend_strength={ts} should route to MSSA_RL (below 0.10 threshold)"
+            assert preferred.upper() == "GARCH", (
+                f"trend_strength={ts} should route to GARCH (below 0.10 threshold)"
             )
 
     def test_above_new_threshold_stays_with_samossa(self):
@@ -195,3 +193,42 @@ class TestDisableDefaultFallbackSelection:
             results, ensemble_meta={"primary_model": "SAMOSSA"}
         )
         assert preferred.upper() == "GARCH"
+
+    def test_flat_trend_prefers_sarimax_before_mssa_rl_when_garch_absent(self):
+        """Tier 2 keeps MSSA_RL containment-only when SARIMAX is available."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        forecaster._latest_metrics = {}
+        forecaster._model_summaries = {
+            "samossa": {"trend_strength": 0.002}
+        }
+        results = _make_results(available_models=("samossa", "sarimax", "mssa_rl"))
+
+        preferred = forecaster._select_disable_default_fallback(
+            results, ensemble_meta={"primary_model": "SAMOSSA"}
+        )
+        assert preferred.upper() == "SARIMAX"
+
+    def test_default_single_selection_deprioritises_mssa_rl_preference(self):
+        """Containment: MSSA_RL may remain available, but not as the preferred fallback."""
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        results = _make_results(available_models=("garch", "mssa_rl"))
+
+        default_model, payload = forecaster._select_default_single_forecast(
+            results,
+            preferred_model="MSSA_RL",
+        )
+
+        assert default_model == "GARCH"
+        assert payload == results["garch_forecast"]
+
+    def test_default_single_selection_uses_mssa_rl_only_as_last_resort(self):
+        forecaster = TimeSeriesForecaster(forecast_horizon=3)
+        results = _make_results(available_models=("mssa_rl",))
+
+        default_model, payload = forecaster._select_default_single_forecast(
+            results,
+            preferred_model="MSSA_RL",
+        )
+
+        assert default_model == "MSSA_RL"
+        assert payload == results["mssa_rl_forecast"]
