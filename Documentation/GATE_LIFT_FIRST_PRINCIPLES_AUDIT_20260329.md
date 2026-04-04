@@ -5,22 +5,25 @@
 **Head commit at audit time**: `5610ce5`
 **Gate state at audit time**: `PASS (INCONCLUSIVE_ALLOWED)` — RMSE violation rate 44% (11/25 effective audits)
 
-**Updated**: 2026-04-01
-**Head commit (current)**: `cd1b8a3`
-**Gate state (current)**: `PASS (semantics=PASS)` — RMSE violation rate 33.33% (11/33 effective audits), warmup expires 2026-04-15
+**Updated**: 2026-04-04
+**Head commit (current)**: `dd9a633`
+**Gate state (current)**: `PASS (semantics=PASS)` — RMSE violation rate 32.35% (11/34 effective audits), warmup expires 2026-04-15
 
 ---
 
-## Implementation Status (as of 2026-04-01)
+## Implementation Status (as of 2026-04-04)
 
 | Item | Status | Commit | Notes |
 |------|--------|--------|-------|
 | P0 — OOS selector wiring | COMPLETE | `cd1b8a3` | Trailing OOS wired into `derive_model_confidence` + DA wired into `select_weights` |
 | P1 — Heuristic distortions | COMPLETE | `cd1b8a3` | Cap moved post-selection; `_change_point_boost` capped 0.20; MSSA-RL floor removed |
 | GARCH threshold | COMPLETE | `cd1b8a3` | `hard_igarch_threshold` 0.99 → 0.97 |
+| GARCH `ewma_lambda` | COMPLETE | `dd9a633` | Externalized to constructor param (default 0.94); config-driven; no longer hardcoded |
+| SAMoSSA CI cap | COMPLETE | `dd9a633` | `sqrt(horizon/2)` cap + `lower_ci.clip(lower=0.0)` for positive series |
+| MSSA-RL offline policy | COMPLETE | `dd9a633` | Online Q-learning replaced with frozen artifact; 7-step fail-closed validation chain |
 | P2 — Gate measurement unit | DEFERRED | — | Governance decision required; changes gate contract |
 | P3 — Fresh evidence | COMPLETE | — | 9 AAPL historical date runs; 25→33 effective audits; gate crossed <35% |
-| P4 — Secondary cleanup | OPEN | — | MSSA-RL Q-table, GARCH lam, signal vol-bands, SAMoSSA CI cap |
+| P4 — Signal vol-bands | OPEN | — | Discrete cliff-edge bands at `time_series_signal_generator.py:1457-1462`; smooth sigmoid not yet implemented |
 
 ### P0 Implementation Detail
 
@@ -58,7 +61,7 @@ Three residual issues identified after verifying the P0/P1 implementation:
 
 2. **`_model_summaries` rebuild wipes `evaluate()` enrichment (architecture note, no fix needed)**: `get_component_summaries()` is called at `forecaster.py:1308` (end of `fit()`) and again at `forecaster.py:1464` (start of `forecast()`), rebuilding `_model_summaries` from in-sample diagnostics only and discarding any `evaluate()` enrichment at lines 2532-2533. The `metrics_map` path in `derive_model_confidence` (reading `component_summaries["regression_metrics"]`) is therefore permanently dead at selection time regardless of whether `evaluate()` has been called. P0 routes around this correctly via `_latest_metrics` and `_load_trailing_oos_metrics()`. Documented at `ensemble.py:455-458`.
 
-3. **Test count portability (2149 vs 2139)**: The P0/P1 commit submission ran `pytest -m "not slow"` (43 deselected, result 2149). The verified workspace run used `pytest -m "not gpu and not slow"` (45 deselected, result 2139). 2-test gap: GPU-marked tests not also marked slow. 8-test gap: P3 audit files caused formerly data-gated tests to transition from skip/xfail to live pass. Portable baseline is **2139**; 2149 is workspace-state-dependent.
+3. **Test count portability (2149 vs 2139 vs 2174)**: The P0/P1 commit submission ran `pytest -m "not slow"` (43 deselected, result 2149). The verified workspace run used `pytest -m "not gpu and not slow"` (45 deselected, result 2139). 2-test gap: GPU-marked tests not also marked slow. 8-test gap: P3 audit files caused formerly data-gated tests to transition from skip/xfail to live pass. Portable pre-P4 baseline is **2139**; 2149 is workspace-state-dependent. After P4 merge (`dd9a633`), the baseline is **2174** passed (`-m "not slow and not gpu"`, 45 deselected, 1 skipped, 10 xfailed, 1 xpassed). The +35 difference from 2139 is: +11 from P4's new contract/guardrail tests, +24 from pre-existing data-gated tests now passing due to policy artifact present.
 
 ---
 
@@ -262,48 +265,75 @@ for the difference.
 
 ---
 
-## Part 4: MSSA-RL is Functionally a Stub (P4 after fixing selector)
+## Part 4: MSSA-RL — Offline Policy Replacement (P4 COMPLETE — commit `dd9a633`)
 
-### Q-table never learns a meaningful policy
+### Original stub diagnosis
 
 Production Q-table values across all 434 audits: range `[-0.025, +0.004]`, indistinguishable
-from the `0.0` default for unseen `(state, action)` pairs.
+from the `0.0` default for unseen `(state, action)` pairs. For all 4 observed states,
+`best_action=1` (neutral, `q_direction_weight=0.0`) always wins. The RL component had no
+effect on forecast output.
 
-For all 4 observed states, `best_action=1` (neutral, `q_direction_weight=0.0`) always wins.
-The RL component has no effect on forecast output.
+**Root cause**: Online Q-learning (`alpha=0.3, gamma=0.85, epsilon=0.1`) with tiny rewards
+(directional PnL on a 30-step horizon) and 11-entry Q-tables cannot converge meaningfully
+within a single fit call. Action degeneracy from `rank_policy="action_cutoffs"` with cutoffs
+`{0:0.25, 1:0.90, 2:1.00}` produced near-identical rank-1 and rank-2 reconstructions on
+short series, making actions 0 and 1 materially equivalent.
 
-**`mssa_rl.py:119-121`**: `alpha=0.3, gamma=0.85, epsilon=0.1` are standard RL textbook
-defaults. No domain calibration has been performed. With tiny rewards (directional PnL on a
-30-step horizon) and 11-entry Q-tables, learning cannot converge meaningfully within any
-single fit call.
+### Resolution applied (commit `dd9a633`)
 
-### Action degeneracy
+Online Q-learning replaced with a **frozen offline policy artifact** (`models/mssa_rl_policy.v1.json`):
 
-**`mssa_rl.py:145-146`**: `action_rank_cutoffs={0:0.25, 1:0.90, 2:1.00}`
-**Production `rank_by_action`**: `{0:1, 1:2, 2:30}` (most common observed)
+- Reward: `clipped_relative_rmse_improvement_vs_random_walk` — measures each action's RMSE
+  improvement vs a naïve random-walk baseline, clipped to `[-1, 1]`.
+- Training: 4-series synthetic curriculum (structured trend, 2 random walks, regime-switching),
+  116 windows × 3 actions per state across 150-bar minimum training windows.
+- 7-step fail-closed validation chain: `missing_artifact → invalid_artifact → stale_artifact →
+  unsupported_state → insufficient_support → degraded_residual_diagnostics → ready`.
+- `_mssa_is_eligible()` containment gate in `ensemble.py` excludes MSSA-RL from all candidates
+  when `policy_status != "ready"`, preventing a degraded policy from corrupting ensemble scoring.
+- `policy_fail_closed` field removed entirely; MSSA-RL is always fail-closed.
+- `change_point_threshold` reverted to 4.0 (was raised to 10.0 by another agent without
+  documentation; threshold=10 permanently disabled the slope decay forecast path).
 
-Action 0 uses rank 1 (lowest-frequency component). Action 1 uses rank 2. For short series
-these are near-identical reconstructions. The agent nominally has 3 choices; it has at most
-2 materially different behaviors, and always picks action 1 (neutral) in practice.
+### Residual limitations (acknowledged)
 
-### Legacy slope blend is dead code
+1. **Equal support counts**: The offline training loop evaluates all 3 actions for every
+   window-state pair. Support per state equals total windows where that state appeared;
+   it is identical across actions (e.g., state 0: `{0:47, 1:47, 2:47}`). The
+   `min_policy_state_support >= 5` gate is equivalent to "did this state appear at all?"
+   It cannot distinguish a well-sampled policy from a barely-trained one.
 
-**`mssa_rl.py:514-516`**:
-```python
-# Legacy slope-direction signal (retained; blended at 0.5 weight below).
-effective_slope = slope + q_direction_weight * abs(slope) * 0.5
+2. **Thin margins**: State 3 margin = 0.0067 (action 1 vs action 0: `−0.143 vs −0.150`).
+   All action values are negative (mean ≈ −0.14) because the synthetic curriculum includes
+   random walk series for which no reconstruction meaningfully beats a random-walk baseline.
+   Policy selects the least-bad action per state; margins improve with real-data retraining.
+
+3. **No test covers the trained artifact**: All 9 contract tests use a monkeypatched fixture
+   artifact with synthetic support values (`{0:7, 1:9, 2:6}`, `best_action=1` for all states).
+   The committed `models/mssa_rl_policy.v1.json` (different action selections, support=12–47)
+   has zero dedicated test coverage. A corrupted or mismatched trained artifact would not be
+   caught by any existing test.
+
+4. **xfail marker is stale**: `test_signal_scaling_invariant_under_price_rescale` is marked
+   `xfail(strict=False)` with the reason "SARIMAX AIC/BIC is scale-dependent." The test passes
+   deterministically on 3 consecutive runs. With `strict=False`, a future real failure becomes
+   invisible to CI (silently reported as xfail). The marker should be removed or set to
+   `strict=True`.
+
+### Script for retraining with real data
+
+```bash
+source simpleTrader_env/bin/activate
+python scripts/train_mssa_rl_policy.py \
+    --input-csv data/training/AAPL_close.csv \
+    --date-column date --value-column close \
+    --change-point-threshold 4.0 \
+    --artifact-path models/mssa_rl_policy.v1.json
 ```
-Since `best_action` is always 1, `q_direction_weight = {0:-1.0, 1:0.0, 2:1.0}[1] = 0.0`.
-The legacy term is always zero. The comment accurately describes the intent; the behavior
-never fires.
 
-### Design decision required
-
-MSSA-RL should either:
-1. Be simplified to a pure heuristic model (remove Q-table, keep reconstruction selection based
-   on deterministic variance cutoffs)
-2. Be properly trained with a defined reward signal, adequate state space, and offline Q-value
-   initialisation before being used as a live signal source
+Real-data retraining is recommended before warmup expires (2026-04-15) to replace the
+synthetic-curriculum baseline and improve action value margins.
 
 ---
 
@@ -321,13 +351,14 @@ EWMA fallback chain. This is a silent 2pp gap in a near-unit-root region.
 
 **Fix**: Align code to 0.97 (matching documentation) or document why 0.99 is correct.
 
-### EWMA lambda hardcoded
+### EWMA lambda externalized (COMPLETE — commit `dd9a633`)
 
-**`garch.py:532`**: `lam = 0.94` — RiskMetrics 1994 daily lambda. No config path exists.
+~~`garch.py:532`: `lam = 0.94` hardcoded.~~ Fixed: `ewma_lambda` is now a constructor
+parameter (`GARCHForecaster(ewma_lambda=0.94)`) with config-driven override. The fallback
+read at `garch.py:579` uses `getattr(self, "ewma_lambda", 0.94)` for snapshot restore safety.
 
-NVDA annual vol ~58%, AAPL ~27%. The same decay constant produces over-smoothing on NVDA
-and under-smoothing on AAPL. The EWMA fallback is already a degraded path; an asset-class
-aware lambda would reduce damage when it fires.
+Asset-class calibration (NVDA ~58% ann vol vs AAPL ~27%) still requires per-ticker config;
+the externalization enables that path without code changes.
 
 ### Outlier clip uses arbitrary multiplier
 
@@ -395,11 +426,16 @@ assumes Platt primarily corrects downward, which is not supported by the win-rat
 
 ## Part 7: CI Growth Factual Record
 
-**MSSA-RL** (`mssa_rl.py:565`): CI scale capped at `sqrt(max(steps/2, 1.0))` — **bounded**.
-**SAMoSSA** (`samossa.py:526`): CI scale `sqrt(step+1)` — **unbounded**.
+**Status as of 2026-04-04 (commit `dd9a633`)**: Both models now bounded.
 
-For SAMoSSA on a 30-step horizon with high `baseline_variance`, CI lower bound can go negative
-for a positive-price asset. MSSA-RL has the Phase 10b cap; SAMoSSA does not.
+**MSSA-RL** (`mssa_rl.py:853-857`): CI scale capped at `sqrt(max(steps/2, 1.0))` — **bounded**.
+**SAMoSSA** (`samossa.py:533-537`): CI scale `min(sqrt(step+1), sqrt(horizon/2))` — **bounded** (P4 fix applied).
+`lower_ci.clip(lower=0.0)` applied when training series is strictly positive — prevents negative
+CI lower bounds on positive-price assets.
+
+**Pre-fix state** (for audit record): SAMoSSA used `sqrt(step+1)` without cap — unbounded.
+On a 30-step horizon CI scale reached `sqrt(30)=5.5x`, producing negative lower CI on any
+positive-price series with moderate noise. MSSA-RL had the Phase 10b cap; SAMoSSA did not.
 
 The `0.85 * base + 0.15 * last_recon` blend appears in **MSSA-RL** (`mssa_rl.py:468`) only.
 SAMoSSA does not use this formula (earlier session note was incorrect).
@@ -458,13 +494,24 @@ Adding `ticker` to the dedupe key changes the gate contract: it shifts measureme
 
 NTFS mtime lesson applied: each date run twice (second run loads first run's audit as trailing OOS → both folds have RMSE → winner guaranteed to have RMSE). Do P0+P1 before generating data — without the selector fix, new audits are scored by broken inputs and violations do not reliably improve.
 
-### P4 — Secondary model cleanup [OPEN — backlog]
-**Prerequisite**: Gate path fixed and violation rate stable (<35%). Both conditions now met.
+### P4 — Secondary model cleanup
 
-1. **MSSA-RL**: Q-table non-functional (all Q-values in `[-0.025, +0.004]`, `best_action=1` always). Decision required — simplify to deterministic heuristic (remove Q-table, keep reconstruction selection on deterministic variance cutoffs) or define proper offline training pipeline with domain-calibrated reward signal and adequate state space.
-2. **GARCH**: Persistence threshold already aligned (0.99 → 0.97, COMPLETE in `cd1b8a3`). Remaining: add `ewma_lambda` to config (currently `lam=0.94` hardcoded at `garch.py:532`); review `10×median` outlier clip for high-vol assets (NVDA crisis windows).
-3. **Signal confidence**: Replace discrete vol bands at `time_series_signal_generator.py:1457-1462` with smooth sigmoid transitions. Review `0.40` edge weight dominance. Fix SNR mapping `(snr - 0.5) / 1.5` — maps most real NVDA observations to zero.
-4. **SAMoSSA**: Add CI cap analogous to MSSA-RL `sqrt(horizon/2)` at `samossa.py:526` — current unbounded `sqrt(step+1)` can produce negative CI lower bounds on positive-price assets at long horizons.
+**Prerequisite**: Gate path fixed and violation rate stable (<35%). Both conditions met.
+
+1. **MSSA-RL**: COMPLETE (`dd9a633`) — online Q-table replaced with frozen offline artifact;
+   7-step fail-closed chain; containment gate. See Part 4 for residual limitations.
+2. **GARCH**: Persistence threshold COMPLETE (`cd1b8a3`, 0.99→0.97). `ewma_lambda`
+   externalization COMPLETE (`dd9a633`, constructor param). Remaining: `10×median` outlier
+   clip for high-vol assets (`garch.py:132`); per-ticker lambda config.
+3. **SAMoSSA**: CI cap COMPLETE (`dd9a633`, `sqrt(horizon/2)` cap + `lower_ci.clip`).
+4. **Signal confidence**: OPEN — discrete vol bands at `time_series_signal_generator.py:1457-1462`
+   still use cliff-edge step function (25pp confidence drop at 40% boundary). Smooth sigmoid
+   transition not yet implemented. SNR mapping `(snr-0.5)/1.5` compresses most NVDA
+   observations to zero. `0.40` edge weight dominance unaddressed.
+5. **Test coverage gap** (NEW): No test covers the committed trained artifact
+   (`models/mssa_rl_policy.v1.json`). Contract tests use monkeypatched fixture only.
+6. **Stale xfail** (NEW): `test_signal_scaling_invariant_under_price_rescale` xpasses
+   deterministically; `strict=False` makes future regressions invisible to CI.
 
 ---
 
@@ -482,18 +529,21 @@ NTFS mtime lesson applied: each date run twice (second run loads first run's aud
 | `forcester_ts/ensemble.py` | 730-734 | MSSA-RL hard floor 0.40 |
 | `forcester_ts/ensemble.py` | 457-465 | `_combine_scores` unweighted mean |
 | `forcester_ts/ensemble.py` | 657 | GARCH domain norm 3-param formula |
-| `forcester_ts/mssa_rl.py` | 119-121 | RL textbook defaults, never trained |
-| `forcester_ts/mssa_rl.py` | 145-146 | Action degeneracy |
-| `forcester_ts/mssa_rl.py` | 477 | Q-table always picks action 1 |
-| `forcester_ts/mssa_rl.py` | 514-516 | Legacy slope blend — dead code |
-| `forcester_ts/mssa_rl.py` | 565 | CI cap at `sqrt(horizon/2)` (bounded) |
-| `forcester_ts/garch.py` | 8, 57, 316 | Persistence threshold 0.99 vs 0.97 mismatch |
-| `forcester_ts/garch.py` | 532 | EWMA `lam=0.94` hardcoded |
-| `forcester_ts/samossa.py` | 526 | CI growth uncapped `sqrt(step+1)` |
-| `models/time_series_signal_generator.py` | 1457-1462 | Discrete vol bands |
-| `models/time_series_signal_generator.py` | 1468-1472 | 0.40 edge weight |
-| `models/time_series_signal_generator.py` | 2764 | Platt ramp constants |
-| `scripts/check_forecast_audits.py` | 1471, 1479 | RMSE dedupe key (no ticker) |
+| `forcester_ts/mssa_rl.py` | 119-121 | ~~RL textbook defaults, never trained~~ REPLACED by offline artifact |
+| `forcester_ts/mssa_rl.py` | 658-774 | 7-step fail-closed validation chain (NEW, `dd9a633`) |
+| `forcester_ts/mssa_rl.py` | 853-857 | CI cap at `sqrt(horizon/2)` — bounded (COMPLETE) |
+| `forcester_ts/garch.py` | 8, 85, 357 | Persistence threshold aligned to 0.97 (COMPLETE, `cd1b8a3`) |
+| `forcester_ts/garch.py` | 83-95, 579 | `ewma_lambda` externalized (COMPLETE, `dd9a633`) |
+| `forcester_ts/garch.py` | 132 | `10×median` outlier clip — open for high-vol assets |
+| `forcester_ts/samossa.py` | 533-541 | CI cap + `lower_ci.clip` (COMPLETE, `dd9a633`) |
+| `forcester_ts/ensemble.py` | 427-441 | `_mssa_is_eligible()` containment gate (NEW, `dd9a633`) |
+| `models/mssa_rl_policy.v1.json` | — | Trained artifact — no dedicated test coverage (gap) |
+| `tests/forcester_ts/test_mssa_rl_policy_contract.py` | all | Validates fixture artifact only, not trained artifact (gap) |
+| `tests/integration/test_time_series_signal_wiring_scaling.py` | 175-182 | Stale `xfail(strict=False)` — xpasses deterministically |
+| `models/time_series_signal_generator.py` | 1457-1462 | Discrete vol bands — OPEN |
+| `models/time_series_signal_generator.py` | 1468-1472 | 0.40 edge weight — OPEN |
+| `models/time_series_signal_generator.py` | 2764 | Platt ramp constants — OPEN |
+| `scripts/check_forecast_audits.py` | ~514-542 | RMSE dedupe key (no ticker): 74.4% multi-ticker collapse |
 
 ---
 
@@ -501,6 +551,8 @@ NTFS mtime lesson applied: each date run twice (second run loads first run's aud
 
 > The selector reads the wrong evidence. Fix that first. [DONE — P0 complete]
 > After that, fix the confidence cap and change-point boost. [DONE — P1 complete]
-> Only then do the RL stub, GARCH constants, and signal-confidence constants become the right next levers. [P4 — now unblocked]
+> Only then do the RL stub, GARCH constants, and signal-confidence constants become the right next levers. [P4 — largely complete]
 
-**Current state (2026-04-01)**: Gate is `PASS (semantics=PASS)` at 33.33% violation rate. P0 and P1 are complete. The MSSA-RL Q-table stub, GARCH EWMA lambda externalization, SAMoSSA CI cap, and signal confidence vol-band smoothing are the remaining open levers in P4. Warmup expires 2026-04-15; no further evidence generation is required for the current gate window unless violation rate drifts back above 35%.
+**Current state (2026-04-04)**: Gate is `PASS (semantics=PASS)` at 32.35% violation rate (11/34 effective, `check_forecast_audits` dedup with no ticker in key). P0, P1, and the majority of P4 are complete. Remaining open items: signal vol-band smoothing (`time_series_signal_generator.py:1457`), trained-artifact test coverage, stale xfail marker. Warmup expires 2026-04-15.
+
+**Gate measurement note (confirmed 2026-04-04)**: `check_forecast_audits` and Layer 1 (`ensemble_health_audit`) both read from `artifacts.evaluation_metrics` (same JSON path, 196 files with data). They differ **only in dedup key**: `check_forecast_audits` dedupes on `(start, end, length, horizon)` — no ticker — collapsing 74.4% of windows into multi-ticker races where latest mtime wins. Layer 1 dedupes on SHA1`(ticker, start, end, length, horizon)`, preserving per-ticker granularity. Result: 34 vs 130 effective windows. Additionally, `check_forecast_audits` uses the EFFECTIVE_DEFAULT baseline (forecast-time model selection) while Layer 1 uses a stricter 0.98 ratio threshold (2% improvement required). These are not equivalent measurements and should not be directly compared without this context.
