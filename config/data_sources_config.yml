@@ -32,14 +32,14 @@ data_sources:
     - name: "finnhub"
       type: "market_data"
       enabled: true  # Enable when API key is configured in .env
-      priority: 4
+      priority: 3
       config_file: "config/finnhub_config.yml"
       credentials_env: "FINNHUB_API_KEY"
 
     - name: "ctrader"
       type: "market_data"
       enabled: true  # cTrader Open API OHLCV source (demo-first per ctrader_config.yml)
-      priority: 3
+      priority: 4
       config_file: "config/ctrader_config.yml"
 
   # Data source selection strategy
