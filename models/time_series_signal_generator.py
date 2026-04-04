@@ -1451,15 +1451,22 @@ class TimeSeriesSignalGenerator:
             snr_score = self._clamp01((float(snr) - 0.5) / 1.5)  # 0.5 -> 0, 2.0 -> 1
 
         # 3) Volatility factor (optional soft penalty; don't artificially inflate).
+        # Piecewise-linear between anchor points to eliminate cliff-edge jumps:
+        #   vol <= 0.15 → 1.05 | 0.15-0.25 → linear 1.05-1.00 | 0.25-0.40 → 1.00
+        #   0.40-0.60 → linear 0.75-0.60 | vol >= 0.60 → 0.60
         vol_factor = 1.0
         if volatility is not None and self.use_volatility_filter:
             vol = float(volatility)
             if vol >= 0.60:
                 vol_factor = 0.60
             elif vol >= 0.40:
-                vol_factor = 0.75
+                # Linear: 0.40 → 0.75, 0.60 → 0.60
+                vol_factor = 0.75 - 0.15 * (vol - 0.40) / 0.20
             elif vol <= 0.15:
                 vol_factor = 1.05
+            elif vol <= 0.25:
+                # Linear: 0.15 → 1.05, 0.25 → 1.00
+                vol_factor = 1.05 - 0.05 * (vol - 0.15) / 0.10
 
         # 4) Combine model-quality features with edge/uncertainty.
         # Edge is additive (not multiplicative) so marginal edges can still

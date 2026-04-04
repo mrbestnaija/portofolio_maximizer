@@ -170,3 +170,17 @@ def mssa_ready_policy_env(
     path, _artifact = mssa_policy_writer()
     force_mssa_ready_residuals()
     return path
+
+
+@pytest.fixture
+def mssa_real_artifact_env(
+    monkeypatch: pytest.MonkeyPatch,
+    force_mssa_ready_residuals: Callable[..., dict[str, Any]],
+) -> Path:
+    """Sets env var to the committed trained artifact. Skips if artifact absent."""
+    artifact_path = Path(__file__).parent.parent / "models" / "mssa_rl_policy.v1.json"
+    if not artifact_path.exists():
+        pytest.skip("models/mssa_rl_policy.v1.json not present")
+    monkeypatch.setenv("PMX_MSSA_POLICY_ARTIFACT_PATH", str(artifact_path))
+    force_mssa_ready_residuals()
+    return artifact_path

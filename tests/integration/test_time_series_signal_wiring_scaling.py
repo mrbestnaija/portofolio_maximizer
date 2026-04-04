@@ -172,14 +172,6 @@ def test_signal_generation_smoke_all_models(sample_price_series_daily: pd.Series
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason=(
-        "Phase 10: SARIMAX AIC/BIC is scale-dependent (price level affects log-likelihood), "
-        "and Phase 10 RMSE-rank can change model ordering under 1000x price rescaling. "
-        "Confidence scale invariance is advisory only when SARIMAX is enabled."
-    ),
-    strict=False,
-)
 def test_signal_scaling_invariant_under_price_rescale(
     sample_price_series_daily: pd.Series, fast_all_model_config: dict, forecast_bundle_all_models: dict
 ) -> None:

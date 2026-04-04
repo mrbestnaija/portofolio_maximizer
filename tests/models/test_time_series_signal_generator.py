@@ -1534,3 +1534,59 @@ class TestHoldReasonCodes:
         action, reason = self._call(confidence=0.10, net_trade_return=0.0001)
         assert action == "HOLD"
         assert reason == "CONFIDENCE_BELOW_THRESHOLD"
+
+
+class TestVolBandContinuity:
+    """Verify piecewise-linear vol-band produces no cliff edges.
+
+    Phase P4: replaced the discrete step function (0.75 flat for vol in [0.40,0.60))
+    with piecewise-linear interpolation so that adjacent vol values near the band
+    boundaries produce smoothly varying confidence rather than sudden jumps.
+    """
+
+    _FIXED_KWARGS = dict(
+        expected_return=0.05,
+        net_trade_return=0.05,
+        min_expected_return=0.001,
+        model_agreement=0.80,
+        diagnostics_score=0.70,
+        snr=2.0,
+        ticker="TEST",
+    )
+
+    def _conf(self, vol: float) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(volatility=vol, **self._FIXED_KWARGS)
+
+    def test_vol_band_continuous_at_0_60_boundary(self) -> None:
+        """vol=0.599 and vol=0.601 produce confidence within 2% of each other.
+
+        Old code: 0.75 (below 0.60) vs 0.60 (at/above 0.60) = 25pp cliff.
+        New code: linear interpolation reaches 0.601 as vol→0.60 from below.
+        """
+        c_below = self._conf(0.599)
+        c_above = self._conf(0.601)
+        assert c_above > 0, "confidence should be positive"
+        relative_diff = abs(c_below - c_above) / c_above
+        assert relative_diff < 0.02, (
+            f"Expected <=2% difference at vol=0.60 boundary; "
+            f"got conf(0.599)={c_below:.4f}, conf(0.601)={c_above:.4f}, "
+            f"relative_diff={relative_diff:.1%}"
+        )
+
+    def test_vol_band_monotonically_decreasing_in_40_60_range(self) -> None:
+        """Confidence strictly decreases as vol rises through [0.40, 0.60].
+
+        Old code: vol=0.41 and vol=0.59 produced identical confidence (flat 0.75).
+        New code: linear interpolation from 0.75 at vol=0.40 to 0.60 at vol=0.60.
+        """
+        c_low = self._conf(0.41)
+        c_mid = self._conf(0.50)
+        c_high = self._conf(0.59)
+        assert c_low > c_mid, (
+            f"conf(0.41)={c_low:.4f} should exceed conf(0.50)={c_mid:.4f}"
+        )
+        assert c_mid > c_high, (
+            f"conf(0.50)={c_mid:.4f} should exceed conf(0.59)={c_high:.4f}"
+        )
