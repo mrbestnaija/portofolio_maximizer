@@ -214,6 +214,12 @@ def check_ts_closes_in_db(db_path: Path) -> Finding:
         legacy_closes = cur.fetchone()[0]
         conn.close()
     except Exception as exc:
+        if "no such table" in str(exc).lower():
+            return Finding(
+                "ts_closes_in_db",
+                "WARN",
+                f"DB present but schema not initialised (bootstrap not run yet): {exc}",
+            )
         return Finding("ts_closes_in_db", "FAIL", f"DB query failed: {exc}")
 
     if ts_closes == 0:
@@ -323,6 +329,14 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
             "WARN",
             "[NONE] No active tier — CI/fresh environment: neither DB nor JSONL file present. "
             "Run bootstrap cycles locally to seed calibration data.",
+        )
+    if jsonl_pairs == 0 and db_pairs == 0:
+        return Finding(
+            "calibration_active_tier",
+            "WARN",
+            "[NONE] No active tier — DB/JSONL present but 0 usable pairs "
+            "(fresh environment or schema not initialised). "
+            "Run bootstrap cycles to seed calibration data.",
         )
     return Finding(
         "calibration_active_tier",
