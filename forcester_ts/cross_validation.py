@@ -72,6 +72,9 @@ class RollingWindowValidator:
         price_series = price_series.sort_index()
         folds = self._iter_folds(price_series)
         fold_results: List[Dict[str, Any]] = []
+        # P2-B: carry prior fold's non-ensemble eval metrics as OOS proxy for the
+        # next fold's _load_trailing_oos_metrics() fallback. First fold has no prior.
+        prior_fold_oos_metrics: Dict[str, Any] = {}
 
         for fold_number, fold_slice in enumerate(folds, start=1):
             train = price_series.iloc[: fold_slice.start]
@@ -80,6 +83,9 @@ class RollingWindowValidator:
             config = copy.deepcopy(self.forecaster_config)
             config.forecast_horizon = horizon
             rolling_forecaster = TimeSeriesForecaster(config=config)
+            # Inject prior fold metrics so _load_trailing_oos_metrics() has a proxy
+            # when no disk audit exists (typical on first-ever CV run).
+            rolling_forecaster._cv_fold_metrics = prior_fold_oos_metrics
 
             returns_subset = None
             if returns_series is not None:
@@ -93,6 +99,8 @@ class RollingWindowValidator:
             )
             rolling_forecaster.forecast(steps=horizon)
             metrics = rolling_forecaster.evaluate(test)
+            # Update proxy for next fold: exclude ensemble to avoid circular reference.
+            prior_fold_oos_metrics = {k: v for k, v in metrics.items() if k != "ensemble"}
             fold_results.append(
                 {
                     "fold": fold_number,

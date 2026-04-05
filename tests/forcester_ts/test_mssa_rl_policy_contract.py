@@ -152,8 +152,10 @@ def test_insufficient_support_policy_fails_closed(
     forecaster = _fit_default_forecaster()
 
     assert forecaster.get_diagnostics()["policy_status"] == "insufficient_support"
-    with pytest.raises(ValueError, match="insufficient_support"):
-        forecaster.forecast(steps=5)
+    # P3-B fix: insufficient support now returns neutral action (1) rather than
+    # raising ValueError — neutral is safer than no forecast at all.
+    result = forecaster.forecast(steps=5)
+    assert result is not None, "Low-support state must return a forecast (neutral action)"
 
 
 def test_degraded_residual_diagnostics_fail_closed(

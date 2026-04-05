@@ -574,3 +574,89 @@ def test_load_trailing_oos_metrics_fails_closed_when_ticker_unknown(monkeypatch,
     assert result == {}, (
         f"Tickerless forecaster must not load unrelated audit metrics; got {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P2-B: CV OOS proxy from prior fold metrics
+# ---------------------------------------------------------------------------
+
+def test_cv_fold_metrics_used_when_no_disk_audit(monkeypatch, tmp_path: Path) -> None:
+    """When no disk audit exists, _load_trailing_oos_metrics() must return
+    _cv_fold_metrics (injected by RollingWindowValidator) so RMSE-rank is not
+    disabled in CV context. (P2-B fix)"""
+    audit_dir = tmp_path / "empty_audits"
+    audit_dir.mkdir()
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(audit_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    series = pd.Series(list(range(60)), dtype=float, index=index, name="AAPL")
+    forecaster.fit(series, ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(ticker="AAPL", forecast_horizon=30)
+
+    # Inject prior fold metrics (simulating what RollingWindowValidator does)
+    prior_metrics = {"samossa": {"rmse": 1.2, "directional_accuracy": 0.55}}
+    forecaster._cv_fold_metrics = prior_metrics
+
+    result = forecaster._load_trailing_oos_metrics()
+    assert result == prior_metrics, (
+        f"_load_trailing_oos_metrics must return _cv_fold_metrics when no disk audit exists; "
+        f"got {result}"
+    )
+
+
+def test_rolling_window_validator_injects_prior_fold_metrics() -> None:
+    """RollingWindowValidator must inject prior fold metrics into each new forecaster
+    so that from fold 2 onwards, _cv_fold_metrics is non-empty at forecast() time.
+    (P2-B fix — RollingWindowValidator.run() prior_fold_oos_metrics injection)"""
+    import numpy as np
+    from forcester_ts.cross_validation import RollingWindowValidator, RollingWindowCVConfig
+
+    np.random.seed(42)
+    n = 200
+    prices = pd.Series(
+        100 + np.cumsum(np.random.normal(0, 1, n)),
+        index=pd.date_range("2022-01-01", periods=n, freq="D"),
+        name="TEST",
+    )
+
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=True, mssa_rl_enabled=False,
+        ensemble_enabled=False,  # keep simple so evaluate() always has samossa metrics
+    )
+    captured_cv_fold_metrics = []
+
+    # Patch TimeSeriesForecaster to capture _cv_fold_metrics at fit time
+    import forcester_ts.cross_validation as cv_mod
+    _original_tsf = cv_mod.TimeSeriesForecaster
+
+    class _CapturingForecaster(_original_tsf):
+        def fit(self, *args, **kwargs):
+            captured_cv_fold_metrics.append(dict(self._cv_fold_metrics))
+            return super().fit(*args, **kwargs)
+
+    cv_mod.TimeSeriesForecaster = _CapturingForecaster
+    try:
+        validator = RollingWindowValidator(
+            forecaster_config=config,
+            cv_config=RollingWindowCVConfig(min_train_size=120, horizon=10, step_size=30, max_folds=3),
+        )
+        validator.run(price_series=prices, ticker="TEST")
+    finally:
+        cv_mod.TimeSeriesForecaster = _original_tsf
+
+    assert len(captured_cv_fold_metrics) >= 2, "At least 2 folds needed for this test"
+    # Fold 1 must have empty prior metrics (no prior fold)
+    assert captured_cv_fold_metrics[0] == {}, (
+        f"Fold 1 must have empty _cv_fold_metrics; got {captured_cv_fold_metrics[0]}"
+    )
+    # Fold 2+ must have prior fold metrics injected
+    assert captured_cv_fold_metrics[1] != {}, (
+        "Fold 2 must have non-empty _cv_fold_metrics (injected from fold 1 evaluate)"
+    )

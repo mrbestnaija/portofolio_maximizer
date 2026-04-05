@@ -783,6 +783,18 @@ class MSSARLForecaster:
                 "MSSA-RL offline policy not ready (disabled_by_config)"
             )
 
+        if self._policy_status == "insufficient_support":
+            # P3-B: low-support states return neutral action (1 = hold) rather than
+            # failing entirely. A state with too few training samples should not drive
+            # directional decisions — neutral is safer than random or no forecast.
+            logger.debug(
+                "MSSA-RL state %s support=%d < min=%d; returning neutral action",
+                self._current_state,
+                self._policy_support,
+                int(self.config.min_policy_state_support),
+            )
+            return 1  # neutral
+
         if self._policy_status != "ready":
             # Always fail-closed: no graceful-degradation path exists for a degraded policy.
             raise ValueError(

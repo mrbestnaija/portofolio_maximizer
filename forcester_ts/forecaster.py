@@ -197,6 +197,9 @@ class TimeSeriesForecaster:
         self._model_summaries: Dict[str, Dict[str, Any]] = {}
         self._latest_results: Dict[str, Any] = {}
         self._latest_metrics: Dict[str, Dict[str, float]] = {}
+        # P2-B: metrics injected by RollingWindowValidator from prior fold's evaluate().
+        # Used as OOS proxy when no disk audit exists and self._latest_metrics is empty.
+        self._cv_fold_metrics: Dict[str, Dict[str, Any]] = {}
         self._model_errors: Dict[str, str] = {}
         self._model_events: list[Dict[str, Any]] = []
         self._regime_result: Optional[Dict[str, Any]] = None
@@ -2487,6 +2490,16 @@ class TimeSeriesForecaster:
                     len(component),
                 )
                 return component
+
+        # P2-B: No disk audit found. Fall back to prior CV fold metrics injected
+        # by RollingWindowValidator. This gives derive_model_confidence non-empty
+        # OOS metrics in CV context so RMSE-rank is not permanently disabled.
+        if self._cv_fold_metrics:
+            logger.info(
+                "[TS_MODEL] No disk audit found; using prior CV fold OOS proxy (%d models)",
+                len(self._cv_fold_metrics),
+            )
+            return self._cv_fold_metrics
 
         return {}
 
