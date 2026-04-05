@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven)
-**Completed Phases**: P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
-**Last Updated**: 2026-04-04
+**Current Phase**: Domain-Calibrated Remediation (adversarial audit 2026-04-05 — plan written, implementation pending)
+**Completed Phases**: Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven), P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
+**Last Updated**: 2026-04-05
 
 ---
 
@@ -1050,6 +1050,50 @@ directly. Three new tests in `tests/forcester_ts/test_mssa_rl_policy_contract.py
 | Integrity | ALL PASSED |
 
 **Test baseline**: 2165 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane, not slow/gpu/integration)
+
+---
+
+### Domain-Calibrated Remediation (2026-04-05 — adversarial audit, plan written)
+
+**Documentation**: `Documentation/DOMAIN_CALIBRATION_REMEDIATION_2026-04-05.md`
+
+**Key finding**: Gate is PASS but the linkage check (1/309 matched = 0.32%) is covered entirely
+by warmup exemption (expires 2026-04-15). Root cause confirmed: 99.6% of forecasts blocked by
+signal routing (confidence < 0.55, SNR < 1.5) never become trades. This is a funnel problem,
+not a data-accumulation problem.
+
+**Confirmed bypasses**:
+- `max_non_white_noise_rate: 0.75` — raised from 0.25 to pass (currently 100%, still WARN)
+- `residual_diagnostics_rate_warn_only: true` — enforcement removed entirely
+- `fail_on_violation_during_holding_period: false` — hard FAILs → INCONCLUSIVE
+- Missing `baseline_rmse` → `violation=False` in `check_forecast_audits.py:1194` (deflates rate)
+- `diagnostics_score` defaults silently to 0.5 when missing (`time_series_signal_generator.py:767`)
+- GARCH EWMA variance floor `1e-12` → CI collapse → SNR inflation
+- MSSA-RL `policy_support` never checked during action selection
+- `_load_trailing_oos_metrics()` returns `{}` in all CV runs — RMSE-rank always disabled in CV
+- RMSE dedupe key lacks ticker; outcome dedupe has ticker → denominator divergence
+
+**Plan phases**:
+- **P1** (pre-warmup): Fix missing-baseline bypass; add funnel audit logging; diagnostics_score
+  pessimistic fallback; GARCH variance floor; residual diagnostics by model type
+- **P2**: Terminal DA co-gate for RMSE lift; CV OOS proxy from fold metrics
+- **P3**: `calibrate_confidence_thresholds.py` from 40 realized trades; MSSA-RL support gate
+- **P4**: Linkage vacuous-pass hardening; ticker in RMSE dedupe key
+
+**Anti-patterns (forbidden)**:
+- Do NOT lower `min_lift_fraction` or raise `max_violation_rate` if P1 fixes increase violation count
+- Do NOT change confidence/SNR thresholds until funnel audit (P1-B) proves blocked forecasts have `terminal_DA > 0.52`
+- Do NOT add more warmup exemptions
+
+**Gate state (2026-04-05)**:
+
+| Metric | Value | Threshold | Warmup Covering? |
+|--------|-------|-----------|-----------------|
+| Violation rate | 31.43% (11/35) | ≤35% | No |
+| Lift fraction | 57.14% | ≥25% | No |
+| THIN_LINKAGE | 1/309 matched | ≥10 (post-warmup) | **YES** |
+| Recent window | 4/10 effective | need 10 | Data only |
+| Warmup | active until 2026-04-15 | — | 10 days remaining |
 
 ---
 
