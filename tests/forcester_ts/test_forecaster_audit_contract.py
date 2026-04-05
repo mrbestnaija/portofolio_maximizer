@@ -660,3 +660,88 @@ def test_rolling_window_validator_injects_prior_fold_metrics() -> None:
     assert captured_cv_fold_metrics[1] != {}, (
         "Fold 2 must have non-empty _cv_fold_metrics (injected from fold 1 evaluate)"
     )
+
+
+def test_load_trailing_oos_metrics_finds_match_beyond_position_20(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """C5 fix: removing [:20] cap allows matches at position 21+ in the file list.
+
+    Scenario: 25 non-AAPL audits are written first (newest mtime),
+    then 1 AAPL audit is written last (oldest mtime, position 26 when sorted desc).
+    Before the fix the scan stopped at 20 and returned {}. After the fix it must
+    find and return the AAPL audit.
+    """
+    import time
+
+    audit_dir = tmp_path / "many_audits"
+    audit_dir.mkdir()
+
+    # Write 25 non-AAPL audits (they will have newer mtime → sort first)
+    for i in range(25):
+        ticker = f"T{i:02d}"
+        _write_audit(audit_dir, f"forecast_audit_{ticker.lower()}.json", ticker, 30)
+        time.sleep(0.005)  # ensure distinct mtimes
+
+    # Write AAPL audit last → it will have the OLDEST mtime → sort last (position 26)
+    time.sleep(0.01)
+    _write_audit(audit_dir, "forecast_audit_aapl.json", "AAPL", 30)
+
+    # Re-touch the non-AAPL files to make them newer than AAPL
+    for i in range(25):
+        ticker = f"T{i:02d}"
+        p = audit_dir / f"forecast_audit_{ticker.lower()}.json"
+        p.touch()
+        time.sleep(0.001)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(audit_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+    assert result, (
+        "C5 fix: _load_trailing_oos_metrics must find AAPL audit at position 26 "
+        "(beyond old [:20] cap); got empty result"
+    )
+    assert "samossa" in result, f"Expected samossa metrics in AAPL audit; got keys: {list(result)}"
+
+
+def test_load_trailing_oos_metrics_warns_when_no_match(
+    monkeypatch, tmp_path: Path, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    """C5 fix: when no file matches the current ticker, a WARNING must be emitted.
+    This makes RMSE-rank fallback visible in logs without reading source code.
+    """
+    import logging
+
+    audit_dir = tmp_path / "no_match_audits"
+    audit_dir.mkdir()
+    for ticker in ("MSFT", "NVDA", "TSLA", "GOOGL", "META"):
+        _write_audit(audit_dir, f"forecast_audit_{ticker.lower()}.json", ticker, 30)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(audit_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    with caplog.at_level(logging.WARNING, logger="forcester_ts.forecaster"):
+        result = forecaster._load_trailing_oos_metrics()
+
+    assert result == {}, f"Expected empty result when no AAPL audit exists; got {result}"
+    warning_texts = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("no matching file with evaluation_metrics" in t for t in warning_texts), (
+        f"Expected WARNING about no matching audit file; got: {warning_texts}"
+    )

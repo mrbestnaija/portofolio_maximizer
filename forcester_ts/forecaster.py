@@ -2450,7 +2450,7 @@ class TimeSeriesForecaster:
 
         from forcester_ts.ensemble import TRACKED_MODELS  # local import avoids cycle
 
-        for path in files[:20]:  # scan recent files; most will match on first try
+        for path in files:  # scan all files; sorted mtime-desc so most matches come first
             try:
                 audit = json.loads(path.read_text())
             except Exception:
@@ -2490,6 +2490,17 @@ class TimeSeriesForecaster:
                     len(component),
                 )
                 return component
+
+        # Post-loop: no matching audit found in any file.
+        if files:
+            logger.warning(
+                "[TS_MODEL] _load_trailing_oos_metrics: scanned %d audit file(s) for "
+                "ticker=%s horizon=%s — no matching file with evaluation_metrics found. "
+                "RMSE-rank will fall back to heuristic scoring.",
+                len(files),
+                current_ticker,
+                current_horizon,
+            )
 
         # P2-B: No disk audit found. Fall back to prior CV fold metrics injected
         # by RollingWindowValidator. This gives derive_model_confidence non-empty

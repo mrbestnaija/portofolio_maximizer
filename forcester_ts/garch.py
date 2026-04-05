@@ -169,7 +169,7 @@ class GARCHForecaster:
         realized_volatility = float(returns_clean.std(ddof=0))
         if not np.isfinite(realized_volatility) or realized_volatility <= 0.0:
             realized_volatility = float(returns_clean.abs().mean())
-        self._realized_volatility = max(realized_volatility, 1e-12)
+        self._realized_volatility = max(realized_volatility, 1e-6)
 
         backend = getattr(self, "backend", "arch")
         if backend != "arch":
@@ -202,7 +202,7 @@ class GARCHForecaster:
         realized_volatility = float(returns_clean.std(ddof=0))
         if not np.isfinite(realized_volatility) or realized_volatility <= 0.0:
             realized_volatility = float(returns_clean.abs().mean())
-        self._realized_volatility = max(realized_volatility, 1e-12)
+        self._realized_volatility = max(realized_volatility, 1e-6)
 
         if len(returns_clean) < self.min_arch_sample_size:
             logger.warning(
@@ -639,7 +639,7 @@ class GARCHForecaster:
             state = self._fallback_state or {}
             fallback_mode = self._state_fallback_mode(state)
             last_var = float(state.get("last_variance") or 0.0)
-            last_var = float(max(last_var, 1e-12))
+            last_var = float(max(last_var, 1e-6))
             idx = pd.Index(range(1, int(steps) + 1), name="horizon")
             variance = pd.Series([last_var] * int(steps), index=idx)
             mean = pd.Series([float(state.get("mean") or 0.0)] * int(steps), index=idx)
@@ -655,7 +655,7 @@ class GARCHForecaster:
                 "dist": self.dist,
                 "aic": None,
                 "bic": None,
-                "convergence_ok": True,  # EWMA/GJR fallback is always "converged"
+                "convergence_ok": False,  # EWMA fallback means arch fit failed or unavailable
                 "residual_diagnostics": {},
                 "residual_diagnostics_status": "unavailable",
                 "residual_diagnostics_reason": "ewma_fallback",

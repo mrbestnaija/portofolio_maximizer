@@ -1456,7 +1456,12 @@ class TimeSeriesSignalGenerator:
 
         # 2) Uncertainty score from SNR (CI-implied).
         if snr is None:
-            snr_score = 0.5
+            logger.debug(
+                "SNR unavailable for ticker=%s; using pessimistic snr_score=0.0 "
+                "(missing CI means unknown uncertainty — consistent with P1-C diagnostics_score policy)",
+                ticker,
+            )
+            snr_score = 0.0
         else:
             snr_score = self._clamp01((float(snr) - 0.5) / 1.5)  # 0.5 -> 0, 2.0 -> 1
 

@@ -218,6 +218,10 @@ def test_ewma_forecast_reports_guardrail_metadata() -> None:
     assert "fallback_reason" not in result
     assert result["persistence"] == pytest.approx(0.995)
     assert result["volatility_ratio_to_realized"] == pytest.approx(4.5)
+    # M1 fix: EWMA fallback must signal convergence failure, not success
+    assert result["convergence_ok"] is False, (
+        "EWMA fallback must report convergence_ok=False so CI inflation fires in forecaster"
+    )
 
 
 def test_ewma_variance_floor_prevents_ci_collapse() -> None:
@@ -249,3 +253,26 @@ def test_ewma_variance_floor_prevents_ci_collapse() -> None:
     assert vol_val >= (MIN_EWMA_VARIANCE ** 0.5) * 0.5, (
         f"volatility ({vol_val:.2e}) too close to zero; EWMA floor not effective"
     )
+
+
+def test_realized_volatility_floor_consistent_with_ewma_floor() -> None:
+    """H2 fix: _realized_volatility floor must be 1e-6 (same as EWMA variance floor).
+    On a constant series, volatility_ratio_to_realized must not reach 1e6 (telemetry corruption).
+    """
+    MIN_VOL_FLOOR = 1e-6
+    forecaster = GARCHForecaster(auto_select=True, max_p=1, max_q=1, min_arch_sample_size=120)
+    constant_returns = pd.Series([0.0] * 60)  # zero variance — worst case
+    forecaster.fit(constant_returns)
+
+    assert forecaster._realized_volatility >= MIN_VOL_FLOOR, (
+        f"_realized_volatility ({forecaster._realized_volatility:.2e}) below floor "
+        f"{MIN_VOL_FLOOR:.2e}; H2 fix not applied"
+    )
+
+    result = forecaster.forecast(steps=5)
+    ratio = result.get("volatility_ratio_to_realized")
+    if ratio is not None:
+        assert ratio <= 100.0, (
+            f"volatility_ratio_to_realized={ratio:.1f} is unrealistically large; "
+            "inconsistent _realized_volatility floor causes telemetry corruption"
+        )

@@ -450,7 +450,10 @@ class TestTimeSeriesSignalGenerator:
             quant_validation_config={"enabled": False},
         )
 
-        forecast = pd.Series([100.4, 100.4, 100.4])
+        # Use a stronger return (0.7%) so MSFT (min_return=0.3%) passes confidence gate
+        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic). AAPL's higher
+        # per-ticker min_return (1.0%) still blocks it.
+        forecast = pd.Series([100.7, 100.7, 100.7])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -493,7 +496,9 @@ class TestTimeSeriesSignalGenerator:
             quant_validation_config={"enabled": False},
         )
 
-        forecast = pd.Series([99.6, 99.6, 99.6])
+        # Use a stronger return (-0.7%) so the SELL signal passes confidence gate
+        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic 0.0 not neutral 0.5).
+        forecast = pd.Series([99.3, 99.3, 99.3])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -521,8 +526,8 @@ class TestTimeSeriesSignalGenerator:
         ctx = signal.provenance.get("decision_context") or {}
         assert signal.action == "SELL"
         assert ctx.get("roundtrip_cost_bps") == pytest.approx(10.0)
-        assert ctx.get("expected_return") == pytest.approx(-0.004)
-        assert ctx.get("expected_return_net") == pytest.approx(-0.003)
+        assert ctx.get("expected_return") == pytest.approx(-0.007)
+        assert ctx.get("expected_return_net") == pytest.approx(-0.006)
         # Net should be closer to zero than gross for SELL signals.
         assert ctx["expected_return_net"] > ctx["expected_return"]
 
@@ -1630,4 +1635,46 @@ class TestDiagnosticsScorePessimisticFallback:
         assert conf_missing < conf_good, (
             f"Missing diagnostics_score must produce lower confidence than good score; "
             f"got missing={conf_missing:.4f}, good={conf_good:.4f}"
+        )
+
+
+class TestSNRNonePessimisticFallback:
+    """H6: SNR=None must use 0.0 (pessimistic), not 0.5 (neutral).
+
+    Consistent with P1-C policy: missing uncertainty measurement should lower confidence,
+    not credit it neutrally. SNR is unavailable only when CI computation entirely fails.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.05,
+        net_trade_return=0.05,
+        min_expected_return=0.001,
+        volatility=0.20,
+        model_agreement=0.80,
+        diagnostics_score=0.7,
+        ticker="TEST",
+    )
+
+    def _conf(self, snr: float | None) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(snr=snr, **self._BASE_KWARGS)
+
+    def test_snr_none_produces_lower_confidence_than_snr_neutral(self) -> None:
+        """conf(snr=None) < conf(snr=1.0) — pessimistic fallback penalises absence."""
+        conf_none = self._conf(None)
+        conf_neutral = self._conf(1.0)
+        assert conf_none < conf_neutral, (
+            f"SNR=None must produce lower confidence than snr=1.0 (neutral); "
+            f"got none={conf_none:.4f}, neutral={conf_neutral:.4f}"
+        )
+
+    def test_snr_none_does_not_credit_neutral(self) -> None:
+        """conf(snr=None) < conf(snr=1.5) — snr=None uses score=0.0, snr=1.5 uses score=0.667.
+        Note: snr=0.5 maps to score=0.0 (same as None), so comparison must use snr > 0.5."""
+        conf_none = self._conf(None)
+        conf_moderate = self._conf(1.5)  # snr_score = clamp01((1.5-0.5)/1.5) = 0.667
+        assert conf_none < conf_moderate, (
+            f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.667); "
+            f"got none={conf_none:.4f}, snr_moderate={conf_moderate:.4f}"
         )

@@ -490,7 +490,12 @@ def derive_model_confidence(
         for model, m in _rmse_source.items()
         if (m or {}).get("rmse") is not None and np.isfinite(float(m.get("rmse")))
     }
-    if _rmse_source is _oos_component_metrics and _rmse_values:
+    if _rmse_source is metrics_map:
+        logger.info(
+            "Phase 10 RMSE-rank: falling back to in-sample metrics (OOS not available). "
+            "RMSE-rank will be inactive if in-sample metrics are empty."
+        )
+    elif _rmse_values:
         logger.info("Phase 10 RMSE-rank: using trailing OOS metrics (%d models)", len(_rmse_values))
     if len(_rmse_values) >= 2:
         _min_rmse = min(_rmse_values.values())
@@ -505,6 +510,13 @@ def derive_model_confidence(
         logger.info("Phase 10 RMSE-rank scores: %s", {m: f"{v:.3f}" for m, v in _rmse_rank_scores.items()})
     else:
         _rmse_rank_scores: Dict[str, float] = {}
+        logger.warning(
+            "Phase 10 RMSE-rank DISABLED: only %d model(s) have finite OOS RMSE "
+            "(need >=2 for rank normalization). Models with RMSE: %s. "
+            "Ensemble selection falls back to heuristic scoring (AIC/BIC/EVR).",
+            len(_rmse_values),
+            list(_rmse_values.keys()) if _rmse_values else [],
+        )
 
     # Wiring fix cont. (2026-03-29): if OOS component metrics are available,
     # override baseline_rmse, baseline_te, baseline_metrics, and the per-model
@@ -850,23 +862,6 @@ def derive_model_confidence(
             if isinstance(mssa_summary.get("residual_diagnostics"), dict)
             else None,
         )
-
-    # If SAMOSSA has strictly lower residual variance than SARIMAX but
-    # ended up with a lower raw score (e.g. due to information-criteria
-    # heuristics), gently bump it above SARIMAX so variance improvements
-    # are reflected in ordering before normalisation.
-    samossa_te = samossa_metrics.get("tracking_error")
-    sarimax_te = sarimax_metrics.get("tracking_error")
-    if (
-        samossa_score is not None
-        and sarimax_score is not None
-        and isinstance(samossa_te, (int, float))
-        and isinstance(sarimax_te, (int, float))
-        and samossa_te < sarimax_te
-        and samossa_score <= sarimax_score
-    ):
-        samossa_score = min(1.0, sarimax_score + 0.05)
-        confidence["samossa"] = samossa_score
 
     # Phase 7.10: Floor confidence at 0.05 to avoid division-by-zero downstream.
     floored_confidence = {

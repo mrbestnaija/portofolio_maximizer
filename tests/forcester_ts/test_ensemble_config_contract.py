@@ -982,3 +982,81 @@ class TestPhase10RmseRankHybrid:
         assert "mssa_rl" not in conf_with
         # SAMoSSA still has the strongest score among the remaining component models.
         assert conf_with.get("samossa", 0) >= conf_with.get("garch", 1)
+
+    def test_rmse_rank_disabled_warning_emitted_for_single_model(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """H7: RMSE-rank must emit WARNING when <2 models have finite OOS RMSE."""
+        import logging
+
+        from forcester_ts.ensemble import derive_model_confidence
+
+        base_summaries = {
+            "samossa": {"explained_variance_ratio": 0.95},
+            "garch": {"aic": 200.0, "bic": 210.0},
+        }
+        # Only one model has OOS RMSE — RMSE-rank cannot normalize with <2 values
+        oos_single = {
+            "samossa": {"rmse": 9.77, "directional_accuracy": 0.55, "n_observations": 50},
+        }
+
+        with caplog.at_level(logging.WARNING, logger="forcester_ts.ensemble"):
+            derive_model_confidence(base_summaries, oos_metrics=oos_single)
+
+        warning_texts = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("RMSE-rank DISABLED" in t for t in warning_texts), (
+            f"Expected 'RMSE-rank DISABLED' WARNING when only 1 model has RMSE; "
+            f"got: {warning_texts}"
+        )
+
+    def test_samossa_score_not_bumped_when_te_lower_than_sarimax(self) -> None:
+        """C3: The pre-rank +0.05 SAMoSSA bump must be removed.
+
+        Before fix: when SAMoSSA TE < SARIMAX TE AND samossa_score <= sarimax_score,
+        samossa was set to min(1.0, sarimax_score + 0.05) — artificially inflated.
+        After fix: RMSE-rank and heuristic scoring determine the final order without
+        the TE-driven bump.
+
+        Test setup: SAMoSSA has very low EVR (poor heuristic score) + worse OOS RMSE,
+        while SARIMAX has excellent AIC (high heuristic) + much better OOS RMSE.
+        SAMoSSA's lower TE would have triggered the bump; without it, SARIMAX wins.
+        """
+        from forcester_ts.ensemble import derive_model_confidence
+
+        # SAMoSSA: terrible EVR=0.1 → low heuristic score
+        # SARIMAX: excellent AIC=-100 → high heuristic score
+        base_summaries = {
+            "samossa": {"explained_variance_ratio": 0.1},
+            "sarimax": {"aic": -100.0, "bic": -90.0},
+            "garch": {"aic": 200.0, "bic": 210.0},
+        }
+        # SAMoSSA: lower TE (SSA construction) but 4x worse OOS RMSE
+        # SARIMAX: higher TE but much better OOS RMSE — RMSE evidence favors SARIMAX
+        oos = {
+            "samossa": {
+                "rmse": 20.0,
+                "tracking_error": 0.5,  # lower TE — old bump would fire
+                "directional_accuracy": 0.48,
+                "n_observations": 50,
+            },
+            "sarimax": {
+                "rmse": 5.0,
+                "tracking_error": 2.0,  # higher TE — old bump condition: te_samossa < te_sarimax
+                "directional_accuracy": 0.55,
+                "n_observations": 50,
+            },
+            "garch": {
+                "rmse": 12.0,
+                "directional_accuracy": 0.51,
+                "n_observations": 50,
+            },
+        }
+        conf = derive_model_confidence(base_summaries, oos_metrics=oos)
+        samossa_score = conf.get("samossa", 0.0)
+        sarimax_score = conf.get("sarimax", 0.0)
+        # SARIMAX has: excellent IC heuristic + 4x better OOS RMSE vs SAMoSSA's poor EVR
+        # Without the bump, SARIMAX must outscore SAMoSSA
+        assert sarimax_score > samossa_score, (
+            f"C3 fix: SARIMAX (aic=-100, rmse=5.0) must outscore SAMoSSA (evr=0.1, rmse=20.0) "
+            f"when bump is removed; got sarimax={sarimax_score:.4f}, samossa={samossa_score:.4f}"
+        )
