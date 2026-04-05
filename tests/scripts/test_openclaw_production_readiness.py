@@ -62,6 +62,21 @@ def _write_production_gate_artifact(path: Path) -> None:
     )
 
 
+def test_security_posture_accepts_windows_user_env_approval_token(monkeypatch) -> None:
+    monkeypatch.delenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_windows_user_env_value",
+        lambda name: "user-token-12345" if name == "OPENCLAW_AUTONOMY_APPROVAL_TOKEN" else "",
+    )
+
+    snapshot, blockers, warnings = mod._security_posture()
+
+    assert snapshot["non_default_approval_token_configured"] is True
+    assert not any(row["code"] == "weak_approval_token" for row in blockers)
+    assert warnings == []
+
+
 def test_gate_truth_posture_detects_skip_policy_and_phase3_drift(tmp_path: Path) -> None:
     gate_artifact = tmp_path / "gate_status_latest.json"
     gate_artifact.write_text(

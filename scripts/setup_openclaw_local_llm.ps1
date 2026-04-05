@@ -161,17 +161,13 @@ if (-not $resolvedOllamaHost -or $resolvedOllamaHost.Trim().Length -eq 0) {
   }
 }
 
-# OpenClaw `models.providers.ollama.baseUrl` is typically configured with `/v1`.
+# OpenClaw should use the native Ollama endpoint root, without `/v1`.
 $openclawOllamaBaseUrl = $resolvedOllamaHost.TrimEnd("/")
-if (-not $openclawOllamaBaseUrl.ToLower().EndsWith("/v1")) {
-  $openclawOllamaBaseUrl = $openclawOllamaBaseUrl + "/v1"
+if ($openclawOllamaBaseUrl.ToLower().EndsWith("/v1")) {
+  $openclawOllamaBaseUrl = $openclawOllamaBaseUrl.Substring(0, $openclawOllamaBaseUrl.Length - 3)
 }
 
-# OpenClaw expects baseUrl typically with /v1, but our health check uses native endpoints.
 $ollamaHealthHost = $openclawOllamaBaseUrl
-if ($ollamaHealthHost.ToLower().EndsWith("/v1")) {
-  $ollamaHealthHost = $ollamaHealthHost.Substring(0, $ollamaHealthHost.Length - 3)
-}
 
 # Ensure Python helper sees it (OpenClaw itself will read from config after apply).
 $env:OPENCLAW_OLLAMA_BASE_URL = $openclawOllamaBaseUrl

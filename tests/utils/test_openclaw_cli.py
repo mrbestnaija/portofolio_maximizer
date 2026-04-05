@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import utils.openclaw_cli as cli_mod
 from utils.openclaw_cli import (
     _append_operator_hints,
     _clear_stuck_gateway_sessions,
@@ -340,6 +341,62 @@ def test_parse_openclaw_targets_default_channel_applies_to_bare_targets() -> Non
     assert targets == [("telegram", "@me")]
 
 
+def test_run_agent_turn_allows_high_risk_with_windows_user_env_approval_token(monkeypatch) -> None:
+    proc = MagicMock(returncode=0, stdout='{"response":"ok"}', stderr="")
+    monkeypatch.setattr(
+        cli_mod,
+        "_windows_user_env_value",
+        lambda name: "WINDOWS_USER_APPROVAL_TOKEN" if name == "OPENCLAW_AUTONOMY_APPROVAL_TOKEN" else "",
+    )
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_AUTONOMY_GUARD_ENABLED": "1",
+            "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN": "1",
+            "OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS": "0",
+        },
+        clear=True,
+    ):
+        with patch("utils.openclaw_cli.subprocess.run", return_value=proc) as mock_run:
+            result = run_agent_turn(
+                to="+15551234567",
+                message="Execute trade now WINDOWS_USER_APPROVAL_TOKEN",
+                command="openclaw",
+                timeout_seconds=5.0,
+            )
+
+    assert result.ok is True
+    mock_run.assert_called_once()
+
+
+def test_run_agent_turn_logs_blocked_security_event(monkeypatch) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(cli_mod, "_log_llm_activity_event", lambda **kwargs: events.append(dict(kwargs)))
+    with patch.dict(
+        "utils.openclaw_cli.os.environ",
+        {
+            "OPENCLAW_AUTONOMY_GUARD_ENABLED": "1",
+            "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN": "1",
+            "OPENCLAW_AUTONOMY_APPROVAL_TOKEN": "PMX_APPROVE_HIGH_RISK",
+            "OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS": "0",
+        },
+        clear=False,
+    ):
+        result = run_agent_turn(
+            to="+15551234567",
+            message="Execute the trade and enter the API key in the broker page.",
+            command="openclaw",
+            timeout_seconds=5.0,
+        )
+
+    assert result.ok is False
+    assert any(event["event_type"] == "autonomy_guard_blocked" for event in events)
+    blocked = next(event for event in events if event["event_type"] == "autonomy_guard_blocked")
+    assert blocked["metadata"]["reason_count"] == 2
+    assert "financial_transaction" in blocked["metadata"]["risky_hits"]
+    assert "credential_entry" in blocked["metadata"]["risky_hits"]
+
+
 class TestAutonomyGuard:
     def test_run_agent_turn_blocks_high_risk_without_approval_token(self) -> None:
         with patch.dict(
@@ -392,6 +449,35 @@ class TestAutonomyGuard:
         assert "[PMX_AUTONOMY_POLICY]" in sent_message
         assert "User request:" in sent_message
         assert "Execute trade now PMX_APPROVE_HIGH_RISK" in sent_message
+
+    def test_run_agent_turn_logs_override_and_completion_when_approved(self, monkeypatch) -> None:
+        events: list[dict[str, object]] = []
+        monkeypatch.setattr(cli_mod, "_log_llm_activity_event", lambda **kwargs: events.append(dict(kwargs)))
+        proc = MagicMock(returncode=0, stdout='{"response":"ok"}', stderr="")
+        with patch.dict(
+            "utils.openclaw_cli.os.environ",
+            {
+                "OPENCLAW_AUTONOMY_GUARD_ENABLED": "1",
+                "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN": "1",
+                "OPENCLAW_AUTONOMY_APPROVAL_TOKEN": "PMX_APPROVE_HIGH_RISK",
+                "OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS": "0",
+            },
+            clear=False,
+        ):
+            with patch("utils.openclaw_cli.subprocess.run", return_value=proc):
+                result = run_agent_turn(
+                    to="+15551234567",
+                    message="Execute trade now PMX_APPROVE_HIGH_RISK",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                )
+
+        assert result.ok is True
+        assert any(event["event_type"] == "autonomy_guard_override" for event in events)
+        assert any(event["event_type"] == "agent_turn_complete" for event in events)
+        override = next(event for event in events if event["event_type"] == "autonomy_guard_override")
+        assert override["metadata"]["approval_token_present"] is True
+        assert "financial_transaction" in override["metadata"]["risky_hits"]
 
     def test_run_agent_turn_policy_prefix_can_be_disabled(self) -> None:
         proc = MagicMock(returncode=0, stdout='{"response":"ok"}', stderr="")

@@ -118,9 +118,69 @@ def _env_enabled(name: str, *, default: bool) -> bool:
     return raw not in _FALSEY_ENV_VALUES
 
 
+def _windows_user_env_value(name: str) -> str:
+    key_name = str(name or "").strip()
+    if os.name != "nt" or not key_name:
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            value, _ = winreg.QueryValueEx(key, key_name)
+    except Exception:
+        return ""
+    return str(value or "").strip()
+
+
 def _autonomy_approval_token() -> str:
     token = str(os.getenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")).strip()
+    if not token:
+        token = _windows_user_env_value("OPENCLAW_AUTONOMY_APPROVAL_TOKEN")
     return token or _DEFAULT_AUTONOMY_APPROVAL_TOKEN
+
+
+def _activity_logger() -> Any:
+    try:
+        from ai_llm.llm_activity_logger import get_logger
+
+        return get_logger()
+    except Exception:
+        return None
+
+
+def _short_sha(value: str, *, length: int = 16) -> str:
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[: max(8, int(length))]
+
+
+def _log_llm_activity_event(
+    *,
+    event_type: str,
+    channel: Optional[str],
+    message: str = "",
+    target: str = "",
+    metadata: Optional[dict[str, Any]] = None,
+) -> None:
+    activity = _activity_logger()
+    if activity is None:
+        return
+    payload: dict[str, Any] = {
+        "message_len": len(str(message or "")),
+        "message_sha256_16": _short_sha(message, length=16),
+    }
+    target_text = str(target or "").strip()
+    if target_text:
+        payload["target_sha256_12"] = _short_sha(target_text, length=12)
+    if isinstance(metadata, dict):
+        payload.update(metadata)
+    try:
+        activity.log_openclaw_event(
+            channel=(channel or "openclaw").strip() or "openclaw",
+            event_type=event_type,
+            metadata=payload,
+        )
+    except Exception:
+        return
 
 
 def _autonomy_policy_prefix(*, approval_token: str) -> str:
@@ -160,26 +220,40 @@ def _find_pattern_hits(message: str, patterns: list[tuple[str, re.Pattern[str]]]
     return hits
 
 
-def _evaluate_autonomy_message(message: str) -> tuple[bool, list[str], str]:
-    if not _env_enabled("OPENCLAW_AUTONOMY_GUARD_ENABLED", default=True):
-        return True, [], _autonomy_approval_token()
-
+def _inspect_autonomy_message(message: str) -> dict[str, Any]:
     approval_token = _autonomy_approval_token()
+    guard_enabled = _env_enabled("OPENCLAW_AUTONOMY_GUARD_ENABLED", default=True)
+    approval_required = _env_enabled("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", default=True)
+    injection_block_enabled = _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=True)
     lowered = str(message or "").lower()
     token_present = approval_token.lower() in lowered
+    risky_hits = _find_pattern_hits(message, _HIGH_RISK_INTENT_PATTERNS)
+    injection_hits = _find_pattern_hits(message, _PROMPT_INJECTION_PATTERNS)
     reasons: list[str] = []
 
-    risky_hits = _find_pattern_hits(message, _HIGH_RISK_INTENT_PATTERNS)
-    if risky_hits and _env_enabled("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", default=True):
+    if guard_enabled and risky_hits and approval_required:
         if not token_present:
             reasons.extend([f"high_risk:{hit}" for hit in risky_hits])
-
-    injection_hits = _find_pattern_hits(message, _PROMPT_INJECTION_PATTERNS)
-    if injection_hits and _env_enabled("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", default=True):
+    if guard_enabled and injection_hits and injection_block_enabled:
         if not token_present:
             reasons.extend([f"prompt_injection:{hit}" for hit in injection_hits])
 
-    return len(reasons) == 0, reasons, approval_token
+    return {
+        "allowed": len(reasons) == 0,
+        "reasons": reasons,
+        "approval_token": approval_token,
+        "token_present": token_present,
+        "risky_hits": risky_hits,
+        "injection_hits": injection_hits,
+        "guard_enabled": guard_enabled,
+        "approval_required": approval_required,
+        "injection_block_enabled": injection_block_enabled,
+    }
+
+
+def _evaluate_autonomy_message(message: str) -> tuple[bool, list[str], str]:
+    details = _inspect_autonomy_message(message)
+    return bool(details["allowed"]), list(details["reasons"]), str(details["approval_token"])
 
 
 # ---------------------------------------------------------------------------
@@ -1951,9 +2025,36 @@ def run_agent_turn(
         configured_cli_timeout = 120.0
     cli_timeout_seconds = min(float(timeout_seconds), max(15.0, configured_cli_timeout))
 
-    guard_allowed, guard_reasons, approval_token = _evaluate_autonomy_message(message)
+    autonomy = _inspect_autonomy_message(message)
+    guard_allowed = bool(autonomy["allowed"])
+    guard_reasons = list(autonomy["reasons"])
+    approval_token = str(autonomy["approval_token"])
+    turn_meta = {
+        "deliver": bool(deliver),
+        "local": bool(local),
+        "json_output": bool(json_output),
+        "max_retries": int(max_retries),
+        "guard_enabled": bool(autonomy["guard_enabled"]),
+        "approval_required": bool(autonomy["approval_required"]),
+        "injection_block_enabled": bool(autonomy["injection_block_enabled"]),
+        "approval_token_present": bool(autonomy["token_present"]),
+        "risky_hits": list(autonomy["risky_hits"]),
+        "injection_hits": list(autonomy["injection_hits"]),
+        "reason_count": len(guard_reasons),
+    }
     if not guard_allowed:
         reason_text = ", ".join(guard_reasons) if guard_reasons else "blocked_by_policy"
+        _log_llm_activity_event(
+            event_type="autonomy_guard_blocked",
+            channel=channel,
+            message=message,
+            target=to,
+            metadata={
+                **turn_meta,
+                "guard_reasons": guard_reasons,
+                "returncode": 403,
+            },
+        )
         dry_cmd = build_agent_turn_command(
             command=command,
             to=to,
@@ -1982,6 +2083,16 @@ def run_agent_turn(
             ),
         )
 
+    if autonomy["risky_hits"] or autonomy["injection_hits"]:
+        event_type = "autonomy_guard_override" if autonomy["token_present"] else "autonomy_guard_permissive_allow"
+        _log_llm_activity_event(
+            event_type=event_type,
+            channel=channel,
+            message=message,
+            target=to,
+            metadata={**turn_meta, "guard_reasons": guard_reasons},
+        )
+
     guarded_message = _apply_autonomy_policy(message, approval_token=approval_token)
 
     effective_reply_channel = reply_channel
@@ -2000,6 +2111,24 @@ def run_agent_turn(
             )
 
     effective_session_id = session_id
+
+    def _finalize_turn_result(result: OpenClawResult, *, event_type: str = "agent_turn_complete") -> OpenClawResult:
+        _log_llm_activity_event(
+            event_type=event_type,
+            channel=effective_reply_channel or channel,
+            message=message,
+            target=to,
+            metadata={
+                **turn_meta,
+                "ok": bool(result.ok),
+                "returncode": int(result.returncode),
+                "used_reply_channel": str(effective_reply_channel or ""),
+                "reply_target_present": bool(effective_reply_to),
+                "session_id_present": bool(effective_session_id),
+            },
+        )
+        return result
+
     cmd = build_agent_turn_command(
         command=command,
         to=to,
@@ -2067,9 +2196,21 @@ def run_agent_turn(
         )
 
     active_cmd = list(cmd)
+    _log_llm_activity_event(
+        event_type="agent_turn_started",
+        channel=effective_reply_channel or channel,
+        message=message,
+        target=to,
+        metadata={
+            **turn_meta,
+            "used_reply_channel": str(effective_reply_channel or ""),
+            "reply_target_present": bool(effective_reply_to),
+            "session_id_present": bool(effective_session_id),
+        },
+    )
     last_result = _try_run(active_cmd)
     if last_result.ok:
-        return last_result
+        return _finalize_turn_result(last_result)
 
     if _is_session_lock_error(last_result) and not effective_session_id:
         effective_session_id = f"pmx-{int(time.time())}-{os.getpid()}"
@@ -2091,7 +2232,7 @@ def run_agent_turn(
         )
         last_result = _try_run(active_cmd)
         if last_result.ok:
-            return last_result
+            return _finalize_turn_result(last_result)
 
     for attempt in range(max_retries):
         if not _is_retryable_error(last_result):
@@ -2100,7 +2241,7 @@ def run_agent_turn(
         time.sleep(delay)
         last_result = _try_run(active_cmd)
         if last_result.ok:
-            return last_result
+            return _finalize_turn_result(last_result)
 
     if deliver and _is_missing_listener_error(last_result):
         fallback_send_result: Optional[OpenClawResult] = None
@@ -2134,12 +2275,15 @@ def run_agent_turn(
                     skip_dedup=True,
                 )
                 if send_result.ok:
-                    return OpenClawResult(
-                        ok=True,
-                        returncode=0,
-                        command=send_result.command,
-                        stdout=no_deliver_result.stdout,
-                        stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
+                    return _finalize_turn_result(
+                        OpenClawResult(
+                            ok=True,
+                            returncode=0,
+                            command=send_result.command,
+                            stdout=no_deliver_result.stdout,
+                            stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
+                        ),
+                        event_type="agent_turn_recovered_via_fallback_send",
                     )
                 fallback_send_result = send_result
         if _is_missing_listener_error(last_result):
@@ -2168,7 +2312,7 @@ def run_agent_turn(
                     ).strip(),
                 )
 
-    return _append_operator_hints(last_result)
+    return _finalize_turn_result(_append_operator_hints(last_result))
 
 
 def parse_openclaw_targets(raw: str, *, default_channel: Optional[str] = None) -> list[tuple[Optional[str], str]]:

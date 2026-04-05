@@ -131,3 +131,100 @@ def test_run_regression_gate_passes_when_probe_and_maintenance_pass(monkeypatch)
     assert ok is True
     assert report["status"] == "PASS"
     assert not report["errors"]
+
+
+def test_run_regression_gate_softens_known_non_json_probe_when_remote_workflow_is_healthy(monkeypatch) -> None:
+    config_only_stdout = "\n".join(
+        [
+            "Gateway not reachable; showing config-only status.",
+            "Config: C:\\Users\\Bestman\\.openclaw\\openclaw.json",
+            "Mode: local",
+            "",
+            "- Telegram default: enabled, configured, mode:polling, token:config",
+            "- WhatsApp default: enabled, configured, linked",
+        ]
+    )
+    health_payload = {"overall": "OK", "primary_status": "OK", "recovery_mode": "channels_status_timeout_softened"}
+
+    def fake_run(cmd: list[str], *, timeout_seconds: float):
+        del timeout_seconds
+        text = " ".join(cmd)
+        if "channels status --probe" in text:
+            return gate._CmdResult(True, 0, cmd, config_only_stdout, "")
+        if "openclaw_remote_workflow.py" in text:
+            return gate._CmdResult(True, 0, cmd, json.dumps(health_payload), "")
+        if "openclaw_maintenance.py" in text:
+            return gate._CmdResult(True, 0, cmd, "[openclaw_maintenance] status=PASS", "")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+
+    ok, report = gate.run_regression_gate(
+        openclaw_command="openclaw",
+        python_bin="python",
+        primary_channel="whatsapp",
+        timeout_seconds=5.0,
+        allow_missing_openclaw=False,
+    )
+
+    assert ok is True
+    assert report["status"] == "PASS"
+    assert report["checks"]["primary_channel"]["reason"] == "channels_probe_non_json_softened"
+    assert "channels_probe_non_json_softened" in report["warnings"]
+
+
+def test_run_regression_gate_fails_known_non_json_probe_when_remote_workflow_is_not_healthy(monkeypatch) -> None:
+    config_only_stdout = "\n".join(
+        [
+            "Gateway not reachable; showing config-only status.",
+            "Config: C:\\Users\\Bestman\\.openclaw\\openclaw.json",
+            "Mode: local",
+        ]
+    )
+    health_payload = {"overall": "WARN", "primary_status": "WARN", "recovery_mode": "channels_status_timeout_softened"}
+
+    def fake_run(cmd: list[str], *, timeout_seconds: float):
+        del timeout_seconds
+        text = " ".join(cmd)
+        if "channels status --probe" in text:
+            return gate._CmdResult(True, 0, cmd, config_only_stdout, "")
+        if "openclaw_remote_workflow.py" in text:
+            return gate._CmdResult(True, 0, cmd, json.dumps(health_payload), "")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+
+    ok, report = gate.run_regression_gate(
+        openclaw_command="openclaw",
+        python_bin="python",
+        primary_channel="whatsapp",
+        timeout_seconds=5.0,
+        allow_missing_openclaw=False,
+    )
+
+    assert ok is False
+    assert report["status"] == "FAIL"
+    assert "channels_probe_invalid_json" in report["errors"]
+    assert "remote_workflow_health_not_ready" in report["errors"]
+
+
+def test_run_regression_gate_keeps_unknown_invalid_json_as_hard_failure(monkeypatch) -> None:
+    def fake_run(cmd: list[str], *, timeout_seconds: float):
+        del timeout_seconds
+        if "channels" in cmd and "status" in cmd:
+            return gate._CmdResult(True, 0, cmd, "not-json", "")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+
+    ok, report = gate.run_regression_gate(
+        openclaw_command="openclaw",
+        python_bin="python",
+        primary_channel="whatsapp",
+        timeout_seconds=5.0,
+        allow_missing_openclaw=False,
+    )
+
+    assert ok is False
+    assert report["status"] == "FAIL"
+    assert report["errors"] == ["channels_probe_invalid_json"]

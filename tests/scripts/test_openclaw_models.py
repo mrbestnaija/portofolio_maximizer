@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from scripts import openclaw_models as mod
 def test_ollama_api_base_defaults_to_native_endpoint() -> None:
     assert mod._ollama_api_base_from_configured("") == "http://127.0.0.1:11434"
     assert mod._ollama_api_base_from_configured("http://127.0.0.1:11434/v1") == "http://127.0.0.1:11434"
+    assert mod._ollama_api_base_from_configured("http://127.0.0.1:11434/") == "http://127.0.0.1:11434"
 
 
 @pytest.mark.xfail(reason="qwen3.5:27b not yet in production model list; current primary is qwen3:8b")
@@ -94,3 +96,132 @@ def test_update_openclaw_json_agents_list_accepts_utf8_bom(tmp_path, monkeypatch
     assert result.ok is True
     updated = json.loads(config_path.read_text(encoding="utf-8"))
     assert updated["agents"]["list"] == [{"id": "ops", "model": "ollama/qwen3:8b"}]
+
+
+def test_cmd_apply_normalizes_legacy_ollama_base_url_before_writing(monkeypatch) -> None:
+    writes: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(mod, "_bootstrap_dotenv", lambda: None)
+    monkeypatch.setattr(mod, "_split_command", lambda command: ["openclaw"])
+    monkeypatch.setattr(mod, "_detect_default_agent_id", lambda oc_base: "ops")
+    monkeypatch.setattr(mod, "_auth_store_path_for_agent", lambda agent_id: Path("auth-store.json"))
+    monkeypatch.setattr(mod, "_load_secret", lambda name: None)
+    monkeypatch.setattr(
+        mod,
+        "_sync_auth_store",
+        lambda **kwargs: (False, []),
+    )
+    monkeypatch.setattr(mod, "_discover_ollama_models", lambda base_url, timeout_seconds=2.0: ["qwen3:8b"])
+
+    def fake_set_json(*, oc_base, path, value, timeout_seconds, dry_run):
+        writes.append((path, value))
+        return mod._CmdResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_oc_config_set_json", fake_set_json)
+    monkeypatch.setattr(mod, "_restart_gateway", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(mod, "_build_fallbacks", lambda **kwargs: ["ollama/deepseek-r1:8b"])
+    monkeypatch.setattr(mod, "_sync_explicit_agent_models", lambda agents_list, primary: (agents_list, [], False))
+    monkeypatch.setattr(mod, "_oc_config_get_json", lambda **kwargs: [])
+    monkeypatch.setattr(mod, "_update_openclaw_json_agents_list", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+
+    args = SimpleNamespace(
+        command="openclaw",
+        agent_id="ops",
+        dry_run=False,
+        sync_auth=False,
+        ollama_base_url="http://127.0.0.1:11434/v1",
+        ollama_models="qwen3:8b",
+        enable_ollama_provider=True,
+        openai_models="",
+        enable_openai_provider=False,
+        anthropic_models="",
+        enable_anthropic_provider=False,
+        enable_remote_qwen=False,
+        strategy="local-first",
+        openai_primary_model="gpt-4o-mini",
+        anthropic_primary_model="claude-sonnet-4-6",
+        openai_model="gpt-4o-mini",
+        anthropic_model="claude-sonnet-4-6",
+        remote_qwen_text_model="qwen-portal/coder-model",
+        remote_qwen_image_model="qwen-portal/vision-model",
+        set_image_defaults=False,
+        image_primary="",
+        openai_image_model="gpt-4o",
+        restart_gateway=False,
+    )
+
+    rc = mod._cmd_apply(args)
+
+    assert rc == 0
+    provider = next(value for path, value in writes if path == "models.providers.ollama")
+    assert provider["baseUrl"] == "http://127.0.0.1:11434"
+
+
+def test_cmd_apply_prunes_remote_allowlist_when_local_only(monkeypatch) -> None:
+    writes: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(mod, "_bootstrap_dotenv", lambda: None)
+    monkeypatch.setattr(mod, "_split_command", lambda command: ["openclaw"])
+    monkeypatch.setattr(mod, "_detect_default_agent_id", lambda oc_base: "ops")
+    monkeypatch.setattr(mod, "_auth_store_path_for_agent", lambda agent_id: Path("auth-store.json"))
+    monkeypatch.setattr(mod, "_load_secret", lambda name: None)
+    monkeypatch.setattr(
+        mod,
+        "_sync_auth_store",
+        lambda **kwargs: (False, []),
+    )
+    monkeypatch.setattr(mod, "_discover_ollama_models", lambda base_url, timeout_seconds=2.0: ["qwen3:8b"])
+
+    def fake_set_json(*, oc_base, path, value, timeout_seconds, dry_run):
+        writes.append((path, value))
+        return mod._CmdResult(ok=True, returncode=0, stdout="", stderr="")
+
+    def fake_get_json(*, oc_base, path, timeout_seconds):
+        if path == "agents.defaults.models":
+            return {
+                "ollama/qwen3:8b": {},
+                "qwen-portal/coder-model": {"alias": "qwen"},
+                "qwen-portal/vision-model": {},
+            }
+        return []
+
+    monkeypatch.setattr(mod, "_oc_config_set_json", fake_set_json)
+    monkeypatch.setattr(mod, "_restart_gateway", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(mod, "_build_fallbacks", lambda **kwargs: ["ollama/deepseek-r1:8b"])
+    monkeypatch.setattr(mod, "_sync_explicit_agent_models", lambda agents_list, primary: (agents_list, [], False))
+    monkeypatch.setattr(mod, "_oc_config_get_json", fake_get_json)
+    monkeypatch.setattr(mod, "_update_openclaw_json_agents_list", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+
+    args = SimpleNamespace(
+        command="openclaw",
+        agent_id="ops",
+        dry_run=False,
+        sync_auth=False,
+        ollama_base_url="http://127.0.0.1:11434",
+        ollama_models="qwen3:8b",
+        enable_ollama_provider=True,
+        openai_models="",
+        enable_openai_provider=False,
+        anthropic_models="",
+        enable_anthropic_provider=False,
+        enable_remote_qwen=False,
+        strategy="local-first",
+        openai_primary_model="gpt-4o-mini",
+        anthropic_primary_model="claude-sonnet-4-6",
+        openai_model="gpt-4o-mini",
+        anthropic_model="claude-sonnet-4-6",
+        remote_qwen_text_model="qwen-portal/coder-model",
+        remote_qwen_image_model="qwen-portal/vision-model",
+        set_image_defaults=False,
+        image_primary="",
+        openai_image_model="gpt-4o",
+        restart_gateway=False,
+    )
+
+    rc = mod._cmd_apply(args)
+
+    assert rc == 0
+    allowlist = next(value for path, value in writes if path == "agents.defaults.models")
+    assert "qwen-portal/coder-model" not in allowlist
+    assert "qwen-portal/vision-model" not in allowlist
+    assert set(allowlist.keys()) == {"ollama/qwen3:8b", "ollama/deepseek-r1:8b"}

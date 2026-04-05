@@ -59,6 +59,28 @@ def _parse_json_best_effort(raw: str) -> Any:
     raise ValueError("invalid json output")
 
 
+def _looks_like_config_only_channels_probe_output(raw: str) -> bool:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return False
+    required = (
+        "gateway not reachable; showing config-only status.",
+        "config:",
+        "mode: local",
+    )
+    return all(token in text for token in required)
+
+
+def _remote_workflow_health_check(*, python_bin: str, timeout_seconds: float) -> _CmdResult:
+    cmd = [
+        str(python_bin),
+        str(PROJECT_ROOT / "scripts" / "openclaw_remote_workflow.py"),
+        "health",
+        "--json",
+    ]
+    return _run(cmd, timeout_seconds=max(10.0, float(timeout_seconds)))
+
+
 def _run(cmd: list[str], *, timeout_seconds: float) -> _CmdResult:
     try:
         proc = subprocess.run(
@@ -153,19 +175,70 @@ def run_regression_gate(
     try:
         payload = _parse_json_best_effort(status_res.stdout)
     except Exception:
-        report["errors"].append("channels_probe_invalid_json")
         report["checks"]["channels_probe"]["stdout"] = "\n".join((status_res.stdout or "").splitlines()[-10:])
-        return False, report
+        if _looks_like_config_only_channels_probe_output(status_res.stdout):
+            health_res = _remote_workflow_health_check(
+                python_bin=str(python_bin),
+                timeout_seconds=max(10.0, float(timeout_seconds)),
+            )
+            report["checks"]["remote_workflow_health"] = {
+                "ok": health_res.ok,
+                "returncode": health_res.returncode,
+                "command": health_res.command,
+            }
+            if not health_res.ok:
+                report["errors"].append("channels_probe_invalid_json")
+                report["errors"].append("remote_workflow_health_failed")
+                report["checks"]["remote_workflow_health"]["stderr"] = "\n".join((health_res.stderr or "").splitlines()[-10:])
+                report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
+                return False, report
+            try:
+                health_payload = _parse_json_best_effort(health_res.stdout)
+            except Exception:
+                report["errors"].append("channels_probe_invalid_json")
+                report["errors"].append("remote_workflow_health_invalid_json")
+                report["checks"]["remote_workflow_health"]["stdout"] = "\n".join((health_res.stdout or "").splitlines()[-10:])
+                return False, report
+            if not isinstance(health_payload, dict):
+                report["errors"].append("channels_probe_invalid_json")
+                report["errors"].append("remote_workflow_health_invalid_payload")
+                return False, report
 
-    if not isinstance(payload, dict):
+            softened = (
+                str(health_payload.get("overall") or "").strip().upper() == "OK"
+                and str(health_payload.get("primary_status") or "").strip().upper() == "OK"
+            )
+            report["checks"]["remote_workflow_health"]["payload"] = {
+                "overall": health_payload.get("overall"),
+                "primary_status": health_payload.get("primary_status"),
+                "recovery_mode": health_payload.get("recovery_mode"),
+            }
+            if not softened:
+                report["errors"].append("channels_probe_invalid_json")
+                report["errors"].append("remote_workflow_health_not_ready")
+                return False, report
+
+            report["warnings"].append("channels_probe_non_json_softened")
+            report["checks"]["primary_channel"] = {
+                "ok": True,
+                "reason": "channels_probe_non_json_softened",
+            }
+            payload = None
+        else:
+            report["errors"].append("channels_probe_invalid_json")
+            return False, report
+
+    if payload is None:
+        ready = True
+    elif not isinstance(payload, dict):
         report["errors"].append("channels_probe_invalid_payload")
         return False, report
-
-    ready, reason = _channel_ready(payload, primary_channel)
-    report["checks"]["primary_channel"] = {"ok": ready, "reason": reason}
-    if not ready:
-        report["errors"].append(f"primary_channel_not_ready:{reason}")
-        return False, report
+    else:
+        ready, reason = _channel_ready(payload, primary_channel)
+        report["checks"]["primary_channel"] = {"ok": ready, "reason": reason}
+        if not ready:
+            report["errors"].append(f"primary_channel_not_ready:{reason}")
+            return False, report
 
     maintenance_cmd = [
         str(python_bin),

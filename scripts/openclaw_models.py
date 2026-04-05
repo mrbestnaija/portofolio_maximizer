@@ -189,7 +189,7 @@ def _parse_csv(text: str) -> list[str]:
 
 def _ollama_api_base_from_configured(base_url: str) -> str:
     # OpenClaw strips /v1 when talking to native endpoints; do the same here for discovery.
-    u = (base_url or "").strip() or "http://127.0.0.1:11434/v1"
+    u = (base_url or "").strip() or "http://127.0.0.1:11434"
     u = u.rstrip("/")
     if u.lower().endswith("/v1"):
         u = u[: -len("/v1")]
@@ -259,6 +259,21 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
 
     first_tool = tool_candidates[0]
     return [first_tool, *[m for m in models if m != first_tool]]
+
+
+def _prune_non_local_allowlist_refs(existing_models: Any) -> tuple[dict[str, Any], list[str]]:
+    models = existing_models if isinstance(existing_models, dict) else {}
+    pruned: dict[str, Any] = {}
+    removed: list[str] = []
+    for raw_ref, raw_cfg in models.items():
+        ref = str(raw_ref or "").strip()
+        if not ref:
+            continue
+        if ref.startswith("ollama/"):
+            pruned[ref] = raw_cfg if isinstance(raw_cfg, dict) else {}
+            continue
+        removed.append(ref)
+    return pruned, removed
 
 
 def _ollama_model_def(model_id: str) -> dict[str, Any]:
@@ -525,7 +540,9 @@ def _cmd_status(args) -> int:
     has_ollama_store = _auth_has_provider_key(store_path=store_path, provider="ollama")
 
     # Ollama reachability + model inventory
-    ollama_base = (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434/v1").strip()
+    ollama_base = _ollama_api_base_from_configured(
+        (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+    )
     discovered = _discover_ollama_models(ollama_base, timeout_seconds=2.0)
 
     print("[openclaw_models] OpenClaw model status")
@@ -622,7 +639,10 @@ def _cmd_apply(args) -> int:
                 print(f"[openclaw_models] {m}")
 
     # Provider configs
-    ollama_base_url = (args.ollama_base_url or "").strip() or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434/v1").strip()
+    ollama_base_url = _ollama_api_base_from_configured(
+        (args.ollama_base_url or "").strip()
+        or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
+    )
     ollama_models = _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
     discovered = _discover_ollama_models(ollama_base_url, timeout_seconds=2.0)
     if not ollama_models:
@@ -897,9 +917,12 @@ def _cmd_apply(args) -> int:
 
     # Update model allowlist (agents.defaults.models) to include all referenced refs.
     existing_models = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.models", timeout_seconds=10.0)
-    if not isinstance(existing_models, dict):
-        existing_models = {}
+    existing_models = existing_models if isinstance(existing_models, dict) else {}
     changed_models = False
+    removed_remote_allowlist: list[str] = []
+    if local_only:
+        existing_models, removed_remote_allowlist = _prune_non_local_allowlist_refs(existing_models)
+        changed_models = bool(removed_remote_allowlist)
     for ref in sorted([r for r in allow_refs if str(r).strip()]):
         if ref in existing_models:
             continue
@@ -919,7 +942,10 @@ def _cmd_apply(args) -> int:
             if tail:
                 print(tail, file=sys.stderr)
             return 1
-        print(f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}updated agents.defaults.models allowlist (+{len(allow_refs)} refs)")
+        msg = f"[openclaw_models] {'DRY-RUN ' if dry_run else ''}updated agents.defaults.models allowlist (+{len(allow_refs)} refs)"
+        if removed_remote_allowlist:
+            msg += f"; pruned remote refs={len(removed_remote_allowlist)}"
+        print(msg)
 
     if bool(args.restart_gateway):
         res = _restart_gateway(oc_base=oc_base, dry_run=dry_run)
@@ -954,7 +980,7 @@ def main(argv: list[str]) -> int:
     pa.add_argument("--sync-auth", action="store_true", help="Sync OpenAI/Anthropic keys from .env into OpenClaw auth store.")
 
     pa.add_argument("--enable-ollama-provider", action="store_true", default=True, help="Ensure models.providers.ollama is configured.")
-    pa.add_argument("--ollama-base-url", default="", help="Ollama baseUrl (default: OPENCLAW_OLLAMA_BASE_URL / OLLAMA_HOST / http://127.0.0.1:11434/v1).")
+    pa.add_argument("--ollama-base-url", default="", help="Ollama baseUrl (default: OPENCLAW_OLLAMA_BASE_URL / OLLAMA_HOST / http://127.0.0.1:11434).")
     pa.add_argument("--ollama-models", default="", help="Comma-separated Ollama model names to register (default: discover / defaults).")
 
     pa.add_argument("--enable-openai-provider", action="store_true", default=False, help="Configure OpenAI provider (requires OPENAI_API_KEY in .env/auth store).")

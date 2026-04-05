@@ -123,8 +123,24 @@ def _env_enabled(name: str, *, default: bool) -> bool:
     return raw not in FALSEY_ENV_VALUES
 
 
+def _windows_user_env_value(name: str) -> str:
+    key_name = str(name or "").strip()
+    if os.name != "nt" or not key_name:
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+            value, _ = winreg.QueryValueEx(key, key_name)
+    except Exception:
+        return ""
+    return str(value or "").strip()
+
+
 def _approval_token_value() -> str:
     token = str(os.getenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")).strip()
+    if not token:
+        token = _windows_user_env_value("OPENCLAW_AUTONOMY_APPROVAL_TOKEN")
     return token or DEFAULT_APPROVAL_TOKEN
 
 

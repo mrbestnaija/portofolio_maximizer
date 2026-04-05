@@ -567,15 +567,19 @@ restart frequency:
 These are set as active defaults in `.env.template`. To apply:
 ```bash
 # One-time apply after updating .env:
-python scripts/openclaw_models.py apply --strategy local-first
+python scripts/openclaw_models.py apply --strategy local-first --ollama-base-url http://127.0.0.1:11434
 # Then restart gateway once to pick up new cooldown state:
 openclaw gateway restart
 ```
 
+Important:
+- The canonical Ollama base URL for `models.providers.ollama.baseUrl` is `http://127.0.0.1:11434` without `/v1` when `api='ollama'`.
+- If `OPENCLAW_OLLAMA_BASE_URL` is set, keep it on the native root as well.
+
 **Local LLM as main agent** — enforce qwen3:8b as the only primary model:
 ```bash
 # Ensure OPENCLAW_LOCAL_ONLY=1 and OPENCLAW_MODEL_STRATEGY=local-first are in .env, then:
-python scripts/openclaw_models.py apply --strategy local-first
+python scripts/openclaw_models.py apply --strategy local-first --ollama-base-url http://127.0.0.1:11434
 # Verify primary is ollama/qwen3:8b with no cloud fallbacks:
 python scripts/openclaw_models.py status
 ```
@@ -786,7 +790,7 @@ ollama pull deepseek-r1:32b
 ollama pull qwen3:8b
 
 # Apply to OpenClaw (local-first strategy with all 3 models)
-python scripts/openclaw_models.py apply --strategy local-first --restart-gateway
+python scripts/openclaw_models.py apply --strategy local-first --ollama-base-url http://127.0.0.1:11434 --restart-gateway
 
 # Verify
 python scripts/openclaw_models.py status --list-ollama-models

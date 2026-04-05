@@ -70,6 +70,11 @@ Recommended env defaults for automation hosts:
 - `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` (strict mode for unattended autonomous runs)
 
+Important:
+- Set `OPENCLAW_AUTONOMY_APPROVAL_TOKEN` in the user/service environment that actually launches OpenClaw or the gateway scheduled task.
+- Do not rely on repo `.env` alone for scheduled-task or long-running launcher contexts that may not inherit it.
+- Security-relevant OpenClaw autonomy events are audited to `logs/llm_activity/YYYY-MM-DD.jsonl`; watch for `autonomy_guard_blocked`, `autonomy_guard_override`, `agent_turn_started`, and `agent_turn_complete`.
+
 Do not place the approval token in chat content unless a human has reviewed and approved that exact action.
 
 ## GitHub Authentication (Local Only)
