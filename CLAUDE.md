@@ -6,8 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Domain-Calibrated Remediation (adversarial audit 2026-04-05 — plan written, implementation pending)
-**Completed Phases**: Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven), P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
+**Current Phase**: Domain-Calibrated Remediation — Phases 1+2+3 complete (2026-04-05); heuristic distortion fixes (OOS scan cap, SAMoSSA bump, SNR fallback, RMSE-rank logging, EWMA convergence_ok, realized_vol floor) pending
+**Completed Phases**: DCR-P1 (missing-baseline bypass, residual enforcement, diagnostics_score pessimistic fallback, GARCH EWMA floor, funnel audit logging), DCR-P2B (CV OOS proxy), DCR-P3A (confidence calibration script), DCR-P3B (MSSA-RL neutral-on-low-support), Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven), P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
 **Last Updated**: 2026-04-05
 
 ---
@@ -1498,7 +1498,37 @@ Results: Key metrics or validation results
 
 ---
 
+## Domain-Calibrated Remediation Reference (DCR 2026-04-05)
+
+**Documentation**: `Documentation/DOMAIN_CALIBRATION_REMEDIATION_2026-04-05.md`
+
+### Completed DCR Commits
+
+| Commit | Description | Tests |
+|--------|-------------|-------|
+| `78142bb` | P1: missing-baseline bypass, residual enforcement, diagnostics_score 0.5→0.0, GARCH EWMA floor 1e-12→1e-6 | 2173 passed |
+| `f83a6ea` | docs(status): Phase 1 complete | — |
+| `40dfa8e` | P2-B: CV OOS proxy; P3-A: confidence calibration script; P3-B: MSSA-RL neutral-on-low-support | 2184 passed |
+
+### Remaining Heuristic Distortion Fixes (pending)
+
+| Fix | File | Change |
+|-----|------|--------|
+| C5 — OOS scan cap | `forcester_ts/forecaster.py:2453` | Remove `[:20]` + post-loop warning |
+| C3 — SAMoSSA bump | `forcester_ts/ensemble.py:860-869` | Delete entire bump block |
+| H6 — SNR neutral fallback | `models/time_series_signal_generator.py:1459` | `0.5` → `0.0` + debug log |
+| H7 — RMSE-rank silent disable | `forcester_ts/ensemble.py:506-507` | Add `logger.warning` |
+| M1 — EWMA convergence_ok | `forcester_ts/garch.py:658` | `True` → `False` |
+| H2 — realized_vol floor | `forcester_ts/garch.py:172, 205, 642` | `1e-12` → `1e-6` |
+
+### Anti-Patterns (DCR)
+- Do NOT gate SAMoSSA bump removal on TE delta threshold — adds back the heuristic; remove fully
+- Do NOT lower `fail_on_violation_during_holding_period` or `holding_period_audits` — governance
+- Do NOT change confidence/SNR routing thresholds until funnel audit data justifies it
+
+---
+
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-02-21 (Repo reorganization: 7 test files moved scripts/->tests/scripts/, build scripts moved to bash/, BOOTSTRAP.md+HEARTBEAT.md moved to Documentation/, arch_tree.md ASCII-cleaned, file placement rules added)
+**Last Updated**: 2026-04-05 (DCR Phases 1+2+3 complete; heuristic distortion fixes pending)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git

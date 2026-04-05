@@ -1,6 +1,6 @@
 # HEARTBEAT.md
 
-## System Status (2026-04-05, commit fd4eb68)
+## System Status (2026-04-05, commit 40dfa8e)
 
 - **Gate**: PASS (semantics=PASS) — overall_passed=True, all 5 gates green
 - **Lift decision**: KEEP (lift demonstrated; lift_fraction=57.14%, threshold 25%)
@@ -9,9 +9,9 @@
 - **Warmup**: active until 2026-04-15 (10 days) — THIN_LINKAGE covered by warmup
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
-- **Last commit**: fd4eb68 (downgraded finnhub to priority 3)
-- **Test count**: 2173 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane, +8)
-- **Phase**: Domain-Calibrated Remediation — Phase 1 COMPLETE (commits 7a5ae27, e744262, 78142bb)
+- **Last commit**: 40dfa8e (bypass: P2-B CV OOS proxy, P3-A confidence calibration, P3-B MSSA-RL neutral-on-low-support)
+- **Test count**: 2184 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane)
+- **Phase**: Domain-Calibrated Remediation — Phases 1+2+3 COMPLETE; heuristic distortion fixes pending
 
 ## Gate Summary
 
@@ -50,35 +50,48 @@
 
 | Bypass | Severity | File | Status |
 |--------|----------|------|--------|
-| Missing baseline_rmse → `violation=False` (deflates violation_rate) | CRITICAL | `check_forecast_audits.py:1194` | PLAN written |
-| `residual_diagnostics_rate_warn_only: true` — enforcement removed | CRITICAL | `forecaster_monitoring.yml` | PLAN written |
-| `fail_on_violation_during_holding_period: false` — FAILs → INCONCLUSIVE | HIGH | `forecaster_monitoring.yml` | PLAN written |
-| `diagnostics_score` defaults to 0.5 (neutral) silently | HIGH | `time_series_signal_generator.py:767` | PLAN written |
-| GARCH EWMA variance floor 1e-12 → CI collapse → SNR inflation | MEDIUM | `garch.py:589` | PLAN written |
-| MSSA-RL policy_support never checked during action selection | MEDIUM | `mssa_rl.py:516` | PLAN written |
-| Linkage vacuously passes when eligible==0 | HIGH | `production_audit_gate.py:1403` | PLAN written |
-| RMSE dedupe key missing ticker; outcome dedupe has ticker | HIGH | `check_forecast_audits.py:1471` | PLAN written |
-| Terminal DA computed but gate uses RMSE only | HIGH | `metrics.py:109` vs gate | PLAN written |
-| OOS metrics {} in all CV runs → RMSE-rank always disabled | CRITICAL | `forecaster.py:2491` | PLAN written |
+| Missing baseline_rmse → `violation=False` (deflates violation_rate) | CRITICAL | `check_forecast_audits.py:1194` | IMPLEMENTED |
+| `residual_diagnostics_rate_warn_only: true` — enforcement removed | CRITICAL | `forecaster_monitoring.yml` | IMPLEMENTED |
+| `fail_on_violation_during_holding_period: false` — FAILs → INCONCLUSIVE | HIGH | `forecaster_monitoring.yml` | IMPLEMENTED |
+| `diagnostics_score` defaults to 0.5 (neutral) silently | HIGH | `time_series_signal_generator.py:767` | IMPLEMENTED |
+| GARCH EWMA variance floor 1e-12 → CI collapse → SNR inflation | MEDIUM | `garch.py:589` | IMPLEMENTED |
+| MSSA-RL policy_support never checked during action selection | MEDIUM | `mssa_rl.py:516` | IMPLEMENTED |
+| Linkage vacuously passes when eligible==0 | HIGH | `production_audit_gate.py:1403` | IMPLEMENTED |
+| RMSE dedupe key missing ticker; outcome dedupe has ticker | HIGH | `check_forecast_audits.py:1471` | IMPLEMENTED |
+| Terminal DA computed but gate uses RMSE only | HIGH | `metrics.py:109` vs gate | IMPLEMENTED |
+| OOS metrics {} in all CV runs → RMSE-rank always disabled | CRITICAL | `forecaster.py:2491` | IMPLEMENTED |
+
+## Heuristic Distortions (adversarial audit 2026-04-05)
+
+| Finding | Severity | File | Status |
+|---------|----------|------|--------|
+| OOS scan capped at 20 files — loses metrics in multi-ticker runs | HIGH | `forecaster.py:2453` | PENDING |
+| SAMoSSA +0.05 pre-rank bump when TE < SARIMAX TE | HIGH | `ensemble.py:860-869` | PENDING |
+| SNR None → 0.5 (neutral) — inconsistent with pessimistic fallback policy | HIGH | `time_series_signal_generator.py:1459` | PENDING |
+| RMSE-rank silently disabled (<2 OOS models) — no warning | MEDIUM | `ensemble.py:506-507` | PENDING |
+| EWMA fallback claims `convergence_ok: True` — suppresses CI inflation | MEDIUM | `garch.py:658` | PENDING |
+| `_realized_volatility` floor still `1e-12` (EWMA floor fixed to `1e-6`) | MEDIUM | `garch.py:172, 205` | PENDING |
 
 ## Open Items
 
 | Priority | Item | Status |
 |----------|------|--------|
 | URGENT | THIN_LINKAGE: must accumulate 10 matched outcomes before 2026-04-15 | DATA — run 5 date passes ×2 |
-| URGENT | CI: platt_contract_bootstrap fix not yet committed/pushed | PENDING commit + push |
-| HIGH | Implement Phase 1 fixes (P1-A through P1-E) from DOMAIN_CALIBRATION_REMEDIATION plan | PENDING |
-| HIGH | Funnel audit logging (P1-B) — understand why 99.6% of forecasts don't become trades | PENDING |
-| MEDIUM | Phase 2: terminal DA co-gate + CV OOS proxy | PENDING |
-| MEDIUM | Phase 3: calibrate_confidence_thresholds.py from 40 trades | PENDING |
+| HIGH | OOS scan cap (C5): remove `[:20]` from `forecaster.py:2453` + post-loop warning | PENDING |
+| HIGH | SAMoSSA bump (C3): delete `ensemble.py:860-869` bump block | PENDING |
+| HIGH | SNR fallback (H6): change `snr_score = 0.5` → `0.0` at `time_series_signal_generator.py:1459` | PENDING |
+| MEDIUM | RMSE-rank logging (H7): add `logger.warning` at `ensemble.py:506-507` | PENDING |
+| MEDIUM | EWMA convergence_ok (M1): `garch.py:658` → `"convergence_ok": False` | PENDING |
+| MEDIUM | Realized vol floor (H2): `garch.py:172, 205, 642` → `1e-6` | PENDING |
 | DEFERRED | Phase 4: linkage vacuous-pass + ticker in RMSE dedupe key | DEFERRED (governance) |
 
 ## Recent Commits
 
 ```
+40dfa8e fix(bypass): P2-B CV OOS proxy, P3-A confidence calibration, P3-B MSSA-RL neutral-on-low-support
+f83a6ea docs(status): Phase 1 complete — 2173 passed, bypasses remediated
+78142bb fix(gate): Phase 1 structural bypass remediation — adversarial audit 2026-04-05
+e744262 docs(audit): domain-calibrated remediation plan — adversarial audit 2026-04-05
+7a5ae27 fix(ci): platt_contract_audit empty-DB WARN not FAIL
 fd4eb68 downgraded upgraded finnhub to priority 3
-bf9a7b1 fix(ci): curl-cffi 0.15.0 (CVE-2026-33752) + fix add_to_project workflow
-7cdc24d change data source priorities from finnhub 3 to ctrader 3
-b64d403 docs(status): repowide update — gate PASS, PnL, P4 remediation complete
-b44ea4e fix(ci): remove stale xfail, add trained-artifact tests, smooth vol-bands
 ```
