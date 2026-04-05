@@ -10,8 +10,8 @@
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
 - **Last commit**: fd4eb68 (downgraded finnhub to priority 3)
-- **Test count**: 2165 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane)
-- **Phase**: Domain-Calibrated Remediation (adversarial audit 2026-04-05) — PLAN written, implementation pending
+- **Test count**: 2173 passed, 0 failed, 10 xfailed, 0 xpassed (fast lane, +8)
+- **Phase**: Domain-Calibrated Remediation — Phase 1 COMPLETE (commits 7a5ae27, e744262, 78142bb)
 
 ## Gate Summary
 
