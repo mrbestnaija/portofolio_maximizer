@@ -439,3 +439,87 @@ def test_forecaster_passes_stationarity_hint_into_sarimax(monkeypatch):
 
     assert captured["stationarity_hint"] == forecaster._series_diagnostics
     assert "force_difference" in captured["stationarity_hint"]
+
+
+# ---------------------------------------------------------------------------
+# P1-E: residual diagnostics enforcement by model type (exemptions)
+# ---------------------------------------------------------------------------
+
+class TestResidualDiagnosticsModelTypeExemptions:
+    """P1-E: SAMoSSA-primary windows excluded from non-WN count; GARCH included.
+
+    SSA-based models produce structurally autocorrelated in-sample residuals by
+    design. Counting them inflates the non-WN rate and penalises a correct model.
+    After the exemption list is wired, only GARCH/SARIMAX windows are counted.
+    """
+
+    def _make_result(self, default_model: str, white_noise: bool):
+        """Minimal AuditCheckResult for residual diagnostics pool testing."""
+        import sys, importlib
+        mod = importlib.import_module("scripts.check_forecast_audits")
+        return mod.AuditCheckResult(
+            path=None,
+            ensemble_rmse=1.0,
+            baseline_rmse=1.0,
+            rmse_ratio=1.0,
+            violation=False,
+            baseline_model="SAMOSSA",
+            ensemble_missing=False,
+            default_model=default_model,
+            residual_diag_present=True,
+            residual_diag_white_noise=white_noise,
+            residual_diag_n=50,
+            ensemble_index_mismatch=False,
+        )
+
+    def test_samossa_window_excluded_from_non_wn_count(self) -> None:
+        """SAMoSSA-primary window with non-WN residuals must NOT count toward non-WN rate."""
+        import scripts.check_forecast_audits as mod
+        exemptions: set = {"SAMOSSA", "MSSA_RL"}
+        results = [self._make_result("SAMOSSA", white_noise=False)]
+        effective = [
+            r for r in results
+            if (
+                r.residual_diag_present
+                and r.residual_diag_n is not None
+                and r.residual_diag_n >= 20
+                and (r.default_model or "").upper() not in exemptions
+            )
+        ]
+        assert len(effective) == 0, (
+            "SAMoSSA-primary window must be excluded from residual effective pool"
+        )
+
+    def test_garch_window_included_in_non_wn_count(self) -> None:
+        """GARCH-primary window with non-WN residuals MUST count toward non-WN rate."""
+        exemptions: set = {"SAMOSSA", "MSSA_RL"}
+        results = [self._make_result("GARCH", white_noise=False)]
+        effective = [
+            r for r in results
+            if (
+                r.residual_diag_present
+                and r.residual_diag_n is not None
+                and r.residual_diag_n >= 20
+                and (r.default_model or "").upper() not in exemptions
+            )
+        ]
+        assert len(effective) == 1, (
+            "GARCH-primary window must be included in residual effective pool"
+        )
+        non_wn = sum(1 for r in effective if r.residual_diag_white_noise is False)
+        assert non_wn == 1, "Non-WN GARCH window must be counted in violation tally"
+
+    def test_mssa_rl_window_excluded_from_non_wn_count(self) -> None:
+        """MSSA-RL-primary window (SSA-based) must also be exempt."""
+        exemptions: set = {"SAMOSSA", "MSSA_RL"}
+        results = [self._make_result("MSSA_RL", white_noise=False)]
+        effective = [
+            r for r in results
+            if (
+                r.residual_diag_present
+                and r.residual_diag_n is not None
+                and r.residual_diag_n >= 20
+                and (r.default_model or "").upper() not in exemptions
+            )
+        ]
+        assert len(effective) == 0, "MSSA_RL-primary window must be excluded"

@@ -580,13 +580,16 @@ class GARCHForecaster:
         squared = np.square(returns_clean.to_numpy(dtype=float, copy=False))
         baseline_var = float(np.var(squared)) if squared.size else 0.0
         variance = float(np.var(returns_clean.to_numpy(dtype=float, copy=False), ddof=0))
+        # Floor at 1e-6 (~0.1% daily vol): below any real equity daily variance.
+        # 1e-12 (machine-epsilon) collapses the CI → inflates SNR spuriously.
+        MIN_EWMA_VARIANCE = 1e-6
         if not np.isfinite(variance) or variance <= 0.0:
-            variance = max(1e-12, baseline_var)
+            variance = max(MIN_EWMA_VARIANCE, baseline_var)
 
         ewma_var = variance
         for r2 in squared:
             ewma_var = lam * ewma_var + (1.0 - lam) * float(r2)
-        ewma_var = float(max(ewma_var, 1e-12))
+        ewma_var = float(max(ewma_var, MIN_EWMA_VARIANCE))
 
         self._fallback_state = {
             "lambda": lam,

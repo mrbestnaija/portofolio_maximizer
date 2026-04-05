@@ -127,20 +127,22 @@ forecaster_monitoring:
     # Residual-diagnostics default-path gate: model-backed default selections
     # should expose diagnostics, and too many non-white-noise residuals should
     # block promotion/production readiness.
-    # Phase 7.14+: raised 0.25→0.75. SSA-based models (SAMoSSA, MSSA-RL) produce
-    # structurally autocorrelated in-sample fit residuals by design — SSA filters
-    # leave structured residuals and Ljung-Box at n=261 rejects H0 at p~1e-112.
-    # 0.25 was unreachable in production. 0.75 still catches pathological cases
-    # (e.g., 100% failure across all windows) without false-failing healthy runs.
+    # Phase 7.14+: raised 0.25→0.75. P1-E (2026-04-05): model-type exemptions added so
+    # SSA-based models (SAMoSSA, MSSA-RL) are excluded from the non-WN pool entirely.
+    # After exemptions, only GARCH/SARIMAX windows are counted — for those, non-WN
+    # residuals represent a genuine model quality issue. 0.75 threshold retained;
+    # re-evaluate after ≥20 GARCH/SARIMAX-primary windows accumulate.
     max_non_white_noise_rate: 0.75
-    # When true, the non-white-noise rate check emits a WARN in the summary output
-    # but does NOT hard-fail (exit 1) the gate. Analogous to
-    # fail_on_violation_during_holding_period=false for the RMSE gate.
-    # Set to true while the production audit mix is dominated by SSA-based models
-    # whose in-sample fit residuals are structurally autocorrelated.
-    # Flip to false once GARCH standardized residuals are consistently tracked and
-    # constitute >= 50% of the residual diagnostic pool.
-    residual_diagnostics_rate_warn_only: true
+    # Model types structurally excluded from the non-white-noise residual count.
+    # SAMoSSA and MSSA-RL produce autocorrelated in-sample fit residuals by design
+    # (SSA filters leave structured residuals; Ljung-Box rejects H0 at p~1e-112).
+    # GARCH and SARIMAX are NOT exempt — residual non-WN for those is a real defect.
+    residual_diagnostics_model_type_exemptions:
+      - samossa
+      - mssa_rl
+    # P1-E (2026-04-05): flipped from true to false now that model-type exemptions are
+    # wired. Enforcement is now model-type selective: SSA exempt, GARCH/SARIMAX enforced.
+    residual_diagnostics_rate_warn_only: false
     min_residual_diagnostics_n: 20
     # Warn-only while legacy audit files (pre-ENSEMBLE-fallback fix) lack residual
     # diagnostics. Old files cannot be retroactively populated; new audits always

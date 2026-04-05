@@ -278,6 +278,7 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
     jsonl_pairs = _count_jsonl_outcome_pairs(jsonl_path)
 
     db_pairs = 0
+    db_schema_initialised = False  # True only when trade_executions table exists
     if db_path.exists():
         try:
             conn = sqlite3.connect(str(db_path), timeout=3.0)
@@ -299,6 +300,7 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
                 where.append("is_contaminated = 0")
             cur.execute("SELECT COUNT(*) FROM trade_executions WHERE " + " AND ".join(where))
             db_pairs = cur.fetchone()[0]
+            db_schema_initialised = True
             conn.close()
         except Exception:
             pass
@@ -330,7 +332,16 @@ def check_calibration_active_tier(db_path: Path, jsonl_path: Path) -> Finding:
             "[NONE] No active tier — CI/fresh environment: neither DB nor JSONL file present. "
             "Run bootstrap cycles locally to seed calibration data.",
         )
-    if jsonl_pairs == 0 and db_pairs == 0:
+    # Only WARN for a genuine fresh/CI environment where neither source has ANY data.
+    # If JSONL has real entries (but all invalid) or DB schema is initialised (but 0 rows),
+    # those are real calibration regressions → hard FAIL.
+    jsonl_has_any_entries = jsonl_path.exists() and any(
+        True for _l in (jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if jsonl_path.exists() else []) if _l.strip()
+    )
+    if jsonl_pairs == 0 and db_pairs == 0 and not db_schema_initialised and not jsonl_has_any_entries:
+        # DB file exists but schema was never initialised (sqlite3.connect() side-effect).
+        # This is a CI/fresh-environment condition, not a calibration regression.
         return Finding(
             "calibration_active_tier",
             "WARN",

@@ -218,3 +218,34 @@ def test_ewma_forecast_reports_guardrail_metadata() -> None:
     assert "fallback_reason" not in result
     assert result["persistence"] == pytest.approx(0.995)
     assert result["volatility_ratio_to_realized"] == pytest.approx(4.5)
+
+
+def test_ewma_variance_floor_prevents_ci_collapse() -> None:
+    """Constant series has zero variance; EWMA floor must keep variance_forecast at
+    least MIN_EWMA_VARIANCE so downstream CI does not collapse to 0 and inflate SNR
+    spuriously. (P1-D fix: floor raised from 1e-12 to 1e-6)."""
+    MIN_EWMA_VARIANCE = 1e-6  # mirror constant from garch.py
+    # Use sample too short for arch fitting → forces EWMA fallback path
+    forecaster = GARCHForecaster(auto_select=True, max_p=1, max_q=1, min_arch_sample_size=120)
+    # Constant series (60 obs, < 120 threshold): zero variance — worst case for CI collapse
+    constant_returns = pd.Series([0.0] * 60)
+    forecaster.fit(constant_returns)
+
+    result = forecaster.forecast(steps=5)
+    var_forecast = result.get("variance_forecast")
+    volatility = result.get("volatility")
+
+    # variance_forecast is a scalar (last-step variance); must be >= floor
+    assert var_forecast is not None, "variance_forecast must be present in EWMA forecast"
+    # variance_forecast may be a scalar or a Series; take the last step value
+    import pandas as _pd
+    var_val = float(var_forecast.iloc[-1] if isinstance(var_forecast, _pd.Series) else var_forecast)
+    assert var_val >= MIN_EWMA_VARIANCE, (
+        f"variance_forecast last-step ({var_val:.2e}) below MIN_EWMA_VARIANCE ({MIN_EWMA_VARIANCE:.2e}); "
+        "floor not applied — CI would collapse to zero"
+    )
+    # volatility (sqrt of variance) must also be non-trivially positive
+    vol_val = float(volatility.iloc[-1] if isinstance(volatility, _pd.Series) else volatility) if volatility is not None else 0.0
+    assert vol_val >= (MIN_EWMA_VARIANCE ** 0.5) * 0.5, (
+        f"volatility ({vol_val:.2e}) too close to zero; EWMA floor not effective"
+    )

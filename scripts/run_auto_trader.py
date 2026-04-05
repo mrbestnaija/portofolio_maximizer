@@ -523,6 +523,41 @@ def _compute_mid_price(frame: pd.DataFrame) -> Optional[float]:
     return None
 
 
+FUNNEL_AUDIT_LOG_PATH = ROOT_PATH / "logs" / "funnel_audit.jsonl"
+
+
+def _write_funnel_audit_entry(
+    *,
+    ticker: str,
+    ts_signal_id: Optional[str],
+    reason: str,
+    confidence: Optional[float],
+    snr: Optional[float],
+    expected_return: Optional[float],
+) -> None:
+    """Append a blocked-signal entry to logs/funnel_audit.jsonl.
+
+    Observability only — no threshold changes.  Used by P1-B to understand why
+    99.6% of forecasts are blocked by signal routing without becoming executed
+    trades (confidence < 0.55, SNR < 1.5, min_return < 20 bps).
+    """
+    entry = {
+        "logged_at": datetime.now(UTC).isoformat(),
+        "ticker": ticker,
+        "ts_signal_id": ts_signal_id,
+        "reason": reason,
+        "confidence": confidence,
+        "snr": snr,
+        "expected_return": expected_return,
+    }
+    try:
+        FUNNEL_AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with FUNNEL_AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        logger.debug("Unable to write funnel_audit entry for %s", ticker)
+
+
 def _log_execution_event(run_id: str, cycle: int, record: Dict[str, Any]) -> None:
     """Append a compact execution/skip event for slippage + no-trade audits."""
     payload = dict(record or {})
@@ -1780,6 +1815,18 @@ def _execute_signal(
     if not primary:
         logger.info("No actionable signal produced for %s", ticker)
         return None
+
+    # Funnel audit: log signals whose action is HOLD (blocked by signal routing thresholds:
+    # confidence < 0.55, SNR < 1.5, min_return < 20 bps). Observability only — P1-B.
+    if str(primary.get("action", "")).upper() == "HOLD":
+        _write_funnel_audit_entry(
+            ticker=ticker,
+            ts_signal_id=str(primary.get("ts_signal_id") or primary.get("signal_id") or ""),
+            reason=str(primary.get("reason") or "HOLD"),
+            confidence=primary.get("confidence"),
+            snr=primary.get("snr"),
+            expected_return=primary.get("expected_return"),
+        )
 
     primary_payload = dict(primary)
     if not primary_payload.get("ts_signal_id"):

@@ -1191,7 +1191,12 @@ def check_audit_file(
         and baseline_rmse > 0
     )
 
-    if ensemble_rmse is None or baseline_rmse is None or baseline_rmse <= 0:
+    if baseline_rmse is None or baseline_rmse <= 0:
+        # Exclude window entirely — missing/invalid baseline cannot be treated as
+        # non-violation because that silently deflates the violation rate.
+        return None
+
+    if ensemble_rmse is None:
         return AuditCheckResult(
             path=path,
             ensemble_rmse=ensemble_rmse,
@@ -1456,6 +1461,12 @@ def main() -> None:
     residual_diagnostics_rate_warn_only = bool(
         rmse_cfg.get("residual_diagnostics_rate_warn_only", False)
     )
+    # Model types whose in-sample residuals are structurally autocorrelated by design
+    # (e.g., SSA-based models). Excluded from the non-white-noise residual count.
+    _raw_exemptions = rmse_cfg.get("residual_diagnostics_model_type_exemptions") or []
+    residual_diagnostics_model_type_exemptions: set[str] = {
+        str(m).upper() for m in _raw_exemptions if m
+    }
     min_forecast_horizon = (
         int(args.min_forecast_horizon)
         if args.min_forecast_horizon is not None
@@ -1700,6 +1711,9 @@ def main() -> None:
             r.residual_diag_present
             and r.residual_diag_n is not None
             and r.residual_diag_n >= min_residual_diagnostics_n
+            # Exempt SSA-based models whose in-sample residuals are structurally
+            # autocorrelated by design — counting them inflates the non-WN rate.
+            and (r.default_model or "").upper() not in residual_diagnostics_model_type_exemptions
         )
     ]
     residual_effective_n = len(residual_effective_results)

@@ -1590,3 +1590,44 @@ class TestVolBandContinuity:
         assert c_mid > c_high, (
             f"conf(0.50)={c_mid:.4f} should exceed conf(0.59)={c_high:.4f}"
         )
+
+
+class TestDiagnosticsScorePessimisticFallback:
+    """P1-C: missing diagnostics_score must use 0.0 (pessimistic), not 0.5 (neutral).
+
+    A missing diagnostics score should LOWER confidence, not leave it neutral, so that
+    forecasts with absent diagnostics are penalised rather than silently passed through.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.05,
+        net_trade_return=0.05,
+        min_expected_return=0.001,
+        volatility=0.20,
+        model_agreement=0.80,
+        snr=2.0,
+        ticker="TEST",
+    )
+
+    def _conf(self, diagnostics_score: float) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(diagnostics_score=diagnostics_score, **self._BASE_KWARGS)
+
+    def test_missing_score_lower_than_neutral(self) -> None:
+        """conf(missing=0.0) < conf(score=0.5) — pessimistic fallback penalises absence."""
+        conf_missing = self._conf(0.0)   # P1-C: missing maps to 0.0
+        conf_neutral = self._conf(0.5)   # old default
+        assert conf_missing < conf_neutral, (
+            f"Missing diagnostics_score (0.0) must produce lower confidence than neutral (0.5); "
+            f"got missing={conf_missing:.4f}, neutral={conf_neutral:.4f}"
+        )
+
+    def test_missing_score_lower_than_good(self) -> None:
+        """conf(missing=0.0) < conf(score=0.8) — a good diagnostics score earns higher confidence."""
+        conf_missing = self._conf(0.0)
+        conf_good = self._conf(0.8)
+        assert conf_missing < conf_good, (
+            f"Missing diagnostics_score must produce lower confidence than good score; "
+            f"got missing={conf_missing:.4f}, good={conf_good:.4f}"
+        )

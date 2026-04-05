@@ -758,13 +758,23 @@ class TimeSeriesSignalGenerator:
             )
 
             # Calculate confidence score (discriminative: net edge + uncertainty + model quality).
+            _diag_score_raw = diagnostics.get("score")
+            if _diag_score_raw is None:
+                logger.warning(
+                    "diagnostics_score missing from forecast diagnostics for ticker=%s; "
+                    "using 0.0 (pessimistic fallback — penalises forecasts with absent diagnostics)",
+                    ticker,
+                )
+                _diagnostics_score = 0.0
+            else:
+                _diagnostics_score = float(_diag_score_raw)
             confidence = self._calculate_confidence(
                 expected_return=expected_return,
                 net_trade_return=net_trade_return,
                 min_expected_return=min_expected_return,
                 volatility=volatility,
                 model_agreement=model_agreement,
-                diagnostics_score=float(diagnostics.get("score", 0.5)),
+                diagnostics_score=_diagnostics_score,
                 snr=snr,
                 ticker=ticker,
             )

@@ -1366,6 +1366,33 @@ def test_check_audit_file_missing_ensemble_metrics_no_fallback(tmp_path: Path) -
     assert res.ensemble_missing is True
 
 
+def test_check_audit_file_missing_baseline_rmse_excluded(tmp_path: Path) -> None:
+    """Window with missing baseline_rmse must be excluded (return None), not counted
+    as a non-violation, which would silently deflate the violation rate (P1-A fix)."""
+    audit = tmp_path / "audit_missing_baseline.json"
+    # eval_metrics has ensemble but NO samossa/garch/sarimax keys → BEST_SINGLE is None
+    _write_audit(
+        audit,
+        start="2024-05-01",
+        end="2024-05-31",
+        length=180,
+        horizon=30,
+        weights={"ensemble": 1.0},
+        eval_metrics={
+            "ensemble": {"rmse": 1.5},
+        },
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    res = mod.check_audit_file(audit, tolerance=0.1, baseline_model="BEST_SINGLE")
+    # Must be absent from effective count, not counted as violation=False
+    assert res is None, (
+        "Window with missing baseline_rmse must return None (excluded from effective "
+        f"count), got {res}"
+    )
+
+
 def test_check_forecast_audits_manifest_fail_mode_blocks_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
