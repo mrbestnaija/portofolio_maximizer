@@ -623,7 +623,11 @@ class PnLIntegrityEnforcer:
         # 302,303: AAPL SELL opens from 2022-09-30 (Phase 10 PLATT_BOOTSTRAP historical
         #   backtest runs; execution_mode='live' but trade_date='2022-09-30'; no close
         #   generated because bootstrap only produces signals, not round-trips).
-        known_historical: set[int] = {5, 6, 11, 13, 302, 303}
+        # 315: AMZN SELL open 2026-04-01 ($210.45, 1 share) — intentional live short;
+        #   data-source failure on 2026-04-05 (Sat) prevented auto-close.
+        # 316,317: NVDA SELL opens 2026-04-01/02 ($175.65/$177.29, 1 share each) —
+        #   intentional live shorts; same data-source failure prevented auto-close.
+        known_historical: set[int] = {5, 6, 11, 13, 302, 303, 315, 316, 317}
         raw_whitelist = os.getenv("INTEGRITY_ORPHAN_WHITELIST_IDS", "")
         if raw_whitelist.strip():
             for token in raw_whitelist.split(","):
@@ -778,7 +782,10 @@ class PnLIntegrityEnforcer:
         # from canonical metrics (is_contaminated=1 in DB) and have been audited.
         # 252: MSFT cross-mode close from 2026-03-04 synthetic run (is_contaminated=1)
         # 255: TSLA cross-mode close from 2026-03-09 synthetic-resume (is_contaminated=1)
-        known_contaminated: set[int] = {252, 255}
+        # 318: AAPL live close 2026-04-02 whose opener (id=314) is synthetic —
+        #   data-source failure on 2026-04-05 (Sat) caused auto-trader to inherit the
+        #   synthetic position as a live close; excluded from production_closed_trades.
+        known_contaminated: set[int] = {252, 255, 318}
         all_rows = [r for r in all_rows if r["id"] not in known_contaminated]
         if not all_rows:
             return []

@@ -1678,3 +1678,58 @@ class TestSNRNonePessimisticFallback:
             f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.667); "
             f"got none={conf_none:.4f}, snr_moderate={conf_moderate:.4f}"
         )
+
+
+class TestModelAgreementPessimisticFallback:
+    """_check_model_agreement must return 0.0 (pessimistic) when <2 model forecasts are
+    available — consistent with P1-C/H6 policy. Previously returned 0.5 (neutral credit).
+    """
+
+    def _gen(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        return TimeSeriesSignalGenerator(use_volatility_filter=False)
+
+    def _bundle_with_n_models(self, n: int) -> dict:
+        """Build a minimal forecast_bundle with exactly n model payloads."""
+        bundle: dict = {}
+        payloads = [
+            ("samossa_forecast", {"forecast": pd.Series([105.0, 106.0, 107.0])}),
+            ("mssa_rl_forecast", {"forecast": pd.Series([104.0, 105.0, 106.0])}),
+            ("sarimax_forecast", {"forecast": pd.Series([106.0, 107.0, 108.0])}),
+        ]
+        for key, payload in payloads[:n]:
+            bundle[key] = payload
+        return bundle
+
+    def test_single_model_returns_pessimistic_zero(self) -> None:
+        """With only 1 model forecast, agreement cannot be assessed → must return 0.0."""
+        gen = self._gen()
+        score = gen._check_model_agreement(self._bundle_with_n_models(1))
+        assert score == 0.0, (
+            f"_check_model_agreement with 1 model must return 0.0; got {score}"
+        )
+
+    def test_no_models_returns_pessimistic_zero(self) -> None:
+        """With 0 model forecasts, must return 0.0 (not 0.5 neutral)."""
+        gen = self._gen()
+        score = gen._check_model_agreement({})
+        assert score == 0.0, (
+            f"_check_model_agreement with 0 models must return 0.0; got {score}"
+        )
+
+    def test_two_models_returns_nonzero_for_close_agreement(self) -> None:
+        """With 2 well-agreeing models, score must be positive (agreement path active)."""
+        gen = self._gen()
+        score = gen._check_model_agreement(self._bundle_with_n_models(2))
+        assert score > 0.0, (
+            f"_check_model_agreement with 2 well-agreeing models must return >0; got {score}"
+        )
+
+    def test_single_model_lower_than_two_agreeing_models(self) -> None:
+        """1-model pessimistic (0.0) < 2-model agreement score."""
+        gen = self._gen()
+        score_one = gen._check_model_agreement(self._bundle_with_n_models(1))
+        score_two = gen._check_model_agreement(self._bundle_with_n_models(2))
+        assert score_one < score_two, (
+            f"1-model score ({score_one}) must be < 2-model score ({score_two})"
+        )

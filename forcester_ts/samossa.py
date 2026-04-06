@@ -88,7 +88,7 @@ class SAMOSSAForecaster:
             normalize=normalize,
             ar_order=ar_order,
             matrix_type=matrix_type,
-            arima_order=tuple(arima_order) if arima_order else (1, 0, 1),  # type: ignore[arg-type]
+            arima_order=tuple(arima_order) if arima_order else (1, 0, 0),  # type: ignore[arg-type]
             trend_slope_bars=max(3, int(trend_slope_bars)),
         )
         self._fitted = False
@@ -269,7 +269,7 @@ class SAMOSSAForecaster:
         # as the residual model (previously only exceptions triggered the AutoReg fallback;
         # statsmodels emits ConvergenceWarning without raising, so the bad model was kept).
         if ARIMA_AVAILABLE and _ARIMA is not None:
-            arima_order = getattr(self.config, "arima_order", (1, 0, 1)) or (1, 0, 0)
+            arima_order = getattr(self.config, "arima_order", (1, 0, 0)) or (1, 0, 0)
             try:
                 with _warnings.catch_warnings(record=True) as _caught:
                     _warnings.simplefilter("always")

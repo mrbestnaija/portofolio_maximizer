@@ -278,6 +278,11 @@ class AlphaVantageExtractor(BaseExtractor):
         if 'Note' in data:
             raise ValueError(f"API Rate Limit: {data['Note']}")
 
+        if 'Information' in data:
+            # Alpha Vantage free-tier daily/per-minute cap or premium quota exhausted.
+            # Response contains a human-readable message but no price data.
+            raise ValueError(f"API Rate Limit (Information): {data['Information']}")
+
         # Extract time series data
         time_series_key = 'Time Series (Daily)'
         if time_series_key not in data:

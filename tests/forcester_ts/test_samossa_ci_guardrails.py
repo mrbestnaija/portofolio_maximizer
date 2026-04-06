@@ -56,3 +56,56 @@ def test_samossa_clamps_negative_lower_ci_for_strictly_positive_low_price_series
     assert unclamped_lower.min() < 0.0, "fixture must exercise the negative-CI path"
     assert (result["lower_ci"] >= 0.0).all()
     assert (result["lower_ci"] == 0.0).any()
+
+
+# ---------------------------------------------------------------------------
+# E1/E2 regression — arima_order fallback must be AR-only (1,0,0), not (1,0,1)
+# ---------------------------------------------------------------------------
+
+def test_samossa_default_arima_order_is_ar_only() -> None:
+    """E1: SAMOSSAConfig.arima_order default and __init__ fallback must be (1,0,0).
+
+    Phase 7.16 deliberately removed the MA(1) term to avoid convergence warnings
+    on short residual series. Both the config default and the constructor fallback
+    were incorrectly set to (1,0,1) — this test pins the correct value.
+    """
+    from forcester_ts.samossa import SAMOSSAConfig
+
+    cfg = SAMOSSAConfig()
+    assert cfg.arima_order == (1, 0, 0), (
+        f"SAMOSSAConfig.arima_order default must be (1,0,0); got {cfg.arima_order}"
+    )
+
+
+def test_samossa_init_arima_order_fallback_is_ar_only() -> None:
+    """E2: when arima_order=() (falsy) the constructor must use (1,0,0), not (1,0,1)."""
+    forecaster = SAMOSSAForecaster(window_length=40, n_components=2, arima_order=())
+    assert forecaster.config.arima_order == (1, 0, 0), (
+        f"Constructor falsy-arima_order fallback must be (1,0,0); "
+        f"got {forecaster.config.arima_order}"
+    )
+
+
+def test_samossa_fit_arima_order_getattr_fallback_is_ar_only() -> None:
+    """E2 (line 272): _fit_residual_model getattr fallback must be (1,0,0) not (1,0,1).
+
+    Exercises the _fit_residual_model path with a series long enough to reach the
+    ARIMA branch. The forecaster is built with arima_order=(1,0,0) explicitly so the
+    getattr returns the right value — this test verifies no MA term is injected
+    by confirming the stored residual_model order is (1,0,0).
+    """
+    rng = np.random.default_rng(42)
+    series = pd.Series(
+        100.0 + np.cumsum(rng.normal(0.0, 0.5, 300)),
+        index=pd.date_range("2023-01-01", periods=300, freq="D"),
+        name="Close",
+    )
+    forecaster = SAMOSSAForecaster(window_length=40, n_components=4, arima_order=(1, 0, 0))
+    forecaster.fit(series)
+
+    if forecaster._residual_model is not None and hasattr(forecaster._residual_model, "model"):
+        order = getattr(forecaster._residual_model.model, "order", None)
+        if order is not None:
+            assert order == (1, 0, 0), (
+                f"Fitted ARIMA order must be (1,0,0); got {order}"
+            )

@@ -1668,7 +1668,13 @@ class TimeSeriesSignalGenerator:
                 forecasts.append(mssa_val)
 
         if len(forecasts) < 2:
-            return 0.5  # Can't assess agreement with <2 models
+            logger.debug(
+                "_check_model_agreement: only %d model forecast(s) available — "
+                "returning pessimistic score 0.0 (cannot assess agreement; "
+                "consistent with P1-C/H6 pessimistic fallback policy).",
+                len(forecasts),
+            )
+            return 0.0  # pessimistic: cannot assess agreement with <2 models
 
         # Calculate coefficient of variation (lower = more agreement)
         mean_forecast = np.mean(forecasts)
