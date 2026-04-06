@@ -45,6 +45,14 @@ __all__ = [
     "calculate_sortino_ratio",
     "test_strategy_significance",
     "stress_test_portfolio",
+    # Phase 11 — Nigeria production extensions (additive, zero breakage)
+    "omega_ratio",
+    "fractional_kelly_fat_tail",
+    "effective_ngn_return",
+    "portfolio_metrics_ngn",
+    "NGN_ANNUAL_INFLATION",
+    "NGN_P2P_FRICTION",
+    "DAILY_NGN_THRESHOLD",
 ]
 
 
@@ -487,3 +495,200 @@ def stress_test_portfolio(
         }
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — Nigeria Production Extensions
+# Additive only. No existing function modified. All 2208+ tests unaffected.
+# Implementation date: 2026-04-06. Wiring (Phases B-E) begins after
+# THIN_LINKAGE ≥ 10 (warmup expires 2026-04-15).
+# ---------------------------------------------------------------------------
+
+import os as _os
+
+# ── NGN Calibration Constants ────────────────────────────────────────────────
+# Update quarterly from CBN Statistical Bulletin and Bybit P2P median.
+# Source: CBN MPC communiqués, Q1 2026 headline CPI + parallel-rate friction.
+# Override via environment variables for live deployment.
+NGN_ANNUAL_INFLATION: float = float(_os.getenv("NGN_ANNUAL_INFLATION", "0.28"))
+NGN_P2P_FRICTION: float = float(_os.getenv("NGN_P2P_FRICTION", "0.03"))
+# Daily compound hurdle: 28% inflation + 3% P2P friction, annualised to daily
+DAILY_NGN_THRESHOLD: float = (
+    (1.0 + NGN_ANNUAL_INFLATION + NGN_P2P_FRICTION) ** (1.0 / TRADING_DAYS) - 1.0
+)
+
+
+def omega_ratio(
+    returns: pd.Series,
+    threshold: float | None = None,
+) -> float:
+    """
+    Omega ratio partitioned at the Nigeria-inflation-adjusted daily threshold.
+
+    Replaces Sharpe as the primary barbell objective. Sharpe penalises
+    asymmetric upside identically to downside — directly contradicting
+    barbell philosophy. Omega is distribution-free and captures the
+    full shape of the return distribution above/below the hurdle.
+
+    Omega = sum(max(r - τ, 0)) / sum(max(τ - r, 0))
+
+    τ defaults to DAILY_NGN_THRESHOLD — the true hurdle rate for a
+    Nigeria-domiciled account (NGN inflation + USDT P2P withdrawal
+    friction), not the USD risk-free rate used by Sharpe.
+
+    Parameters
+    ----------
+    returns   : Daily return series from actual execution log (pd.Series)
+    threshold : Daily threshold. None → DAILY_NGN_THRESHOLD
+
+    Returns
+    -------
+    float — Omega ratio. >1 = portfolio beats NGN hurdle more than it misses.
+            inf when zero losses above threshold. nan when series too short.
+
+    Notes
+    -----
+    Requires ≥ 10 observations to be meaningful. The existing
+    calculate_kelly_fraction_correct and Sharpe-based metrics are retained
+    for backward compatibility with existing gate checks.
+    """
+    if returns is None or len(returns) < 10:
+        return float("nan")
+
+    tau = DAILY_NGN_THRESHOLD if threshold is None else threshold
+    excess = pd.Series(returns) - tau
+    gain = float(excess.clip(lower=0).sum())
+    loss = float((-excess).clip(lower=0).sum())
+
+    if loss == 0.0:
+        return float("inf")
+    return gain / loss
+
+
+def fractional_kelly_fat_tail(
+    returns: pd.Series,
+    risk_free: float | None = None,
+    kelly_fraction: float = 0.25,
+) -> float:
+    """
+    Fractional Kelly with excess-kurtosis correction for fat-tailed assets.
+
+    Extends the existing calculate_kelly_fraction_correct with a kurtosis
+    dampener. Crypto and EM FX return distributions have excess kurtosis
+    κ >> 3; applying full Kelly to such series is catastrophic.
+
+    f* = [(μ - rf) / σ²] × [1 / (1 + max(κ-3, 0) / 4)] × λ
+
+    Hard cap: position fraction clipped to [0.0, 0.20].
+
+    Parameters
+    ----------
+    returns        : Daily return series from actual execution log (pd.Series)
+    risk_free      : Daily risk-free rate. None → DAILY_NGN_THRESHOLD
+    kelly_fraction : Fractional multiplier λ (default 0.25 = quarter-Kelly)
+
+    Returns
+    -------
+    float — Position fraction in [0.0, 0.20].
+
+    Notes
+    -----
+    Use alongside calculate_kelly_fraction_correct for cross-validation.
+    Requires ≥ 30 observations; returns 0.01 (minimum stake) for short series.
+    """
+    if returns is None or len(returns) < 30:
+        return 0.01
+
+    rf = DAILY_NGN_THRESHOLD if risk_free is None else risk_free
+    s = pd.Series(returns)
+    mu = float(s.mean())
+    sigma2 = float(s.var())
+    kappa = float(s.kurtosis())  # pandas kurtosis = excess kurtosis (Fisher)
+
+    if sigma2 == 0.0:
+        return 0.0
+
+    full_kelly = (mu - rf) / sigma2
+    kurtosis_correction = 1.0 / (1.0 + max(kappa - 3.0, 0.0) / 4.0)
+    f_star = full_kelly * kurtosis_correction * kelly_fraction
+
+    return float(np.clip(f_star, 0.0, 0.20))
+
+
+def effective_ngn_return(
+    usd_return: float,
+    ngn_usd_spot_change: float,
+    withdrawal_friction: float | None = None,
+) -> float:
+    """
+    Realised return in NGN terms after USDT-bridge conversion.
+
+    Every USD PnL from OANDA/IC Markets/Bybit passes through a
+    USDT → NGN P2P conversion on withdrawal. NGN has a structural
+    devaluation drift — this is not symmetric noise.
+
+    R_eff = R_USD + Δspot_NGN/USD − friction_per_day
+
+    Parameters
+    ----------
+    usd_return          : Return denominated in USD (fractional, not %)
+    ngn_usd_spot_change : Fractional change in NGN/USD spot rate for the period.
+                          Positive = NGN weakened → favourable for USD holder.
+    withdrawal_friction : P2P round-trip friction per day.
+                          None → NGN_P2P_FRICTION / TRADING_DAYS
+
+    Returns
+    -------
+    float — Effective daily return in NGN purchasing-power terms.
+    """
+    friction = (
+        NGN_P2P_FRICTION / TRADING_DAYS
+        if withdrawal_friction is None
+        else withdrawal_friction
+    )
+    return float(usd_return + ngn_usd_spot_change - friction)
+
+
+def portfolio_metrics_ngn(returns: pd.Series) -> Dict[str, float]:
+    """
+    Full Nigeria-calibrated metric set.
+
+    Wraps calculate_enhanced_portfolio_metrics (existing, backward-compatible)
+    and appends NGN-specific extensions. Does not replace or modify any
+    existing function.
+
+    Parameters
+    ----------
+    returns : Daily return series from actual execution log (pd.Series).
+              Must be compatible with calculate_enhanced_portfolio_metrics.
+
+    Returns
+    -------
+    Dict extending the base enhanced_metrics with:
+      - omega_ratio           : Omega ratio vs NGN hurdle
+      - fractional_kelly_fat_tail : Quarter-Kelly with kurtosis correction
+      - ngn_daily_threshold   : Current daily NGN hurdle rate
+      - ngn_annual_hurdle_pct : Annualised hurdle in % (inflation + friction)
+      - beats_ngn_hurdle      : bool, omega_ratio > 1.0
+
+    Notes
+    -----
+    The "beats_ngn_hurdle" flag is the canonical Phase 11 success criterion.
+    A system beating the NGN hurdle is outperforming the structural
+    devaluation rate — the minimum acceptable bar for Nigeria deployment.
+    """
+    arr = np.array(returns).reshape(-1, 1)
+    weights = np.ones(1)
+    base: Dict[str, float] = calculate_enhanced_portfolio_metrics(arr, weights)
+
+    omega = omega_ratio(returns)
+    ngn_ext: Dict[str, object] = {
+        "omega_ratio": omega,
+        "fractional_kelly_fat_tail": fractional_kelly_fat_tail(returns),
+        "ngn_daily_threshold": DAILY_NGN_THRESHOLD,
+        "ngn_annual_hurdle_pct": round(
+            (NGN_ANNUAL_INFLATION + NGN_P2P_FRICTION) * 100.0, 1
+        ),
+        "beats_ngn_hurdle": (omega > 1.0) if not (isinstance(omega, float) and omega != omega) else False,
+    }
+    return {**base, **ngn_ext}

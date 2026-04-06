@@ -1528,7 +1528,62 @@ Results: Key metrics or validation results
 
 ---
 
+---
+
+## Phase 11 — Nigeria Production Path (2026-04-06, planning)
+
+**Documentation**: `Documentation/PHASE_11_NIGERIA_PRODUCTION_PLAN.md`
+
+### Hard Rule — Sessions Until 2026-04-15
+
+```
+IF matched < 10 (THIN_LINKAGE):
+    run audit sprint -> accumulate evidence -> check gate
+    STOP — no new features
+ELSE:
+    proceed to Phase 11 Phase B
+```
+
+THIN_LINKAGE warmup expires 2026-04-15. After expiry, `matched >= 10` is required
+or the gate hard-fails. Current: `matched = 1/309 (0.32%)`.
+
+### What Is and Is Not Implemented
+
+**Phase A — IMPLEMENTED (2026-04-06, zero breakage)**:
+- `omega_ratio()`, `fractional_kelly_fat_tail()`, `effective_ngn_return()`,
+  `portfolio_metrics_ngn()` added **additively** to `etl/portfolio_math.py`
+- Constants: `NGN_ANNUAL_INFLATION=0.28`, `NGN_P2P_FRICTION=0.03`, `DAILY_NGN_THRESHOLD`
+- 39 tests in `tests/etl/test_portfolio_math_ngn.py`
+- No existing function modified; all 2208+ tests unaffected
+
+**Phases B–E — NOT IMPLEMENTED (blocked until THIN_LINKAGE >= 10)**:
+
+| Phase | What | Files |
+|-------|------|-------|
+| B | New modules, no wiring | `nigeria/fx_layer.py`, `nigeria/broker_cost_model.py`, `utils/wat_execution_filter.py`, `execution/oanda_executor.py` |
+| C | `--executor oanda` flag | `scripts/run_auto_trader.py` |
+| D | HMM covariance behind config flag | `forcester_ts/ensemble.py`, `requirements-ml.txt` |
+| E | OANDA /candles as data source | `etl/oanda_extractor.py` |
+
+### Nigeria Deployment Success Criterion
+
+```python
+from etl.portfolio_math import portfolio_metrics_ngn
+m = portfolio_metrics_ngn(live_returns)
+assert m["beats_ngn_hurdle"] is True   # omega_ratio > 1.0 vs 31% NGN annual hurdle
+```
+
+### Critical Constraints for All Future Nigeria Code
+
+- **No pytz** — use `datetime.timezone(datetime.timedelta(hours=1))` for WAT
+- **No Bybit internal API** — use `CBN_OFFICIAL_RATE` env var or official OAuth
+- **No hmmlearn in requirements.txt** — `requirements-ml.txt` only
+- **Import path** — always `from etl.portfolio_math import ...` (never root-level)
+- **No dead code** — every method must be wired and tested before merge
+
+---
+
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
-**Last Updated**: 2026-04-05 (DCR Phases 1+2+3 complete; heuristic distortion fixes pending)
+**Last Updated**: 2026-04-06 (DCR Phases 1-3 + adversarial fixes complete; Phase 11-A math extension added; Phase 11 B-E blocked until THIN_LINKAGE >= 10)
 **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
