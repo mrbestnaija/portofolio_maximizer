@@ -47,7 +47,7 @@ model_type CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAM
 
 ### 2. Requirements Files Updated
 
-**File**: [requirements.txt](../requirements.txt)
+**File**: [requirements.txt](../../../requirements.txt)
 
 **Changes**: Updated 30+ package versions to match current environment
 
@@ -73,7 +73,7 @@ model_type CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAM
 
 ### 3. Migration Script Fixed
 
-**File**: [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py)
+**File**: [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py)
 
 **Issue**: Unicode characters (✓, ✗) caused UnicodeEncodeError on Windows
 
@@ -115,8 +115,8 @@ python scripts/run_etl_pipeline.py \
 ## Files Modified This Session
 
 ### Modified
-1. ✅ [requirements.txt](../requirements.txt) - Package version updates
-2. ✅ [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py) - ASCII output
+1. ✅ [requirements.txt](../../../requirements.txt) - Package version updates
+2. ✅ [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py) - ASCII output
 
 ### Created
 3. ✅ [Documentation/STATUS_UPDATE_2026-01-23.md](STATUS_UPDATE_2026-01-23.md) - Run status analysis

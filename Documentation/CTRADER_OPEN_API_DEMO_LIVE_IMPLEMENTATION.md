@@ -47,7 +47,7 @@ For each environment, run the full OAuth + Open API flow:
 
 ## 4) Environment Variables (Aligned to Current `.env`)
 
-Per `SECURITY.md` and the security audit guides, **do not commit secrets** and **never echo credentials in logs**. This document uses placeholders only.
+Per [SECURITY.md](../SECURITY.md) and the security audit guides, **do not commit secrets** and **never echo credentials in logs**. This document uses placeholders only.
 
 ### Current `.env` Keys (as implemented)
 

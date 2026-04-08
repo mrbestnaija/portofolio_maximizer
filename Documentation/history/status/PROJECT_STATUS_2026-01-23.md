@@ -26,7 +26,7 @@
 
 ### Database Migration ✅
 
-**Script**: [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py)
+**Script**: [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py)
 **Executed**: 07:17 UTC (hot fix while pipeline running)
 
 **Results**:
@@ -59,12 +59,12 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 
 | # | Task | Status | Evidence | Notes |
 |---|------|--------|----------|-------|
-| 1 | Bug Investigation | ✅ Complete | [PHASE_7.4_CALIBRATION_RESULTS.md](PHASE_7.4_CALIBRATION_RESULTS.md) | Root cause: line 1471 in time_series_signal_generator.py |
-| 2 | Bug Fix Implementation | ✅ Complete | [PHASE_7.4_BUG_FIX.md](PHASE_7.4_BUG_FIX.md) | Ensemble config preservation in CV folds |
-| 3 | Single-Ticker Validation | ✅ Complete | [PHASE_7.4_FIX_VALIDATION.md](PHASE_7.4_FIX_VALIDATION.md) | AAPL: 1.043 RMSE ratio, 100% GARCH selection |
+| 1 | Bug Investigation | ✅ Complete | [PHASE_7.4_CALIBRATION_RESULTS.md](../../PHASE_7.4_CALIBRATION_RESULTS.md) | Root cause: line 1471 in time_series_signal_generator.py |
+| 2 | Bug Fix Implementation | ✅ Complete | [PHASE_7.4_BUG_FIX.md](../../PHASE_7.4_BUG_FIX.md) | Ensemble config preservation in CV folds |
+| 3 | Single-Ticker Validation | ✅ Complete | [PHASE_7.4_FIX_VALIDATION.md](../../PHASE_7.4_FIX_VALIDATION.md) | AAPL: 1.043 RMSE ratio, 100% GARCH selection |
 | 4 | Confidence Calibration | ✅ Complete | Log evidence | Quantile-based normalization working |
 | 5 | Database Schema Update | ✅ Complete | [MIGRATION_FIX_2026-01-23.md](MIGRATION_FIX_2026-01-23.md) | ENSEMBLE model_type enabled |
-| 6 | Requirements Update | ✅ Complete | [requirements.txt](../requirements.txt) | 30+ packages updated |
+| 6 | Requirements Update | ✅ Complete | [requirements.txt](../../../requirements.txt) | 30+ packages updated |
 | 7 | Documentation | ✅ Complete | 8 docs created | Comprehensive coverage |
 | 8 | Multi-Ticker Validation | 🔄 Running | Currently at 18 min | Expected: ~20-25 min total |
 | 9 | Results Analysis | ⏳ Pending | Awaiting completion | Verify 2/3 or 3/3 tickers at target |
@@ -95,7 +95,7 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 ```
 
 **Files Modified**:
-- [models/time_series_signal_generator.py](../models/time_series_signal_generator.py) (lines 137, 196-204, 230-250, 1470-1494)
+- [models/time_series_signal_generator.py](../../../models/time_series_signal_generator.py) (lines 137, 196-204, 230-250, 1470-1494)
 
 ### 2. Quantile-Based Confidence Calibration ✅
 
@@ -127,7 +127,7 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 
 ### 4. Requirements Management ✅
 
-**Updated**: [requirements.txt](../requirements.txt)
+**Updated**: [requirements.txt](../../../requirements.txt)
 
 **Key Changes**:
 - `numpy==2.4.0` (for Python ≥3.11, from 1.26.4)
@@ -186,22 +186,22 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 
 ### Core Documentation (8 Files)
 
-1. **[PHASE_7.4_CALIBRATION_RESULTS.md](PHASE_7.4_CALIBRATION_RESULTS.md)**
+1. **[PHASE_7.4_CALIBRATION_RESULTS.md](../../PHASE_7.4_CALIBRATION_RESULTS.md)**
    - Initial bug analysis
    - Empty config investigation
    - Test results showing GARCH disappearance
 
-2. **[PHASE_7.4_BUG_FIX.md](PHASE_7.4_BUG_FIX.md)**
+2. **[PHASE_7.4_BUG_FIX.md](../../PHASE_7.4_BUG_FIX.md)**
    - Detailed fix implementation
    - Code changes with line numbers
    - Validation approach
 
-3. **[PHASE_7.4_FIX_VALIDATION.md](PHASE_7.4_FIX_VALIDATION.md)**
+3. **[PHASE_7.4_FIX_VALIDATION.md](../../PHASE_7.4_FIX_VALIDATION.md)**
    - AAPL single-ticker test results
    - RMSE improvement analysis
    - GARCH selection validation
 
-4. **[PHASE_7.4_COMPLETION_SUMMARY.md](PHASE_7.4_COMPLETION_SUMMARY.md)**
+4. **[PHASE_7.4_COMPLETION_SUMMARY.md](../../PHASE_7.4_COMPLETION_SUMMARY.md)**
    - Overall phase summary
    - Technical achievements
    - Integration verification
@@ -228,7 +228,7 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 
 ### Agent Documentation
 
-9. **[CLAUDE.md](../CLAUDE.md)** (Updated)
+9. **[CLAUDE.md](../../../CLAUDE.md)** (Updated)
    - Phase 7.4 context
    - Platform-specific guidance (Windows)
    - Database management commands
@@ -239,22 +239,22 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 ## Files Modified This Session
 
 ### Source Code
-1. [models/time_series_signal_generator.py](../models/time_series_signal_generator.py)
+1. [models/time_series_signal_generator.py](../../../models/time_series_signal_generator.py)
    - Lines 137, 196-204, 230-250, 1470-1494
    - Ensemble config preservation fix
 
 ### Scripts
-2. [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py)
+2. [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py)
    - Unicode → ASCII conversion for Windows
    - Fixed console output compatibility
 
 ### Configuration
-3. [requirements.txt](../requirements.txt)
+3. [requirements.txt](../../../requirements.txt)
    - 30+ package version updates
    - Header with phase context
 
 ### Database
-4. [data/portfolio_maximizer.db](../data/portfolio_maximizer.db)
+4. [data/portfolio_maximizer.db](../../../data/portfolio_maximizer.db)
    - Schema migration (ENSEMBLE support)
    - 360 records preserved
 

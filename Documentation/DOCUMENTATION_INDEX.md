@@ -1,7 +1,7 @@
 # Documentation Index — Portfolio Maximizer v45
 
 **Purpose**: Canonical navigator for all project documentation.
-**Last updated**: 2026-03-02 (Phase 7.25-7.31 complete)
+**Last updated**: 2026-04-08 (documentation hygiene cleanup)
 
 > For the current phase status and next steps, start with [Planning and Status (Canonical)](#planning-and-status-canonical).
 
@@ -90,20 +90,15 @@ Add new run logs to `history/run_logs/` using the naming convention
 
 ## Compatibility Policy
 
-Historical files that have been moved under `Documentation/history/` retain compatibility
-stubs at their previous paths.  **Do not delete a stub until all inbound references
-(cron jobs, agent instructions, external tooling) have been updated and validated.**
+Historical files should be linked directly from `Documentation/history/` once they are
+archived. Temporary compatibility stubs are allowed only when inbound references cannot
+be updated in the same change.
 
-**Stub format** (insert at the top of the old file when moving it):
+If a stub is temporarily required:
 
-```markdown
-> **[MOVED]** This document has been moved to
-> [history/sessions/SESSION_SUMMARY_YYYY_MM_DD.md](history/sessions/SESSION_SUMMARY_YYYY_MM_DD.md).
-> This stub will be removed once all inbound references are updated.
-```
-
-Stubs are reviewed quarterly; confirmed-dead stubs are removed in the next hygiene
-cleanup pass after all referencing systems have been updated.
+- keep it short
+- point directly to the new `history/` path
+- remove it in the next documentation hygiene pass after references are updated
 
 ---
 

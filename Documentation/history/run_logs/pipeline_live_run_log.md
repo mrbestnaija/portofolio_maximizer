@@ -44,4 +44,4 @@ Tracks production-style executions that exercise every pipeline stage against li
 1. Prefer `./bash/run_pipeline_live.sh` for routine live/auto executions (env overrides: `TICKERS`, `EXECUTION_MODE`, `ENABLE_LLM`, etc.).
 2. If a fallback occurs, capture the reason from `logs/events/events.log` and record a short blurb in this journal.
 3. Cross-check database and Parquet outputs to verify the synthetic label sources are traceable.
-4. For pure offline validations, continue to log runs separately in `Documentation/pipeline_dry_run_log.md`.
+4. For pure offline validations, continue to log runs separately in `Documentation/history/run_logs/pipeline_dry_run_log.md`.

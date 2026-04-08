@@ -39,7 +39,7 @@ This document is intentionally “policy-like”: it tells you what must be true
 The project contains many documents; the following are the **core** ones that should remain consistent with the code and with each other:
 
 - **Repo overview and onboarding**: `README.md`
-- **Security policy (responsible disclosure)**: `SECURITY.md`
+- **Security policy (responsible disclosure)**: [SECURITY.md](../SECURITY.md)
 - **API key handling (local secrets)**: `Documentation/API_KEYS_SECURITY.md`
 - **Version control policy (remote-first)**: `Documentation/GIT_WORKFLOW.md`
 - **Architecture + navigation map**: `Documentation/arch_tree.md`

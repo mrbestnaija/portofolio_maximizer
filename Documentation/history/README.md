@@ -13,6 +13,7 @@ but not part of the active operator runbook set.
 
 When moving markdown into history:
 
-1. Keep a compatibility stub at the original path.
-2. Update `Documentation/DOCS_INDEX.md`.
-3. Verify links still resolve.
+1. Update inbound links directly to the archived `history/` path whenever possible.
+2. Update `Documentation/DOCUMENTATION_INDEX.md`.
+3. Keep a temporary compatibility stub only if some references cannot be updated in the same change.
+4. Verify links still resolve.

@@ -366,10 +366,10 @@ calibrated = 0.3 + (ranks - 1) / (len(ranks) - 1) * 0.6  # Maps to [0.3, 0.9]
 6. [PHASE_7.4_BUG_FIX.md](PHASE_7.4_BUG_FIX.md) - Fix implementation details
 7. [PHASE_7.4_FIX_VALIDATION.md](PHASE_7.4_FIX_VALIDATION.md) - AAPL test results
 8. [PHASE_7.4_COMPLETION_SUMMARY.md](PHASE_7.4_COMPLETION_SUMMARY.md) - Phase overview
-9. [STATUS_UPDATE_2026-01-23.md](STATUS_UPDATE_2026-01-23.md) - Run status analysis
-10. [ACTIONS_COMPLETED_2026-01-23.md](ACTIONS_COMPLETED_2026-01-23.md) - Session log
-11. [MIGRATION_FIX_2026-01-23.md](MIGRATION_FIX_2026-01-23.md) - Migration details
-12. [PROJECT_STATUS_2026-01-23.md](PROJECT_STATUS_2026-01-23.md) - Comprehensive status
+9. [history/status/STATUS_UPDATE_2026-01-23.md](history/status/STATUS_UPDATE_2026-01-23.md) - Run status analysis
+10. [history/status/ACTIONS_COMPLETED_2026-01-23.md](history/status/ACTIONS_COMPLETED_2026-01-23.md) - Session log
+11. [history/status/MIGRATION_FIX_2026-01-23.md](history/status/MIGRATION_FIX_2026-01-23.md) - Migration details
+12. [history/status/PROJECT_STATUS_2026-01-23.md](history/status/PROJECT_STATUS_2026-01-23.md) - Comprehensive status
 13. [PHASE_7.4_MULTI_TICKER_RESULTS.md](PHASE_7.4_MULTI_TICKER_RESULTS.md) - This document
 
 ### Documentation Updated

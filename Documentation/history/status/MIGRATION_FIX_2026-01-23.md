@@ -23,7 +23,7 @@ model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'SAMOSSA', 'MSSA_RL')
 
 ### 1. Database Schema Migration
 
-**Script**: [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py)
+**Script**: [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py)
 
 **Execution Time**: 07:17 UTC (while pipeline was running)
 
@@ -158,14 +158,14 @@ git push origin master
 ## Files Modified This Session
 
 ### Database
-1. ✅ [data/portfolio_maximizer.db](../data/portfolio_maximizer.db) - Schema migrated
+1. ✅ [data/portfolio_maximizer.db](../../../data/portfolio_maximizer.db) - Schema migrated
 
 ### Scripts
-2. ✅ [scripts/migrate_add_ensemble_model_type.py](../scripts/migrate_add_ensemble_model_type.py) - ASCII output fix
+2. ✅ [scripts/migrate_add_ensemble_model_type.py](../../../scripts/migrate_add_ensemble_model_type.py) - ASCII output fix
 
 ### Configuration
-3. ✅ [requirements.txt](../requirements.txt) - Package updates
-4. ✅ [CLAUDE.md](../CLAUDE.md) - Agent workflow documentation
+3. ✅ [requirements.txt](../../../requirements.txt) - Package updates
+4. ✅ [CLAUDE.md](../../../CLAUDE.md) - Agent workflow documentation
 
 ### Documentation
 5. ✅ [Documentation/MIGRATION_FIX_2026-01-23.md](MIGRATION_FIX_2026-01-23.md) - This document

@@ -237,14 +237,14 @@
 ## 📚 Documentation Deliverables
 
 ### Technical Documentation
-- ✅ [PHASE_7.3_COMPLETE.md](PHASE_7.3_COMPLETE.md) - 500+ lines, comprehensive implementation guide
-- ✅ [PHASE_7.3_MULTI_TICKER_VALIDATION.md](PHASE_7.3_MULTI_TICKER_VALIDATION.md) - 450+ lines, validation report with insights
-- ✅ [PHASE_8_NEURAL_FORECASTER_PLAN.md](PHASE_8_NEURAL_FORECASTER_PLAN.md) - 700+ lines, neural forecaster roadmap
+- ✅ [PHASE_7.3_COMPLETE.md](../../PHASE_7.3_COMPLETE.md) - 500+ lines, comprehensive implementation guide
+- ✅ [PHASE_7.3_MULTI_TICKER_VALIDATION.md](../../PHASE_7.3_MULTI_TICKER_VALIDATION.md) - 450+ lines, validation report with insights
+- ✅ [PHASE_8_NEURAL_FORECASTER_PLAN.md](../../PHASE_8_NEURAL_FORECASTER_PLAN.md) - 700+ lines, neural forecaster roadmap
 
 ### Tools and Scripts
-- ✅ [analyze_multi_ticker_results.py](../scripts/analyze_multi_ticker_results.py) - Automated analysis tool
-- ✅ [live_ensemble_monitor.py](../dashboard/live_ensemble_monitor.py) - Self-iterative dashboard (500+ lines)
-- ✅ [static_dashboard.md](../dashboard/static_dashboard.md) - Reference dashboard
+- ✅ [analyze_multi_ticker_results.py](../../../scripts/analyze_multi_ticker_results.py) - Automated analysis tool
+- ✅ [live_ensemble_monitor.py](../../../dashboard/live_ensemble_monitor.py) - Self-iterative dashboard (500+ lines)
+- ✅ [static_dashboard.md](../../../dashboard/static_dashboard.md) - Reference dashboard
 
 ### Total Documentation: 2,150+ lines of technical content
 

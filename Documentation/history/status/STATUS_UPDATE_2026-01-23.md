@@ -208,7 +208,7 @@ python scripts/analyze_multi_ticker_results.py
 
 ## Files Modified This Session
 
-1. ✅ [requirements.txt](../requirements.txt)
+1. ✅ [requirements.txt](../../../requirements.txt)
    - Updated 30+ package versions
    - Added 2 missing packages (colorama, fonttools)
    - Documented update date in header

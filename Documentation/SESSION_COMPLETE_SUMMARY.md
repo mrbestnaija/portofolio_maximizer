@@ -1,3 +1,28 @@
+# Documentation Hygiene Cleanup — Session Complete Summary
+
+**Date**: 2026-04-08
+**Scope**: Repository documentation sanitization, canonicalization, and archive-link cleanup
+**Verification**:
+- `python -m pytest tests/scripts/test_hygiene_wiring.py -q --basetemp C:\tmp\pmx_docs_cleanup_pytest`
+- Targeted markdown-link audit over touched docs: `OK`
+
+## What Was Done
+
+- Removed duplicate or obsolete documentation entry points and relocation stubs once surviving references were updated.
+- Re-centered navigation on `Documentation/DOCUMENTATION_INDEX.md` and reduced `Documentation/README.md` to a short landing page.
+- Updated archived documents under `Documentation/history/` so their internal links resolve from their current locations.
+- Removed duplicate mirrors of `CLAUDE.md`, `SECURITY.md`, and the stale root `HEARTBEAT.md`; canonical references now point to root docs or `Documentation/HEARTBEAT.md`.
+- Repaired the root `README.md` documentation section so it no longer points at missing `logs/README.md` or a non-existent local `LICENSE` file.
+- Recorded the repo-wide documentation hygiene posture in `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+
+## Result
+
+- Documentation cleanup is now committed as a docs-only unit, separate from unrelated code edits in the worktree.
+- Touched documentation surfaces passed the targeted link audit.
+- Broader historical docs still contain older broken links outside this pass and remain follow-up work.
+
+---
+
 # Phases 7.25 / 7.29 / 7.30 / 7.31 — Session Complete Summary
 
 **Date**: 2026-03-02

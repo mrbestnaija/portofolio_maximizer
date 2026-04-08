@@ -241,16 +241,16 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 19. **[Documentation/PHASE_7.4_MULTI_TICKER_RESULTS.md](PHASE_7.4_MULTI_TICKER_RESULTS.md)** (NEW)
     - Content: Final multi-ticker validation results
 
-20. **[Documentation/STATUS_UPDATE_2026-01-23.md](STATUS_UPDATE_2026-01-23.md)** (NEW)
+20. **[history/status/STATUS_UPDATE_2026-01-23.md](history/status/STATUS_UPDATE_2026-01-23.md)** (NEW)
     - Content: Run status analysis
 
-21. **[Documentation/ACTIONS_COMPLETED_2026-01-23.md](ACTIONS_COMPLETED_2026-01-23.md)** (NEW)
+21. **[history/status/ACTIONS_COMPLETED_2026-01-23.md](history/status/ACTIONS_COMPLETED_2026-01-23.md)** (NEW)
     - Content: Session activity log
 
-22. **[Documentation/MIGRATION_FIX_2026-01-23.md](MIGRATION_FIX_2026-01-23.md)** (NEW)
+22. **[history/status/MIGRATION_FIX_2026-01-23.md](history/status/MIGRATION_FIX_2026-01-23.md)** (NEW)
     - Content: Database migration details
 
-23. **[Documentation/PROJECT_STATUS_2026-01-23.md](PROJECT_STATUS_2026-01-23.md)** (NEW)
+23. **[history/status/PROJECT_STATUS_2026-01-23.md](history/status/PROJECT_STATUS_2026-01-23.md)** (NEW)
     - Content: Comprehensive project status
 
 24. **[Documentation/PHASE_7.4_FINAL_SUMMARY.md](PHASE_7.4_FINAL_SUMMARY.md)** (NEW)
@@ -483,10 +483,10 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 
 ### Session Documentation
 
-7. [STATUS_UPDATE_2026-01-23.md](STATUS_UPDATE_2026-01-23.md) - Status analysis
-8. [ACTIONS_COMPLETED_2026-01-23.md](ACTIONS_COMPLETED_2026-01-23.md) - Activity log
-9. [MIGRATION_FIX_2026-01-23.md](MIGRATION_FIX_2026-01-23.md) - Migration details
-10. [PROJECT_STATUS_2026-01-23.md](PROJECT_STATUS_2026-01-23.md) - Project status
+7. [history/status/STATUS_UPDATE_2026-01-23.md](history/status/STATUS_UPDATE_2026-01-23.md) - Status analysis
+8. [history/status/ACTIONS_COMPLETED_2026-01-23.md](history/status/ACTIONS_COMPLETED_2026-01-23.md) - Activity log
+9. [history/status/MIGRATION_FIX_2026-01-23.md](history/status/MIGRATION_FIX_2026-01-23.md) - Migration details
+10. [history/status/PROJECT_STATUS_2026-01-23.md](history/status/PROJECT_STATUS_2026-01-23.md) - Project status
 
 ### Agent Documentation
 

@@ -6,7 +6,7 @@
 This runbook is the canonical operating path for institutional-grade unattended workflows.
 
 Related navigator:
-- [DOCS_INDEX.md](DOCS_INDEX.md)
+- [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)
 
 ## 1) Preflight
 

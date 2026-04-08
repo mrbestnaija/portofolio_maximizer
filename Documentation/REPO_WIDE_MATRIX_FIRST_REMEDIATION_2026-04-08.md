@@ -29,6 +29,18 @@ neatness is the primary objective, that statement is superseded by this document
   - `FAIL`
 - Warmup-covered states are compatibility evidence only; they do not count as unattended-run readiness.
 
+## Documentation Hygiene Posture
+
+- `Documentation/DOCUMENTATION_INDEX.md` is the canonical navigator for repository documentation.
+- `Documentation/history/` is the canonical home for archived status snapshots, session notes, and run logs.
+- Repo-wide docs should link directly to archived `history/` files instead of keeping duplicate mirrors or long-lived relocation stubs.
+- Canonical top-level entry points are:
+  - `README.md` for repo overview
+  - `CLAUDE.md` for agent guidance
+  - `SECURITY.md` for responsible disclosure
+  - `Documentation/HEARTBEAT.md` for the live status snapshot
+- Duplicate mirrors of canonical docs should be removed once inbound references are updated in the same hygiene pass.
+
 ## Primary vs Diagnostic Fields
 
 ### Primary objective fields

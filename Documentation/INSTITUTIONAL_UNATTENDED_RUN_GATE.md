@@ -3,7 +3,7 @@
 This document defines the hardening gate for unattended/autonomous operation claims.
 
 Related navigator:
-- [DOCS_INDEX.md](DOCS_INDEX.md)
+- [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)
 
 ## Scope
 
