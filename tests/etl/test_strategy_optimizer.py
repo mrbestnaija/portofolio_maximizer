@@ -113,6 +113,43 @@ def test_constraints_bypass_when_no_trades():
     assert evaluations, "Zero-trade candidates should bypass constraints"
 
 
+def test_score_metrics_caps_infinite_barbell_metrics() -> None:
+    optimizer = StrategyOptimizer(
+        search_space={},
+        objectives={"omega_ratio": 1.0, "profit_factor": 1.0},
+    )
+
+    finite_score = optimizer.score_metrics({"omega_ratio": 1.0, "profit_factor": 1.0})
+    infinite_score = optimizer.score_metrics({"omega_ratio": float("inf"), "profit_factor": float("inf")})
+
+    assert math.isfinite(infinite_score)
+    assert infinite_score > finite_score
+
+
+def test_profit_factor_constraint_can_reject_candidates():
+    optimizer = StrategyOptimizer(
+        search_space={"alpha": {"type": "continuous", "bounds": [0.0, 1.0]}},
+        objectives={"total_return": 1.0, "omega_ratio": 1.0},
+        constraints={"min": {"profit_factor": 1.05}},
+        random_state=7,
+    )
+
+    def evaluation_fn(candidate: StrategyCandidate):
+        return {
+            "total_return": 0.8,
+            "omega_ratio": 2.0,
+            "profit_factor": 0.9,
+        }
+
+    evaluations = optimizer.run(
+        n_candidates=5,
+        evaluation_fn=evaluation_fn,
+        regime="barbell",
+    )
+
+    assert evaluations == []
+
+
 def test_strategy_config_persistence_roundtrip(tmp_path):
     db_file = tmp_path / "test_strategy.db"
     db = DatabaseManager(db_path=str(db_file))
@@ -169,3 +206,5 @@ def test_equity_curve_and_backtester_sanity(tmp_path):
 
     assert result.total_trades >= 0
     assert result.profit_factor >= 0
+    assert result.strategy_returns is not None
+    assert result.total_return >= 0

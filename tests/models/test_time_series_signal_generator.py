@@ -112,14 +112,18 @@ def quant_validation_config():
         'enabled': True,
         'lookback_days': 60,
         'risk_free_rate': 0.02,
+        'scoring_mode': 'domain_utility',
         'success_criteria': {
             'capital_base': 10000,
             'min_annual_return': -1.0,
             'min_sharpe': -5.0,
             'min_sortino': -5.0,
             'max_drawdown': 1.0,
+            'min_omega_ratio': 0.0,
             'min_profit_factor': 0.0,
             'min_win_rate': 0.0,
+            'min_expected_shortfall': -1.0,
+            'min_terminal_directional_accuracy': 0.0,
             'min_expected_profit': -1000.0,
         },
         'visualization': {'enabled': False},
@@ -134,14 +138,18 @@ def quant_validation_config_strict():
         'enabled': True,
         'lookback_days': 60,
         'risk_free_rate': 0.02,
+        'scoring_mode': 'domain_utility',
         'success_criteria': {
             'capital_base': 10000,
             'min_annual_return': 1.0,
             'min_sharpe': 2.0,
             'min_sortino': 2.0,
             'max_drawdown': 0.01,
+            'min_omega_ratio': 2.0,
             'min_profit_factor': 5.0,
             'min_win_rate': 0.9,
+            'min_expected_shortfall': -0.001,
+            'min_terminal_directional_accuracy': 0.9,
             'min_expected_profit': 10000.0,
             'require_significance': True,
         },
@@ -237,6 +245,145 @@ class TestTimeSeriesSignalGenerator:
 
         # Strong forecast should have higher confidence
         assert signal.confidence >= 0.5
+
+    def test_quant_success_profile_exposes_omega_ratio(
+        self,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+    ):
+        """Quant profile should expose omega_ratio for barbell-aware scoring."""
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+            quant_validation_config=quant_validation_config,
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+        profile = generator._build_quant_success_profile("AAPL", sample_market_data, signal)
+
+        assert profile is not None
+        assert "omega_ratio" in profile["metrics"]
+        assert profile["metrics"]["omega_ratio"] is not None
+        assert "utility_breakdown" in profile
+        assert "omega_ratio" in profile["utility_breakdown"]
+        assert "diagnostics" in profile
+
+    def test_evaluate_success_criteria_only_keeps_structural_gates(self):
+        criteria = TimeSeriesSignalGenerator._evaluate_success_criteria(
+            criteria_cfg={
+                "min_expected_profit": 5.0,
+                "min_omega_ratio": 1.5,
+                "min_profit_factor": 2.0,
+                "min_win_rate": 0.8,
+            },
+            metrics={"omega_ratio": 2.0},
+            performance_snapshot={"profit_factor": 3.0, "win_rate": 0.2},
+            significance=None,
+            expected_profit=10.0,
+            position_value=1000.0,
+            action="BUY",
+        )
+
+        assert criteria["expected_profit"] is True
+        assert "omega_ratio" not in criteria
+        assert "profit_factor" not in criteria
+        assert "win_rate" not in criteria
+
+    def test_build_domain_utility_rewards_asymmetric_payoff_despite_low_win_rate(self):
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": False},
+        )
+        utility = generator._build_domain_utility(
+            metrics={
+                "omega_ratio": 2.2,
+                "max_drawdown": 0.10,
+                "expected_shortfall": -0.01,
+            },
+            performance_snapshot={"profit_factor": 2.0, "win_rate": 0.33},
+            edge_block={"terminal_directional_accuracy": 0.60},
+            criteria_cfg={
+                "min_expected_profit": 5.0,
+                "min_omega_ratio": 1.0,
+                "min_profit_factor": 1.0,
+                "max_drawdown": 0.30,
+                "min_expected_shortfall": -0.03,
+                "min_terminal_directional_accuracy": 0.45,
+            },
+            config={
+                "validation_mode": "forecast_edge",
+                "utility_weights": {
+                    "expected_profit": 0.24,
+                    "omega_ratio": 0.20,
+                    "profit_factor": 0.18,
+                    "terminal_directional_accuracy": 0.18,
+                    "max_drawdown": 0.10,
+                    "expected_shortfall": 0.10,
+                },
+            },
+            expected_profit=25.0,
+            position_value=1000.0,
+        )
+
+        assert utility["utility_score"] is not None
+        assert utility["utility_score"] > 0.60
+        assert utility["utility_breakdown"]["profit_factor"]["passed_threshold"] is True
+        assert utility["utility_breakdown"]["omega_ratio"]["passed_threshold"] is True
+
+    def test_build_domain_utility_penalizes_weak_payoff_even_with_better_hit_rate(self):
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=0.0,
+            min_expected_return=0.0,
+            max_risk_score=1.0,
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": False},
+        )
+        utility = generator._build_domain_utility(
+            metrics={
+                "omega_ratio": 0.8,
+                "max_drawdown": 0.40,
+                "expected_shortfall": -0.08,
+            },
+            performance_snapshot={"profit_factor": 0.7, "win_rate": 0.75},
+            edge_block={"terminal_directional_accuracy": 0.58},
+            criteria_cfg={
+                "min_expected_profit": 5.0,
+                "min_omega_ratio": 1.0,
+                "min_profit_factor": 1.0,
+                "max_drawdown": 0.25,
+                "min_expected_shortfall": -0.03,
+                "min_terminal_directional_accuracy": 0.45,
+            },
+            config={
+                "validation_mode": "forecast_edge",
+                "utility_weights": {
+                    "expected_profit": 0.24,
+                    "omega_ratio": 0.20,
+                    "profit_factor": 0.18,
+                    "terminal_directional_accuracy": 0.18,
+                    "max_drawdown": 0.10,
+                    "expected_shortfall": 0.10,
+                },
+            },
+            expected_profit=8.0,
+            position_value=1000.0,
+        )
+
+        assert utility["utility_score"] is not None
+        assert utility["utility_score"] < 0.60
+        assert utility["utility_breakdown"]["profit_factor"]["passed_threshold"] is False
+        assert utility["utility_breakdown"]["omega_ratio"]["passed_threshold"] is False
 
     def test_confidence_penalizes_small_net_edge(self):
         """Confidence should be lower when net edge is tiny after costs."""
@@ -709,15 +856,23 @@ class TestTimeSeriesSignalGenerator:
             "baseline_model": "samossa",
         }
         cfg["success_criteria"]["max_rmse_ratio_vs_baseline"] = 1.10
-        cfg["success_criteria"]["min_directional_accuracy"] = 0.55
+        cfg["success_criteria"]["min_terminal_directional_accuracy"] = 0.55
 
         import models.time_series_signal_generator as tsg_mod
 
         def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
             return {
                 "aggregate_metrics": {
-                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
-                    "samossa": {"rmse": 1.0, "directional_accuracy": 0.55},
+                    "ensemble": {
+                        "rmse": 0.9,
+                        "directional_accuracy": 0.60,
+                        "terminal_directional_accuracy": 0.58,
+                    },
+                    "samossa": {
+                        "rmse": 1.0,
+                        "directional_accuracy": 0.55,
+                        "terminal_directional_accuracy": 0.56,
+                    },
                 },
                 "fold_count": 1,
                 "horizon": 5,
@@ -743,8 +898,73 @@ class TestTimeSeriesSignalGenerator:
         assert quant_profile is not None
         assert quant_profile["forecast_edge"]["rmse_ratio_vs_baseline"] == pytest.approx(0.9)
         assert quant_profile["forecast_edge"]["directional_accuracy"] == pytest.approx(0.60)
+        assert quant_profile["forecast_edge"]["terminal_directional_accuracy"] == pytest.approx(0.58)
         assert quant_profile["criteria"]["rmse_ratio_vs_baseline"] is True
-        assert quant_profile["criteria"]["directional_accuracy"] is True
+        assert quant_profile["criteria"]["terminal_directional_accuracy"] is True
+        assert quant_profile["diagnostics"]["directional_accuracy"] == pytest.approx(0.60)
+
+    def test_quant_validation_forecast_edge_uses_terminal_direction_not_one_step(
+        self,
+        monkeypatch,
+        sample_forecast_bundle,
+        sample_market_data,
+        quant_validation_config,
+        ts_routing_config,
+    ):
+        cfg = copy.deepcopy(quant_validation_config)
+        cfg["validation_mode"] = "forecast_edge"
+        cfg["forecast_edge_cv"] = {
+            "min_train_size": 10,
+            "horizon": 5,
+            "step_size": 5,
+            "max_folds": 1,
+            "baseline_model": "samossa",
+        }
+        cfg["success_criteria"]["max_rmse_ratio_vs_baseline"] = 1.10
+        cfg["success_criteria"]["min_terminal_directional_accuracy"] = 0.55
+
+        import models.time_series_signal_generator as tsg_mod
+
+        def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
+            return {
+                "aggregate_metrics": {
+                    "ensemble": {
+                        "rmse": 0.9,
+                        "directional_accuracy": 0.95,
+                        "terminal_directional_accuracy": 0.40,
+                    },
+                    "samossa": {
+                        "rmse": 1.0,
+                        "directional_accuracy": 0.55,
+                        "terminal_directional_accuracy": 0.54,
+                    },
+                },
+                "fold_count": 1,
+                "horizon": 5,
+            }
+
+        monkeypatch.setattr(tsg_mod.RollingWindowValidator, "run", fake_run)
+
+        generator = TimeSeriesSignalGenerator(
+            confidence_threshold=float(ts_routing_config.get("confidence_threshold", 0.55)),
+            min_expected_return=float(ts_routing_config.get("min_expected_return", 0.003)),
+            max_risk_score=float(ts_routing_config.get("max_risk_score", 0.7)),
+            quant_validation_config=cfg,
+        )
+
+        signal = generator.generate_signal(
+            forecast_bundle=sample_forecast_bundle,
+            current_price=100.0,
+            ticker="AAPL",
+            market_data=sample_market_data,
+        )
+
+        quant_profile = signal.provenance.get("quant_validation")
+        assert quant_profile is not None
+        assert quant_profile["forecast_edge"]["directional_accuracy"] == pytest.approx(0.95)
+        assert quant_profile["forecast_edge"]["terminal_directional_accuracy"] == pytest.approx(0.40)
+        assert quant_profile["criteria"]["terminal_directional_accuracy"] is False
+        assert quant_profile["status"] == "FAIL"
 
     def test_quant_validation_forecast_edge_mode_uses_shared_forecaster_config(
         self,
@@ -800,8 +1020,16 @@ class TestTimeSeriesSignalGenerator:
             captured["regime_detection_enabled"] = bool(self.forecaster_config.regime_detection_enabled)
             return {
                 "aggregate_metrics": {
-                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
-                    "samossa": {"rmse": 1.0, "directional_accuracy": 0.55},
+                    "ensemble": {
+                        "rmse": 0.9,
+                        "directional_accuracy": 0.60,
+                        "terminal_directional_accuracy": 0.58,
+                    },
+                    "samossa": {
+                        "rmse": 1.0,
+                        "directional_accuracy": 0.55,
+                        "terminal_directional_accuracy": 0.56,
+                    },
                 },
                 "fold_count": 1,
                 "horizon": 5,
@@ -864,8 +1092,16 @@ class TestTimeSeriesSignalGenerator:
         def fake_run(self, price_series, returns_series=None, ticker=""):  # noqa: ARG001
             return {
                 "aggregate_metrics": {
-                    "ensemble": {"rmse": 0.9, "directional_accuracy": 0.60},
-                    "mssa_rl": {"rmse": 1.0, "directional_accuracy": 0.55},
+                    "ensemble": {
+                        "rmse": 0.9,
+                        "directional_accuracy": 0.60,
+                        "terminal_directional_accuracy": 0.58,
+                    },
+                    "mssa_rl": {
+                        "rmse": 1.0,
+                        "directional_accuracy": 0.55,
+                        "terminal_directional_accuracy": 0.56,
+                    },
                 },
                 "fold_count": 1,
                 "horizon": 5,

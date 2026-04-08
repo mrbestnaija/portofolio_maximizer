@@ -40,6 +40,7 @@ from etl.portfolio_math import (
     bootstrap_confidence_intervals,
     calculate_enhanced_portfolio_metrics,
     calculate_portfolio_metrics,
+    portfolio_metrics_ngn,
     test_strategy_significance,
 )
 
@@ -2075,6 +2076,20 @@ class TimeSeriesSignalGenerator:
         except Exception as exc:  # pragma: no cover
             logger.debug("Unable to compute quant metrics for %s: %s", ticker, exc)
             return None
+        try:
+            domain_metrics = portfolio_metrics_ngn(pd.Series(strategy_returns))
+        except Exception as exc:  # pragma: no cover
+            logger.debug("Unable to compute barbell-tail metrics for %s: %s", ticker, exc)
+            domain_metrics = {}
+        for key in (
+            "omega_ratio",
+            "fractional_kelly_fat_tail",
+            "ngn_daily_threshold",
+            "ngn_annual_hurdle_pct",
+            "beats_ngn_hurdle",
+        ):
+            if key in domain_metrics:
+                metrics[key] = domain_metrics[key]
 
         bootstrap_cfg = config.get('bootstrap', {})
         try:
@@ -2123,7 +2138,7 @@ class TimeSeriesSignalGenerator:
         except (TypeError, ValueError):
             net_trade_return = max(0.0, abs(float(signal.expected_return or 0.0)))
         expected_profit = position_value * net_trade_return
-        criteria = self._evaluate_success_criteria(
+        structural_gates = self._evaluate_success_criteria(
             criteria_cfg=criteria_cfg,
             metrics=metrics,
             performance_snapshot=performance_snapshot,
@@ -2132,7 +2147,7 @@ class TimeSeriesSignalGenerator:
             position_value=position_value,
             action=action,
         )
-        drift_criteria = dict(criteria) if isinstance(criteria, dict) else {}
+        drift_criteria = dict(structural_gates) if isinstance(structural_gates, dict) else {}
 
         # Forecast-edge validation (optional): measure incremental edge using
         # rolling-window forecast regression metrics instead of drift proxy.
@@ -2149,13 +2164,18 @@ class TimeSeriesSignalGenerator:
                 # Edge criteria are the primary gate; keep drift-proxy criteria
                 # available in metrics but do not require them unless explicitly requested.
                 include_drift = bool(criteria_cfg.get("include_drift_proxy_criteria", False))
-                criteria = dict(edge_criteria)
+                structural_gates = dict(edge_criteria)
                 if "expected_profit" in drift_criteria:
-                    criteria = {"expected_profit": drift_criteria.get("expected_profit"), **criteria}
+                    structural_gates = {"expected_profit": drift_criteria.get("expected_profit"), **structural_gates}
+                for extra_key in ("significance", "information_ratio"):
+                    if extra_key in drift_criteria:
+                        structural_gates[extra_key] = drift_criteria[extra_key]
                 if include_drift:
-                    criteria.update({f"drift_{k}": v for k, v in drift_criteria.items() if k != "expected_profit"})
+                    structural_gates.update(
+                        {f"drift_{k}": v for k, v in drift_criteria.items() if k not in {"expected_profit", "significance", "information_ratio"}}
+                    )
 
-        criteria = self._canonicalize_criteria(criteria)
+        structural_gates = self._canonicalize_criteria(structural_gates)
 
         viz_cfg = config.get('visualization') or {}
         visualization_result = None
@@ -2167,28 +2187,51 @@ class TimeSeriesSignalGenerator:
                 max_points=int(viz_cfg.get('max_points', lookback)),
             )
 
-        failed = [name for name, passed in criteria.items() if not passed]
-        scoring_mode = str(config.get('scoring_mode', 'weighted')).lower()
+        scoring_mode_raw = str(
+            config.get('scoring_mode')
+            or config.get("objective_mode")
+            or 'domain_utility'
+        ).lower()
+        scoring_mode = (
+            "domain_utility"
+            if scoring_mode_raw in {"weighted", "domain_utility", "two_layer_utility"}
+            else scoring_mode_raw
+        )
         pass_threshold = float(config.get('pass_threshold', 0.60))
         strict_weight_coverage = self._to_bool(
             config.get("strict_weight_coverage"),
             default=True,
         )
-        normalized_score = None
-        total_weight = 0.0
-        weight_validation: Dict[str, Any] = {
-            "strict_weight_coverage": strict_weight_coverage,
-            "missing_weight_keys": [],
-            "unused_weight_keys": [],
-            "coverage_ok": True,
-        }
+        domain_utility = self._build_domain_utility(
+            metrics=metrics,
+            performance_snapshot=performance_snapshot,
+            edge_block=edge_block,
+            criteria_cfg=criteria_cfg,
+            config=config,
+            expected_profit=expected_profit,
+            position_value=position_value,
+        )
+        utility_score = domain_utility.get("utility_score")
+        total_weight = float(domain_utility.get("total_weight") or 0.0)
+        weight_validation: Dict[str, Any] = dict(domain_utility.get("weight_validation") or {})
+        weight_validation["strict_weight_coverage"] = strict_weight_coverage
+        config_warnings = list(domain_utility.get("config_warnings") or [])
+        config_warnings.extend(self._ignored_success_threshold_warnings(criteria_cfg))
+        if scoring_mode_raw == "weighted":
+            config_warnings.append("deprecated_scoring_mode:weighted")
+
+        utility_breakdown = dict(domain_utility.get("utility_breakdown") or {})
+        utility_pass = bool(utility_score is not None and float(utility_score) >= pass_threshold)
+        criteria = dict(structural_gates)
+        if action != "HOLD":
+            criteria["domain_utility"] = utility_pass
 
         if action == "HOLD":
             # HOLD is non-actionable for trade-health metrics; keep as SKIPPED.
             status = "SKIPPED"
         elif not criteria:
             status = "SKIPPED"
-        elif criteria.get("expected_profit") is False:
+        elif structural_gates.get("expected_profit") is False:
             # Expected-profit floor is an economic viability gate; failing it is always FAIL.
             status = "FAIL"
         elif scoring_mode == "all_pass":
@@ -2198,28 +2241,16 @@ class TimeSeriesSignalGenerator:
             # Hard gate: negative expected_profit is always FAIL regardless of score.
             if expected_profit < 0:
                 status = "FAIL"
+            elif any(not passed for passed in structural_gates.values()):
+                status = "FAIL"
+            elif strict_weight_coverage and not bool(weight_validation.get("coverage_ok", True)):
+                status = "FAIL"
+            elif utility_score is None:
+                status = "FAIL" if strict_weight_coverage else "SKIPPED"
             else:
-                resolved_weights, missing_keys, unused_keys = self._resolve_weighted_scoring_weights(
-                    criteria=criteria,
-                    configured_weights=config.get("criterion_weights"),
-                )
-                weight_validation["missing_weight_keys"] = missing_keys
-                weight_validation["unused_weight_keys"] = unused_keys
-                weight_validation["coverage_ok"] = not missing_keys
+                status = "PASS" if utility_pass else "FAIL"
 
-                if missing_keys and strict_weight_coverage:
-                    status = "FAIL"
-                else:
-                    score = sum(
-                        float(resolved_weights.get(k, 0.0)) * (1.0 if v else 0.0)
-                        for k, v in criteria.items()
-                    )
-                    total_weight = sum(float(resolved_weights.get(k, 0.0)) for k in criteria)
-                    if total_weight <= 0:
-                        status = "FAIL" if strict_weight_coverage else "SKIPPED"
-                    else:
-                        normalized_score = score / total_weight
-                        status = "PASS" if normalized_score >= pass_threshold else "FAIL"
+        failed = [name for name, passed in criteria.items() if not passed]
 
         return {
             'status': status,
@@ -2229,20 +2260,35 @@ class TimeSeriesSignalGenerator:
                 'sortino_ratio': metrics.get('sortino_ratio'),
                 'max_drawdown': metrics.get('max_drawdown'),
                 'volatility': metrics.get('volatility'),
+                'expected_shortfall': metrics.get('expected_shortfall'),
+                'omega_ratio': metrics.get('omega_ratio'),
                 'win_rate': performance_snapshot.get('win_rate'),
                 'profit_factor': performance_snapshot.get('profit_factor'),
+            },
+            'diagnostics': {
+                'win_rate': performance_snapshot.get('win_rate'),
+                'sharpe_ratio': metrics.get('sharpe_ratio'),
+                'sortino_ratio': metrics.get('sortino_ratio'),
+                'directional_accuracy': edge_block.get('directional_accuracy'),
             },
             'forecast_edge': edge_block,
             'bootstrap': bootstrap_stats,
             'criteria': criteria,
+            'structural_gates': structural_gates,
             'failed_criteria': failed,
+            'utility_breakdown': utility_breakdown,
+            'utility_score': utility_score,
             'weight_validation': weight_validation,
             'scoring': {
                 'mode': scoring_mode,
                 'pass_threshold': pass_threshold,
-                'normalized_score': normalized_score,
+                'normalized_score': utility_score,
+                'utility_score': utility_score,
+                'utility_pass': utility_pass,
+                'structural_pass': bool(structural_gates) and all(structural_gates.values()),
                 'total_weight': total_weight,
             },
+            'config_warnings': sorted(set(config_warnings)),
             'significance': significance,
             'lookback_bars': int(len(price_series)),
             'expected_profit': expected_profit,
@@ -2383,6 +2429,16 @@ class TimeSeriesSignalGenerator:
             except (TypeError, ValueError):
                 dir_acc = None
             edge_payload["directional_accuracy"] = dir_acc
+            terminal_dir_acc = None
+            try:
+                terminal_dir_acc = (
+                    float(ens.get("terminal_directional_accuracy"))
+                    if isinstance(ens, dict) and ens.get("terminal_directional_accuracy") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                terminal_dir_acc = None
+            edge_payload["terminal_directional_accuracy"] = terminal_dir_acc
 
             max_rmse_ratio = criteria_cfg.get("max_rmse_ratio_vs_baseline")
             if max_rmse_ratio is not None:
@@ -2391,18 +2447,24 @@ class TimeSeriesSignalGenerator:
                     edge_criteria["rmse_ratio_vs_baseline"] = rmse_ratio is not None and rmse_ratio <= thr
                 except (TypeError, ValueError):
                     pass
-            min_dir_acc = criteria_cfg.get("min_directional_accuracy")
+            min_dir_acc, _min_dir_alias = self._resolve_success_threshold(
+                criteria_cfg,
+                "min_terminal_directional_accuracy",
+                aliases=("min_directional_accuracy",),
+            )
             if min_dir_acc is not None:
                 try:
                     thr = float(min_dir_acc)
-                    edge_criteria["directional_accuracy"] = dir_acc is not None and dir_acc >= thr
+                    edge_criteria["terminal_directional_accuracy"] = (
+                        terminal_dir_acc is not None and terminal_dir_acc >= thr
+                    )
                 except (TypeError, ValueError):
                     pass
             if "rmse_ratio_vs_baseline" not in edge_criteria and rmse_ratio is not None:
                 # Conservative default when no explicit criteria provided.
                 edge_criteria["rmse_ratio_vs_baseline"] = rmse_ratio <= 1.10
-            if "directional_accuracy" not in edge_criteria and dir_acc is not None:
-                edge_criteria["directional_accuracy"] = dir_acc >= 0.50
+            if "terminal_directional_accuracy" not in edge_criteria and terminal_dir_acc is not None:
+                edge_criteria["terminal_directional_accuracy"] = terminal_dir_acc >= 0.50
         except Exception as exc:  # pragma: no cover - best-effort metric
             edge_payload["error"] = str(exc)
 
@@ -2448,6 +2510,7 @@ class TimeSeriesSignalGenerator:
         aliases = {
             "rmse_ratio": "rmse_ratio_vs_baseline",
             "rmse": "rmse_ratio_vs_baseline",
+            "directional_accuracy": "terminal_directional_accuracy",
         }
         return prefix + aliases.get(key, key)
 
@@ -2467,18 +2530,261 @@ class TimeSeriesSignalGenerator:
         return normalized
 
     @staticmethod
-    def _default_weighted_criterion_weights() -> Dict[str, float]:
-        """Default weighted schema kept aligned with emitted quant criteria."""
+    def _default_domain_utility_weights() -> Dict[str, float]:
+        """Default weights for the asymmetry-first domain utility scorer."""
         return {
-            "expected_profit": 0.23,
-            "rmse_ratio_vs_baseline": 0.20,
-            "directional_accuracy": 0.16,
-            "annual_return": 0.08,
-            "max_drawdown": 0.07,
-            "sharpe_ratio": 0.08,
-            "sortino_ratio": 0.08,
-            "profit_factor": 0.06,
-            "win_rate": 0.04,
+            "expected_profit": 0.24,
+            "omega_ratio": 0.20,
+            "profit_factor": 0.18,
+            "terminal_directional_accuracy": 0.18,
+            "max_drawdown": 0.10,
+            "expected_shortfall": 0.10,
+        }
+
+    @staticmethod
+    def _resolve_success_threshold(
+        criteria_cfg: Optional[Dict[str, Any]],
+        primary_key: str,
+        *,
+        aliases: Tuple[str, ...] = (),
+    ) -> Tuple[Any, Optional[str]]:
+        if not isinstance(criteria_cfg, dict):
+            return None, None
+        if primary_key in criteria_cfg:
+            return criteria_cfg.get(primary_key), None
+        for alias in aliases:
+            if alias in criteria_cfg:
+                return criteria_cfg.get(alias), alias
+        return None, None
+
+    @staticmethod
+    def _effective_expected_profit_floor(
+        criteria_cfg: Optional[Dict[str, Any]],
+        *,
+        position_value: Optional[float],
+    ) -> float:
+        if not isinstance(criteria_cfg, dict):
+            return 1.0
+
+        try:
+            abs_floor = float(criteria_cfg.get("min_expected_profit", 1.0))
+        except (TypeError, ValueError):
+            abs_floor = 1.0
+
+        try:
+            pct_floor = float(criteria_cfg.get("min_expected_profit_pct", 0.0))
+        except (TypeError, ValueError):
+            pct_floor = 0.0
+
+        try:
+            trade_notional = float(position_value) if position_value is not None else 0.0
+        except (TypeError, ValueError):
+            trade_notional = 0.0
+
+        pct_floor_abs = trade_notional * pct_floor if pct_floor > 0 else 0.0
+        positive_floors = [value for value in (abs_floor, pct_floor_abs) if value > 0]
+        return float(min(positive_floors)) if positive_floors else 1.0
+
+    @staticmethod
+    def _ignored_success_threshold_warnings(criteria_cfg: Optional[Dict[str, Any]]) -> List[str]:
+        if not isinstance(criteria_cfg, dict):
+            return []
+        ignored_keys = (
+            "min_sharpe",
+            "min_sortino",
+            "min_win_rate",
+            "min_annual_return",
+        )
+        return [f"ignored_success_threshold:{key}" for key in ignored_keys if key in criteria_cfg]
+
+    @staticmethod
+    def _normalize_domain_utility_component(
+        *,
+        name: str,
+        raw_value: Any,
+        threshold: Any,
+    ) -> Tuple[Optional[float], bool]:
+        key = str(name or "").strip().lower()
+
+        try:
+            raw = float(raw_value)
+        except (TypeError, ValueError):
+            return None, False
+
+        if math.isnan(raw):
+            return None, False
+
+        if key in {"omega_ratio", "profit_factor"}:
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = 1.0
+            thr = max(thr, 1e-6)
+            if math.isinf(raw):
+                return (1.0 if raw > 0 else 0.0), bool(raw > 0)
+            passed = raw >= thr
+            normalized = math.log1p(max(raw, 0.0) / thr) / math.log1p(3.0)
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        if key == "expected_profit":
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = 1.0
+            thr = max(thr, 1e-6)
+            passed = raw >= thr
+            if raw <= 0:
+                return 0.0, False
+            normalized = math.log1p(raw / thr) / math.log1p(4.0)
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        if key == "terminal_directional_accuracy":
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = 0.5
+            thr = float(np.clip(thr, 0.0, 0.999999))
+            passed = raw >= thr
+            denom = max(1.0 - thr, 1e-6)
+            normalized = (raw - thr) / denom
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        if key == "max_drawdown":
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = 0.25
+            thr = max(thr, 1e-6)
+            passed = raw <= thr
+            normalized = (thr - raw) / thr
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        if key == "expected_shortfall":
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = -0.02
+            if math.isnan(thr):
+                thr = -0.02
+            upper = 0.0
+            lower = thr if thr < upper else -0.02
+            span = max(upper - lower, 1e-6)
+            passed = raw >= lower
+            normalized = (raw - lower) / span
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        return None, False
+
+    def _build_domain_utility(
+        self,
+        *,
+        metrics: Dict[str, float],
+        performance_snapshot: Dict[str, float],
+        edge_block: Dict[str, Any],
+        criteria_cfg: Optional[Dict[str, Any]],
+        config: Dict[str, Any],
+        expected_profit: float,
+        position_value: Optional[float],
+    ) -> Dict[str, Any]:
+        expected_profit_floor = self._effective_expected_profit_floor(
+            criteria_cfg,
+            position_value=position_value,
+        )
+        terminal_da_threshold, terminal_da_alias = self._resolve_success_threshold(
+            criteria_cfg,
+            "min_terminal_directional_accuracy",
+            aliases=("min_directional_accuracy",),
+        )
+        if terminal_da_threshold is None:
+            terminal_da_threshold = 0.50
+
+        expected_shortfall_threshold = None
+        if isinstance(criteria_cfg, dict):
+            expected_shortfall_threshold = criteria_cfg.get("min_expected_shortfall")
+        if expected_shortfall_threshold is None:
+            expected_shortfall_threshold = -0.02
+
+        validation_mode = str(config.get("validation_mode") or "drift_proxy").lower()
+
+        utility_values = {
+            "expected_profit": expected_profit,
+            "omega_ratio": metrics.get("omega_ratio"),
+            "profit_factor": performance_snapshot.get("profit_factor"),
+            "max_drawdown": metrics.get("max_drawdown"),
+            "expected_shortfall": metrics.get("expected_shortfall"),
+        }
+        utility_thresholds = {
+            "expected_profit": expected_profit_floor,
+            "omega_ratio": (criteria_cfg or {}).get("min_omega_ratio", 1.0),
+            "profit_factor": (criteria_cfg or {}).get("min_profit_factor", 1.0),
+            "max_drawdown": (criteria_cfg or {}).get("max_drawdown", 0.25),
+            "expected_shortfall": expected_shortfall_threshold,
+        }
+        if validation_mode == "forecast_edge" or edge_block.get("terminal_directional_accuracy") is not None:
+            utility_values["terminal_directional_accuracy"] = edge_block.get("terminal_directional_accuracy")
+            utility_thresholds["terminal_directional_accuracy"] = terminal_da_threshold
+
+        configured_weights = None
+        weights_source = "utility_weights"
+        config_warnings: List[str] = []
+        if isinstance(config, dict):
+            configured_weights = config.get("utility_weights")
+            if configured_weights is None and isinstance(config.get("criterion_weights"), dict):
+                configured_weights = config.get("criterion_weights")
+                weights_source = "criterion_weights"
+                config_warnings.append("deprecated_config_key:criterion_weights")
+        if terminal_da_alias:
+            config_warnings.append(f"deprecated_success_threshold:{terminal_da_alias}")
+
+        resolved_weights, missing_keys, unused_keys = self._resolve_weighted_scoring_weights(
+            criteria={key: True for key in utility_values},
+            configured_weights=configured_weights,
+        )
+
+        missing_value_keys: List[str] = []
+        utility_breakdown: Dict[str, Dict[str, Any]] = {}
+        weighted_sum = 0.0
+        total_weight = 0.0
+
+        for key, raw_value in utility_values.items():
+            normalized_score, passed_threshold = self._normalize_domain_utility_component(
+                name=key,
+                raw_value=raw_value,
+                threshold=utility_thresholds.get(key),
+            )
+            if normalized_score is None:
+                missing_value_keys.append(key)
+                weighted_contribution = 0.0
+            else:
+                weight = float(resolved_weights.get(key, 0.0))
+                weighted_contribution = weight * normalized_score
+                total_weight += weight
+                weighted_sum += weighted_contribution
+
+            utility_breakdown[key] = {
+                "raw_value": raw_value,
+                "threshold": utility_thresholds.get(key),
+                "normalized_score": normalized_score,
+                "weight": float(resolved_weights.get(key, 0.0)),
+                "weighted_contribution": float(weighted_contribution),
+                "passed_threshold": bool(passed_threshold),
+            }
+
+        utility_score = (weighted_sum / total_weight) if total_weight > 0 else None
+        coverage_ok = not missing_keys and not missing_value_keys
+        return {
+            "utility_breakdown": utility_breakdown,
+            "utility_score": utility_score,
+            "total_weight": total_weight,
+            "weight_validation": {
+                "strict_weight_coverage": True,
+                "missing_weight_keys": missing_keys,
+                "unused_weight_keys": unused_keys,
+                "missing_component_values": missing_value_keys,
+                "coverage_ok": coverage_ok,
+                "weights_source": weights_source,
+            },
+            "config_warnings": config_warnings,
         }
 
     def _resolve_weighted_scoring_weights(
@@ -2493,7 +2799,7 @@ class TimeSeriesSignalGenerator:
         Returns:
             (resolved_weights_by_criterion, missing_criterion_weights, unused_weight_keys)
         """
-        defaults = self._default_weighted_criterion_weights()
+        defaults = self._default_domain_utility_weights()
         normalized_config: Dict[str, float] = {}
         if isinstance(configured_weights, dict):
             for raw_key, raw_weight in configured_weights.items():
@@ -2544,26 +2850,6 @@ class TimeSeriesSignalGenerator:
             return {}
 
         results: Dict[str, bool] = {}
-
-        if 'min_annual_return' in criteria_cfg and 'annual_return' in metrics:
-            results['annual_return'] = metrics['annual_return'] >= float(criteria_cfg['min_annual_return'])
-
-        if 'min_sharpe' in criteria_cfg and 'sharpe_ratio' in metrics:
-            results['sharpe_ratio'] = metrics['sharpe_ratio'] >= float(criteria_cfg['min_sharpe'])
-
-        if 'min_sortino' in criteria_cfg and 'sortino_ratio' in metrics:
-            results['sortino_ratio'] = metrics['sortino_ratio'] >= float(criteria_cfg['min_sortino'])
-
-        if 'max_drawdown' in criteria_cfg and 'max_drawdown' in metrics:
-            results['max_drawdown'] = metrics['max_drawdown'] <= float(criteria_cfg['max_drawdown'])
-
-        if 'min_profit_factor' in criteria_cfg:
-            pf = performance_snapshot.get('profit_factor', 0.0)
-            results['profit_factor'] = pf >= float(criteria_cfg['min_profit_factor'])
-
-        if 'min_win_rate' in criteria_cfg:
-            wr = performance_snapshot.get('win_rate', 0.0)
-            results['win_rate'] = wr >= float(criteria_cfg['min_win_rate'])
 
         action_upper = str(action or "HOLD").upper()
         if action_upper != "HOLD" and ('min_expected_profit' in criteria_cfg or 'min_expected_profit_pct' in criteria_cfg):

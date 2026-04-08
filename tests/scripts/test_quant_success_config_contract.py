@@ -9,29 +9,33 @@ def test_quant_success_config_weight_schema_contract() -> None:
     qv = payload.get("quant_validation") or {}
 
     assert qv.get("objective_mode") == "domain_utility"
-    assert qv.get("scoring_mode") == "weighted"
+    assert qv.get("scoring_mode") == "domain_utility"
     assert bool(qv.get("strict_weight_coverage")) is True
 
     pass_threshold = float(qv.get("pass_threshold", 0.0))
     assert 0.0 <= pass_threshold <= 1.0
 
-    weights = qv.get("criterion_weights") or {}
+    weights = qv.get("utility_weights") or {}
     assert isinstance(weights, dict)
 
     required = {
         "expected_profit",
-        "annual_return",
+        "omega_ratio",
+        "profit_factor",
+        "terminal_directional_accuracy",
         "max_drawdown",
-        "rmse_ratio_vs_baseline",
-        "directional_accuracy",
+        "expected_shortfall",
     }
     assert required.issubset(set(weights.keys()))
-    assert "omega_ratio" in weights
-    assert "rmse_ratio" not in weights
-    assert float(weights["omega_ratio"]) > float(weights["win_rate"])
+    assert "criterion_weights" not in qv
+    assert "directional_accuracy" not in weights
 
     total = sum(float(v) for v in weights.values())
     assert abs(total - 1.0) < 1e-6
+
+    success = qv.get("success_criteria") or {}
+    assert "min_terminal_directional_accuracy" in success
+    assert "min_expected_shortfall" in success
 
 
 def test_barbell_objective_docs_contract() -> None:

@@ -26,39 +26,36 @@ quant_validation:
     # Phase 7.10: Recalibrated to magnitude-asymmetry regime (2.65x win/loss ratio,
     # 41% WR). Previous thresholds caused 94.2% FAIL rate (P0 adversarial finding).
     # System profits through asymmetric sizing, not directional accuracy.
-    min_annual_return: -0.05     # Allow small negative annual return (magnitude asymmetry compensates)
-    min_sharpe: -0.10            # Phase 7.10: Lowered from 0.10; asymmetry-based system has low Sharpe by design
-    min_sortino: -0.10           # Phase 7.10: Lowered from 0.15; same reasoning as Sharpe
+    min_annual_return: -0.05     # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
+    min_sharpe: -0.10            # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
+    min_sortino: -0.10           # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     max_drawdown: 0.45           # Phase 7.10: Widened from 0.40 to accommodate volatility
     min_omega_ratio: 1.00        # Barbell-aware hurdle: require gain mass to beat loss mass around NGN hurdle
     min_profit_factor: 0.80      # Phase 7.10: Lowered from 1.00; allow marginal trades that contribute to portfolio diversification
-    min_win_rate: 0.30           # Phase 7.10: Lowered from 0.40; system targets 2.5x+ win/loss ratio, not accuracy
+    min_win_rate: 0.30           # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     min_expected_profit: 5.00          # Phase 7.10b: Absolute floor ($); raised from 0.50 to prevent trivially small trades
     min_expected_profit_pct: 0.002    # Phase 7.10b: Relative floor (0.2% of capital_base=$50); PASS if either met
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
-    min_directional_accuracy: 0.45    # Requires material directional edge above coin-flip floor
+    min_terminal_directional_accuracy: 0.45  # Canonical directional gate for multi-bar trade alignment
+    min_directional_accuracy: 0.45           # Deprecated alias; kept for one compatibility pass
+    min_expected_shortfall: -0.02           # Downside floor: less negative ES is better
     require_significance: false
     min_information_ratio: 0.0
 
-  # Weighted scoring is the implementation detail for the canonical domain_utility objective.
-  # Primary economic fields are expected_profit, omega_ratio, profit_factor, directional edge,
-  # drawdown, and expected shortfall. Sharpe, Sortino, and win_rate remain secondary diagnostics.
-  # PASS if normalized_score >= pass_threshold. expected_profit < 0 is always FAIL (hard gate).
-  scoring_mode: weighted              # 'all_pass' (legacy) or 'weighted'
+  # Two-layer scoring is the implementation detail for the canonical domain_utility objective.
+  # Layer 1: structural forecast gates (expected_profit, RMSE ratio, terminal directional edge).
+  # Layer 2: continuous domain utility on asymmetric upside and bounded downside.
+  scoring_mode: domain_utility        # 'domain_utility' (canonical) or 'all_pass' (legacy)
   pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
-  strict_weight_coverage: true       # Fail when a criterion has no explicit/known weight mapping
-  criterion_weights:
-    expected_profit: 0.20            # Economic viability of the proposed trade
-    rmse_ratio_vs_baseline: 0.18     # Forecast-edge quality vs baseline model
-    directional_accuracy: 0.14       # Directional edge signal quality
-    omega_ratio: 0.16                # Barbell-aware upside asymmetry around NGN hurdle
-    annual_return: 0.06              # Performance floor alignment
-    max_drawdown: 0.05               # Drawdown guardrail contribution
-    sharpe_ratio: 0.03               # Kept for continuity, but deemphasized for barbell legs
-    sortino_ratio: 0.02              # Downside-adjusted return still relevant, not dominant
-    profit_factor: 0.14              # Win/loss magnitude quality
-    win_rate: 0.02                   # Lowest weight: asymmetry matters more than hit rate
+  strict_weight_coverage: true       # Fail when a utility component lacks an explicit/known weight or value
+  utility_weights:
+    expected_profit: 0.24            # Economic viability of the proposed trade
+    omega_ratio: 0.20                # Barbell-aware upside asymmetry around NGN hurdle
+    profit_factor: 0.18              # Win/loss magnitude quality
+    terminal_directional_accuracy: 0.18  # Multi-step directional alignment with realized trade payoff
+    max_drawdown: 0.10               # Drawdown containment contribution
+    expected_shortfall: 0.10         # Tail-loss containment contribution
 
   calibration:
     db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query
@@ -83,7 +80,6 @@ quant_validation:
         min_annual_return: -0.05
         max_drawdown: 0.45
         min_profit_factor: 0.80
-        min_win_rate: 0.30
         min_expected_profit: 1.0
 
   bootstrap:
@@ -101,9 +97,9 @@ quant_validation:
     filename: "quant_validation.jsonl"
     tail_entries: 10            # Used by bash helpers when printing summaries
 
-# THR-03 fix: canonical accessor path used by adversarial checker and Layer 3 of
-# check_model_improvement.py (quant_success.quant_validation.min_directional_accuracy).
-# Value must stay in sync with quant_validation.success_criteria.min_directional_accuracy above.
+# THR-03 compatibility shim: Layer 3 and older health scripts still read the root key.
+# Keep the deprecated alias in sync with the canonical terminal-directional threshold.
 quant_success:
   quant_validation:
+    min_terminal_directional_accuracy: 0.45
     min_directional_accuracy: 0.45
