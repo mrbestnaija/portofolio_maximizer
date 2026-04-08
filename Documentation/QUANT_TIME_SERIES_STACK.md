@@ -14,6 +14,13 @@ Focus: data science, ML, and statistical modeling for time series / investments 
 > - Barbell risk view captured in `BARBELL_INTEGRATION_TODO.md`: evaluation of long-vol/tail-hedge legs should lean on asymmetric/tail-aware metrics (Sortino, Omega, CVaR, crisis scenarios) rather than Sharpe alone.
 > - Options/derivatives path formalised as a **future, feature-flagged extension**: `config/options_config.yml` + `Documentation/BARBELL_OPTIONS_MIGRATION.md` describe how to add options under a barbell allocation *without* changing the Tier-1 time-series stack or spot-only pipelines when options are disabled.
 
+> **Apr 8, 2026 Delta**
+> - Canonical objective policy now lives in `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> - Model selection, ensemble governance, and audit language must be judged against barbell-compatible
+>   utility, not generic forecast neatness.
+> - Horizon semantics are bars, not calendar days. Use `forecast_horizon_bars`,
+>   `forecast_horizon_units="bars"`, and `expected_close_source` when documenting time alignment.
+
 ## Tiered Stack Overview (Project-Aligned)
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.

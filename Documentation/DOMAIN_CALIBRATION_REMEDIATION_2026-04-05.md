@@ -1,5 +1,10 @@
 # Domain-Calibrated Remediation Plan — 2026-04-05
 
+> Historical evidence note: objective semantics are now governed by
+> `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> Where this note frames Sharpe, win rate, or other symmetric metrics as primary, treat that wording
+> as historical context rather than the current repo-wide default.
+
 ## Purpose
 
 This document captures the findings and implementation plan from the adversarial audit

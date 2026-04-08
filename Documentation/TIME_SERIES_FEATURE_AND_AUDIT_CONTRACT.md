@@ -3,6 +3,19 @@
 This contract defines the minimum provenance and policy fields that every
 production-facing time-series forecast artifact must carry.
 
+> Canonical objective policy: `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`
+> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+
+## Required repo-wide policy fields
+
+- `objective_mode`: Must default to `domain_utility`.
+- `forecast_horizon_bars`: Canonical horizon count in bars.
+- `forecast_horizon_units`: Must be `"bars"` when the horizon is emitted explicitly.
+- `expected_close_source`: How the expected close timestamp was resolved.
+- `posture`: `GENUINE_PASS`, `WARMUP_COVERED_PASS`, or `FAIL`.
+- `matrix_health`: Structural diagnostics for the matrix/design path.
+- `utility_breakdown`: Primary-objective breakdown for the emitted signal or audit record.
+
 ## Required audit fields
 
 - `dataset_hash`: Stable hash for the dataset snapshot used by the report or run.
@@ -20,6 +33,26 @@ production-facing time-series forecast artifact must carry.
 - `residual_diagnostics`: Per-model normalized residual diagnostics.
 - `active_rank`: MSSA-RL rank selected by the bounded policy for the emitted forecast.
 - `q_state`: MSSA-RL policy state used for the emitted forecast.
+
+## Objective field vocabulary
+
+### Primary objective fields
+
+- `expected_profit`
+- `omega_ratio`
+- `profit_factor`
+- `terminal_directional_accuracy`
+- `max_drawdown`
+- `expected_shortfall`
+- `utility_breakdown`
+
+### Diagnostic-only fields by default
+
+- `win_rate`
+- `sharpe_ratio`
+- `sortino_ratio`
+- `brier_score`
+- one-step directional metrics unless a local contract promotes them explicitly
 
 ## Required behaviors
 

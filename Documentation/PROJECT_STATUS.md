@@ -6,6 +6,12 @@
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
 **Document updated**: 2026-03-02
 
+## Delta (2026-04-08)
+
+- Canonical objective policy now lives in `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+- Implemented documentation rule: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+- Older sections in this file remain useful evidence, but when they describe Sharpe, win rate, or generic forecast neatness as the primary goal, treat that wording as historical context rather than the current repo-wide default.
+
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 
 **Regression baseline**: 1489 passed, 1 skipped, 7 xfailed (`pytest -m "not gpu and not slow"`)

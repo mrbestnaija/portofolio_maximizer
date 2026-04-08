@@ -5,6 +5,12 @@
 **Status**: Draft calibration memo – codifies current behaviour and outlines how to tighten it.
 **Current status (2026-01-07)**: Brutal suite quant health is GREEN; thresholds and scripts here remain the production monitoring source (see `Documentation/PROJECT_STATUS.md`).
 
+> **Delta (2026-04-08):** Canonical objective policy now lives in
+> `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> Quant validation gates protect the asymmetric economic objective; they do not replace it with
+> symmetric scoring. Calibration, DA, and health thresholds exist to keep barbell-style upside
+> capture honest and causally valid.
+
 This document explains how the current quant validation monitoring thresholds work, how they map to GREEN / YELLOW / RED states, and how they should be interpreted in the context of Portfolio Maximizer’s “evidence before complexity” philosophy.
 
 The goal is twofold:

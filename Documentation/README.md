@@ -8,6 +8,9 @@
 
 > Canonical documentation navigator: [DOCS_INDEX.md](DOCS_INDEX.md)
 
+> Canonical objective policy: [REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md](REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md)
+> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+
 **Version**: 3.0
 **Status**: Production Ready âœ…
 **Last Updated**: 2026-03-05

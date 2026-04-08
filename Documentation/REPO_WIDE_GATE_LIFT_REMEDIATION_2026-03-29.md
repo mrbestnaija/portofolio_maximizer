@@ -1,5 +1,10 @@
 # Repo-Wide Gate Lift Remediation
 
+> Historical evidence note: objective semantics are now governed by
+> `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> This note remains valid for gate-lift evidence, but its objective framing is subordinate to the
+> repo-wide barbell-asymmetry policy.
+
 **Status**: COMPLETE — gate PASS (semantics=PASS), 33.33% violation rate, decision=KEEP
 **Date**: 2026-03-29 (audit) / 2026-03-30 (remediation complete)
 **Scope**: Repo-wide guidance for forecast-gate lift recovery, selector correctness, and evidence generation

@@ -6,6 +6,7 @@
 
 quant_validation:
   enabled: true
+  objective_mode: domain_utility  # Canonical repo-wide default: asymmetric upside with bounded downside
   validation_mode: forecast_edge  # drift_proxy | forecast_edge
   lookback_days: 365  # Align with quant-validation automation to grow sample size
   risk_free_rate: 0.04  # Annualized risk-free assumption per success doc
@@ -29,6 +30,7 @@ quant_validation:
     min_sharpe: -0.10            # Phase 7.10: Lowered from 0.10; asymmetry-based system has low Sharpe by design
     min_sortino: -0.10           # Phase 7.10: Lowered from 0.15; same reasoning as Sharpe
     max_drawdown: 0.45           # Phase 7.10: Widened from 0.40 to accommodate volatility
+    min_omega_ratio: 1.00        # Barbell-aware hurdle: require gain mass to beat loss mass around NGN hurdle
     min_profit_factor: 0.80      # Phase 7.10: Lowered from 1.00; allow marginal trades that contribute to portfolio diversification
     min_win_rate: 0.30           # Phase 7.10: Lowered from 0.40; system targets 2.5x+ win/loss ratio, not accuracy
     min_expected_profit: 5.00          # Phase 7.10b: Absolute floor ($); raised from 0.50 to prevent trivially small trades
@@ -39,23 +41,24 @@ quant_validation:
     require_significance: false
     min_information_ratio: 0.0
 
-  # Weighted scoring mode (Phase 7.10b+): replaces ALL-MUST-PASS with weighted average.
-  # Each criterion contributes weight * {0|1} to overall score.
+  # Weighted scoring is the implementation detail for the canonical domain_utility objective.
+  # Primary economic fields are expected_profit, omega_ratio, profit_factor, directional edge,
+  # drawdown, and expected shortfall. Sharpe, Sortino, and win_rate remain secondary diagnostics.
   # PASS if normalized_score >= pass_threshold. expected_profit < 0 is always FAIL (hard gate).
-  # Set scoring_mode: all_pass to restore legacy behaviour.
   scoring_mode: weighted              # 'all_pass' (legacy) or 'weighted'
   pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
   strict_weight_coverage: true       # Fail when a criterion has no explicit/known weight mapping
   criterion_weights:
-    expected_profit: 0.23            # Largest weight: expected value quality
-    rmse_ratio_vs_baseline: 0.20     # Forecast-edge quality vs baseline model
-    directional_accuracy: 0.16       # Directional edge signal quality
-    annual_return: 0.08              # Performance floor alignment
-    max_drawdown: 0.07               # Drawdown guardrail contribution
-    sharpe_ratio: 0.08               # Risk-adjusted return contribution
-    sortino_ratio: 0.08              # Downside-adjusted return contribution
-    profit_factor: 0.06              # Win/loss magnitude quality
-    win_rate: 0.04                   # Raw hit-rate (intentionally lowest weight)
+    expected_profit: 0.20            # Economic viability of the proposed trade
+    rmse_ratio_vs_baseline: 0.18     # Forecast-edge quality vs baseline model
+    directional_accuracy: 0.14       # Directional edge signal quality
+    omega_ratio: 0.16                # Barbell-aware upside asymmetry around NGN hurdle
+    annual_return: 0.06              # Performance floor alignment
+    max_drawdown: 0.05               # Drawdown guardrail contribution
+    sharpe_ratio: 0.03               # Kept for continuity, but deemphasized for barbell legs
+    sortino_ratio: 0.02              # Downside-adjusted return still relevant, not dominant
+    profit_factor: 0.14              # Win/loss magnitude quality
+    win_rate: 0.02                   # Lowest weight: asymmetry matters more than hit rate
 
   calibration:
     db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query

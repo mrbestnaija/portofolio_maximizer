@@ -9,6 +9,9 @@
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
+> Canonical objective policy: [Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md](Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md)
+> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+
 **Version**: 4.5
 **Status**: Phase 10 complete — SARIMAX re-enable, RMSE-rank hybrid confidence, production gate unblock, OpenClaw integration
 **Last Updated**: 2026-03-19
@@ -19,6 +22,11 @@ Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
 ## Current Repo Truth (2026-03-19)
+
+- **Implemented documentation policy (2026-04-08):** repo-wide objective semantics now live in
+  `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`. Treat
+  `objective_mode: domain_utility` and bar-based horizon language as the current canonical wording.
+  Any older wording that treats Sharpe, win rate, or generic forecast RMSE as the primary target is historical context, not the current default.
 
 - **Phase 10 (SARIMAX Re-enable + Production Gate Unblock) is complete.** SARIMAX
   is now enabled by default (`sarimax_enabled: true`) for model-class diversity.

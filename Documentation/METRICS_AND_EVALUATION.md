@@ -12,6 +12,39 @@
 
 **Purpose**: Provide unambiguous, auditable metric definitions for papers/thesis, internal reports, dashboards, and automated gates.
 
+## Delta (2026-04-08)
+
+- Canonical objective policy: `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+- Implemented default: `objective_mode: domain_utility`.
+- Binding rule: barbell asymmetry is the primary economic objective. Metrics in this file protect,
+  explain, or quantify that objective; they do not override it.
+
+## 0. Domain Utility (Primary Economic Objective)
+
+For time-series signal selection, optimization, and audit language, the repo-wide default objective is
+`domain_utility`, not symmetric textbook efficiency.
+
+### Primary objective fields
+
+- `expected_profit`
+- `omega_ratio`
+- `profit_factor`
+- `terminal_directional_accuracy`
+- `max_drawdown`
+- `expected_shortfall`
+- `utility_breakdown`
+
+### Diagnostic-only metrics by default
+
+- `win_rate`
+- `sharpe_ratio`
+- `sortino_ratio`
+- `brier_score`
+- one-step directional metrics unless a local contract explicitly promotes them
+
+Use diagnostic metrics to explain why an asymmetric strategy is healthy or unhealthy. Do not use them as
+the repo-wide top-level optimization target unless a local exception is documented explicitly.
+
 Ground truth implementations live in:
 
 - `etl/portfolio_math.py` (portfolio-level metrics and risk)

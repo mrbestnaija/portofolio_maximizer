@@ -26,6 +26,12 @@ This document is intentionally “policy-like”: it tells you what must be true
 - DB-backed dashboard now **falls back to trade executions** when `portfolio_positions` is empty and **filters trade events to the latest `run_id` by default** (opt-out via `--latest-run-only`).
 - Ops helpers: `bash/run_daily_trader.sh` (daily + intraday passes with resume), `bash/reset_portfolio.sh` (clear persisted state), and `scripts/migrate_add_portfolio_state.py` (add the new state tables for existing DBs).
 
+## Delta (2026-04-08)
+
+- Canonical objective policy added: `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+- Binding economic objective: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+- Conflict rule: if any older document implies Sharpe, win rate, or balanced classification-style accuracy is the primary target, that statement is superseded by the barbell-asymmetry policy above.
+
 ---
 
 ## 1. Canonical Documents (Single Source of Truth)
@@ -38,6 +44,7 @@ The project contains many documents; the following are the **core** ones that sh
 - **Version control policy (remote-first)**: `Documentation/GIT_WORKFLOW.md`
 - **Architecture + navigation map**: `Documentation/arch_tree.md`
 - **Current engineering health snapshot**: `Documentation/PROJECT_STATUS.md`
+- **Repo-wide objective and matrix-first remediation policy**: `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`
 - **Chronological verification/evidence log**: `Documentation/implementation_checkpoint.md`
 - **Research questions + experimental design**: `Documentation/RESEARCH_PROGRESS_AND_PUBLICATION_PLAN.md`
 - **Institutional operating procedure (runbook)**: `Documentation/INSTITUTIONAL_WORKFLOW_RUNBOOK.md`
@@ -51,8 +58,9 @@ The project contains many documents; the following are the **core** ones that sh
 If something is unclear or conflicting, treat this as the priority order for resolving ambiguity:
 
 1. Code + tests (ground truth)
-2. `Documentation/PROJECT_STATUS.md` (current intent)
-3. `Documentation/METRICS_AND_EVALUATION.md` (definitions)
+2. `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md` (objective semantics and repo-wide policy)
+3. `Documentation/PROJECT_STATUS.md` (current intent)
+4. `Documentation/METRICS_AND_EVALUATION.md` (definitions)
 4. Other docs (supporting context)
 
 **Remote-first hygiene**

@@ -1,6 +1,10 @@
 # TODO – Taleb Barbell Strategy Integration
 
 > Scope: implement a **Taleb-style barbell framework** across allocation, LLM Phase A, ML Phase B, antifragility tests, and NGX/frontier exposure – without violating guardrails/phase gating in `UNIFIED_ROADMAP.md`.
+>
+> Repo-wide objective semantics are now canonical in `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> This file is roadmap scope only. Do not treat it as the canonical place to redefine objective policy,
+> metric priority, or warmup posture semantics.
 
 ---
 

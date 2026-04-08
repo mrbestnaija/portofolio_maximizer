@@ -1,5 +1,10 @@
 ## MSSA-RL Offline Remediation 2026-04-04
 
+> Historical evidence note: objective semantics are now governed by
+> `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> This note remains the canonical offline-policy containment record for MSSA-RL, but any broader
+> objective framing is subordinate to the repo-wide barbell-asymmetry policy.
+
 ### Purpose
 
 This note records the remediation contract for the MSSA-RL offline-policy redesign after the
@@ -86,4 +91,3 @@ The codebase must follow these rules after this remediation:
 5. Exclude non-ready MSSA-RL from ensemble confidence and candidate scoring.
 6. Replace stale Q-learning tests with offline-policy contract tests.
 7. Re-run targeted MSSA/GARCH/SAMOSSA/monitoring lanes and the fast regression lane.
-

@@ -5,6 +5,11 @@
 **Status**: Production Standard  
 **Primary Goal**: **MEASURABLE PROFIT ON TRADE**
 
+> **Delta (2026-04-08):** Canonical objective policy now lives in
+> `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+> For time-series signal evaluation, asymmetric payoff quality is primary; Sharpe, Sortino, and win rate are secondary diagnostics unless a local exception is documented explicitly.
+
 > **Telemetry update (Nov 16, 2025):** Time-series forecaster instrumentation now emits per-model audit reports (dataset summary + RMSE/sMAPE/tracking error), so every KPI listed here can be traced back to concrete runs (`logs/forecast_audits/*.json` when enabled).
 
 ---
@@ -13,6 +18,10 @@
 
 ### **Definition**
 Success is measured by **actual realized profit** from executed trades, not predictive metrics or theoretical returns.
+
+For the time-series forecasting and signal stack, realized profit must be interpreted through the
+barbell-asymmetry policy above. A lower hit rate can still be healthy when convex upside, payoff
+asymmetry, and downside containment improve total economic utility.
 
 ### **Formula**
 ```

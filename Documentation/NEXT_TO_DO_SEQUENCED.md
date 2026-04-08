@@ -2,6 +2,11 @@
 
 > **Reward-to-Effort Integration:** For automation, monetization, and sequencing work, align with `Documentation/REWARD_TO_EFFORT_INTEGRATION_PLAN.md`.
 
+> **Objective policy (2026-04-08):** `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md` is now canonical.
+> Barbell asymmetry is the primary economic objective. Sequencing that optimizes Sharpe, win rate,
+> or generic forecast neatness ahead of asymmetric upside and bounded downside is out of policy unless
+> a local exception is documented explicitly.
+
 **Production-Ready ML Trading System - Critical Fixes First**
 
 **Date**: October 19, 2025
