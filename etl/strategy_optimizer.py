@@ -111,13 +111,19 @@ class StrategyOptimizer:
         return True
 
     def score_metrics(self, metrics: Dict[str, float]) -> float:
-        """Compute a scalar score using a weighted sum of metrics."""
+        """Compute a scalar score using a weighted sum of metrics.
+
+        Infinite values (e.g., omega_ratio=inf when there are no losses) are capped
+        at _BARBELL_SCORE_CAP to keep the score finite and comparable across candidates.
+        """
+        _BARBELL_SCORE_CAP = 1e6
         score = 0.0
         for name, weight in self.objectives.items():
             value = metrics.get(name)
             if value is None:
                 continue
-            score += float(weight) * float(value)
+            capped = max(-_BARBELL_SCORE_CAP, min(_BARBELL_SCORE_CAP, float(value)))
+            score += float(weight) * capped
         return score
 
     def run(

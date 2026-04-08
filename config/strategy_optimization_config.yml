@@ -20,19 +20,26 @@ strategy_optimization:
 
   # Objective weights for scoring candidates. Positive weights reward; negative
   # weights penalize. These weights are purely configuration-driven.
+  # Barbell-asymmetry policy: reward upside (omega_ratio, profit_factor) and
+  # penalize tail loss (max_drawdown, expected_shortfall). win_rate and sortino
+  # are intentionally omitted — asymmetric systems can profit at 30-40% WR.
   objectives:
     total_return: 1.0
+    omega_ratio: 0.8
     profit_factor: 0.5
+    expected_shortfall: -0.4
     max_drawdown: -0.5
 
   # Hard constraints on metrics. The optimizer will discard candidates whose
   # evaluated metrics do not satisfy these thresholds.
+  # NOTE: win_rate is NOT a constraint here — barbell-asymmetry policy permits low win rate
+  # when payoff asymmetry is large (p*avg_win > (1-p)*avg_loss). Candidates are
+  # evaluated by omega_ratio + profit_factor, not by directional accuracy.
   constraints:
     min:
-      win_rate: 0.5
-      profit_factor: 1.2
+      profit_factor: 1.0
     max:
-      max_drawdown: 0.2
+      max_drawdown: 0.3
 
   evaluation:
     # Shorten the default window so recent trades (e.g., last week) are evaluated

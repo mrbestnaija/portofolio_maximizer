@@ -31,6 +31,8 @@ class BacktestResult:
     profit_factor: float
     max_drawdown: float
     total_trades: int
+    total_return: float = 0.0
+    strategy_returns: Optional[pd.Series] = None
 
 
 def _max_drawdown(equity: pd.Series) -> float:
@@ -62,11 +64,11 @@ def backtest_candidate(
       this backtest does not modify them.
     """
     if not tickers:
-        return BacktestResult(0.0, 0.0, 0.0, 0.0, 0)
+        return BacktestResult(0.0, 0.0, 0.0, 0.0, 0, total_return=0.0, strategy_returns=pd.Series(dtype=float))
 
     df = db_manager.load_ohlcv(list(tickers), start_date=start, end_date=end)
     if df.empty:
-        return BacktestResult(0.0, 0.0, 0.0, 0.0, 0)
+        return BacktestResult(0.0, 0.0, 0.0, 0.0, 0, total_return=0.0, strategy_returns=pd.Series(dtype=float))
 
     # Extract guardrails
     min_ret = float(guardrails.get("min_expected_return", 0.0) or 0.0)
@@ -116,7 +118,7 @@ def backtest_candidate(
     gross_loss = float(np.abs(np.sum([ev for ev in pnl_events if ev < 0]))) if pnl_events else 0.0
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf") if gross_profit > 0 else 0.0
 
-    # Equity aggregation for drawdown
+    # Equity aggregation for drawdown and strategy returns
     max_len = max((len(eq) for eq in equity_curve), default=0)
     agg = np.zeros(max_len)
     for eq in equity_curve:
@@ -126,7 +128,11 @@ def backtest_candidate(
             padded = eq
         agg += padded
     agg = agg / max(1, len(equity_curve)) if len(equity_curve) else agg
-    max_drawdown = _max_drawdown(pd.Series(agg))
+    agg_series = pd.Series(agg)
+    max_drawdown = _max_drawdown(agg_series)
+    total_return = float(agg_series.iloc[-1] - 1.0) if len(agg_series) > 0 else 0.0
+    # Per-bar returns for portfolio_metrics_ngn() and omega_ratio computation
+    strategy_returns = agg_series.pct_change().fillna(0.0) if len(agg_series) > 1 else pd.Series([0.0])
 
     return BacktestResult(
         total_profit=total_profit,
@@ -134,4 +140,6 @@ def backtest_candidate(
         profit_factor=profit_factor,
         max_drawdown=max_drawdown,
         total_trades=len(pnl_events),
+        total_return=total_return,
+        strategy_returns=strategy_returns,
     )

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import yaml
 
 import scripts.run_strategy_optimization as strategy_opt
 
@@ -115,3 +117,27 @@ def test_run_strategy_optimization_fails_closed_when_regression_summary_missing(
         )
 
     assert "requires ensemble and baseline RMSE" in str(excinfo.value)
+
+
+def test_strategy_optimization_config_has_no_win_rate_constraint():
+    """Barbell policy: win_rate must NOT be a hard constraint.
+    Low win rate is valid when payoff asymmetry is large (p*avg_win > (1-p)*avg_loss).
+    """
+    cfg_path = Path("config/strategy_optimization_config.yml")
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    constraints = cfg.get("strategy_optimization", {}).get("constraints", {})
+    min_constraints = constraints.get("min", {})
+    assert "win_rate" not in min_constraints, (
+        "win_rate must not be a hard min constraint — barbell asymmetry policy permits "
+        "low win rate when avg_win/avg_loss is large. Remove 'win_rate' from constraints.min."
+    )
+
+
+def test_strategy_optimization_config_barbell_objectives_present():
+    """Barbell policy: omega_ratio and expected_shortfall must be in optimizer objectives."""
+    cfg_path = Path("config/strategy_optimization_config.yml")
+    cfg = yaml.safe_load(cfg_path.read_text()) or {}
+    objectives = cfg.get("strategy_optimization", {}).get("objectives", {})
+    assert "omega_ratio" in objectives, "omega_ratio must be an optimizer objective (barbell asymmetry)"
+    assert "expected_shortfall" in objectives, "expected_shortfall must be an optimizer objective (downside bound)"
+    assert objectives.get("expected_shortfall", 0) < 0, "expected_shortfall weight must be negative (penalize tail loss)"
