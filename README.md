@@ -937,7 +937,7 @@ pytest tests/ -v --tb=short
 ### Operational Documentation
 
 - **[AGENTS.md](AGENTS.md)**: Agent guardrails, cron notification rules, tool-use protocol
-- **[Documentation/LOG_ORGANIZATION_SUMMARY.md](Documentation/LOG_ORGANIZATION_SUMMARY.md)**: Log structure, search patterns, retention policies
+- **[logs/README.md](logs/README.md)**: Log structure, search patterns, retention policies
 - **[Cron Automation](Documentation/CRON_AUTOMATION.md)**: Production-style scheduling + evidence freshness wiring
 - **[Production Security + Profitability Runbook](Documentation/PRODUCTION_SECURITY_AND_PROFITABILITY_RUNBOOK.md)**: CVE defaults, overrides, gate-clearance workflow
 - **[Implementation Checkpoint](Documentation/implementation_checkpoint.md)**: Development status

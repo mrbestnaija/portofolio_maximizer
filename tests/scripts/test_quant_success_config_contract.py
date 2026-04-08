@@ -62,7 +62,7 @@ def test_barbell_objective_docs_contract() -> None:
         assert token in canonical_text
 
     link_only_docs = (
-        Path("Documentation/DOCS_INDEX.md"),
+        Path("Documentation/DOCUMENTATION_INDEX.md"),
         Path("Documentation/DOCUMENTATION_INDEX.md"),
         Path("Documentation/CORE_PROJECT_DOCUMENTATION.md"),
         Path("README.md"),
