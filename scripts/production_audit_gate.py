@@ -1390,8 +1390,10 @@ def main() -> int:
     # they can be tuned without code changes.  Defaults match the prior
     # hardcoded values (10 / 0.8) and the yaml values above.
     _linkage_rmse_cfg = _load_regression_monitoring_config(monitor_config)
-    _linkage_min_matched = int(_linkage_rmse_cfg.get("linkage_min_matched", 10) or 10)
-    _linkage_min_ratio = float(_linkage_rmse_cfg.get("linkage_min_ratio", 0.8) or 0.8)
+    _configured_linkage_min_matched = int(_linkage_rmse_cfg.get("linkage_min_matched", 10) or 10)
+    _configured_linkage_min_ratio = float(_linkage_rmse_cfg.get("linkage_min_ratio", 0.8) or 0.8)
+    _linkage_min_matched = _configured_linkage_min_matched
+    _linkage_min_ratio = _configured_linkage_min_ratio
     # Phase 10: During warmup, relax THIN_LINKAGE to a 1-match floor so the
     # gate does not block when the system is still accumulating live closed
     # trades. Full thresholds apply once warmup has expired.
@@ -1401,6 +1403,11 @@ def main() -> int:
         _linkage_min_ratio = 0.0
     # Vacuously pass when no eligible records exist yet (accumulation phase).
     _linkage_no_eligible = outcome_eligible == 0
+    linkage_full_thresholds_pass = (
+        outcome_eligible > 0
+        and outcome_matched >= _configured_linkage_min_matched
+        and matched_over_eligible >= _configured_linkage_min_ratio
+    )
     linkage_pass = _linkage_no_eligible or (
         outcome_matched >= _linkage_min_matched
         and matched_over_eligible >= _linkage_min_ratio
@@ -1511,6 +1518,19 @@ def main() -> int:
             f"{phase3_reason},{strict_reason_code}" if phase3_reason else strict_reason_code
         )
 
+    proof_evidence_ready = bool(evidence_progress.get("ready"))
+    covered_state_reasons: List[str] = []
+    if phase3_ready:
+        if gate_semantics_status != "PASS":
+            covered_state_reasons.append(f"gate_semantics_{gate_semantics_status.lower()}")
+        if not proof_evidence_ready:
+            covered_state_reasons.append("proof_evidence_incomplete")
+        if _linkage_warmup_active and not linkage_full_thresholds_pass:
+            covered_state_reasons.append("linkage_warmup_exemption")
+    posture = "FAIL"
+    if phase3_ready:
+        posture = "WARMUP_COVERED_PASS" if covered_state_reasons else "GENUINE_PASS"
+
     thresholds = _collect_thresholds(
         monitor_config=monitor_config,
         proof_requirements=proof_requirements,
@@ -1537,6 +1557,8 @@ def main() -> int:
         "phase3_reason": phase3_reason,
         "phase3_strict_ready": bool(strict_phase3_ready),
         "phase3_strict_reason": strict_phase3_reason,
+        "posture": posture,
+        "covered_state_reasons": covered_state_reasons,
         "repo_state": repo_state,
         "inputs": {
             "db": str(db_path),
@@ -1607,24 +1629,32 @@ def main() -> int:
             "first_audit_ts_utc": warmup_policy.get("first_audit_ts_utc"),
             "allow_inconclusive_until_utc": warmup_policy.get("allow_inconclusive_until_utc"),
             "warmup_expired": bool(warmup_policy.get("warmup_expired", True)),
+            "posture": posture,
+            "covered_state_reasons": covered_state_reasons,
         },
         "readiness": {
             "phase3_ready": bool(phase3_ready),
             "phase3_reason": phase3_reason,
             "phase3_strict_ready": bool(strict_phase3_ready),
             "phase3_strict_reason": strict_phase3_reason,
+            "posture": posture,
+            "covered_state_reasons": covered_state_reasons,
             "gates_pass": bool(gates_pass),
             "linkage_pass": bool(linkage_pass),
+            "linkage_full_thresholds_pass": bool(linkage_full_thresholds_pass),
             "evidence_hygiene_pass": bool(evidence_hygiene_pass),
             "integrity_pass": bool(integrity_pass),
             "artifact_binding_pass": bool(artifact_binding_pass),
             "outcome_matched": outcome_matched,
             "outcome_eligible": outcome_eligible,
             "matched_over_eligible": matched_over_eligible,
+            "configured_linkage_min_matched": _configured_linkage_min_matched,
+            "configured_linkage_min_ratio": _configured_linkage_min_ratio,
             "linkage_min_matched": _linkage_min_matched,
             "linkage_min_ratio": _linkage_min_ratio,
             "linkage_warmup_active": bool(_linkage_warmup_active),
             "linkage_no_eligible": bool(_linkage_no_eligible),
+            "proof_evidence_ready": proof_evidence_ready,
             "non_trade_context_count": non_trade_count,
             "invalid_context_count": invalid_context_count,
             "linkage_waterfall": linkage_waterfall,
@@ -1640,6 +1670,8 @@ def main() -> int:
         "readiness_v2": {
             "overall_ready": bool(phase3_ready),
             "strict_overall_ready": bool(strict_phase3_ready),
+            "posture": posture,
+            "covered_state_reasons": covered_state_reasons,
             "evidence_chain_ready": bool(
                 linkage_pass
                 and evidence_hygiene_pass
@@ -1739,6 +1771,11 @@ def main() -> int:
         f"remaining_days={evidence_progress.get('remaining_trading_days')}"
     )
     print(f"Gate status    : {gate_status} (semantics={gate_semantics_status})")
+    print(
+        "Posture        : "
+        f"{posture}"
+        + (f" (covered={','.join(covered_state_reasons)})" if covered_state_reasons else "")
+    )
     print(
         "Phase3 ready   : "
         f"{int(phase3_ready)} (reason={phase3_reason}, matched={outcome_matched}/{outcome_eligible}, "

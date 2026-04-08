@@ -55,6 +55,7 @@ try:
         gate_semantics_status as _gate_semantics_status,
         legacy_phase3_ready as _legacy_phase3_ready,
         legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_posture as _phase3_posture,
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
@@ -63,6 +64,7 @@ except Exception:  # pragma: no cover - script execution path fallback
         gate_semantics_status as _gate_semantics_status,
         legacy_phase3_ready as _legacy_phase3_ready,
         legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_posture as _phase3_posture,
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
@@ -253,6 +255,7 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
         "phase3_reason": "",
         "phase3_legacy_ready": None,
         "phase3_legacy_reason": "",
+        "phase3_posture": "",
         "age_hours": None,
         "mtime_utc": _artifact_mtime_utc(path),
         "status_stage": "",
@@ -275,6 +278,7 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
     snapshot["phase3_reason"] = _phase3_strict_reason(payload)
     snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
     snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
+    snapshot["phase3_posture"] = _phase3_posture(payload)
     snapshot["status_stage"] = str(payload.get("status_stage") or "")
     snapshot["skipped_optional_gates"] = payload.get("skipped_optional_gates")
     snapshot["max_skipped_optional_gates"] = payload.get("max_skipped_optional_gates")
@@ -292,6 +296,7 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
         "phase3_reason": "",
         "phase3_legacy_ready": None,
         "phase3_legacy_reason": "",
+        "phase3_posture": "",
         "warmup_expired": None,
         "gate_semantics_status": "",
         "pass_semantics_version": None,
@@ -319,6 +324,7 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
     snapshot["phase3_reason"] = _phase3_strict_reason(payload)
     snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
     snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
+    snapshot["phase3_posture"] = _phase3_posture(payload)
     snapshot["warmup_expired"] = payload.get("warmup_expired")
     snapshot["gate_semantics_status"] = _gate_semantics_status(payload) or str(gate_block.get("gate_semantics_status") or "")
     snapshot["pass_semantics_version"] = payload.get("pass_semantics_version")
@@ -937,11 +943,13 @@ def _gate_truth_posture(
     freshest_phase3_source = "gate_status_latest"
     effective_phase3_ready = gate_artifact.get("phase3_ready")
     effective_phase3_reason = gate_artifact.get("phase3_reason")
+    effective_phase3_posture = gate_artifact.get("phase3_posture")
 
     if production_time and (gate_time is None or production_time >= gate_time):
         freshest_phase3_source = "production_gate_latest"
         effective_phase3_ready = production_gate.get("phase3_ready")
         effective_phase3_reason = production_gate.get("phase3_reason")
+        effective_phase3_posture = production_gate.get("phase3_posture")
 
     skipped_optional = gate_artifact.get("skipped_optional_gates")
     max_skipped = gate_artifact.get("max_skipped_optional_gates")
@@ -989,6 +997,19 @@ def _gate_truth_posture(
                 )
             )
 
+    if str(effective_phase3_posture or "").strip().upper() == "WARMUP_COVERED_PASS":
+        blockers.append(
+            _issue(
+                source="gate_truth",
+                code="warmup_covered_pass_not_ready",
+                detail=(
+                    "The freshest production-gate artifact is only WARMUP_COVERED_PASS. "
+                    "Treat readiness, threshold changes, and production promotion as blocked "
+                    "until the live non-synthetic evidence gap closes."
+                ),
+            )
+        )
+
     snapshot = {
         "gate_artifact": gate_artifact,
         "production_gate_artifact": production_gate,
@@ -996,6 +1017,7 @@ def _gate_truth_posture(
         "freshest_phase3_source": freshest_phase3_source,
         "effective_phase3_ready": effective_phase3_ready,
         "effective_phase3_reason": effective_phase3_reason,
+        "effective_phase3_posture": effective_phase3_posture,
         "drift_detected": bool(blockers or warnings),
     }
     return snapshot, blockers, warnings
@@ -1178,6 +1200,8 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         add("Validate messaging health with `python scripts/openclaw_regression_gate.py --json` and repair channels via `python scripts/openclaw_maintenance.py --strict`.")
     if codes & {"gate_skip_policy_failed", "stale_gate_artifact_phase3_drift"}:
         add("Refresh canonical gate truth without skip flags; see `python scripts/openclaw_production_readiness.py --action-guide canonical_gate_truth`.")
+    if "warmup_covered_pass_not_ready" in codes:
+        add("Do not treat the current gate as ready while posture is WARMUP_COVERED_PASS; wait for live non-synthetic evidence to clear on its own merit.")
     if codes & {"capital_readiness_failed", "runtime_check_failed:production_gate"}:
         add("Do not promote to production yet; use `python scripts/run_all_gates.py --json` and `python scripts/capital_readiness_check.py --json` to confirm current blockers and evidence gaps.")
         add("For a focused human triage checklist, run `python scripts/openclaw_production_readiness.py --action-guide capital_readiness`.")
@@ -1301,6 +1325,7 @@ def _print_human_summary(payload: dict[str, Any]) -> None:
         print(
             "[openclaw_production_readiness] gate_truth "
             f"effective_phase3_ready={gate_truth.get('effective_phase3_ready')} "
+            f"effective_phase3_posture={gate_truth.get('effective_phase3_posture')} "
             f"source={gate_truth.get('freshest_phase3_source')} "
             f"drift_detected={gate_truth.get('drift_detected')}"
         )

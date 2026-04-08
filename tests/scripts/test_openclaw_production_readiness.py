@@ -13,9 +13,11 @@ def _write_production_gate_artifact(path: Path) -> None:
                 "timestamp_utc": "2026-03-14T20:04:49Z",
                 "phase3_ready": False,
                 "phase3_reason": "GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL",
+                "posture": "FAIL",
                 "pass_semantics_version": 3,
                 "production_profitability_gate": {
                     "gate_semantics_status": "FAIL",
+                    "posture": "FAIL",
                 },
                 "inputs": {
                     "audit_dir": "logs/forecast_audits/production",
@@ -102,8 +104,10 @@ def test_gate_truth_posture_detects_skip_policy_and_phase3_drift(tmp_path: Path)
                 "warmup_expired": False,
                 "phase3_ready": False,
                 "phase3_reason": "GATES_FAIL,THIN_LINKAGE,EVIDENCE_HYGIENE_FAIL",
+                "posture": "FAIL",
                 "production_profitability_gate": {
                     "gate_semantics_status": "FAIL",
+                    "posture": "FAIL",
                 },
             }
         ),
@@ -137,10 +141,12 @@ def test_production_gate_snapshot_prefers_strict_phase3_fields(tmp_path: Path) -
                 "phase3_reason": "READY",
                 "phase3_strict_ready": False,
                 "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "posture": "WARMUP_COVERED_PASS",
                 "production_profitability_gate": {
                     "pass": True,
                     "strict_pass": False,
                     "gate_semantics_status": "INCONCLUSIVE_ALLOWED",
+                    "posture": "WARMUP_COVERED_PASS",
                 },
             }
         ),
@@ -153,6 +159,58 @@ def test_production_gate_snapshot_prefers_strict_phase3_fields(tmp_path: Path) -
     assert snapshot["phase3_reason"].endswith("GATE_SEMANTICS_INCONCLUSIVE_ALLOWED")
     assert snapshot["phase3_legacy_ready"] is True
     assert snapshot["gate_semantics_status"] == "INCONCLUSIVE_ALLOWED"
+    assert snapshot["phase3_posture"] == "WARMUP_COVERED_PASS"
+
+
+def test_gate_truth_posture_blocks_warmup_covered_pass(tmp_path: Path) -> None:
+    gate_artifact = tmp_path / "gate_status_latest.json"
+    gate_artifact.write_text(
+        json.dumps(
+            {
+                "timestamp_utc": "2026-03-14T17:20:45Z",
+                "overall_passed": True,
+                "phase3_ready": False,
+                "phase3_reason": "READY",
+                "phase3_posture": "WARMUP_COVERED_PASS",
+                "skipped_optional_gates": 0,
+                "max_skipped_optional_gates": 1,
+                "skipped_gate_labels": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    production_artifact = tmp_path / "production_gate_latest.json"
+    production_artifact.write_text(
+        json.dumps(
+            {
+                "timestamp_utc": "2026-03-14T17:30:28Z",
+                "pass_semantics_version": 3,
+                "warmup_expired": False,
+                "phase3_ready": True,
+                "phase3_reason": "READY",
+                "phase3_strict_ready": True,
+                "phase3_strict_reason": "READY",
+                "posture": "WARMUP_COVERED_PASS",
+                "production_profitability_gate": {
+                    "gate_semantics_status": "PASS",
+                    "posture": "WARMUP_COVERED_PASS",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    truth, blockers, warnings = mod._gate_truth_posture(
+        gate_artifact_path=gate_artifact,
+        production_gate_artifact_path=production_artifact,
+        refresh_production_gate=False,
+        timeout_seconds=5.0,
+    )
+
+    codes = {row["code"] for row in blockers}
+    assert "warmup_covered_pass_not_ready" in codes
+    assert truth["effective_phase3_posture"] == "WARMUP_COVERED_PASS"
+    assert warnings == []
 
 
 def test_gate_decomposition_snapshot_refreshes_stale_report(tmp_path: Path) -> None:

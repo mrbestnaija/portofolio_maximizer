@@ -38,6 +38,8 @@ try:
         gate_semantics_status as _gate_semantics_status,
         legacy_phase3_ready as _legacy_phase3_ready,
         legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_genuine_ready as _phase3_genuine_ready,
+        phase3_posture as _phase3_posture,
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
@@ -46,6 +48,8 @@ except Exception:  # pragma: no cover - script execution path fallback
         gate_semantics_status as _gate_semantics_status,
         legacy_phase3_ready as _legacy_phase3_ready,
         legacy_phase3_reason as _legacy_phase3_reason,
+        phase3_genuine_ready as _phase3_genuine_ready,
+        phase3_posture as _phase3_posture,
         phase3_strict_ready as _phase3_strict_ready,
         phase3_strict_reason as _phase3_strict_reason,
     )
@@ -63,6 +67,7 @@ REQUIRED_PRODUCTION_PAYLOAD_KEYS = {
     "phase3_reason",
     "phase3_strict_ready",
     "phase3_strict_reason",
+    "posture",
     "lift_gate",
     "profitability_proof",
     "production_profitability_gate",
@@ -77,12 +82,14 @@ REQUIRED_READINESS_KEYS = {
     "phase3_reason",
     "phase3_strict_ready",
     "phase3_strict_reason",
+    "posture",
 }
 REQUIRED_GATE_BLOCK_KEYS = {
     "status",
     "pass",
     "strict_pass",
     "gate_semantics_status",
+    "posture",
 }
 
 # Artifact written after every run so downstream tools (e.g. institutional gate) can
@@ -194,6 +201,8 @@ def _build_summary(
     )
     strict_phase3_ready = _phase3_strict_ready(production_gate_payload)
     strict_phase3_reason = _phase3_strict_reason(production_gate_payload)
+    phase3_posture = _phase3_posture(production_gate_payload)
+    genuine_phase3_ready = _phase3_genuine_ready(production_gate_payload)
     legacy_phase3_ready = _legacy_phase3_ready(production_gate_payload)
     legacy_phase3_reason = _legacy_phase3_reason(production_gate_payload)
     return {
@@ -208,9 +217,10 @@ def _build_summary(
         "lift_inconclusive_allowed": production_gate_payload.get("lift_inconclusive_allowed"),
         "proof_profitable_required": production_gate_payload.get("proof_profitable_required"),
         "warmup_expired": production_gate_payload.get("warmup_expired"),
+        "phase3_posture": phase3_posture,
         "gate_semantics_status": _gate_semantics_status(production_gate_payload)
         or gate_payload_block.get("gate_semantics_status"),
-        "phase3_ready": bool(strict_phase3_ready),
+        "phase3_ready": bool(genuine_phase3_ready),
         "phase3_reason": strict_phase3_reason,
         "phase3_strict_ready": bool(strict_phase3_ready),
         "phase3_strict_reason": strict_phase3_reason,
@@ -339,7 +349,7 @@ def main() -> None:
         }
         results.append(schema_result)
         overall_pass = overall_pass and schema_ok
-        overall_pass = overall_pass and _phase3_strict_ready(production_gate_payload)
+        overall_pass = overall_pass and _phase3_genuine_ready(production_gate_payload)
 
     # Publish a pre-institutional snapshot so institutional P4 validates current run
     # state instead of stale prior-run artifacts.

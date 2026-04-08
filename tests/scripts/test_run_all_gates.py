@@ -20,6 +20,7 @@ def _write_green_production_gate_artifact(path) -> None:
                 "phase3_reason": "READY",
                 "phase3_strict_ready": True,
                 "phase3_strict_reason": "READY",
+                "posture": "GENUINE_PASS",
                 "lift_gate": {},
                 "profitability_proof": {},
                 "production_profitability_gate": {
@@ -27,6 +28,7 @@ def _write_green_production_gate_artifact(path) -> None:
                     "pass": True,
                     "strict_pass": True,
                     "gate_semantics_status": "PASS",
+                    "posture": "GENUINE_PASS",
                 },
                 "readiness": {
                     "gates_pass": True,
@@ -37,6 +39,7 @@ def _write_green_production_gate_artifact(path) -> None:
                     "phase3_reason": "READY",
                     "phase3_strict_ready": True,
                     "phase3_strict_reason": "READY",
+                    "posture": "GENUINE_PASS",
                 },
             }
         ),
@@ -166,6 +169,7 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
                 "phase3_reason": "THIN_LINKAGE",
                 "phase3_strict_ready": False,
                 "phase3_strict_reason": "THIN_LINKAGE",
+                "posture": "FAIL",
                 "lift_gate": {"status": "INCONCLUSIVE", "pass": False, "gate_semantics_status": "INCONCLUSIVE_BLOCKED"},
                 "profitability_proof": {"status": "PASS", "pass": True},
                 "production_profitability_gate": {
@@ -173,6 +177,7 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
                     "pass": False,
                     "strict_pass": False,
                     "gate_semantics_status": "INCONCLUSIVE_BLOCKED",
+                    "posture": "FAIL",
                 },
                 "readiness": {
                     "gates_pass": False,
@@ -183,6 +188,7 @@ def test_run_all_gates_uses_unattended_profile_and_emits_phase3_fields(
                     "phase3_reason": "THIN_LINKAGE",
                     "phase3_strict_ready": False,
                     "phase3_strict_reason": "THIN_LINKAGE",
+                    "posture": "FAIL",
                 },
             }
         ),
@@ -292,6 +298,7 @@ def test_skipped_gate_labels_populated(monkeypatch, capsys, tmp_path) -> None:
                 "phase3_reason": "READY",
                 "phase3_strict_ready": True,
                 "phase3_strict_reason": "READY",
+                "posture": "GENUINE_PASS",
                 "lift_gate": {},
                 "profitability_proof": {},
                 "production_profitability_gate": {
@@ -299,6 +306,7 @@ def test_skipped_gate_labels_populated(monkeypatch, capsys, tmp_path) -> None:
                     "pass": True,
                     "strict_pass": True,
                     "gate_semantics_status": "PASS",
+                    "posture": "GENUINE_PASS",
                 },
                 "readiness": {
                     "gates_pass": True,
@@ -309,6 +317,7 @@ def test_skipped_gate_labels_populated(monkeypatch, capsys, tmp_path) -> None:
                     "phase3_reason": "READY",
                     "phase3_strict_ready": True,
                     "phase3_strict_reason": "READY",
+                    "posture": "GENUINE_PASS",
                 },
             }
         ),
@@ -354,6 +363,7 @@ def test_run_all_gates_fails_closed_on_inconclusive_allowed_phase3(monkeypatch, 
                 "phase3_reason": "READY",
                 "phase3_strict_ready": False,
                 "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "posture": "WARMUP_COVERED_PASS",
                 "lift_gate": {"status": "INCONCLUSIVE", "pass": True},
                 "profitability_proof": {"status": "PASS", "pass": True},
                 "production_profitability_gate": {
@@ -361,6 +371,7 @@ def test_run_all_gates_fails_closed_on_inconclusive_allowed_phase3(monkeypatch, 
                     "pass": True,
                     "strict_pass": False,
                     "gate_semantics_status": "INCONCLUSIVE_ALLOWED",
+                    "posture": "WARMUP_COVERED_PASS",
                 },
                 "readiness": {
                     "gates_pass": True,
@@ -371,6 +382,7 @@ def test_run_all_gates_fails_closed_on_inconclusive_allowed_phase3(monkeypatch, 
                     "phase3_reason": "READY",
                     "phase3_strict_ready": False,
                     "phase3_strict_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                    "posture": "WARMUP_COVERED_PASS",
                 },
             }
         ),
@@ -394,3 +406,73 @@ def test_run_all_gates_fails_closed_on_inconclusive_allowed_phase3(monkeypatch, 
     assert summary["phase3_ready"] is False
     assert summary["phase3_reason"].endswith("GATE_SEMANTICS_INCONCLUSIVE_ALLOWED")
     assert summary["phase3_legacy_ready"] is True
+    assert summary["phase3_posture"] == "WARMUP_COVERED_PASS"
+
+
+def test_run_all_gates_fails_closed_on_warmup_covered_pass_even_when_strict_ready(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    artifact = tmp_path / "logs" / "audit_gate" / "production_gate_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "pass_semantics_version": 3,
+                "lift_inconclusive_allowed": True,
+                "proof_profitable_required": True,
+                "warmup_expired": False,
+                "phase3_ready": True,
+                "phase3_reason": "READY",
+                "phase3_strict_ready": True,
+                "phase3_strict_reason": "READY",
+                "posture": "WARMUP_COVERED_PASS",
+                "lift_gate": {"status": "PASS", "pass": True},
+                "profitability_proof": {
+                    "status": "PASS",
+                    "pass": True,
+                    "evidence_progress": {"ready": False},
+                },
+                "production_profitability_gate": {
+                    "status": "PASS",
+                    "pass": True,
+                    "strict_pass": True,
+                    "gate_semantics_status": "PASS",
+                    "posture": "WARMUP_COVERED_PASS",
+                },
+                "readiness": {
+                    "gates_pass": True,
+                    "linkage_pass": True,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                    "phase3_ready": True,
+                    "phase3_reason": "READY",
+                    "phase3_strict_ready": True,
+                    "phase3_strict_reason": "READY",
+                    "posture": "WARMUP_COVERED_PASS",
+                    "covered_state_reasons": [
+                        "proof_evidence_incomplete",
+                        "linkage_warmup_exemption",
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run(cmd, label):  # noqa: ANN001
+        return {"label": label, "exit_code": 0, "passed": True, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(mod, "_run", _fake_run)
+    monkeypatch.setattr(mod, "PRODUCTION_GATE_ARTIFACT", artifact)
+
+    with monkeypatch.context() as m:
+        m.setattr(mod.sys, "argv", ["run_all_gates.py", "--json"])
+        with pytest.raises(SystemExit) as exc:
+            mod.main()
+
+    assert exc.value.code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["overall_passed"] is False
+    assert summary["phase3_ready"] is False
+    assert summary["phase3_strict_ready"] is True
+    assert summary["phase3_posture"] == "WARMUP_COVERED_PASS"
