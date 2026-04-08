@@ -396,6 +396,7 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     import scripts.check_forecast_audits as mod
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "DEFAULT_DB_PATH", tmp_path / "data" / "portfolio_maximizer.db")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -462,6 +463,146 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
         "healthy_ticker_count": 2,
         "distinct_trading_days": 2,
     }
+
+
+def test_check_forecast_audits_defaults_to_repo_db_for_default_production_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    audit_dir = tmp_path / "logs" / "forecast_audits" / "production"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    db_path = data_dir / "portfolio_maximizer.db"
+    ts_signal_id = "ts_AAPL_prod_default_db_0001"
+
+    _write_audit(
+        audit_dir / "forecast_audit_prod.json",
+        start="2024-01-01",
+        end="2024-04-01",
+        length=90,
+        horizon=5,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 1.5},
+            "samossa": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+        ticker="AAPL",
+        signal_context={
+            "context_type": "TRADE",
+            "ts_signal_id": ts_signal_id,
+            "run_id": "pmx_ts_20240101T120000Z_1234",
+            "entry_ts": "2024-01-01T12:00:00+00:00",
+            "expected_close_ts": "2024-01-07T12:00:00+00:00",
+            "forecast_horizon": 5,
+            "event_type": "FORECAST_AUDIT",
+        },
+    )
+    _write_closed_trades_db(db_path, [{"ts_signal_id": ts_signal_id}])
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    output = capsys.readouterr().out
+    assert "Outcome join   : outcomes_loaded=1 join_attempted=1" in output
+
+    summary = json.loads((tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text())
+    assert summary["outcome_join"]["db_path"].endswith("data\\portfolio_maximizer.db")
+    assert summary["telemetry_contract"]["outcomes_loaded"] is True
+    assert summary["window_counts"]["n_outcome_windows_matched"] == 1
+
+
+def test_check_forecast_audits_fails_loudly_when_default_production_db_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit_dir = tmp_path / "logs" / "forecast_audits" / "production"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    _write_audit(
+        audit_dir / "forecast_audit_prod.json",
+        start="2024-01-01",
+        end="2024-04-01",
+        length=90,
+        horizon=5,
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 1.5},
+            "samossa": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+        ticker="AAPL",
+    )
+
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 0.25",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "DEFAULT_DB_PATH", tmp_path / "data" / "portfolio_maximizer.db")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 1
 
 
 def test_check_audit_file_uses_requested_baseline(tmp_path: Path) -> None:
@@ -2402,3 +2543,225 @@ def test_effective_default_baseline_uses_ensemble_selection_primary_model(
     _, baseline_bs, resolved_bs = mod._extract_metrics(payload, baseline_model="BEST_SINGLE")
     assert resolved_bs == "GARCH"
     assert abs(baseline_bs["rmse"] - 2.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Fix A + Fix B: Linkage denominator — rejected and synthetic signals
+# ---------------------------------------------------------------------------
+
+
+def _make_trade_signal_id_audit(
+    path: Path,
+    *,
+    ts_signal_id: str,
+    execution_decision: dict | None = None,
+) -> None:
+    """Write a minimal TRADE-context audit with an optional execution_decision."""
+    payload: dict = {
+        "dataset": {
+            "start": "2024-01-01",
+            "end": "2024-04-01",
+            "length": 90,
+            "forecast_horizon": 5,
+            "ticker": "AAPL",
+        },
+        "artifacts": {
+            "ensemble_weights": {"samossa": 1.0},
+            "evaluation_metrics": {"samossa": {"rmse": 1.0}, "ensemble": {"rmse": 1.0}},
+        },
+        "signal_context": {
+            "context_type": "TRADE",
+            "ts_signal_id": ts_signal_id,
+            "run_id": "run_20240101_120000",
+            "entry_ts": "2024-01-01T12:00:00+00:00",
+            "forecast_horizon": 5,
+        },
+    }
+    if execution_decision is not None:
+        payload["execution_decision"] = execution_decision
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_rejected_signal_classified_as_invalid_context(tmp_path: Path) -> None:
+    """Fix A: audit with execution_decision.executed=False must become INVALID_CONTEXT
+    (EXECUTION_REJECTED) and must NOT count toward the linkage eligible denominator."""
+    import scripts.check_forecast_audits as mod
+
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True)
+
+    # REJECTED signal — executed=False
+    _make_trade_signal_id_audit(
+        audit_dir / "forecast_audit_rejected.json",
+        ts_signal_id="ts_AAPL_rejected_0001",
+        execution_decision={
+            "executed": False,
+            "status": "REJECTED",
+            "reason": "low_confidence",
+            "source_classification": "producer-native",
+        },
+    )
+
+    entries, counts, _, _ = mod._build_failure_dataset_snapshot(
+        audit_roots=[audit_dir],
+        max_files=50,
+        db_path=None,
+        min_forecast_horizon=None,
+        generated_utc="2024-04-01T00:00:00Z",
+    )
+
+    assert len(entries) == 1, "Expected exactly 1 entry"
+    assert entries[0]["outcome_status"] == "INVALID_CONTEXT"
+    assert entries[0]["outcome_reason"] == "EXECUTION_REJECTED"
+    # Must NOT count toward eligible denominator
+    assert counts["n_outcome_windows_eligible"] == 0
+    assert counts["n_outcome_windows_execution_rejected"] == 1
+    assert counts["n_outcome_windows_invalid_context"] >= 1
+
+
+def test_rejected_signal_without_producer_native_provenance_not_excluded(tmp_path: Path) -> None:
+    """Reject-path exclusion requires producer-native provenance; otherwise the
+    audit stays in the normal outcome flow instead of shrinking the denominator."""
+    import scripts.check_forecast_audits as mod
+
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True)
+
+    _make_trade_signal_id_audit(
+        audit_dir / "forecast_audit_unverified_rejected.json",
+        ts_signal_id="ts_AAPL_unverified_rejected_0001",
+        execution_decision={"executed": False, "status": "REJECTED", "reason": "low_confidence"},
+    )
+
+    entries, counts, _, _ = mod._build_failure_dataset_snapshot(
+        audit_roots=[audit_dir],
+        max_files=50,
+        db_path=None,
+        min_forecast_horizon=None,
+        generated_utc="2024-04-01T00:00:00Z",
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["outcome_status"] == "OUTCOMES_NOT_LOADED"
+    assert entries[0]["signal_rejected"] is False
+    assert entries[0]["signal_rejected_unverified"] is True
+    assert counts["n_outcome_windows_execution_rejected"] == 0
+    assert counts["n_outcome_windows_unverified_execution_rejected"] == 1
+
+
+def test_executed_none_not_classified_as_rejected(tmp_path: Path) -> None:
+    """Backward compat: executed=None (pre-dates field) must NOT be excluded.
+    The audit should fall through to OUTCOMES_NOT_LOADED (no DB configured)."""
+    import scripts.check_forecast_audits as mod
+
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True)
+
+    # executed=None — missing field (old audit format)
+    _make_trade_signal_id_audit(
+        audit_dir / "forecast_audit_no_exec.json",
+        ts_signal_id="ts_AAPL_noexec_0001",
+        execution_decision={"executed": None, "status": "UNKNOWN"},
+    )
+
+    entries, counts, _, _ = mod._build_failure_dataset_snapshot(
+        audit_roots=[audit_dir],
+        max_files=50,
+        db_path=None,
+        min_forecast_horizon=None,
+        generated_utc="2024-04-01T00:00:00Z",
+    )
+
+    assert len(entries) == 1
+    # With no DB, outcome falls through to OUTCOMES_NOT_LOADED — not INVALID_CONTEXT
+    assert entries[0]["outcome_status"] == "OUTCOMES_NOT_LOADED"
+    assert counts["n_outcome_windows_execution_rejected"] == 0
+
+
+def test_missing_execution_decision_not_excluded(tmp_path: Path) -> None:
+    """Backward compat: audit with no execution_decision field must not be silently excluded."""
+    import scripts.check_forecast_audits as mod
+
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True)
+
+    _make_trade_signal_id_audit(
+        audit_dir / "forecast_audit_nofield.json",
+        ts_signal_id="ts_AAPL_nofield_0001",
+        execution_decision=None,  # No execution_decision in audit at all
+    )
+
+    entries, counts, _, _ = mod._build_failure_dataset_snapshot(
+        audit_roots=[audit_dir],
+        max_files=50,
+        db_path=None,
+        min_forecast_horizon=None,
+        generated_utc="2024-04-01T00:00:00Z",
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["outcome_status"] == "OUTCOMES_NOT_LOADED"
+    assert counts["n_outcome_windows_execution_rejected"] == 0
+
+
+def test_load_closed_trade_match_counts_returns_synthetic_tsids(tmp_path: Path) -> None:
+    """Fix B: _load_closed_trade_match_counts must return synthetic ts_signal_ids
+    in the fourth element of the returned tuple."""
+    import scripts.check_forecast_audits as mod
+
+    db = tmp_path / "test.db"
+    _write_closed_trades_db(
+        db,
+        rows=[
+            # Live closed trade — should be in mapping
+            {"ts_signal_id": "ts_AAPL_live_0001", "is_close": 1, "is_synthetic": 0},
+            # Synthetic closed trade — should be in synthetic_tsids
+            {"ts_signal_id": "ts_AAPL_synth_0001", "is_close": 1, "is_synthetic": 1},
+        ],
+    )
+
+    loaded, mapping, error, synthetic_tsids = mod._load_closed_trade_match_counts(db)
+
+    assert loaded is True
+    assert error is None
+    # Live trade appears in production_closed_trades view
+    assert "ts_AAPL_live_0001" in mapping
+    # Synthetic trade is excluded from view but captured in synthetic_tsids
+    assert "ts_AAPL_synth_0001" not in mapping
+    assert "ts_AAPL_synth_0001" in synthetic_tsids
+
+
+def test_synthetic_executed_signal_classified_as_invalid_context(tmp_path: Path) -> None:
+    """Fix B: audit whose ts_signal_id is in trade_executions.is_synthetic=1 must
+    become INVALID_CONTEXT (SYNTHETIC_EXECUTION) and not count toward eligible."""
+    import scripts.check_forecast_audits as mod
+
+    audit_dir = tmp_path / "audits"
+    audit_dir.mkdir(parents=True)
+    db = tmp_path / "test.db"
+
+    synth_sid = "ts_AAPL_synth_0001"
+    _make_trade_signal_id_audit(
+        audit_dir / "forecast_audit_synth.json",
+        ts_signal_id=synth_sid,
+        execution_decision={"executed": True, "status": "FILLED"},
+    )
+    # DB: ts_signal_id present in trade_executions but is_synthetic=1
+    _write_closed_trades_db(
+        db,
+        rows=[{"ts_signal_id": synth_sid, "is_close": 1, "is_synthetic": 1}],
+    )
+
+    entries, counts, _, _ = mod._build_failure_dataset_snapshot(
+        audit_roots=[audit_dir],
+        max_files=50,
+        db_path=db,
+        min_forecast_horizon=None,
+        generated_utc="2024-04-01T00:00:00Z",
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["outcome_status"] == "INVALID_CONTEXT"
+    assert entries[0]["outcome_reason"] == "SYNTHETIC_EXECUTION"
+    assert counts["n_outcome_windows_eligible"] == 0
+    assert counts["n_outcome_windows_invalid_context"] >= 1

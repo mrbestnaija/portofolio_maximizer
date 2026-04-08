@@ -267,6 +267,43 @@ class TestValidateProfitabilityProofIntegration:
             "Proof must be INVALID when only diagnostic trades exist"
         )
 
+    def test_low_win_rate_barbell_profile_can_still_validate_proof(self, tmp_path):
+        """Low hit rate is not a proof blocker when payoff asymmetry remains strong."""
+        try:
+            db = self._proof_db(tmp_path)
+        except Exception:
+            pytest.skip("guarded_sqlite_connect unavailable in this environment")
+
+        rows = []
+        for i in range(35):
+            is_win = i < 10
+            pnl = 100.0 if is_win else -20.0
+            rows.append(
+                (
+                    i + 1,
+                    "AAPL",
+                    f"2026-01-{(i % 21) + 1:02d}",
+                    "SELL",
+                    pnl,
+                    100.0,
+                    110.0 if is_win else 98.0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    None,
+                    "live",
+                )
+            )
+        _insert(db, rows)
+
+        result = validate_profitability_proof(str(db))
+        assert result["is_proof_valid"] is True
+        assert result["metrics"]["win_rate"] == pytest.approx(10 / 35, abs=0.001)
+        assert result["metrics"]["profit_factor"] == pytest.approx(2.0, abs=0.001)
+        assert not any("Win rate" in row for row in result["violations"])
+        assert not any("Win rate" in row for row in result["warnings"])
+
 
 # ---------------------------------------------------------------------------
 # Phase 7.40: import-path collision tests

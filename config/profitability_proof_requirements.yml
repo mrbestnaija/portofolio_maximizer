@@ -16,7 +16,7 @@ profitability_proof_requirements:
     min_closed_trades: 30       # At least 30 completed round-trips (BUY -> SELL)
     min_trading_days: 21        # At least 1 month of trading
     max_win_rate: 0.85          # Win rate > 85% is statistically suspicious
-    min_win_rate: 0.35          # Win rate < 35% indicates unprofitable strategy
+    # Low win rate is diagnostic-only by default; barbell asymmetry is primary.
 
   # Performance Requirements (for proof to be considered valid)
   performance:

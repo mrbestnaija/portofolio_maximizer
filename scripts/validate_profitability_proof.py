@@ -43,7 +43,6 @@ def load_requirements(config_path: str = "config/profitability_proof_requirement
             "min_closed_trades": 30,
             "min_trading_days": 21,
             "max_win_rate": 0.85,
-            "min_win_rate": 0.35
         },
         "performance": {
             "min_profit_factor": 1.1,
@@ -319,14 +318,17 @@ def validate_profitability_proof(db_path: str) -> Dict[str, Any]:
     # 3. Win Rate Reality Check (from production_closed_trades)
     win_rate = calculate_win_rate(cursor)
     if win_rate is not None:
-        max_win_rate = requirements["statistical_significance"]["max_win_rate"]
-        min_win_rate = requirements["statistical_significance"]["min_win_rate"]
+        stat_req = requirements.get("statistical_significance", {})
+        max_win_rate = stat_req["max_win_rate"]
+        min_win_rate = stat_req.get("min_win_rate")
 
         if win_rate > max_win_rate:
             violations.append(f"Win rate {win_rate:.1%} exceeds {max_win_rate:.1%} - statistically suspicious")
             recommendations.append("Investigate data quality - 100% win rate is impossible in real trading")
-        elif win_rate < min_win_rate:
-            warnings.append(f"Win rate {win_rate:.1%} below {min_win_rate:.1%} - strategy may be unprofitable")
+        elif min_win_rate is not None and win_rate < min_win_rate:
+            warnings.append(
+                f"Win rate {win_rate:.1%} below {min_win_rate:.1%} - diagnostic only under barbell policy"
+            )
 
     # 4. Position Lifecycle Completeness (raw table: lifecycle BUY/SELL ratio)
     buy_count = actions.get("BUY", 0)

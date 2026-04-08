@@ -1401,16 +1401,18 @@ def main() -> int:
     if _linkage_warmup_active:
         _linkage_min_matched = 1
         _linkage_min_ratio = 0.0
-    # Vacuously pass when no eligible records exist yet (accumulation phase).
     _linkage_no_eligible = outcome_eligible == 0
     linkage_full_thresholds_pass = (
         outcome_eligible > 0
         and outcome_matched >= _configured_linkage_min_matched
         and matched_over_eligible >= _configured_linkage_min_ratio
     )
-    linkage_pass = _linkage_no_eligible or (
+    linkage_pass = (
+        outcome_eligible > 0
+        and (
         outcome_matched >= _linkage_min_matched
         and matched_over_eligible >= _linkage_min_ratio
+        )
     )
 
     non_trade_count = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)

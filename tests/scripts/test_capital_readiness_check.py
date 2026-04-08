@@ -171,6 +171,25 @@ class TestCapitalReadinessR3:
         assert result["ready"] is False
         assert any("R3" in r for r in result["reasons"])
 
+    def test_low_win_rate_does_not_fail_r3_when_profit_factor_and_trades_are_strong(
+        self, monkeypatch, tmp_path
+    ):
+        import scripts.capital_readiness_check as mod
+
+        _patch_all_passing(monkeypatch)
+        monkeypatch.setattr(
+            mod,
+            "_check_r3_trade_quality",
+            lambda db: (
+                True,
+                "",
+                {"n_trades": 42, "win_rate": 0.29, "profit_factor": 2.10},
+            ),
+        )
+        result = run_capital_readiness(tmp_path / "x.db", tmp_path, tmp_path / "q.jsonl")
+        assert result["ready"] is True
+        assert result["verdict"] == "PASS"
+
 
 class TestCapitalReadinessR4:
     def test_fails_when_calibration_inactive(self, monkeypatch, tmp_path):

@@ -1426,8 +1426,8 @@ def test_count_masked_unlinked_closes_absent_from_db_returns_zero(
 # ---------------------------------------------------------------------------
 
 
-def test_linkage_pass_vacuously_true_when_no_eligible_records() -> None:
-    """During accumulation (0 eligible), linkage must not block the gate."""
+def test_linkage_fails_closed_when_no_eligible_records() -> None:
+    """0 eligible records must no longer vacuously satisfy linkage."""
     import scripts.production_audit_gate as mod
 
     # Simulate: 0 matched, 0 eligible — warmup active
@@ -1443,12 +1443,15 @@ def test_linkage_pass_vacuously_true_when_no_eligible_records() -> None:
         _linkage_min_matched = 1
         _linkage_min_ratio = 0.0
     _linkage_no_eligible = outcome_eligible == 0
-    linkage_pass = _linkage_no_eligible or (
+    linkage_pass = (
+        outcome_eligible > 0
+        and (
         outcome_matched >= _linkage_min_matched
         and matched_over_eligible >= _linkage_min_ratio
+        )
     )
 
-    assert linkage_pass is True, "0 eligible records during warmup must vacuously pass linkage"
+    assert linkage_pass is False, "0 eligible records must fail closed on linkage"
     assert _linkage_warmup_active is True
     assert _linkage_no_eligible is True
 

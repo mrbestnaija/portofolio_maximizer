@@ -9,7 +9,8 @@ Verdict rules (R1–R4, R6 are hard gates; R5 is conditional):
 
   R1  No confirmed CRITICAL or HIGH adversarial findings.
   R2  Gate artifact (logs/gate_status_latest.json) exists, overall_passed=True, age < 26 h.
-  R3  Trade quality: n_trades >= 20, win_rate >= 0.45, profit_factor >= 1.30.
+  R3  Trade quality: n_trades >= 20, profit_factor >= 1.30.
+      win_rate remains diagnostic-only.
   R4  Calibration not inactive: tier != 'inactive', brier < 0.25.
   R5  Lift CI:
         ci_high < 0 with n_used >= 20 windows → hard FAIL (ensemble definitively
@@ -61,7 +62,7 @@ GATE_ARTIFACT = ROOT / "logs" / "gate_status_latest.json"
 
 # Hard-gate thresholds
 R3_MIN_TRADES = 20
-R3_MIN_WIN_RATE = 0.45
+R3_MIN_WIN_RATE = 0.45  # Diagnostic-only advisory floor; not part of PASS/FAIL.
 R3_MIN_PROFIT_FACTOR = 1.30
 R4_MAX_BRIER = 0.25
 R2_MAX_AGE_HOURS = 26.0
@@ -118,7 +119,7 @@ def _check_r2_gate_artifact() -> tuple[bool, str, dict]:
 
 
 def _check_r3_trade_quality(db_path: Path) -> tuple[Optional[bool], str, dict]:
-    """R3: n_trades >= 20, win_rate >= 0.45, profit_factor >= 1.30."""
+    """R3: n_trades >= 20, profit_factor >= 1.30; win_rate is diagnostic only."""
     metrics: dict[str, Any] = {"n_trades": None, "win_rate": None, "profit_factor": None}
     if not db_path.exists():
         return None, f"R3: db not found -- {db_path}", metrics
@@ -135,8 +136,6 @@ def _check_r3_trade_quality(db_path: Path) -> tuple[Optional[bool], str, dict]:
         reasons = []
         if (n_trades or 0) < R3_MIN_TRADES:
             reasons.append(f"only {n_trades} trades (min {R3_MIN_TRADES})")
-        if (win_rate or 0.0) < R3_MIN_WIN_RATE:
-            reasons.append(f"win_rate={win_rate:.1%} < {R3_MIN_WIN_RATE:.0%}")
         if (pf or 0.0) < R3_MIN_PROFIT_FACTOR:
             reasons.append(f"profit_factor={pf:.2f} < {R3_MIN_PROFIT_FACTOR:.2f}")
         if reasons:

@@ -104,9 +104,11 @@ def test_gate_failure_decomposition_preserves_linkage_counts(
 
     data = json.loads(output.read_text(encoding="utf-8"))
     linkage = data["components"]["LINKAGE_BLOCKER"]
+    performance = data["components"]["PERFORMANCE_BLOCKER"]
     assert linkage["pass"] is False
     assert linkage["metrics"]["outcome_matched"]["value"] == 0
     assert linkage["metrics"]["outcome_eligible"]["value"] == 1
+    assert performance["metrics"]["win_rate"]["threshold"] == "diagnostic_only"
     assert linkage["waterfall"]["raw_candidates"] == 82
     assert linkage["waterfall"]["linked"] == 1
     assert linkage["waterfall"]["matched"] == 0
@@ -184,13 +186,23 @@ def test_gate_failure_decomposition_marks_summary_binding_mismatch(
 
     data = json.loads(output.read_text(encoding="utf-8"))
     reason_breakdown = data["reason_breakdown"]
-    assert reason_breakdown["available"] is False
+    assert reason_breakdown["available"] is True
     assert reason_breakdown["binding_match"] is False
     assert "audit_dir" in reason_breakdown["binding_mismatch"]
-    assert reason_breakdown["invalid_context_top_reasons"][0]["reason_code"] == "UNATTRIBUTED_INVALID_CONTEXT"
-    assert reason_breakdown["invalid_context_top_reasons"][0]["count"] == 30
-    assert reason_breakdown["non_trade_context_top_reasons"][0]["reason_code"] == "UNATTRIBUTED_NON_TRADE_CONTEXT"
-    assert reason_breakdown["non_trade_context_top_reasons"][0]["count"] == 33
+    invalid_map = {
+        str(item["reason_code"]): int(item["count"])
+        for item in reason_breakdown["invalid_context_top_reasons"]
+    }
+    non_trade_map = {
+        str(item["reason_code"]): int(item["count"])
+        for item in reason_breakdown["non_trade_context_top_reasons"]
+    }
+    assert invalid_map["MISSING_EXECUTION_METADATA"] == 2
+    assert invalid_map["HORIZON_MISMATCH"] == 1
+    assert invalid_map["UNATTRIBUTED_INVALID_CONTEXT"] == 27
+    assert non_trade_map["MISSING_TICKER"] == 2
+    assert non_trade_map["NON_TRADE_CONTEXT"] == 1
+    assert non_trade_map["UNATTRIBUTED_NON_TRADE_CONTEXT"] == 30
     assert output_md.exists()
 
 

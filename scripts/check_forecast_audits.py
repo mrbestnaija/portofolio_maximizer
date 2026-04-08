@@ -38,10 +38,16 @@ try:
 except Exception:  # pragma: no cover - script execution path fallback
     from telemetry_adapter import normalize_telemetry_payload, telemetry_now_utc
 
+try:
+    from etl.paths import DB_PATH as _DEFAULT_DB_PATH
+except Exception:  # pragma: no cover - script execution path fallback
+    _DEFAULT_DB_PATH = Path("data/portfolio_maximizer.db")
+
 DEFAULT_AUDIT_ROOT = Path("logs/forecast_audits")
 DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
 DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
 DEFAULT_MONITORING_CONFIG = Path("config/forecaster_monitoring.yml")
+DEFAULT_DB_PATH = Path(_DEFAULT_DB_PATH)
 DEFAULT_BASELINE_MODEL = "BEST_SINGLE"
 DEFAULT_DECISION_KEEP = "KEEP"
 DEFAULT_DECISION_RESEARCH = "RESEARCH_ONLY"
@@ -127,6 +133,38 @@ def _parse_utc_datetime(raw: Any) -> Optional[datetime]:
         return None
 
 
+def _is_producer_native(value: Any) -> bool:
+    return str(value or "").strip().lower() == "producer-native"
+
+
+def _classify_execution_rejection(
+    *,
+    signal_context: Dict[str, Any],
+    execution_decision: Dict[str, Any],
+    semantic_admission: Dict[str, Any],
+) -> Tuple[bool, bool]:
+    """Return (trusted_rejected, unverified_rejected).
+
+    We only exclude rejected signals from linkage denominators when the
+    rejection provenance is producer-native. A bare `executed=False` without
+    that provenance is treated conservatively and remains in the normal outcome
+    flow instead of shrinking the denominator.
+    """
+    signal_executed = execution_decision.get("executed")
+    if signal_executed is not False:
+        return False, False
+
+    trusted = any(
+        _is_producer_native(candidate)
+        for candidate in (
+            execution_decision.get("source_classification"),
+            signal_context.get("evidence_source_classification"),
+            semantic_admission.get("evidence_source_classification"),
+        )
+    )
+    return trusted, not trusted
+
+
 def _expected_close_ts(end_raw: Any, horizon_raw: Any) -> Optional[datetime]:
     end_ts = _parse_utc_datetime(end_raw)
     if end_ts is None:
@@ -179,11 +217,17 @@ def compute_expected_close(
 
 def _load_closed_trade_match_counts(
     db_path: Optional[Path],
-) -> Tuple[bool, Dict[str, int], Optional[str]]:
+) -> Tuple[bool, Dict[str, int], Optional[str], set]:
+    """Return (outcomes_loaded, mapping, error, synthetic_tsids).
+
+    synthetic_tsids: ts_signal_ids from trade_executions where is_synthetic=1.
+    These audits can never become MATCHED (synthetic trades excluded from
+    production_closed_trades view) and should be classified as INVALID_CONTEXT.
+    """
     if db_path is None:
-        return False, {}, "db_not_configured"
+        return False, {}, "db_not_configured", set()
     if not db_path.exists():
-        return False, {}, f"db_not_found:{db_path}"
+        return False, {}, f"db_not_found:{db_path}", set()
     conn: Optional[sqlite3.Connection] = None
     try:
         conn = sqlite3.connect(str(db_path))
@@ -201,9 +245,25 @@ def _load_closed_trade_match_counts(
             sid = str(ts_signal_id or "").strip()
             if sid:
                 mapping[sid] = int(count or 0)
-        return True, mapping, None
+        # Also collect synthetic ts_signal_ids so their audits can be excluded
+        # from the linkage denominator (synthetic trades never appear in
+        # production_closed_trades, so they can never become MATCHED).
+        synthetic_query_error: Optional[str] = None
+        try:
+            cur.execute(
+                """
+                SELECT ts_signal_id FROM trade_executions
+                WHERE is_synthetic = 1
+                  AND ts_signal_id IS NOT NULL AND TRIM(ts_signal_id) <> ''
+                """
+            )
+            synthetic_tsids: set = {str(r[0]).strip() for r in cur.fetchall() if r[0]}
+        except Exception as exc:
+            synthetic_tsids = set()
+            synthetic_query_error = f"synthetic_tsid_query_failed:{exc}"
+        return True, mapping, synthetic_query_error, synthetic_tsids
     except Exception as exc:
-        return False, {}, str(exc)
+        return False, {}, str(exc), set()
     finally:
         if conn is not None:
             conn.close()
@@ -545,8 +605,9 @@ def _build_failure_dataset_snapshot(
     outcomes_loaded = False
     outcome_join_error: Optional[str] = None
     closed_trade_counts: Dict[str, int] = {}
+    synthetic_tsids: set = set()
     if db_path is not None:
-        outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(db_path)
+        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = _load_closed_trade_match_counts(db_path)
 
     now = now_utc()
     dataset_entries: List[Dict[str, Any]] = []
@@ -562,6 +623,8 @@ def _build_failure_dataset_snapshot(
     outcome_windows_no_signal_id = 0
     outcome_windows_non_trade_context = 0
     outcome_windows_missing_execution_metadata = 0
+    outcome_windows_execution_rejected = 0
+    outcome_windows_unverified_execution_rejected = 0
 
     def _legacy_to_status(outcome_status: str) -> str:
         mapping = {
@@ -579,6 +642,15 @@ def _build_failure_dataset_snapshot(
         signal_context = (audit or {}).get("signal_context") or {}
         if not isinstance(signal_context, dict):
             signal_context = {}
+        semantic_admission = (audit or {}).get("semantic_admission") or {}
+        if not isinstance(semantic_admission, dict):
+            semantic_admission = {}
+        execution_decision = (audit or {}).get("execution_decision") or {}
+        signal_rejected, signal_rejected_unverified = _classify_execution_rejection(
+            signal_context=signal_context,
+            execution_decision=execution_decision,
+            semantic_admission=semantic_admission,
+        )
 
         context_type = str(signal_context.get("context_type") or "").strip().upper() or "TRADE"
         raw_ts_signal_id = signal_context.get("ts_signal_id")
@@ -610,7 +682,9 @@ def _build_failure_dataset_snapshot(
             "evidence_contract_version": (audit or {}).get("evidence_contract_version"),
             "cohort_id": (audit or {}).get("cohort_id"),
             "cohort_identity": (audit or {}).get("cohort_identity"),
-            "semantic_admission": (audit or {}).get("semantic_admission"),
+            "semantic_admission": semantic_admission,
+            "signal_rejected": signal_rejected,
+            "signal_rejected_unverified": signal_rejected_unverified,
             "outcome_status": None,
             "outcome_reason": None,
         }
@@ -640,6 +714,17 @@ def _build_failure_dataset_snapshot(
             entry["outcome_status"] = "INVALID_CONTEXT"
             entry["outcome_reason"] = "MISSING_SIGNAL_ID"
             outcome_windows_no_signal_id += 1
+            outcome_windows_invalid_context += 1
+        elif signal_rejected:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "EXECUTION_REJECTED"
+            outcome_windows_execution_rejected += 1
+            outcome_windows_invalid_context += 1
+        elif signal_rejected_unverified:
+            outcome_windows_unverified_execution_rejected += 1
+        elif ts_signal_id in synthetic_tsids:
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "SYNTHETIC_EXECUTION"
             outcome_windows_invalid_context += 1
         elif (
             signal_horizon is not None
@@ -693,6 +778,8 @@ def _build_failure_dataset_snapshot(
 
         outcome_status = str(entry.get("outcome_status") or "OUTCOMES_NOT_LOADED").strip().upper()
         outcome_reason = str(entry.get("outcome_reason") or "OUTCOME_JOIN_UNAVAILABLE").strip().upper()
+        entry["outcome_status"] = outcome_status
+        entry["outcome_reason"] = outcome_reason
         counts_toward_linkage = outcome_status in {"MATCHED", "OUTCOME_MISSING"}
         counts_toward_readiness = _counts_toward_readiness_denominator(
             context_type=context_type,
@@ -766,6 +853,8 @@ def _build_failure_dataset_snapshot(
         "n_outcome_windows_not_due": outcome_windows_not_due,
         "n_outcome_windows_not_yet_eligible": outcome_windows_not_yet_eligible,
         "n_outcome_windows_invalid_context": outcome_windows_invalid_context,
+        "n_outcome_windows_execution_rejected": outcome_windows_execution_rejected,
+        "n_outcome_windows_unverified_execution_rejected": outcome_windows_unverified_execution_rejected,
         "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
         "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
         "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,
@@ -1295,8 +1384,9 @@ def main() -> None:
         "--db",
         default=None,
         help=(
-            "Optional path to SQLite DB for deterministic ts_signal_id outcome joins. "
-            "If omitted, outcome join telemetry stays disabled."
+            "Path to SQLite DB for deterministic ts_signal_id outcome joins. "
+            "Defaults to data/portfolio_maximizer.db for production audit runs; "
+            "non-production audit runs require explicit --db."
         ),
     )
     parser.add_argument(
@@ -1366,7 +1456,35 @@ def main() -> None:
         # Backward-compatible fallback for repos that still keep audits under
         # logs/forecast_audits without production/research partitioning.
         audit_dir = DEFAULT_AUDIT_ROOT
-    db_path = Path(args.db) if args.db else None
+    requested_default_production_dir = False
+    try:
+        requested_default_production_dir = (
+            requested_audit_dir.resolve() == DEFAULT_AUDIT_PRODUCTION_DIR.resolve()
+        )
+    except Exception:
+        requested_default_production_dir = str(requested_audit_dir) == str(DEFAULT_AUDIT_PRODUCTION_DIR)
+
+    if args.db:
+        db_path = Path(args.db)
+    elif requested_default_production_dir and DEFAULT_DB_PATH.exists():
+        db_path = DEFAULT_DB_PATH
+    else:
+        db_path = None
+
+    if requested_default_production_dir and db_path is None:
+        _emit_failure_summary_and_exit(
+            message=(
+                "Outcome joins are required for production audit reviews, but no SQLite DB is "
+                f"available. Expected default DB at: {DEFAULT_DB_PATH}"
+            ),
+            audit_dir=audit_dir,
+            audit_roots=_resolve_audit_roots(audit_dir, bool(args.include_research)),
+            include_research=bool(args.include_research),
+            max_files=int(args.max_files),
+            db_path=None,
+            min_forecast_horizon=None,
+            exit_code=1,
+        )
     min_forecast_horizon: Optional[int] = None
     audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
     files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
@@ -1795,6 +1913,8 @@ def main() -> None:
     outcome_windows_no_signal_id = 0
     outcome_windows_non_trade_context = 0
     outcome_windows_missing_execution_metadata = 0
+    outcome_windows_execution_rejected = 0
+    outcome_windows_unverified_execution_rejected = 0
 
     print(
         "RMSE coverage  : "
@@ -2316,6 +2436,12 @@ def main() -> None:
         context_type = str(signal_context.get("context_type") or "").strip().upper()
         if not context_type:
             context_type = "TRADE"
+        execution_decision = (audit or {}).get("execution_decision") or {}
+        signal_rejected, signal_rejected_unverified = _classify_execution_rejection(
+            signal_context=signal_context,
+            execution_decision=execution_decision,
+            semantic_admission=semantic_admission,
+        )
         meta = _extract_window_metadata(audit or {})
         manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
         audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
@@ -2352,6 +2478,8 @@ def main() -> None:
             "payload_sha256": _sha256_file(f),
             "outcome_status": None,
             "outcome_reason": None,
+            "signal_rejected": signal_rejected,
+            "signal_rejected_unverified": signal_rejected_unverified,
         }
         matching = results_by_path.get(f)
         if matching:
@@ -2384,7 +2512,8 @@ def main() -> None:
     if db_path is not None:
         outcome_join_attempted = True
         closed_trade_counts: Dict[str, int] = {}
-        outcomes_loaded, closed_trade_counts, outcome_join_error = _load_closed_trade_match_counts(
+        synthetic_tsids: set = set()
+        outcomes_loaded, closed_trade_counts, outcome_join_error, synthetic_tsids = _load_closed_trade_match_counts(
             db_path
         )
         if outcomes_loaded:
@@ -2418,6 +2547,22 @@ def main() -> None:
                     entry["outcome_status"] = "INVALID_CONTEXT"
                     entry["outcome_reason"] = "MISSING_SIGNAL_ID"
                     outcome_windows_no_signal_id += 1
+                    outcome_windows_invalid_context += 1
+                    continue
+
+                if bool(entry.get("signal_rejected")):
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "EXECUTION_REJECTED"
+                    outcome_windows_execution_rejected += 1
+                    outcome_windows_invalid_context += 1
+                    continue
+
+                if bool(entry.get("signal_rejected_unverified")):
+                    outcome_windows_unverified_execution_rejected += 1
+
+                if ts_signal_id in synthetic_tsids:
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "SYNTHETIC_EXECUTION"
                     outcome_windows_invalid_context += 1
                     continue
 
@@ -2776,6 +2921,8 @@ def main() -> None:
             "n_outcome_windows_not_due": outcome_windows_not_due,
             "n_outcome_windows_not_yet_eligible": outcome_windows_not_yet_eligible,
             "n_outcome_windows_invalid_context": outcome_windows_invalid_context,
+            "n_outcome_windows_execution_rejected": outcome_windows_execution_rejected,
+            "n_outcome_windows_unverified_execution_rejected": outcome_windows_unverified_execution_rejected,
             "n_outcome_windows_outcomes_not_loaded": outcome_windows_outcomes_not_loaded,
             "n_outcome_windows_no_signal_id": outcome_windows_no_signal_id,
             "n_outcome_windows_non_trade_context": outcome_windows_non_trade_context,

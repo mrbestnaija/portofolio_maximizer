@@ -90,6 +90,14 @@ def _metric(value: Any, threshold: str, passed: bool) -> Dict[str, Any]:
     }
 
 
+def _diagnostic_metric(value: Any) -> Dict[str, Any]:
+    return {
+        "value": value,
+        "threshold": "diagnostic_only",
+        "pass": value is not None,
+    }
+
+
 def _top_counts(items: list[str], *, limit: int = 10) -> list[Dict[str, Any]]:
     counts = Counter(items)
     out: list[Dict[str, Any]] = []
@@ -216,12 +224,6 @@ def _extract_reason_breakdown(
         return _fallback_unattributed(available=False, binding_match=False)
 
     matches, mismatch = _summary_matches_gate_inputs(summary_payload, gate_inputs)
-    if not matches:
-        return _fallback_unattributed(
-            available=False,
-            binding_match=False,
-            mismatch=mismatch,
-        )
 
     windows = summary_payload.get("dataset_windows")
     if not isinstance(windows, list):
@@ -244,6 +246,12 @@ def _extract_reason_breakdown(
         if isinstance(summary_payload.get("window_counts"), dict)
         else {}
     )
+    if not windows and not window_counts:
+        return _fallback_unattributed(
+            available=False,
+            binding_match=matches,
+            mismatch=mismatch,
+        )
     missing_exec_count = _safe_int(
         window_counts.get("n_outcome_windows_missing_execution_metadata"),
         0,
@@ -282,8 +290,8 @@ def _extract_reason_breakdown(
 
     return {
         "available": True,
-        "binding_match": True,
-        "binding_mismatch": {},
+        "binding_match": matches,
+        "binding_mismatch": {} if matches else mismatch,
         "summary_path": summary_payload.get("audit_dir"),
         "invalid_context_top_reasons": _top_counts(
             list(invalid_counter.elements()),
@@ -337,7 +345,6 @@ def _build_decomposition(
         _safe_int(thresholds.get("r3_min_trades"), 30),
     )
     min_trading_days = _safe_int(proof_evidence.get("min_trading_days"), 21)
-    min_win_rate = _safe_float(thresholds.get("r3_min_win_rate"))
     min_profit_factor = _safe_float(thresholds.get("r3_min_profit_factor"))
 
     matched = _safe_int(readiness.get("outcome_matched"), 0)
@@ -385,11 +392,7 @@ def _build_decomposition(
                     f">= {min_profit_factor}",
                     False if (pf is None or min_profit_factor is None) else pf >= min_profit_factor,
                 ),
-                "win_rate": _metric(
-                    wr,
-                    f">= {min_win_rate}",
-                    False if (wr is None or min_win_rate is None) else wr >= min_win_rate,
-                ),
+                "win_rate": _diagnostic_metric(wr),
                 "total_pnl": _metric(pnl, "context metric", False if pnl is None else True),
                 "closed_trades": _metric(
                     closed_trades,
