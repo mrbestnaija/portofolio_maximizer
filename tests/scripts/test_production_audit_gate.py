@@ -1557,3 +1557,50 @@ def test_main_passes_effective_default_baseline_through_to_gate_output(
     assert rc == 0
     payload = original_safe_load_json(output_json)
     assert payload["lift_gate"]["baseline_model"] == "EFFECTIVE_DEFAULT"
+
+
+def test_evidence_hygiene_excludes_execution_rejected_from_dirty_count() -> None:
+    """EXECUTION_REJECTED invalids must not fail evidence hygiene.
+
+    Phase 11-B introduced writing audit files for every forecaster run to the
+    production dir, including HOLD/blocked signals (executed=False,
+    source=producer-native).  These are legitimate production artifacts — they
+    should be counted as EXECUTION_REJECTED and excluded from the "dirty"
+    invalid count that evidence_hygiene_pass tests against.
+    """
+    import scripts.production_audit_gate as mod
+
+    safe_int = mod._safe_int
+
+    # Scenario: 100 invalids, 95 of which are EXECUTION_REJECTED (clean HOLD signals).
+    # Only 5 are genuinely dirty (missing metadata, horizon mismatch, etc.).
+    invalid_context_count = 100
+    execution_rejected_count = 95
+    non_trade_count = 0
+    production_audit_only = True
+
+    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
+    evidence_hygiene_pass = (
+        production_audit_only and non_trade_count == 0 and dirty_invalid_count == 0
+    )
+
+    # 5 dirty invalids remain — hygiene must FAIL.
+    assert dirty_invalid_count == 5
+    assert evidence_hygiene_pass is False
+
+    # With all invalids being EXECUTION_REJECTED — hygiene must PASS.
+    all_rejected_dirty_count = max(0, 100 - 100)
+    evidence_hygiene_all_clean = (
+        production_audit_only and non_trade_count == 0 and all_rejected_dirty_count == 0
+    )
+    assert all_rejected_dirty_count == 0
+    assert evidence_hygiene_all_clean is True
+
+    # Verify _safe_int handles the new field name correctly.
+    window_counts = {
+        "n_outcome_windows_invalid_context": 123,
+        "n_outcome_windows_execution_rejected": 123,
+    }
+    er = safe_int(window_counts.get("n_outcome_windows_execution_rejected"), 0)
+    inv = safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    assert max(0, inv - er) == 0

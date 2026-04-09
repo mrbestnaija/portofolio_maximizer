@@ -1417,6 +1417,14 @@ def main() -> int:
 
     non_trade_count = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
     invalid_context_count = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    # EXECUTION_REJECTED is a clean, expected classification for HOLD/blocked signals
+    # that legitimately live in the production audit dir.  Only count "dirty" invalids
+    # (missing metadata, horizon mismatch, causality violations, ambiguous matches) as
+    # evidence hygiene failures.  EXECUTION_REJECTED should never block hygiene.
+    execution_rejected_count = _safe_int(
+        window_counts.get("n_outcome_windows_execution_rejected"), 0
+    )
+    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
     scope_block = lift_summary.get("scope", {}) if isinstance(lift_summary.get("scope"), dict) else {}
     production_audit_only = bool(
         scope_block.get(
@@ -1425,7 +1433,7 @@ def main() -> int:
         )
     )
     evidence_hygiene_pass = (
-        production_audit_only and non_trade_count == 0 and invalid_context_count == 0
+        production_audit_only and non_trade_count == 0 and dirty_invalid_count == 0
     )
     linkage_waterfall = _build_linkage_waterfall(
         window_counts,
@@ -1659,6 +1667,8 @@ def main() -> int:
             "proof_evidence_ready": proof_evidence_ready,
             "non_trade_context_count": non_trade_count,
             "invalid_context_count": invalid_context_count,
+            "execution_rejected_count": execution_rejected_count,
+            "dirty_invalid_count": dirty_invalid_count,
             "linkage_waterfall": linkage_waterfall,
             "production_audit_only": production_audit_only,
             "high_integrity_violation_count": high_integrity_violation_count,
