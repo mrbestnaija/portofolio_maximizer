@@ -1506,6 +1506,139 @@ def _persist_forecast_snapshots(
             logger.debug("Failed to persist %s forecast snapshot for %s", model_type, ticker, exc_info=True)
 
 
+def _json_safe_audit_value(obj: Any) -> Any:
+    """Recursively coerce audit fragments into JSON-safe primitives."""
+    if obj is None or isinstance(obj, (str, bool)):
+        return obj
+    if isinstance(obj, int):
+        return int(obj)
+    if isinstance(obj, float):
+        return float(obj) if np.isfinite(obj) else None
+    if isinstance(obj, (datetime, pd.Timestamp)):
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, (np.floating, np.integer)):
+        scalar = obj.item()
+        if isinstance(scalar, float) and not np.isfinite(scalar):
+            return None
+        return scalar
+    if isinstance(obj, np.ndarray):
+        return [_json_safe_audit_value(v) for v in obj.tolist()]
+    if isinstance(obj, dict):
+        return {str(k): _json_safe_audit_value(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe_audit_value(v) for v in obj]
+    return str(obj)
+
+
+def _build_routed_signal_snapshot(
+    *,
+    ticker: str,
+    primary_signal: Dict[str, Any],
+    primary_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Extract the economically relevant routed-signal state for audit persistence."""
+    signal = primary_signal if isinstance(primary_signal, dict) else {}
+    payload = primary_payload if isinstance(primary_payload, dict) else {}
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    decision_context = (
+        provenance.get("decision_context")
+        if isinstance(provenance.get("decision_context"), dict)
+        else {}
+    )
+    quant_validation = (
+        provenance.get("quant_validation")
+        if isinstance(provenance.get("quant_validation"), dict)
+        else {}
+    )
+
+    hold_reason = str(provenance.get("hold_reason") or "").strip() or None
+    routing_reason = None
+    if payload.get("execution_policy_blocked"):
+        routing_reason = (
+            str(payload.get("execution_policy_detail") or "").strip()
+            or "EXECUTION_POLICY_BLOCKED"
+        )
+    if not routing_reason:
+        routing_reason = hold_reason
+    if not routing_reason:
+        routing_reason = str(signal.get("reason") or "").strip() or None
+    if not routing_reason and str(payload.get("action") or "").strip().upper() == "HOLD":
+        routing_reason = "UNKNOWN_HOLD"
+
+    snr = decision_context.get("signal_to_noise")
+    if snr is None:
+        snr = provenance.get("decision_context_snr")
+    if snr is None:
+        snr = signal.get("snr")
+
+    quant_summary: Dict[str, Any] = {}
+    if quant_validation:
+        for key in (
+            "status",
+            "failed_criteria",
+            "utility_score",
+            "objective_mode",
+            "structural_gates",
+            "diagnostics",
+        ):
+            value = quant_validation.get(key)
+            if value not in (None, "", [], {}):
+                quant_summary[key] = value
+
+    snapshot: Dict[str, Any] = {
+        "ticker": ticker,
+        "signal_source": signal.get("source") or payload.get("signal_source") or "TIME_SERIES",
+        "signal_id": payload.get("signal_id"),
+        "ts_signal_id": payload.get("ts_signal_id") or signal.get("ts_signal_id"),
+        "action": payload.get("action") or signal.get("action"),
+        "confidence": signal.get("confidence"),
+        "effective_confidence": payload.get("confidence"),
+        "base_confidence": payload.get("base_confidence"),
+        "confidence_calibrated": signal.get("confidence_calibrated"),
+        "model_type": signal.get("model_type"),
+        "signal_type": signal.get("signal_type"),
+        "expected_return": signal.get("expected_return"),
+        "expected_return_net": signal.get("expected_return_net"),
+        "gross_trade_return": signal.get("gross_trade_return"),
+        "net_trade_return": signal.get("net_trade_return"),
+        "roundtrip_cost_fraction": signal.get("roundtrip_cost_fraction"),
+        "roundtrip_cost_bps": signal.get("roundtrip_cost_bps"),
+        "risk_score": signal.get("risk_score"),
+        "risk_level": signal.get("risk_level"),
+        "volatility": signal.get("volatility"),
+        "p_up": provenance.get("p_up") if provenance else signal.get("p_up"),
+        "signal_timestamp": payload.get("signal_timestamp") or signal.get("signal_timestamp"),
+        "bar_timestamp": payload.get("bar_timestamp"),
+        "forecast_horizon": payload.get("forecast_horizon") or signal.get("forecast_horizon"),
+        "hold_reason": hold_reason,
+        "routing_reason": routing_reason,
+        "snr": snr,
+        "snr_gate_blocked": provenance.get("snr_gate_blocked"),
+        "snr_gate_threshold": provenance.get("snr_gate_threshold"),
+        "directional_gate_applied": bool(
+            provenance.get("directional_gate_applied") or signal.get("directional_gate_applied")
+        ),
+        "execution_policy_blocked": bool(payload.get("execution_policy_blocked")),
+        "reasoning": payload.get("reasoning") or signal.get("reasoning"),
+    }
+    if quant_summary:
+        snapshot["quant_validation"] = quant_summary
+
+    safe_snapshot = _json_safe_audit_value(snapshot)
+    return {
+        str(key): value
+        for key, value in safe_snapshot.items()
+        if value not in (None, "", [], {})
+    }
+
+
 def _attach_signal_context_to_forecast_audit(
     *,
     forecast_bundle: Dict[str, Any],
@@ -1517,7 +1650,8 @@ def _attach_signal_context_to_forecast_audit(
     Patch the just-written forecast_audit artifact with causal signal identity.
 
     Keeps scope bounded to one write-path: forecast audit files gain a top-level
-    signal_context block carrying ts_signal_id and routing metadata.
+    signal_context block carrying ts_signal_id and routing metadata, plus a
+    compact routed-signal snapshot so live rejection taxonomy is inspectable.
     """
     if not isinstance(forecast_bundle, dict) or not isinstance(execution_report, dict):
         return
@@ -1619,22 +1753,53 @@ def _attach_signal_context_to_forecast_audit(
         if not merged.get("event_type"):
             merged["event_type"] = str(execution_report.get("event_type") or "TRADE_FORECAST_AUDIT").strip().upper()
 
-        # Copy execution policy fields from execution_report
+        # Copy execution policy and routing fields from execution_report.
+        # routing_reason = signal router's rejection/hold reason (e.g. SNR_GATE,
+        # CONFIDENCE_BELOW_THRESHOLD); distinct from execution_decision.reason
+        # which is PTE's blunt rejection string.
         for field in (
             "execution_policy_blocked",
             "admission_override_reason_code",
             "admission_override_reason_codes",
             "expected_return",
+            "expected_return_net",
+            "gross_trade_return",
             "net_trade_return",
             "roundtrip_cost_fraction",
+            "roundtrip_cost_bps",
             "signal_to_noise",
+            "action",          # BUY / SELL / HOLD — the routing decision
+            "routing_reason",  # signal router's hold/reject reason (not PTE's blunt string)
+            "snr",             # signal-to-noise ratio at routing time
+            "hold_reason",
+            "directional_gate_applied",
+            "confidence_calibrated",
+            "quant_validation_status",
+            "quant_validation_failed_criteria",
         ):
             incoming_value = execution_report.get(field)
             if incoming_value not in (None, "", []):
                 merged[field] = incoming_value
 
+        # signal_confidence → confidence: model confidence [0, 1] at routing time.
+        # Stored under "confidence" so downstream tooling (check_forecast_audits, dashboards)
+        # can read it without knowing the execution_report key name.
+        incoming_confidence = execution_report.get("signal_confidence")
+        if incoming_confidence is not None:
+            merged["confidence"] = incoming_confidence
+
         merged["signal_context_missing"] = not bool(merged.get("ts_signal_id"))
         payload["signal_context"] = merged
+
+        incoming_signal = execution_report.get("signal_snapshot")
+        if isinstance(incoming_signal, dict):
+            existing_signal = payload.get("signal")
+            merged_signal = dict(existing_signal) if isinstance(existing_signal, dict) else {}
+            for key, value in incoming_signal.items():
+                if value not in (None, "", [], {}):
+                    merged_signal[str(key)] = _json_safe_audit_value(value)
+            if merged_signal:
+                payload["signal"] = merged_signal
 
         # Backfill ticker into dataset section when missing
         ticker_val = merged.get("ticker")
@@ -1661,7 +1826,8 @@ def _attach_signal_context_to_forecast_audit(
 
         tmp_path_w = audit_path.with_suffix(audit_path.suffix + ".tmp")
         try:
-            tmp_path_w.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            safe_payload = _json_safe_audit_value(payload)
+            tmp_path_w.write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
             os.replace(tmp_path_w, audit_path)
         except Exception:
             logger.debug("Failed to patch signal_context into %s", audit_path, exc_info=True)
@@ -1816,15 +1982,26 @@ def _execute_signal(
         logger.info("No actionable signal produced for %s", ticker)
         return None
 
+    primary_provenance = primary.get("provenance") if isinstance(primary.get("provenance"), dict) else {}
+    decision_context = (
+        primary_provenance.get("decision_context")
+        if isinstance(primary_provenance.get("decision_context"), dict)
+        else {}
+    )
+    hold_reason = str(primary_provenance.get("hold_reason") or "").strip() or str(primary.get("reason") or "HOLD")
+    routing_snr = decision_context.get("signal_to_noise")
+    if routing_snr is None:
+        routing_snr = primary_provenance.get("decision_context_snr")
+
     # Funnel audit: log signals whose action is HOLD (blocked by signal routing thresholds:
     # confidence < 0.55, SNR < 1.5, min_return < 20 bps). Observability only — P1-B.
     if str(primary.get("action", "")).upper() == "HOLD":
         _write_funnel_audit_entry(
             ticker=ticker,
             ts_signal_id=str(primary.get("ts_signal_id") or primary.get("signal_id") or ""),
-            reason=str(primary.get("reason") or "HOLD"),
+            reason=hold_reason,
             confidence=primary.get("confidence"),
-            snr=primary.get("snr"),
+            snr=routing_snr,
             expected_return=primary.get("expected_return"),
         )
 
@@ -1912,6 +2089,20 @@ def _execute_signal(
             primary_payload.get("stop_loss"), primary_payload.get("target_price"),
         )
 
+    signal_snapshot = _build_routed_signal_snapshot(
+        ticker=ticker,
+        primary_signal=primary,
+        primary_payload=primary_payload,
+    )
+    routing_reason = signal_snapshot.get("routing_reason")
+    routing_hold_reason = signal_snapshot.get("hold_reason")
+    routing_snr = signal_snapshot.get("snr")
+    quant_validation_summary = (
+        signal_snapshot.get("quant_validation")
+        if isinstance(signal_snapshot.get("quant_validation"), dict)
+        else {}
+    )
+
     # Execution policy pre-order block: signal rejected before reaching trading engine.
     if primary_payload.get("execution_policy_blocked"):
         reason_codes = list(primary_payload.get("execution_policy_reason_codes") or [])
@@ -1929,6 +2120,21 @@ def _execute_signal(
             "ts_signal_id": primary_payload.get("ts_signal_id"),
             "ticker": ticker,
             "action": primary_payload.get("action"),
+            "signal_confidence": signal_snapshot.get("confidence"),
+            "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
+            "expected_return": signal_snapshot.get("expected_return"),
+            "expected_return_net": signal_snapshot.get("expected_return_net"),
+            "gross_trade_return": signal_snapshot.get("gross_trade_return"),
+            "net_trade_return": signal_snapshot.get("net_trade_return"),
+            "roundtrip_cost_fraction": signal_snapshot.get("roundtrip_cost_fraction"),
+            "roundtrip_cost_bps": signal_snapshot.get("roundtrip_cost_bps"),
+            "routing_reason": routing_reason,
+            "hold_reason": routing_hold_reason,
+            "snr": routing_snr,
+            "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
+            "quant_validation_status": quant_validation_summary.get("status"),
+            "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
+            "signal_snapshot": signal_snapshot,
         }
 
     result = trading_engine.execute_signal(
@@ -1952,7 +2158,20 @@ def _execute_signal(
             "ts_signal_id": primary_payload.get("ts_signal_id"),
             "action": primary_payload.get("action"),
             "signal_source": primary.get("source", "TIME_SERIES"),
-            "signal_confidence": primary.get("confidence"),
+            "signal_confidence": signal_snapshot.get("confidence"),
+            "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
+            "expected_return": signal_snapshot.get("expected_return"),
+            "expected_return_net": signal_snapshot.get("expected_return_net"),
+            "gross_trade_return": signal_snapshot.get("gross_trade_return"),
+            "net_trade_return": signal_snapshot.get("net_trade_return"),
+            "roundtrip_cost_fraction": signal_snapshot.get("roundtrip_cost_fraction"),
+            "roundtrip_cost_bps": signal_snapshot.get("roundtrip_cost_bps"),
+            "routing_reason": routing_reason,
+            "hold_reason": routing_hold_reason,
+            "snr": routing_snr,
+            "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
+            "quant_validation_status": quant_validation_summary.get("status"),
+            "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
             "signal_timestamp": primary_payload.get("signal_timestamp"),
             "bar_timestamp": primary_payload.get("bar_timestamp"),
             "warnings": result.validation_warnings,
@@ -1961,6 +2180,7 @@ def _execute_signal(
             "mid_price": mid_px,
             "barbell_bucket": primary_payload.get("barbell_bucket"),
             "barbell_multiplier": primary_payload.get("barbell_multiplier"),
+            "signal_snapshot": signal_snapshot,
         }
 
     realized_pnl = getattr(result.trade, "realized_pnl", None)
@@ -1985,12 +2205,24 @@ def _execute_signal(
         "entry_price": entry_price,
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
-        "signal_confidence": primary.get("confidence"),
+        "signal_confidence": signal_snapshot.get("confidence"),
+        "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
         "base_confidence": primary_payload.get("base_confidence"),
         "effective_confidence": primary_payload.get("confidence"),
         "barbell_bucket": primary_payload.get("barbell_bucket"),
         "barbell_multiplier": primary_payload.get("barbell_multiplier"),
-        "expected_return": primary.get("expected_return"),
+        "expected_return": signal_snapshot.get("expected_return"),
+        "expected_return_net": signal_snapshot.get("expected_return_net"),
+        "gross_trade_return": signal_snapshot.get("gross_trade_return"),
+        "net_trade_return": signal_snapshot.get("net_trade_return"),
+        "roundtrip_cost_fraction": signal_snapshot.get("roundtrip_cost_fraction"),
+        "roundtrip_cost_bps": signal_snapshot.get("roundtrip_cost_bps"),
+        "routing_reason": routing_reason,
+        "hold_reason": routing_hold_reason,
+        "snr": routing_snr,
+        "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
+        "quant_validation_status": quant_validation_summary.get("status"),
+        "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
         "quality": quality,
         "data_source": data_source,
         "timestamp": executed_at,
@@ -2000,6 +2232,7 @@ def _execute_signal(
         "realized_pnl_pct": realized_pnl_pct,
         "mid_price": mid_px,
         "mid_slippage_bp": mid_slippage_bp,
+        "signal_snapshot": signal_snapshot,
     }
 
 
