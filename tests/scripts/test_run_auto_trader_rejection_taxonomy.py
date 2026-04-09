@@ -262,6 +262,35 @@ def test_attach_signal_context_backfills_expected_close_source_when_timestamp_al
         assert signal_context["expected_close_source"] == "signal_context_explicit"
 
 
+def test_attach_signal_context_refuses_latest_file_fallback_when_audit_path_missing() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        audit_dir = tmp_path / "logs" / "forecast_audits" / "production"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        audit_file = audit_dir / "forecast_audit_20260409_090000.json"
+        original_payload = _audit_payload()
+        audit_file.write_text(json.dumps(original_payload), encoding="utf-8")
+
+        execution_report = {
+            "ts_signal_id": "ts_MSFT_20260409T090000Z_abcd_0001",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "executed": False,
+            "status": "REJECTED",
+            "action": "HOLD",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle={"horizon": 30},
+                execution_report=execution_report,
+                ticker="MSFT",
+                run_id="20260409_090000",
+            )
+
+        updated = json.loads(audit_file.read_text(encoding="utf-8"))
+        assert updated == original_payload, "missing forecast_audit_path must not patch latest file"
+
+
 def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path: Path) -> None:
     """Execution-policy blocks must still carry entry_ts/bar timestamps into the patched audit."""
     audit_file = tmp_path / "forecast_audit_20260409_093000.json"

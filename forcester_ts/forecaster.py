@@ -1651,6 +1651,7 @@ class TimeSeriesForecaster:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
             self.save_audit_report(audit_path)
+            results["forecast_audit_path"] = str(audit_path)
         return results
 
     def _build_forecast_index(self, horizon: int) -> pd.Index:

@@ -139,6 +139,18 @@ def test_forecast_records_detected_regime_in_dataset_metadata(monkeypatch) -> No
     assert result["instrumentation_report"]["dataset"]["forecast_horizon"] == 3
 
 
+def test_forecast_returns_written_audit_path(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
+    forecaster = _minimal_forecaster()
+
+    result = forecaster.forecast(steps=2)
+
+    audit_path = Path(result["forecast_audit_path"])
+    assert audit_path.exists()
+    assert audit_path.parent == tmp_path
+    assert audit_path.name.startswith("forecast_audit_")
+
+
 def test_save_audit_report_rewrites_manifest_with_valid_jsonl_only(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
     forecaster = _minimal_forecaster()

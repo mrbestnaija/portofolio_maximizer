@@ -1286,18 +1286,11 @@ def _generate_time_series_forecast(
             forecaster_config=fcfg_obj,
         )
         if isinstance(forecast_bundle, dict) and not forecast_bundle.get("forecast_audit_path"):
-            try:
-                audit_dir = getattr(forecaster, "_audit_dir", None)
-                if isinstance(audit_dir, Path) and audit_dir.exists():
-                    latest = max(
-                        audit_dir.glob("forecast_audit_*.json"),
-                        key=lambda p: p.stat().st_mtime,
-                        default=None,
-                    )
-                    if latest is not None:
-                        forecast_bundle["forecast_audit_path"] = str(latest)
-            except Exception:
-                logger.debug("Unable to infer forecast_audit_path for %s", ticker, exc_info=True)
+            logger.warning(
+                "Forecaster returned no forecast_audit_path for %s; refusing to patch live signal "
+                "context onto an inferred latest audit file.",
+                ticker,
+            )
     except Exception as exc:
         logger.error("Forecasting failed: %s", exc)
         return None, None
@@ -1782,31 +1775,29 @@ def _attach_signal_context_to_forecast_audit(
     audit_dir = ROOT_PATH / "logs" / "forecast_audits"
     candidate_paths: List[Path] = []
     raw_path = forecast_bundle.get("forecast_audit_path")
-    if raw_path:
-        try:
-            direct_path = Path(str(raw_path))
-            if not direct_path.is_absolute():
-                direct_path = ROOT_PATH / direct_path
-            if direct_path.exists():
-                candidate_paths.append(direct_path)
-                audit_dir = direct_path.parent
-        except Exception:
-            logger.debug("Failed to resolve forecast_audit_path=%r", raw_path, exc_info=True)
-
-    cutoff_ts = time.time() - 180.0
+    if not raw_path:
+        logger.warning(
+            "Skipping forecast audit patch for %s: forecast_audit_path missing; "
+            "refusing latest-file fallback to avoid stale audit contamination.",
+            ticker,
+        )
+        return
     try:
-        for path in sorted(
-            audit_dir.glob("forecast_audit_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:20]:
-            if path in candidate_paths:
-                continue
-            if path.stat().st_mtime < cutoff_ts:
-                continue
-            candidate_paths.append(path)
+        direct_path = Path(str(raw_path))
+        if not direct_path.is_absolute():
+            direct_path = ROOT_PATH / direct_path
+        if direct_path.exists():
+            candidate_paths.append(direct_path)
+            audit_dir = direct_path.parent
     except Exception:
-        logger.debug("Unable to scan recent forecast audits in %s", audit_dir, exc_info=True)
+        logger.debug("Failed to resolve forecast_audit_path=%r", raw_path, exc_info=True)
+    if not candidate_paths:
+        logger.warning(
+            "Skipping forecast audit patch for %s: resolved forecast_audit_path not found (%r).",
+            ticker,
+            raw_path,
+        )
+        return
 
     for audit_path in candidate_paths:
         try:
