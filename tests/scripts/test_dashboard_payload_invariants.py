@@ -110,3 +110,24 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
 def test_run_auto_trader_snapshot_path_is_separate_from_canonical_dashboard() -> None:
     assert run_auto_trader.RUN_AUTO_TRADER_ARTIFACT_PATH != bridge_mod.DEFAULT_OUTPUT_PATH
     assert run_auto_trader.RUN_AUTO_TRADER_ARTIFACT_PATH.name == "run_auto_trader_latest.json"
+
+
+def test_dashboard_payload_serializes_nan_as_null(tmp_path: Path) -> None:
+    path = tmp_path / "run_auto_trader_latest.json"
+
+    _emit_dashboard_json(
+        path=path,
+        meta={"run_id": "nan_test", "ts": "2026-04-09T00:00:00Z", "tickers": ["AAPL"], "cycles": 1, "llm_enabled": False, "strategy": {}},
+        summary={"cash": 100.0, "positions": {}, "total_value": float("nan"), "trades": 1, "pnl_dollars": float("nan"), "pnl_pct": float("nan")},
+        routing_stats={"time_series_signals": 1, "llm_fallback_signals": 0},
+        equity_points=[{"t": "end", "v": float("nan")}],
+        recent_signals=[{"ticker": "AAPL", "entry_price": float("nan"), "portfolio_value": float("nan")}],
+        trade_events=[{"ticker": "AAPL", "price": float("nan"), "slippage": float("nan")}],
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["pnl"]["absolute"] is None
+    assert payload["pnl"]["pct"] is None
+    assert payload["equity"][0]["v"] is None
+    assert payload["signals"][0]["entry_price"] is None
+    assert payload["trade_events"][0]["price"] is None

@@ -337,24 +337,8 @@ def _env_flag(name: str) -> Optional[bool]:
 
 def _extract_last_bar_timestamp(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
     """Return the last observed bar timestamp for a ticker frame (UTC-normalized)."""
-    if frame is None or frame.empty:
-        return None
-    try:
-        idx = pd.DatetimeIndex(frame.index)
-        if idx.empty:
-            return None
-        raw = pd.Timestamp(idx[-1])
-        # Normalize to UTC: intraday bars are tz-aware, daily bars are tz-naive.
-        return raw.tz_localize("UTC") if raw.tzinfo is None else raw.tz_convert("UTC")
-    except Exception:
-        try:
-            ts = pd.to_datetime(frame.index[-1], errors="coerce")
-            if ts is pd.NaT:
-                return None
-            raw = pd.Timestamp(ts)
-            return raw.tz_localize("UTC") if raw.tzinfo is None else raw.tz_convert("UTC")
-        except Exception:
-            return None
+    _, bar_ts = _find_last_priced_bar(frame)
+    return bar_ts
 
 
 def _format_bar_timestamp(ts: pd.Timestamp) -> str:
@@ -497,9 +481,9 @@ def _in_no_trade_window(ticker: str) -> bool:
 
 def _compute_mid_price(frame: pd.DataFrame) -> Optional[float]:
     """Best-effort mid-price using bid/ask -> high/low -> close."""
-    if frame is None or frame.empty:
+    last, _ = _find_last_priced_bar(frame)
+    if last is None:
         return None
-    last = frame.iloc[-1]
     try:
         bid = last.get("Bid")
         ask = last.get("Ask")
@@ -521,6 +505,78 @@ def _compute_mid_price(frame: pd.DataFrame) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+def _row_has_usable_price(row: Any) -> bool:
+    """Return True when a market-data row contains a finite price context."""
+    if row is None or not hasattr(row, "get"):
+        return False
+    try:
+        bid = row.get("Bid")
+        ask = row.get("Ask")
+        if bid is not None and ask is not None and pd.notna(bid) and pd.notna(ask):
+            bid_f = float(bid)
+            ask_f = float(ask)
+            if np.isfinite(bid_f) and np.isfinite(ask_f) and bid_f > 0.0 and ask_f > 0.0:
+                return True
+    except Exception:
+        pass
+    for field in ("Close", "Adj Close", "High", "Low", "Open"):
+        try:
+            value = row.get(field)
+            if value is not None and pd.notna(value):
+                value_f = float(value)
+                if np.isfinite(value_f) and value_f > 0.0:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def _find_last_priced_bar(frame: Optional[pd.DataFrame]) -> Tuple[Optional[pd.Series], Optional[pd.Timestamp]]:
+    """Return the last row/timestamp pair with usable price context."""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None, None
+    try:
+        idx = pd.DatetimeIndex(frame.index)
+    except Exception:
+        idx = None
+    for pos in range(len(frame) - 1, -1, -1):
+        try:
+            row = frame.iloc[pos]
+        except Exception:
+            continue
+        if not _row_has_usable_price(row):
+            continue
+        try:
+            raw = pd.Timestamp(idx[pos]) if idx is not None else pd.to_datetime(frame.index[pos], errors="coerce")
+            if raw is pd.NaT:
+                return row, None
+            bar_ts = raw.tz_localize("UTC") if raw.tzinfo is None else raw.tz_convert("UTC")
+        except Exception:
+            bar_ts = None
+        return row, bar_ts
+    return None, None
+
+
+def _trim_trailing_unpriced_rows(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Drop terminal rows that contain no usable price context."""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    last_pos: Optional[int] = None
+    for pos in range(len(frame) - 1, -1, -1):
+        try:
+            row = frame.iloc[pos]
+        except Exception:
+            continue
+        if _row_has_usable_price(row):
+            last_pos = pos
+            break
+    if last_pos is None:
+        return frame.iloc[0:0].copy()
+    if last_pos == len(frame) - 1:
+        return frame.copy()
+    return frame.iloc[: last_pos + 1].copy()
 
 
 FUNNEL_AUDIT_LOG_PATH = ROOT_PATH / "logs" / "funnel_audit.jsonl"
@@ -553,7 +609,7 @@ def _write_funnel_audit_entry(
     try:
         FUNNEL_AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with FUNNEL_AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, default=str) + "\n")
+            fh.write(json.dumps(_json_safe_audit_value(entry), default=str) + "\n")
     except Exception:
         logger.debug("Unable to write funnel_audit entry for %s", ticker)
 
@@ -567,7 +623,7 @@ def _log_execution_event(run_id: str, cycle: int, record: Dict[str, Any]) -> Non
     try:
         EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with EXECUTION_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, default=str) + "\n")
+            handle.write(json.dumps(_json_safe_audit_value(payload), default=str) + "\n")
     except Exception:
         logger.debug("Unable to log execution event for %s", record.get("ticker"))
 
@@ -579,7 +635,7 @@ def _log_run_summary(record: Dict[str, Any]) -> None:
     try:
         RUN_SUMMARY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with RUN_SUMMARY_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, default=str) + "\n")
+            handle.write(json.dumps(_json_safe_audit_value(payload), default=str) + "\n")
     except Exception:
         logger.debug("Unable to append run summary log", exc_info=True)
 
@@ -1104,6 +1160,9 @@ def _generate_time_series_forecast(
 
     close_series = price_frame["Close"].astype(float)
     clean_close = close_series.dropna()
+    if clean_close.empty:
+        logger.warning("Close series empty after dropping NaNs; skipping forecasting.")
+        return None, None
     if _gpu_parallel_enabled() and len(clean_close) > 1:
         try:
             values = torch.as_tensor(clean_close.to_numpy(dtype=float, copy=False), device="cuda")  # type: ignore
@@ -1178,7 +1237,7 @@ def _generate_time_series_forecast(
             monte_carlo_config=monte_carlo_cfg,
         )
         forecaster = TimeSeriesForecaster(config=fcfg_obj)
-        forecaster.fit(price_series=close_series, returns_series=returns_series, ticker=ticker)
+        forecaster.fit(price_series=clean_close, returns_series=returns_series, ticker=ticker)
         forecast_bundle = forecaster.forecast()
         # OOS holdout evaluation for production gate accumulation.
         # Uses a fresh forecaster on a trimmed series so the gate gets proper
@@ -1207,7 +1266,7 @@ def _generate_time_series_forecast(
         logger.error("Forecasting failed: %s", exc)
         return None, None
 
-    current_price = float(close_series.iloc[-1])
+    current_price = float(clean_close.iloc[-1])
     return forecast_bundle, current_price
 
 
@@ -1269,7 +1328,7 @@ def _prepare_ticker_candidate(
     """Compute quality, preprocess, and derive mid-price for a ticker frame."""
     raw_frame = frame.copy()
     quality = _compute_quality_metrics(raw_frame)
-    processed = _ensure_min_length(preprocessor.handle_missing(frame))
+    processed = _trim_trailing_unpriced_rows(_ensure_min_length(preprocessor.handle_missing(frame)))
     mid_price = _compute_mid_price(processed)
     return {
         "ticker": ticker,
@@ -1777,7 +1836,6 @@ def _attach_signal_context_to_forecast_audit(
             "roundtrip_cost_fraction",
             "roundtrip_cost_bps",
             "signal_to_noise",
-            "action",          # BUY / SELL / HOLD — the routing decision
             "routing_reason",  # signal router's hold/reject reason (not PTE's blunt string)
             "snr",             # signal-to-noise ratio at routing time
             "hold_reason",
@@ -1786,6 +1844,18 @@ def _attach_signal_context_to_forecast_audit(
             "quant_validation_status",
             "quant_validation_failed_criteria",
         ):
+            incoming_value = execution_report.get(field)
+            if incoming_value not in (None, "", []):
+                merged[field] = incoming_value
+
+        routed_action = execution_report.get("routed_action")
+        if routed_action not in (None, "", []):
+            merged["action"] = routed_action
+        else:
+            legacy_action = execution_report.get("action")
+            if legacy_action not in (None, "", []):
+                merged["action"] = legacy_action
+        for field in ("executed_action", "execution_override_type", "forced_exit", "exit_reason"):
             incoming_value = execution_report.get(field)
             if incoming_value not in (None, "", []):
                 merged[field] = incoming_value
@@ -1830,6 +1900,11 @@ def _attach_signal_context_to_forecast_audit(
             "execution_policy_blocked": bool(merged.get("execution_policy_blocked")),
             "status": str(execution_report.get("status") or ""),
             "reason": str(execution_report.get("reason") or ""),
+            "routed_action": routed_action or execution_report.get("action"),
+            "executed_action": execution_report.get("executed_action"),
+            "execution_override_type": execution_report.get("execution_override_type"),
+            "forced_exit": bool(execution_report.get("forced_exit")),
+            "exit_reason": execution_report.get("exit_reason"),
             "source_classification": "producer-native",
         }
 
@@ -2103,6 +2178,12 @@ def _execute_signal(
         primary_signal=primary,
         primary_payload=primary_payload,
     )
+    routed_action = (
+        signal_snapshot.get("action")
+        or primary_payload.get("action")
+        or primary.get("action")
+        or "HOLD"
+    )
     routing_reason = signal_snapshot.get("routing_reason")
     routing_hold_reason = signal_snapshot.get("hold_reason")
     routing_snr = signal_snapshot.get("snr")
@@ -2129,7 +2210,12 @@ def _execute_signal(
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
             "ticker": ticker,
-            "action": primary_payload.get("action"),
+            "action": routed_action,
+            "routed_action": routed_action,
+            "executed_action": None,
+            "execution_override_type": None,
+            "forced_exit": False,
+            "exit_reason": None,
             "signal_source": primary.get("source", "TIME_SERIES"),
             "signal_confidence": signal_snapshot.get("confidence"),
             "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
@@ -2169,7 +2255,12 @@ def _execute_signal(
             "executed": False,
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
-            "action": primary_payload.get("action"),
+            "action": routed_action,
+            "routed_action": routed_action,
+            "executed_action": None,
+            "execution_override_type": None,
+            "forced_exit": False,
+            "exit_reason": None,
             "signal_source": primary.get("source", "TIME_SERIES"),
             "signal_confidence": signal_snapshot.get("confidence"),
             "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
@@ -2200,6 +2291,10 @@ def _execute_signal(
     realized_pnl_pct = getattr(result.trade, "realized_pnl_pct", None)
     executed_at = result.trade.timestamp.isoformat() if result.trade else None
     entry_price = result.trade.entry_price if result.trade else current_price
+    executed_action = result.trade.action if result.trade else None
+    forced_exit = bool(getattr(result.trade, "is_forced_exit", 0)) if result.trade else False
+    exit_reason = getattr(result.trade, "exit_reason", None) if result.trade else None
+    execution_override_type = "LIFECYCLE_FORCED_EXIT" if forced_exit else None
     mid_slippage_bp = None
     if mid_px not in (None, 0, 0.0):
         try:
@@ -2214,7 +2309,12 @@ def _execute_signal(
         "signal_id": primary_payload.get("signal_id"),
         "ts_signal_id": primary_payload.get("ts_signal_id"),
         "shares": result.trade.shares if result.trade else 0,
-        "action": result.trade.action if result.trade else primary.get("action", "HOLD"),
+        "action": routed_action,
+        "routed_action": routed_action,
+        "executed_action": executed_action,
+        "execution_override_type": execution_override_type,
+        "forced_exit": forced_exit,
+        "exit_reason": exit_reason,
         "entry_price": entry_price,
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
@@ -2327,16 +2427,8 @@ def _emit_dashboard_json(
 ) -> None:
     """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
-        """Recursively convert datetimes/pd.Timestamps to ISO strings for JSON dump."""
-        from pandas import Timestamp  # lazy import to avoid circulars
-
-        if isinstance(obj, (datetime, Timestamp)):
-            return obj.isoformat()
-        if isinstance(obj, dict):
-            return {k: _json_safe(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_json_safe(v) for v in obj]
-        return obj
+        """Recursively sanitize dashboard payloads, including NaN/Inf values."""
+        return _json_safe_audit_value(obj)
 
     payload = {
         "meta": meta,

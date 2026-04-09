@@ -297,22 +297,16 @@ class PaperTradingEngine:
                 current_price = float(market_data["Close"].iloc[-1])
         except Exception:
             current_price = None
-        if current_price is None:
-            try:
-                current_price = float(signal.get("entry_price") or 0.0)
-            except Exception:
-                current_price = 0.0
-        if float(current_price or 0.0) <= 0.0:
-            return ExecutionResult(status="REJECTED", reason="Missing current price context")
+        market_row, bar_timestamp, market_ref_price, market_mid_price = self._find_last_market_observation(market_data)
 
-        bar_timestamp = None
-        try:
-            if isinstance(market_data, pd.DataFrame) and not market_data.empty:
-                idx = market_data.index
-                if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
-                    bar_timestamp = ensure_utc(pd.Timestamp(idx[-1]))
-        except Exception:
-            bar_timestamp = None
+        current_price_f = self._safe_float(current_price)
+        if current_price_f is None:
+            current_price_f = self._safe_float(signal.get("entry_price"))
+        if current_price_f is None:
+            current_price_f = market_ref_price
+        if current_price_f is None or current_price_f <= 0.0:
+            return ExecutionResult(status="REJECTED", reason="Missing current price context")
+        current_price = float(current_price_f)
 
         forced_exit_reason = None
         forced_exit_shares = None
@@ -569,14 +563,19 @@ class PaperTradingEngine:
             market_data=market_data,
             ticker=ticker,
         )
+        if self._safe_float(entry_price) is None or float(entry_price) <= 0.0:
+            return ExecutionResult(
+                status="REJECTED",
+                reason="Unable to derive a finite execution price",
+                validation_warnings=validation.warnings,
+            )
 
         # Step 5: Calculate transaction costs
         transaction_value = position_size * entry_price
         txn_cost_bps = None
-        if isinstance(market_data, pd.DataFrame) and not market_data.empty:
+        if market_row is not None:
             try:
-                last = market_data.iloc[-1]
-                txn_cost_bps = self._safe_float(last.get("TxnCostBps") if hasattr(last, "get") else None)
+                txn_cost_bps = self._safe_float(market_row.get("TxnCostBps") if hasattr(market_row, "get") else None)
             except Exception:
                 txn_cost_bps = None
         # If TxnCostBps is present, it is assumed to have been applied via
@@ -634,24 +633,7 @@ class PaperTradingEngine:
         except (TypeError, ValueError):
             mid_price = None
         if mid_price is None:
-            try:
-                if isinstance(market_data, pd.DataFrame) and not market_data.empty:
-                    last = market_data.iloc[-1]
-                    bid = last.get("Bid") if hasattr(last, "get") else None
-                    ask = last.get("Ask") if hasattr(last, "get") else None
-                    if bid is not None and ask is not None and pd.notna(bid) and pd.notna(ask):
-                        mid_price = (float(bid) + float(ask)) / 2.0
-                    else:
-                        high = last.get("High") if hasattr(last, "get") else None
-                        low = last.get("Low") if hasattr(last, "get") else None
-                        if high is not None and low is not None and pd.notna(high) and pd.notna(low):
-                            mid_price = (float(high) + float(low)) / 2.0
-                        else:
-                            close = last.get("Close") if hasattr(last, "get") else None
-                            if close is not None and pd.notna(close):
-                                mid_price = float(close)
-            except Exception:
-                mid_price = None
+            mid_price = market_mid_price
 
         if mid_price is not None and mid_price > 0:
             trade.mid_price = mid_price
@@ -765,7 +747,10 @@ class PaperTradingEngine:
         position_value = max_position_value * confidence_weight
 
         # Calculate shares
-        current_price = market_data['Close'].iloc[-1]
+        _, _, current_price_ref, _ = self._find_last_market_observation(market_data)
+        current_price = self._safe_float(current_price_ref)
+        if current_price is None or current_price <= 0.0:
+            return 0
 
         if action == "SELL":
             desired = max(0, int(position_value / current_price))
@@ -884,6 +869,63 @@ class PaperTradingEngine:
         if out != out:  # NaN
             return None
         return out
+
+    def _extract_market_prices(self, row: Any) -> tuple[Optional[float], Optional[float]]:
+        """Return (reference_price, mid_price) for a single market-data row."""
+        if row is None or not hasattr(row, "get"):
+            return None, None
+
+        bid_f = self._safe_float(row.get("Bid"))
+        ask_f = self._safe_float(row.get("Ask"))
+        if bid_f is not None and ask_f is not None and bid_f > 0 and ask_f > 0:
+            mid = 0.5 * (bid_f + ask_f)
+            if mid > 0:
+                return mid, mid
+
+        high_f = self._safe_float(row.get("High"))
+        low_f = self._safe_float(row.get("Low"))
+        if high_f is not None and low_f is not None and high_f > 0 and low_f > 0:
+            mid = 0.5 * (high_f + low_f)
+            if mid > 0:
+                return mid, mid
+
+        close_f = self._safe_float(row.get("Close"))
+        if close_f is not None and close_f > 0:
+            return close_f, close_f
+
+        open_f = self._safe_float(row.get("Open"))
+        if open_f is not None and open_f > 0:
+            return open_f, open_f
+
+        return None, None
+
+    def _find_last_market_observation(
+        self,
+        market_data: Optional[pd.DataFrame],
+    ) -> tuple[Optional[Any], Optional[datetime], Optional[float], Optional[float]]:
+        """Find the last market row with usable price context."""
+        if not isinstance(market_data, pd.DataFrame) or market_data.empty:
+            return None, None, None, None
+
+        for pos in range(len(market_data) - 1, -1, -1):
+            try:
+                row = market_data.iloc[pos]
+            except Exception:
+                continue
+            ref_price, mid_price = self._extract_market_prices(row)
+            if ref_price is None:
+                continue
+
+            bar_timestamp = None
+            try:
+                idx = market_data.index
+                if isinstance(idx, pd.DatetimeIndex) and len(idx) > pos:
+                    bar_timestamp = ensure_utc(pd.Timestamp(idx[pos]))
+            except Exception:
+                bar_timestamp = None
+            return row, bar_timestamp, ref_price, mid_price
+
+        return None, None, None, None
 
     def _simulate_entry_price(
         self,

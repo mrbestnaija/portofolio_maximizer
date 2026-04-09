@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 from typing import List
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -55,6 +56,13 @@ def make_indexed_market_data(close_price: float, ts: datetime) -> pd.DataFrame:
     return pd.DataFrame({"Close": [close_price]}, index=pd.DatetimeIndex([ts]))
 
 
+def make_indexed_market_data_with_trailing_nan(close_price: float, ts_valid: datetime, ts_nan: datetime) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"Close": [close_price, float("nan")]},
+        index=pd.DatetimeIndex([ts_valid, ts_nan]),
+    )
+
+
 def test_execute_signal_rejected_when_validation_fails():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(False, "REJECT", 0.2, ["low_confidence"]))
@@ -101,6 +109,33 @@ def test_execute_signal_executes_and_persists_trade():
     assert row["ticker"] == "MSFT"
     assert row["action"] == "BUY"
     assert row["signal_id"] == 42
+
+    db.close()
+
+
+def test_execute_signal_uses_last_valid_market_row_when_terminal_close_is_nan():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    signal = {"ticker": "MSFT", "action": "BUY", "confidence": 0.8}
+    market_data = make_indexed_market_data_with_trailing_nan(
+        120.0,
+        datetime(2026, 4, 8, tzinfo=timezone.utc),
+        datetime(2026, 4, 9, tzinfo=timezone.utc),
+    )
+    result = engine.execute_signal(signal, market_data)
+
+    assert result.status == "EXECUTED"
+    assert result.trade is not None
+    assert result.trade.entry_price == pytest.approx(120.0, rel=1e-3)
+    assert result.trade.bar_timestamp == datetime(2026, 4, 8, tzinfo=timezone.utc)
 
     db.close()
 
