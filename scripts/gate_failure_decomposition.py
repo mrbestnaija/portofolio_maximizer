@@ -352,6 +352,14 @@ def _build_decomposition(
     matched_ratio = _safe_float(readiness.get("matched_over_eligible"))
     non_trade = _safe_int(readiness.get("non_trade_context_count"), 0)
     invalid = _safe_int(readiness.get("invalid_context_count"), 0)
+    # Use dirty_invalid_count if available (populated by production_audit_gate after the
+    # Phase 11-B hygiene fix).  EXECUTION_REJECTED records are expected, clean artifacts
+    # from HOLD/blocked forecasts — they must not count as hygiene failures.
+    execution_rejected = _safe_int(readiness.get("execution_rejected_count"), 0)
+    dirty_invalid = _safe_int(
+        readiness.get("dirty_invalid_count"),
+        max(0, invalid - execution_rejected),
+    )
 
     violation_pass = (
         violation_rate is not None
@@ -366,7 +374,7 @@ def _build_decomposition(
     matched_count_pass = matched >= 10
     matched_ratio_pass = matched_ratio is not None and matched_ratio >= 0.8
     hygiene_non_trade_pass = non_trade == 0
-    hygiene_invalid_pass = invalid == 0
+    hygiene_invalid_pass = dirty_invalid == 0
 
     components = {
         "PERFORMANCE_BLOCKER": {
@@ -433,7 +441,9 @@ def _build_decomposition(
             "pass": _safe_bool(readiness.get("evidence_hygiene_pass"), default=False),
             "metrics": {
                 "non_trade_context_count": _metric(non_trade, "== 0", hygiene_non_trade_pass),
-                "invalid_context_count": _metric(invalid, "== 0", hygiene_invalid_pass),
+                "dirty_invalid_count": _metric(dirty_invalid, "== 0", hygiene_invalid_pass),
+                "execution_rejected_count": _metric(execution_rejected, "excluded_from_hygiene", True),
+                "invalid_context_total": _metric(invalid, "informational", invalid == 0),
             },
         },
     }
