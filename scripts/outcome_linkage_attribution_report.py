@@ -19,7 +19,11 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "data" / "portfolio_maximizer.db"
-DEFAULT_AUDIT_DIR = ROOT / "logs" / "forecast_audits"
+# Prefer the production-specific subdirectory when it exists; fall back to root.
+# Without this, the report defaults to the combined (research + production) directory,
+# which inflates attribution denominators with non-trade research audits.
+_production_audit_dir = ROOT / "logs" / "forecast_audits" / "production"
+DEFAULT_AUDIT_DIR = _production_audit_dir if _production_audit_dir.exists() else ROOT / "logs" / "forecast_audits"
 
 
 def _load_audit_index(audit_dir: Path) -> Dict[str, Dict[str, Any]]:

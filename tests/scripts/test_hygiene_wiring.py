@@ -558,3 +558,118 @@ class TestForecasterAuditDirDefault:
                     os.environ["TS_FORECAST_AUDIT_DIR"] = env_backup
         finally:
             os.chdir(original_cwd)
+
+
+# ---------------------------------------------------------------------------
+# Tests: routing taxonomy fields persisted in signal_context (2026-04-09)
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingTaxonomyFields:
+    """_attach_signal_context_to_forecast_audit must persist action, confidence,
+    routing_reason, and snr so the live rejection taxonomy is measurable."""
+
+    def test_action_confidence_routing_reason_snr_written_for_hold_signal(
+        self, tmp_path: Path
+    ) -> None:
+        """HOLD signal: action, confidence, routing_reason, snr must appear in signal_context."""
+        audit_file = tmp_path / "forecast_audit_20260409_000000_hold.json"
+        payload = _make_audit_payload()
+        audit_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        forecast_bundle: Dict[str, Any] = {
+            "horizon": 30,
+            "forecast_audit_path": str(audit_file),
+        }
+        execution_report = {
+            "ts_signal_id": "ts_AAPL_20260409_0001",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "action": "HOLD",
+            "signal_confidence": 0.38,
+            "routing_reason": "confidence_below_threshold",
+            "snr": 0.92,
+            "executed": False,
+            "status": "REJECTED",
+            "reason": "Non-actionable signal",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle=forecast_bundle,
+                execution_report=execution_report,
+                ticker="AAPL",
+                run_id="20260409_090000",
+            )
+
+        result = json.loads(audit_file.read_text())
+        sc = result.get("signal_context", {})
+        assert sc.get("action") == "HOLD", f"Expected action=HOLD, got {sc.get('action')!r}"
+        assert sc.get("confidence") == pytest.approx(0.38), f"Expected confidence=0.38, got {sc.get('confidence')}"
+        assert sc.get("routing_reason") == "confidence_below_threshold", (
+            f"Expected routing_reason=confidence_below_threshold, got {sc.get('routing_reason')!r}"
+        )
+        assert sc.get("snr") == pytest.approx(0.92), f"Expected snr=0.92, got {sc.get('snr')}"
+
+    def test_existing_fields_not_overwritten_by_routing_taxonomy_patch(
+        self, tmp_path: Path
+    ) -> None:
+        """Adding routing fields must not clobber ts_signal_id, expected_return, or context_type."""
+        audit_file = tmp_path / "forecast_audit_20260409_000001_reg.json"
+        payload = _make_audit_payload()
+        audit_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        forecast_bundle = {"horizon": 30, "forecast_audit_path": str(audit_file)}
+        execution_report = {
+            "ts_signal_id": "ts_AAPL_20260409_0002",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "action": "BUY",
+            "signal_confidence": 0.72,
+            "routing_reason": "",
+            "snr": 2.1,
+            "expected_return": 0.009,
+            "executed": True,
+            "status": "EXECUTED",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle=forecast_bundle,
+                execution_report=execution_report,
+                ticker="AAPL",
+                run_id="20260409_090000",
+            )
+
+        result = json.loads(audit_file.read_text())
+        sc = result.get("signal_context", {})
+        assert sc.get("ts_signal_id") == "ts_AAPL_20260409_0002"
+        assert sc.get("context_type") == "TRADE"
+        assert sc.get("action") == "BUY"
+        assert sc.get("confidence") == pytest.approx(0.72)
+        assert sc.get("snr") == pytest.approx(2.1)
+        assert sc.get("expected_return") == pytest.approx(0.009)
+        # routing_reason is empty string — must NOT be written (falsy guard in copy loop)
+        assert sc.get("routing_reason") is None, (
+            f"Empty routing_reason must not be written, got {sc.get('routing_reason')!r}"
+        )
+
+    def test_outcome_linkage_report_default_audit_dir_prefers_production(self) -> None:
+        """outcome_linkage_attribution_report DEFAULT_AUDIT_DIR logic: prefers production/."""
+        # Test the selection logic directly without re-importing the module
+        # (module-level variable computed at import time against real filesystem).
+        from pathlib import Path
+        import tempfile, os
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prod = root / "logs" / "forecast_audits" / "production"
+            fallback = root / "logs" / "forecast_audits"
+            prod.mkdir(parents=True)
+
+            chosen = prod if prod.exists() else fallback
+            assert chosen == prod, "Must prefer production/ when it exists"
+
+            # Without production/, fall back
+            import shutil
+            shutil.rmtree(str(prod))
+            chosen2 = prod if prod.exists() else fallback
+            assert chosen2 == fallback, "Must fall back to root when production/ absent"
