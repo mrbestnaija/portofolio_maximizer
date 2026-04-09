@@ -209,3 +209,74 @@ def test_attach_signal_context_persists_routed_signal_snapshot() -> None:
         assert signal["snr"] == pytest.approx(0.84)
         assert signal["quant_validation"]["status"] == "FAIL"
         assert signal["quant_validation"]["failed_criteria"] == ["min_expected_profit"]
+
+
+def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path: Path) -> None:
+    """Execution-policy blocks must still carry entry_ts/bar timestamps into the patched audit."""
+    audit_file = tmp_path / "forecast_audit_20260409_093000.json"
+    audit_file.write_text(json.dumps(_audit_payload() | {"dataset": {**_audit_payload()["dataset"], "ticker": "AAPL"}}), encoding="utf-8")
+
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(
+        primary_signal={
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.72,
+            "expected_return": 0.0015,
+            "expected_return_net": -0.0008,
+            "gross_trade_return": 0.0015,
+            "net_trade_return": -0.0008,
+            "roundtrip_cost_fraction": 0.0023,
+            "roundtrip_cost_bps": 23.0,
+            "model_type": "ENSEMBLE",
+            "signal_type": "TIME_SERIES",
+            "source": "TIME_SERIES",
+            "ts_signal_id": "ts_AAPL_20260409T093000Z_dead_0001",
+            "execution_policy_blocked": True,
+            "execution_policy_reason_codes": ["NON_POSITIVE_NET_EDGE"],
+            "execution_policy_detail": "Net expected return did not clear roundtrip cost gate.",
+            "provenance": {
+                "decision_context": {
+                    "signal_to_noise": 0.4,
+                    "expected_return_net": -0.0008,
+                    "gross_trade_return": 0.0015,
+                    "net_trade_return": -0.0008,
+                    "roundtrip_cost_fraction": 0.0023,
+                    "roundtrip_cost_bps": 23.0,
+                },
+            },
+        }
+    )
+    trading_engine = MagicMock()
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="AAPL",
+        forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+        current_price=100.0,
+        market_data=_market_frame(),
+        run_id="20260409_093000",
+    )
+
+    assert report is not None
+    assert report["execution_policy_blocked"] is True
+    assert report["signal_timestamp"] == "2026-04-09T09:00:00+00:00"
+    assert report["bar_timestamp"] == "2026-04-09T09:00:00+00:00"
+
+    with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+        _attach_signal_context_to_forecast_audit(
+            forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+            execution_report=report,
+            ticker="AAPL",
+            run_id="20260409_093000",
+        )
+
+    payload = json.loads(audit_file.read_text(encoding="utf-8"))
+    signal_context = payload["signal_context"]
+    assert signal_context["entry_ts"] == "2026-04-09T09:00:00+00:00"
+    assert signal_context["expected_close_ts"] == "2026-05-09T09:00:00+00:00"
+    assert signal_context["routing_reason"] == "NON_POSITIVE_NET_EDGE"
+    assert payload["signal"]["routing_reason"] == "NON_POSITIVE_NET_EDGE"
+    assert payload["signal"]["execution_policy_detail"] == "Net expected return did not clear roundtrip cost gate."
+    assert payload["signal"]["execution_policy_reason_codes"] == ["NON_POSITIVE_NET_EDGE"]

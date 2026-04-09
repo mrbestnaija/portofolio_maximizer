@@ -1557,14 +1557,21 @@ def _build_routed_signal_snapshot(
         if isinstance(provenance.get("quant_validation"), dict)
         else {}
     )
+    execution_policy_reason_codes = [
+        str(code).strip()
+        for code in (
+            payload.get("execution_policy_reason_codes")
+            or payload.get("admission_override_reason_codes")
+            or []
+        )
+        if str(code).strip()
+    ]
+    execution_policy_detail = str(payload.get("execution_policy_detail") or "").strip() or None
 
     hold_reason = str(provenance.get("hold_reason") or "").strip() or None
     routing_reason = None
     if payload.get("execution_policy_blocked"):
-        routing_reason = (
-            str(payload.get("execution_policy_detail") or "").strip()
-            or "EXECUTION_POLICY_BLOCKED"
-        )
+        routing_reason = execution_policy_reason_codes[0] if execution_policy_reason_codes else "EXECUTION_POLICY_BLOCKED"
     if not routing_reason:
         routing_reason = hold_reason
     if not routing_reason:
@@ -1626,6 +1633,8 @@ def _build_routed_signal_snapshot(
             provenance.get("directional_gate_applied") or signal.get("directional_gate_applied")
         ),
         "execution_policy_blocked": bool(payload.get("execution_policy_blocked")),
+        "execution_policy_detail": execution_policy_detail,
+        "execution_policy_reason_codes": execution_policy_reason_codes,
         "reasoning": payload.get("reasoning") or signal.get("reasoning"),
     }
     if quant_summary:
@@ -2117,9 +2126,11 @@ def _execute_signal(
             "execution_policy_blocked": True,
             "admission_override_reason_codes": reason_codes,
             "evidence_source_classification": "producer-native",
+            "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
             "ticker": ticker,
             "action": primary_payload.get("action"),
+            "signal_source": primary.get("source", "TIME_SERIES"),
             "signal_confidence": signal_snapshot.get("confidence"),
             "confidence_calibrated": signal_snapshot.get("confidence_calibrated"),
             "expected_return": signal_snapshot.get("expected_return"),
@@ -2134,6 +2145,8 @@ def _execute_signal(
             "directional_gate_applied": signal_snapshot.get("directional_gate_applied"),
             "quant_validation_status": quant_validation_summary.get("status"),
             "quant_validation_failed_criteria": quant_validation_summary.get("failed_criteria"),
+            "signal_timestamp": primary_payload.get("signal_timestamp"),
+            "bar_timestamp": primary_payload.get("bar_timestamp"),
             "signal_snapshot": signal_snapshot,
         }
 
