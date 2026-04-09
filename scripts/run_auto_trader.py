@@ -161,17 +161,53 @@ def _build_cohort_identity(audit_path: Path) -> Dict[str, Any]:
     return identity
 
 
-def _compute_expected_close_ts(entry_ts_raw: Any, forecast_horizon_raw: Any) -> Optional[str]:
+def _forecast_index_expected_close_ts(
+    forecast_bundle: Dict[str, Any],
+    forecast_horizon_raw: Any,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve expected_close_ts from explicit future-bar forecast indices."""
+    if not isinstance(forecast_bundle, dict):
+        return None, None
     try:
         horizon = int(forecast_horizon_raw)
     except (TypeError, ValueError):
-        return None
-    if horizon < 0:
-        return None
-    entry_ts = pd.to_datetime(entry_ts_raw, utc=True, errors="coerce")
-    if entry_ts is pd.NaT:
-        return None
-    return (entry_ts + pd.Timedelta(days=horizon)).isoformat()
+        horizon = None
+
+    candidates = [
+        forecast_bundle.get("point"),
+        forecast_bundle.get("forecast"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, pd.Series) and not candidate.empty:
+            idx = candidate.index
+        elif isinstance(candidate, pd.DataFrame) and not candidate.empty:
+            idx = candidate.index
+        else:
+            continue
+        try:
+            dt_idx = pd.DatetimeIndex(idx)
+        except Exception:
+            continue
+        if dt_idx.empty:
+            continue
+        pos = len(dt_idx) - 1
+        if horizon is not None and horizon > 0 and horizon <= len(dt_idx):
+            pos = horizon - 1
+        try:
+            ts = pd.Timestamp(dt_idx[pos])
+        except Exception:
+            continue
+        if ts is pd.NaT:
+            continue
+        try:
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        except Exception:
+            pass
+        try:
+            return ts.isoformat(), "forecast_index"
+        except Exception:
+            return str(ts), "forecast_index"
+    return None, None
 
 
 def _normalize_reason_code(raw: Any) -> str:
@@ -1813,10 +1849,15 @@ def _attach_signal_context_to_forecast_audit(
         merged["forecast_horizon"] = (
             incoming_horizon if incoming_horizon is not None else merged.get("forecast_horizon")
         )
-        merged["expected_close_ts"] = (
-            _compute_expected_close_ts(merged.get("entry_ts"), merged.get("forecast_horizon"))
-            or merged.get("expected_close_ts")
+        expected_close_ts, expected_close_source = _forecast_index_expected_close_ts(
+            forecast_bundle,
+            merged.get("forecast_horizon"),
         )
+        merged["expected_close_ts"] = expected_close_ts or merged.get("expected_close_ts")
+        if expected_close_source:
+            merged["expected_close_source"] = expected_close_source
+        elif merged.get("expected_close_ts") and not merged.get("expected_close_source"):
+            merged["expected_close_source"] = "signal_context_explicit"
         # event_type defaults to TRADE_FORECAST_AUDIT if not already present
         if not merged.get("event_type"):
             merged["event_type"] = str(execution_report.get("event_type") or "TRADE_FORECAST_AUDIT").strip().upper()

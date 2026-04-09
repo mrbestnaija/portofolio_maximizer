@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 
@@ -89,6 +90,10 @@ class TestContextTypeTradeWiring:
         forecast_bundle: Dict[str, Any] = {
             "horizon": 30,
             "forecast_audit_path": str(audit_file),
+            "point": pd.Series(
+                range(30),
+                index=pd.date_range("2026-01-02T00:00:00+00:00", periods=30, freq="D"),
+            ),
         }
         execution_report = _make_execution_report()
 
@@ -106,6 +111,7 @@ class TestContextTypeTradeWiring:
             f"Expected context_type='TRADE', got {sc.get('context_type')!r}"
         )
         assert sc.get("expected_close_ts") == "2026-01-31T00:00:00+00:00"
+        assert sc.get("expected_close_source") == "forecast_index"
 
     def test_context_type_trade_overwrites_existing_forecast_only(self, tmp_path: Path) -> None:
         """Reverted Agent B code may have written FORECAST_ONLY — must be overwritten."""
@@ -165,7 +171,14 @@ class TestHorizonMismatchPrevention:
         payload = {"dataset": {"ticker": "AAPL"}, "results": {}}
         audit_file.write_text(json.dumps(payload), encoding="utf-8")
 
-        forecast_bundle = {"horizon": 6, "forecast_audit_path": str(audit_file)}
+        forecast_bundle = {
+            "horizon": 6,
+            "forecast_audit_path": str(audit_file),
+            "point": pd.Series(
+                range(6),
+                index=pd.date_range("2026-01-02T00:00:00+00:00", periods=6, freq="D"),
+            ),
+        }
         execution_report = _make_execution_report()
 
         with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
@@ -180,6 +193,7 @@ class TestHorizonMismatchPrevention:
         sc = result.get("signal_context", {})
         assert sc.get("forecast_horizon") == 6
         assert sc.get("expected_close_ts") == "2026-01-07T00:00:00+00:00"
+        assert sc.get("expected_close_source") == "forecast_index"
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +346,10 @@ class TestSemanticAdmission:
         forecast_bundle: Dict[str, Any] = {
             "horizon": 30,
             "forecast_audit_path": str(audit_file),
+            "point": pd.Series(
+                range(30),
+                index=pd.date_range("2026-01-02T00:00:00+00:00", periods=30, freq="D"),
+            ),
         }
         execution_report = {
             "ts_signal_id": "ts_AAPL_20260101_0004",

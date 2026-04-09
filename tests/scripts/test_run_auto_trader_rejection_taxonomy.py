@@ -226,6 +226,42 @@ def test_attach_signal_context_persists_routed_signal_snapshot() -> None:
         assert signal["quant_validation"]["failed_criteria"] == ["min_expected_profit"]
 
 
+def test_attach_signal_context_backfills_expected_close_source_when_timestamp_already_exists() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        audit_file = tmp_path / "forecast_audit_20260409_090000.json"
+        payload = _audit_payload()
+        payload["signal_context"] = {
+            "context_type": "TRADE",
+            "ts_signal_id": "ts_MSFT_20260409T090000Z_abcd_0001",
+            "entry_ts": "2026-04-09T09:00:00+00:00",
+            "forecast_horizon": 30,
+            "expected_close_ts": "2026-05-09T09:00:00+00:00",
+        }
+        audit_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        execution_report = {
+            "ts_signal_id": "ts_MSFT_20260409T090000Z_abcd_0001",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "executed": False,
+            "status": "REJECTED",
+            "action": "HOLD",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+                execution_report=execution_report,
+                ticker="MSFT",
+                run_id="20260409_090000",
+            )
+
+        updated = json.loads(audit_file.read_text(encoding="utf-8"))
+        signal_context = updated["signal_context"]
+        assert signal_context["expected_close_ts"] == "2026-05-09T09:00:00+00:00"
+        assert signal_context["expected_close_source"] == "signal_context_explicit"
+
+
 def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path: Path) -> None:
     """Execution-policy blocks must still carry entry_ts/bar timestamps into the patched audit."""
     audit_file = tmp_path / "forecast_audit_20260409_093000.json"
@@ -268,7 +304,14 @@ def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path:
         router=router,
         trading_engine=trading_engine,
         ticker="AAPL",
-        forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+        forecast_bundle={
+            "horizon": 30,
+            "forecast_audit_path": str(audit_file),
+            "point": pd.Series(
+                range(30),
+                index=pd.date_range("2026-04-10T09:00:00+00:00", periods=30, freq="D"),
+            ),
+        },
         current_price=100.0,
         market_data=_market_frame(),
         run_id="20260409_093000",
@@ -281,7 +324,14 @@ def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path:
 
     with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
         _attach_signal_context_to_forecast_audit(
-            forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+            forecast_bundle={
+                "horizon": 30,
+                "forecast_audit_path": str(audit_file),
+                "point": pd.Series(
+                    range(30),
+                    index=pd.date_range("2026-04-10T09:00:00+00:00", periods=30, freq="D"),
+                ),
+            },
             execution_report=report,
             ticker="AAPL",
             run_id="20260409_093000",
@@ -291,6 +341,7 @@ def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path:
     signal_context = payload["signal_context"]
     assert signal_context["entry_ts"] == "2026-04-09T09:00:00+00:00"
     assert signal_context["expected_close_ts"] == "2026-05-09T09:00:00+00:00"
+    assert signal_context["expected_close_source"] == "forecast_index"
     assert signal_context["routing_reason"] == "NON_POSITIVE_NET_EDGE"
     assert payload["signal"]["routing_reason"] == "NON_POSITIVE_NET_EDGE"
     assert payload["signal"]["execution_policy_detail"] == "Net expected return did not clear roundtrip cost gate."

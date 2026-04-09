@@ -192,27 +192,32 @@ def compute_expected_close(
     signal_context: Dict[str, Any],
     dataset: Dict[str, Any],
 ) -> Tuple[Optional[datetime], str]:
-    """Prefer signal-context timing for outcome eligibility.
+    """Prefer explicit signal-context timing for outcome eligibility.
 
     Returns (expected_close_ts, source) where source is one of:
-      - signal_context
-      - dataset_fallback
+      - signal_context_explicit or a caller-provided explicit source such as forecast_index
+      - legacy_signal_context_days
+      - legacy_dataset_days
       - signal_context_invalid
       - unavailable
     """
     ctx = signal_context if isinstance(signal_context, dict) else {}
     has_signal_context = bool(ctx) and not bool(ctx.get("signal_context_missing"))
     if has_signal_context:
+        expected_close = _parse_utc_datetime(ctx.get("expected_close_ts"))
+        if expected_close is not None:
+            source = str(ctx.get("expected_close_source") or "").strip() or "signal_context_explicit"
+            return expected_close, source
         entry_ts = _parse_utc_datetime(ctx.get("entry_ts"))
         horizon = _parse_non_negative_int(ctx.get("forecast_horizon"))
         if entry_ts is None or horizon is None:
             return None, "signal_context_invalid"
-        return entry_ts + timedelta(days=horizon), "signal_context"
+        return entry_ts + timedelta(days=horizon), "legacy_signal_context_days"
 
     fallback = _expected_close_ts(dataset.get("end"), dataset.get("forecast_horizon"))
     if fallback is None:
         return None, "unavailable"
-    return fallback, "dataset_fallback"
+    return fallback, "legacy_dataset_days"
 
 
 def _load_closed_trade_match_counts(

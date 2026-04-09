@@ -118,6 +118,57 @@ def _write_closed_trades_db(path: Path, rows: list[dict]) -> None:
         conn.close()
 
 
+def test_compute_expected_close_prefers_explicit_signal_context_timestamp_and_source() -> None:
+    import scripts.check_forecast_audits as mod
+
+    expected_close, source = mod.compute_expected_close(
+        {
+            "entry_ts": "2026-04-09T09:00:00+00:00",
+            "forecast_horizon": 30,
+            "expected_close_ts": "2026-05-09T09:00:00+00:00",
+            "expected_close_source": "forecast_index",
+        },
+        {"end": "2026-04-09T00:00:00+00:00", "forecast_horizon": 30},
+    )
+
+    assert expected_close is not None
+    assert expected_close.isoformat() == "2026-05-09T09:00:00+00:00"
+    assert source == "forecast_index"
+
+
+def test_compute_expected_close_defaults_source_when_explicit_timestamp_has_no_source() -> None:
+    import scripts.check_forecast_audits as mod
+
+    expected_close, source = mod.compute_expected_close(
+        {
+            "entry_ts": "2026-04-09T09:00:00+00:00",
+            "forecast_horizon": 30,
+            "expected_close_ts": "2026-05-09T09:00:00+00:00",
+        },
+        {"end": "2026-04-09T00:00:00+00:00", "forecast_horizon": 30},
+    )
+
+    assert expected_close is not None
+    assert expected_close.isoformat() == "2026-05-09T09:00:00+00:00"
+    assert source == "signal_context_explicit"
+
+
+def test_compute_expected_close_falls_back_to_legacy_signal_context_days_when_needed() -> None:
+    import scripts.check_forecast_audits as mod
+
+    expected_close, source = mod.compute_expected_close(
+        {
+            "entry_ts": "2026-04-09T09:00:00+00:00",
+            "forecast_horizon": 30,
+        },
+        {"end": "2026-04-09T00:00:00+00:00", "forecast_horizon": 30},
+    )
+
+    assert expected_close is not None
+    assert expected_close.isoformat() == "2026-05-09T09:00:00+00:00"
+    assert source == "legacy_signal_context_days"
+
+
 def test_check_forecast_audits_dedupes_by_dataset_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Two audits with the same dataset window; only the most recent should count.
     audit_dir = tmp_path / "audits"
