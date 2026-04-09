@@ -259,10 +259,56 @@ def test_lob_execution_price_moves_with_order_size():
     buy_small = engine._simulate_entry_price(100.0, "BUY", 1, market_data=market_data)
     buy_large = engine._simulate_entry_price(100.0, "BUY", 25, market_data=market_data)
     assert buy_large >= buy_small
-
     sell_small = engine._simulate_entry_price(100.0, "SELL", 1, market_data=market_data)
     sell_large = engine._simulate_entry_price(100.0, "SELL", 25, market_data=market_data)
     assert sell_large <= sell_small
+
+    db.close()
+
+
+def test_execute_signal_marks_returned_trade_contaminated_when_closing_synthetic_opener():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    opener_id = db.save_trade_execution(
+        ticker="AAPL",
+        trade_date=datetime(2026, 4, 8, tzinfo=timezone.utc).date(),
+        action="BUY",
+        shares=1,
+        price=100.0,
+        total_value=100.0,
+        commission=0.0,
+        execution_mode="synthetic",
+        is_synthetic=1,
+    )
+    engine.portfolio.positions["AAPL"] = 1
+    engine.portfolio.entry_prices["AAPL"] = 100.0
+    engine.portfolio.entry_timestamps["AAPL"] = datetime(2026, 4, 8, tzinfo=timezone.utc)
+    engine.portfolio.entry_trade_ids["AAPL"] = opener_id
+    engine.portfolio.total_value = 10_000.0
+
+    result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(110.0),
+        proof_mode=True,
+    )
+
+    assert result.status == "EXECUTED"
+    assert result.trade is not None
+    assert result.trade.is_contaminated == 1
+
+    row = db.cursor.execute(
+        "SELECT COALESCE(is_contaminated, 0) AS is_contaminated "
+        "FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert int(row["is_contaminated"]) == 1
 
     db.close()
 

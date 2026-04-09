@@ -13,6 +13,7 @@ from models.signal_router import SignalBundle
 from scripts.run_auto_trader import (
     _attach_signal_context_to_forecast_audit,
     _execute_signal,
+    _forecast_index_expected_close_ts,
     _trim_trailing_unpriced_rows,
 )
 
@@ -289,6 +290,63 @@ def test_attach_signal_context_refuses_latest_file_fallback_when_audit_path_miss
 
         updated = json.loads(audit_file.read_text(encoding="utf-8"))
         assert updated == original_payload, "missing forecast_audit_path must not patch latest file"
+        assert execution_report["forecast_audit_patch_status"] == "FAILED"
+        assert execution_report["forecast_audit_patch_reason"] == "MISSING_FORECAST_AUDIT_PATH"
+
+
+def test_forecast_index_expected_close_ts_resolves_nested_forecast_payloads() -> None:
+    forecast_bundle = {
+        "horizon": 30,
+        "ensemble_forecast": {
+            "mean_forecast": pd.Series(
+                range(30),
+                index=pd.date_range("2026-04-10T09:00:00+00:00", periods=30, freq="D"),
+            )
+        },
+    }
+
+    expected_close_ts, expected_close_source = _forecast_index_expected_close_ts(forecast_bundle, 30)
+
+    assert expected_close_source == "forecast_index"
+    assert expected_close_ts == "2026-05-09T09:00:00+00:00"
+
+
+def test_attach_signal_context_surfaces_patch_failure_when_audit_ticker_mismatches() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        audit_file = tmp_path / "forecast_audit_20260409_090000.json"
+        payload = _audit_payload()
+        payload["dataset"]["ticker"] = "AAPL"
+        audit_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        execution_report = {
+            "ts_signal_id": "ts_MSFT_20260409T090000Z_abcd_0001",
+            "signal_timestamp": "2026-04-09T09:00:00+00:00",
+            "executed": False,
+            "status": "REJECTED",
+            "action": "HOLD",
+        }
+
+        with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
+            _attach_signal_context_to_forecast_audit(
+                forecast_bundle={
+                    "horizon": 30,
+                    "forecast_audit_path": str(audit_file),
+                    "ensemble_forecast": {
+                        "mean_forecast": pd.Series(
+                            range(30),
+                            index=pd.date_range("2026-04-10T09:00:00+00:00", periods=30, freq="D"),
+                        )
+                    },
+                },
+                execution_report=execution_report,
+                ticker="MSFT",
+                run_id="20260409_090000",
+            )
+
+        assert execution_report["forecast_audit_patch_status"] == "FAILED"
+        assert execution_report["forecast_audit_patch_reason"] == "DATASET_TICKER_MISMATCH"
+        assert Path(execution_report["forecast_audit_path"]) == audit_file
 
 
 def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path: Path) -> None:
@@ -452,7 +510,16 @@ def test_attach_signal_context_keeps_routed_action_separate_from_executed_action
 
         with patch("scripts.run_auto_trader.ROOT_PATH", tmp_path):
             _attach_signal_context_to_forecast_audit(
-                forecast_bundle={"horizon": 30, "forecast_audit_path": str(audit_file)},
+                forecast_bundle={
+                    "horizon": 30,
+                    "forecast_audit_path": str(audit_file),
+                    "ensemble_forecast": {
+                        "mean_forecast": pd.Series(
+                            range(30),
+                            index=pd.date_range("2026-04-10T09:00:00+00:00", periods=30, freq="D"),
+                        )
+                    },
+                },
                 execution_report=execution_report,
                 ticker="MSFT",
                 run_id="20260409_090000",
@@ -466,6 +533,10 @@ def test_attach_signal_context_keeps_routed_action_separate_from_executed_action
         assert payload["execution_decision"]["routed_action"] == "HOLD"
         assert payload["execution_decision"]["executed_action"] == "SELL"
         assert payload["execution_decision"]["execution_override_type"] == "LIFECYCLE_FORCED_EXIT"
+        assert execution_report["forecast_audit_patch_status"] == "PATCHED"
+        assert execution_report["forecast_audit_patch_reason"] == "OK"
+        assert execution_report["expected_close_source"] == "forecast_index"
+        assert execution_report["expected_close_ts"] == "2026-05-09T09:00:00+00:00"
 
 
 def test_trim_trailing_unpriced_rows_drops_terminal_nan_bar() -> None:
@@ -474,3 +545,45 @@ def test_trim_trailing_unpriced_rows_drops_terminal_nan_bar() -> None:
     assert len(trimmed) == 1
     assert trimmed.index[-1] == pd.Timestamp("2026-04-08T09:00:00+00:00")
     assert trimmed["Close"].iloc[-1] == pytest.approx(100.5)
+
+
+def test_execute_signal_surfaces_contamination_status_for_gate_evidence() -> None:
+    router = MagicMock()
+    router.route_signal.return_value = SignalBundle(primary_signal=_hold_primary_signal())
+
+    trade = SimpleNamespace(
+        shares=6,
+        action="SELL",
+        entry_price=100.25,
+        timestamp=pd.Timestamp("2026-04-09T09:00:00+00:00").to_pydatetime(),
+        realized_pnl=5.0,
+        realized_pnl_pct=0.01,
+        is_forced_exit=1,
+        exit_reason="TIME_EXIT",
+        is_contaminated=1,
+        is_synthetic=0,
+        is_diagnostic=0,
+        execution_mode="live",
+    )
+    trading_engine = MagicMock()
+    trading_engine.execute_signal.return_value = SimpleNamespace(
+        status="EXECUTED",
+        reason=None,
+        validation_warnings=[],
+        trade=trade,
+        portfolio=SimpleNamespace(total_value=25005.0),
+    )
+
+    report = _execute_signal(
+        router=router,
+        trading_engine=trading_engine,
+        ticker="MSFT",
+        forecast_bundle={"horizon": 30},
+        current_price=100.0,
+        market_data=_market_frame(),
+    )
+
+    assert report is not None
+    assert report["is_contaminated"] == 1
+    assert report["evidence_eligible_for_gate"] is False
+    assert report["evidence_exclusion_reason"] == "CROSS_MODE_CONTAMINATION"

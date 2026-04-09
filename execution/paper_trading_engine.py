@@ -1396,6 +1396,9 @@ class PaperTradingEngine:
                         # are visible in debug traces without blocking trade execution.
                         logger.debug("[INT-05] Contamination guard check failed: %s", _cont_exc)
 
+            contamination_flag = max(int(trade.is_contaminated or 0), int(is_contaminated_ref or 0))
+            trade.is_contaminated = contamination_flag
+
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,
                 trade_date=trade.timestamp.date(),
@@ -1436,7 +1439,7 @@ class PaperTradingEngine:
                 exit_reason=trade.exit_reason,
                 is_diagnostic=trade.is_diagnostic,
                 is_synthetic=trade.is_synthetic,
-                is_contaminated=max(trade.is_contaminated, is_contaminated_ref),
+                is_contaminated=contamination_flag,
                 confidence_calibrated=trade.confidence_calibrated,
                 ts_signal_id=trade.ts_signal_id,  # Phase 7.13-A2
                 is_forced_exit=trade.is_forced_exit,  # Phase 10

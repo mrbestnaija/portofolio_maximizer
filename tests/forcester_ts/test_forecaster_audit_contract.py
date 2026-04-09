@@ -151,6 +151,18 @@ def test_forecast_returns_written_audit_path(monkeypatch, tmp_path: Path) -> Non
     assert audit_path.name.startswith("forecast_audit_")
 
 
+def test_forecast_uses_unique_audit_paths_across_consecutive_writes(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
+    forecaster = _minimal_forecaster()
+
+    first = forecaster.forecast(steps=2)
+    second = forecaster.forecast(steps=2)
+
+    assert first["forecast_audit_path"] != second["forecast_audit_path"]
+    assert Path(first["forecast_audit_path"]).exists()
+    assert Path(second["forecast_audit_path"]).exists()
+
+
 def test_save_audit_report_rewrites_manifest_with_valid_jsonl_only(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
     forecaster = _minimal_forecaster()

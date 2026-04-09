@@ -213,6 +213,8 @@ class TimeSeriesForecaster:
         self._last_price: Optional[float] = None
         self._last_timestamp: Optional[pd.Timestamp] = None
         self._series_freq_hint: Optional[str] = None
+        self._audit_write_counter: int = 0
+        self._audit_session_tag: str = f"{id(self) & 0xFFFFFFFF:08x}"
         audit_dir = None
         if isinstance(self.config.ensemble_kwargs, dict) and "audit_log_dir" in self.config.ensemble_kwargs:
             audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
@@ -1648,10 +1650,10 @@ class TimeSeriesForecaster:
         results["model_events"] = list(self._model_events)
         results["instrumentation_report"] = self._instrumentation.export()
         if self._audit_dir:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
-            self.save_audit_report(audit_path)
-            results["forecast_audit_path"] = str(audit_path)
+            audit_path = self._next_audit_path()
+            if audit_path is not None:
+                self.save_audit_report(audit_path)
+                results["forecast_audit_path"] = str(audit_path)
         return results
 
     def _build_forecast_index(self, horizon: int) -> pd.Index:
@@ -1792,6 +1794,18 @@ class TimeSeriesForecaster:
         """Persist the instrumentation report to disk for interpretable-AI auditing."""
         self._instrumentation.dump_json(output_path)
         self._append_audit_manifest_entry(output_path)
+
+    def _next_audit_path(self) -> Optional[Path]:
+        """Return a collision-resistant audit path for this forecaster instance."""
+        if not self._audit_dir:
+            return None
+        self._audit_write_counter += 1
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        filename = (
+            f"forecast_audit_{timestamp}_{self._audit_session_tag}_"
+            f"{self._audit_write_counter:04d}.json"
+        )
+        return self._audit_dir / filename
 
     @staticmethod
     def _sha256_file(path: Path) -> Optional[str]:
@@ -2643,9 +2657,9 @@ class TimeSeriesForecaster:
             metadata["regression_metrics"] = metrics_map["ensemble"]
 
         if self._audit_dir:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            audit_path = self._audit_dir / f"forecast_audit_{timestamp}.json"
-            self.save_audit_report(audit_path)
+            audit_path = self._next_audit_path()
+            if audit_path is not None:
+                self.save_audit_report(audit_path)
 
         return metrics_map
 

@@ -173,15 +173,70 @@ def _forecast_index_expected_close_ts(
     except (TypeError, ValueError):
         horizon = None
 
-    candidates = [
-        forecast_bundle.get("point"),
-        forecast_bundle.get("forecast"),
-    ]
-    for candidate in candidates:
+    queue: List[Any] = []
+    seen: set[int] = set()
+
+    def _enqueue(value: Any) -> None:
+        if value is None:
+            return
+        try:
+            marker = id(value)
+        except Exception:
+            marker = None
+        if marker is not None and marker in seen:
+            return
+        if marker is not None:
+            seen.add(marker)
+        queue.append(value)
+
+    for key in (
+        "point",
+        "forecast",
+        "mean_forecast",
+        "ensemble_forecast",
+        "sarimax_forecast",
+        "samossa_forecast",
+        "garch_forecast",
+        "mssa_rl_forecast",
+        "volatility_forecast",
+    ):
+        _enqueue(forecast_bundle.get(key))
+    for value in forecast_bundle.values():
+        if isinstance(value, (dict, pd.Series, pd.DataFrame, list, tuple)):
+            _enqueue(value)
+
+    while queue:
+        candidate = queue.pop(0)
         if isinstance(candidate, pd.Series) and not candidate.empty:
             idx = candidate.index
         elif isinstance(candidate, pd.DataFrame) and not candidate.empty:
             idx = candidate.index
+        elif isinstance(candidate, dict):
+            for key in (
+                "point",
+                "forecast",
+                "mean_forecast",
+                "ensemble_forecast",
+                "sarimax_forecast",
+                "samossa_forecast",
+                "garch_forecast",
+                "mssa_rl_forecast",
+                "volatility_forecast",
+                "lower_ci",
+                "upper_ci",
+                "variance_forecast",
+            ):
+                if key in candidate:
+                    _enqueue(candidate.get(key))
+            for value in candidate.values():
+                if isinstance(value, (dict, pd.Series, pd.DataFrame, list, tuple)):
+                    _enqueue(value)
+            continue
+        elif isinstance(candidate, (list, tuple)):
+            for value in candidate:
+                if isinstance(value, (dict, pd.Series, pd.DataFrame, list, tuple)):
+                    _enqueue(value)
+            continue
         else:
             continue
         try:
@@ -1753,6 +1808,12 @@ def _attach_signal_context_to_forecast_audit(
     if not isinstance(forecast_bundle, dict) or not isinstance(execution_report, dict):
         return
 
+    def _mark_patch(status: str, reason: str, *, path: Optional[Path] = None) -> None:
+        execution_report["forecast_audit_patch_status"] = str(status).upper()
+        execution_report["forecast_audit_patch_reason"] = str(reason).upper()
+        if path is not None:
+            execution_report["forecast_audit_path"] = str(path)
+
     tsid_source = execution_report.get("ts_signal_id")
     if not tsid_source and isinstance(execution_report.get("signal_id"), str):
         tsid_source = execution_report.get("signal_id")
@@ -1772,26 +1833,39 @@ def _attach_signal_context_to_forecast_audit(
     }
     target_ticker = str(ticker or "").strip().upper()
 
+    initial_expected_close_ts, initial_expected_close_source = _forecast_index_expected_close_ts(
+        forecast_bundle,
+        canonical_context.get("forecast_horizon"),
+    )
+    if initial_expected_close_ts and not execution_report.get("expected_close_ts"):
+        execution_report["expected_close_ts"] = initial_expected_close_ts
+    if initial_expected_close_source and not execution_report.get("expected_close_source"):
+        execution_report["expected_close_source"] = initial_expected_close_source
+
     audit_dir = ROOT_PATH / "logs" / "forecast_audits"
     candidate_paths: List[Path] = []
     raw_path = forecast_bundle.get("forecast_audit_path")
     if not raw_path:
+        _mark_patch("FAILED", "MISSING_FORECAST_AUDIT_PATH")
         logger.warning(
             "Skipping forecast audit patch for %s: forecast_audit_path missing; "
             "refusing latest-file fallback to avoid stale audit contamination.",
             ticker,
         )
         return
+    direct_path: Optional[Path] = None
     try:
         direct_path = Path(str(raw_path))
         if not direct_path.is_absolute():
             direct_path = ROOT_PATH / direct_path
+        execution_report["forecast_audit_path"] = str(direct_path)
         if direct_path.exists():
             candidate_paths.append(direct_path)
             audit_dir = direct_path.parent
     except Exception:
         logger.debug("Failed to resolve forecast_audit_path=%r", raw_path, exc_info=True)
     if not candidate_paths:
+        _mark_patch("FAILED", "AUDIT_PATH_NOT_FOUND", path=direct_path)
         logger.warning(
             "Skipping forecast audit patch for %s: resolved forecast_audit_path not found (%r).",
             ticker,
@@ -1799,10 +1873,12 @@ def _attach_signal_context_to_forecast_audit(
         )
         return
 
+    failure_reason = "UNKNOWN_PATCH_FAILURE"
     for audit_path in candidate_paths:
         try:
             payload = json.loads(audit_path.read_text(encoding="utf-8"))
         except Exception:
+            failure_reason = "UNREADABLE_AUDIT_JSON"
             logger.debug(
                 "Skipping signal_context patch; unreadable audit JSON %s",
                 audit_path,
@@ -1810,6 +1886,7 @@ def _attach_signal_context_to_forecast_audit(
             )
             continue
         if not isinstance(payload, dict):
+            failure_reason = "AUDIT_JSON_NOT_OBJECT"
             continue
 
         dataset = payload.get("dataset")
@@ -1817,6 +1894,14 @@ def _attach_signal_context_to_forecast_audit(
         if isinstance(dataset, dict):
             dataset_ticker = str(dataset.get("ticker") or dataset.get("symbol") or "").strip().upper()
         if target_ticker and dataset_ticker and dataset_ticker != target_ticker:
+            failure_reason = "DATASET_TICKER_MISMATCH"
+            logger.warning(
+                "Skipping forecast audit patch for %s: audit dataset ticker=%s mismatched target=%s at %s",
+                ticker,
+                dataset_ticker,
+                target_ticker,
+                audit_path,
+            )
             continue
 
         signal_context = payload.get("signal_context")
@@ -1824,6 +1909,14 @@ def _attach_signal_context_to_forecast_audit(
             signal_context = {}
         existing_tsid = str(signal_context.get("ts_signal_id") or "").strip()
         if existing_tsid and incoming_tsid and existing_tsid != incoming_tsid:
+            failure_reason = "TS_SIGNAL_ID_MISMATCH"
+            logger.warning(
+                "Skipping forecast audit patch for %s: existing ts_signal_id=%s mismatched incoming=%s at %s",
+                ticker,
+                existing_tsid,
+                incoming_tsid,
+                audit_path,
+            )
             continue
 
         merged = dict(signal_context)
@@ -1945,13 +2038,29 @@ def _attach_signal_context_to_forecast_audit(
             safe_payload = _json_safe_audit_value(payload)
             tmp_path_w.write_text(json.dumps(safe_payload, indent=2), encoding="utf-8")
             os.replace(tmp_path_w, audit_path)
+            if merged.get("expected_close_ts") and not execution_report.get("expected_close_ts"):
+                execution_report["expected_close_ts"] = merged.get("expected_close_ts")
+            if merged.get("expected_close_source"):
+                execution_report["expected_close_source"] = merged.get("expected_close_source")
+            _mark_patch("PATCHED", "OK", path=audit_path)
+            return
         except Exception:
+            failure_reason = "WRITE_FAILED"
             logger.debug("Failed to patch signal_context into %s", audit_path, exc_info=True)
             try:
                 if tmp_path_w.exists():
                     tmp_path_w.unlink()
             except OSError:
                 pass
+            continue
+
+    _mark_patch("FAILED", failure_reason, path=direct_path)
+    logger.warning(
+        "Forecast audit patch failed for %s: reason=%s path=%s",
+        ticker,
+        failure_reason,
+        direct_path,
+    )
 
 
 def _backfill_forecast_regression_metrics(
@@ -2327,6 +2436,24 @@ def _execute_signal(
     forced_exit = bool(getattr(result.trade, "is_forced_exit", 0)) if result.trade else False
     exit_reason = getattr(result.trade, "exit_reason", None) if result.trade else None
     execution_override_type = "LIFECYCLE_FORCED_EXIT" if forced_exit else None
+    is_contaminated = int(getattr(result.trade, "is_contaminated", 0) or 0) if result.trade else 0
+    is_synthetic = int(getattr(result.trade, "is_synthetic", 0) or 0) if result.trade else 0
+    is_diagnostic = int(getattr(result.trade, "is_diagnostic", 0) or 0) if result.trade else 0
+    execution_mode = getattr(result.trade, "execution_mode", None) if result.trade else None
+    evidence_exclusion_reason = None
+    if is_contaminated:
+        evidence_exclusion_reason = "CROSS_MODE_CONTAMINATION"
+    elif is_synthetic:
+        evidence_exclusion_reason = "SYNTHETIC_EXECUTION"
+    elif is_diagnostic:
+        evidence_exclusion_reason = "DIAGNOSTIC_EXECUTION"
+    evidence_eligible_for_gate = bool(
+        result.trade
+        and str(execution_mode or "").strip().lower() == "live"
+        and not is_contaminated
+        and not is_synthetic
+        and not is_diagnostic
+    )
     mid_slippage_bp = None
     if mid_px not in (None, 0, 0.0):
         try:
@@ -2347,6 +2474,12 @@ def _execute_signal(
         "execution_override_type": execution_override_type,
         "forced_exit": forced_exit,
         "exit_reason": exit_reason,
+        "execution_mode": execution_mode,
+        "is_contaminated": is_contaminated,
+        "is_synthetic": is_synthetic,
+        "is_diagnostic": is_diagnostic,
+        "evidence_eligible_for_gate": evidence_eligible_for_gate,
+        "evidence_exclusion_reason": evidence_exclusion_reason,
         "entry_price": entry_price,
         "portfolio_value": result.portfolio.total_value if result.portfolio else None,
         "signal_source": primary.get("source", "TIME_SERIES"),
