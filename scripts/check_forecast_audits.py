@@ -250,28 +250,24 @@ def _load_closed_trade_match_counts(
             sid = str(ts_signal_id or "").strip()
             if sid:
                 mapping[sid] = int(count or 0)
-        # Also load open-leg tsids linked to confirmed closed trades.
+        # Also load open-leg tsids linked to canonical confirmed closed trades.
         # Audit files store the OPEN-leg ts_signal_id (is_close=0, the entry
-        # signal).  production_closed_trades stores CLOSE-leg ts_signal_ids
-        # (is_close=1).  These two sets are always disjoint — the forecaster
-        # writes an audit file when a BUY/SELL is generated (open leg), but
-        # the matching CLOSE execution gets a different tsid from its own run.
-        # The entry_trade_id FK bridges the gap:
-        #   te_close.entry_trade_id -> te_open.id -> te_open.ts_signal_id
-        # Adding these open-leg tsids to `mapping` lets the early-credit bypass
-        # (and the final MATCHED classification) fire correctly without waiting
-        # for ECTs to expire.
+        # signal). production_closed_trades stores CLOSE-leg rows selected with
+        # the canonical hygiene rules (non-diagnostic, non-synthetic, and
+        # non-contaminated, with synthetic openers excluded by the view).
+        # The entry_trade_id FK bridges the tsid gap:
+        #   production_closed_trades.entry_trade_id -> trade_executions.id
+        # Using the view here is critical: a raw trade_executions close-leg scan
+        # can leak contaminated closes back into the match map and create false
+        # MATCHED credits for exits that production evidence explicitly excludes.
         try:
             cur.execute(
                 """
                 SELECT te_open.ts_signal_id, COUNT(*) AS n
-                FROM trade_executions te_close
+                FROM production_closed_trades te_close
                 JOIN trade_executions te_open
                   ON te_close.entry_trade_id = te_open.id
-                WHERE te_close.is_close = 1
-                  AND COALESCE(te_close.is_diagnostic, 0) = 0
-                  AND COALESCE(te_close.is_synthetic, 0) = 0
-                  AND te_open.ts_signal_id IS NOT NULL
+                WHERE te_open.ts_signal_id IS NOT NULL
                   AND TRIM(te_open.ts_signal_id) <> ''
                 GROUP BY te_open.ts_signal_id
                 """

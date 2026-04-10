@@ -2943,3 +2943,64 @@ def test_load_closed_trade_match_counts_open_leg_not_included_for_diagnostic_clo
     # Diagnostic close: neither close-leg nor open-leg tsid should appear
     assert "ts_AAPL_diag_close" not in mapping
     assert "ts_AAPL_diag_open" not in mapping
+
+
+def test_load_closed_trade_match_counts_open_leg_not_included_for_contaminated_closes(
+    tmp_path: Path,
+) -> None:
+    """Contaminated closes must not bridge open-leg tsids into the match map.
+
+    The open-leg helper must follow production_closed_trades semantics exactly.
+    If it scans raw close rows instead of the canonical view, a contaminated live
+    close against a synthetic opener can create a false MATCHED credit.
+    """
+    import scripts.check_forecast_audits as mod
+
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ts_signal_id TEXT,
+                is_close INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                is_contaminated INTEGER DEFAULT 0,
+                entry_trade_id INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, is_synthetic, is_contaminated) VALUES (20, 'ts_AAPL_contam_open', 0, 1, 0)"
+        )
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, is_synthetic, is_contaminated, entry_trade_id) VALUES (21, 'ts_AAPL_contam_close', 1, 0, 1, 20)"
+        )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT *
+            FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+              AND COALESCE(is_contaminated, 0) = 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM trade_executions o
+                  WHERE o.id = trade_executions.entry_trade_id
+                    AND COALESCE(o.is_synthetic, 0) = 1
+              )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = tmp_path / "test.db"
+    loaded, mapping, error, _ = mod._load_closed_trade_match_counts(db)
+
+    assert loaded is True
+    assert "ts_AAPL_contam_close" not in mapping
+    assert "ts_AAPL_contam_open" not in mapping
