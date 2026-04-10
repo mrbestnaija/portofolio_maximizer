@@ -2476,65 +2476,103 @@ class TimeSeriesForecaster:
             )
             return {}
 
-        try:
-            files = sorted(
-                self._audit_dir.glob("forecast_audit_*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-        except Exception:
-            return {}
-
         from forcester_ts.ensemble import TRACKED_MODELS  # local import avoids cycle
 
-        for path in files:  # scan all files; sorted mtime-desc so most matches come first
+        def _scan_dir_for_oos(
+            scan_dir: Path,
+        ) -> Optional[Dict[str, Dict[str, Any]]]:
+            """Scan one audit directory for the most recent matching OOS metrics.
+
+            Returns a non-empty per-model dict on the first match, or None when
+            the directory is absent, empty, or contains no files with
+            evaluation_metrics for this ticker + horizon.
+            """
             try:
-                audit = json.loads(path.read_text())
-            except Exception:
-                continue
-
-            # --- Ticker filter ---
-            dataset = audit.get("dataset") or {}
-            audit_ticker = dataset.get("ticker") or None
-            if audit_ticker and current_ticker.upper() != str(audit_ticker).upper():
-                continue  # different asset — skip
-
-            # --- Horizon filter ---
-            audit_horizon = dataset.get("forecast_horizon")
-            if current_horizon and audit_horizon is not None:
-                try:
-                    if int(audit_horizon) != current_horizon:
-                        continue  # incompatible horizon — skip
-                except (TypeError, ValueError):
-                    pass  # non-numeric horizon field; skip check
-
-            artifacts = audit.get("artifacts") or {}
-            eval_metrics = artifacts.get("evaluation_metrics") or {}
-            if not isinstance(eval_metrics, dict) or not eval_metrics:
-                continue
-
-            component = {
-                k: v for k, v in eval_metrics.items()
-                if k in TRACKED_MODELS and isinstance(v, dict)
-            }
-            if component:
-                logger.info(
-                    "[TS_MODEL] Loaded trailing OOS metrics from audit %s "
-                    "(ticker=%s horizon=%s %d models)",
-                    path.name,
-                    audit_ticker or "unknown",
-                    audit_horizon,
-                    len(component),
+                dir_files = sorted(
+                    scan_dir.glob("forecast_audit_*.json"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
                 )
-                return component
+            except Exception:
+                return None
+            if not dir_files:
+                return None
 
-        # Post-loop: no matching audit found in any file.
-        if files:
+            for path in dir_files:
+                try:
+                    audit = json.loads(path.read_text())
+                except Exception:
+                    continue
+
+                # --- Ticker filter ---
+                dataset = audit.get("dataset") or {}
+                audit_ticker = dataset.get("ticker") or None
+                if audit_ticker and current_ticker.upper() != str(audit_ticker).upper():
+                    continue
+
+                # --- Horizon filter ---
+                audit_horizon = dataset.get("forecast_horizon")
+                if current_horizon and audit_horizon is not None:
+                    try:
+                        if int(audit_horizon) != current_horizon:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
+                artifacts = audit.get("artifacts") or {}
+                eval_metrics = artifacts.get("evaluation_metrics") or {}
+                if not isinstance(eval_metrics, dict) or not eval_metrics:
+                    continue
+
+                component = {
+                    k: v for k, v in eval_metrics.items()
+                    if k in TRACKED_MODELS and isinstance(v, dict)
+                }
+                if component:
+                    logger.info(
+                        "[TS_MODEL] Loaded trailing OOS metrics from audit %s "
+                        "(dir=%s ticker=%s horizon=%s %d models)",
+                        path.name,
+                        scan_dir.name,
+                        audit_ticker or "unknown",
+                        audit_horizon,
+                        len(component),
+                    )
+                    return component
+
+            return None
+
+        # Primary scan: production/ (trade-evidence audits written by auto_trader).
+        # These contain evaluation_metrics only for ETL/CV runs, not live cycles.
+        result = _scan_dir_for_oos(self._audit_dir)
+        if result:
+            return result
+
+        # Secondary scan: production_eval/ (OOS eval audits written by ETL/CV runs).
+        # Live auto_trader instances need OOS metrics from prior ETL runs to activate
+        # RMSE-rank scoring in derive_model_confidence().  Without this, RMSE-rank is
+        # permanently dead in live mode because auto_trader never writes evaluation_metrics.
+        # production_eval/ is the canonical location for RMSE_ONLY audit files after
+        # the evidence split (commit 525c661).  Look for it as a sibling of _audit_dir.
+        eval_dir = self._audit_dir.parent / "production_eval"
+        if eval_dir != self._audit_dir and eval_dir.exists():
+            result = _scan_dir_for_oos(eval_dir)
+            if result:
+                return result
+
+        # Post-scan: log if the primary dir had files but no metric match.
+        try:
+            primary_count = sum(1 for _ in self._audit_dir.glob("forecast_audit_*.json"))
+        except Exception:
+            primary_count = 0
+        if primary_count:
             logger.warning(
-                "[TS_MODEL] _load_trailing_oos_metrics: scanned %d audit file(s) for "
-                "ticker=%s horizon=%s — no matching file with evaluation_metrics found. "
+                "[TS_MODEL] _load_trailing_oos_metrics: scanned %d audit file(s) in %s "
+                "(+ production_eval if present) for ticker=%s horizon=%s — "
+                "no matching file with evaluation_metrics found. "
                 "RMSE-rank will fall back to heuristic scoring.",
-                len(files),
+                primary_count,
+                self._audit_dir.name,
                 current_ticker,
                 current_horizon,
             )

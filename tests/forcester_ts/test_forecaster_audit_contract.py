@@ -796,3 +796,80 @@ def test_load_trailing_oos_metrics_warns_when_no_match(
     assert any("no matching file with evaluation_metrics" in t for t in warning_texts), (
         f"Expected WARNING about no matching audit file; got: {warning_texts}"
     )
+
+
+def test_load_trailing_oos_metrics_falls_back_to_production_eval_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Live auto_trader runs write to production/ but never write evaluation_metrics.
+    OOS metrics from prior ETL/CV runs live in production_eval/.  The function must
+    scan production_eval/ as a secondary source when production/ has no match.
+
+    This is the fix for the OOS dead-code bug: RMSE-rank was permanently disabled
+    in live mode because _load_trailing_oos_metrics() only scanned self._audit_dir
+    (production/), which never contains evaluation_metrics during live cycles.
+    """
+    # Simulate production/ (primary, written by auto_trader — no evaluation_metrics)
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+    trade_audit = {
+        "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+        "artifacts": {},  # no evaluation_metrics — live run
+        "signal_context": {"ts_signal_id": "ts_AAPL_live_0001"},
+    }
+    (production_dir / "forecast_audit_live.json").write_text(json.dumps(trade_audit))
+
+    # Simulate production_eval/ (secondary, written by ETL/CV — has evaluation_metrics)
+    eval_dir = tmp_path / "production_eval"
+    eval_dir.mkdir()
+    _write_audit(eval_dir, "forecast_audit_cv.json", "AAPL", 30)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, (
+        "Expected non-empty OOS metrics from production_eval/ fallback; "
+        "live auto_trader RMSE-rank is permanently dead without this"
+    )
+    assert "samossa" in result, f"Expected samossa metrics in result; got keys: {list(result)}"
+
+
+def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """production_eval/ fallback must apply the same ticker filter as the primary scan.
+    An MSFT eval audit must NOT be returned when current ticker is AAPL.
+    """
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+
+    eval_dir = tmp_path / "production_eval"
+    eval_dir.mkdir()
+    _write_audit(eval_dir, "forecast_audit_msft.json", "MSFT", 30)  # wrong ticker
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result == {}, (
+        "production_eval/ fallback must NOT return MSFT metrics when current ticker is AAPL"
+    )
