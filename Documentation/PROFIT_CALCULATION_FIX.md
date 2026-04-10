@@ -121,7 +121,7 @@ test_negative_profit_tracking        PASSED  ✓
 
 ### **Run Fixed Tests** (in bash terminal):
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 
 # Test 1: Run profit-critical tests

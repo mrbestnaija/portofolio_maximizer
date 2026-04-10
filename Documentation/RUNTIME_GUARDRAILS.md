@@ -18,7 +18,7 @@ If you run the code under any other interpreter (Windows Python, `py`, `.venv`, 
 Run this **before** any ETL/backtest/auto-trader execution and include the **command + output** in logs/issues/PRs:
 
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 
 which python
@@ -48,7 +48,7 @@ export EXECUTION_MODE=live
 - To view it reliably, serve the repo root over HTTP (avoids `file://` fetch restrictions):
 
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 python3 -m http.server 8000
 ```
 
@@ -57,7 +57,7 @@ Then open `http://localhost:8000/visualizations/live_dashboard.html`.
 If you cannot `cd` into the repo first, use `--directory`:
 
 ```bash
-python3 -m http.server 8000 --directory /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+python3 -m http.server 8000 --directory <PROJECT_ROOT>
 ```
 
 ## Portfolio State Persistence (Auto‑Trader)

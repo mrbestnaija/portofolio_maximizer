@@ -13,7 +13,7 @@ Related navigator:
 1. Enter runtime:
 
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 ```
 
@@ -125,7 +125,7 @@ python -m pytest -m "not gpu and not slow" --tb=short -q
 Serve repository root over HTTP:
 
 ```bash
-python3 -m http.server 8000 --bind 127.0.0.1 --directory /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45/portfolio_maximizer_v45
+python3 -m http.server 8000 --bind 127.0.0.1 --directory <PROJECT_ROOT>
 ```
 
 Open:

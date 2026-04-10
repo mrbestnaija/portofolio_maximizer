@@ -699,8 +699,8 @@ Keep in version control:
 ```
 🤖 Generated with co-companion
 
-Authored-By: Bestman Ezekwu Enock
-Email : csgtmalice@protonmail.ch
+Authored-By: Portfolio Maximizer Maintainers
+Email : redacted
 
 BREAKING CHANGE: Description of breaking change
 Fixes #123
@@ -821,7 +821,7 @@ git reset --hard origin/master
 **Last Updated**: 2026-01-10
 **Status**: ACTIVE
 **Review Schedule**: Monthly or before major changes
-**Maintainer**: Bestman Ezekwu Enock (csgtmalice@protonmail.ch)
+**Maintainer**: Portfolio Maximizer Maintainers
 
 ---
 

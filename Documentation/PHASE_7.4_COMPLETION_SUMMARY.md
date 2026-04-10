@@ -190,7 +190,7 @@ This is the only critical remaining task for Phase 7.4. Based on the AAPL result
 
 **Command**:
 ```bash
-cd /c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 
 ./simpleTrader_env/Scripts/python.exe scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT,NVDA \

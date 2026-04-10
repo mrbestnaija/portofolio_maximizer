@@ -20,5 +20,4 @@ export EXECUTION_MODE="${EXECUTION_MODE:-live}"
 
 bash "${SCRIPT_DIR}/run_pipeline.sh" --mode live "$@"
 
-echo "Bestman's Portfolio Maximizer v45 Live pipeline run complete."
-
+echo "Portfolio Maximizer v45 live pipeline run complete."

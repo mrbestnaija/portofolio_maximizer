@@ -79,7 +79,7 @@ Testing already executed: `python3 -m compileall scripts/run_auto_trader.py`. Ne
 
 **Command**:
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 
 # Run Time Series signal generator tests

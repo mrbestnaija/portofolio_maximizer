@@ -35,11 +35,11 @@ Repo defaults:
 
 Google Drive folder (share link):
 
-`https://drive.google.com/drive/folders/1VHYgx_YZ6HVJAjtOxVNLBEzkPJZpc2G0?usp=sharing`
+`https://drive.google.com/drive/folders/<folder_id>?usp=sharing`
 
 DVC remote URL form:
 
-`gdrive://1VHYgx_YZ6HVJAjtOxVNLBEzkPJZpc2G0`
+`gdrive://<folder_id>`
 
 ## One-Time Setup
 

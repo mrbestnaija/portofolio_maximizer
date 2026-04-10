@@ -12,7 +12,7 @@
 
 ```bash
 # 1. Activate virtual environment
-cd /c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate  # Linux/Mac
 # simpleTrader_env\Scripts\activate  # Windows
 

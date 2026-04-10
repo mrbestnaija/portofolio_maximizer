@@ -277,7 +277,7 @@ Per AGENT_INSTRUCTION.md:
 **Solution**:
 ```bash
 # Ensure you're in project root
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 
 # Activate virtual environment
 source simpleTrader_env/bin/activate

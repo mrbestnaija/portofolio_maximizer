@@ -267,7 +267,7 @@ The market is currently showing bullish momentum.
 
 ### **1. Run Integration Test**
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 python3 tests/ai_llm/test_integration_full.py
 ```
 

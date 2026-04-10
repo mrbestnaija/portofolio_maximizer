@@ -231,7 +231,7 @@ def update_openclaw_tools_md() -> None:
 
 ## Portfolio Maximizer (PMX) Source Access
 
-PMX project root: `C:\\Users\\Bestman\\personal_projects\\portfolio_maximizer_v45\\portfolio_maximizer_v45`
+PMX project root: `<PROJECT_ROOT>`
 
 ### Readable Directories
 - `ai_llm/` - LLM integration (ollama_client, activity logger, signal generator)

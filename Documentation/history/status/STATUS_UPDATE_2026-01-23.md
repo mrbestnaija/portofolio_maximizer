@@ -168,7 +168,7 @@ CHECK constraint failed: model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'SAMOSSA
 
 **Command**:
 ```bash
-cd /c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 
 ./simpleTrader_env/Scripts/python.exe scripts/run_etl_pipeline.py \
   --tickers AAPL,MSFT,NVDA \

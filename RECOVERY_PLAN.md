@@ -73,7 +73,7 @@ wsl --import Ubuntu-22.04 C:\WSL\Ubuntu ubuntu-rootfs.tar.gz
 Once Python is installed:
 
 ```bash
-cd c:/Users/Bestman/personal_projects/portfolio_maximizer_v45/portfolio_maximizer_v45
+cd <OLD_REPO_ROOT>
 
 # Create fresh virtual environment
 python -m venv venv
@@ -109,7 +109,7 @@ python -c "from etl import *; from ai_llm import *; print('Project imports succe
 
 **Search Locations:**
 - Check WSL filesystem once accessible: `/home/mrbestnaija/`
-- Check Windows: `C:\Users\Bestman\`
+- Check Windows: `C:\Users\<username>\`
 - Check external drives/backups
 
 **Expected Files:**
@@ -203,7 +203,7 @@ git add .env.template
 Once Python and WSL are installed, run:
 
 ```bash
-cd c:/Users/Bestman/personal_projects/portfolio_maximizer_v45/portfolio_maximizer_v45
+cd <NEW_REPO_ROOT>
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pytest tests/ --collect-only  # Verify test discovery
@@ -220,8 +220,8 @@ pytest tests/ --collect-only  # Verify test discovery
 
 If issues arise, the old directory is still available:
 ```
-c:\Users\Bestman\personal_projects\portfolio_maximizer_v45\  (OLD - corrupted git)
-c:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45\  (NEW - fresh clone)
+c:\Users\<username>\personal_projects\portfolio_maximizer_v45\  (OLD - corrupted git)
+c:\Users\<username>\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45\  (NEW - fresh clone)
 ```
 
 Old data directories (if needed):

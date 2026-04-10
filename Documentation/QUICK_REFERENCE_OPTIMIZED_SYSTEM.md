@@ -18,7 +18,7 @@
 
 ### **1. Run Optimized Pipeline**
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 
 # Ensure Ollama is running

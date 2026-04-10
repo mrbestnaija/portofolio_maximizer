@@ -21,7 +21,7 @@ ollama pull qwen:14b-chat-q4_K_M
 
 ### 3. Start Development
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 python ai_development/console.py
 ```
 

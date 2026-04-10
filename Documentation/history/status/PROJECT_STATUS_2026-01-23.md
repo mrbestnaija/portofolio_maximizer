@@ -361,7 +361,7 @@ grep "ENSEMBLE build_complete" logs/phase7.4_multi_ticker_retry.log | \
 
 #### 6. Stage and Commit Changes
 ```bash
-cd /c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 
 # Check what's changed
 git status

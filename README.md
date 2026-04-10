@@ -967,7 +967,7 @@ If you use this work in academic research, please cite:
 ```bibtex
 @software{bestman2026portfolio,
   title={Portfolio Maximizer: Autonomous Quantitative Trading with Regime-Adaptive Ensemble},
-  author={Bestman, Ezekwu Enock},
+  author={Portfolio Maximizer Team},
   year={2026},
   version={4.3},
   url={https://github.com/mrbestnaija/portofolio_maximizer},
@@ -1173,7 +1173,7 @@ This project is documented as MIT-licensed in the repo badges and policy docs.
 
 ## 👤 Author
 
-**Bestman Ezekwu Enock**
+**Project Maintainer**
 
 - GitHub: [@mrbestnaija](https://github.com/mrbestnaija)
 - Public contact: See Support section
@@ -1183,7 +1183,6 @@ This project is documented as MIT-licensed in the repo badges and policy docs.
 ## 🙏 Acknowledgments
 
 - **MIT OpenCourseWare**: Micro Masters in Statistics and Data Science (MMSDS)
-- **Wife**: Linda Bestman
 - **Yahoo Finance**: Market data API
 
 ---
@@ -1259,7 +1258,7 @@ For questions or issues:
 1. **Check Documentation**: `Documentation/` directory
 2. **Search Issues**: [GitHub Issues](https://github.com/mrbestnaija/portofolio_maximizer/issues)
 3. **Open New Issue**: Provide reproducible example
-4. **Public contact email**: csgtmalice@protonmail.ch
+4. **Public contact email**: redacted
 
 ---
 

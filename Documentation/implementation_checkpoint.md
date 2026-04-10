@@ -308,7 +308,7 @@ Status: resolved; see `logs/brutal/results_20251228_224751/test.log` and `Docume
 ### How to Execute (WSL)
 
 ```bash
-cd /mnt/c/Users/Bestman/personal_projects/portfolio_maximizer_v45
+cd <PROJECT_ROOT>
 source simpleTrader_env/bin/activate
 
 # Run a live-first pipeline (auto synthetic fallback, LLM enabled)

@@ -185,15 +185,15 @@ Installer behavior:
 Recommended install from PowerShell:
 
 ```powershell
-Set-Location C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
+Set-Location <PROJECT_ROOT>
 & .\scripts\install_observability_stack.ps1 -DownloadOfficialBinaries
 ```
 
 Manual Loki ZIP import if you already downloaded the archive in a browser:
 
 ```powershell
-Set-Location C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
-& .\scripts\install_observability_stack.ps1 -LokiZipPath "C:\Users\Bestman\Downloads\loki-windows-amd64.exe.zip"
+Set-Location <PROJECT_ROOT>
+& .\scripts\install_observability_stack.ps1 -LokiZipPath "$env:USERPROFILE\Downloads\loki-windows-amd64.exe.zip"
 & .\scripts\start_loki.ps1
 ```
 
@@ -202,7 +202,7 @@ That imports the local ZIP into `tools\observability\loki` without redownloading
 No-admin portable Alloy install if the Windows installer is blocked or times out:
 
 ```powershell
-Set-Location C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
+Set-Location <PROJECT_ROOT>
 New-Item -ItemType Directory -Force -Path .\tools\observability\alloy | Out-Null
 $alloyZip = Join-Path $env:TEMP "alloy-windows-amd64.exe.zip"
 curl.exe -L --fail --retry 5 --retry-delay 5 --retry-all-errors -C - "https://github.com/grafana/alloy/releases/download/v1.14.0/alloy-windows-amd64.exe.zip" -o $alloyZip
