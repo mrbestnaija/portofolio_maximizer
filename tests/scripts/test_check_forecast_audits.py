@@ -26,6 +26,8 @@ def _write_audit(
     residual_diagnostics: dict | None = None,
     effective_default_model: str | None = None,
     ensemble_index_mismatch: bool | None = None,
+    event_type: str | None = None,
+    evidence_context: str | None = None,
 ) -> None:
     payload = {
         "dataset": {
@@ -47,6 +49,12 @@ def _write_audit(
         payload["artifacts"]["effective_default_model"] = effective_default_model
     if ensemble_index_mismatch is not None:
         payload["artifacts"]["ensemble_index_mismatch"] = ensemble_index_mismatch
+    if event_type is None and signal_context is not None:
+        event_type = "TRADE_FORECAST_AUDIT"
+    if event_type is not None:
+        payload["event_type"] = event_type
+    if evidence_context is not None:
+        payload["evidence_context"] = evidence_context
     if signal_context is not None:
         payload["signal_context"] = signal_context
     if semantic_admission is not None:
@@ -472,7 +480,7 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
         "Outcome join   : outcomes_loaded=0 join_attempted=0 accepted=2 accepted_noneligible=0 "
         "eligible=2 quarantined=0 due_eligible=0 matched=0 missing=0 ambiguous=0 "
         "not_due=0 invalid_context=0 not_yet_eligible=0 duplicate_conflicts=0 "
-        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=2"
+        "contract_drift=0 cohort_drift=0 no_signal_id=0 non_trade_context=0 missing_exec_meta=0"
     ) in output
     assert "Diversity      : regimes=2 healthy_tickers=2 trading_days=2" in output
 
@@ -499,13 +507,13 @@ def test_check_forecast_audits_emits_window_counts_and_diversity_summary(
     assert summary["window_counts"]["n_eligible_records"] == 2
     assert summary["window_counts"]["n_quarantined_records"] == 0
     assert summary["window_counts"]["n_duplicate_conflicts"] == 0
-    assert summary["window_counts"]["n_admission_missing_execution_metadata_records"] == 2
+    assert summary["window_counts"]["n_admission_missing_execution_metadata_records"] == 0
     assert summary["window_counts"]["n_readiness_denominator_included"] == 0
     assert summary["window_counts"]["n_linkage_denominator_included"] == 0
     assert summary["measurement_contract_version"] == 1
     assert summary["baseline_model"] == "BEST_SINGLE"
     assert summary["lift_threshold_rmse_ratio"] == pytest.approx(1.0)
-    assert summary["admission_summary"]["missing_execution_metadata_records"] == 2
+    assert summary["admission_summary"]["missing_execution_metadata_records"] == 0
     assert summary["telemetry_contract"]["schema_version"] == 3
     assert summary["telemetry_contract"]["outcomes_loaded"] is False
     assert "cache_status" in summary
@@ -2609,6 +2617,7 @@ def _make_trade_signal_id_audit(
 ) -> None:
     """Write a minimal TRADE-context audit with an optional execution_decision."""
     payload: dict = {
+        "event_type": "TRADE_FORECAST_AUDIT",
         "dataset": {
             "start": "2024-01-01",
             "end": "2024-04-01",
@@ -3004,3 +3013,202 @@ def test_load_closed_trade_match_counts_open_leg_not_included_for_contaminated_c
     assert loaded is True
     assert "ts_AAPL_contam_close" not in mapping
     assert "ts_AAPL_contam_open" not in mapping
+
+
+def test_main_splits_rmse_and_outcome_roots_and_excludes_forecast_only_records_from_hygiene(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    production_dir = tmp_path / "logs" / "forecast_audits" / "production"
+    production_eval_dir = tmp_path / "logs" / "forecast_audits" / "production_eval"
+    production_dir.mkdir(parents=True, exist_ok=True)
+    production_eval_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        production_dir / "forecast_audit_trade.json",
+        start="2026-04-01",
+        end="2026-04-10",
+        length=10,
+        horizon=30,
+        ticker="AMZN",
+        event_type="TRADE_FORECAST_AUDIT",
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+        signal_context={
+            "run_id": "run_trade",
+            "entry_ts": "2026-04-10T07:00:00+00:00",
+            "ts_signal_id": "ts_AMZN_open_0001",
+            "forecast_horizon": 30,
+            "expected_close_ts": "2026-05-10T07:00:00+00:00",
+            "expected_close_source": "signal_context_explicit",
+            "context_type": "TRADE",
+            "event_type": "TRADE_FORECAST_AUDIT",
+        },
+        semantic_admission={"evidence_source_classification": "producer-native"},
+    )
+    _write_audit(
+        production_dir / "forecast_audit_legacy_eval.json",
+        start="2026-03-01",
+        end="2026-03-20",
+        length=20,
+        horizon=30,
+        ticker="MSFT",
+        event_type="FORECAST_AUDIT",
+        weights={"samossa": 1.0},
+        eval_metrics={
+            "samossa": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+    )
+    _write_audit(
+        production_eval_dir / "forecast_audit_eval.json",
+        start="2026-02-01",
+        end="2026-02-20",
+        length=20,
+        horizon=30,
+        ticker="NVDA",
+        event_type="FORECAST_AUDIT",
+        evidence_context="RMSE_ONLY",
+        weights={"garch": 1.0},
+        eval_metrics={
+            "garch": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+    )
+
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [])
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(production_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads(
+        (tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert summary["scope"]["rmse_roots"] == [str(production_dir), str(production_eval_dir)]
+    assert summary["scope"]["outcome_roots"] == [str(production_dir)]
+    assert summary["window_counts"]["n_deduped_windows"] == 3
+    assert summary["window_counts"]["n_outcome_deduped_windows"] == 2
+    assert summary["window_counts"]["n_rmse_only_records"] == 2
+    assert summary["window_counts"]["n_misrouted_rmse_only_records"] == 0
+    assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
+    assert summary["window_counts"]["n_outcome_windows_non_trade_context"] == 1
+    assert summary["window_counts"]["n_outcome_windows_not_due"] == 1
+    statuses = {entry["file"]: entry["outcome_status"] for entry in summary["dataset_windows"]}
+    assert statuses["forecast_audit_trade.json"] == "NOT_DUE"
+    assert statuses["forecast_audit_legacy_eval.json"] == "NON_TRADE_CONTEXT"
+
+
+def test_main_fails_closed_for_explicit_rmse_only_artifact_inside_production(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.check_forecast_audits as mod
+
+    monkeypatch.chdir(tmp_path)
+    production_dir = tmp_path / "logs" / "forecast_audits" / "production"
+    production_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_audit(
+        production_dir / "forecast_audit_misrouted.json",
+        start="2026-04-01",
+        end="2026-04-10",
+        length=10,
+        horizon=30,
+        ticker="AAPL",
+        event_type="FORECAST_AUDIT",
+        evidence_context="RMSE_ONLY",
+        weights={"sarimax": 1.0},
+        eval_metrics={
+            "sarimax": {"rmse": 1.0},
+            "ensemble": {"rmse": 1.0},
+        },
+    )
+
+    db_path = tmp_path / "portfolio.db"
+    _write_closed_trades_db(db_path, [])
+    cfg = tmp_path / "forecaster_monitoring.yml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "forecaster_monitoring:",
+                "  regression_metrics:",
+                "    baseline_model: BEST_SINGLE",
+                "    holding_period_audits: 1",
+                "    disable_ensemble_if_no_lift: false",
+                "    max_rmse_ratio_vs_baseline: 1.1",
+                "    max_violation_rate: 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_forecast_audits.py",
+            "--audit-dir",
+            str(production_dir),
+            "--db",
+            str(db_path),
+            "--config-path",
+            str(cfg),
+            "--max-files",
+            "50",
+        ],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+
+    summary = json.loads(
+        (tmp_path / "logs" / "forecast_audits_cache" / "latest_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert summary["window_counts"]["n_misrouted_rmse_only_records"] == 1
+    assert summary["window_counts"]["n_outcome_windows_invalid_context"] == 1
+    assert summary["window_counts"]["n_outcome_windows_missing_execution_metadata"] == 0
+    assert summary["dataset_windows"][0]["outcome_reason"] == "MISROUTED_RMSE_ONLY_AUDIT"

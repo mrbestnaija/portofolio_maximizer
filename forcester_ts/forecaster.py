@@ -42,7 +42,7 @@ from .ensemble import (
     derive_model_confidence,
 )
 from .garch import GARCHForecaster
-from .instrumentation import ModelInstrumentation
+from .instrumentation import ModelInstrumentation, _make_json_safe
 from .mssa_rl import MSSARLConfig, MSSARLForecaster
 from .samossa import SAMOSSAForecaster
 from .sarimax import SARIMAXForecaster
@@ -216,8 +216,23 @@ class TimeSeriesForecaster:
         self._audit_write_counter: int = 0
         self._audit_session_tag: str = f"{id(self) & 0xFFFFFFFF:08x}"
         audit_dir = None
-        if isinstance(self.config.ensemble_kwargs, dict) and "audit_log_dir" in self.config.ensemble_kwargs:
-            audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
+        self._audit_event_type: Optional[str] = None
+        self._audit_evidence_context: Optional[str] = None
+        if isinstance(self.config.ensemble_kwargs, dict):
+            if "audit_log_dir" in self.config.ensemble_kwargs:
+                audit_dir = self.config.ensemble_kwargs.get("audit_log_dir")
+            raw_event_type = str(self.config.ensemble_kwargs.get("audit_event_type") or "").strip().upper()
+            if raw_event_type:
+                self._audit_event_type = raw_event_type
+            raw_evidence_context = str(
+                self.config.ensemble_kwargs.get("audit_evidence_context") or ""
+            ).strip().upper()
+            if raw_evidence_context:
+                self._audit_evidence_context = raw_evidence_context
+            if audit_dir is None:
+                # Preserve the longstanding env-var override when ensemble_kwargs
+                # is present but does not explicitly own the audit directory.
+                audit_dir = os.environ.get("TS_FORECAST_AUDIT_DIR") or None
         else:
             # Treat empty / whitespace-only env var the same as unset so that
             # CI environments with TS_FORECAST_AUDIT_DIR="" don't trip the
@@ -1792,7 +1807,14 @@ class TimeSeriesForecaster:
 
     def save_audit_report(self, output_path: Path) -> None:
         """Persist the instrumentation report to disk for interpretable-AI auditing."""
-        self._instrumentation.dump_json(output_path)
+        payload = self._instrumentation.export()
+        if self._audit_event_type:
+            payload["event_type"] = self._audit_event_type
+        if self._audit_evidence_context:
+            payload["evidence_context"] = self._audit_evidence_context
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(_make_json_safe(payload), handle, indent=2)
         self._append_audit_manifest_entry(output_path)
 
     def _next_audit_path(self) -> Optional[Path]:

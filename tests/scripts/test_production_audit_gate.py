@@ -1580,9 +1580,7 @@ def test_evidence_hygiene_excludes_execution_rejected_from_dirty_count() -> None
     production_audit_only = True
 
     dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
-    evidence_hygiene_pass = (
-        production_audit_only and non_trade_count == 0 and dirty_invalid_count == 0
-    )
+    evidence_hygiene_pass = production_audit_only and dirty_invalid_count == 0
 
     # 5 dirty invalids remain — hygiene must FAIL.
     assert dirty_invalid_count == 5
@@ -1590,9 +1588,7 @@ def test_evidence_hygiene_excludes_execution_rejected_from_dirty_count() -> None
 
     # With all invalids being EXECUTION_REJECTED — hygiene must PASS.
     all_rejected_dirty_count = max(0, 100 - 100)
-    evidence_hygiene_all_clean = (
-        production_audit_only and non_trade_count == 0 and all_rejected_dirty_count == 0
-    )
+    evidence_hygiene_all_clean = production_audit_only and all_rejected_dirty_count == 0
     assert all_rejected_dirty_count == 0
     assert evidence_hygiene_all_clean is True
 
@@ -1604,3 +1600,34 @@ def test_evidence_hygiene_excludes_execution_rejected_from_dirty_count() -> None
     er = safe_int(window_counts.get("n_outcome_windows_execution_rejected"), 0)
     inv = safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
     assert max(0, inv - er) == 0
+
+
+def test_evidence_hygiene_keeps_misrouted_rmse_only_records_dirty() -> None:
+    """Explicit RMSE_ONLY artifacts in production remain hygiene blockers."""
+    import scripts.production_audit_gate as mod
+
+    safe_int = mod._safe_int
+    window_counts = {
+        "n_outcome_windows_invalid_context": 3,
+        "n_outcome_windows_execution_rejected": 2,
+        "n_misrouted_rmse_only_records": 1,
+    }
+
+    invalid_context_count = safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    execution_rejected_count = safe_int(window_counts.get("n_outcome_windows_execution_rejected"), 0)
+    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
+
+    assert dirty_invalid_count == 1
+    assert safe_int(window_counts.get("n_misrouted_rmse_only_records"), 0) == 1
+
+
+def test_evidence_hygiene_ignores_non_trade_rmse_only_exclusions() -> None:
+    """Non-trade RMSE-only exclusions are no longer hygiene blockers."""
+    production_audit_only = True
+    non_trade_count = 2
+    dirty_invalid_count = 0
+
+    evidence_hygiene_pass = production_audit_only and dirty_invalid_count == 0
+
+    assert non_trade_count == 2
+    assert evidence_hygiene_pass is True

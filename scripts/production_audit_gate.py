@@ -1432,9 +1432,11 @@ def main() -> int:
             str(audit_dir.name).strip().lower() == "production",
         )
     )
-    evidence_hygiene_pass = (
-        production_audit_only and non_trade_count == 0 and dirty_invalid_count == 0
-    )
+    # RMSE-only / forecast-only artifacts are now excluded upstream from the
+    # trade-evidence contract, so non-trade counts are informative but no
+    # longer hygiene blockers on their own. Only true dirty invalids should
+    # fail evidence hygiene.
+    evidence_hygiene_pass = production_audit_only and dirty_invalid_count == 0
     linkage_waterfall = _build_linkage_waterfall(
         window_counts,
         production_audit_only=production_audit_only,

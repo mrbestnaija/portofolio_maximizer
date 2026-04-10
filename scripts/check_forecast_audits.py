@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover - script execution path fallback
 
 DEFAULT_AUDIT_ROOT = Path("logs/forecast_audits")
 DEFAULT_AUDIT_PRODUCTION_DIR = DEFAULT_AUDIT_ROOT / "production"
+DEFAULT_AUDIT_PRODUCTION_EVAL_DIR = DEFAULT_AUDIT_ROOT / "production_eval"
 DEFAULT_AUDIT_DIR = DEFAULT_AUDIT_PRODUCTION_DIR
 DEFAULT_MONITORING_CONFIG = Path("config/forecaster_monitoring.yml")
 DEFAULT_DB_PATH = Path(_DEFAULT_DB_PATH)
@@ -555,15 +556,20 @@ def _derive_semantic_admission(
         gate_bucket = "ELIGIBLE"
     else:
         gate_bucket = "ACCEPTED_NONELIGIBLE"
-    missing_execution_metadata_fields: List[str] = []
-    if not str(entry.get("run_id") or "").strip():
-        missing_execution_metadata_fields.append("run_id")
-    if not str(entry.get("entry_ts") or "").strip():
-        missing_execution_metadata_fields.append("entry_ts")
-    missing_execution_metadata = (
-        str(entry.get("outcome_reason") or "").strip().upper() == "MISSING_EXECUTION_METADATA"
-        or bool(missing_execution_metadata_fields)
-    )
+    is_trade_evidence = bool(entry.get("trade_evidence_record"))
+    if is_trade_evidence:
+        missing_execution_metadata_fields: List[str] = []
+        if not str(entry.get("run_id") or "").strip():
+            missing_execution_metadata_fields.append("run_id")
+        if not str(entry.get("entry_ts") or "").strip():
+            missing_execution_metadata_fields.append("entry_ts")
+        missing_execution_metadata = (
+            str(entry.get("outcome_reason") or "").strip().upper() == "MISSING_EXECUTION_METADATA"
+            or bool(missing_execution_metadata_fields)
+        )
+    else:
+        missing_execution_metadata_fields = []
+        missing_execution_metadata = False
 
     return {
         "accepted_for_audit_history": accepted_for_audit_history,
@@ -662,6 +668,8 @@ def _build_failure_dataset_snapshot(
     outcome_windows_missing_execution_metadata = 0
     outcome_windows_execution_rejected = 0
     outcome_windows_unverified_execution_rejected = 0
+    n_rmse_only_records = 0
+    n_misrouted_rmse_only_records = 0
 
     def _legacy_to_status(outcome_status: str) -> str:
         mapping = {
@@ -696,10 +704,25 @@ def _build_failure_dataset_snapshot(
 
         expected_close, expected_close_source = compute_expected_close(signal_context, ds)
         meta = _extract_window_metadata(audit or {})
+        event_type = _audit_event_type(audit or {}, signal_context)
+        evidence_context = _audit_evidence_context(audit or {})
+        is_trade_evidence = _is_trade_evidence_audit(event_type=event_type)
+        is_rmse_only = _is_rmse_only_audit(
+            event_type=event_type,
+            evidence_context=evidence_context,
+        )
+        is_misrouted_rmse_only = bool(
+            evidence_context == "RMSE_ONLY"
+            and _path_is_within(path, DEFAULT_AUDIT_PRODUCTION_DIR)
+        )
+        if is_rmse_only:
+            n_rmse_only_records += 1
 
         entry: Dict[str, Any] = {
             "file": path.name,
             "audit_id": str((audit or {}).get("audit_id") or path.stem).strip() or path.stem,
+            "event_type": event_type,
+            "evidence_context": evidence_context,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
@@ -722,6 +745,9 @@ def _build_failure_dataset_snapshot(
             "semantic_admission": semantic_admission,
             "signal_rejected": signal_rejected,
             "signal_rejected_unverified": signal_rejected_unverified,
+            "rmse_only_record": is_rmse_only,
+            "misrouted_rmse_only_record": is_misrouted_rmse_only,
+            "trade_evidence_record": is_trade_evidence,
             "outcome_status": None,
             "outcome_reason": None,
         }
@@ -734,7 +760,20 @@ def _build_failure_dataset_snapshot(
         expected_close_ts = _parse_utc_datetime(entry.get("expected_close_ts"))
         entry_ts = _parse_utc_datetime(entry.get("entry_ts"))
 
-        if context_type != "TRADE":
+        if bool(entry.get("misrouted_rmse_only_record")):
+            entry["outcome_status"] = "INVALID_CONTEXT"
+            entry["outcome_reason"] = "MISROUTED_RMSE_ONLY_AUDIT"
+            outcome_windows_invalid_context += 1
+            n_misrouted_rmse_only_records += 1
+        elif not bool(entry.get("trade_evidence_record")):
+            entry["outcome_status"] = "NON_TRADE_CONTEXT"
+            entry["outcome_reason"] = (
+                "RMSE_ONLY_EVIDENCE"
+                if bool(entry.get("rmse_only_record"))
+                else "NON_TRADE_AUDIT_EVENT"
+            )
+            outcome_windows_non_trade_context += 1
+        elif context_type != "TRADE":
             entry["outcome_status"] = "NON_TRADE_CONTEXT"
             entry["outcome_reason"] = "NON_TRADE_CONTEXT"
             outcome_windows_non_trade_context += 1
@@ -883,6 +922,8 @@ def _build_failure_dataset_snapshot(
         "n_outcome_deduped_windows": len(dedup_map),
         "n_rmse_windows_processed": 0,
         "n_rmse_windows_usable": 0,
+        "n_rmse_only_records": n_rmse_only_records,
+        "n_misrouted_rmse_only_records": n_misrouted_rmse_only_records,
         "n_outcome_windows_eligible": outcome_windows_eligible,
         "n_outcome_windows_matched": outcome_windows_matched,
         "n_outcome_windows_missing": outcome_windows_missing,
@@ -920,11 +961,13 @@ def _emit_failure_summary_and_exit(
     summary_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
     generated_utc = telemetry_now_utc()
+    rmse_audit_roots = _resolve_rmse_audit_roots(audit_dir, include_research)
+    outcome_audit_roots = _resolve_outcome_audit_roots(audit_dir, include_research)
     cache_dir = Path("logs/forecast_audits_cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / "latest_summary.json"
     dataset_entries, window_counts, outcomes_loaded, outcome_join_error = _build_failure_dataset_snapshot(
-        audit_roots=audit_roots,
+        audit_roots=outcome_audit_roots,
         max_files=int(max_files),
         db_path=db_path,
         min_forecast_horizon=min_forecast_horizon,
@@ -970,6 +1013,8 @@ def _emit_failure_summary_and_exit(
         "scope": {
             "include_research": bool(include_research),
             "production_audit_only": not bool(include_research),
+            "rmse_roots": [str(root) for root in rmse_audit_roots],
+            "outcome_roots": [str(root) for root in outcome_audit_roots],
         },
         "window_counts": window_counts,
         "admission_summary": admission_summary,
@@ -1036,6 +1081,40 @@ def _resolve_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
     return roots
 
 
+def _paths_match(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except Exception:
+        return str(left) == str(right)
+
+
+def _is_default_production_dir(audit_dir: Path) -> bool:
+    return _paths_match(audit_dir, DEFAULT_AUDIT_PRODUCTION_DIR)
+
+
+def _resolve_rmse_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
+    roots = _resolve_audit_roots(audit_dir, include_research)
+    if _is_default_production_dir(audit_dir):
+        eval_root = audit_dir.parent / DEFAULT_AUDIT_PRODUCTION_EVAL_DIR.name
+        if not any(_paths_match(root, eval_root) for root in roots):
+            roots.append(eval_root)
+    return roots
+
+
+def _resolve_outcome_audit_roots(audit_dir: Path, include_research: bool) -> List[Path]:
+    if _is_default_production_dir(audit_dir):
+        return [audit_dir]
+    return _resolve_audit_roots(audit_dir, include_research)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
 def _collect_audit_files(
     *,
     audit_roots: List[Path],
@@ -1082,6 +1161,80 @@ def _load_manifest_index(manifest_path: Path) -> Tuple[Dict[str, str], Dict[str,
             continue
         index[file_name] = digest
     return index, stats
+
+
+def _load_manifest_indexes(
+    *,
+    audit_roots: List[Path],
+    manifest_filename: str,
+    manifest_mode: str,
+) -> Tuple[Dict[Path, Dict[str, str]], Dict[str, Any]]:
+    stats = {
+        "mode": manifest_mode,
+        "manifest_path": str((audit_roots[0] / manifest_filename)) if audit_roots else str(manifest_filename),
+        "manifest_paths": [str(root / manifest_filename) for root in audit_roots],
+        "manifest_exists": False,
+        "invalid_records": 0,
+        "verified": 0,
+        "missing": 0,
+        "hash_failed": 0,
+        "mismatch": 0,
+        "excluded_unverified": 0,
+    }
+    if manifest_mode == "off":
+        return {}, stats
+
+    indexes: Dict[Path, Dict[str, str]] = {}
+    for root in audit_roots:
+        manifest_path = root / manifest_filename
+        index, loaded_stats = _load_manifest_index(manifest_path)
+        indexes[root.resolve()] = index
+        stats["manifest_exists"] = bool(stats["manifest_exists"] or loaded_stats.get("manifest_exists"))
+        stats["invalid_records"] += int(loaded_stats.get("invalid_records", 0) or 0)
+    return indexes, stats
+
+
+def _verify_manifest_entry_for_file(
+    path: Path,
+    *,
+    manifest_indexes: Dict[Path, Dict[str, str]],
+) -> str:
+    try:
+        parent_key = path.parent.resolve()
+    except Exception:
+        parent_key = path.parent
+    return _verify_manifest_entry(path, manifest_indexes.get(parent_key, {}))
+
+
+def _audit_evidence_context(audit: Dict[str, Any]) -> Optional[str]:
+    dataset = audit.get("dataset") if isinstance(audit, dict) else {}
+    if not isinstance(dataset, dict):
+        dataset = {}
+    raw = audit.get("evidence_context") if isinstance(audit, dict) else None
+    if raw in (None, ""):
+        raw = dataset.get("evidence_context")
+    text = str(raw or "").strip().upper()
+    return text or None
+
+
+def _audit_event_type(audit: Dict[str, Any], signal_context: Optional[Dict[str, Any]] = None) -> str:
+    context = signal_context if isinstance(signal_context, dict) else {}
+    raw = (
+        audit.get("event_type")
+        or context.get("event_type")
+        or "FORECAST_AUDIT"
+    )
+    return str(raw or "FORECAST_AUDIT").strip().upper() or "FORECAST_AUDIT"
+
+
+def _is_trade_evidence_audit(*, event_type: str) -> bool:
+    return str(event_type or "").strip().upper() == "TRADE_FORECAST_AUDIT"
+
+
+def _is_rmse_only_audit(*, event_type: str, evidence_context: Optional[str]) -> bool:
+    if str(evidence_context or "").strip().upper() == "RMSE_ONLY":
+        return True
+    return str(event_type or "").strip().upper() == "FORECAST_AUDIT"
 
 
 def _verify_manifest_entry(path: Path, manifest_index: Dict[str, str]) -> str:
@@ -1515,7 +1668,7 @@ def main() -> None:
                 f"available. Expected default DB at: {DEFAULT_DB_PATH}"
             ),
             audit_dir=audit_dir,
-            audit_roots=_resolve_audit_roots(audit_dir, bool(args.include_research)),
+            audit_roots=_resolve_rmse_audit_roots(audit_dir, bool(args.include_research)),
             include_research=bool(args.include_research),
             max_files=int(args.max_files),
             db_path=None,
@@ -1523,14 +1676,17 @@ def main() -> None:
             exit_code=1,
         )
     min_forecast_horizon: Optional[int] = None
-    audit_roots = _resolve_audit_roots(audit_dir, bool(args.include_research))
-    files = _collect_audit_files(audit_roots=audit_roots, max_files=int(args.max_files))
+    rmse_audit_roots = _resolve_rmse_audit_roots(audit_dir, bool(args.include_research))
+    outcome_audit_roots = _resolve_outcome_audit_roots(audit_dir, bool(args.include_research))
+    audit_roots = rmse_audit_roots
+    files = _collect_audit_files(audit_roots=rmse_audit_roots, max_files=int(args.max_files))
+    outcome_files = _collect_audit_files(audit_roots=outcome_audit_roots, max_files=int(args.max_files))
     if not files:
-        roots_text = ", ".join(str(root) for root in audit_roots)
+        roots_text = ", ".join(str(root) for root in rmse_audit_roots)
         _emit_failure_summary_and_exit(
             message=f"No forecast_audit_*.json files found in: {roots_text}",
             audit_dir=audit_dir,
-            audit_roots=audit_roots,
+            audit_roots=rmse_audit_roots,
             include_research=bool(args.include_research),
             max_files=int(args.max_files),
             db_path=db_path,
@@ -1675,11 +1831,12 @@ def main() -> None:
     parseable_count = 0
     parse_error_count = 0
 
-    manifest_index: Dict[str, str] = {}
+    manifest_indexes: Dict[Path, Dict[str, str]] = {}
     manifest_stats: Dict[str, Any] = {
         "mode": manifest_mode,
         "manifest_path": str(manifest_path),
         "manifest_exists": None,
+        "manifest_paths": [str(manifest_path)],
         "invalid_records": 0,
         "verified": 0,
         "missing": 0,
@@ -1688,8 +1845,18 @@ def main() -> None:
         "excluded_unverified": 0,
     }
     if manifest_mode != "off":
-        manifest_index, loaded_stats = _load_manifest_index(manifest_path)
-        manifest_stats.update(loaded_stats)
+        if args.manifest_path:
+            manifest_index, loaded_stats = _load_manifest_index(manifest_path)
+            manifest_stats.update(loaded_stats)
+            for root in rmse_audit_roots:
+                manifest_indexes[root.resolve()] = manifest_index
+        else:
+            manifest_indexes, loaded_stats = _load_manifest_indexes(
+                audit_roots=rmse_audit_roots,
+                manifest_filename=manifest_filename,
+                manifest_mode=manifest_mode,
+            )
+            manifest_stats.update(loaded_stats)
 
     for f in files:
         audit, load_error = _load_audit_with_error(f)
@@ -1706,7 +1873,10 @@ def main() -> None:
                 continue
 
         if manifest_mode != "off":
-            status = _verify_manifest_entry(f, manifest_index)
+            status = _verify_manifest_entry_for_file(
+                f,
+                manifest_indexes=manifest_indexes,
+            )
             if status == "ok":
                 manifest_stats["verified"] += 1
             else:
@@ -1721,12 +1891,39 @@ def main() -> None:
             pass
         else:
             unique_map[key] = f
+
+    for f in outcome_files:
+        audit, _ = _load_audit_with_error(f)
+        if not audit:
+            continue
+
+        if min_forecast_horizon is not None:
+            horizon = _forecast_horizon_from_audit(audit)
+            if horizon is None or horizon < min_forecast_horizon:
+                continue
+
+        if manifest_mode != "off":
+            status = _verify_manifest_entry_for_file(
+                f,
+                manifest_indexes=manifest_indexes,
+            )
+            if status != "ok" and manifest_mode == "fail":
+                continue
+
         outcome_key = _outcome_dedupe_key_from_audit(audit)
         if outcome_key not in outcome_unique_map:
             outcome_unique_map[outcome_key] = f
 
     unique_files: List[Path] = list(unique_map.values())
     outcome_unique_files: List[Path] = list(outcome_unique_map.values())
+    n_rmse_only_records = 0
+    for f in unique_files:
+        audit = _load_audit(f) or {}
+        signal_context = audit.get("signal_context") if isinstance(audit.get("signal_context"), dict) else {}
+        event_type = _audit_event_type(audit, signal_context)
+        evidence_context = _audit_evidence_context(audit)
+        if _is_rmse_only_audit(event_type=event_type, evidence_context=evidence_context):
+            n_rmse_only_records += 1
 
     results: List[AuditCheckResult] = []
     for f in unique_files:
@@ -1737,10 +1934,11 @@ def main() -> None:
     print("=== Forecast Audit Regression Check ===")
     print(f"Audit directory : {audit_dir}")
     print(
-        "Audit roots    : "
-        + ", ".join(str(root) for root in audit_roots)
+        "RMSE roots     : "
+        + ", ".join(str(root) for root in rmse_audit_roots)
         + f" (include_research={int(bool(args.include_research))})"
     )
+    print("Outcome roots  : " + ", ".join(str(root) for root in outcome_audit_roots))
     print(
         f"Files inspected : {len(results)} unique (raw={len(files)}, max_files={args.max_files})"
     )
@@ -1952,6 +2150,7 @@ def main() -> None:
     outcome_windows_missing_execution_metadata = 0
     outcome_windows_execution_rejected = 0
     outcome_windows_unverified_execution_rejected = 0
+    n_misrouted_rmse_only_records = 0
 
     print(
         "RMSE coverage  : "
@@ -1963,7 +2162,7 @@ def main() -> None:
     )
     print(
         "Outcome dedupe : "
-        f"raw={len(files)} "
+        f"raw={len(outcome_files)} "
         f"deduped={len(outcome_unique_map)}"
     )
 
@@ -2480,17 +2679,31 @@ def main() -> None:
             semantic_admission=semantic_admission,
         )
         meta = _extract_window_metadata(audit or {})
-        manifest_status = _verify_manifest_entry(f, manifest_index) if manifest_mode != "off" else None
+        manifest_status = (
+            _verify_manifest_entry_for_file(
+                f,
+                manifest_indexes=manifest_indexes,
+            )
+            if manifest_mode != "off"
+            else None
+        )
         audit_id = str((audit or {}).get("audit_id") or f.stem).strip() or f.stem
-        event_type = str(
-            (audit or {}).get("event_type")
-            or signal_context.get("event_type")
-            or "FORECAST_AUDIT"
-        ).strip().upper()
+        event_type = _audit_event_type(audit or {}, signal_context)
+        evidence_context = _audit_evidence_context(audit or {})
+        is_trade_evidence = _is_trade_evidence_audit(event_type=event_type)
+        is_rmse_only = _is_rmse_only_audit(
+            event_type=event_type,
+            evidence_context=evidence_context,
+        )
+        is_misrouted_rmse_only = bool(
+            evidence_context == "RMSE_ONLY"
+            and _path_is_within(f, DEFAULT_AUDIT_PRODUCTION_DIR)
+        )
         entry = {
             "file": f.name,
             "audit_id": audit_id,
             "event_type": event_type,
+            "evidence_context": evidence_context,
             "start": ds.get("start"),
             "end": ds.get("end"),
             "length": ds.get("length"),
@@ -2517,6 +2730,9 @@ def main() -> None:
             "outcome_reason": None,
             "signal_rejected": signal_rejected,
             "signal_rejected_unverified": signal_rejected_unverified,
+            "rmse_only_record": is_rmse_only,
+            "misrouted_rmse_only_record": is_misrouted_rmse_only,
+            "trade_evidence_record": is_trade_evidence,
         }
         matching = results_by_path.get(f)
         if matching:
@@ -2556,6 +2772,23 @@ def main() -> None:
         if outcomes_loaded:
             now = now_utc()
             for entry in dataset_entries:
+                if bool(entry.get("misrouted_rmse_only_record")):
+                    entry["outcome_status"] = "INVALID_CONTEXT"
+                    entry["outcome_reason"] = "MISROUTED_RMSE_ONLY_AUDIT"
+                    outcome_windows_invalid_context += 1
+                    n_misrouted_rmse_only_records += 1
+                    continue
+
+                if not bool(entry.get("trade_evidence_record")):
+                    entry["outcome_status"] = "NON_TRADE_CONTEXT"
+                    entry["outcome_reason"] = (
+                        "RMSE_ONLY_EVIDENCE"
+                        if bool(entry.get("rmse_only_record"))
+                        else "NON_TRADE_AUDIT_EVENT"
+                    )
+                    outcome_windows_non_trade_context += 1
+                    continue
+
                 context_type = str(entry.get("context_type") or "").strip().upper()
                 if context_type and context_type != "TRADE":
                     entry["outcome_status"] = "NON_TRADE_CONTEXT"
@@ -2943,14 +3176,19 @@ def main() -> None:
         "scope": {
             "include_research": bool(args.include_research),
             "production_audit_only": not bool(args.include_research),
+            "rmse_roots": [str(root) for root in rmse_audit_roots],
+            "outcome_roots": [str(root) for root in outcome_audit_roots],
         },
         "window_counts": {
             "n_raw_windows": len(files),
+            "n_outcome_raw_windows": len(outcome_files),
             "n_parseable_windows": parseable_count,
             "n_deduped_windows": len(unique_map),
             "n_outcome_deduped_windows": len(outcome_unique_map),
             "n_rmse_windows_processed": rmse_windows_processed,
             "n_rmse_windows_usable": rmse_windows_usable,
+            "n_rmse_only_records": n_rmse_only_records,
+            "n_misrouted_rmse_only_records": n_misrouted_rmse_only_records,
             "n_outcome_windows_eligible": outcome_windows_eligible,
             "n_outcome_windows_matched": outcome_windows_matched,
             "n_outcome_windows_missing": outcome_windows_missing,

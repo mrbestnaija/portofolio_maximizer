@@ -1142,3 +1142,44 @@ class TestOosEvaluationAudit:
             # Must not raise
         finally:
             self.mod.TimeSeriesForecaster = orig_cls
+
+    def test_oos_eval_clones_config_and_routes_audits_to_production_eval(self, monkeypatch, tmp_path: Path):
+        fn = getattr(self.mod, "_run_oos_evaluation_audit")
+        from etl.time_series_forecaster import TimeSeriesForecasterConfig
+
+        series = self._make_series(n=100)
+        returns = series.pct_change().dropna()
+        cfg = TimeSeriesForecasterConfig(
+            forecast_horizon=10,
+            ensemble_kwargs={"audit_log_dir": str(tmp_path / "logs" / "forecast_audits" / "production")},
+        )
+
+        seen_kwargs = {}
+        orig_cls = self.mod.TimeSeriesForecaster
+
+        class _RecordingForecaster:
+            def __init__(self, config):
+                seen_kwargs.update(dict(config.ensemble_kwargs or {}))
+                seen_kwargs["same_object"] = config is cfg
+
+            def fit(self, **kwargs):
+                return None
+
+            def forecast(self):
+                return {}
+
+            def evaluate(self, holdout):
+                return {"rows": len(holdout)}
+
+        self.mod.TimeSeriesForecaster = _RecordingForecaster
+        try:
+            fn(series, returns, horizon=10, ticker="AAPL", forecaster_config=cfg)
+        finally:
+            self.mod.TimeSeriesForecaster = orig_cls
+
+        assert seen_kwargs["same_object"] is False
+        assert seen_kwargs["audit_event_type"] == "FORECAST_AUDIT"
+        assert seen_kwargs["audit_evidence_context"] == "RMSE_ONLY"
+        assert Path(seen_kwargs["audit_log_dir"]).name == "production_eval"
+        assert cfg.ensemble_kwargs["audit_log_dir"].endswith("production")
+        assert "audit_event_type" not in cfg.ensemble_kwargs

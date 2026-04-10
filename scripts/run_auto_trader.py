@@ -11,6 +11,7 @@ execution into a single continuously running workflow.
 from __future__ import annotations
 
 import atexit
+import copy
 import hashlib
 import inspect
 import logging
@@ -80,6 +81,7 @@ QUICK_FAIL_MIN_PROFIT_FACTOR = 0.5  # Below 0.5 PF = clearly losing
 QUICK_FAIL_MIN_WIN_RATE = 0.20  # Below 20% win rate = clearly losing
 EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
 RUN_SUMMARY_LOG_PATH = ROOT_PATH / "logs" / "automation" / "run_summary.jsonl"
+DEFAULT_EVAL_AUDIT_DIR = ROOT_PATH / "logs" / "forecast_audits" / "production_eval"
 _NO_TRADE_WINDOWS = None
 DEFAULT_BAR_STATE_PATH = ROOT_PATH / "logs" / "automation" / "bar_state.json"
 PERFORMANCE_LOG_DIR = ROOT_PATH / "logs" / "performance"
@@ -1219,7 +1221,21 @@ def _run_oos_evaluation_audit(
         holdout_series = close_series.iloc[-horizon:]
         fit_returns = returns_series.iloc[: len(fit_series) - 1] if returns_series is not None else None
 
-        oos_forecaster = TimeSeriesForecaster(config=forecaster_config)
+        eval_config = copy.deepcopy(forecaster_config)
+        ensemble_kwargs = (
+            dict(eval_config.ensemble_kwargs)
+            if isinstance(eval_config.ensemble_kwargs, dict)
+            else {}
+        )
+        eval_audit_dir = str(os.environ.get("TS_FORECAST_EVAL_AUDIT_DIR") or "").strip()
+        if not eval_audit_dir:
+            eval_audit_dir = str(DEFAULT_EVAL_AUDIT_DIR.resolve())
+        ensemble_kwargs["audit_log_dir"] = eval_audit_dir
+        ensemble_kwargs["audit_event_type"] = "FORECAST_AUDIT"
+        ensemble_kwargs["audit_evidence_context"] = "RMSE_ONLY"
+        eval_config.ensemble_kwargs = ensemble_kwargs
+
+        oos_forecaster = TimeSeriesForecaster(config=eval_config)
         oos_forecaster.fit(
             price_series=fit_series,
             returns_series=fit_returns,

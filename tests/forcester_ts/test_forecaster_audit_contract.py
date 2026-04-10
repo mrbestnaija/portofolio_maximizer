@@ -200,6 +200,33 @@ def test_save_audit_report_rewrites_manifest_with_valid_jsonl_only(monkeypatch, 
     assert not list(tmp_path.glob(".forecast_manifest_*.tmp"))
 
 
+def test_save_audit_report_includes_configured_event_type_and_evidence_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False,
+        garch_enabled=False,
+        samossa_enabled=False,
+        mssa_rl_enabled=False,
+        ensemble_enabled=False,
+        ensemble_kwargs={
+            "audit_event_type": "FORECAST_AUDIT",
+            "audit_evidence_context": "RMSE_ONLY",
+        },
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    forecaster._instrumentation.set_dataset_metadata(ticker="AAPL")
+
+    audit_path = tmp_path / "forecast_audit_20260101_000001.json"
+    forecaster.save_audit_report(audit_path)
+
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert payload["event_type"] == "FORECAST_AUDIT"
+    assert payload["evidence_context"] == "RMSE_ONLY"
+
+
 def test_forecast_records_exog_policy_artifacts(monkeypatch) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", "")
     config = TimeSeriesForecasterConfig(
