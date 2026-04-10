@@ -39,7 +39,7 @@ quant_validation:
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
     min_terminal_directional_accuracy: 0.45  # Canonical directional gate for multi-bar trade alignment
     min_directional_accuracy: 0.45           # Deprecated alias; kept for one compatibility pass
-    min_expected_shortfall: -0.02           # Downside floor: less negative ES is better
+    min_expected_shortfall: -0.00108        # NGN daily hurdle: 31% annual / 252 bars (~0.108%/day)
     require_significance: false
     min_information_ratio: 0.0
 
@@ -50,12 +50,21 @@ quant_validation:
   pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
   strict_weight_coverage: true       # Fail when a utility component lacks an explicit/known weight or value
   utility_weights:
-    expected_profit: 0.24            # Economic viability of the proposed trade
+    # Barbell-objective weights (Nigeria jurisdiction, 2026-04-10 recalibration):
+    # - Reduced expected_profit 0.24→0.20 and terminal_da 0.18→0.14 to make room
+    #   for terminal_ci_coverage (0.14), which measures stop/target placement quality.
+    # - Halved max_drawdown and expected_shortfall: ES already has domain-specific
+    #   NGN threshold (-0.00108/day); drawdown is correlated with ES so double-weighting
+    #   was penalising tail risk twice.
+    # Weights sum to 1.0 when terminal_ci_coverage is present; when absent (non-
+    # forecast_edge mode), the weight resolver distributes proportionally via defaults.
+    expected_profit: 0.20            # Economic viability of the proposed trade
     omega_ratio: 0.20                # Barbell-aware upside asymmetry around NGN hurdle
     profit_factor: 0.18              # Win/loss magnitude quality
-    terminal_directional_accuracy: 0.18  # Multi-step directional alignment with realized trade payoff
-    max_drawdown: 0.10               # Drawdown containment contribution
-    expected_shortfall: 0.10         # Tail-loss containment contribution
+    terminal_directional_accuracy: 0.14  # Multi-step directional alignment with realized trade payoff
+    terminal_ci_coverage: 0.14      # CI quality gate — did realized price land inside forecast CI?
+    max_drawdown: 0.07               # Drawdown containment (correlated with ES; reduced to avoid double-penalty)
+    expected_shortfall: 0.07         # Tail-loss below NGN daily threshold (0.108%/day)
 
   calibration:
     db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query
