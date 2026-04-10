@@ -2816,3 +2816,130 @@ def test_synthetic_executed_signal_classified_as_invalid_context(tmp_path: Path)
     assert entries[0]["outcome_reason"] == "SYNTHETIC_EXECUTION"
     assert counts["n_outcome_windows_eligible"] == 0
     assert counts["n_outcome_windows_invalid_context"] >= 1
+
+
+def _write_open_close_leg_db(path: Path) -> None:
+    """Create a DB with an open-leg (is_close=0) linked to a close-leg (is_close=1)
+    via entry_trade_id.  The open-leg has ts_OPEN; the close-leg has ts_CLOSE.
+    Only ts_CLOSE appears in production_closed_trades (the view filters is_close=1).
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ts_signal_id TEXT,
+                is_close INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                entry_trade_id INTEGER
+            )
+            """
+        )
+        # Open leg — the signal that generated the entry; its tsid is in audit files
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, entry_trade_id) VALUES (1, 'ts_AAPL_open_0001', 0, NULL)"
+        )
+        # Close leg — produced by the exit run; different tsid; links back to open via entry_trade_id
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, entry_trade_id) VALUES (2, 'ts_AAPL_close_0001', 1, 1)"
+        )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT *
+            FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_load_closed_trade_match_counts_includes_open_leg_tsids_via_entry_trade_id(
+    tmp_path: Path,
+) -> None:
+    """Root-cause fix: audit files store the OPEN-leg ts_signal_id (is_close=0).
+    production_closed_trades only contains CLOSE-leg rows (is_close=1).
+    These two sets are always disjoint — the close-leg tsid is never in any
+    audit file, so matched=0 forever without this fix.
+
+    The entry_trade_id FK bridges the gap:
+        te_close.entry_trade_id -> te_open.id -> te_open.ts_signal_id
+
+    After the fix, _load_closed_trade_match_counts() must include the open-leg
+    tsid in the mapping so that audit-file lookups can yield MATCHED.
+    """
+    import scripts.check_forecast_audits as mod
+
+    db = tmp_path / "test.db"
+    _write_open_close_leg_db(db)
+
+    loaded, mapping, error, synthetic_tsids = mod._load_closed_trade_match_counts(db)
+
+    assert loaded is True
+    # Close-leg tsid appears in production_closed_trades view — always present
+    assert "ts_AAPL_close_0001" in mapping
+    # Open-leg tsid must ALSO be in mapping (via entry_trade_id join)
+    assert "ts_AAPL_open_0001" in mapping, (
+        "open-leg tsid missing: audit files store open-leg tsids but "
+        "production_closed_trades only holds close-leg rows; matched will "
+        "always be 0 without the entry_trade_id join"
+    )
+    assert mapping["ts_AAPL_open_0001"] >= 1
+
+
+def test_load_closed_trade_match_counts_open_leg_not_included_for_diagnostic_closes(
+    tmp_path: Path,
+) -> None:
+    """Diagnostic close legs must NOT contribute open-leg tsids to the mapping.
+    Only production (non-diagnostic, non-synthetic) closes should bridge back.
+    """
+    import scripts.check_forecast_audits as mod
+
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ts_signal_id TEXT,
+                is_close INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                entry_trade_id INTEGER
+            )
+            """
+        )
+        # Open leg
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close) VALUES (10, 'ts_AAPL_diag_open', 0)"
+        )
+        # Close leg — but is_diagnostic=1 (should be excluded)
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, is_diagnostic, entry_trade_id) VALUES (11, 'ts_AAPL_diag_close', 1, 1, 10)"
+        )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT * FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = tmp_path / "test.db"
+    loaded, mapping, error, _ = mod._load_closed_trade_match_counts(db)
+
+    assert loaded is True
+    # Diagnostic close: neither close-leg nor open-leg tsid should appear
+    assert "ts_AAPL_diag_close" not in mapping
+    assert "ts_AAPL_diag_open" not in mapping

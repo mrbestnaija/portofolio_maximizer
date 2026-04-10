@@ -250,6 +250,42 @@ def _load_closed_trade_match_counts(
             sid = str(ts_signal_id or "").strip()
             if sid:
                 mapping[sid] = int(count or 0)
+        # Also load open-leg tsids linked to confirmed closed trades.
+        # Audit files store the OPEN-leg ts_signal_id (is_close=0, the entry
+        # signal).  production_closed_trades stores CLOSE-leg ts_signal_ids
+        # (is_close=1).  These two sets are always disjoint — the forecaster
+        # writes an audit file when a BUY/SELL is generated (open leg), but
+        # the matching CLOSE execution gets a different tsid from its own run.
+        # The entry_trade_id FK bridges the gap:
+        #   te_close.entry_trade_id -> te_open.id -> te_open.ts_signal_id
+        # Adding these open-leg tsids to `mapping` lets the early-credit bypass
+        # (and the final MATCHED classification) fire correctly without waiting
+        # for ECTs to expire.
+        try:
+            cur.execute(
+                """
+                SELECT te_open.ts_signal_id, COUNT(*) AS n
+                FROM trade_executions te_close
+                JOIN trade_executions te_open
+                  ON te_close.entry_trade_id = te_open.id
+                WHERE te_close.is_close = 1
+                  AND COALESCE(te_close.is_diagnostic, 0) = 0
+                  AND COALESCE(te_close.is_synthetic, 0) = 0
+                  AND te_open.ts_signal_id IS NOT NULL
+                  AND TRIM(te_open.ts_signal_id) <> ''
+                GROUP BY te_open.ts_signal_id
+                """
+            )
+            for ts_signal_id, count in cur.fetchall():
+                sid = str(ts_signal_id or "").strip()
+                if sid:
+                    # max() so a tsid that also appears as a close-leg (edge
+                    # case: same tsid reused) is not double-counted downward
+                    mapping[sid] = max(mapping.get(sid, 0), int(count or 0))
+        except Exception:
+            # Non-fatal: entry_trade_id column may not exist on older schemas.
+            # The close-leg query above remains as the sole source.
+            pass
         # Also collect synthetic ts_signal_ids so their audits can be excluded
         # from the linkage denominator (synthetic trades never appear in
         # production_closed_trades, so they can never become MATCHED).
