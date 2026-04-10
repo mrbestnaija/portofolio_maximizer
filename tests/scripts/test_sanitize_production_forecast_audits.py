@@ -82,10 +82,14 @@ def test_sanitize_production_forecast_audits_quarantines_suspects_and_rebuilds_m
         expected_close_source="forecast_index",
     )
 
+    eval_audit_dir = tmp_path / "production_eval"
+    eval_manifest_path = eval_audit_dir / "forecast_audit_manifest.jsonl"
     summary = sanitize_production_forecast_audits(
         audit_dir=audit_dir,
+        eval_audit_dir=eval_audit_dir,
         quarantine_dir=quarantine_dir,
         manifest_path=manifest_path,
+        eval_manifest_path=eval_manifest_path,
         apply=True,
     )
 
