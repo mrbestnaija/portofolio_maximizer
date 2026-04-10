@@ -39,7 +39,7 @@ quant_validation:
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
     min_terminal_directional_accuracy: 0.45  # Canonical directional gate for multi-bar trade alignment
     min_directional_accuracy: 0.45           # Deprecated alias; kept for one compatibility pass
-    min_expected_shortfall: -0.00108        # NGN daily hurdle: 31% annual / 252 bars (~0.108%/day)
+    min_expected_shortfall: -0.0108         # 10× NGN daily hurdle (~1.08%/day CVaR floor); ES is tail loss not return hurdle
     require_significance: false
     min_information_ratio: 0.0
 

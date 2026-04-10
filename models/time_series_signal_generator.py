@@ -2794,17 +2794,27 @@ class TimeSeriesSignalGenerator:
         if isinstance(criteria_cfg, dict):
             expected_shortfall_threshold = criteria_cfg.get("min_expected_shortfall")
         if expected_shortfall_threshold is None:
-            # Domain-specific default: use the negative of the NGN daily hurdle rate
-            # rather than the generic -0.02 USD floor.
-            # For a Nigeria-domiciled account, any daily return below DAILY_NGN_THRESHOLD
-            # (~0.00108/day = 31% annual) is a real purchasing-power loss even if
-            # nominally positive in USD.  The -0.02 default is a US equity convention
-            # that vastly understates the actual hurdle this system is measured against.
+            # Domain-specific default: 10× the NGN daily hurdle rate.
+            #
+            # The NGN daily hurdle (~0.108%/day) is the minimum acceptable RETURN,
+            # not an ES floor.  Expected shortfall (CVaR 5%) for US equities is
+            # typically 1-3% per day (e.g., AAPL: ~1-1.5% from 365-day window).
+            # Using -DAILY_NGN_THRESHOLD directly (-0.108%) would block every real
+            # equity signal — a threshold miscalibration, not a domain improvement.
+            #
+            # 10× multiplier rationale:
+            #   - Tail losses should not exceed 10× the daily return hurdle in a
+            #     worst-5% scenario.  At hurdle 0.108%/day: threshold = -1.08%/day.
+            #   - This is stricter than the US-convention -2% (0.92pp tighter) but
+            #     remains reachable for investment-grade US equities (AAPL ES ≈ -1%).
+            #   - Signals with ES worse than -1.08% represent excessive tail risk
+            #     relative to the NGN benchmark even if omega_ratio passes.
+            #   - Configurable via min_expected_shortfall in success_criteria.
             try:
                 from etl.portfolio_math import DAILY_NGN_THRESHOLD as _NGN_DAILY
-                expected_shortfall_threshold = -float(_NGN_DAILY)
+                expected_shortfall_threshold = -10.0 * float(_NGN_DAILY)
             except Exception:
-                expected_shortfall_threshold = -0.00108  # fallback: 31% annual / 252 bars
+                expected_shortfall_threshold = -0.0108  # fallback: 10× (31%/252)
 
         validation_mode = str(config.get("validation_mode") or "drift_proxy").lower()
 
