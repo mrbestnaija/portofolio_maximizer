@@ -22,7 +22,7 @@ Do **not** post security issues publicly.
 
 Use GitHub Private Vulnerability Reporting:
 
-`https://github.com/mrbestnaija/portofolio_maximizer/security/advisories/new`
+`https://github.com/example-org/portofolio_maximizer/security/advisories/new`
 
 ### If private advisory submission is unavailable
 

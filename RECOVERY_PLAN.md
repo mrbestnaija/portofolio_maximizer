@@ -59,7 +59,7 @@ python --version  # Should show Python 3.12.x
    ```bash
    wsl --set-default Ubuntu-22.04
    ubuntu2204.exe
-   # Follow setup prompts - create user 'mrbestnaija'
+   # Follow setup prompts - create user '<username>'
    ```
 
 **Option B: Import Existing Ubuntu Tar (If Available)**
@@ -108,7 +108,7 @@ python -c "from etl import *; from ai_llm import *; print('Project imports succe
 ### 5. Model Artifacts Recovery
 
 **Search Locations:**
-- Check WSL filesystem once accessible: `/home/mrbestnaija/`
+- Check WSL filesystem once accessible: `/home/<username>/`
 - Check Windows: `C:\Users\<username>\`
 - Check external drives/backups
 
@@ -125,19 +125,19 @@ python -c "from etl import *; from ai_llm import *; print('Project imports succe
 
 The project uses a SQLite database with WSL symlink:
 ```
-data/portfolio_maximizer.db.wsl -> /home/mrbestnaija/portfolio_data/data/portfolio_maximizer.db
+data/portfolio_maximizer.db.wsl -> /home/<username>/portfolio_data/data/portfolio_maximizer.db
 ```
 
 **Once WSL is restored:**
 ```bash
 # In WSL Ubuntu
-mkdir -p /home/mrbestnaija/portfolio_data/data
+mkdir -p /home/<username>/portfolio_data/data
 
 # Option A: Recreate empty database (project will rebuild)
 # Database will auto-initialize on first run
 
 # Option B: Restore from backup if available
-# cp /path/to/backup/portfolio_maximizer.db /home/mrbestnaija/portfolio_data/data/
+# cp /path/to/backup/portfolio_maximizer.db /home/<username>/portfolio_data/data/
 ```
 
 ### 7. Test End-to-End
@@ -164,7 +164,7 @@ python -m ai_llm.market_analyzer --test
 - [ ] Core dependencies installed from requirements.txt
 - [ ] GPU dependencies installed (if CUDA GPU available)
 - [ ] .env file in place with valid API keys
-- [ ] WSL user 'mrbestnaija' created
+- [ ] WSL user '<username>' created
 - [ ] Database directory structure recreated
 - [ ] Model artifacts located/retrained
 - [ ] Basic imports working

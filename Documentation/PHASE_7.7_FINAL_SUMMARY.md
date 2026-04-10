@@ -371,7 +371,7 @@ cat data/phase7.7_optimized_weights.json | jq '.results.MODERATE_TRENDING'
 
 ## Contact & Support
 
-**GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer
+**GitHub Repository**: https://github.com/example-org/portofolio_maximizer
 **Branch**: master
 **Latest Commits**: 3543e9f, 2108e96
 

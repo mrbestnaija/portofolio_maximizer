@@ -32,7 +32,7 @@
 
 1. Clone the repository and check out `master`:
    ```bash
-   git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+   git clone https://github.com/example-org/portofolio_maximizer.git
    cd portofolio_maximizer
    git checkout master
    ```
@@ -103,7 +103,7 @@
 
 ## Remote Repository
 
-**GitHub Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**GitHub Repository**: https://github.com/example-org/portofolio_maximizer.git
 **Primary Branch**: `master`
 
 **Authentication policy (GitHub)**:
@@ -116,14 +116,14 @@
 git remote -v
 
 # Recommended: SSH (avoids PAT/credential-helper issues)
-git remote set-url origin git@github.com:mrbestnaija/portofolio_maximizer.git
+git remote set-url origin git@github.com:example-org/portofolio_maximizer.git
 ```
 
 ### Adding Upstream (For Contributors)
 
 ```bash
 # For forks: add upstream and keep it read-only
-git remote add upstream git@github.com:mrbestnaija/portofolio_maximizer.git
+git remote add upstream git@github.com:example-org/portofolio_maximizer.git
 git fetch upstream
 ```
 
@@ -169,7 +169,7 @@ git config --global push.default current
 ## Authentication & Security
 
 ### GitHub Authentication (Required)
-- **Preferred**: SSH (`git@github.com:mrbestnaija/portofolio_maximizer.git`).
+- **Preferred**: SSH (`git@github.com:example-org/portofolio_maximizer.git`).
 - **Alternative**: HTTPS + **PAT** (classic or fine-grained) stored via a credential helper.
 - **Forbidden**: GitHub account password for git operations (will fail).
 
@@ -179,7 +179,7 @@ git config --global push.default current
 ssh-keygen -t ed25519 -C "your_email@example.com"
 
 # Add public key (~/.ssh/id_ed25519.pub) to GitHub > Settings > SSH and GPG keys
-git remote set-url origin git@github.com:mrbestnaija/portofolio_maximizer.git
+git remote set-url origin git@github.com:example-org/portofolio_maximizer.git
 
 # Test auth
 ssh -T git@github.com
@@ -283,7 +283,7 @@ ssh -T git@github.com
 1. Fork the repo on GitHub.
 2. Add `upstream` and keep your fork synced:
    ```bash
-   git remote add upstream git@github.com:mrbestnaija/portofolio_maximizer.git
+   git remote add upstream git@github.com:example-org/portofolio_maximizer.git
    git fetch upstream
    git checkout master
    git pull --ff-only upstream master
@@ -487,7 +487,7 @@ git push -u origin fix/revert-bad-merge
 
 **Response**: Re-clone and sync from remote:
 ```bash
-git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+git clone https://github.com/example-org/portofolio_maximizer.git
 ```
 
 ### Scenario 3: Need to Inspect Remote Changes
@@ -808,7 +808,7 @@ git reset --hard origin/master
 
 ✅ **Configured**: Remote-first git workflow
 ✅ **Policy**: Remote history is canonical
-✅ **Remote**: https://github.com/mrbestnaija/portofolio_maximizer.git
+✅ **Remote**: https://github.com/example-org/portofolio_maximizer.git
 ✅ **Settings**: recommend `pull.rebase=true` and `pull.ff=only` on `master`
 ✅ **Conflicts**: preserve remote history; apply local changes via feature branches
 ✅ **Force Push**: never on `master`; feature branches only with care

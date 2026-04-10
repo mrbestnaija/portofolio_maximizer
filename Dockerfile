@@ -95,13 +95,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 CMD ["python", "scripts/run_etl_pipeline.py", "--help"]
 
-LABEL maintainer="Bestman Ezekwu Enock <mrbestnaija@example.com>" \
+LABEL maintainer="Portfolio Maximizer Team" \
       version="4.5" \
       description="Portfolio Management System with Quantitative Trading Strategies" \
-      org.opencontainers.image.source="https://github.com/mrbestnaija/portofolio_maximizer" \
-      org.opencontainers.image.documentation="https://github.com/mrbestnaija/portofolio_maximizer/blob/master/README.md" \
-      org.opencontainers.image.authors="Bestman Ezekwu Enock" \
-      org.opencontainers.image.url="https://github.com/mrbestnaija/portofolio_maximizer" \
+      org.opencontainers.image.source="https://github.com/example-org/portofolio_maximizer" \
+      org.opencontainers.image.documentation="https://github.com/example-org/portofolio_maximizer/blob/master/README.md" \
+      org.opencontainers.image.authors="Portfolio Maximizer Team" \
+      org.opencontainers.image.url="https://github.com/example-org/portofolio_maximizer" \
       org.opencontainers.image.vendor="Portfolio Maximizer Team" \
       org.opencontainers.image.licenses="MIT"
 

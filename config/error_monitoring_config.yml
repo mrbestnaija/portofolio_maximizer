@@ -115,7 +115,7 @@ templates:
   error_alert:
     subject: "Portfolio Maximizer Error Alert"
     body: |
-      Error Alert - Bestman's Portfolio Maximizer v45
+      Error Alert - Portfolio Maximizer v45
       =====================================
       
       Timestamp: {timestamp}

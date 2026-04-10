@@ -404,7 +404,7 @@ def test_gateway_health_recovers_detached_listener_conflict(monkeypatch) -> None
                             {
                                 "pid": 12345,
                                 "command": "node.exe",
-                                "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Users\\Bestman\\AppData\\Roaming\\npm\\node_modules\\openclaw\\dist\\index.js gateway --port 18789",
+                                "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Users\\ExampleUser\\AppData\\Roaming\\npm\\node_modules\\openclaw\\dist\\index.js gateway --port 18789",
                             }
                         ],
                     },

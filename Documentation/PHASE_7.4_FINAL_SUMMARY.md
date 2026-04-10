@@ -4,7 +4,7 @@
 **Status**: ✅ **COMPLETE**
 **Completion Date**: 2026-01-23
 **GitHub Commit**: b02b0ee
-**Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Repository**: https://github.com/example-org/portofolio_maximizer.git
 
 ---
 
@@ -297,7 +297,7 @@ KEY FIXES:
 Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 ```
 
-**GitHub URL**: https://github.com/mrbestnaija/portofolio_maximizer/commit/b02b0ee
+**GitHub URL**: https://github.com/example-org/portofolio_maximizer/commit/b02b0ee
 
 ---
 
@@ -494,8 +494,8 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 
 ### GitHub
 
-- **Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
-- **Commit**: https://github.com/mrbestnaija/portofolio_maximizer/commit/b02b0ee
+- **Repository**: https://github.com/example-org/portofolio_maximizer.git
+- **Commit**: https://github.com/example-org/portofolio_maximizer/commit/b02b0ee
 - **Branch**: master
 
 ---

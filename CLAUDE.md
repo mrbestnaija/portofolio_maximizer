@@ -1426,7 +1426,7 @@ python scripts/run_etl_pipeline.py --execution-mode synthetic  # Safe test mode
 
 ## Git & GitHub Integration
 
-**Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Repository**: https://github.com/example-org/portofolio_maximizer.git
 **Default Branch**: master
 **Main Branch**: master (for PRs)
 
@@ -1586,4 +1586,4 @@ assert m["beats_ngn_hurdle"] is True   # omega_ratio > 1.0 vs 31% NGN annual hur
 **Remember**: Always activate virtual environment, check platform compatibility, and update documentation when making changes!
 
 **Last Updated**: 2026-04-06 (DCR Phases 1-3 + adversarial fixes complete; Phase 11-A math extension added; Phase 11 B-E blocked until THIN_LINKAGE >= 10)
-**GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**GitHub**: https://github.com/example-org/portofolio_maximizer.git

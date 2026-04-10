@@ -263,4 +263,4 @@ CHECK(model_type IN ('SARIMAX', 'GARCH', 'COMBINED', 'ENSEMBLE', 'SAMOSSA', 'MSS
 **Migration Fixed**: 2026-01-23 07:17 UTC
 **Validation Running**: Yes (error-free since 07:17)
 **Expected Completion**: 2026-01-23 07:25 UTC
-**GitHub Repo**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**GitHub Repo**: https://github.com/example-org/portofolio_maximizer.git

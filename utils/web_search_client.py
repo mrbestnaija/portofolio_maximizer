@@ -154,7 +154,7 @@ def _search_duckduckgo_provider(
             },
             headers={
                 "Accept": "application/json",
-                "User-Agent": "pmx-web-search/1.0 (+https://github.com/mrbestnaija/portofolio_maximizer)",
+                "User-Agent": "pmx-web-search/1.0 (+https://github.com/example-org/portofolio_maximizer)",
             },
             timeout=max(1.0, float(timeout_seconds)),
         )
@@ -280,7 +280,7 @@ def _search_wikipedia_provider(
             },
             headers={
                 "Accept": "application/json",
-                "User-Agent": "pmx-web-search/1.0 (+https://github.com/mrbestnaija/portofolio_maximizer)",
+                "User-Agent": "pmx-web-search/1.0 (+https://github.com/example-org/portofolio_maximizer)",
             },
             timeout=max(1.0, float(timeout_seconds)),
         )

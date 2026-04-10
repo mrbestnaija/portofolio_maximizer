@@ -29,5 +29,5 @@ jobs:
         if: env.PROJECTS_TOKEN != ''
         uses: actions/add-to-project@v1.0.2
         with:
-          project-url: https://github.com/users/mrbestnaija/projects/7
+          project-url: https://github.com/users/${{ github.repository_owner }}/projects/7
           github-token: ${{ secrets.PROJECTS_TOKEN }}

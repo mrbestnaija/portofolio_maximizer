@@ -404,7 +404,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 ```bash
 # Verify remote
 git remote -v
-# Should show: https://github.com/mrbestnaija/portofolio_maximizer.git
+# Should show: https://github.com/example-org/portofolio_maximizer.git
 
 # Push to master
 git push origin master
@@ -501,7 +501,7 @@ git push origin master
 ## Contact & References
 
 ### Repository
-- **GitHub**: https://github.com/mrbestnaija/portofolio_maximizer.git
+- **GitHub**: https://github.com/example-org/portofolio_maximizer.git
 - **Branch**: master
 - **Last Commit**: [Pending Phase 7.4 completion]
 

@@ -4,7 +4,7 @@
 **Status**: ✅ **COMPLETE** (Feature Flag Disabled)
 **Completion Date**: 2026-01-24
 **GitHub Commit**: ffc5b19
-**Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
+**Repository**: https://github.com/example-org/portofolio_maximizer.git
 
 ---
 
@@ -306,7 +306,7 @@ Primary model: GARCH
 
 **Commit Message**: "Phase 7.5: Regime detection integration (feature flag disabled)"
 
-**GitHub URL**: https://github.com/mrbestnaija/portofolio_maximizer/commit/ffc5b19
+**GitHub URL**: https://github.com/example-org/portofolio_maximizer/commit/ffc5b19
 
 ---
 
@@ -585,8 +585,8 @@ vi config/forecasting_config.yml
 
 ### GitHub
 
-- **Repository**: https://github.com/mrbestnaija/portofolio_maximizer.git
-- **Commit**: https://github.com/mrbestnaija/portofolio_maximizer/commit/ffc5b19
+- **Repository**: https://github.com/example-org/portofolio_maximizer.git
+- **Commit**: https://github.com/example-org/portofolio_maximizer/commit/ffc5b19
 - **Branch**: master
 
 ---

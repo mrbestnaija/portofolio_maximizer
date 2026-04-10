@@ -137,7 +137,7 @@ def test_run_regression_gate_softens_known_non_json_probe_when_remote_workflow_i
     config_only_stdout = "\n".join(
         [
             "Gateway not reachable; showing config-only status.",
-            "Config: C:\\Users\\Bestman\\.openclaw\\openclaw.json",
+            "Config: C:\\Users\\ExampleUser\\.openclaw\\openclaw.json",
             "Mode: local",
             "",
             "- Telegram default: enabled, configured, mode:polling, token:config",
@@ -177,7 +177,7 @@ def test_run_regression_gate_fails_known_non_json_probe_when_remote_workflow_is_
     config_only_stdout = "\n".join(
         [
             "Gateway not reachable; showing config-only status.",
-            "Config: C:\\Users\\Bestman\\.openclaw\\openclaw.json",
+            "Config: C:\\Users\\ExampleUser\\.openclaw\\openclaw.json",
             "Mode: local",
         ]
     )

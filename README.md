@@ -485,7 +485,7 @@ Prerequisites:
 
 ```bash
 # Clone the repository
-git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+git clone https://github.com/example-org/portofolio_maximizer.git
 cd portofolio_maximizer
 
 # Create virtual environment
@@ -970,7 +970,7 @@ If you use this work in academic research, please cite:
   author={Portfolio Maximizer Team},
   year={2026},
   version={4.3},
-  url={https://github.com/mrbestnaija/portofolio_maximizer},
+  url={https://github.com/example-org/portofolio_maximizer},
   note={Phase 7.9: PnL integrity enforcement, adversarial audit, OpenClaw automation}
 }
 ```
@@ -996,7 +996,7 @@ If you use this work in academic research, please cite:
 
 1. **Environment Setup**:
    ```bash
-   git clone https://github.com/mrbestnaija/portofolio_maximizer.git
+   git clone https://github.com/example-org/portofolio_maximizer.git
    cd portofolio_maximizer
    python -m venv simpleTrader_env
    source simpleTrader_env/bin/activate  # Linux/Mac
@@ -1134,7 +1134,7 @@ Contributions are welcome! Please follow these guidelines:
 git clone https://github.com/YOUR_USERNAME/portofolio_maximizer.git
 
 # Add upstream remote
-git remote add upstream https://github.com/mrbestnaija/portofolio_maximizer.git
+git remote add upstream https://github.com/example-org/portofolio_maximizer.git
 
 # Create feature branch
 git checkout -b feature/your-feature
@@ -1175,7 +1175,7 @@ This project is documented as MIT-licensed in the repo badges and policy docs.
 
 **Project Maintainer**
 
-- GitHub: [@mrbestnaija](https://github.com/mrbestnaija)
+- GitHub: [example-org](https://github.com/example-org)
 - Public contact: See Support section
 
 ---
@@ -1256,7 +1256,7 @@ python --version  # Should be 3.10+
 For questions or issues:
 
 1. **Check Documentation**: `Documentation/` directory
-2. **Search Issues**: [GitHub Issues](https://github.com/mrbestnaija/portofolio_maximizer/issues)
+2. **Search Issues**: [GitHub Issues](https://github.com/example-org/portofolio_maximizer/issues)
 3. **Open New Issue**: Provide reproducible example
 4. **Public contact email**: redacted
 
