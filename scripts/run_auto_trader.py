@@ -2706,7 +2706,7 @@ def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
 @click.command()
 @click.option(
     "--tickers",
-    default="AAPL,MSFT",
+    default="AMZN,NVDA,MSFT",
     show_default=True,
     help="Comma separated list of tickers to trade automatically.",
 )
