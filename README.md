@@ -2,62 +2,77 @@
 
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Phase 10 Complete](https://img.shields.io/badge/Phase%2010-Complete-green.svg)](Documentation/)
-[![Fast Lane: 1874 passing](https://img.shields.io/badge/fast%20lane-1874%20passing-success.svg)](tests/)
+[![Phase 11 Active](https://img.shields.io/badge/Phase%2011-Active-blue.svg)](Documentation/)
+[![Fast Lane: 2355 passing](https://img.shields.io/badge/fast%20lane-2355%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
 > End-to-end quantitative automation that ingests data, forecasts regimes, routes signals, and executes trades hands-free with profit as the north star.
 
 > Canonical objective policy: [Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md](Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md)
-> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
+> **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside (omega_ratio > 1 vs NGN 31% annual hurdle), not for symmetric textbook efficiency metrics.**
 
 **Version**: 4.5
-**Status**: Phase 10 complete — SARIMAX re-enable, RMSE-rank hybrid confidence, production gate unblock, OpenClaw integration
-**Last Updated**: 2026-03-19
+**Status**: Phase 11 active — Nigeria production path, lot-aware close linkage, domain-calibrated barbell objective
+**Last Updated**: 2026-04-11
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-03-19)
+## Current Repo Truth (2026-04-11)
 
-- **Implemented documentation policy (2026-04-08):** repo-wide objective semantics now live in
-  `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`. Treat
-  `objective_mode: domain_utility` and bar-based horizon language as the current canonical wording.
-  Any older wording that treats Sharpe, win rate, or generic forecast RMSE as the primary target is historical context, not the current default.
+- **Canonical objective**: `domain_utility` barbell mode — omega_ratio vs NGN 31% annual hurdle
+  (`DAILY_NGN_THRESHOLD = (1.31)^(1/252)-1 ≈ 0.00108/day`) is the primary metric. Win rate is
+  a diagnostic, not a gate. See `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
 
-- **Phase 10 (SARIMAX Re-enable + Production Gate Unblock) is complete.** SARIMAX
-  is now enabled by default (`sarimax_enabled: true`) for model-class diversity.
-  Ensemble candidate_weights expanded from 10→15 with SARIMAX-anchored positions and
-  MSSA-RL elevated. Hybrid RMSE-rank scoring (`_rmse_rank_scores`) injected into
-  `_combine_scores()` to prevent SAMoSSA EVR inflation dominating confidence.
-  The scale-invariance test is marked `xfail(strict=False)` — SARIMAX AIC/BIC is
-  inherently scale-dependent.
-- **Production audit gate fully unblocked** (three sub-fixes):
-  - `EVIDENCE_HYGIENE_FAIL` → CLEARED: 476 research/synthetic/pre-admission audit
-    files quarantined from `logs/forecast_audits/production/` via adversarial scan.
-  - `THIN_LINKAGE` → CLEARED: warmup provision (vacuous pass at 0 eligible; 1-match
-    floor during 30-day warmup window); early-credit bypass in both NOT_DUE code
-    paths — already-closed trades skip the exp_close wait. Gate now shows
-    `matched=1/1` (100%).
-  - `GATES_FAIL` → structural fix applied (Phase 10 SARIMAX diversity). Recent
-    violation window already at 40%; needs ~20 more Phase 10 audits to clear 35%.
-- **OpenClaw integration restored**: gateway placeholder URL (`<your-real-tunnel>`)
-  replaced with local mode (`mode: local, bind: loopback`). Gateway restarted.
-  WhatsApp linked, Telegram OK. All 22 cron jobs fully operational. Heartbeat
-  default (30m) added. WhatsApp message delivery verified.
-- **Phase 9 (Binary Directional Classifier) remains complete.** Walk-forward
-  DA=0.562, ECE=0.075 on 290 labeled examples (AAPL). Gate-lift WARN is expected
-  at this sample size — accumulate more ETL passes.
-- Latest verification snapshot:
-  - `python -m pytest tests/ --tb=short -q -m "not slow and not integration"`
-  - Result: `1874 passed, 1 skipped, 11 xfailed, 1 xpassed` (Phase 10, 2026-03-19)
-  - `python scripts/production_audit_gate.py` → `phase3_reason=GATES_FAIL, matched=1/1`
+- **Live funnel: lot-aware close linkage (commit 521c37e)** — `trade_close_allocations` table
+  + `trade_close_linkages` view enable a single closing trade to link multiple openers (e.g. NVDA
+  close id=322 against lots 316+317). All gate queries route through the view. `repair_unlinked_closes.py`
+  hardened to reject synthetic-ancestry matches. `PaperTradingEngine` does FIFO lot matching
+  at close time and persists allocation rows automatically.
 
-Historical sections below preserve earlier phase notes for chronology; use this
-section as the current repo baseline.
+- **Gate state (2026-04-11)**:
+  - `ci_integrity_gate`: **PASS** — CROSS_MODE_CONTAMINATION fixed; only untagged synthetic-opener
+    closes are flagged (tagged closes already excluded from `production_closed_trades`).
+  - `check_quant_validation_health`: **PASS** (728 PASS, 0 FAIL)
+  - `production_audit_gate`: **PASS** (INCONCLUSIVE_ALLOWED) — warmup until 2026-04-24;
+    `Phase3 ready=True`, `matched=2/2`, `phase3_reason=READY`
+  - `institutional_unattended_gate`: FAIL — `prior_gate_execution` latch only;
+    `WARMUP_COVERED_PASS ≠ GENUINE_PASS` by design (resolves at warmup expiry + real lift evidence)
+  - `overall_passed`: False — institutional latch; not a live-funnel failure
+
+- **Default tickers**: `AMZN,NVDA,MSFT` — fastest-closing live evidence candidates.
+  NVDA avg hold 0.25d; AMZN has clean producer-native NOT_DUE open evidence.
+
+- **DCR (Domain-Calibrated Remediation) phases 1-3 complete**:
+  - P1: missing-baseline bypass, residual enforcement, diagnostics_score pessimistic fallback,
+    GARCH variance floor 1e-12→1e-6, funnel audit logging
+  - P2-B: CV OOS proxy; P3-A: confidence calibration script; P3-B: MSSA-RL neutral-on-low-support
+  - Remaining heuristic distortion fixes (C5 OOS scan cap, C3 SAMoSSA bump, H6 SNR fallback,
+    H7 RMSE-rank silent disable, M1 EWMA convergence_ok, H2 realized_vol floor): pending
+
+- **Phase 11-A (Nigeria math extension)**: `omega_ratio()`, `fractional_kelly_fat_tail()`,
+  `effective_ngn_return()`, `portfolio_metrics_ngn()` in `etl/portfolio_math.py`.
+  Phases B-E (fx_layer, broker_cost_model, oanda executor) blocked until GENUINE_PASS.
+
+- **Adversarial suite barbell extension (commit 58b07a1)**: 4 new NGN-domain scenarios
+  (ngn_high_inflation, asymmetric_vol, fat_tail_crash, crisis_recovery), `compute_barbell_per_run`,
+  `summarize_barbell`, `evaluate_barbell_thresholds`. Denominator false-PASS bug fixed. 4→47 tests.
+
+- **Funnel audit observability**: `logs/funnel_audit.jsonl` — 68 entries; 60 SNR_GATE (MSFT, conf≈0.37,
+  SNR≈0.79 < 1.5 threshold), 8 QUANT_VALIDATION_FAIL. SNR_GATE blocks are the primary routing
+  bottleneck. Confidence below 0.55 floor is the secondary.
+
+- **Latest verification**:
+  - `python -m pytest tests/ -m "not slow and not gpu and not integration" -q`
+  - Result: **2355 passed, 1 skipped, 10 xfailed** (2026-04-11)
+  - `python scripts/ci_integrity_gate.py` → `[PASS] All integrity checks passed.`
+  - `python scripts/production_audit_gate.py --unattended-profile` → `PASS, Phase3 ready=1`
+
+Historical sections below preserve earlier phase notes for chronology; use this section as the
+current repo baseline.
 
 ---
 
@@ -123,7 +138,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **📊 Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
 - **📈 Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
-- **✅ Comprehensive Testing**: 731 tests with high coverage across ETL, LLM, forecaster, execution, and security modules
+- **✅ Comprehensive Testing**: 2355+ tests with high coverage across ETL, LLM, forecaster, execution, integrity, and security modules
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
 - **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, neural/TS stages, and ticker discovery with auditable logging
 - **🔐 Resilient Data Access**: Hardened Yahoo Finance extraction with pooling to reduce transient failures
@@ -131,7 +146,49 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 
 ---
 
-### Latest Enhancements (Mar 2026)
+### Latest Enhancements (Apr 2026)
+
+**Phase 11-A + Live Funnel Integrity (2026-04-11)**:
+
+- **Lot-aware close linkage** (`etl/database_manager.py`, `execution/paper_trading_engine.py`):
+  New `trade_close_allocations` table and `trade_close_linkages` UNION-ALL view allow one closing
+  trade to reference multiple openers. `PaperTradingEngine` does FIFO lot matching via
+  `_build_close_allocations()` and persists rows via `save_trade_close_allocations()`.
+  Legacy scalar `entry_trade_id` closes still work via the view fallback arm.
+  `load_open_entry_lots()` reconstructs the lot map on resume, filtering `is_synthetic=0`.
+- **repair_unlinked_closes.py hardened**: rejects synthetic-ancestry matches; fail-closes unless
+  the close matches a live lot from the current position run. Prevented fake-green repair of
+  close 322 to stale synthetic opener 211; correctly wrote 322 → {316, 317} allocations.
+- **CROSS_MODE_CONTAMINATION gate fix**: `_check_cross_mode_contamination()` now flags only
+  untagged closes (is_contaminated=0 with synthetic opener). Tagged closes are already excluded
+  from `production_closed_trades` — no manual whitelist needed for future contaminated closes.
+- **Resume backfill synthetic filter**: `AND COALESCE(is_synthetic, 0) = 0` in the entry_trade_id
+  backfill query prevents a later synthetic opener from shadowing the real live opener on resume,
+  which would cause the close to be tagged contaminated and excluded from THIN_LINKAGE evidence.
+- **Win-rate quick-fail removed** from auto-trader cycle loop: barbell runs with 10-15% WR and
+  high PF are valid; only PF < 0.5 retains action-required status.
+- **Barbell adversarial suite** (`scripts/run_adversarial_forecaster_suite.py`): 4 new
+  NGN-domain scenarios, `compute_barbell_per_run`, `summarize_barbell`, `evaluate_barbell_thresholds`.
+  Denominator false-PASS bug (max(1, runs-errors)) fixed to produce `nan`. 4→47 tests.
+- **Nigeria math layer** (`etl/portfolio_math.py`): `omega_ratio()`, `fractional_kelly_fat_tail()`,
+  `effective_ngn_return()`, `portfolio_metrics_ngn()` with `NGN_ANNUAL_INFLATION=0.28`,
+  `NGN_P2P_FRICTION=0.03`, `DAILY_NGN_THRESHOLD`. 39 tests. No existing functions modified.
+- **Default tickers updated**: `AMZN,NVDA,MSFT` — fastest historical close speeds and clean
+  producer-native NOT_DUE open evidence (ids 315, 316/317).
+- **Regression baseline**: 2355 passed, 1 skipped, 10 xfailed (fast lane, 2026-04-11).
+
+**Phase 10c + DCR (2026-03-30 to 2026-04-05)**:
+
+- **OOS selector wiring** (`forcester_ts/ensemble.py`, `forcester_ts/forecaster.py`):
+  `derive_model_confidence` now accepts trailing OOS metrics from audit files scoped to current
+  ticker + horizon. RMSE-rank hybrid scoring and DA extraction are active in live auto_trader runs.
+- **Heuristic distortion cleanup**: `_change_point_boost` capped at 0.20; MSSA-RL hard floor
+  `max(mssa_score, 0.40)` removed; `CONFIDENCE_ACCURACY_CAP=0.65` moved post-selection.
+- **DCR P1**: missing-baseline bypass fixed; residual diagnostics enforced by model type;
+  `diagnostics_score` defaults 0.5→0.0 (pessimistic); GARCH EWMA variance floor 1e-12→1e-6.
+- **DCR P2-B**: CV OOS proxy from fold metrics. **DCR P3-A**: confidence calibration script.
+  **DCR P3-B**: MSSA-RL neutral-on-low-support guard.
+- **Gate**: PASS (semantics=PASS, 33.33% violation rate, warmup expired 2026-04-24).
 
 **Phase 9: Binary Directional Classifier + Pre-Flight Validator (2026-03-18)**:
 
@@ -824,7 +881,7 @@ portfolio_maximizer/
 │   ├── secrets_guard.py            # Pre-commit secrets leak guard
 │   └── pmx_git_askpass.py          # Git credential helper
 │
-├── tests/                           # Test suite (731 tests)
+├── tests/                           # Test suite (2355+ tests)
 │   ├── etl/                        # ETL module tests
 │   ├── forecaster/                 # Forecaster tests
 │   ├── execution/                  # Execution tests
