@@ -17,6 +17,8 @@ and prints:
     few signals in the dashboard payload.
 
 This is a read-only CLI intended for brutal/manual inspection.
+Win-rate thresholds are diagnostic only under the repo's barbell policy;
+profit factor and RMSE are the active production-quality signals.
 """
 
 from __future__ import annotations
@@ -68,7 +70,7 @@ def _summarize_forecaster_health(
     print("  Thresholds:")
     print(
         f"    min_profit_factor : {thresholds.get('profit_factor_min')!r}  "
-        f"min_win_rate : {thresholds.get('win_rate_min')!r}  "
+        f"min_win_rate(diag) : {thresholds.get('win_rate_min')!r}  "
         f"max_rmse_ratio : {thresholds.get('rmse_ratio_max')!r}"
     )
 
@@ -160,7 +162,7 @@ def _summarize_tickers(
                 alerts.append("PF<min")
         if isinstance(min_wr, (int, float)):
             if win_rate < float(min_wr):
-                alerts.append("WR<min")
+                alerts.append("WR<diag")
 
         wr_str = f"{win_rate:.2f}"
         pf_str = "inf" if profit_factor == float("inf") else f"{profit_factor:.2f}"

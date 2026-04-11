@@ -264,10 +264,12 @@ def _load_closed_trade_match_counts(
         try:
             cur.execute(
                 """
-                SELECT te_open.ts_signal_id, COUNT(*) AS n
+                SELECT te_open.ts_signal_id, COUNT(DISTINCT te_close.id) AS n
                 FROM production_closed_trades te_close
+                JOIN trade_close_linkages link
+                  ON link.close_trade_id = te_close.id
                 JOIN trade_executions te_open
-                  ON te_close.entry_trade_id = te_open.id
+                  ON link.entry_trade_id = te_open.id
                 WHERE te_open.ts_signal_id IS NOT NULL
                   AND TRIM(te_open.ts_signal_id) <> ''
                 GROUP BY te_open.ts_signal_id
@@ -280,9 +282,27 @@ def _load_closed_trade_match_counts(
                     # case: same tsid reused) is not double-counted downward
                     mapping[sid] = max(mapping.get(sid, 0), int(count or 0))
         except Exception:
-            # Non-fatal: entry_trade_id column may not exist on older schemas.
-            # The close-leg query above remains as the sole source.
-            pass
+            try:
+                cur.execute(
+                    """
+                    SELECT te_open.ts_signal_id, COUNT(*) AS n
+                    FROM production_closed_trades te_close
+                    JOIN trade_executions te_open
+                      ON te_close.entry_trade_id = te_open.id
+                    WHERE te_open.ts_signal_id IS NOT NULL
+                      AND TRIM(te_open.ts_signal_id) <> ''
+                    GROUP BY te_open.ts_signal_id
+                    """
+                )
+                for ts_signal_id, count in cur.fetchall():
+                    sid = str(ts_signal_id or "").strip()
+                    if sid:
+                        mapping[sid] = max(mapping.get(sid, 0), int(count or 0))
+            except Exception:
+                # Non-fatal: legacy schemas may not expose allocation-aware or
+                # scalar entry linkage. The close-leg query above remains as the
+                # sole source in that case.
+                pass
         # Also collect synthetic ts_signal_ids so their audits can be excluded
         # from the linkage denominator (synthetic trades never appear in
         # production_closed_trades, so they can never become MATCHED).

@@ -134,11 +134,28 @@ def _count_masked_unlinked_closes(db_path: Path) -> Tuple[int, List[int]]:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" for _ in _whitelist_ids)
-        rows = conn.execute(
-            f"SELECT id FROM trade_executions "
-            f"WHERE is_close = 1 AND entry_trade_id IS NULL AND id IN ({placeholders})",
-            tuple(sorted(_whitelist_ids)),
-        ).fetchall()
+        params = tuple(sorted(_whitelist_ids))
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT id
+                FROM trade_executions
+                WHERE is_close = 1
+                  AND id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM trade_close_linkages link
+                      WHERE link.close_trade_id = trade_executions.id
+                  )
+                """,
+                params,
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = conn.execute(
+                f"SELECT id FROM trade_executions "
+                f"WHERE is_close = 1 AND entry_trade_id IS NULL AND id IN ({placeholders})",
+                params,
+            ).fetchall()
         conn.close()
         found = [int(r["id"]) for r in rows]
         return len(found), found
@@ -170,10 +187,10 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
 
     where = [
         "is_close = 1",
-        "entry_trade_id IS NULL",
         # Note: intentionally no realized_pnl IS NOT NULL filter -- matches the scope
-        # used by PnLIntegrityEnforcer.CLOSE_WITHOUT_ENTRY_LINK (pnl_integrity_enforcer.py:552)
-        # so that reconcile PASS ↔ zero integrity violations, not just zero PnL-carrying ones.
+        # used by PnLIntegrityEnforcer.CLOSE_WITHOUT_ENTRY_LINK so reconcile PASS
+        # means there are no closes missing any effective linkage, not just no
+        # PnL-carrying or scalar entry_trade_id links.
     ]
     params: list[Any] = []
 
@@ -189,16 +206,34 @@ def _count_unlinked_closes(db_path: Path, close_ids: Optional[list[int]] = None)
         where.append(f"id IN ({placeholders})")
         params.extend(filtered_ids)
 
-    sql_where = " AND ".join(where)
-    count_sql = f"SELECT COUNT(*) AS n FROM trade_executions WHERE {sql_where}"
-    sample_sql = f"SELECT id FROM trade_executions WHERE {sql_where} ORDER BY id LIMIT 20"
-
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
-        row = conn.execute(count_sql, tuple(params)).fetchone()
+        sql_where = " AND ".join(where)
+        try:
+            count_sql = (
+                "SELECT COUNT(*) AS n FROM trade_executions "
+                f"WHERE {sql_where} AND NOT EXISTS ("
+                "SELECT 1 FROM trade_close_linkages link "
+                "WHERE link.close_trade_id = trade_executions.id)"
+            )
+            sample_sql = (
+                "SELECT id FROM trade_executions "
+                f"WHERE {sql_where} AND NOT EXISTS ("
+                "SELECT 1 FROM trade_close_linkages link "
+                "WHERE link.close_trade_id = trade_executions.id) "
+                "ORDER BY id LIMIT 20"
+            )
+            row = conn.execute(count_sql, tuple(params)).fetchone()
+            sample_rows = conn.execute(sample_sql, tuple(params)).fetchall()
+        except sqlite3.OperationalError:
+            legacy_where = where + ["entry_trade_id IS NULL"]
+            legacy_sql_where = " AND ".join(legacy_where)
+            count_sql = f"SELECT COUNT(*) AS n FROM trade_executions WHERE {legacy_sql_where}"
+            sample_sql = f"SELECT id FROM trade_executions WHERE {legacy_sql_where} ORDER BY id LIMIT 20"
+            row = conn.execute(count_sql, tuple(params)).fetchone()
+            sample_rows = conn.execute(sample_sql, tuple(params)).fetchall()
         count_val = int(row["n"]) if row and row["n"] is not None else 0
-        sample_rows = conn.execute(sample_sql, tuple(params)).fetchall()
         sample_ids = [int(r["id"]) for r in sample_rows if r and r["id"] is not None]
         conn.close()
         return count_val, sample_ids, None

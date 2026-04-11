@@ -42,6 +42,15 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _position_sign(value: Any) -> int:
+    numeric = _safe_float(value, 0.0)
+    if numeric > 1e-9:
+        return 1
+    if numeric < -1e-9:
+        return -1
+    return 0
+
+
 def _parse_trade_date(value: Any) -> datetime | None:
     raw = str(value or "").strip()
     if not raw:
@@ -76,17 +85,86 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _ensure_close_allocation_schema(conn: sqlite3.Connection) -> None:
+    schema_sql = """
+        CREATE TABLE IF NOT EXISTS trade_close_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            close_trade_id INTEGER NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            allocated_shares REAL NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(close_trade_id, entry_trade_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_close_allocations_close
+            ON trade_close_allocations(close_trade_id);
+        CREATE INDEX IF NOT EXISTS idx_trade_close_allocations_entry
+            ON trade_close_allocations(entry_trade_id);
+        CREATE VIEW IF NOT EXISTS trade_close_linkages AS
+        SELECT
+            a.close_trade_id,
+            a.entry_trade_id,
+            a.allocated_shares
+        FROM trade_close_allocations a
+        UNION ALL
+        SELECT
+            c.id AS close_trade_id,
+            c.entry_trade_id,
+            COALESCE(c.close_size, c.shares, 0.0) AS allocated_shares
+        FROM trade_executions c
+        WHERE COALESCE(c.is_close, 0) = 1
+          AND c.entry_trade_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM trade_close_allocations a
+              WHERE a.close_trade_id = c.id
+          );
+        """
+    try:
+        conn.executescript(schema_sql)
+        return
+    except sqlite3.DatabaseError as exc:
+        if "not authorized" not in str(exc).lower():
+            raise
+
+    db_list = conn.execute("PRAGMA database_list").fetchall()
+    db_path = None
+    for row in db_list:
+        try:
+            candidate = str(row[2] or "")
+        except (IndexError, TypeError):
+            candidate = ""
+        if candidate:
+            db_path = candidate
+            break
+    if not db_path:
+        raise
+
+    fallback = sqlite3.connect(db_path)
+    try:
+        fallback.executescript(schema_sql)
+        fallback.commit()
+    finally:
+        fallback.close()
+
+
 def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = None) -> list[sqlite3.Row]:
     """Find closing legs with no entry_trade_id."""
+    _ensure_close_allocation_schema(conn)
     base_sql = """
         SELECT
             id, ticker, trade_date, action, shares, price, realized_pnl, bar_timestamp, run_id,
             entry_price, close_size, position_before, position_after, holding_period_days,
             data_source, execution_mode, asset_class, instrument_type, multiplier,
-            commission, mid_price, mid_slippage_bps, effective_confidence
+            commission, mid_price, mid_slippage_bps, effective_confidence,
+            COALESCE(is_synthetic, 0) AS is_synthetic,
+            COALESCE(is_contaminated, 0) AS is_contaminated
         FROM trade_executions
         WHERE is_close = 1
-          AND entry_trade_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM trade_close_linkages link
+              WHERE link.close_trade_id = trade_executions.id
+          )
     """
     params: tuple[Any, ...] = ()
     if close_ids:
@@ -99,31 +177,131 @@ def find_unlinked_closes(conn: sqlite3.Connection, close_ids: set[int] | None = 
 
 def find_orphaned_entries(conn: sqlite3.Connection, ticker: str, entry_action: str) -> list[sqlite3.Row]:
     """Find orphaned entries for a ticker/action pair (no close linkage)."""
+    _ensure_close_allocation_schema(conn)
     return conn.execute(
         """
-        SELECT id, ticker, trade_date, shares, price, bar_timestamp, run_id, position_after
+        SELECT
+            o.id,
+            o.ticker,
+            o.trade_date,
+            o.execution_mode,
+            o.shares,
+            o.price,
+            o.bar_timestamp,
+            o.run_id,
+            COALESCE(o.is_synthetic, 0) AS is_synthetic,
+            o.position_before,
+            o.position_after,
+            COALESCE(link.used_qty, 0.0) AS used_qty,
+            MAX(0.0, COALESCE(o.shares, 0.0) - COALESCE(link.used_qty, 0.0)) AS remaining_qty
         FROM trade_executions
-        WHERE ticker = ?
-          AND action = ?
-          AND is_close = 0
-          AND id NOT IN (
-              SELECT DISTINCT entry_trade_id
-              FROM trade_executions
-              WHERE entry_trade_id IS NOT NULL
-          )
-        ORDER BY trade_date, id
+        AS o
+        LEFT JOIN (
+            SELECT entry_trade_id, SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
+            FROM trade_close_linkages
+            GROUP BY entry_trade_id
+        ) AS link
+          ON link.entry_trade_id = o.id
+        WHERE o.ticker = ?
+          AND o.action = ?
+          AND o.is_close = 0
+          AND MAX(0.0, COALESCE(o.shares, 0.0) - COALESCE(link.used_qty, 0.0)) > 0.0
+        ORDER BY o.trade_date, o.id
         """,
         (ticker, entry_action),
     ).fetchall()
 
 
-def match_fifo(unlinked_close: sqlite3.Row, orphaned_entries: list[sqlite3.Row]) -> int | None:
-    """Match close leg to opposite-side open by proximity + share match within run context."""
+def _is_clean_live_close(close_row: sqlite3.Row) -> bool:
+    return (
+        str(close_row["execution_mode"] or "").strip().lower() == "live"
+        and _safe_int(close_row["is_synthetic"]) == 0
+        and _safe_int(close_row["is_contaminated"]) == 0
+    )
+
+
+def _current_position_run_entry_ids(
+    conn: sqlite3.Connection,
+    close_row: sqlite3.Row,
+) -> set[int]:
+    ticker = str(close_row["ticker"] or "").strip()
+    close_date = str(close_row["trade_date"] or "").strip()
+    close_id = _safe_int(close_row["id"])
+    target_sign = _position_sign(close_row["position_before"])
+    if not ticker or not close_date or close_id <= 0 or target_sign == 0:
+        return set()
+
+    prior_rows = conn.execute(
+        """
+        SELECT id, position_after
+        FROM trade_executions
+        WHERE ticker = ?
+          AND (trade_date < ? OR (trade_date = ? AND id < ?))
+        ORDER BY trade_date, id
+        """,
+        (ticker, close_date, close_date, close_id),
+    ).fetchall()
+
+    if not prior_rows:
+        return set()
+
+    boundary_index = -1
+    for idx, row in enumerate(prior_rows):
+        sign_after = _position_sign(row["position_after"])
+        if sign_after == 0 or sign_after != target_sign:
+            boundary_index = idx
+
+    return {
+        _safe_int(row["id"])
+        for row in prior_rows[boundary_index + 1 :]
+        if _safe_int(row["id"]) > 0
+    }
+
+
+def _sum_remaining_qty(entries: list[sqlite3.Row]) -> float:
+    return sum(_safe_float(entry["remaining_qty"], _safe_float(entry["shares"])) for entry in entries)
+
+
+def _select_candidate_entries(
+    conn: sqlite3.Connection,
+    close_row: sqlite3.Row,
+    orphaned_entries: list[sqlite3.Row],
+) -> tuple[list[sqlite3.Row], str]:
+    close_size = _safe_float(close_row["close_size"], _safe_float(close_row["shares"]))
+    clean_live_close = _is_clean_live_close(close_row)
+
+    def _non_synthetic_only(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+        return [
+            row
+            for row in rows
+            if _safe_int(row["is_synthetic"]) == 0
+            and str(row["execution_mode"] or "").strip().lower() != "synthetic"
+        ]
+
+    current_run_ids = _current_position_run_entry_ids(conn, close_row)
+    if current_run_ids:
+        run_entries = [row for row in orphaned_entries if _safe_int(row["id"]) in current_run_ids]
+        if clean_live_close:
+            run_entries = _non_synthetic_only(run_entries)
+        if _sum_remaining_qty(run_entries) >= close_size > 0.0:
+            return run_entries, "current_position_run"
+
+    if clean_live_close:
+        return [], "clean_live_no_current_run_match"
+
+    broad_entries = list(orphaned_entries)
+    if _sum_remaining_qty(broad_entries) >= close_size > 0.0:
+        return broad_entries, "broad_orphan_match"
+    return [], "insufficient_orphan_inventory"
+
+
+def match_fifo_allocations(unlinked_close: sqlite3.Row, orphaned_entries: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Allocate a close leg across remaining opposite-side open lots."""
     close_date = str(unlinked_close["trade_date"] or "")
-    close_shares = _safe_float(unlinked_close["shares"])
+    close_shares = _safe_float(unlinked_close["close_size"], _safe_float(unlinked_close["shares"]))
     close_run = str(unlinked_close["run_id"] or "")
 
-    candidates: list[tuple[int, int]] = []
+    candidates: list[tuple[int, str, int, float]] = []
     for entry in orphaned_entries:
         entry_date = str(entry["trade_date"] or "")
         if entry_date > close_date:
@@ -135,16 +313,62 @@ def match_fifo(unlinked_close: sqlite3.Row, orphaned_entries: list[sqlite3.Row])
         except (ValueError, IndexError):
             run_distance = 10_000
 
-        entry_shares = _safe_float(entry["shares"])
-        share_match = abs(close_shares - entry_shares) < 1e-9
-        score = -run_distance + (100 if share_match else 0)
-        candidates.append((score, _safe_int(entry["id"])))
+        remaining_qty = _safe_float(entry["remaining_qty"], _safe_float(entry["shares"]))
+        if remaining_qty <= 0.0:
+            continue
+        candidates.append((run_distance, entry_date, _safe_int(entry["id"]), remaining_qty))
 
     if not candidates:
-        return None
+        return []
 
-    candidates.sort(reverse=True)
-    return int(candidates[0][1])
+    candidates.sort(key=lambda item: (item[1], item[2], item[0]))
+    remaining_close = close_shares
+    allocations: list[dict[str, Any]] = []
+    for _, _, entry_id, remaining_qty in candidates:
+        if remaining_close <= 1e-9:
+            break
+        allocated = min(remaining_close, remaining_qty)
+        if allocated <= 1e-9:
+            continue
+        allocations.append(
+            {
+                "entry_id": int(entry_id),
+                "allocated_shares": float(allocated),
+            }
+        )
+        remaining_close -= allocated
+
+    if remaining_close > 1e-9:
+        return []
+    return allocations
+
+
+def _apply_allocations_to_close(
+    conn: sqlite3.Connection,
+    close_id: int,
+    allocations: list[dict[str, Any]],
+) -> None:
+    if not allocations:
+        return
+    representative_entry_id = int(allocations[0]["entry_id"])
+    conn.execute(
+        "UPDATE trade_executions SET entry_trade_id = ? WHERE id = ?",
+        (representative_entry_id, close_id),
+    )
+    conn.execute(
+        "DELETE FROM trade_close_allocations WHERE close_trade_id = ?",
+        (close_id,),
+    )
+    conn.executemany(
+        """
+        INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares)
+        VALUES (?, ?, ?)
+        """,
+        [
+            (int(close_id), int(allocation["entry_id"]), float(allocation["allocated_shares"]))
+            for allocation in allocations
+        ],
+    )
 
 
 def _collect_forensic_evidence(close_row: sqlite3.Row, logs_root: Path) -> dict[str, Any]:
@@ -329,6 +553,7 @@ def repair_linkage(
 
     conn = guarded_sqlite_connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    _ensure_close_allocation_schema(conn)
 
     print("=" * 70)
     print("REPAIR UNLINKED CLOSES")
@@ -373,28 +598,41 @@ def repair_linkage(
             continue
 
         orphans = find_orphaned_entries(conn, ticker, entry_action=entry_action)
-        matched_entry_id = match_fifo(close_leg, orphans) if orphans else None
-        if matched_entry_id:
-            entry = next(b for b in orphans if _safe_int(b["id"]) == matched_entry_id)
-            print(
-                f"  [MATCH] {entry_action} ID {matched_entry_id}: {entry['trade_date']} - "
-                f"{_safe_float(entry['shares']):.4f} shares @ {_safe_float(entry['price']):.2f}"
-            )
-            print(f"          Run: {entry['run_id']}")
+        selected_orphans: list[sqlite3.Row] = []
+        candidate_strategy = "no_orphans"
+        if orphans:
+            selected_orphans, candidate_strategy = _select_candidate_entries(conn, close_leg, orphans)
+        matched_allocations = match_fifo_allocations(close_leg, selected_orphans) if selected_orphans else []
+        if matched_allocations:
+            for allocation in matched_allocations:
+                entry = next(b for b in selected_orphans if _safe_int(b["id"]) == int(allocation["entry_id"]))
+                print(
+                    f"  [MATCH] {entry_action} ID {allocation['entry_id']}: {entry['trade_date']} - "
+                    f"{float(allocation['allocated_shares']):.4f}/{_safe_float(entry['shares']):.4f} shares "
+                    f"@ {_safe_float(entry['price']):.2f}"
+                )
+                print(f"          Run: {entry['run_id']}")
             direct_repairs.append(
                 {
                     "close_id": close_id,
-                    "entry_id": matched_entry_id,
+                    "entry_id": int(matched_allocations[0]["entry_id"]),
+                    "allocations": matched_allocations,
                     "entry_action": entry_action,
                     "ticker": ticker,
-                    "reason": "matched_existing_orphan_entry",
+                    "reason": f"matched_existing_orphan_entry:{candidate_strategy}",
                 }
             )
             print()
             continue
 
         if not reconstruct_from_state:
-            print(f"  [WARNING] No orphaned {entry_action} entries found for {ticker}")
+            if candidate_strategy == "clean_live_no_current_run_match":
+                print(
+                    f"  [WARNING] Refusing broad repair for clean live close; "
+                    f"no current-position {entry_action} lots matched {ticker}"
+                )
+            else:
+                print(f"  [WARNING] No orphaned {entry_action} entries found for {ticker}")
             print()
             continue
 
@@ -474,7 +712,14 @@ def repair_linkage(
     if dry_run:
         print("[DRY RUN] Would apply the following repairs:")
         for op in direct_repairs:
-            print(f"  UPDATE trade_executions SET entry_trade_id = {op['entry_id']} WHERE id = {op['close_id']}")
+            alloc_desc = ", ".join(
+                f"{allocation['entry_id']}:{float(allocation['allocated_shares']):.4f}"
+                for allocation in op.get("allocations", [])
+            )
+            print(
+                f"  LINK CLOSE {op['close_id']} -> [{alloc_desc}] "
+                f"(representative entry_trade_id={op['entry_id']})"
+            )
         for op in reconstruct_repairs:
             candidate = op["candidate"]
             print(
@@ -503,10 +748,7 @@ def repair_linkage(
         print("Applying repairs...")
         try:
             for op in direct_repairs:
-                conn.execute(
-                    "UPDATE trade_executions SET entry_trade_id = ? WHERE id = ?",
-                    (op["entry_id"], op["close_id"]),
-                )
+                _apply_allocations_to_close(conn, int(op["close_id"]), list(op.get("allocations", [])))
                 print(
                     f"  [OK] Linked CLOSE {op['close_id']} -> {op['entry_action']} {op['entry_id']} "
                     f"({op['ticker']}, reason={op['reason']})"
@@ -516,9 +758,10 @@ def repair_linkage(
                 candidate = op["candidate"]
                 close_id = _safe_int(op["close_id"])
                 entry_id = _insert_reconstructed_entry(conn, candidate)
-                conn.execute(
-                    "UPDATE trade_executions SET entry_trade_id = ? WHERE id = ? AND entry_trade_id IS NULL",
-                    (entry_id, close_id),
+                _apply_allocations_to_close(
+                    conn,
+                    close_id,
+                    [{"entry_id": entry_id, "allocated_shares": float(candidate["shares"])}],
                 )
                 print(
                     f"  [OK] Reconstructed {candidate['entry_action']} {entry_id} and linked CLOSE {close_id} "

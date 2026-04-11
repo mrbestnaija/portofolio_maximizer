@@ -50,6 +50,7 @@ def _create_trade_executions_table(db_path: Path) -> None:
             effective_confidence REAL,
             is_diagnostic INTEGER DEFAULT 0,
             is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
             confidence_calibrated REAL,
             entry_trade_id INTEGER,
             bar_open REAL,
@@ -315,3 +316,134 @@ def test_repair_linkage_short_cover_matches_existing_orphan_sell(tmp_path: Path)
     conn.close()
     assert close_row is not None
     assert int(close_row[0]) == 77
+
+
+def test_repair_linkage_allocates_multi_lot_close_across_multiple_openers(tmp_path: Path) -> None:
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, data_source, execution_mode, run_id,
+            position_before, position_after, is_close, is_synthetic
+        ) VALUES
+            (316, 'NVDA', '2026-04-02', 'SELL', 1.0, 175.0, 175.0, 0.0, 'yfinance', 'live', '20260402_120000', 0.0, -1.0, 0, 0),
+            (317, 'NVDA', '2026-04-02', 'SELL', 1.0, 177.0, 177.0, 0.0, 'yfinance', 'live', '20260402_120500', -1.0, -2.0, 0, 0);
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id
+        ) VALUES (
+            322, 'NVDA', '2026-04-10', 'BUY', 2.0, 165.0, 330.0,
+            0.0, 165.0, 0.0,
+            'yfinance', 'live', '20260411_180517',
+            -24.6, -0.07, 8,
+            176.0, 165.0, 2.0, -2.0, 0.0,
+            1, '2026-04-10T00:00:00+00:00', 'STOP_LOSS', 'US_EQUITY', 'spot',
+            1.0, 0.62, NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    rc = repair.repair_linkage(
+        db_path=db_path,
+        dry_run=False,
+        close_ids=[322],
+        reconstruct_from_state=False,
+        forensic_report_file=None,
+        logs_root=tmp_path / "logs",
+    )
+    assert rc == 0
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    close_row = conn.execute("SELECT entry_trade_id FROM trade_executions WHERE id = 322").fetchone()
+    allocation_rows = conn.execute(
+        """
+        SELECT entry_trade_id, allocated_shares
+        FROM trade_close_allocations
+        WHERE close_trade_id = 322
+        ORDER BY entry_trade_id
+        """
+    ).fetchall()
+    conn.close()
+
+    assert close_row is not None
+    assert int(close_row["entry_trade_id"]) == 316
+    assert [int(row["entry_trade_id"]) for row in allocation_rows] == [316, 317]
+    assert abs(sum(float(row["allocated_shares"]) for row in allocation_rows) - 2.0) < 1e-9
+
+
+def test_repair_linkage_refuses_stale_synthetic_orphan_for_clean_live_close(tmp_path: Path) -> None:
+    db_path = tmp_path / "portfolio.db"
+    _create_trade_executions_table(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, data_source, execution_mode, run_id,
+            position_before, position_after, is_close, is_synthetic
+        ) VALUES
+            (211, 'NVDA', '2026-01-15', 'SELL', 4.0, 50.53, 202.12, 0.0, 'synthetic', 'synthetic', '20260226_171533', 0.0, -4.0, 0, 1),
+            (316, 'NVDA', '2026-04-01', 'SELL', 1.0, 175.65, 175.65, 0.0, 'yfinance', 'live', '20260402_120633', 0.0, -1.0, 0, 0),
+            (317, 'NVDA', '2026-04-02', 'SELL', 1.0, 177.28, 177.28, 0.0, 'yfinance', 'live', '20260403_181838', -1.0, -2.0, 0, 0);
+        INSERT INTO trade_executions (
+            id, ticker, trade_date, action, shares, price, total_value,
+            commission, mid_price, mid_slippage_bps,
+            data_source, execution_mode, run_id,
+            realized_pnl, realized_pnl_pct, holding_period_days,
+            entry_price, exit_price, close_size, position_before, position_after,
+            is_close, bar_timestamp, exit_reason, asset_class, instrument_type,
+            multiplier, effective_confidence, entry_trade_id, is_synthetic, is_contaminated
+        ) VALUES (
+            322, 'NVDA', '2026-04-10', 'BUY', 2.0, 188.73941028564454, 377.4788205712891,
+            0.0, 188.73941028564454, 0.0,
+            'yfinance', 'live', '20260411_180517',
+            -24.6, -0.07, 8,
+            176.0, 188.73941028564454, 2.0, -2.0, 0.0,
+            1, '2026-04-10T00:00:00+00:00', 'STOP_LOSS', 'US_EQUITY', 'spot',
+            1.0, 0.62, NULL, 0, 0
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    rc = repair.repair_linkage(
+        db_path=db_path,
+        dry_run=False,
+        close_ids=[322],
+        reconstruct_from_state=False,
+        forensic_report_file=None,
+        logs_root=tmp_path / "logs",
+    )
+    assert rc == 0
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    close_row = conn.execute("SELECT entry_trade_id FROM trade_executions WHERE id = 322").fetchone()
+    allocation_rows = conn.execute(
+        """
+        SELECT entry_trade_id, allocated_shares
+        FROM trade_close_allocations
+        WHERE close_trade_id = 322
+        ORDER BY entry_trade_id
+        """
+    ).fetchall()
+    conn.close()
+
+    assert close_row is not None
+    assert int(close_row["entry_trade_id"]) == 316
+    assert [int(row["entry_trade_id"]) for row in allocation_rows] == [316, 317]
+    assert 211 not in [int(row["entry_trade_id"]) for row in allocation_rows]

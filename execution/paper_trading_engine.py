@@ -20,7 +20,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -116,6 +116,7 @@ class Portfolio:
     entry_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened timestamp
     entry_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> opened bar timestamp
     entry_trade_ids: Dict[str, int] = field(default_factory=dict)  # ticker -> opening trade ID (for audit linkage)
+    entry_lots: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)  # ticker -> FIFO opening lots
     last_bar_timestamps: Dict[str, datetime] = field(default_factory=dict)  # ticker -> last evaluated bar timestamp
     holding_bars: Dict[str, int] = field(default_factory=dict)  # ticker -> bars held since entry
     stop_losses: Dict[str, float] = field(default_factory=dict)  # ticker -> stop loss price
@@ -141,6 +142,18 @@ class ExecutionResult:
     performance_impact: Optional[Dict[str, float]] = None
     reason: Optional[str] = None
     validation_warnings: list = field(default_factory=list)
+
+
+@dataclass
+class StoredTradeResult:
+    """Persisted trade details needed to keep portfolio linkage state honest."""
+
+    trade_id: int
+    realized_pnl: Optional[float]
+    realized_pct: Optional[float]
+    is_close: bool
+    position_after: float
+    close_allocations: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class PaperTradingEngine:
@@ -209,27 +222,14 @@ class PaperTradingEngine:
                     self.portfolio.last_bar_timestamps.update(state["last_bar_timestamps"])
                 # Recalculate total value using entry prices as proxy
                 self.portfolio.update_value(state["entry_prices"])
-                # Phase 7.10: Backfill entry_trade_ids for open positions so
-                # closing legs get proper entry linkage (prevents orphan opens
-                # and unlinked closes after resume).
-                for ticker in list(state["positions"].keys()):
-                    if state["positions"][ticker] != 0 and ticker not in self.portfolio.entry_trade_ids:
-                        try:
-                            row = self.db_manager.cursor.execute(
-                                "SELECT id FROM trade_executions "
-                                "WHERE ticker = ? AND COALESCE(is_close, 0) = 0 "
-                                "  AND COALESCE(is_synthetic, 0) = 0 "
-                                "ORDER BY id DESC LIMIT 1",
-                                (ticker,),
-                            ).fetchone()
-                            if row:
-                                self.portfolio.entry_trade_ids[ticker] = row[0]
-                                logger.debug(
-                                    "Backfilled entry_trade_id=%d for %s on resume",
-                                    row[0], ticker,
-                                )
-                        except Exception as exc:
-                            logger.warning("Failed to backfill entry_trade_id for %s: %s", ticker, exc)
+                # Reconstruct remaining opening lots from trade_executions so
+                # multi-entry tickers can close honestly after resume.
+                try:
+                    open_lots = self.db_manager.load_open_entry_lots(list(state["positions"].keys()))
+                    self.portfolio.entry_lots.update(open_lots)
+                    self._sync_entry_trade_id_map(self.portfolio)
+                except Exception as exc:
+                    logger.warning("Failed to reconstruct entry lots on resume: %s", exc)
 
                 loaded = True
                 logger.info(
@@ -251,6 +251,170 @@ class PaperTradingEngine:
             f"Paper Trading Engine initialized with ${self.initial_capital:,.2f} "
             f"(slippage={slippage_pct:.2%}, costs={transaction_cost_pct:.2%})"
         )
+
+    @staticmethod
+    def _clone_entry_lots(entry_lots: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            str(ticker): [dict(lot) for lot in (lots or [])]
+            for ticker, lots in (entry_lots or {}).items()
+        }
+
+    def _lookup_trade_synthetic_flag(self, trade_id: Optional[int]) -> int:
+        try:
+            trade_id_i = int(trade_id or 0)
+        except (TypeError, ValueError):
+            return 0
+        if trade_id_i <= 0:
+            return 0
+        try:
+            row = self.db_manager.conn.execute(
+                "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id = ?",
+                (trade_id_i,),
+            ).fetchone()
+        except Exception:
+            return 0
+        if not row:
+            return 0
+        try:
+            return int(row[0] or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _sync_entry_trade_id_map(self, portfolio: Portfolio, ticker: Optional[str] = None) -> None:
+        tickers = [ticker] if ticker else list(portfolio.entry_lots.keys())
+        for symbol in tickers:
+            lots = [dict(lot) for lot in portfolio.entry_lots.get(symbol, []) if float(lot.get("remaining_shares") or 0.0) > 1e-9]
+            if not lots:
+                portfolio.entry_lots.pop(symbol, None)
+                portfolio.entry_trade_ids.pop(symbol, None)
+                continue
+            portfolio.entry_lots[symbol] = lots
+            preferred = next(
+                (lot for lot in lots if int(lot.get("is_synthetic") or 0) == 0),
+                lots[0],
+            )
+            try:
+                portfolio.entry_trade_ids[symbol] = int(preferred["trade_id"])
+            except (KeyError, TypeError, ValueError):
+                portfolio.entry_trade_ids.pop(symbol, None)
+
+    def _build_close_allocations(
+        self,
+        ticker: str,
+        close_action: str,
+        close_size: float,
+        portfolio: Portfolio,
+    ) -> List[Dict[str, Any]]:
+        close_size_f = float(close_size or 0.0)
+        if close_size_f <= 0.0:
+            return []
+
+        target_open_action = "BUY" if str(close_action).upper() == "SELL" else "SELL"
+        lots = portfolio.entry_lots.get(ticker, [])
+        remaining = close_size_f
+        allocations: List[Dict[str, Any]] = []
+
+        for lot in lots:
+            if remaining <= 1e-9:
+                break
+            if str(lot.get("action") or "").upper() != target_open_action:
+                continue
+            lot_remaining = float(lot.get("remaining_shares") or 0.0)
+            if lot_remaining <= 1e-9:
+                continue
+            allocated = min(lot_remaining, remaining)
+            if allocated <= 1e-9:
+                continue
+            allocations.append(
+                {
+                    "entry_trade_id": int(lot["trade_id"]),
+                    "allocated_shares": float(allocated),
+                    "is_synthetic": int(lot.get("is_synthetic") or 0),
+                }
+            )
+            remaining -= allocated
+
+        fallback_entry_trade_id = portfolio.entry_trade_ids.get(ticker)
+        if remaining > 1e-9 and fallback_entry_trade_id:
+            fallback_id = int(fallback_entry_trade_id)
+            existing = next(
+                (allocation for allocation in allocations if int(allocation.get("entry_trade_id") or 0) == fallback_id),
+                None,
+            )
+            if existing is not None:
+                existing["allocated_shares"] = float(existing.get("allocated_shares") or 0.0) + remaining
+                existing["is_synthetic"] = max(
+                    int(existing.get("is_synthetic") or 0),
+                    self._lookup_trade_synthetic_flag(fallback_id),
+                )
+            else:
+                allocations.append(
+                    {
+                        "entry_trade_id": fallback_id,
+                        "allocated_shares": remaining,
+                        "is_synthetic": self._lookup_trade_synthetic_flag(fallback_id),
+                    }
+                )
+            remaining = 0.0
+        return allocations if remaining <= 1e-9 else []
+
+    def _apply_close_allocations_to_portfolio(
+        self,
+        portfolio: Portfolio,
+        ticker: str,
+        allocations: List[Dict[str, Any]],
+    ) -> None:
+        if not allocations:
+            return
+        remaining_by_entry: Dict[int, float] = {}
+        for allocation in allocations:
+            try:
+                entry_trade_id = int(allocation.get("entry_trade_id"))
+                allocated_shares = float(allocation.get("allocated_shares"))
+            except (TypeError, ValueError):
+                continue
+            if entry_trade_id <= 0 or allocated_shares <= 0.0:
+                continue
+            remaining_by_entry[entry_trade_id] = remaining_by_entry.get(entry_trade_id, 0.0) + allocated_shares
+
+        if not remaining_by_entry:
+            return
+
+        updated_lots: List[Dict[str, Any]] = []
+        for lot in portfolio.entry_lots.get(ticker, []):
+            lot_copy = dict(lot)
+            trade_id = int(lot_copy.get("trade_id") or 0)
+            lot_remaining = float(lot_copy.get("remaining_shares") or 0.0)
+            consume = min(lot_remaining, remaining_by_entry.get(trade_id, 0.0))
+            lot_copy["remaining_shares"] = max(0.0, lot_remaining - consume)
+            remaining_by_entry[trade_id] = max(0.0, remaining_by_entry.get(trade_id, 0.0) - consume)
+            if float(lot_copy.get("remaining_shares") or 0.0) > 1e-9:
+                updated_lots.append(lot_copy)
+
+        if updated_lots:
+            portfolio.entry_lots[ticker] = updated_lots
+        else:
+            portfolio.entry_lots.pop(ticker, None)
+        self._sync_entry_trade_id_map(portfolio, ticker)
+
+    def _append_open_lot_to_portfolio(self, portfolio: Portfolio, trade: Trade, trade_id: int) -> None:
+        try:
+            trade_id_i = int(trade_id)
+        except (TypeError, ValueError):
+            return
+        if trade_id_i <= 0:
+            return
+        portfolio.entry_lots.setdefault(trade.ticker, []).append(
+            {
+                "trade_id": trade_id_i,
+                "action": str(trade.action).upper(),
+                "remaining_shares": float(trade.shares),
+                "is_synthetic": int(trade.is_synthetic or 0),
+                "trade_date": trade.timestamp.date().isoformat() if isinstance(trade.timestamp, datetime) else None,
+                "bar_timestamp": trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
+            }
+        )
+        self._sync_entry_trade_id_map(portfolio, trade.ticker)
 
     def execute_signal(self,
                       signal: Dict[str, Any],
@@ -645,9 +809,31 @@ class PaperTradingEngine:
             updated_portfolio = self._update_portfolio(trade, self.portfolio)
 
             # Step 8: Store in database
-            realized_pnl, realized_pct = self._store_trade_execution(trade)
-            trade.realized_pnl = realized_pnl
-            trade.realized_pnl_pct = realized_pct
+            stored = self._store_trade_execution(trade)
+            trade.realized_pnl = stored.realized_pnl
+            trade.realized_pnl_pct = stored.realized_pct
+            if stored.is_close:
+                self._apply_close_allocations_to_portfolio(
+                    updated_portfolio,
+                    trade.ticker,
+                    stored.close_allocations,
+                )
+                if not stored.close_allocations and updated_portfolio.positions.get(trade.ticker, 0) == 0:
+                    updated_portfolio.entry_lots.pop(trade.ticker, None)
+                    updated_portfolio.entry_trade_ids.pop(trade.ticker, None)
+            elif stored.trade_id > 0:
+                self._append_open_lot_to_portfolio(updated_portfolio, trade, stored.trade_id)
+
+            if (
+                stored.is_close
+                and updated_portfolio.positions.get(trade.ticker, 0) != 0
+                and not updated_portfolio.entry_lots.get(trade.ticker)
+            ):
+                logger.warning(
+                    "Position for %s remains open after close execution but no entry lots remain. "
+                    "This indicates a reverse-through-flat trade path that still lacks dedicated opener persistence.",
+                    trade.ticker,
+                )
 
             # Step 9: Calculate performance impact
             performance_impact = self._calculate_performance_impact(trade, updated_portfolio)
@@ -1027,6 +1213,8 @@ class PaperTradingEngine:
             entry_prices=portfolio.entry_prices.copy(),
             entry_timestamps=portfolio.entry_timestamps.copy(),
             entry_bar_timestamps=portfolio.entry_bar_timestamps.copy(),
+            entry_trade_ids=portfolio.entry_trade_ids.copy(),
+            entry_lots=self._clone_entry_lots(portfolio.entry_lots),
             last_bar_timestamps=portfolio.last_bar_timestamps.copy(),
             holding_bars=portfolio.holding_bars.copy(),
             stop_losses=portfolio.stop_losses.copy(),
@@ -1299,8 +1487,8 @@ class PaperTradingEngine:
             return "TIME_EXIT"
         return None
 
-    def _store_trade_execution(self, trade: Trade):
-        """Store trade execution in database and return realized PnL details."""
+    def _store_trade_execution(self, trade: Trade) -> StoredTradeResult:
+        """Store trade execution and return the linkage state needed by the caller."""
         try:
             # Calculate P&L if closing position
             realized_pnl = 0.0
@@ -1369,14 +1557,31 @@ class PaperTradingEngine:
             # Retrieve entry_trade_id when closing position (for audit linkage)
             entry_trade_id_ref = None
             is_contaminated_ref = 0
+            close_allocations: List[Dict[str, Any]] = []
             if is_close_ref:
-                entry_trade_id_ref = self.portfolio.entry_trade_ids.get(trade.ticker)
+                close_allocations = self._build_close_allocations(
+                    trade.ticker,
+                    trade.action,
+                    float(close_size_ref or 0.0),
+                    self.portfolio,
+                )
+                if close_allocations:
+                    entry_trade_id_ref = int(close_allocations[0]["entry_trade_id"])
+                    if any(int(a.get("is_synthetic") or 0) == 1 for a in close_allocations):
+                        is_contaminated_ref = 1
+                        logger.warning(
+                            "[INT-05] Cross-mode contamination detected: closing %s against "
+                            "synthetic opener lot(s) via allocation model. Marking is_contaminated=1.",
+                            trade.ticker,
+                        )
                 if not entry_trade_id_ref:
+                    entry_trade_id_ref = self.portfolio.entry_trade_ids.get(trade.ticker)
+                if not entry_trade_id_ref and not close_allocations:
                     logger.warning(
                         "Closing %s position but no entry_trade_id found - audit trail incomplete",
                         trade.ticker
                     )
-                else:
+                elif not close_allocations:
                     # INT-05 prevention: detect cross-mode contamination at write time.
                     # If the opening leg is synthetic, this live close's PnL is phantom.
                     try:
@@ -1446,21 +1651,28 @@ class PaperTradingEngine:
                 is_forced_exit=trade.is_forced_exit,  # Phase 10
             )
 
-            # Store entry_trade_id when opening position (for future close linkage)
-            if not is_close_ref and trade_id:
-                self.portfolio.entry_trade_ids[trade.ticker] = trade_id
-                logger.debug("Stored entry_trade_id=%d for %s position", trade_id, trade.ticker)
-
-            # Clean up entry_trade_id when position fully closed
-            if is_close_ref and position_after == 0 and trade.ticker in self.portfolio.entry_trade_ids:
-                del self.portfolio.entry_trade_ids[trade.ticker]
-                logger.debug("Removed entry_trade_id for %s (position fully closed)", trade.ticker)
+            if is_close_ref and trade_id > 0 and close_allocations:
+                self.db_manager.save_trade_close_allocations(trade_id, close_allocations)
 
             logger.debug("Trade stored in database: %s", trade.trade_id)
-            return realized_pnl if realized_pct is not None else None, realized_pct
+            return StoredTradeResult(
+                trade_id=int(trade_id or -1),
+                realized_pnl=realized_pnl if realized_pct is not None else None,
+                realized_pct=realized_pct,
+                is_close=bool(is_close_ref),
+                position_after=position_after,
+                close_allocations=close_allocations,
+            )
         except Exception as exc:
             logger.error("Failed to store trade: %s", exc)
-            return None, None
+            return StoredTradeResult(
+                trade_id=-1,
+                realized_pnl=None,
+                realized_pct=None,
+                is_close=False,
+                position_after=0.0,
+                close_allocations=[],
+            )
 
     def _calculate_performance_impact(self,
                                      trade: Trade,

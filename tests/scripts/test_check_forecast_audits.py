@@ -3015,6 +3015,91 @@ def test_load_closed_trade_match_counts_open_leg_not_included_for_contaminated_c
     assert "ts_AAPL_contam_open" not in mapping
 
 
+def test_load_closed_trade_match_counts_includes_multi_lot_open_tsids_via_allocations(
+    tmp_path: Path,
+) -> None:
+    import scripts.check_forecast_audits as mod
+
+    conn = sqlite3.connect(str(tmp_path / "test.db"))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_executions (
+                id INTEGER PRIMARY KEY,
+                ts_signal_id TEXT,
+                is_close INTEGER DEFAULT 0,
+                is_diagnostic INTEGER DEFAULT 0,
+                is_synthetic INTEGER DEFAULT 0,
+                is_contaminated INTEGER DEFAULT 0,
+                entry_trade_id INTEGER,
+                close_size REAL,
+                shares REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE trade_close_allocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                close_trade_id INTEGER NOT NULL,
+                entry_trade_id INTEGER NOT NULL,
+                allocated_shares REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, shares) VALUES (10, 'ts_NVDA_open_1', 0, 1.0)"
+        )
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, shares) VALUES (11, 'ts_NVDA_open_2', 0, 1.0)"
+        )
+        conn.execute(
+            "INSERT INTO trade_executions (id, ts_signal_id, is_close, shares, close_size) VALUES (12, 'ts_NVDA_close', 1, 2.0, 2.0)"
+        )
+        conn.execute(
+            "INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares) VALUES (12, 10, 1.0)"
+        )
+        conn.execute(
+            "INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares) VALUES (12, 11, 1.0)"
+        )
+        conn.execute(
+            """
+            CREATE VIEW trade_close_linkages AS
+            SELECT close_trade_id, entry_trade_id, allocated_shares
+            FROM trade_close_allocations
+            UNION ALL
+            SELECT id AS close_trade_id, entry_trade_id, COALESCE(close_size, shares, 0.0) AS allocated_shares
+            FROM trade_executions
+            WHERE is_close = 1
+              AND entry_trade_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM trade_close_allocations a WHERE a.close_trade_id = trade_executions.id
+              )
+            """
+        )
+        conn.execute(
+            """
+            CREATE VIEW production_closed_trades AS
+            SELECT *
+            FROM trade_executions
+            WHERE is_close = 1
+              AND COALESCE(is_diagnostic, 0) = 0
+              AND COALESCE(is_synthetic, 0) = 0
+              AND COALESCE(is_contaminated, 0) = 0
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    loaded, mapping, error, _ = mod._load_closed_trade_match_counts(tmp_path / "test.db")
+
+    assert loaded is True
+    assert mapping["ts_NVDA_close"] >= 1
+    assert mapping["ts_NVDA_open_1"] >= 1
+    assert mapping["ts_NVDA_open_2"] >= 1
+
+
 def test_main_splits_rmse_and_outcome_roots_and_excludes_forecast_only_records_from_hygiene(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

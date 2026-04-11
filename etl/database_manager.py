@@ -1010,6 +1010,30 @@ class DatabaseManager:
             self.cursor.execute(
                 "ALTER TABLE trade_executions ADD COLUMN is_contaminated INTEGER DEFAULT 0"
             )
+        self.cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_close_allocations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                close_trade_id INTEGER NOT NULL,
+                entry_trade_id INTEGER NOT NULL,
+                allocated_shares REAL NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(close_trade_id, entry_trade_id)
+            )
+            """
+        )
+        self.cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trade_close_allocations_close
+            ON trade_close_allocations(close_trade_id)
+            """
+        )
+        self.cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trade_close_allocations_entry
+            ON trade_close_allocations(entry_trade_id)
+            """
+        )
 
         # Database metadata for provenance + governance flags.
         self.cursor.execute(
@@ -1324,6 +1348,29 @@ class DatabaseManager:
                      AND  o.is_synthetic = 1
               )
         """)
+        self.cursor.execute(
+            """
+            CREATE VIEW IF NOT EXISTS trade_close_linkages AS
+            SELECT
+                a.close_trade_id,
+                a.entry_trade_id,
+                a.allocated_shares
+            FROM trade_close_allocations a
+            UNION ALL
+            SELECT
+                c.id AS close_trade_id,
+                c.entry_trade_id,
+                COALESCE(c.close_size, c.shares, 0.0) AS allocated_shares
+            FROM trade_executions c
+            WHERE COALESCE(c.is_close, 0) = 1
+              AND c.entry_trade_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM trade_close_allocations a
+                  WHERE a.close_trade_id = c.id
+              )
+        """
+        )
         self.cursor.execute("""
             CREATE VIEW IF NOT EXISTS round_trips AS
             SELECT
@@ -2299,6 +2346,133 @@ class DatabaseManager:
             safe_error = sanitize_error(exc)
             logger.error("Failed to save trade execution: %s", safe_error)
             return -1
+
+    def save_trade_close_allocations(
+        self,
+        close_trade_id: int,
+        allocations: List[Dict[str, Any]],
+    ) -> int:
+        """Persist lot-level close allocations for a closing trade.
+
+        The allocation table is authoritative when present. Legacy close rows
+        without explicit allocations continue to flow through trade_close_linkages
+        via their scalar entry_trade_id.
+        """
+        try:
+            close_trade_id_i = int(close_trade_id)
+        except (TypeError, ValueError):
+            return 0
+        if close_trade_id_i <= 0:
+            return 0
+
+        cleaned: List[Tuple[int, float]] = []
+        for allocation in allocations or []:
+            try:
+                entry_trade_id = int(allocation.get("entry_trade_id"))
+                allocated_shares = float(allocation.get("allocated_shares"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if entry_trade_id <= 0 or allocated_shares <= 0.0:
+                continue
+            cleaned.append((entry_trade_id, allocated_shares))
+
+        if not cleaned:
+            return 0
+
+        try:
+            with self.conn:
+                self.cursor.execute(
+                    "DELETE FROM trade_close_allocations WHERE close_trade_id = ?",
+                    (close_trade_id_i,),
+                )
+                self.cursor.executemany(
+                    """
+                    INSERT INTO trade_close_allocations
+                    (close_trade_id, entry_trade_id, allocated_shares)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(close_trade_id_i, entry_trade_id, allocated_shares) for entry_trade_id, allocated_shares in cleaned],
+                )
+            return len(cleaned)
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.error("Failed to save trade close allocations: %s", safe_error)
+            return 0
+
+    def load_open_entry_lots(
+        self,
+        tickers: Optional[List[str]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Load remaining unmatched opening lots grouped by ticker.
+
+        Remaining quantity is computed from the effective linkage view so the
+        result stays correct for both legacy scalar entry_trade_id closes and
+        allocation-aware multi-lot closes.
+        """
+        tickers_clean = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+        params: List[Any] = []
+        where = ["COALESCE(o.is_close, 0) = 0", "COALESCE(o.is_diagnostic, 0) = 0"]
+        if tickers_clean:
+            placeholders = ", ".join("?" for _ in tickers_clean)
+            where.append(f"UPPER(o.ticker) IN ({placeholders})")
+            params.extend(tickers_clean)
+
+        sql = f"""
+            SELECT
+                o.id,
+                o.ticker,
+                o.action,
+                COALESCE(o.shares, 0.0) AS shares,
+                o.trade_date,
+                o.bar_timestamp,
+                COALESCE(o.is_synthetic, 0) AS is_synthetic,
+                COALESCE(link.used_qty, 0.0) AS used_qty
+            FROM trade_executions o
+            LEFT JOIN (
+                SELECT
+                    entry_trade_id,
+                    SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
+                FROM trade_close_linkages
+                GROUP BY entry_trade_id
+            ) link
+              ON link.entry_trade_id = o.id
+            WHERE {" AND ".join(where)}
+            ORDER BY o.trade_date, o.id
+        """
+
+        lots_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            rows = self.conn.execute(sql, tuple(params)).fetchall()
+        except Exception as exc:
+            safe_error = sanitize_error(exc)
+            logger.warning("Failed to load open entry lots: %s", safe_error)
+            return {}
+
+        for row in rows:
+            try:
+                trade_id = int(row["id"])
+                total_shares = float(row["shares"] or 0.0)
+                used_qty = float(row["used_qty"] or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            remaining_qty = max(0.0, total_shares - used_qty)
+            if remaining_qty <= 1e-9:
+                continue
+            ticker = str(row["ticker"] or "").strip().upper()
+            if not ticker:
+                continue
+            lots_by_ticker.setdefault(ticker, []).append(
+                {
+                    "trade_id": trade_id,
+                    "action": str(row["action"] or "").strip().upper(),
+                    "remaining_shares": remaining_qty,
+                    "is_synthetic": int(row["is_synthetic"] or 0),
+                    "trade_date": str(row["trade_date"] or "") or None,
+                    "bar_timestamp": str(row["bar_timestamp"] or "") or None,
+                }
+            )
+
+        return lots_by_ticker
 
     # ------------------------------------------------------------------
     # DB provenance / governance helpers

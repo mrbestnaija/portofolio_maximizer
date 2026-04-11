@@ -785,9 +785,13 @@ def _build_action_plan(
     rmse = (metrics.get("rmse") or {}) if isinstance(metrics, dict) else {}
 
     if isinstance(status, dict):
-        if status.get("profit_factor_ok") is False or status.get("win_rate_ok") is False:
+        if status.get("profit_factor_ok") is False:
             actions.append(
-                "Forecast-driven hit-rate below target; rerun hyperopt or tighten quant validation."
+                "Forecast profitability below target; review signal quality, sizing, and quant validation."
+            )
+        elif status.get("win_rate_ok") is False:
+            actions.append(
+                "Forecast win rate is below the diagnostic threshold; under barbell policy treat this as a diagnostic, not a standalone trading stop."
             )
         if status.get("rmse_ok") is False:
             ratio = rmse.get("ratio")

@@ -571,6 +571,52 @@ def _seed_trade_exec_table(db_path: Path, *, close_id: int, entry_trade_id: int 
     conn.close()
 
 
+def _seed_trade_exec_table_with_allocations(
+    db_path: Path,
+    *,
+    close_id: int,
+    allocation_entry_ids: list[int],
+) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY,
+            is_close INTEGER NOT NULL,
+            entry_trade_id INTEGER,
+            realized_pnl REAL
+        );
+        CREATE TABLE trade_close_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            close_trade_id INTEGER NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            allocated_shares REAL NOT NULL
+        );
+        CREATE VIEW trade_close_linkages AS
+        SELECT close_trade_id, entry_trade_id, allocated_shares
+        FROM trade_close_allocations
+        UNION ALL
+        SELECT id AS close_trade_id, entry_trade_id, 1.0 AS allocated_shares
+        FROM trade_executions
+        WHERE is_close = 1
+          AND entry_trade_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM trade_close_allocations a WHERE a.close_trade_id = trade_executions.id
+          );
+        """
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, is_close, entry_trade_id, realized_pnl) VALUES (?, 1, NULL, 10.0)",
+        (int(close_id),),
+    )
+    conn.executemany(
+        "INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares) VALUES (?, ?, 1.0)",
+        [(int(close_id), int(entry_id)) for entry_id in allocation_entry_ids],
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_run_reconcile_step_apply_fails_when_unlinked_remains_even_if_command_exit_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -639,6 +685,19 @@ def test_run_reconcile_step_apply_passes_when_verified_zero_unlinked(
     assert res["status_reason"] == "verified_zero_unlinked_after_apply"
     assert res["remaining_unlinked_closes"] == 0
     assert res["remaining_unlinked_close_ids"] == []
+
+
+def test_count_unlinked_closes_treats_allocation_linked_close_as_linked(tmp_path: Path) -> None:
+    import scripts.production_audit_gate as mod
+
+    db_path = tmp_path / "portfolio.db"
+    _seed_trade_exec_table_with_allocations(db_path, close_id=77, allocation_entry_ids=[1001, 1002])
+
+    remaining_count, remaining_ids, error = mod._count_unlinked_closes(db_path, close_ids=[77])
+
+    assert error is None
+    assert remaining_count == 0
+    assert remaining_ids == []
 
 
 def test_run_reconcile_step_dry_run_fails_when_unlinked_detected(

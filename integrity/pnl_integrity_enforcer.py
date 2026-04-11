@@ -461,15 +461,28 @@ class PnLIntegrityEnforcer:
         # queue front. Pure FIFO (no entry_trade_id) falls back to date-order queue.
         # This prevents blind FIFO mismatches where an early close leg consumes the
         # wrong BUY leg, leaving a linked-but-later BUY stranded in the queue.
-        close_rows = self.conn.execute(
-            "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty, "
-            "       entry_trade_id "
-            "FROM trade_executions "
-            "WHERE action = 'SELL' AND is_close = 1 "
-            "  AND is_diagnostic = 0 "
-            "  AND is_synthetic = 0 "
-            "ORDER BY trade_date, id"
-        ).fetchall()
+        try:
+            close_rows = self.conn.execute(
+                "SELECT c.id, c.ticker, c.trade_date, "
+                "       COALESCE(link.allocated_shares, COALESCE(c.close_size, c.shares, 0.0)) AS qty, "
+                "       link.entry_trade_id "
+                "FROM trade_executions c "
+                "LEFT JOIN trade_close_linkages link ON link.close_trade_id = c.id "
+                "WHERE c.action = 'SELL' AND c.is_close = 1 "
+                "  AND c.is_diagnostic = 0 "
+                "  AND c.is_synthetic = 0 "
+                "ORDER BY c.trade_date, c.id"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            close_rows = self.conn.execute(
+                "SELECT id, ticker, trade_date, COALESCE(close_size, shares, 0.0) AS qty, "
+                "       entry_trade_id "
+                "FROM trade_executions "
+                "WHERE action = 'SELL' AND is_close = 1 "
+                "  AND is_diagnostic = 0 "
+                "  AND is_synthetic = 0 "
+                "ORDER BY trade_date, id"
+            ).fetchall()
 
         # Track BUY inventory remaining after close consumption.
         fifo_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
@@ -661,13 +674,24 @@ class PnLIntegrityEnforcer:
 
         # BUY close legs that cover these short opens via entry_trade_id link.
         covered_sell_ids: set[int] = set()
-        buy_close_rows = self.conn.execute(
-            "SELECT entry_trade_id FROM trade_executions "
-            "WHERE action = 'BUY' AND is_close = 1 "
-            "  AND entry_trade_id IS NOT NULL "
-            "  AND is_diagnostic = 0 "
-            "  AND is_synthetic = 0"
-        ).fetchall()
+        try:
+            buy_close_rows = self.conn.execute(
+                "SELECT DISTINCT link.entry_trade_id "
+                "FROM trade_executions c "
+                "JOIN trade_close_linkages link ON link.close_trade_id = c.id "
+                "WHERE c.action = 'BUY' AND c.is_close = 1 "
+                "  AND c.is_diagnostic = 0 "
+                "  AND c.is_synthetic = 0 "
+                "  AND link.entry_trade_id IS NOT NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            buy_close_rows = self.conn.execute(
+                "SELECT entry_trade_id FROM trade_executions "
+                "WHERE action = 'BUY' AND is_close = 1 "
+                "  AND entry_trade_id IS NOT NULL "
+                "  AND is_diagnostic = 0 "
+                "  AND is_synthetic = 0"
+            ).fetchall()
         for row in buy_close_rows:
             if row["entry_trade_id"]:
                 covered_sell_ids.add(int(row["entry_trade_id"]))
@@ -872,10 +896,20 @@ class PnLIntegrityEnforcer:
                 except ValueError:
                     pass
 
-        rows = self.conn.execute(
-            "SELECT id, ticker FROM trade_executions "
-            "WHERE is_close = 1 AND entry_trade_id IS NULL"
-        ).fetchall()
+        try:
+            rows = self.conn.execute(
+                "SELECT id, ticker FROM trade_executions "
+                "WHERE is_close = 1 "
+                "  AND NOT EXISTS ("
+                "      SELECT 1 FROM trade_close_linkages link "
+                "      WHERE link.close_trade_id = trade_executions.id"
+                "  )"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = self.conn.execute(
+                "SELECT id, ticker FROM trade_executions "
+                "WHERE is_close = 1 AND entry_trade_id IS NULL"
+            ).fetchall()
 
         filtered = [r for r in rows if int(r["id"]) not in whitelist]
         if not filtered:
@@ -885,7 +919,7 @@ class PnLIntegrityEnforcer:
             check_name="CLOSE_WITHOUT_ENTRY_LINK",
             severity="MEDIUM",
             description=(
-                f"{len(filtered)} closing legs (is_close=1) have no entry_trade_id. "
+                f"{len(filtered)} closing legs (is_close=1) have no effective opener linkage. "
                 f"Round-trip attribution is incomplete."
                 + (f" ({len(rows) - len(filtered)} whitelisted)" if whitelist else "")
             ),
@@ -948,22 +982,42 @@ class PnLIntegrityEnforcer:
         opening leg. The integrity violation is when *multiple* linked close
         legs over-consume the opening leg quantity.
         """
-        rows = self.conn.execute(
-            "SELECT "
-            "  o.id AS open_id, "
-            "  COALESCE(o.shares, 0.0) AS open_qty, "
-            "  COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) AS closed_qty "
-            "FROM trade_executions o "
-            "JOIN trade_executions c "
-            "  ON c.entry_trade_id = o.id "
-            " AND c.is_close = 1 "
-            "WHERE o.action = 'BUY' "
-            "  AND o.is_close = 0 "
-            "GROUP BY o.id "
-            "HAVING COUNT(c.id) > 1 "
-            "   AND COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) "
-            "       > COALESCE(o.shares, 0.0) + 0.02"
-        ).fetchall()
+        try:
+            rows = self.conn.execute(
+                "SELECT "
+                "  o.id AS open_id, "
+                "  COALESCE(o.shares, 0.0) AS open_qty, "
+                "  COALESCE(SUM(COALESCE(link.allocated_shares, 0.0)), 0.0) AS closed_qty "
+                "FROM trade_executions o "
+                "JOIN trade_close_linkages link "
+                "  ON link.entry_trade_id = o.id "
+                "JOIN trade_executions c "
+                "  ON c.id = link.close_trade_id "
+                " AND c.is_close = 1 "
+                "WHERE o.action = 'BUY' "
+                "  AND o.is_close = 0 "
+                "GROUP BY o.id "
+                "HAVING COUNT(DISTINCT c.id) > 1 "
+                "   AND COALESCE(SUM(COALESCE(link.allocated_shares, 0.0)), 0.0) "
+                "       > COALESCE(o.shares, 0.0) + 0.02"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = self.conn.execute(
+                "SELECT "
+                "  o.id AS open_id, "
+                "  COALESCE(o.shares, 0.0) AS open_qty, "
+                "  COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) AS closed_qty "
+                "FROM trade_executions o "
+                "JOIN trade_executions c "
+                "  ON c.entry_trade_id = o.id "
+                " AND c.is_close = 1 "
+                "WHERE o.action = 'BUY' "
+                "  AND o.is_close = 0 "
+                "GROUP BY o.id "
+                "HAVING COUNT(c.id) > 1 "
+                "   AND COALESCE(SUM(COALESCE(c.close_size, c.shares, 0.0)), 0.0) "
+                "       > COALESCE(o.shares, 0.0) + 0.02"
+            ).fetchall()
 
         if not rows:
             return []

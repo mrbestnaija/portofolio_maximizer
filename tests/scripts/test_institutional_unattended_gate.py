@@ -85,3 +85,64 @@ def test_phase_p4_stale_artifact_fails_closed(monkeypatch, tmp_path) -> None:
     assert findings
     assert findings[0].status == "FAIL"
     assert "stale" in findings[0].detail.lower()
+
+
+def test_phase_p4_reports_current_run_warmup_covered_blocker_semantically(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    artifact = tmp_path / "logs" / "gate_status_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "overall_passed": False,
+                "status_stage": "pre_institutional",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "phase3_posture": "WARMUP_COVERED_PASS",
+                "phase3_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "readiness_components": {
+                    "gates_pass": True,
+                    "linkage_pass": True,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    findings = mod._phase_p4_prior_gate_verification()
+    assert findings
+    assert findings[0].status == "FAIL"
+    assert "Current run pre-institutional snapshot" in findings[0].detail
+    assert "WARMUP_COVERED_PASS" in findings[0].detail
+    assert "Subgates are green" in findings[0].detail
+
+
+def test_phase_p4_reports_latest_artifact_warmup_covered_blocker_semantically(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    artifact = tmp_path / "logs" / "gate_status_latest.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "overall_passed": False,
+                "status_stage": "final",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "phase3_posture": "WARMUP_COVERED_PASS",
+                "phase3_reason": "READY,GATE_SEMANTICS_INCONCLUSIVE_ALLOWED",
+                "readiness_components": {
+                    "gates_pass": True,
+                    "linkage_pass": True,
+                    "evidence_hygiene_pass": True,
+                    "integrity_pass": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    findings = mod._phase_p4_prior_gate_verification()
+    assert findings
+    assert findings[0].status == "FAIL"
+    assert "Latest gate artifact" in findings[0].detail
+    assert "WARMUP_COVERED_PASS" in findings[0].detail

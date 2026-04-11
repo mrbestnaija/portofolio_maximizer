@@ -313,6 +313,77 @@ def test_execute_signal_marks_returned_trade_contaminated_when_closing_synthetic
     db.close()
 
 
+def test_execute_signal_persists_multi_lot_close_allocations_for_same_ticker():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    opener_1 = db.save_trade_execution(
+        ticker="NVDA",
+        trade_date=datetime(2026, 4, 2, tzinfo=timezone.utc).date(),
+        action="BUY",
+        shares=1.0,
+        price=175.0,
+        total_value=175.0,
+        commission=0.0,
+        execution_mode="live",
+    )
+    opener_2 = db.save_trade_execution(
+        ticker="NVDA",
+        trade_date=datetime(2026, 4, 2, tzinfo=timezone.utc).date(),
+        action="BUY",
+        shares=1.0,
+        price=177.0,
+        total_value=177.0,
+        commission=0.0,
+        execution_mode="live",
+    )
+    engine.portfolio.positions["NVDA"] = 2
+    engine.portfolio.entry_prices["NVDA"] = 176.0
+    engine.portfolio.entry_timestamps["NVDA"] = datetime(2026, 4, 2, tzinfo=timezone.utc)
+    engine.portfolio.entry_lots["NVDA"] = [
+        {"trade_id": opener_1, "action": "BUY", "remaining_shares": 1.0, "is_synthetic": 0},
+        {"trade_id": opener_2, "action": "BUY", "remaining_shares": 1.0, "is_synthetic": 0},
+    ]
+    engine._sync_entry_trade_id_map(engine.portfolio)
+    engine._calculate_position_size = lambda signal, confidence_score, market_data, current_position: 2  # type: ignore[method-assign]
+
+    close_signal = {"ticker": "NVDA", "action": "SELL", "confidence": 0.9, "execution_mode": "live"}
+    close_result = engine.execute_signal(close_signal, make_market_data(165.0), proof_mode=True)
+
+    assert close_result.status == "EXECUTED"
+    assert engine.portfolio.positions.get("NVDA", 0) == 0
+    assert "NVDA" not in engine.portfolio.entry_lots
+
+    close_row = db.cursor.execute(
+        "SELECT id, entry_trade_id, is_close, close_size FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert close_row is not None
+    assert int(close_row["is_close"]) == 1
+    assert close_row["entry_trade_id"] is not None
+    assert abs(float(close_row["close_size"]) - 2.0) < 1e-9
+
+    allocation_rows = db.cursor.execute(
+        """
+        SELECT entry_trade_id, allocated_shares
+        FROM trade_close_allocations
+        WHERE close_trade_id = ?
+        ORDER BY entry_trade_id
+        """,
+        (int(close_row["id"]),),
+    ).fetchall()
+    assert len(allocation_rows) == 2
+    assert abs(sum(float(row["allocated_shares"]) for row in allocation_rows) - 2.0) < 1e-9
+
+    db.close()
+
+
 def test_lob_fallback_uses_depth_profiles_when_depth_missing(monkeypatch):
     """When Depth/Spread are missing, LOB simulator should fall back to configured profiles."""
     db = DatabaseManager(":memory:")

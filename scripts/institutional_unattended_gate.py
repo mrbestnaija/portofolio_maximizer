@@ -287,6 +287,16 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
     # Check overall_passed
     overall_passed = bool(data.get("overall_passed", False))
     ts_str = data.get("timestamp_utc", "")
+    status_stage = str(data.get("status_stage") or "").strip().lower()
+    phase3_posture = str(data.get("phase3_posture") or "").strip().upper()
+    phase3_reason = str(data.get("phase3_reason") or "").strip()
+    readiness_components = data.get("readiness_components")
+    readiness_components = readiness_components if isinstance(readiness_components, dict) else {}
+    all_subgates_passed = all(
+        bool(readiness_components.get(key))
+        for key in ("gates_pass", "linkage_pass", "evidence_hygiene_pass", "integrity_pass")
+        if key in readiness_components
+    )
 
     # Check freshness
     age_ok = False
@@ -304,6 +314,26 @@ def _phase_p4_prior_gate_verification() -> List[Finding]:
             age_detail = "unparseable timestamp"
 
     if not overall_passed:
+        if phase3_posture == "WARMUP_COVERED_PASS":
+            subject = (
+                "Current run pre-institutional snapshot"
+                if status_stage == "pre_institutional"
+                else "Latest gate artifact"
+            )
+            detail = (
+                f"{subject} is not genuinely unattended-ready: "
+                f"phase3_posture={phase3_posture}, phase3_reason={phase3_reason or 'UNKNOWN'} "
+                f"({age_detail}). "
+            )
+            if all_subgates_passed:
+                detail += (
+                    "Subgates are green, but warmup-covered/inconclusive semantics do not satisfy "
+                    "the unattended-run contract."
+                )
+            else:
+                detail += "Resolve the remaining readiness components before autonomous runs."
+            out.append(Finding("P4", "prior_gate_execution", "FAIL", detail))
+            return out
         out.append(Finding(
             "P4", "prior_gate_execution",
             "FAIL",

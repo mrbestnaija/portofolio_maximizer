@@ -92,6 +92,50 @@ def test_duplicate_close_check_flags_overclosed_entries(tmp_path):
     assert violations[0].affected_ids == [1]
 
 
+def test_close_without_entry_link_ignores_allocation_linked_close(tmp_path):
+    db_path = tmp_path / "allocation_linked.db"
+    _create_trade_db(db_path)
+    _insert_rows(
+        db_path,
+        [
+            (10, "NVDA", "2026-04-02", "SELL", 1.0, 175.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (11, "NVDA", "2026-04-02", "SELL", 1.0, 177.0, None, None, None, None, None, None, None, "live", 0, None, 0, 0, 0.0),
+            (12, "NVDA", "2026-04-10", "BUY", 2.0, 165.0, 2.0, -24.6, -0.07, 176.0, 165.0, 8.0, "STOP_LOSS", "live", 1, None, 0, 0, 0.0),
+        ],
+    )
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trade_close_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            close_trade_id INTEGER NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            allocated_shares REAL NOT NULL
+        );
+        CREATE VIEW trade_close_linkages AS
+        SELECT close_trade_id, entry_trade_id, allocated_shares
+        FROM trade_close_allocations
+        UNION ALL
+        SELECT id AS close_trade_id, entry_trade_id, COALESCE(close_size, shares, 0.0) AS allocated_shares
+        FROM trade_executions
+        WHERE is_close = 1
+          AND entry_trade_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM trade_close_allocations a WHERE a.close_trade_id = trade_executions.id
+          );
+        INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares) VALUES (12, 10, 1.0);
+        INSERT INTO trade_close_allocations (close_trade_id, entry_trade_id, allocated_shares) VALUES (12, 11, 1.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with PnLIntegrityEnforcer(str(db_path), allow_schema_changes=True) as enforcer:
+        violations = enforcer._check_closing_without_entry_link()
+
+    assert violations == []
+
+
 def test_backfill_entry_links_supports_partial_close_inventory(tmp_path):
     db_path = tmp_path / "backfill_partial.db"
     _create_trade_db(db_path)
