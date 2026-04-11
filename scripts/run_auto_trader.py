@@ -3858,13 +3858,38 @@ def main(
         "next_actions": action_plan,
     }
     _log_run_summary(run_summary_record)
+
+    # -----------------------------------------------------------------------
+    # Run summary — make source of each metric explicit so contradictions
+    # (positive mark-to-market PnL alongside PF=0.00/WR=0%) are diagnosable.
+    #
+    # pnl_dollars / pnl_pct   : mark-to-market (cash + open-position value vs
+    #                            initial capital). UNREALIZED when no closed trades.
+    # PF / Win rate            : from DB closed-trade records for this run_id only.
+    #                            Both are 0 when no trades were closed in this run.
+    # Cash ratio > 100%        : open positions are in mark-to-market loss
+    #                            (market_value < cost_basis → total_value < cash).
+    # -----------------------------------------------------------------------
+    _n_closed = int(realized_trades or 0)
+    _n_open = len(final_summary.get("positions") or {})
+    _pnl_label = "unrealized" if _n_closed == 0 else "realized+unrealized"
+    _pf_val = float(profit_factor) if isinstance(profit_factor, (int, float)) else 0.0
+    _wr_val = float(win_rate) * 100 if isinstance(win_rate, (int, float)) else 0.0
+    _pf_str = "n/a (0 closed)" if _n_closed == 0 else f"{_pf_val:.2f}"
+    _wr_str = "n/a (0 closed)" if _n_closed == 0 else f"{_wr_val:.1f}%"
+    _cr_str = f"{cash_ratio:.1%}" if cash_ratio is not None else "n/a"
+    _cr_note = " [>100%=open positions in loss]" if (cash_ratio or 0.0) > 1.005 else ""
     logger.info(
-        "Run summary: PnL $%.2f (%.2f%%) | PF %.2f | Win rate %.1f%% | Cash ratio %s",
+        "Run summary: PnL $%.2f (%.2f%%, %s) | closed=%d open=%d | PF %s | Win rate %s | Cash ratio %s%s",
         final_summary["pnl_dollars"],
         final_summary["pnl_pct"] * 100,
-        float(profit_factor) if isinstance(profit_factor, (int, float)) else 0.0,
-        float(win_rate) * 100 if isinstance(win_rate, (int, float)) else 0.0,
-        f"{cash_ratio:.1%}" if cash_ratio is not None else "n/a",
+        _pnl_label,
+        _n_closed,
+        _n_open,
+        _pf_str,
+        _wr_str,
+        _cr_str,
+        _cr_note,
     )
     logger.info("Next actions: %s", " | ".join(action_plan))
 
