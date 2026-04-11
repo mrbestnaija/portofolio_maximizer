@@ -2140,7 +2140,12 @@ class TimeSeriesSignalGenerator:
         # universe.
         per_ticker_cfg = (config.get('per_ticker') or {}).get(ticker, {})
         if isinstance(per_ticker_cfg, dict) and per_ticker_cfg.get('success_criteria'):
-            criteria_cfg = per_ticker_cfg['success_criteria']
+            # Merge per-ticker overrides ON TOP of the global success_criteria so that
+            # global thresholds (e.g. min_terminal_directional_accuracy) are not silently
+            # suppressed when a per-ticker override only specifies a subset of fields.
+            global_criteria = dict(config.get('success_criteria') or {})
+            global_criteria.update(per_ticker_cfg['success_criteria'])
+            criteria_cfg = global_criteria
         else:
             criteria_cfg = config.get('success_criteria', {})
 
@@ -2361,7 +2366,14 @@ class TimeSeriesSignalGenerator:
         cache_key = (symbol, last_ts, horizon, baseline_key)
         cached = self._forecast_edge_cache.get(cache_key)
         if cached is not None:
-            return cached
+            # Cache stores only edge_payload (expensive CV run result).
+            # Criteria are recomputed fresh from the cached payload so that
+            # threshold changes and code fixes (e.g. Fix C CI-coverage override,
+            # max_rmse_ratio_vs_baseline config updates) take effect immediately
+            # without requiring a cache flush or process restart.
+            cached_payload = cached if isinstance(cached, dict) else cached[0]
+            fresh_criteria = self._edge_criteria_from_payload(cached_payload, criteria_cfg)
+            return cached_payload, fresh_criteria
 
         edge_payload: Dict[str, Any] = {
             "mode": "forecast_edge",
@@ -2469,59 +2481,16 @@ class TimeSeriesSignalGenerator:
                 pass
             edge_payload["terminal_ci_coverage"] = ens_ci_cov
             edge_payload["baseline_ci_coverage"] = base_ci_cov
-
-            # Fix C — CI-coverage override for rmse_ratio_vs_baseline:
-            # If the ensemble covers realized terminal prices materially better than the
-            # baseline (delta >= 0.20), the RMSE regression does not block the signal.
-            # Worse point-forecast RMSE + better CI = better tail-risk management under
-            # the barbell objective.  A model that bounds actual outcomes 50% of the time
-            # (vs baseline 0%) earns position-sizing trust even with larger mean error.
-            _ci_cov_delta = (
-                (ens_ci_cov - base_ci_cov)
-                if ens_ci_cov is not None and base_ci_cov is not None
-                else None
-            )
-            _ci_cov_override_threshold = float(
-                (criteria_cfg or {}).get("ci_coverage_rmse_override_delta", 0.20)
-            )
-            _rmse_overridden_by_ci = (
-                _ci_cov_delta is not None
-                and _ci_cov_delta >= _ci_cov_override_threshold
-            )
-            edge_payload["rmse_overridden_by_ci_coverage"] = _rmse_overridden_by_ci
-
-            max_rmse_ratio = criteria_cfg.get("max_rmse_ratio_vs_baseline")
-            if max_rmse_ratio is not None:
-                try:
-                    thr = float(max_rmse_ratio)
-                    passes_rmse = rmse_ratio is not None and rmse_ratio <= thr
-                    edge_criteria["rmse_ratio_vs_baseline"] = passes_rmse or _rmse_overridden_by_ci
-                except (TypeError, ValueError):
-                    pass
-            min_dir_acc, _min_dir_alias = self._resolve_success_threshold(
-                criteria_cfg,
-                "min_terminal_directional_accuracy",
-                aliases=("min_directional_accuracy",),
-            )
-            if min_dir_acc is not None:
-                try:
-                    thr = float(min_dir_acc)
-                    edge_criteria["terminal_directional_accuracy"] = (
-                        terminal_dir_acc is not None and terminal_dir_acc >= thr
-                    )
-                except (TypeError, ValueError):
-                    pass
-            if "rmse_ratio_vs_baseline" not in edge_criteria and rmse_ratio is not None:
-                # Conservative default when no explicit criteria provided.
-                edge_criteria["rmse_ratio_vs_baseline"] = rmse_ratio <= 1.10 or _rmse_overridden_by_ci
-            if "terminal_directional_accuracy" not in edge_criteria and terminal_dir_acc is not None:
-                edge_criteria["terminal_directional_accuracy"] = terminal_dir_acc >= 0.50
         except Exception as exc:  # pragma: no cover - best-effort metric
             edge_payload["error"] = str(exc)
 
         if len(self._forecast_edge_cache) >= 256:
             self._forecast_edge_cache.clear()
-        self._forecast_edge_cache[cache_key] = (edge_payload, edge_criteria)
+        # Store only the payload (computed from expensive CV runs).
+        # Criteria are NOT cached — they must be recomputed fresh each call so
+        # that threshold/code changes take effect without a process restart.
+        self._forecast_edge_cache[cache_key] = edge_payload
+        edge_criteria = self._edge_criteria_from_payload(edge_payload, criteria_cfg)
         return edge_payload, edge_criteria
 
     @staticmethod
@@ -2579,6 +2548,68 @@ class TimeSeriesSignalGenerator:
             else:
                 normalized[key] = bool(passed)
         return normalized
+
+    @staticmethod
+    def _edge_criteria_from_payload(
+        edge_payload: Dict[str, Any],
+        criteria_cfg: Optional[Dict[str, Any]],
+    ) -> Dict[str, bool]:
+        """Derive pass/fail criteria from a (possibly cached) edge_payload.
+
+        Separated from _evaluate_forecast_edge() so that criteria are always
+        recomputed with the current code/config thresholds — even when edge_payload
+        was loaded from the in-process cache.  The CV run (which produces edge_payload)
+        is expensive; the threshold checks here are O(1) and must not be stale.
+        """
+        edge_criteria: Dict[str, bool] = {}
+        try:
+            rmse_ratio = edge_payload.get("rmse_ratio_vs_baseline")
+            terminal_dir_acc = edge_payload.get("terminal_directional_accuracy")
+            ens_ci_cov = edge_payload.get("terminal_ci_coverage")
+            base_ci_cov = edge_payload.get("baseline_ci_coverage")
+
+            # Fix C — CI-coverage override for rmse_ratio_vs_baseline:
+            # Ensemble CI coverage materially better than baseline → RMSE regression
+            # does not block the signal (better tail-risk management wins).
+            _ci_cov_delta = (
+                (ens_ci_cov - base_ci_cov)
+                if ens_ci_cov is not None and base_ci_cov is not None
+                else None
+            )
+            _ci_cov_override_threshold = float(
+                (criteria_cfg or {}).get("ci_coverage_rmse_override_delta", 0.20)
+            )
+            _rmse_overridden_by_ci = (
+                _ci_cov_delta is not None
+                and _ci_cov_delta >= _ci_cov_override_threshold
+            )
+
+            max_rmse_ratio = (criteria_cfg or {}).get("max_rmse_ratio_vs_baseline")
+            if max_rmse_ratio is not None:
+                try:
+                    thr = float(max_rmse_ratio)
+                    passes_rmse = rmse_ratio is not None and rmse_ratio <= thr
+                    edge_criteria["rmse_ratio_vs_baseline"] = passes_rmse or _rmse_overridden_by_ci
+                except (TypeError, ValueError):
+                    pass
+            min_dir_acc = (criteria_cfg or {}).get("min_terminal_directional_accuracy") or (
+                criteria_cfg or {}).get("min_directional_accuracy")
+            if min_dir_acc is not None:
+                try:
+                    thr = float(min_dir_acc)
+                    edge_criteria["terminal_directional_accuracy"] = (
+                        terminal_dir_acc is not None and terminal_dir_acc >= thr
+                    )
+                except (TypeError, ValueError):
+                    pass
+            if "rmse_ratio_vs_baseline" not in edge_criteria and rmse_ratio is not None:
+                # Conservative default when no explicit criteria provided.
+                edge_criteria["rmse_ratio_vs_baseline"] = rmse_ratio <= 1.10 or _rmse_overridden_by_ci
+            if "terminal_directional_accuracy" not in edge_criteria and terminal_dir_acc is not None:
+                edge_criteria["terminal_directional_accuracy"] = terminal_dir_acc >= 0.50
+        except Exception:  # pragma: no cover
+            pass
+        return edge_criteria
 
     @staticmethod
     def _default_domain_utility_weights() -> Dict[str, float]:
