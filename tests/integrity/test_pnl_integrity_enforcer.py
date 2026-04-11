@@ -490,6 +490,120 @@ def test_canonical_metrics_reject_null_production_flags(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Barbell objective metrics
+# ---------------------------------------------------------------------------
+
+def _make_barbell_db(db_path: Path, pnl_pct_pairs: list) -> None:
+    """Create DB with production closed trades for barbell metric tests.
+
+    Each element of pnl_pct_pairs is (realized_pnl, realized_pnl_pct).
+    """
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL DEFAULT 'AAPL',
+            trade_date TEXT NOT NULL DEFAULT '2026-01-01',
+            action TEXT NOT NULL DEFAULT 'SELL',
+            shares REAL DEFAULT 1,
+            price REAL DEFAULT 100,
+            close_size REAL DEFAULT 1,
+            realized_pnl REAL,
+            realized_pnl_pct REAL,
+            entry_price REAL DEFAULT 90,
+            exit_price REAL DEFAULT 100,
+            holding_period_days REAL DEFAULT 1,
+            is_close INTEGER DEFAULT 1,
+            is_diagnostic INTEGER DEFAULT 0,
+            is_synthetic INTEGER DEFAULT 0,
+            is_contaminated INTEGER DEFAULT 0,
+            entry_trade_id INTEGER,
+            execution_mode TEXT DEFAULT 'live',
+            commission REAL DEFAULT 0,
+            total_value REAL DEFAULT 100
+        );
+        """
+    )
+    for pnl, pct in pnl_pct_pairs:
+        conn.execute(
+            "INSERT INTO trade_executions (realized_pnl, realized_pnl_pct) VALUES (?, ?)",
+            (pnl, pct),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_barbell_payoff_ratio_computed(tmp_path):
+    """payoff_ratio = avg_win / |avg_loss|."""
+    db_path = tmp_path / "barbell.db"
+    # 6 wins at +$60, 4 losses at -$20 → avg_win=60, avg_loss=-20, ratio=3.0
+    pairs = [(60.0, 0.06)] * 6 + [(-20.0, -0.02)] * 4
+    _make_barbell_db(db_path, pairs)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        m = enforcer.get_canonical_metrics()
+
+    assert m.win_count == 6
+    assert m.loss_count == 4
+    assert abs(m.payoff_ratio - 3.0) < 0.01
+
+
+def test_barbell_expected_shortfall_worst_decile(tmp_path):
+    """expected_shortfall = average of worst 10% of dollar losses."""
+    db_path = tmp_path / "es.db"
+    # 10 losses: -10, -20, ..., -100 → worst 1 (10% of 10) = -100
+    pairs = [(-(i * 10), -(i * 0.01)) for i in range(1, 11)]
+    _make_barbell_db(db_path, pairs)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        m = enforcer.get_canonical_metrics()
+
+    assert m.expected_shortfall < 0.0
+    assert abs(m.expected_shortfall - (-100.0)) < 0.01  # worst single loss
+
+
+def test_barbell_omega_ratio_requires_10_pct_obs(tmp_path):
+    """omega_ratio stays None when fewer than 10 realized_pnl_pct values."""
+    db_path = tmp_path / "omega_short.db"
+    pairs = [(10.0, 0.01)] * 5
+    _make_barbell_db(db_path, pairs)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        m = enforcer.get_canonical_metrics()
+
+    assert m.omega_ratio is None
+    assert m.beats_ngn_hurdle is None
+
+
+def test_barbell_omega_ratio_computed_with_10_obs(tmp_path):
+    """omega_ratio is computed when >= 10 realized_pnl_pct values exist."""
+    db_path = tmp_path / "omega_ok.db"
+    # 10 large wins at +5% each vs a tiny NGN hurdle (~0.108%/day)
+    pairs = [(50.0, 0.05)] * 10
+    _make_barbell_db(db_path, pairs)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        m = enforcer.get_canonical_metrics()
+
+    # All returns well above NGN hurdle → omega should be inf (no losses above threshold)
+    assert m.omega_ratio is not None
+    assert m.beats_ngn_hurdle is True
+
+
+def test_barbell_payoff_ratio_infinite_with_no_losses(tmp_path):
+    """payoff_ratio is inf when there are no loss trades."""
+    db_path = tmp_path / "all_wins.db"
+    pairs = [(30.0, 0.03)] * 5
+    _make_barbell_db(db_path, pairs)
+
+    with PnLIntegrityEnforcer(str(db_path)) as enforcer:
+        m = enforcer.get_canonical_metrics()
+
+    assert m.payoff_ratio == float("inf")
+
+
+# ---------------------------------------------------------------------------
 # INT-06: metrics drift detection
 # ---------------------------------------------------------------------------
 

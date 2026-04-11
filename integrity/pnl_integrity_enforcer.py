@@ -28,6 +28,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from integrity.sqlite_guardrails import apply_sqlite_guardrails, guarded_sqlite_connect
 
+try:
+    from etl.portfolio_math import (
+        omega_ratio as _calc_omega_ratio,
+        DAILY_NGN_THRESHOLD as _NGN_THRESHOLD,
+    )
+    _PORTFOLIO_MATH_AVAILABLE = True
+except Exception:  # pragma: no cover — isolated test environments
+    _PORTFOLIO_MATH_AVAILABLE = False
+    _NGN_THRESHOLD = (1.31) ** (1.0 / 252) - 1.0  # fallback: 31% annual hurdle
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -109,18 +119,35 @@ class IntegrityViolation:
 
 @dataclass
 class CanonicalMetrics:
-    """Single source of truth for PnL reporting."""
+    """Single source of truth for PnL reporting (barbell-objective layout).
+
+    Primary policy metrics are barbell-oriented: omega_ratio, payoff_ratio,
+    expected_shortfall, beats_ngn_hurdle.  Win rate is retained for
+    diagnostics only — the barbell goal is payoff asymmetry, not win rate.
+    """
+    # --- Core ---
     total_round_trips: int = 0
     total_realized_pnl: float = 0.0
+    profit_factor: float = 0.0
+
+    # --- Barbell objective (primary policy metrics) ---
+    omega_ratio: Optional[float] = None       # vs NGN daily hurdle; None = < 10 obs
+    beats_ngn_hurdle: Optional[bool] = None   # omega_ratio > 1.0
+    payoff_ratio: float = 0.0                 # avg_win / |avg_loss| — asymmetry
+    expected_shortfall: float = 0.0           # CVaR 90%: avg of worst-decile losses ($)
+    ngn_threshold_used: float = 0.0           # daily hurdle rate applied
+
+    # --- Diagnostic (not action-required) ---
     win_count: int = 0
     loss_count: int = 0
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
-    profit_factor: float = 0.0
     largest_win: float = 0.0
     largest_loss: float = 0.0
     avg_holding_days: float = 0.0
+
+    # --- Integrity bookkeeping ---
     diagnostic_trades_excluded: int = 0
     synthetic_trades_excluded: int = 0
     contaminated_trades_excluded: int = 0
@@ -297,6 +324,34 @@ class PnLIntegrityEnforcer:
         metrics.avg_holding_days = (
             sum(hold_days) / len(hold_days) if hold_days else 0.0
         )
+
+        # --- Barbell objective metrics ---
+        metrics.ngn_threshold_used = _NGN_THRESHOLD
+
+        # Payoff ratio: avg_win / |avg_loss| (asymmetry indicator)
+        if losses and metrics.avg_loss != 0.0:
+            metrics.payoff_ratio = metrics.avg_win / abs(metrics.avg_loss)
+        elif wins:
+            metrics.payoff_ratio = float("inf")
+
+        # Expected shortfall: average of worst 10% of dollar losses (CVaR 90%)
+        if losses:
+            sorted_losses = sorted(losses)               # ascending; most negative first
+            n_tail = max(1, len(sorted_losses) // 10)    # worst decile
+            metrics.expected_shortfall = sum(sorted_losses[:n_tail]) / n_tail
+
+        # Omega ratio vs NGN daily hurdle — uses realized_pnl_pct (fractional returns)
+        if _PORTFOLIO_MATH_AVAILABLE:
+            pct_vals = [
+                float(r["realized_pnl_pct"])
+                for r in rows
+                if r["realized_pnl_pct"] is not None
+            ]
+            if len(pct_vals) >= 10:
+                omega = _calc_omega_ratio(pct_vals)
+                metrics.omega_ratio = omega
+                if isinstance(omega, float) and omega == omega:  # not NaN
+                    metrics.beats_ngn_hurdle = omega > 1.0
 
         # Count excluded trades
         metrics.diagnostic_trades_excluded = self.conn.execute(
@@ -1209,26 +1264,51 @@ class PnLIntegrityEnforcer:
     def print_report(self) -> None:
         """Print a comprehensive integrity report to stdout."""
         print("=" * 70)
-        print("PnL INTEGRITY REPORT")
+        print("PnL INTEGRITY REPORT (CANONICAL METRICS)")
         print("=" * 70)
 
-        # Canonical metrics
         m = self.get_canonical_metrics()
+
+        # --- Barbell objective (primary policy) ---
         print()
-        print("--- Canonical Metrics (production_closed_trades only) ---")
+        print("--- Barbell Objective (production_closed_trades only) ---")
         print(f"  Round-trips:       {m.total_round_trips}")
         print(f"  Total PnL:         ${m.total_realized_pnl:+,.2f}")
-        print(f"  Win rate:          {m.win_rate:.1%}")
-        print(f"  Wins/Losses:       {m.win_count}/{m.loss_count}")
+        print(f"  Profit factor:     {m.profit_factor:.2f}")
+        if m.payoff_ratio == float("inf"):
+            print("  Payoff ratio:      inf  (no losses)")
+        else:
+            print(f"  Payoff ratio:      {m.payoff_ratio:.2f}x  (avg win / |avg loss|)")
+        if m.expected_shortfall != 0.0:
+            print(f"  Exp. shortfall:    ${m.expected_shortfall:+,.2f}  (CVaR 90%, worst-decile avg)")
+        if m.omega_ratio is None:
+            print("  Omega ratio:       N/A  (need >= 10 fractional returns)")
+            print("  NGN hurdle beat:   N/A")
+        elif m.omega_ratio == float("inf"):
+            print(f"  Omega ratio:       inf  (vs {m.ngn_threshold_used:.5f}/day NGN hurdle)")
+            print("  NGN hurdle beat:   YES")
+        else:
+            print(f"  Omega ratio:       {m.omega_ratio:.3f}  (vs {m.ngn_threshold_used:.5f}/day NGN hurdle)")
+            hurdle_str = "YES" if m.beats_ngn_hurdle else "NO"
+            print(f"  NGN hurdle beat:   {hurdle_str}")
+
+        # --- Diagnostic (not action-required) ---
+        print()
+        print("--- Diagnostic (win rate is advisory -- barbell goal is payoff asymmetry) ---")
+        print(f"  Win rate:          {m.win_rate:.1%}  [{m.win_count}W / {m.loss_count}L]")
         print(f"  Avg win:           ${m.avg_win:+,.2f}")
         print(f"  Avg loss:          ${m.avg_loss:+,.2f}")
-        print(f"  Profit factor:     {m.profit_factor:.2f}")
         print(f"  Largest win:       ${m.largest_win:+,.2f}")
         print(f"  Largest loss:      ${m.largest_loss:+,.2f}")
         print(f"  Avg holding days:  {m.avg_holding_days:.1f}")
+
+        # --- Exclusions & integrity bookkeeping ---
+        print()
+        print("--- Exclusions ---")
         print(f"  Diagnostic excl:   {m.diagnostic_trades_excluded}")
         print(f"  Synthetic excl:    {m.synthetic_trades_excluded}")
         print(f"  Contaminated excl: {m.contaminated_trades_excluded}")
+        print(f"  Double-count chk:  {m.opening_legs_with_pnl}  (must be 0)")
 
         if m.opening_legs_with_pnl > 0:
             print(
@@ -1236,17 +1316,17 @@ class PnLIntegrityEnforcer:
                 "(causes double-counting!)"
             )
 
-        # Integrity audit
+        # --- Integrity audit ---
         violations = self.run_full_integrity_audit()
         print()
         if not violations:
-            print("--- Integrity Checks: ALL PASSED ---")
+            print("[OK] All integrity checks passed")
         else:
-            print(f"--- Integrity Checks: {len(violations)} VIOLATION(S) ---")
+            print(f"[FAIL] {len(violations)} integrity violation(s):")
             for v in violations:
                 print(f"  [{v.severity}] {v.check_name}: {v.description}")
 
-        # DB totals
+        # --- DB totals ---
         total = self.conn.execute(
             "SELECT COUNT(*) FROM trade_executions"
         ).fetchone()[0]
