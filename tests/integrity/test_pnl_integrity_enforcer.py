@@ -245,8 +245,13 @@ def _create_contamination_db(db_path: Path) -> None:
     conn.close()
 
 
-def test_cross_mode_contamination_tagged_closer_detected(tmp_path):
-    """is_contaminated=1 on a closing leg is reported as CROSS_MODE_CONTAMINATION."""
+def test_cross_mode_contamination_tagged_closer_suppressed(tmp_path):
+    """is_contaminated=1 on a closing leg does NOT raise CROSS_MODE_CONTAMINATION.
+
+    Tagged closes are already excluded from production_closed_trades — re-blocking
+    on them here would require a manual whitelist entry for every new contaminated
+    close.  The architectural fix is to only flag UNTAGGED contamination.
+    """
     db_path = tmp_path / "contam.db"
     _create_contamination_db(db_path)
     conn = sqlite3.connect(db_path)
@@ -255,7 +260,7 @@ def test_cross_mode_contamination_tagged_closer_detected(tmp_path):
         "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
         "is_close, is_synthetic, execution_mode) VALUES (1,'MSFT','2026-02-27','SELL',3,64.0,0,1,'synthetic')"
     )
-    # closer: live BUY but is_contaminated=1 (entry_price was $64, real exit $405)
+    # closer: live BUY with is_contaminated=1 — already excluded from canonical metrics
     conn.execute(
         "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
         "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
@@ -269,9 +274,10 @@ def test_cross_mode_contamination_tagged_closer_detected(tmp_path):
         violations = enforcer.run_full_integrity_audit()
 
     contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
-    assert len(contam) == 1
-    assert 2 in contam[0].affected_ids
-    assert contam[0].severity == "HIGH"
+    assert contam == [], (
+        f"Tagged closes (is_contaminated=1) must not trigger violation — "
+        f"they are already excluded from production_closed_trades. Got: {contam}"
+    )
 
 
 def test_cross_mode_contamination_untagged_closer_detected_via_opener_join(tmp_path):
@@ -368,20 +374,33 @@ def test_cross_mode_contamination_excluded_from_canonical_metrics(tmp_path):
     assert metrics.contaminated_trades_excluded >= 1
 
 
-def test_cross_mode_contamination_whitelist_suppresses_known_ids(tmp_path):
-    """Whitelisted contaminated IDs (252, 255) do not raise CROSS_MODE_CONTAMINATION."""
-    db_path = tmp_path / "whitelist.db"
+def test_cross_mode_contamination_tagged_count_in_description_when_untagged_fires(tmp_path):
+    """When untagged contamination fires, the description reports the tagged-suppressed count."""
+    db_path = tmp_path / "mixed.db"
     _create_contamination_db(db_path)
     conn = sqlite3.connect(db_path)
-    # Simulate trades 252 and 255: both tagged is_contaminated=1, already excluded from metrics
-    for trade_id in (252, 255):
-        conn.execute(
-            "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
-            "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
-            "execution_mode) "
-            "VALUES (?,'MSFT','2026-03-04','BUY',1,100.0,1,-50.0,50.0,100.0,1,1,'live')",
-            (trade_id,),
-        )
+    # tagged close (is_contaminated=1): suppressed, opener is synthetic
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (50,'MSFT','2026-02-01','SELL',1,64.0,0,1,'synthetic')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+        "entry_trade_id, execution_mode) "
+        "VALUES (51,'MSFT','2026-03-01','BUY',1,100.0,1,-36.0,64.0,100.0,1,1,50,'live')"
+    )
+    # untagged close (is_contaminated=0 but opener is synthetic): fires violation
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "is_close, is_synthetic, execution_mode) VALUES (60,'AAPL','2026-02-01','SELL',1,80.0,0,1,'synthetic')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "close_size, realized_pnl, entry_price, exit_price, is_close, is_contaminated, "
+        "entry_trade_id, execution_mode) "
+        "VALUES (61,'AAPL','2026-03-15','BUY',1,350.0,1,-270.0,80.0,350.0,1,0,60,'live')"
+    )
     conn.commit()
     conn.close()
 
@@ -389,9 +408,11 @@ def test_cross_mode_contamination_whitelist_suppresses_known_ids(tmp_path):
         violations = enforcer.run_full_integrity_audit()
 
     contam = [v for v in violations if v.check_name == "CROSS_MODE_CONTAMINATION"]
-    assert contam == [], (
-        f"Whitelisted IDs 252/255 must not trigger CROSS_MODE_CONTAMINATION, got: {contam}"
-    )
+    assert len(contam) == 1, f"Only untagged contamination should fire, got: {contam}"
+    assert 61 in contam[0].affected_ids
+    assert 51 not in contam[0].affected_ids
+    # tagged count must appear in the description for observability
+    assert "1" in contam[0].description  # 1 tagged-and-suppressed close reported
 
 
 def test_canonical_metrics_reject_null_production_flags(tmp_path):

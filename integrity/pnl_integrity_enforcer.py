@@ -743,74 +743,59 @@ class PnLIntegrityEnforcer:
         )]
 
     def _check_cross_mode_contamination(self) -> List[IntegrityViolation]:
-        """HIGH: INT-05 — closing legs whose opener is synthetic (cross-mode contamination).
+        """HIGH: INT-05 — untagged closing legs whose opener is synthetic.
 
         When a live session inherits a position from a prior synthetic run (via
         portfolio_state or direct entry_trade_id linkage to a synthetic opener),
         the closing leg's PnL is computed against a synthetic entry price — producing
         phantom losses/gains that corrupt production metrics.
 
-        Detects both:
-          (a) Explicitly-tagged contaminated closes (is_contaminated=1)
-          (b) Untagged closes whose entry_trade_id references a synthetic opener
-        """
-        # (a) explicitly tagged
-        tagged = self.conn.execute(
-            "SELECT id, ticker, realized_pnl, entry_trade_id "
-            "FROM trade_executions "
-            "WHERE is_close = 1 AND COALESCE(is_contaminated, 0) = 1"
-        ).fetchall()
+        Only flags UNTAGGED contaminated closes (is_contaminated=0 but opener is
+        synthetic). Tagged closes (is_contaminated=1) are already excluded from
+        production_closed_trades and from canonical metrics — re-blocking on them
+        here is redundant and requires a manual whitelist entry for every new
+        contaminated close. That is the architectural defect this method avoids.
 
-        # (b) untagged live closes linked to synthetic opener
-        # Only flag when the close is live/non-synthetic but opener is synthetic —
+        Tagged closes are counted and reported informally for observability.
+        """
+        # Count tagged closes (is_contaminated=1) for informational purposes only.
+        # These are already excluded from production_closed_trades — no violation needed.
+        tagged_count = self.conn.execute(
+            "SELECT COUNT(*) FROM trade_executions "
+            "WHERE is_close = 1 AND COALESCE(is_contaminated, 0) = 1"
+        ).fetchone()[0]
+
+        # Only flag UNTAGGED live closes linked to a synthetic opener.
         # synthetic-mode closes against synthetic openers are expected and clean.
         untagged = self.conn.execute(
             "SELECT t.id, t.ticker, t.realized_pnl, t.entry_trade_id "
             "FROM trade_executions t "
             "JOIN trade_executions o ON t.entry_trade_id = o.id "
             "WHERE t.is_close = 1 "
-            "  AND t.is_contaminated = 0 "
-            "  AND t.is_synthetic = 0 "
-            "  AND o.is_synthetic = 1"
+            "  AND COALESCE(t.is_contaminated, 0) = 0 "
+            "  AND COALESCE(t.is_synthetic, 0) = 0 "
+            "  AND COALESCE(o.is_synthetic, 0) = 1"
         ).fetchall()
 
-        all_rows = list(tagged) + list(untagged)
-        if not all_rows:
-            return []
-
-        # Suppress known-historical contaminated closes that are already excluded
-        # from canonical metrics (is_contaminated=1 in DB) and have been audited.
-        # 252: MSFT cross-mode close from 2026-03-04 synthetic run (is_contaminated=1)
-        # 255: TSLA cross-mode close from 2026-03-09 synthetic-resume (is_contaminated=1)
-        # 318: AAPL live close 2026-04-02 whose opener (id=314) is synthetic —
-        #   data-source failure on 2026-04-05 (Sat) caused auto-trader to inherit the
-        #   synthetic position as a live close; excluded from production_closed_trades.
-        known_contaminated: set[int] = {252, 255, 318}
-        all_rows = [r for r in all_rows if r["id"] not in known_contaminated]
-        if not all_rows:
+        if not untagged:
             return []
 
         total_phantom_pnl = sum(
-            float(r["realized_pnl"]) for r in all_rows if r["realized_pnl"] is not None
-        )
-        untagged_ids = [r["id"] for r in untagged]
-        tag_hint = (
-            f" {len(untagged_ids)} untagged (run migrate_fix_synthetic_contamination.py to fix)."
-            if untagged_ids
-            else ""
+            float(r["realized_pnl"]) for r in untagged if r["realized_pnl"] is not None
         )
 
         return [IntegrityViolation(
             check_name="CROSS_MODE_CONTAMINATION",
             severity="HIGH",
             description=(
-                f"{len(all_rows)} closing leg(s) have PnL computed from synthetic entry prices "
-                f"(phantom PnL: ${total_phantom_pnl:+,.2f}). "
-                f"{len(tagged)} explicitly tagged (is_contaminated=1)."
-                + tag_hint
+                f"{len(untagged)} untagged closing leg(s) have PnL computed from synthetic "
+                f"entry prices (phantom PnL: ${total_phantom_pnl:+,.2f}). "
+                f"Run migrate_fix_synthetic_contamination.py to tag them. "
+                f"({tagged_count} already-tagged contaminated closes are suppressed — "
+                f"they are excluded from production_closed_trades.)"
             ),
-            affected_ids=[r["id"] for r in all_rows],
-            count=len(all_rows),
+            affected_ids=[r["id"] for r in untagged],
+            count=len(untagged),
         )]
 
     def _check_metrics_drift(self) -> List[IntegrityViolation]:
