@@ -78,7 +78,6 @@ MIN_QUALITY_SCORE = 0.50
 QUICK_FAIL_MAX_DRAWDOWN_PCT = 0.15  # 15% drawdown from initial capital
 QUICK_FAIL_MIN_TRADES_BEFORE_CHECK = 5  # Need at least 5 realized trades
 QUICK_FAIL_MIN_PROFIT_FACTOR = 0.5  # Below 0.5 PF = clearly losing
-QUICK_FAIL_MIN_WIN_RATE = 0.20  # Below 20% win rate = clearly losing
 EXECUTION_LOG_PATH = ROOT_PATH / "logs" / "automation" / "execution_log.jsonl"
 RUN_SUMMARY_LOG_PATH = ROOT_PATH / "logs" / "automation" / "run_summary.jsonl"
 DEFAULT_EVAL_AUDIT_DIR = ROOT_PATH / "logs" / "forecast_audits" / "production_eval"
@@ -3501,20 +3500,17 @@ def main(
                     mid_trades = int(mid_perf.get("total_trades") or 0)
                     if mid_trades >= QUICK_FAIL_MIN_TRADES_BEFORE_CHECK:
                         mid_pf = float(mid_perf.get("profit_factor") or 0.0)
-                        mid_wr = float(mid_perf.get("win_rate") or 0.0)
+                        # Win-rate quick-fail removed: a barbell strategy legitimately has
+                        # low hit-rate with asymmetric large winners (omega_ratio > 1 at
+                        # 10-15% WR). Aborting on WR stops evidence accumulation in exactly
+                        # the regime where the strategy is valid.
+                        # PF check is retained: PF < 0.5 is unambiguously unprofitable even
+                        # under asymmetric payoff assumptions.
                         if mid_pf < QUICK_FAIL_MIN_PROFIT_FACTOR:
                             logger.warning(
                                 "[QUICK-FAIL] Profit factor %.2f < %.2f after %d trades; stopping early.",
                                 mid_pf,
                                 QUICK_FAIL_MIN_PROFIT_FACTOR,
-                                mid_trades,
-                            )
-                            quick_fail_triggered = True
-                        elif mid_wr < QUICK_FAIL_MIN_WIN_RATE:
-                            logger.warning(
-                                "[QUICK-FAIL] Win rate %.1f%% < %.1f%% after %d trades; stopping early.",
-                                mid_wr * 100,
-                                QUICK_FAIL_MIN_WIN_RATE * 100,
                                 mid_trades,
                             )
                             quick_fail_triggered = True

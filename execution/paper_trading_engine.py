@@ -218,6 +218,7 @@ class PaperTradingEngine:
                             row = self.db_manager.cursor.execute(
                                 "SELECT id FROM trade_executions "
                                 "WHERE ticker = ? AND COALESCE(is_close, 0) = 0 "
+                                "  AND COALESCE(is_synthetic, 0) = 0 "
                                 "ORDER BY id DESC LIMIT 1",
                                 (ticker,),
                             ).fetchone()

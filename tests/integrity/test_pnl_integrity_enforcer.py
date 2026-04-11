@@ -631,3 +631,56 @@ def test_is_synthetic_set_from_execution_mode(tmp_path):
         f"execution_mode='synthetic' must set is_synthetic=1 regardless of data_source. "
         f"Got is_synthetic={recorded_trade.get('is_synthetic')}"
     )
+
+
+def test_resume_backfill_skips_synthetic_openers(tmp_path):
+    """Backfill of entry_trade_ids at PTE resume must ignore synthetic openers.
+
+    Scenario: a live open (id=1) exists for AAPL; a later synthetic open (id=2)
+    also exists.  Without the fix, `ORDER BY id DESC LIMIT 1` would return id=2
+    (the synthetic one) and the subsequent close would be tagged is_contaminated=1,
+    preventing it from counting toward THIN_LINKAGE.
+
+    With the fix (`AND COALESCE(is_synthetic, 0) = 0`), the backfill returns id=1
+    (the live opener) so the close stays clean.
+    """
+    import sqlite3 as _sqlite3
+    from etl.database_manager import DatabaseManager
+    from execution.paper_trading_engine import PaperTradingEngine
+
+    db_path = str(tmp_path / "backfill_test.db")
+
+    # Seed the DB with a live opener (id=1) and a later synthetic opener (id=2)
+    engine = PaperTradingEngine(db_path=db_path, initial_capital=100_000.0)
+    conn = engine.db_manager.conn
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "total_value, is_close, is_synthetic, execution_mode) "
+        "VALUES (1,'AAPL','2026-04-01','BUY',5,170.0,850.0,0,0,'live')"
+    )
+    conn.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "total_value, is_close, is_synthetic, execution_mode) "
+        "VALUES (2,'AAPL','2026-04-03','BUY',5,175.0,875.0,0,1,'synthetic')"
+    )
+    # portfolio_cash_state row is required for load_portfolio_state() to return non-None
+    conn.execute(
+        "INSERT OR REPLACE INTO portfolio_cash_state (id, cash, initial_capital) "
+        "VALUES (1, 99150.0, 100000.0)"
+    )
+    # portfolio_state uses shares (not position); entry_timestamp is required
+    conn.execute(
+        "INSERT INTO portfolio_state (ticker, shares, entry_price, entry_timestamp) "
+        "VALUES ('AAPL', 5, 170.0, '2026-04-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    # Re-create engine with resume_from_db=True to trigger the backfill
+    engine2 = PaperTradingEngine(db_path=db_path, initial_capital=100_000.0, resume_from_db=True)
+
+    # Backfill must have selected the LIVE opener (id=1), not the synthetic one (id=2)
+    entry_id = engine2.portfolio.entry_trade_ids.get("AAPL")
+    assert entry_id == 1, (
+        f"Backfill must prefer live opener (id=1) over synthetic opener (id=2). "
+        f"Got entry_trade_id={entry_id}"
+    )

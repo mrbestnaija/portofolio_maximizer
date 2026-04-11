@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Migration: Fix synthetic-contamination phantom losses in trade_executions.
+"""ONE-TIME historical migration: tag trades 252 and 255 as is_contaminated=1.
 
-Root cause (identified 2026-03-25):
-  Two closing legs appear in production_closed_trades with is_synthetic=0 but
-  their PnL is driven by synthetic opening prices — creating phantom losses that
-  corrupt the headline performance metrics.
+IMPORTANT — This script is NOT the general contamination model.
+
+Current contamination architecture (2026-04-11):
+  - PaperTradingEngine (paper_trading_engine.py) auto-tags is_contaminated=1 at
+    write time whenever the closing leg's opener is_synthetic=1 (INT-05 guard,
+    lines ~1379-1397). No manual intervention required for future trades.
+  - The integrity check (_check_cross_mode_contamination) flags only UNTAGGED
+    closes (is_contaminated=0 with a synthetic opener). Tagged closes are already
+    excluded from production_closed_trades and require no whitelist.
+  - DO NOT add new trade IDs to _CONTAMINATED_CLOSE_IDS. If a trade is
+    correctly tagged is_contaminated=1 in the DB, PTE handled it. If it was
+    missed (is_contaminated=0 with synthetic opener), the integrity check will
+    detect it and prompt running this migration.
+
+Historical context for trades 252 and 255 (identified 2026-03-25):
+  Both closing legs were live-mode executions whose PnL was driven by synthetic
+  opening prices, predating the INT-05 auto-tag guard.
 
   Trade 252 (MSFT, -$1,027.31):
     entry_trade_id=244, opener is_synthetic=1 (exec_mode=synthetic, price=$64.37)
@@ -15,20 +28,7 @@ Root cause (identified 2026-03-25):
     A prior synthetic run wrote TSLA=-2 to portfolio_state (no is_synthetic guard
     at the time). Live --resume read it as a live position and closed it at $397.
 
-Why not is_synthetic=1?
-  A CHECK constraint prevents is_synthetic=1 when execution_mode='live'. These
-  trades were technically executed in live mode (correct) but their PnL is driven
-  by synthetic prices (incorrect). We add is_contaminated=1 — no execution_mode
-  restriction — to precisely label cross-mode contamination.
-
-Fix applied:
-  1. Add is_contaminated INTEGER DEFAULT 0 column to trade_executions (idempotent).
-  2. Mark trades 252 and 255 as is_contaminated=1.
-  3. Recreate production_closed_trades view to exclude is_contaminated=1 AND
-     closes whose entry_trade_id references a synthetic opener (defense-in-depth).
-  4. Verify corrected metrics.
-
-Safe to run multiple times (idempotent).
+Safe to run multiple times (idempotent). Does not affect any other trades.
 """
 
 import os
