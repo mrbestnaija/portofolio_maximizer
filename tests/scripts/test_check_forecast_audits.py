@@ -1541,7 +1541,11 @@ def test_check_audit_file_best_single_includes_garch(tmp_path: Path) -> None:
     assert res.rmse_ratio == pytest.approx(1.0)
 
 
-def test_check_audit_file_missing_ensemble_metrics_no_fallback(tmp_path: Path) -> None:
+def test_check_audit_file_missing_ensemble_metrics_not_a_violation(tmp_path: Path) -> None:
+    """Window with valid baseline but absent ensemble RMSE must return violation=False
+    with ensemble_missing=True.  The RMSE effective_n denominator excludes rows where
+    ensemble_rmse is None, so violation_rate is NOT deflated.  The result remains in
+    results[] so the separate max_missing_ensemble_rate gate can enforce its threshold."""
     audit = tmp_path / "audit_missing_ensemble.json"
     _write_audit(
         audit,
@@ -1553,17 +1557,22 @@ def test_check_audit_file_missing_ensemble_metrics_no_fallback(tmp_path: Path) -
         eval_metrics={
             "sarimax": {"rmse": 3.0},
             "samossa": {"rmse": 2.0},
+            # No "ensemble" key → ensemble_rmse is None
         },
     )
 
     import scripts.check_forecast_audits as mod
 
     res = mod.check_audit_file(audit, tolerance=0.1, baseline_model="BEST_SINGLE")
-    assert res is not None
+    assert res is not None, "Missing ensemble must still return a result for missing_ensemble_rate gate"
     assert res.ensemble_rmse is None
     assert res.baseline_rmse == pytest.approx(2.0)
     assert res.rmse_ratio is None
     assert res.ensemble_missing is True
+    assert res.violation is False, (
+        "Missing ensemble must be violation=False; effective_n already excludes it "
+        "so violation_rate is unaffected"
+    )
 
 
 def test_check_audit_file_missing_baseline_rmse_excluded(tmp_path: Path) -> None:

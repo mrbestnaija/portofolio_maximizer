@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Domain-Calibrated Remediation — Phases 1+2+3 complete (2026-04-05); heuristic distortion fixes (OOS scan cap, SAMoSSA bump, SNR fallback, RMSE-rank logging, EWMA convergence_ok, realized_vol floor) pending
+**Current Phase**: Domain-Calibrated Remediation — Phases 1+2+3 complete (2026-04-05); all DCR heuristic distortion fixes verified resolved (2026-04-13 audit)
 **Completed Phases**: DCR-P1 (missing-baseline bypass, residual enforcement, diagnostics_score pessimistic fallback, GARCH EWMA floor, funnel audit logging), DCR-P2B (CV OOS proxy), DCR-P3A (confidence calibration script), DCR-P3B (MSSA-RL neutral-on-low-support), Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven), P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
 **Last Updated**: 2026-04-05
 
@@ -1510,16 +1510,16 @@ Results: Key metrics or validation results
 | `f83a6ea` | docs(status): Phase 1 complete | — |
 | `40dfa8e` | P2-B: CV OOS proxy; P3-A: confidence calibration script; P3-B: MSSA-RL neutral-on-low-support | 2184 passed |
 
-### Remaining Heuristic Distortion Fixes (pending)
+### Heuristic Distortion Fixes — ALL RESOLVED (verified 2026-04-13 audit)
 
-| Fix | File | Change |
-|-----|------|--------|
-| C5 — OOS scan cap | `forcester_ts/forecaster.py:2453` | Remove `[:20]` + post-loop warning |
-| C3 — SAMoSSA bump | `forcester_ts/ensemble.py:860-869` | Delete entire bump block |
-| H6 — SNR neutral fallback | `models/time_series_signal_generator.py:1459` | `0.5` → `0.0` + debug log |
-| H7 — RMSE-rank silent disable | `forcester_ts/ensemble.py:506-507` | Add `logger.warning` |
-| M1 — EWMA convergence_ok | `forcester_ts/garch.py:658` | `True` → `False` |
-| H2 — realized_vol floor | `forcester_ts/garch.py:172, 205, 642` | `1e-12` → `1e-6` |
+| Fix | File | Status | Verified At |
+|-----|------|--------|-------------|
+| C5 — OOS scan cap | `forcester_ts/forecaster.py:2491` | **DONE** | No `[:20]` slice; returns on first match |
+| C3 — SAMoSSA bump | `forcester_ts/ensemble.py:860–870` | **DONE** | No bump block; MSSA-RL assignment + 0.05 floor only |
+| H6 — SNR neutral fallback | `models/time_series_signal_generator.py:1500–1506` | **DONE** | Default `0.0` with pessimistic log |
+| H7 — RMSE-rank silent disable | `forcester_ts/ensemble.py:513–519` | **DONE** | `logger.warning` present with model list |
+| M1 — EWMA convergence_ok | `forcester_ts/garch.py:658` | **DONE** | `"convergence_ok": False` in EWMA branch |
+| H2 — realized_vol floor | `forcester_ts/garch.py:172, 205, 642` | **DONE** | All sites use `max(..., 1e-6)` |
 
 ### Anti-Patterns (DCR)
 - Do NOT gate SAMoSSA bump removal on TE delta threshold — adds back the heuristic; remove fully

@@ -134,8 +134,11 @@ class MSSARLConfig:
     action_rank_cutoffs: Dict[int, float] = None  # type: ignore[assignment]
     policy_seed: int = 7
     policy_artifact_path: str = DEFAULT_MSSA_POLICY_PATH
-    # MSSA-RL is always fail-closed: forecast() raises ValueError when policy_status != "ready".
-    # There is no graceful-degradation path — containment is the design intent.
+    # MSSA-RL is fail-closed for most error states: forecast() raises ValueError when
+    # policy_status is not "ready" or "insufficient_support".  The one exception is
+    # insufficient_support (P3-B design): states with too few training samples return
+    # neutral action 1 (HOLD) rather than raising, to prevent cascading forecast failures
+    # on cold-start states.  See _select_action() lines ~786–796 for the neutral path.
     min_policy_state_support: int = 5
     reward_horizon: int = 5
     # Deprecated compatibility placeholders kept so older config/scripts do not crash.
@@ -796,7 +799,7 @@ class MSSARLForecaster:
             return 1  # neutral
 
         if self._policy_status != "ready":
-            # Always fail-closed: no graceful-degradation path exists for a degraded policy.
+            # Fail-closed for all non-ready, non-insufficient_support states.
             raise ValueError(
                 f"MSSA-RL offline policy not ready ({self._policy_status})"
             )

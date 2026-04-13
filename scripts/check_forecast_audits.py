@@ -1496,6 +1496,11 @@ def check_audit_file(
         return None
 
     if ensemble_rmse is None:
+        # Ensemble metrics absent: return violation=False with ensemble_missing=True.
+        # The RMSE effective_n denominator (lines 2055–2062) already filters out
+        # results where ensemble_rmse is None, so this does NOT deflate violation_rate.
+        # The result IS included in results[] so the separate missing_ensemble_rate
+        # gate (lines 2064–2065) can detect and enforce max_missing_ensemble_rate.
         return AuditCheckResult(
             path=path,
             ensemble_rmse=ensemble_rmse,

@@ -673,6 +673,12 @@ def _trim_trailing_unpriced_rows(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
 
 FUNNEL_AUDIT_LOG_PATH = ROOT_PATH / "logs" / "funnel_audit.jsonl"
 
+# Run-scoped dedup set: prevents the same (ts_signal_id, reason) pair from being
+# written to funnel_audit.jsonl more than once per process.  Without this guard
+# the same HOLD signal can be re-logged on every cycle iteration, inflating counts
+# by 27x or more and contaminating funnel analysis used to justify routing thresholds.
+_FUNNEL_LOGGED: set[tuple[str, str]] = set()
+
 
 def _write_funnel_audit_entry(
     *,
@@ -688,7 +694,15 @@ def _write_funnel_audit_entry(
     Observability only — no threshold changes.  Used by P1-B to understand why
     99.6% of forecasts are blocked by signal routing without becoming executed
     trades (confidence < 0.55, SNR < 1.5, min_return < 20 bps).
+
+    Dedup: each (ts_signal_id, reason) pair is written at most once per process
+    run. Duplicate calls are silently dropped. This prevents the same HOLD signal
+    from appearing 27+ times when the cycle loop revisits the same forecast.
     """
+    key = (str(ts_signal_id or ""), str(reason or ""))
+    if key in _FUNNEL_LOGGED:
+        return
+    _FUNNEL_LOGGED.add(key)
     entry = {
         "logged_at": datetime.now(UTC).isoformat(),
         "ticker": ticker,
