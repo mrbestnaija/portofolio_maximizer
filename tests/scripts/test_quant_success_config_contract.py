@@ -11,6 +11,11 @@ def test_quant_success_config_weight_schema_contract() -> None:
     assert qv.get("objective_mode") == "domain_utility"
     assert qv.get("scoring_mode") == "domain_utility"
     assert bool(qv.get("strict_weight_coverage")) is True
+    assert qv.get("hard_gate_criteria") == [
+        "expected_profit",
+        "significance",
+        "information_ratio",
+    ]
 
     pass_threshold = float(qv.get("pass_threshold", 0.0))
     assert 0.0 <= pass_threshold <= 1.0
@@ -21,6 +26,7 @@ def test_quant_success_config_weight_schema_contract() -> None:
     required = {
         "expected_profit",
         "omega_ratio",
+        "payoff_asymmetry",
         "profit_factor",
         "terminal_directional_accuracy",
         "max_drawdown",
@@ -36,6 +42,7 @@ def test_quant_success_config_weight_schema_contract() -> None:
     success = qv.get("success_criteria") or {}
     assert "min_terminal_directional_accuracy" in success
     assert "min_expected_shortfall" in success
+    assert "min_payoff_asymmetry" in success
 
 
 def test_barbell_objective_docs_contract() -> None:
@@ -58,6 +65,7 @@ def test_barbell_objective_docs_contract() -> None:
         "expected_close_source",
         "utility_breakdown",
         "matrix_health",
+        "payoff_asymmetry",
     ):
         assert token in canonical_text
 

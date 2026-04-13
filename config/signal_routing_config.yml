@@ -51,11 +51,11 @@ signal_routing:
         confidence_threshold: 0.55
         min_expected_return: 0.0020
       "AAPL":
-        confidence_threshold: 0.60  # Raised from 0.55: require higher conviction given 14% WR history
-        min_expected_return: 0.0080  # 80 bps (4x base): only very strong AAPL signals trade (P0 routing gate)
+        confidence_threshold: 0.60  # Temporary conservative override pending payoff-calibrated re-evaluation
+        min_expected_return: 0.0080  # Temporary conservative override; not evidence of calibrated edge
       "GS":
-        confidence_threshold: 0.65  # Raised to near-maximum: GS has 0% WR over 5 trades; very high bar
-        min_expected_return: 0.0120  # 120 bps (6x base): effectively gates out weak GS signals (P0 routing gate)
+        confidence_threshold: 0.65  # Temporary conservative override pending payoff-calibrated re-evaluation
+        min_expected_return: 0.0120  # Temporary conservative override; not evidence of calibrated edge
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.

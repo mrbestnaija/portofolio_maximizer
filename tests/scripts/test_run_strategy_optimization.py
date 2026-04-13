@@ -66,6 +66,7 @@ def test_run_strategy_optimization_keeps_low_win_rate_candidate_when_asymmetry_i
     assert saved_metrics[0]["total_return"] == 0.25
     assert saved_metrics[0]["profit_factor"] == 2.1
     assert saved_metrics[0]["omega_ratio"] is not None
+    assert saved_metrics[0]["payoff_asymmetry"] is not None
 
 
 def test_run_strategy_optimization_fails_closed_when_regression_summary_missing(monkeypatch):
@@ -134,10 +135,11 @@ def test_strategy_optimization_config_has_no_win_rate_constraint():
 
 
 def test_strategy_optimization_config_barbell_objectives_present():
-    """Barbell policy: omega_ratio and expected_shortfall must be in optimizer objectives."""
+    """Barbell policy: payoff asymmetry and tail metrics must be in optimizer objectives."""
     cfg_path = Path("config/strategy_optimization_config.yml")
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
     objectives = cfg.get("strategy_optimization", {}).get("objectives", {})
     assert "omega_ratio" in objectives, "omega_ratio must be an optimizer objective (barbell asymmetry)"
+    assert "payoff_asymmetry_effective" in objectives, "payoff_asymmetry_effective must be an optimizer objective (support-aware asymmetry engine)"
     assert "expected_shortfall" in objectives, "expected_shortfall must be an optimizer objective (downside bound)"
     assert objectives.get("expected_shortfall", 0) < 0, "expected_shortfall weight must be negative (penalize tail loss)"

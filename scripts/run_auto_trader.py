@@ -55,7 +55,7 @@ from models.signal_router import SignalRouter, validate_routing_contract
 from etl.data_universe import resolve_ticker_universe
 from risk.barbell_policy import BarbellConfig
 from risk.barbell_promotion_gate import load_promotion_evidence
-from risk.barbell_sizing import apply_barbell_confidence
+from risk.barbell_sizing import apply_barbell_confidence, build_barbell_market_context
 
 try:  # Optional Ollama dependency
     from ai_llm.ollama_client import OllamaClient, OllamaConnectionError
@@ -1754,6 +1754,8 @@ def _build_routed_signal_snapshot(
             "failed_criteria",
             "utility_score",
             "objective_mode",
+            "metrics",
+            "utility_breakdown",
             "structural_gates",
             "diagnostics",
         ):
@@ -1798,6 +1800,14 @@ def _build_routed_signal_snapshot(
         "execution_policy_detail": execution_policy_detail,
         "execution_policy_reason_codes": execution_policy_reason_codes,
         "reasoning": payload.get("reasoning") or signal.get("reasoning"),
+        "barbell_bucket": payload.get("barbell_bucket"),
+        "barbell_multiplier": payload.get("barbell_multiplier"),
+        "barbell_bucket_multiplier": payload.get("barbell_bucket_multiplier"),
+        "barbell_regime_multiplier": payload.get("barbell_regime_multiplier"),
+        "barbell_market_multiplier": payload.get("barbell_market_multiplier"),
+        "barbell_strategy_style": payload.get("barbell_strategy_style"),
+        "barbell_rebalance_frequency_bars": payload.get("barbell_rebalance_frequency_bars"),
+        "barbell_diagnostics": payload.get("barbell_diagnostics"),
     }
     if quant_summary:
         snapshot["quant_validation"] = quant_summary
@@ -2268,15 +2278,27 @@ def _execute_signal(
         base_conf = primary_payload.get("confidence")
         try:
             if base_conf is not None:
+                barbell_context = build_barbell_market_context(
+                    signal_payload=primary_payload,
+                    market_data=market_data,
+                    detected_regime=str(forecast_bundle.get("detected_regime") or "").strip().upper() or None,
+                )
                 sizing = apply_barbell_confidence(
                     ticker=ticker,
                     base_confidence=float(base_conf),
                     cfg=barbell_cfg,
+                    context=barbell_context,
                 )
                 primary_payload["base_confidence"] = float(base_conf)
                 primary_payload["confidence"] = float(sizing.effective_confidence)
                 primary_payload["barbell_bucket"] = sizing.bucket
                 primary_payload["barbell_multiplier"] = float(sizing.multiplier)
+                primary_payload["barbell_bucket_multiplier"] = float(sizing.bucket_multiplier)
+                primary_payload["barbell_regime_multiplier"] = float(sizing.regime_multiplier)
+                primary_payload["barbell_market_multiplier"] = float(sizing.market_multiplier)
+                primary_payload["barbell_strategy_style"] = str(barbell_cfg.strategy_style)
+                primary_payload["barbell_rebalance_frequency_bars"] = int(barbell_cfg.rebalance_frequency_bars)
+                primary_payload["barbell_diagnostics"] = dict(sizing.diagnostics)
                 primary_payload["barbell_sizing_enabled"] = True
         except Exception:
             logger.debug("Skipping barbell sizing overlay for %s", ticker, exc_info=True)
@@ -2935,11 +2957,39 @@ def main(
     storage = DataStorage() if enable_data_cache else None
     data_source_manager = DataSourceManager(storage=storage, execution_mode=execution_mode)
     active_source = data_source_manager.get_active_source()
+    requested_source = (
+        os.getenv("DATA_SOURCE")
+        or os.getenv("PMX_PREFERRED_DATA_SOURCE")
+        or os.getenv("PREFER_SOURCE")
+    )
+    requested_source = str(requested_source or "").strip().lower() or None
+    available_sources_getter = getattr(data_source_manager, "get_available_sources", None)
+    available_sources: set[str] = set()
+    if callable(available_sources_getter):
+        try:
+            available_sources = {
+                str(source).strip().lower()
+                for source in available_sources_getter()
+                if str(source).strip()
+            }
+        except Exception:
+            logger.debug("Failed to enumerate available data sources", exc_info=True)
     synthetic_only = bool(_env_flag("SYNTHETIC_ONLY"))
     if active_source == "synthetic" and not synthetic_only and execution_mode != "synthetic":
         raise click.UsageError(
             "Synthetic data source selected; live evaluations require a real provider. "
             "Unset ENABLE_SYNTHETIC_PROVIDER/ENABLE_SYNTHETIC_DATA_SOURCE or set EXECUTION_MODE=live."
+        )
+    if (
+        execution_mode == "live"
+        and active_source != "ctrader"
+        and "ctrader" in available_sources
+        and requested_source is None
+    ):
+        logger.warning(
+            "Live run is using %s market data while broker-native ctrader data is available. "
+            "Set DATA_SOURCE=ctrader to align the forecast source with the execution venue.",
+            active_source,
         )
     universe = resolve_ticker_universe(
         base_tickers=base_tickers,

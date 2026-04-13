@@ -16,7 +16,7 @@ barbell:
     min_weight: 0.75
     max_weight: 0.95
     max_per_position: 0.50
-    description: "Cash/Treasury ballast; primary capital reserve."
+    description: "Cash/Treasury ballast; primary capital reserve in the opposite-risk sleeve."
 
   core_bucket:
     symbols:
@@ -25,7 +25,7 @@ barbell:
       - "MTN"
     max_weight: 0.20
     max_per_position: 0.10
-    description: "Core, high-liquidity names used in TS routing overrides."
+    description: "Liquid risk sleeve for actively managed core TS exposure."
 
   speculative_bucket:
     symbols:
@@ -33,7 +33,59 @@ barbell:
       - "BTC-USD"
     max_weight: 0.10
     max_per_position: 0.05
-    description: "Frontier/experimental sleeves; throttle sizing until evidence improves."
+    description: "Convex/speculative sleeve; explicitly paired with the safe bucket under the barbell shell."
+
+  confidence_overlays:
+    # Domain-specific sizing overlays for the live barbell path. These are soft
+    # confidence adjustments, not hard gates: the signal must still clear the
+    # main economic/quant contracts in quant_success_config.yml.
+    bucket_multipliers:
+      safe: 1.00
+      core: 0.90
+      spec: 0.80
+      other: 0.85
+    edge_ratio_soft_caps:
+      roundtrip_cost_to_edge: 0.35
+      gap_risk_to_edge: 0.75
+      funding_to_edge: 0.25
+      liquidity_to_depth: 0.10
+    floors:
+      cost: 0.55
+      gap: 0.50
+      funding: 0.70
+      liquidity: 0.65
+      leverage: 0.60
+    regime_bucket_multipliers:
+      LIQUID_RANGEBOUND:
+        safe: 1.00
+        core: 0.92
+        spec: 0.82
+      MODERATE_TRENDING:
+        safe: 1.00
+        core: 0.96
+        spec: 0.86
+      HIGH_VOL_TRENDING:
+        safe: 1.00
+        core: 0.84
+        spec: 0.70
+      CRISIS:
+        safe: 1.00
+        core: 0.72
+        spec: 0.55
+
+  active_management:
+    strategy_style: "opposite-risk sleeves"
+    rebalance_frequency_bars: 1
+    notes: "Safe sleeve stays dominant; speculative sleeve is allowed only when edge survives live cost/gap/regime checks."
+
+  promotion_gate:
+    min_total_trades: 30
+    min_losing_trades: 5
+    min_omega_robustness_score: 0.45
+    min_payoff_asymmetry_effective: 1.10
+    max_winner_concentration_ratio: 0.60
+    min_path_risk_ok_rate: 0.80
+    require_path_risk_evidence: true
 
   # Per-market caps for nested barbell constraints (DM vs EM/NGX, crypto).
   market_caps:

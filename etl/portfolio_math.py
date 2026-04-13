@@ -17,9 +17,10 @@ Key capabilities:
 """
 from __future__ import annotations
 
+import math
 import logging
 import warnings
-from typing import Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,10 @@ __all__ = [
     "stress_test_portfolio",
     # Phase 11 — Nigeria production extensions (additive, zero breakage)
     "omega_ratio",
+    "omega_curve",
+    "omega_robustness_summary",
+    "payoff_asymmetry_ratio",
+    "payoff_asymmetry_support_metrics",
     "fractional_kelly_fat_tail",
     "effective_ngn_return",
     "portfolio_metrics_ngn",
@@ -565,6 +570,223 @@ def omega_ratio(
     return gain / loss
 
 
+def _clean_return_series(returns: pd.Series | np.ndarray | list[float]) -> pd.Series:
+    if returns is None:
+        return pd.Series(dtype=float)
+    return pd.Series(returns, dtype=float).replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def omega_curve(
+    returns: pd.Series,
+    *,
+    execution_drag_hurdle: float | None = None,
+) -> Dict[str, Dict[str, float | None]]:
+    """
+    Omega values across a small hurdle ladder.
+
+    The barbell argument only holds when the distribution still clears a
+    realistic hurdle after execution drag. A single Omega point can flatter a
+    strategy whose edge disappears once friction is added back in.
+    """
+    clean = _clean_return_series(returns)
+    drag = None
+    try:
+        if execution_drag_hurdle is not None:
+            drag = max(float(execution_drag_hurdle), 0.0)
+    except (TypeError, ValueError):
+        drag = None
+
+    thresholds = {
+        "zero": 0.0,
+        "ngn_hurdle": DAILY_NGN_THRESHOLD,
+        "cost_adjusted": (
+            DAILY_NGN_THRESHOLD + drag
+            if drag is not None
+            else None
+        ),
+    }
+
+    curve: Dict[str, Dict[str, float | None]] = {}
+    for label, threshold in thresholds.items():
+        if threshold is None:
+            omega_value = None
+        else:
+            value = omega_ratio(clean, threshold)
+            omega_value = None if (isinstance(value, float) and math.isnan(value)) else float(value)
+        curve[label] = {
+            "threshold": (float(threshold) if threshold is not None else None),
+            "omega": omega_value,
+        }
+    return curve
+
+
+def omega_robustness_summary(
+    returns: pd.Series,
+    *,
+    execution_drag_hurdle: float | None = None,
+) -> Dict[str, Any]:
+    """
+    Summarize whether Omega survives realistic hurdle escalation.
+
+    `omega_ratio` remains the headline metric, but a barbell claim is only
+    robust when Omega stays healthy at the NGN hurdle and after adding realized
+    execution drag.
+    """
+    curve = omega_curve(returns, execution_drag_hurdle=execution_drag_hurdle)
+    omega_zero = curve.get("zero", {}).get("omega")
+    omega_hurdle = curve.get("ngn_hurdle", {}).get("omega")
+    omega_cost = curve.get("cost_adjusted", {}).get("omega")
+    cost_threshold = curve.get("cost_adjusted", {}).get("threshold")
+
+    finite_points: List[float] = []
+    for point in (omega_zero, omega_hurdle, omega_cost):
+        if isinstance(point, (int, float)) and not math.isnan(point):
+            finite_points.append(float(point))
+
+    monotonicity_ok = True
+    if len(finite_points) >= 2:
+        for left, right in zip(finite_points, finite_points[1:]):
+            if right > left + 1e-9:
+                monotonicity_ok = False
+                break
+
+    omega_above_hurdle_margin = None
+    if isinstance(omega_hurdle, (int, float)) and not math.isnan(float(omega_hurdle)):
+        omega_above_hurdle_margin = float(omega_hurdle) - 1.0
+
+    complete = cost_threshold is not None
+    robustness_score: Optional[float] = None
+    if complete and all(
+        isinstance(point, (int, float)) and not math.isnan(float(point))
+        for point in (omega_zero, omega_hurdle, omega_cost)
+    ):
+        omega_zero_f = max(float(omega_zero), 0.0)
+        omega_hurdle_f = max(float(omega_hurdle), 0.0)
+        omega_cost_f = max(float(omega_cost), 0.0)
+        hurdle_strength = float(np.clip((omega_hurdle_f - 1.0) / 1.0, 0.0, 1.0))
+        drag_strength = float(np.clip((omega_cost_f - 1.0) / 1.0, 0.0, 1.0))
+        retention = float(np.clip(omega_cost_f / max(omega_hurdle_f, 1e-6), 0.0, 1.0))
+        threshold_stability = float(np.clip(omega_hurdle_f / max(omega_zero_f, 1e-6), 0.0, 1.0))
+        robustness_score = (
+            0.40 * hurdle_strength
+            + 0.30 * drag_strength
+            + 0.20 * retention
+            + 0.10 * threshold_stability
+        )
+        if not monotonicity_ok:
+            robustness_score *= 0.50
+        robustness_score = float(np.clip(robustness_score, 0.0, 1.0))
+
+    return {
+        "omega_curve": curve,
+        "omega_robustness_score": robustness_score,
+        "omega_monotonicity_ok": bool(monotonicity_ok),
+        "omega_above_hurdle_margin": omega_above_hurdle_margin,
+        "omega_robustness_complete": bool(complete),
+        "execution_drag_hurdle": (
+            float(execution_drag_hurdle)
+            if execution_drag_hurdle is not None
+            else None
+        ),
+    }
+
+
+def payoff_asymmetry_ratio(returns: pd.Series) -> float:
+    """
+    Average win divided by average loss magnitude.
+
+    This isolates payoff shape from hit-rate frequency. A low-win-rate barbell
+    sleeve can still be structurally attractive when its winners are materially
+    larger than its losers; this metric captures that engine directly.
+    """
+    if returns is None:
+        return float("nan")
+
+    s = pd.Series(returns).dropna()
+    if s.empty:
+        return float("nan")
+
+    wins = s[s > 0]
+    losses = s[s < 0]
+    avg_win = float(wins.mean()) if not wins.empty else 0.0
+    avg_loss = abs(float(losses.mean())) if not losses.empty else 0.0
+
+    if avg_loss == 0.0:
+        return float("inf") if avg_win > 0.0 else 0.0
+    return avg_win / avg_loss
+
+
+def payoff_asymmetry_support_metrics(
+    returns: pd.Series,
+    *,
+    trim_fraction: float = 0.10,
+    min_wins: int = 3,
+    min_losses: int = 3,
+    max_winner_concentration_ratio: float = 0.60,
+) -> Dict[str, Any]:
+    """
+    Support-aware payoff asymmetry diagnostics.
+
+    Raw asymmetry stays visible because barbell systems *should* monetize rare
+    fat-tail winners. But promotion-grade evidence must prove the asymmetry is
+    not just one lucky outlier.
+    """
+    clean = _clean_return_series(returns)
+    wins = clean[clean > 0].sort_values()
+    losses = clean[clean < 0].abs().sort_values()
+
+    raw_ratio = payoff_asymmetry_ratio(clean)
+    n_wins = int(wins.size)
+    n_losses = int(losses.size)
+    gross_profit = float(wins.sum()) if n_wins else 0.0
+    winner_concentration_ratio = (
+        float(wins.iloc[-1] / gross_profit)
+        if n_wins and gross_profit > 0.0
+        else float("inf") if n_wins else 0.0
+    )
+
+    trim_fraction = float(np.clip(trim_fraction, 0.0, 0.49))
+    trim_wins = int(math.floor(n_wins * trim_fraction))
+    trim_losses = int(math.floor(n_losses * trim_fraction))
+    trimmed_wins = wins.iloc[: max(n_wins - trim_wins, 0)] if trim_wins else wins
+    trimmed_losses = losses.iloc[: max(n_losses - trim_losses, 0)] if trim_losses else losses
+
+    if trimmed_losses.size == 0:
+        trimmed_payoff_asymmetry = float("inf") if trimmed_wins.size > 0 else 0.0
+    elif trimmed_wins.size == 0:
+        trimmed_payoff_asymmetry = 0.0
+    else:
+        trimmed_payoff_asymmetry = float(trimmed_wins.mean() / max(float(trimmed_losses.mean()), 1e-12))
+
+    support_ok = (
+        n_wins >= int(min_wins)
+        and n_losses >= int(min_losses)
+        and winner_concentration_ratio <= float(max_winner_concentration_ratio)
+    )
+
+    if support_ok:
+        if math.isinf(raw_ratio) and math.isfinite(trimmed_payoff_asymmetry):
+            effective = float(trimmed_payoff_asymmetry)
+        elif math.isinf(trimmed_payoff_asymmetry) and math.isfinite(raw_ratio):
+            effective = float(raw_ratio)
+        elif math.isinf(raw_ratio) and math.isinf(trimmed_payoff_asymmetry):
+            effective = float("inf")
+        else:
+            effective = float(min(raw_ratio, trimmed_payoff_asymmetry))
+    else:
+        effective = 0.0
+
+    return {
+        "payoff_asymmetry": raw_ratio,
+        "n_wins": n_wins,
+        "n_losses": n_losses,
+        "winner_concentration_ratio": float(winner_concentration_ratio),
+        "trimmed_payoff_asymmetry": float(trimmed_payoff_asymmetry),
+        "payoff_asymmetry_support_ok": bool(support_ok),
+        "payoff_asymmetry_effective": float(effective),
+    }
+
+
 def fractional_kelly_fat_tail(
     returns: pd.Series,
     risk_free: float | None = None,
@@ -649,7 +871,11 @@ def effective_ngn_return(
     return float(usd_return + ngn_usd_spot_change - friction)
 
 
-def portfolio_metrics_ngn(returns: pd.Series) -> Dict[str, float]:
+def portfolio_metrics_ngn(
+    returns: pd.Series,
+    *,
+    execution_drag_hurdle: float | None = None,
+) -> Dict[str, Any]:
     """
     Full Nigeria-calibrated metric set.
 
@@ -666,6 +892,7 @@ def portfolio_metrics_ngn(returns: pd.Series) -> Dict[str, float]:
     -------
     Dict extending the base enhanced_metrics with:
       - omega_ratio           : Omega ratio vs NGN hurdle
+      - payoff_asymmetry      : avg_win / |avg_loss| structural barbell engine
       - fractional_kelly_fat_tail : Quarter-Kelly with kurtosis correction
       - ngn_daily_threshold   : Current daily NGN hurdle rate
       - ngn_annual_hurdle_pct : Annualised hurdle in % (inflation + friction)
@@ -682,8 +909,15 @@ def portfolio_metrics_ngn(returns: pd.Series) -> Dict[str, float]:
     base: Dict[str, float] = calculate_enhanced_portfolio_metrics(arr, weights)
 
     omega = omega_ratio(returns)
+    omega_robustness = omega_robustness_summary(
+        returns,
+        execution_drag_hurdle=execution_drag_hurdle,
+    )
+    asymmetry_support = payoff_asymmetry_support_metrics(returns)
     ngn_ext: Dict[str, object] = {
         "omega_ratio": omega,
+        **omega_robustness,
+        **asymmetry_support,
         "fractional_kelly_fat_tail": fractional_kelly_fat_tail(returns),
         "ngn_daily_threshold": DAILY_NGN_THRESHOLD,
         "ngn_annual_hurdle_pct": round(

@@ -124,6 +124,40 @@ class TestDataSourceManagerInitialization:
         assert 'selection_strategy' in manager.config
         assert len(manager.config['providers']) == 3
 
+    def test_initialization_honours_data_source_env_override(self, tmp_path, temp_storage, monkeypatch):
+        """DATA_SOURCE env should select the documented preferred provider when available."""
+        config_path = tmp_path / "data_sources_config.yml"
+        config_path.write_text(
+            """
+data_sources:
+  providers:
+    - name: yfinance
+      enabled: true
+      priority: 1
+      credentials_env: null
+    - name: ctrader
+      enabled: true
+      priority: 4
+      credentials_env: null
+  adapters:
+    adapter_registry:
+      yfinance: etl.yfinance_extractor.YFinanceExtractor
+      ctrader: etl.yfinance_extractor.YFinanceExtractor
+  selection_strategy:
+    mode: fallback
+  failover:
+    enabled: true
+    max_failover_attempts: 2
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DATA_SOURCE", "ctrader")
+        manager = DataSourceManager(
+            config_path=str(config_path),
+            storage=temp_storage,
+        )
+        assert manager.get_active_source() == "ctrader"
+
 
 class TestExtractorInstantiation:
     """Test suite for extractor instantiation and registration."""

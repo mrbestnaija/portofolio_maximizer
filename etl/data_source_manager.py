@@ -101,6 +101,12 @@ class DataSourceManager:
         enabled: List[Dict[str, Any]] = []
         enable_synthetic_env = os.getenv("ENABLE_SYNTHETIC_PROVIDER") or os.getenv("ENABLE_SYNTHETIC_DATA_SOURCE")
         synthetic_only = os.getenv("SYNTHETIC_ONLY")
+        preferred_source = (
+            os.getenv("DATA_SOURCE")
+            or os.getenv("PMX_PREFERRED_DATA_SOURCE")
+            or os.getenv("PREFER_SOURCE")
+        )
+        preferred_source = str(preferred_source or "").strip().lower() or None
 
         # Institutional guardrail: synthetic data must never be consumed implicitly during
         # live/auto runs. It is only admitted when explicitly requested (execution_mode=synthetic
@@ -124,7 +130,11 @@ class DataSourceManager:
             if name == "synthetic" and enable_synthetic_env:
                 is_enabled = True
             if is_enabled:
-                enabled.append(provider)
+                entry = dict(provider)
+                if preferred_source and name.lower() == preferred_source:
+                    entry["priority"] = -1
+                    entry["_preferred_source"] = True
+                enabled.append(entry)
 
         # Sort by priority (lower number = higher priority)
         enabled.sort(key=lambda p: p.get('priority', 999))
@@ -134,6 +144,15 @@ class DataSourceManager:
             len(enabled),
             ", ".join(str(p.get("name")) for p in enabled if p.get("name")),
         )
+        if preferred_source:
+            matched_enabled = any(str(p.get("name") or "").strip().lower() == preferred_source for p in enabled)
+            if matched_enabled:
+                logger.info("Preferred data source requested via env: %s", preferred_source)
+            else:
+                logger.warning(
+                    "Preferred data source %s was requested via env but is not enabled/available; falling back to configured priority.",
+                    preferred_source,
+                )
         return enabled
 
     def _resolve_provider_config_path(self, provider_config: Dict[str, Any]) -> Optional[str]:

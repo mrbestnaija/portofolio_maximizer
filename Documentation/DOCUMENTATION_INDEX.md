@@ -1,7 +1,7 @@
 # Documentation Index — Portfolio Maximizer v45
 
 **Purpose**: Canonical navigator for all project documentation.
-**Last updated**: 2026-04-08 (documentation hygiene cleanup)
+**Last updated**: 2026-04-12 (documentation hygiene cleanup)
 
 > For the current phase status and next steps, start with [Planning and Status (Canonical)](#planning-and-status-canonical).
 

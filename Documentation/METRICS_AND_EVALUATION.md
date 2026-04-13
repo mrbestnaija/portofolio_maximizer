@@ -28,6 +28,7 @@ For time-series signal selection, optimization, and audit language, the repo-wid
 
 - `expected_profit`
 - `omega_ratio`
+- `payoff_asymmetry`
 - `profit_factor`
 - `terminal_directional_accuracy`
 - `max_drawdown`
@@ -44,6 +45,11 @@ For time-series signal selection, optimization, and audit language, the repo-wid
 
 Use diagnostic metrics to explain why an asymmetric strategy is healthy or unhealthy. Do not use them as
 the repo-wide top-level optimization target unless a local exception is documented explicitly.
+
+`payoff_asymmetry = avg_gain / |avg_loss|` is the direct convexity statistic for the barbell sleeve:
+it rewards fat-tail upside when winners are materially larger than losers. It is intentionally
+paired with `omega_ratio`, `expected_shortfall`, and `max_drawdown` because a single large outlier
+can raise average winner size long before the full return distribution is proven robust.
 
 Ground truth implementations live in:
 

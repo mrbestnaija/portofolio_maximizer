@@ -32,12 +32,18 @@ if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager
+from etl.portfolio_math import portfolio_metrics_ngn
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_generator_factory import build_signal_generator
 from risk.barbell_policy import BarbellConfig
 from risk.barbell_promotion_gate import decide_promotion_from_report, write_promotion_evidence as _write_promotion_evidence
-from risk.barbell_sizing import apply_barbell_confidence, barbell_confidence_multipliers
+from risk.barbell_sizing import (
+    apply_barbell_confidence,
+    barbell_confidence_multipliers,
+    build_barbell_market_context,
+    evaluate_barbell_path_risk,
+)
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -107,12 +113,14 @@ def _apply_barbell_confidence(
     confidence: float,
     cfg: BarbellConfig,
     multipliers: Dict[str, float],
+    context=None,
 ) -> float:
     _ = multipliers  # signature retained; multipliers are derived from cfg in shared helper
     return apply_barbell_confidence(
         ticker=ticker,
         base_confidence=float(confidence),
         cfg=cfg,
+        context=context,
     ).effective_confidence
 
 
@@ -128,6 +136,80 @@ def _max_drawdown(equity: List[Dict[str, float]]) -> float:
     return max_dd
 
 
+def _mean_or_none(values: List[float]) -> Optional[float]:
+    clean = [float(v) for v in values if v is not None]
+    if not clean:
+        return None
+    return float(sum(clean) / len(clean))
+
+
+def _augment_distribution_metrics(
+    *,
+    summary: Dict[str, Any],
+    pnl_events: Sequence[Tuple[str, str, float]],
+    initial_capital: float,
+    path_risk_records: Optional[Sequence[Dict[str, Any]]] = None,
+    execution_drag_fractions: Optional[Sequence[float]] = None,
+) -> Dict[str, Any]:
+    equity = float(initial_capital)
+    trade_returns: List[float] = []
+    for _, __, pnl in pnl_events:
+        base = equity if abs(equity) > 1e-9 else float(initial_capital or 1.0)
+        trade_returns.append(float(pnl) / float(base))
+        equity += float(pnl)
+
+    if trade_returns:
+        drag_hurdle = _mean_or_none(list(execution_drag_fractions or []))
+        dist = portfolio_metrics_ngn(pd.Series(trade_returns), execution_drag_hurdle=drag_hurdle)
+        for key in (
+            "omega_ratio",
+            "omega_curve",
+            "omega_robustness_score",
+            "omega_monotonicity_ok",
+            "omega_above_hurdle_margin",
+            "omega_robustness_complete",
+            "payoff_asymmetry",
+            "n_wins",
+            "n_losses",
+            "winner_concentration_ratio",
+            "trimmed_payoff_asymmetry",
+            "payoff_asymmetry_support_ok",
+            "payoff_asymmetry_effective",
+            "expected_shortfall",
+            "beats_ngn_hurdle",
+            "fractional_kelly_fat_tail",
+        ):
+            if key in dist:
+                summary[key] = dist.get(key)
+    else:
+        summary.setdefault("omega_ratio", None)
+        summary.setdefault("omega_curve", None)
+        summary.setdefault("omega_robustness_score", None)
+        summary.setdefault("omega_monotonicity_ok", None)
+        summary.setdefault("omega_above_hurdle_margin", None)
+        summary.setdefault("omega_robustness_complete", False)
+        summary.setdefault("payoff_asymmetry_effective", 0.0)
+
+    records = list(path_risk_records or [])
+    if records:
+        ok_count = sum(1 for record in records if bool(record.get("barbell_path_risk_ok")))
+        summary["path_risk_trade_count"] = int(len(records))
+        summary["path_risk_ok_trade_count"] = int(ok_count)
+        summary["path_risk_ok_rate"] = float(ok_count / len(records))
+        summary["barbell_path_risk_ok"] = bool(ok_count == len(records))
+        for key in ("roundtrip_cost_to_edge", "gap_risk_to_edge", "funding_to_edge", "liquidity_to_depth"):
+            mean_value = _mean_or_none([record.get(key) for record in records if record.get(key) is not None])
+            if mean_value is not None:
+                summary[f"{key}_mean"] = mean_value
+    else:
+        summary.setdefault("path_risk_trade_count", 0)
+        summary.setdefault("path_risk_ok_trade_count", 0)
+        summary.setdefault("path_risk_ok_rate", None)
+        summary.setdefault("barbell_path_risk_ok", None)
+
+    return summary
+
+
 def _simulate_from_trade_history(
     *,
     source_db: DatabaseManager,
@@ -137,7 +219,7 @@ def _simulate_from_trade_history(
     enable_barbell_sizing: bool,
     barbell_cfg: BarbellConfig,
     run_id: Optional[str] = None,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     multipliers = _barbell_multipliers(barbell_cfg)
     safe_set = {str(s).upper() for s in (barbell_cfg.safe_symbols or [])}
     core_set = {str(s).upper() for s in (barbell_cfg.core_symbols or [])}
@@ -199,7 +281,7 @@ def _simulate_from_trade_history(
 
     max_dd = _max_drawdown(equity)
     total_return_pct = (eq - float(initial_capital)) / float(initial_capital) if initial_capital else 0.0
-    return {
+    summary = {
         "total_return": float(total_profit),  # alias for backward compat
         "total_profit": float(total_profit),
         "total_return_pct": float(total_return_pct),
@@ -211,6 +293,13 @@ def _simulate_from_trade_history(
         "gross_profit": float(gross_profit),
         "gross_loss": float(gross_loss),
     }
+    return _augment_distribution_metrics(
+        summary=summary,
+        pnl_events=pnl_events,
+        initial_capital=float(initial_capital),
+        path_risk_records=None,
+        execution_drag_fractions=None,
+    )
 
 
 def _simulate_walk_forward(
@@ -231,7 +320,7 @@ def _simulate_walk_forward(
     signal_max_risk_score: float = 0.7,
     disable_quant_validation: bool = False,
     disable_volatility_filter: bool = False,
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     ohlcv = source_db.load_ohlcv(list(tickers), start_date=window.start_date, end_date=window.end_date)
     if ohlcv.empty:
         return {"total_return": 0.0, "profit_factor": 0.0, "win_rate": 0.0, "max_drawdown": 0.0, "total_trades": 0}
@@ -261,6 +350,9 @@ def _simulate_walk_forward(
     profile = str(forecaster_profile or "full").strip().lower()
     if profile not in {"full", "fast", "mssa_only"}:
         raise ValueError("forecaster_profile must be one of {'full','fast','mssa_only'}")
+    path_risk_records: List[Dict[str, Any]] = []
+    execution_drag_fractions: List[float] = []
+    realized_pnl_events: List[Tuple[str, str, float]] = []
 
     frames_by_ticker: Dict[str, pd.DataFrame] = {
         str(sym).upper(): df.sort_index() for sym, df in ohlcv.groupby("ticker")
@@ -339,11 +431,23 @@ def _simulate_walk_forward(
                 "action": getattr(ts_signal, "action", "HOLD"),
                 "confidence": float(getattr(ts_signal, "confidence", 0.0)),
                 "expected_return": float(getattr(ts_signal, "expected_return", 0.0)),
+                "expected_return_net": float((getattr(ts_signal, "provenance", {}) or {}).get("expected_return_net", 0.0)),
+                "roundtrip_cost_bps": float((getattr(ts_signal, "provenance", {}) or {}).get("roundtrip_cost_bps", 0.0)),
                 "forecast_horizon": int(getattr(ts_signal, "forecast_horizon", forecast_horizon)),
                 "stop_loss": getattr(ts_signal, "stop_loss", None),
                 "target_price": getattr(ts_signal, "target_price", None),
                 "source": "TIME_SERIES",
             }
+
+            context = build_barbell_market_context(
+                signal_payload=signal_dict,
+                market_data=engine_frame,
+                detected_regime=str(forecast_bundle.get("detected_regime") or "").strip().upper() or None,
+            )
+            path_risk = evaluate_barbell_path_risk(context=context, cfg=barbell_cfg)
+            signal_dict["barbell_path_risk_ok"] = bool(path_risk.get("barbell_path_risk_ok", True))
+            signal_dict["barbell_diagnostics"] = dict(path_risk.get("diagnostics") or {})
+            signal_dict["barbell_diagnostics"]["path_risk_checks"] = dict(path_risk.get("path_risk_checks") or {})
 
             if enable_barbell_sizing:
                 signal_dict["confidence"] = _apply_barbell_confidence(
@@ -351,9 +455,27 @@ def _simulate_walk_forward(
                     confidence=signal_dict["confidence"],
                     cfg=barbell_cfg,
                     multipliers=multipliers,
+                    context=context,
                 )
 
-            engine.execute_signal(signal_dict, market_data=engine_frame)
+            result = engine.execute_signal(signal_dict, market_data=engine_frame)
+            if result and result.status == "EXECUTED":
+                trade = result.trade
+                trade_date = str(date.date().isoformat()) if hasattr(date, "date") else str(date)
+                if trade is not None and trade.realized_pnl not in (None, 0):
+                    realized_pnl_events.append((trade_date, signal_dict["ticker"], float(trade.realized_pnl)))
+                path_record = {
+                    "barbell_path_risk_ok": bool(path_risk.get("barbell_path_risk_ok", True)),
+                    "roundtrip_cost_to_edge": signal_dict["barbell_diagnostics"].get("roundtrip_cost_to_edge"),
+                    "gap_risk_to_edge": signal_dict["barbell_diagnostics"].get("gap_risk_to_edge"),
+                    "funding_to_edge": signal_dict["barbell_diagnostics"].get("funding_to_edge"),
+                    "liquidity_to_depth": signal_dict["barbell_diagnostics"].get("liquidity_to_depth"),
+                }
+                path_risk_records.append(path_record)
+                try:
+                    execution_drag_fractions.append(float(signal_dict.get("roundtrip_cost_bps", 0.0)) / 1e4)
+                except (TypeError, ValueError):
+                    pass
 
         if price_map:
             # PaperTradingEngine expects plain tickers.
@@ -366,7 +488,7 @@ def _simulate_walk_forward(
     total_profit = float(summary.get("total_profit") or 0.0)
     total_return_pct = (final_equity - float(initial_capital)) / float(initial_capital) if initial_capital else 0.0
 
-    return {
+    summary_metrics = {
         # Backward-compatible alias: "total_return" historically meant total_profit ($).
         "total_return": total_profit,
         "total_profit": total_profit,
@@ -384,6 +506,13 @@ def _simulate_walk_forward(
             )
         ),
     }
+    return _augment_distribution_metrics(
+        summary=summary_metrics,
+        pnl_events=realized_pnl_events,
+        initial_capital=float(initial_capital),
+        path_risk_records=path_risk_records,
+        execution_drag_fractions=execution_drag_fractions,
+    )
 
 
 def run_barbell_eval(
@@ -509,6 +638,7 @@ def run_barbell_eval(
         "passed": bool(decision.passed),
         "reason": decision.reason,
         "evidence_source": decision.evidence_source,
+        "checks": dict(decision.checks or {}),
     }
     try:
         db.close()

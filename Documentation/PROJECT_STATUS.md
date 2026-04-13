@@ -1,16 +1,22 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified (focused)**: 2026-03-02
-**Last full-suite**: 2026-03-02
+**Last verified (focused)**: 2026-04-12
+**Last full-suite**: 2026-04-11
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-03-02
+**Document updated**: 2026-04-12
 
 ## Delta (2026-04-08)
 
 - Canonical objective policy now lives in `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
 - Implemented documentation rule: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
 - Older sections in this file remain useful evidence, but when they describe Sharpe, win rate, or generic forecast neatness as the primary goal, treat that wording as historical context rather than the current repo-wide default.
+
+## Delta (2026-04-12)
+
+- Latest unattended gate snapshot is materially cleaner, but not genuinely green end-to-end: `ci_integrity_gate`, `check_quant_validation_health`, `production_audit_gate`, and `production_gate_schema` are green, while `institutional_unattended_gate` still fails because `WARMUP_COVERED_PASS` is not accepted as unattended-ready.
+- The earlier cross-mode contamination blocker is cleared in the current snapshot, and quant-validation health is GREEN with `728 PASS / 0 FAIL`.
+- Treat the current warmup-covered posture as an operational improvement, not as proof that the repo now passes on its own merit.
 
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 
@@ -123,7 +129,7 @@ Do not conflate these.
 ## Verified Now
 
 - Code compiles cleanly (`python -m compileall` on core packages)
-- Full pytest suite passes: **529 tests** (last full-suite run 2026-01-07; still green)
+- Fast regression lane passes: **2375 passed, 3 skipped, 45 deselected, 10 xfailed** (`pytest -m "not gpu and not slow" --tb=short -q`, 2026-04-12)
 - Historical brutal harness validation completed with quant-validation health GREEN (artifacts pruned from git during 2026-02-25 hygiene cleanup; regenerate locally when needed)
 - LLM monitoring script no longer errors on missing `llm_db_manager` (see `scripts/monitor_llm_system.py`)
 - Time Series execution validation prefers TS provenance edge (`net_trade_return` / `roundtrip_cost_*`) over historical drift fallbacks
@@ -235,14 +241,13 @@ Report artifact: `reports/mvs_paper_window_20251226_183023.md`
 
 ## Current Status (Reality-Based)
 
-- Engineering/Integration: largely unblocked, but runtime is currently `DEGRADED` due to `production_gate` failure.
-- Profitability/Quant Health: quant-validation health is GREEN; proof runway is not ready (`0/30` closed trades and `0/21` trading days).
+- Engineering/Integration: current unattended stack is mostly green, but not genuinely unattended-ready; integrity, quant health, and production audit pass, while the institutional latch still blocks `WARMUP_COVERED_PASS`.
+- Profitability/Quant Health: quant-validation health is GREEN in the latest gate snapshot; continue accumulating recent-window evidence for live/paper profitability separately from the gate state.
 - LLM (Ollama) live inference: optional; integration tests skip unless Ollama is running and `RUN_OLLAMA_TESTS=1`.
 
-## Pending Tasks (Highest Value Next)
+## Current Operational Focus
 
-1. Fix `scripts/validate_profitability_proof.py` import-path collision (`integrity.sqlite_guardrails`) so profitability proof gate can execute.
-2. Increase unique audit windows using AS-OF diversification until lift holding-period evidence reaches requirement (`>=20` effective audits).
-3. Implement Workstream B telemetry from `Documentation/SIGNAL_QUALITY_ENRICHMENT_REVIEW_AND_PLAN_2026-02-25.md` (cross-sectional fallback counters + seasonal availability rate).
-4. Restore OpenClaw WhatsApp listener readiness for reliable gate notifications.
-5. Continue recent-window MVS accumulation (`>=30` realized trades, positive PnL, WR/PF thresholds) on paper/live-like runs.
+1. Keep the recent-window paper/live evidence stream growing so profitability claims stay fresh.
+2. Keep close-linkage and contamination checks clean after resume-based and lot-aware closes.
+3. Refresh the unattended gate snapshot after any code or config change that touches execution, persistence, or monitoring.
+4. Continue validating broker/live data-source paths against the `DATA_SOURCE=ctrader` contract.

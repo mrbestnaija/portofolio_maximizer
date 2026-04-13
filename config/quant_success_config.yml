@@ -31,7 +31,11 @@ quant_validation:
     min_sortino: -0.10           # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     max_drawdown: 0.45           # Phase 7.10: Widened from 0.40 to accommodate volatility
     min_omega_ratio: 1.00        # Barbell-aware hurdle: require gain mass to beat loss mass around NGN hurdle
-    min_profit_factor: 0.80      # Phase 7.10: Lowered from 1.00; allow marginal trades that contribute to portfolio diversification
+    min_omega_robustness_score: 0.45  # Require Omega to survive realistic hurdle escalation, not just K=0
+    min_payoff_asymmetry: 1.25   # Avg winner must exceed avg loser by 25%+; 2.65x realized profile remains a soft upside target, not a hard gate
+    min_trimmed_payoff_asymmetry: 1.10  # Support-aware asymmetry floor after trimming concentrated tail winners/losses
+    max_winner_concentration_ratio: 0.60  # One winner must not dominate realized convexity proof
+    min_profit_factor: 0.80      # Retained as a secondary realized-quality metric; lower weight than payoff asymmetry because PF mixes hit-rate with payoff shape
     min_win_rate: 0.30           # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     min_expected_profit: 5.00          # Phase 7.10b: Absolute floor ($); raised from 0.50 to prevent trivially small trades
     min_expected_profit_pct: 0.002    # Phase 7.10b: Relative floor (0.2% of capital_base=$50); PASS if either met
@@ -40,37 +44,60 @@ quant_validation:
     min_terminal_directional_accuracy: 0.45  # Canonical directional gate for multi-bar trade alignment
     min_directional_accuracy: 0.45           # Deprecated alias; kept for one compatibility pass
     min_expected_shortfall: -0.0108         # 10× NGN daily hurdle (~1.08%/day CVaR floor); ES is tail loss not return hurdle
+    bucket_hard_gate_criteria:
+      safe: []
+      core:
+        - expected_shortfall
+      spec:
+        - expected_shortfall
+        - gap_risk_to_edge
+        - liquidity_to_depth
+    max_gap_risk_to_edge:
+      core: 1.00
+      spec: 0.75
+    max_liquidity_to_depth:
+      core: 0.20
+      spec: 0.10
     require_significance: false
     min_information_ratio: 0.0
 
   # Two-layer scoring is the implementation detail for the canonical domain_utility objective.
-  # Layer 1: structural forecast gates (expected_profit, RMSE ratio, terminal directional edge).
+  # Layer 1: hard economic/statistical blockers only. Forecast-edge RMSE / terminal-DA remain
+  #          visible and scored, but are soft by default so they do not mechanically veto
+  #          asymmetric-payoff trades.
   # Layer 2: continuous domain utility on asymmetric upside and bounded downside.
   scoring_mode: domain_utility        # 'domain_utility' (canonical) or 'all_pass' (legacy)
   pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
   strict_weight_coverage: true       # Fail when a utility component lacks an explicit/known weight or value
+  hard_gate_criteria:
+    - expected_profit
+    - significance
+    - information_ratio
   utility_weights:
     # Barbell-objective weights (Nigeria jurisdiction, 2026-04-10 recalibration):
-    # - Reduced expected_profit 0.24→0.20 and terminal_da 0.18→0.14 to make room
-    #   for terminal_ci_coverage (0.14), which measures stop/target placement quality.
-    # - Halved max_drawdown and expected_shortfall: ES already has domain-specific
-    #   NGN threshold (-0.00108/day); drawdown is correlated with ES so double-weighting
-    #   was penalising tail risk twice.
+    # - Omega + payoff_asymmetry are the two primary upside-shape terms. The
+    #   current 2.65x realized avg-win/avg-loss profile should raise utility
+    #   directly instead of being forced through profit_factor alone.
+    # - profit_factor remains present, but with a lower weight because it mixes
+    #   payoff shape with hit-rate frequency.
+    # - terminal_ci_coverage remains explicit for tail-control / stop placement.
     # Weights sum to 1.0 when terminal_ci_coverage is present; when absent (non-
     # forecast_edge mode), the weight resolver distributes proportionally via defaults.
-    expected_profit: 0.20            # Economic viability of the proposed trade
-    omega_ratio: 0.20                # Barbell-aware upside asymmetry around NGN hurdle
-    profit_factor: 0.18              # Win/loss magnitude quality
-    terminal_directional_accuracy: 0.14  # Multi-step directional alignment with realized trade payoff
-    terminal_ci_coverage: 0.14      # CI quality gate — did realized price land inside forecast CI?
-    max_drawdown: 0.07               # Drawdown containment (correlated with ES; reduced to avoid double-penalty)
-    expected_shortfall: 0.07         # Tail-loss below NGN daily threshold (0.108%/day)
+    expected_profit: 0.18            # Economic viability of the proposed trade; also remains a hard gate by default
+    omega_ratio: 0.20                # Primary realized-distribution hurdle vs NGN carry/friction
+    omega_robustness_score: 0.10     # Survives threshold escalation from K=0 to NGN+execution drag
+    payoff_asymmetry: 0.14           # Direct barbell engine: avg_gain / |avg_loss|
+    profit_factor: 0.10              # Secondary realized quality context
+    terminal_directional_accuracy: 0.10  # Multi-step directional alignment with realized trade payoff
+    terminal_ci_coverage: 0.10      # CI quality gate — did realized price land inside forecast CI?
+    max_drawdown: 0.04               # Drawdown containment
+    expected_shortfall: 0.04         # Tail-loss below NGN daily threshold (0.108%/day)
 
   calibration:
     db_path: "data/portfolio_maximizer.db"  # Explicit path so _calibrate_confidence() executes Platt query
     raw_weight: 0.80              # Weight given to raw (uncalibrated) confidence in the blended output
     max_downside_adjustment: 0.15 # Maximum allowed downward adjustment from Platt correction
-    max_upside_adjustment: 0.10   # Maximum allowed upward adjustment from Platt correction (symmetric cap)
+    max_upside_adjustment: 0.10   # Maximum allowed upward adjustment from Platt correction (guardrail, not primary objective)
 
   # Optional per-ticker overrides for success criteria; used by
   # models/time_series_signal_generator.TimeSeriesSignalGenerator when

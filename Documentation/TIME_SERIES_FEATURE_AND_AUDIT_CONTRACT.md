@@ -9,6 +9,7 @@ production-facing time-series forecast artifact must carry.
 ## Required repo-wide policy fields
 
 - `objective_mode`: Must default to `domain_utility`.
+- `hard_gate_criteria`: The criteria allowed to veto a trade under the barbell objective.
 - `forecast_horizon_bars`: Canonical horizon count in bars.
 - `forecast_horizon_units`: Must be `"bars"` when the horizon is emitted explicitly.
 - `expected_close_source`: How the expected close timestamp was resolved.
@@ -40,6 +41,7 @@ production-facing time-series forecast artifact must carry.
 
 - `expected_profit`
 - `omega_ratio`
+- `payoff_asymmetry`
 - `profit_factor`
 - `terminal_directional_accuracy`
 - `max_drawdown`
@@ -56,6 +58,9 @@ production-facing time-series forecast artifact must carry.
 
 ## Required behaviors
 
+- Under `objective_mode=domain_utility`, only configured `hard_gate_criteria` may veto a trade.
+  Forecast-edge RMSE and terminal directional accuracy remain audit-visible and scored in
+  `utility_breakdown`, but they are soft by default.
 - Ensemble index mismatch must be fail-soft at forecast time and fail-closed in audit/CI gates.
 - Missing residual diagnostics for a model-backed default path must be treated as a governance failure after warmup.
 - Backtests and baseline snapshots must persist provenance fields alongside metrics so comparisons are reproducible.

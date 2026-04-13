@@ -2,7 +2,30 @@
 
 ## 0. Scope & Principles
 
-**Current status (2026-01-07)**: Barbell policy exists (`config/barbell.yml`, `risk/barbell_policy.py`), but NAV tracking/allocator + risk buckets remain unimplemented (see `Documentation/PROJECT_STATUS.md`).
+**Current status (2026-04-12)**: The repo now has:
+- a live barbell shell (`config/barbell.yml`, `risk/barbell_policy.py`)
+- a market-aware barbell confidence overlay (`risk/barbell_sizing.py`, `scripts/run_auto_trader.py`)
+- bucket-level provenance in execution/audit artifacts
+- an asymmetry-first objective where `payoff_asymmetry = avg_gain / |avg_loss|` is
+  measured directly alongside `omega_ratio`, expected shortfall, and drawdown
+
+What is still missing is the full NAV-centric allocator as the single live source of truth. `risk/nav_allocator.py` and `config/risk_buckets.yml` exist, but they remain scaffolding until wired through the production path and backed by promotion evidence.
+
+### Fat-tail interpretation (critical)
+
+- `payoff_asymmetry` is a **convexity detector**, not a standalone proof of robustness.
+  In a Student-t / fat-tail market it rises when rare winners are materially larger than
+  routine losers, which is exactly the barbell sleeve's intended shape.
+- The repo therefore treats payoff asymmetry as one structural engine, not the whole policy.
+  It is paired with:
+  - `omega_ratio` to measure whether the full realized distribution beats the NGN hurdle
+  - `expected_shortfall` and `max_drawdown` to keep left-tail damage bounded
+  - active-management overlays for slippage, liquidity, funding, leverage, gap risk,
+    and regime change so a fat-tail payoff is not over-credited when implementation drag
+    would realistically consume the edge
+- This means we do **not** trim away tail winners just because they are outliers. We keep
+  them visible, but we refuse to treat them as sufficient evidence unless the rest of the
+  distribution and execution context remain healthy.
 
 - [ ] Treat **NAV as the central risk budget** for all sleeves (safe, TS core, ML, LLM, tail hedges, NGX/frontier).
 - [ ] Keep **Time Series (TS) forecasts as primary signal source**, with **LLM strictly as fallback/overlay**.
@@ -109,6 +132,19 @@
   4. **NAV allocation**: apply `risk_buckets.yml` budgets and per-bucket risk scaling.
   5. **Barbell enforcement**: call `BarbellConstraint.project_to_feasible`.
   6. **Order sizing**: convert final target weights to orders and pass to `PaperTradingEngine`.
+- [x] Live barbell confidence overlay already applies active-management penalties for:
+  - round-trip friction relative to edge
+  - liquidity / market depth relative to intended order notional
+  - gap risk relative to edge
+  - leverage
+  - funding drag over the forecast horizon
+  - regime-dependent bucket throttling
+- [x] Live artifacts now record `barbell_bucket`, `barbell_multiplier`, `barbell_bucket_multiplier`,
+  `barbell_regime_multiplier`, `barbell_market_multiplier`, and barbell diagnostics so active
+  management is audit-visible rather than implicit.
+- [x] Active-management cadence is explicitly daily/bar-based rather than static allocation:
+  `rebalance_frequency_bars: 1` in `config/barbell.yml`, so the barbell shell is designed
+  for frequent attention to market conditions, not set-and-forget weighting.
 - [ ] Ensure new logic is **fully bypassed** (no behaviour change) when:
   - [ ] `barbell.enable_barbell_allocation == false` and NAV allocator feature flag is off.
 

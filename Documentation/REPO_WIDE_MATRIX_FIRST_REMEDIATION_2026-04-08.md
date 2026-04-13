@@ -47,6 +47,7 @@ neatness is the primary objective, that statement is superseded by this document
 
 - `expected_profit`
 - `omega_ratio`
+- `payoff_asymmetry`
 - `profit_factor`
 - `terminal_directional_accuracy`
 - `max_drawdown`

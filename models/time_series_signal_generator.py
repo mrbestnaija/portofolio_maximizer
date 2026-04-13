@@ -40,9 +40,22 @@ from etl.portfolio_math import (
     bootstrap_confidence_intervals,
     calculate_enhanced_portfolio_metrics,
     calculate_portfolio_metrics,
+    payoff_asymmetry_support_metrics,
     portfolio_metrics_ngn,
     test_strategy_significance,
 )
+try:  # pragma: no cover - optional for deployments without barbell overlay
+    from risk.barbell_policy import BarbellConfig
+    from risk.barbell_sizing import (
+        barbell_bucket as resolve_barbell_bucket,
+        build_barbell_market_context,
+        evaluate_barbell_path_risk,
+    )
+except Exception:  # pragma: no cover
+    BarbellConfig = None  # type: ignore
+    resolve_barbell_bucket = None  # type: ignore
+    build_barbell_market_context = None  # type: ignore
+    evaluate_barbell_path_risk = None  # type: ignore
 
 try:  # pragma: no cover - optional import for execution references
     from execution.order_manager import request_safe_price
@@ -252,6 +265,7 @@ class TimeSeriesSignalGenerator:
         if runtime_pipeline_id is None:
             runtime_pipeline_id = self._runtime_run_id
         self._runtime_pipeline_id = runtime_pipeline_id
+        self._barbell_cfg = None
 
         # Phase 7.4 FIX: Load forecasting config to preserve ensemble_kwargs during CV
         self._forecasting_config_path = (
@@ -279,6 +293,17 @@ class TimeSeriesSignalGenerator:
             max_risk_score,
             "on" if self._quant_validation_enabled else "off",
         )
+
+    def _get_barbell_config(self):
+        if self._barbell_cfg is not None:
+            return self._barbell_cfg
+        if BarbellConfig is None:
+            return None
+        try:
+            self._barbell_cfg = BarbellConfig.from_yaml()
+        except Exception:  # pragma: no cover - keep generator usable without overlay config
+            self._barbell_cfg = None
+        return self._barbell_cfg
 
     def _load_quant_validation_config(self, override: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Load quant validation configuration from override or disk."""
@@ -987,8 +1012,8 @@ class TimeSeriesSignalGenerator:
                 signal.reasoning = summary if not signal.reasoning else f"{signal.reasoning} | {summary}"
 
                 # When quant validation is enabled, treat FAILED profiles as a hard
-                # gate for new TS trades so that only regimes meeting the configured
-                # profit_factor / win_rate / expected_profit thresholds can open
+                # gate for new TS trades so that only regimes clearing the configured
+                # barbell objective and hard economic/statistical blockers can open
                 # positions. In diagnostic mode this gate is disabled via
                 # _quant_validation_enabled.
                 #
@@ -2082,6 +2107,11 @@ class TimeSeriesSignalGenerator:
         else:
             direction = 1.0
         strategy_returns = log_returns * direction
+        decision_ctx = (signal.provenance or {}).get("decision_context") or {}
+        try:
+            execution_drag_hurdle = float(decision_ctx.get("roundtrip_cost_fraction"))
+        except (TypeError, ValueError):
+            execution_drag_hurdle = None
 
         try:
             metrics = calculate_enhanced_portfolio_metrics(
@@ -2093,16 +2123,30 @@ class TimeSeriesSignalGenerator:
             logger.debug("Unable to compute quant metrics for %s: %s", ticker, exc)
             return None
         try:
-            domain_metrics = portfolio_metrics_ngn(pd.Series(strategy_returns))
+            domain_metrics = portfolio_metrics_ngn(
+                pd.Series(strategy_returns),
+                execution_drag_hurdle=execution_drag_hurdle,
+            )
         except Exception as exc:  # pragma: no cover
             logger.debug("Unable to compute barbell-tail metrics for %s: %s", ticker, exc)
             domain_metrics = {}
         for key in (
             "omega_ratio",
+            "omega_curve",
+            "omega_robustness_score",
+            "omega_monotonicity_ok",
+            "omega_above_hurdle_margin",
+            "omega_robustness_complete",
             "fractional_kelly_fat_tail",
             "ngn_daily_threshold",
             "ngn_annual_hurdle_pct",
             "beats_ngn_hurdle",
+            "n_wins",
+            "n_losses",
+            "winner_concentration_ratio",
+            "trimmed_payoff_asymmetry",
+            "payoff_asymmetry_support_ok",
+            "payoff_asymmetry_effective",
         ):
             if key in domain_metrics:
                 metrics[key] = domain_metrics[key]
@@ -2153,12 +2197,30 @@ class TimeSeriesSignalGenerator:
         allocation = min(max(float(signal.confidence or 0.0), 0.05), 1.0)
         safe_price = request_safe_price(signal.entry_price)
         position_value = capital_base * allocation
-        ctx = (signal.provenance or {}).get("decision_context") or {}
+        ctx = decision_ctx
         try:
             net_trade_return = float(ctx.get("net_trade_return"))
         except (TypeError, ValueError):
             net_trade_return = max(0.0, abs(float(signal.expected_return or 0.0)))
         expected_profit = position_value * net_trade_return
+        path_metrics = self._collect_barbell_path_metrics(
+            ticker=ticker,
+            signal=signal,
+            market_data=market_data,
+            position_value=position_value,
+        )
+        if path_metrics:
+            metrics.update(
+                {
+                    "barbell_bucket": path_metrics.get("barbell_bucket"),
+                    "roundtrip_cost_to_edge": path_metrics.get("roundtrip_cost_to_edge"),
+                    "gap_risk_to_edge": path_metrics.get("gap_risk_to_edge"),
+                    "funding_to_edge": path_metrics.get("funding_to_edge"),
+                    "liquidity_to_depth": path_metrics.get("liquidity_to_depth"),
+                    "leverage": path_metrics.get("leverage"),
+                    "barbell_path_risk_ok": path_metrics.get("barbell_path_risk_ok"),
+                }
+            )
         structural_gates = self._evaluate_success_criteria(
             criteria_cfg=criteria_cfg,
             metrics=metrics,
@@ -2238,6 +2300,13 @@ class TimeSeriesSignalGenerator:
         weight_validation["strict_weight_coverage"] = strict_weight_coverage
         config_warnings = list(domain_utility.get("config_warnings") or [])
         config_warnings.extend(self._ignored_success_threshold_warnings(criteria_cfg))
+        hard_gate_criteria, hard_gate_warnings = self._resolve_hard_gate_criteria(
+            config=config,
+            criteria_cfg=criteria_cfg,
+            structural_gates=structural_gates,
+            bucket=str(metrics.get("barbell_bucket") or ""),
+        )
+        config_warnings.extend(hard_gate_warnings)
         if scoring_mode_raw == "weighted":
             config_warnings.append("deprecated_scoring_mode:weighted")
 
@@ -2246,6 +2315,22 @@ class TimeSeriesSignalGenerator:
         criteria = dict(structural_gates)
         if action != "HOLD":
             criteria["domain_utility"] = utility_pass
+
+        hard_gate_set = set(hard_gate_criteria)
+        hard_gate_results = {
+            name: bool(passed)
+            for name, passed in structural_gates.items()
+            if name in hard_gate_set
+        }
+        soft_gate_results = {
+            name: bool(passed)
+            for name, passed in structural_gates.items()
+            if name not in hard_gate_set
+        }
+        hard_failed = sorted(name for name, passed in hard_gate_results.items() if not passed)
+        soft_failed = sorted(name for name, passed in soft_gate_results.items() if not passed)
+        hard_gate_pass = all(hard_gate_results.values()) if hard_gate_results else True
+        soft_gate_pass = all(soft_gate_results.values()) if soft_gate_results else True
 
         if action == "HOLD":
             # HOLD is non-actionable for trade-health metrics; keep as SKIPPED.
@@ -2262,7 +2347,7 @@ class TimeSeriesSignalGenerator:
             # Hard gate: negative expected_profit is always FAIL regardless of score.
             if expected_profit < 0:
                 status = "FAIL"
-            elif any(not passed for passed in structural_gates.values()):
+            elif not hard_gate_pass:
                 status = "FAIL"
             elif strict_weight_coverage and not bool(weight_validation.get("coverage_ok", True)):
                 status = "FAIL"
@@ -2271,7 +2356,17 @@ class TimeSeriesSignalGenerator:
             else:
                 status = "PASS" if utility_pass else "FAIL"
 
-        failed = [name for name, passed in criteria.items() if not passed]
+        failed: List[str] = []
+        if status == "FAIL":
+            if scoring_mode == "all_pass":
+                failed = sorted(name for name, passed in criteria.items() if not passed)
+            else:
+                failed = list(hard_failed)
+                if not utility_pass:
+                    failed.append("domain_utility")
+                if strict_weight_coverage and not bool(weight_validation.get("coverage_ok", True)):
+                    failed.append("weight_coverage")
+                failed = sorted(set(failed))
 
         return {
             'status': status,
@@ -2283,19 +2378,41 @@ class TimeSeriesSignalGenerator:
                 'volatility': metrics.get('volatility'),
                 'expected_shortfall': metrics.get('expected_shortfall'),
                 'omega_ratio': metrics.get('omega_ratio'),
+                'omega_curve': metrics.get('omega_curve'),
+                'omega_robustness_score': metrics.get('omega_robustness_score'),
+                'omega_monotonicity_ok': metrics.get('omega_monotonicity_ok'),
+                'omega_above_hurdle_margin': metrics.get('omega_above_hurdle_margin'),
+                'payoff_asymmetry': performance_snapshot.get('payoff_asymmetry'),
+                'trimmed_payoff_asymmetry': performance_snapshot.get('trimmed_payoff_asymmetry'),
+                'winner_concentration_ratio': performance_snapshot.get('winner_concentration_ratio'),
+                'payoff_asymmetry_support_ok': performance_snapshot.get('payoff_asymmetry_support_ok'),
+                'payoff_asymmetry_effective': performance_snapshot.get('payoff_asymmetry_effective'),
                 'win_rate': performance_snapshot.get('win_rate'),
                 'profit_factor': performance_snapshot.get('profit_factor'),
+                'gap_risk_to_edge': metrics.get('gap_risk_to_edge'),
+                'liquidity_to_depth': metrics.get('liquidity_to_depth'),
+                'barbell_path_risk_ok': metrics.get('barbell_path_risk_ok'),
             },
             'diagnostics': {
                 'win_rate': performance_snapshot.get('win_rate'),
                 'sharpe_ratio': metrics.get('sharpe_ratio'),
                 'sortino_ratio': metrics.get('sortino_ratio'),
                 'directional_accuracy': edge_block.get('directional_accuracy'),
+                'barbell_bucket': metrics.get('barbell_bucket'),
+                'gap_risk_to_edge': metrics.get('gap_risk_to_edge'),
+                'liquidity_to_depth': metrics.get('liquidity_to_depth'),
+                'roundtrip_cost_to_edge': metrics.get('roundtrip_cost_to_edge'),
+                'funding_to_edge': metrics.get('funding_to_edge'),
+                'barbell_path_risk_ok': metrics.get('barbell_path_risk_ok'),
             },
             'forecast_edge': edge_block,
             'bootstrap': bootstrap_stats,
             'criteria': criteria,
             'structural_gates': structural_gates,
+            'hard_gate_criteria': sorted(hard_gate_results.keys()),
+            'soft_gate_criteria': sorted(soft_gate_results.keys()),
+            'hard_failed_criteria': hard_failed,
+            'soft_failed_criteria': soft_failed,
             'failed_criteria': failed,
             'utility_breakdown': utility_breakdown,
             'utility_score': utility_score,
@@ -2307,6 +2424,8 @@ class TimeSeriesSignalGenerator:
                 'utility_score': utility_score,
                 'utility_pass': utility_pass,
                 'structural_pass': bool(structural_gates) and all(structural_gates.values()),
+                'structural_hard_pass': hard_gate_pass,
+                'structural_soft_pass': soft_gate_pass,
                 'total_weight': total_weight,
             },
             'config_warnings': sorted(set(config_warnings)),
@@ -2498,7 +2617,10 @@ class TimeSeriesSignalGenerator:
         """Return simplified performance stats used for config thresholds."""
         if returns.size == 0:
             return {'win_rate': 0.0, 'profit_factor': 0.0, 'gross_profit': 0.0, 'gross_loss': 0.0,
-                    'avg_gain': 0.0, 'avg_loss': 0.0}
+                    'avg_gain': 0.0, 'avg_loss': 0.0, 'payoff_asymmetry': 0.0,
+                    'n_wins': 0, 'n_losses': 0, 'winner_concentration_ratio': 0.0,
+                    'trimmed_payoff_asymmetry': 0.0, 'payoff_asymmetry_support_ok': False,
+                    'payoff_asymmetry_effective': 0.0}
 
         positive = returns[returns > 0]
         negative = returns[returns < 0]
@@ -2508,14 +2630,29 @@ class TimeSeriesSignalGenerator:
             profit_factor = gross_profit / gross_loss
         else:
             profit_factor = float('inf') if gross_profit > 0 else 0.0
+        avg_gain = float(positive.mean()) if positive.size else 0.0
+        avg_loss = float(negative.mean()) if negative.size else 0.0
+        if positive.size and negative.size and abs(avg_loss) > 1e-8:
+            payoff_asymmetry = avg_gain / abs(avg_loss)
+        else:
+            payoff_asymmetry = float('inf') if positive.size else 0.0
+
+        support = payoff_asymmetry_support_metrics(pd.Series(returns))
 
         return {
             'win_rate': float(positive.size / returns.size),
             'profit_factor': float(profit_factor),
             'gross_profit': gross_profit,
             'gross_loss': gross_loss,
-            'avg_gain': float(positive.mean()) if positive.size else 0.0,
-            'avg_loss': float(negative.mean()) if negative.size else 0.0,
+            'avg_gain': avg_gain,
+            'avg_loss': avg_loss,
+            'payoff_asymmetry': float(payoff_asymmetry),
+            'n_wins': int(support.get('n_wins', positive.size)),
+            'n_losses': int(support.get('n_losses', negative.size)),
+            'winner_concentration_ratio': float(support.get('winner_concentration_ratio', 0.0)),
+            'trimmed_payoff_asymmetry': float(support.get('trimmed_payoff_asymmetry', 0.0)),
+            'payoff_asymmetry_support_ok': bool(support.get('payoff_asymmetry_support_ok', False)),
+            'payoff_asymmetry_effective': float(support.get('payoff_asymmetry_effective', 0.0)),
         }
 
     @staticmethod
@@ -2616,24 +2753,27 @@ class TimeSeriesSignalGenerator:
         """Default weights for the asymmetry-first domain utility scorer.
 
         Weight rationale (barbell objective, Nigeria jurisdiction):
-        - expected_profit (0.20): primary economic gate — signal must clear transaction
-          costs and produce meaningful dollar edge; reduced from 0.24 to make room for
-          CI calibration quality, which governs tail-risk management.
-        - omega_ratio (0.20): distribution-free barbell metric; beats NGN hurdle more
-          than it misses it.  Sharpe is excluded — it penalises asymmetric upside.
-        - profit_factor (0.18): dollar-weighted win/loss ratio; captures asymmetry
-          that win-rate misses (one large winner > many small losers).
-        - terminal_directional_accuracy (0.14): did the forecast call the 30-bar
+        - expected_profit (0.18): primary economic gate — signal must clear transaction
+          costs and produce meaningful dollar edge. Slightly reduced because it
+          already remains a hard gate by default.
+        - omega_ratio (0.24): primary barbell outcome metric; if this rises above 1.0,
+          the realized return distribution is beating the NGN hurdle.
+        - payoff_asymmetry (0.16): avg_win / |avg_loss|. This is the structural engine
+          behind the current 2.65x realized winner/loser profile and should be scored
+          directly instead of only being inferred via profit factor.
+        - profit_factor (0.10): retains realized dollar win/loss context, but with lower
+          weight because it mixes payoff shape with hit-rate frequency.
+        - terminal_directional_accuracy (0.10): did the forecast call the 30-bar
           direction correctly?  Reduced from 0.18 because it is only meaningful when
           n_obs >= 30 and the 0.50 boundary already has zero normalized score.
-        - terminal_ci_coverage (0.14): did the actual terminal price land inside the
+        - terminal_ci_coverage (0.10): did the actual terminal price land inside the
           CI?  This directly measures whether the model's uncertainty quantification
           is trustworthy for stop/target placement — the barbell's tail-control axis.
           A model with better CI coverage supports more accurate position sizing even
           if its point-forecast RMSE is worse.
-        - max_drawdown (0.07): loss-control gate; capped at 7% because the ES component
-          already captures the tail and drawdown is correlated.
-        - expected_shortfall (0.07): tail-loss below NGN daily threshold (~0.108%/day);
+        - max_drawdown (0.06): loss-control gate; kept explicit so upside does not win
+          by simply ignoring the path of losses.
+        - expected_shortfall (0.06): tail-loss below NGN daily threshold (~0.108%/day);
           uses domain-specific hurdle, not generic -0.02 USD floor.
 
         Weights sum to 1.0.  terminal_ci_coverage is only injected when available
@@ -2641,13 +2781,15 @@ class TimeSeriesSignalGenerator:
         the weight resolver distributes proportionally among present components.
         """
         return {
-            "expected_profit": 0.20,
+            "expected_profit": 0.18,
             "omega_ratio": 0.20,
-            "profit_factor": 0.18,
-            "terminal_directional_accuracy": 0.14,
-            "terminal_ci_coverage": 0.14,
-            "max_drawdown": 0.07,
-            "expected_shortfall": 0.07,
+            "omega_robustness_score": 0.10,
+            "payoff_asymmetry": 0.14,
+            "profit_factor": 0.10,
+            "terminal_directional_accuracy": 0.10,
+            "terminal_ci_coverage": 0.10,
+            "max_drawdown": 0.04,
+            "expected_shortfall": 0.04,
         }
 
     @staticmethod
@@ -2707,6 +2849,115 @@ class TimeSeriesSignalGenerator:
         return [f"ignored_success_threshold:{key}" for key in ignored_keys if key in criteria_cfg]
 
     @staticmethod
+    def _resolve_bucket_threshold(
+        criteria_cfg: Optional[Dict[str, Any]],
+        key: str,
+        bucket: str,
+        default: Optional[float] = None,
+    ) -> Optional[float]:
+        if not isinstance(criteria_cfg, dict):
+            return default
+        raw = criteria_cfg.get(key)
+        if isinstance(raw, dict):
+            raw = raw.get(bucket) if bucket in raw else raw.get("default", default)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    def _collect_barbell_path_metrics(
+        self,
+        *,
+        ticker: str,
+        signal: TimeSeriesSignal,
+        market_data: Optional[pd.DataFrame],
+        position_value: float,
+    ) -> Dict[str, Any]:
+        cfg = self._get_barbell_config()
+        if (
+            cfg is None
+            or build_barbell_market_context is None
+            or evaluate_barbell_path_risk is None
+            or resolve_barbell_bucket is None
+        ):
+            return {}
+
+        provenance = signal.provenance if isinstance(signal.provenance, dict) else {}
+        decision_ctx = provenance.get("decision_context") if isinstance(provenance.get("decision_context"), dict) else {}
+        signal_payload = {
+            "expected_return_net": decision_ctx.get("net_trade_return", getattr(signal, "expected_return", None)),
+            "forecast_horizon": getattr(signal, "forecast_horizon", None),
+            "roundtrip_cost_bps": decision_ctx.get("roundtrip_cost_bps"),
+            "position_value": position_value,
+            "leverage": decision_ctx.get("leverage") or provenance.get("leverage"),
+        }
+        try:
+            context = build_barbell_market_context(
+                signal_payload=signal_payload,
+                market_data=market_data,
+                detected_regime=str(provenance.get("detected_regime") or "").strip().upper() or None,
+            )
+        except Exception:
+            return {}
+
+        assessed = evaluate_barbell_path_risk(context=context, cfg=cfg)
+        diagnostics = dict(assessed.get("diagnostics") or {})
+        diagnostics["barbell_path_risk_ok"] = bool(assessed.get("barbell_path_risk_ok", True))
+        diagnostics["path_risk_checks"] = dict(assessed.get("path_risk_checks") or {})
+        diagnostics["barbell_bucket"] = resolve_barbell_bucket(ticker, cfg)
+        return diagnostics
+
+    @staticmethod
+    def _default_hard_gate_criteria() -> Tuple[str, ...]:
+        """Criteria that remain hard blockers under the barbell objective by default."""
+        return ("expected_profit", "significance", "information_ratio")
+
+    def _resolve_hard_gate_criteria(
+        self,
+        *,
+        config: Optional[Dict[str, Any]],
+        criteria_cfg: Optional[Dict[str, Any]],
+        structural_gates: Dict[str, bool],
+        bucket: Optional[str] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """Resolve hard-gate criteria without letting soft forecast diagnostics veto payoff asymmetry."""
+        raw_config = config if isinstance(config, dict) else {}
+        configured = raw_config.get("hard_gate_criteria")
+        warnings: List[str] = []
+        if configured is None and raw_config.get("structural_hard_gate_criteria") is not None:
+            configured = raw_config.get("structural_hard_gate_criteria")
+            warnings.append("deprecated_config_key:structural_hard_gate_criteria")
+
+        if isinstance(configured, (list, tuple, set)):
+            requested = [self._canonical_criterion_key(str(item)) for item in configured]
+        else:
+            requested = [self._canonical_criterion_key(item) for item in self._default_hard_gate_criteria()]
+
+        hard_gate_keys: List[str] = []
+        for key in requested:
+            if key and key in structural_gates and key not in hard_gate_keys:
+                hard_gate_keys.append(key)
+
+        # expected_profit remains a non-negotiable economic viability gate whenever present.
+        if "expected_profit" in structural_gates and "expected_profit" not in hard_gate_keys:
+            hard_gate_keys.insert(0, "expected_profit")
+
+        if isinstance(criteria_cfg, dict):
+            bucket_cfg = criteria_cfg.get("bucket_hard_gate_criteria")
+            requested_bucket = str(bucket or "").strip().lower()
+            if isinstance(bucket_cfg, dict) and requested_bucket:
+                bucket_requested = bucket_cfg.get(requested_bucket) or []
+                if isinstance(bucket_requested, (list, tuple, set)):
+                    for raw_key in bucket_requested:
+                        key = self._canonical_criterion_key(str(raw_key))
+                        if key and key in structural_gates and key not in hard_gate_keys:
+                            hard_gate_keys.append(key)
+
+        return sorted(hard_gate_keys), warnings
+
+    @staticmethod
     def _normalize_domain_utility_component(
         *,
         name: str,
@@ -2723,7 +2974,7 @@ class TimeSeriesSignalGenerator:
         if math.isnan(raw):
             return None, False
 
-        if key in {"omega_ratio", "profit_factor"}:
+        if key in {"omega_ratio", "profit_factor", "payoff_asymmetry", "payoff_asymmetry_effective"}:
             try:
                 thr = float(threshold)
             except (TypeError, ValueError):
@@ -2733,6 +2984,17 @@ class TimeSeriesSignalGenerator:
                 return (1.0 if raw > 0 else 0.0), bool(raw > 0)
             passed = raw >= thr
             normalized = math.log1p(max(raw, 0.0) / thr) / math.log1p(3.0)
+            return float(np.clip(normalized, 0.0, 1.0)), passed
+
+        if key == "omega_robustness_score":
+            try:
+                thr = float(threshold)
+            except (TypeError, ValueError):
+                thr = 0.45
+            thr = float(np.clip(thr, 0.0, 0.999999))
+            passed = raw >= thr
+            denom = max(1.0 - thr, 1e-6)
+            normalized = (raw - thr) / denom
             return float(np.clip(normalized, 0.0, 1.0)), passed
 
         if key == "expected_profit":
@@ -2859,6 +3121,8 @@ class TimeSeriesSignalGenerator:
         utility_values = {
             "expected_profit": expected_profit,
             "omega_ratio": metrics.get("omega_ratio"),
+            "omega_robustness_score": metrics.get("omega_robustness_score"),
+            "payoff_asymmetry": performance_snapshot.get("payoff_asymmetry"),
             "profit_factor": performance_snapshot.get("profit_factor"),
             "max_drawdown": metrics.get("max_drawdown"),
             "expected_shortfall": metrics.get("expected_shortfall"),
@@ -2869,6 +3133,8 @@ class TimeSeriesSignalGenerator:
         utility_thresholds = {
             "expected_profit": expected_profit_floor,
             "omega_ratio": (criteria_cfg or {}).get("min_omega_ratio", 1.0),
+            "omega_robustness_score": (criteria_cfg or {}).get("min_omega_robustness_score", 0.45),
+            "payoff_asymmetry": (criteria_cfg or {}).get("min_payoff_asymmetry", 1.25),
             "profit_factor": (criteria_cfg or {}).get("min_profit_factor", 1.0),
             "max_drawdown": (criteria_cfg or {}).get("max_drawdown", 0.25),
             "expected_shortfall": expected_shortfall_threshold,
@@ -3039,6 +3305,49 @@ class TimeSeriesSignalGenerator:
             ir = significance.get('information_ratio')
             if ir is not None:
                 results['information_ratio'] = float(ir) >= float(criteria_cfg['min_information_ratio'])
+
+        bucket = str(metrics.get("barbell_bucket") or "").strip().lower()
+        bucket_cfg = criteria_cfg.get("bucket_hard_gate_criteria")
+        requested_bucket_gates = []
+        if isinstance(bucket_cfg, dict) and bucket:
+            raw_requested = bucket_cfg.get(bucket) or []
+            if isinstance(raw_requested, (list, tuple, set)):
+                requested_bucket_gates = [str(item).strip().lower().replace("-", "_") for item in raw_requested if str(item).strip()]
+
+        if "expected_shortfall" in requested_bucket_gates:
+            try:
+                es_value = metrics.get("expected_shortfall")
+                es_threshold = float(criteria_cfg.get("min_expected_shortfall", -0.0108))
+                results["expected_shortfall"] = es_value is not None and float(es_value) >= es_threshold
+            except (TypeError, ValueError):
+                results["expected_shortfall"] = False
+
+        if "gap_risk_to_edge" in requested_bucket_gates:
+            ratio = metrics.get("gap_risk_to_edge")
+            threshold = TimeSeriesSignalGenerator._resolve_bucket_threshold(
+                criteria_cfg,
+                "max_gap_risk_to_edge",
+                bucket,
+                default=None,
+            )
+            results["gap_risk_to_edge"] = (
+                ratio is not None and threshold is not None and float(ratio) <= float(threshold)
+            )
+
+        if "liquidity_to_depth" in requested_bucket_gates:
+            ratio = metrics.get("liquidity_to_depth")
+            threshold = TimeSeriesSignalGenerator._resolve_bucket_threshold(
+                criteria_cfg,
+                "max_liquidity_to_depth",
+                bucket,
+                default=None,
+            )
+            results["liquidity_to_depth"] = (
+                ratio is not None and threshold is not None and float(ratio) <= float(threshold)
+            )
+
+        if "barbell_path_risk_ok" in requested_bucket_gates:
+            results["barbell_path_risk_ok"] = bool(metrics.get("barbell_path_risk_ok"))
 
         return results
 

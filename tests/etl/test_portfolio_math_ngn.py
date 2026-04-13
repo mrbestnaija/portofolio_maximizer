@@ -2,11 +2,9 @@
 Tests for Nigeria-extension functions added to etl/portfolio_math.
 
 Additive only — no existing test is modified or affected.
-These functions are Phase 11 stubs; wiring (Phases B-E) begins after
-THIN_LINKAGE >= 10 (gate warmup expires 2026-04-15).
-
 Design contract:
 - omega_ratio: distribution-free hurdle metric replacing Sharpe for barbell
+- payoff_asymmetry_ratio: direct avg_win / |avg_loss| payoff-shape metric
 - fractional_kelly_fat_tail: kurtosis-corrected quarter-Kelly sizing
 - effective_ngn_return: USD -> NGN return after P2P bridge friction
 - portfolio_metrics_ngn: additive extension of calculate_enhanced_portfolio_metrics
@@ -28,6 +26,7 @@ from etl.portfolio_math import (
     effective_ngn_return,
     fractional_kelly_fat_tail,
     omega_ratio,
+    payoff_asymmetry_ratio,
     portfolio_metrics_ngn,
 )
 
@@ -144,6 +143,27 @@ class TestOmegaRatio:
         omegas = [omega_ratio(profitable_series, threshold=t) for t in thresholds]
         for i in range(len(omegas) - 1):
             assert omegas[i] >= omegas[i + 1] or math.isinf(omegas[i])
+
+
+# ---------------------------------------------------------------------------
+# payoff_asymmetry_ratio
+# ---------------------------------------------------------------------------
+
+class TestPayoffAsymmetryRatio:
+
+    def test_ratio_exceeds_one_when_winners_dominate(self):
+        returns = pd.Series([0.04, -0.01, 0.05, -0.02, 0.03, -0.01])
+        assert payoff_asymmetry_ratio(returns) > 1.0
+
+    def test_ratio_is_infinite_when_losses_absent(self):
+        returns = pd.Series([0.01, 0.03, 0.02, 0.04])
+        assert payoff_asymmetry_ratio(returns) == float("inf")
+
+    def test_ratio_nan_for_empty_input(self):
+        assert math.isnan(payoff_asymmetry_ratio(pd.Series(dtype=float)))
+
+    def test_ratio_nan_for_none(self):
+        assert math.isnan(payoff_asymmetry_ratio(None))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +284,7 @@ class TestPortfolioMetricsNGN:
 
     def test_ngn_keys_present(self, profitable_series):
         m = portfolio_metrics_ngn(profitable_series)
-        for key in ("omega_ratio", "beats_ngn_hurdle", "ngn_daily_threshold",
+        for key in ("omega_ratio", "payoff_asymmetry", "beats_ngn_hurdle", "ngn_daily_threshold",
                     "ngn_annual_hurdle_pct", "fractional_kelly_fat_tail"):
             assert key in m, f"Missing key: {key}"
 
@@ -288,6 +308,14 @@ class TestPortfolioMetricsNGN:
         m = portfolio_metrics_ngn(profitable_series)
         standalone = omega_ratio(profitable_series)
         assert abs(m["omega_ratio"] - standalone) < 1e-10
+
+    def test_payoff_asymmetry_consistent_with_standalone(self, profitable_series):
+        m = portfolio_metrics_ngn(profitable_series)
+        standalone = payoff_asymmetry_ratio(profitable_series)
+        if math.isinf(standalone):
+            assert math.isinf(m["payoff_asymmetry"])
+        else:
+            assert abs(m["payoff_asymmetry"] - standalone) < 1e-10
 
     def test_losing_series_does_not_beat_hurdle(self, losing_series):
         m = portfolio_metrics_ngn(losing_series)

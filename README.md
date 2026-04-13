@@ -3,7 +3,7 @@
 [![Python 3.10-3.12](https://img.shields.io/badge/python-3.10--3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Phase 11 Active](https://img.shields.io/badge/Phase%2011-Active-blue.svg)](Documentation/)
-[![Fast Lane: 2355 passing](https://img.shields.io/badge/fast%20lane-2355%20passing-success.svg)](tests/)
+[![Fast Lane: 2375 passing](https://img.shields.io/badge/fast%20lane-2375%20passing-success.svg)](tests/)
 [![Documentation](https://img.shields.io/badge/docs-comprehensive-informational.svg)](Documentation/)
 [![Research Ready](https://img.shields.io/badge/research-reproducible-purple.svg)](#-research--reproducibility)
 
@@ -14,18 +14,21 @@
 
 **Version**: 4.5
 **Status**: Phase 11 active — Nigeria production path, lot-aware close linkage, domain-calibrated barbell objective
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-04-12
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-04-11)
+## Current Repo Truth (2026-04-12)
 
 - **Canonical objective**: `domain_utility` barbell mode — omega_ratio vs NGN 31% annual hurdle
   (`DAILY_NGN_THRESHOLD = (1.31)^(1/252)-1 ≈ 0.00108/day`) is the primary metric. Win rate is
-  a diagnostic, not a gate. See `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
+  a diagnostic, not a gate. `expected_profit` remains the default hard economic blocker; forecast-edge
+  RMSE / terminal directional accuracy are soft by default and must be explicitly promoted via
+  `quant_validation.hard_gate_criteria` before they can veto asymmetric-payoff trades.
+  See `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
 
 - **Live funnel: lot-aware close linkage (commit 521c37e)** — `trade_close_allocations` table
   + `trade_close_linkages` view enable a single closing trade to link multiple openers (e.g. NVDA
@@ -33,15 +36,16 @@ Telemetry changes must follow the Evidence Integrity Contract (schema version bu
   hardened to reject synthetic-ancestry matches. `PaperTradingEngine` does FIFO lot matching
   at close time and persists allocation rows automatically.
 
-- **Gate state (2026-04-11)**:
-  - `ci_integrity_gate`: **PASS** — CROSS_MODE_CONTAMINATION fixed; only untagged synthetic-opener
-    closes are flagged (tagged closes already excluded from `production_closed_trades`).
+- **Gate state (2026-04-12)**:
+  - `ci_integrity_gate`: **PASS** — cross-mode contamination blocker cleared; current closes are clean.
   - `check_quant_validation_health`: **PASS** (728 PASS, 0 FAIL)
-  - `production_audit_gate`: **PASS** (INCONCLUSIVE_ALLOWED) — warmup until 2026-04-24;
-    `Phase3 ready=True`, `matched=2/2`, `phase3_reason=READY`
-  - `institutional_unattended_gate`: FAIL — `prior_gate_execution` latch only;
-    `WARMUP_COVERED_PASS ≠ GENUINE_PASS` by design (resolves at warmup expiry + real lift evidence)
-  - `overall_passed`: False — institutional latch; not a live-funnel failure
+  - `production_audit_gate`: **PASS** (`WARMUP_COVERED_PASS`) — warmup exemption covers the gap; this is not a genuine unattended pass.
+  - `institutional_unattended_gate`: **FAIL** — intentionally blocks unattended claims while posture is still warmup-covered.
+  - `overall_passed`: **False** — current stack is operationally cleaner, but it still does not genuinely pass on its own merit yet.
+
+- **Live data-source contract**: default secure profile still prioritizes `yfinance`, but `DATA_SOURCE=ctrader`
+  is now honoured by `DataSourceManager` and `run_auto_trader.py` warns when live runs are using
+  non-broker data while `ctrader` is available. This removes the prior documentation/code mismatch.
 
 - **Default tickers**: `AMZN,NVDA,MSFT` — fastest-closing live evidence candidates.
   NVDA avg hold 0.25d; AMZN has clean producer-native NOT_DUE open evidence.
@@ -66,10 +70,11 @@ Telemetry changes must follow the Evidence Integrity Contract (schema version bu
   bottleneck. Confidence below 0.55 floor is the secondary.
 
 - **Latest verification**:
-  - `python -m pytest tests/ -m "not slow and not gpu and not integration" -q`
-  - Result: **2355 passed, 1 skipped, 10 xfailed** (2026-04-11)
+  - `python -m pytest -m "not gpu and not slow" --tb=short -q`
+  - Result: **2375 passed, 3 skipped, 45 deselected, 10 xfailed** (2026-04-12)
   - `python scripts/ci_integrity_gate.py` → `[PASS] All integrity checks passed.`
   - `python scripts/production_audit_gate.py --unattended-profile` → `PASS, Phase3 ready=1`
+  - `python scripts/run_all_gates.py --json` → `overall_passed=false`, blocked only by the genuine-readiness latch (`WARMUP_COVERED_PASS ≠ GENUINE_PASS`)
 
 Historical sections below preserve earlier phase notes for chronology; use this section as the
 current repo baseline.
@@ -113,7 +118,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 **Phase 7.9 Complete** - PnL Integrity Enforcement, Adversarial Audit, OpenClaw Automation:
 
 - **PnL Integrity Framework**: Database-level constraints preventing double-counting, orphaned positions, and diagnostic contamination
-- **Adversarial Audit**: 10-finding stress test revealing 94.2% quant FAIL rate, broken confidence calibration, ensemble underperformance
+- **Historical adversarial audit**: 10-finding stress test that originally revealed a 94.2% quant FAIL rate, broken confidence calibration, and ensemble underperformance
 - **Forecast Audit Gate**: PASS (21.4% violation rate, 28 effective audits, threshold 25%)
 - **OpenClaw Cron Automation**: 9 audit-aligned cron jobs (P0-P2 priority) with real script execution via agentTurn mode
 - **Interactions API**: Security-hardened FastAPI with auth mode enforcement (JWT/API-key/any), CORS, rate limiting
@@ -138,7 +143,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
 - **📊 Advanced Analysis**: MIT-standard time series analysis (ADF, ACF/PACF, stationarity)
 - **📈 Publication-Quality Visualizations**: 8 professional plots with 150 DPI quality
 - **🔄 Robust ETL Pipeline**: 4-stage pipeline with comprehensive validation
-- **✅ Comprehensive Testing**: 2355+ tests with high coverage across ETL, LLM, forecaster, execution, integrity, and security modules
+- **✅ Comprehensive Testing**: 2375+ tests with high coverage across ETL, LLM, forecaster, execution, integrity, and security modules
 - **⚡ High Performance**: Vectorized operations, Parquet format (10x faster than CSV)
 - **🧠 Modular Orchestration**: Dataclass-driven pipeline runner coordinating CV splits, neural/TS stages, and ticker discovery with auditable logging
 - **🔐 Resilient Data Access**: Hardened Yahoo Finance extraction with pooling to reduce transient failures
@@ -175,7 +180,7 @@ Portfolio Maximizer is a self-directed trading stack that marries institutional-
   `NGN_P2P_FRICTION=0.03`, `DAILY_NGN_THRESHOLD`. 39 tests. No existing functions modified.
 - **Default tickers updated**: `AMZN,NVDA,MSFT` — fastest historical close speeds and clean
   producer-native NOT_DUE open evidence (ids 315, 316/317).
-- **Regression baseline**: 2355 passed, 1 skipped, 10 xfailed (fast lane, 2026-04-11).
+- **Regression baseline**: 2375 passed, 3 skipped, 45 deselected, 10 xfailed (fast lane, 2026-04-12).
 
 **Phase 10c + DCR (2026-03-30 to 2026-04-05)**:
 
@@ -314,7 +319,7 @@ python scripts/check_model_improvement.py
 | Layer | What it measures | Green signal | Script |
 |-------|-----------------|--------------|--------|
 | 1 — Forecast Quality | Ensemble lift over best single model; SAMOSSA DA anomaly; data coverage | lift_global >= 5%, samossa_da_zero < 40%, n_used >= 50 | `ensemble_health_audit.py` |
-| 2 — Gate Status | 4 CI gates: integrity, quant health, audit lift, institutional | overall_passed = True | `run_all_gates.py` |
+| 2 — Gate Status | 4 CI gates: integrity, quant health, audit lift, institutional | overall_passed = True and `phase3_posture=GENUINE_PASS` | `run_all_gates.py` |
 | 3 — Trade Quality | Win rate, profit factor, exit-reason gap diagnosis | win_rate >= 45%, pf >= 1.3 | `exit_quality_audit.py` |
 | 4 — Calibration | Platt scaling active tier, Brier score, ECE | tier = db_local/jsonl, brier < 0.25 | `platt_contract_audit.py` |
 
@@ -470,7 +475,7 @@ openclaw cron list
 
 Prerequisites:
 
-- Address adversarial findings (94.2% quant FAIL rate, ensemble underperformance)
+- Historical note: adversarial findings (including the 94.2% quant FAIL rate) were the original Phase 7.10 blockers; current gate state is documented above and in `Documentation/PROJECT_STATUS.md`.
 - Improve directional accuracy (currently below coin-flip at 41% WR)
 - Fix confidence calibration (0.9+ confidence yields only 41% win rate)
 - Widen proof-mode max_holding (5 -> 8-10 bars) for better risk/reward
@@ -881,7 +886,7 @@ portfolio_maximizer/
 │   ├── secrets_guard.py            # Pre-commit secrets leak guard
 │   └── pmx_git_askpass.py          # Git credential helper
 │
-├── tests/                           # Test suite (2355+ tests)
+├── tests/                           # Test suite (2375+ tests)
 │   ├── etl/                        # ETL module tests
 │   ├── forecaster/                 # Forecaster tests
 │   ├── execution/                  # Execution tests
@@ -1339,7 +1344,7 @@ For questions or issues:
 - 731 tests collected (718 passing)
 
 **Next Steps** (Phase 7.10):
-1. Address 94.2% quant FAIL rate (0.8% from RED gate)
+1. Historical note: the 94.2% quant FAIL blocker has since cleared; current gate state is recorded above and in `Documentation/PROJECT_STATUS.md`.
 2. Fix ensemble underperformance (worse than best single 92% of the time)
 3. Improve directional accuracy (41% WR below coin-flip)
 4. Fix confidence calibration (0.9+ confidence yields 41% WR)

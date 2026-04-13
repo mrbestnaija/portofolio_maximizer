@@ -20,7 +20,7 @@ change behaviour anywhere until callers explicitly opt in via
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -47,6 +47,12 @@ class BarbellConfig:
   spec_max: float
   spec_max_per: float
   risk_symbols: Iterable[str] | None = None
+  bucket_multipliers: Dict[str, float] = field(default_factory=dict)
+  edge_ratio_soft_caps: Dict[str, float] = field(default_factory=dict)
+  overlay_floors: Dict[str, float] = field(default_factory=dict)
+  regime_bucket_multipliers: Dict[str, Dict[str, float]] = field(default_factory=dict)
+  strategy_style: str = "opposite-risk sleeves"
+  rebalance_frequency_bars: int = 1
 
   @classmethod
   def from_yaml(cls, path: Path = BARBELL_CONFIG_PATH) -> "BarbellConfig":
@@ -55,6 +61,8 @@ class BarbellConfig:
     sb = b.get("safe_bucket") or {}
     core = b.get("core_bucket") or {}
     spec = b.get("speculative_bucket") or {}
+    overlays = b.get("confidence_overlays") or {}
+    active = b.get("active_management") or {}
     return cls(
       enable_barbell_allocation=bool(b.get("enable_barbell_allocation", False)),
       enable_barbell_validation=bool(b.get("enable_barbell_validation", False)),
@@ -70,6 +78,12 @@ class BarbellConfig:
       spec_max=float(spec.get("max_weight", 0.0)),
       spec_max_per=float(spec.get("max_per_position", 0.0)),
       risk_symbols=list((core.get("symbols") or []) + (spec.get("symbols") or [])),
+      bucket_multipliers=dict(overlays.get("bucket_multipliers") or {}),
+      edge_ratio_soft_caps=dict(overlays.get("edge_ratio_soft_caps") or {}),
+      overlay_floors=dict(overlays.get("floors") or {}),
+      regime_bucket_multipliers=dict(overlays.get("regime_bucket_multipliers") or {}),
+      strategy_style=str(active.get("strategy_style") or "opposite-risk sleeves"),
+      rebalance_frequency_bars=max(1, int(active.get("rebalance_frequency_bars", 1))),
     )
 
 
@@ -82,7 +96,7 @@ class BarbellConstraint:
   def __init__(self, cfg: BarbellConfig | None = None):
     self.cfg = cfg or BarbellConfig.from_yaml()
 
-  def bucket_weights(self, weights: Dict[str, float]) -> Tuple[float, float, float]:
+  def bucket_weights(self, weights: Dict[str, float]) -> Tuple[float, float, float, float]:
     """
     Compute (safe_weight, core_weight, speculative_weight, other_weight) given a mapping of
     symbol -> weight.

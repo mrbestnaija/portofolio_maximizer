@@ -233,6 +233,7 @@ def main(
             "total_trades": int(total_trades),
             "max_drawdown": float(max_dd),
             "omega_ratio": barbell_metrics.get("omega_ratio"),
+            "payoff_asymmetry": barbell_metrics.get("payoff_asymmetry"),
             "expected_shortfall": barbell_metrics.get("expected_shortfall"),
             "cvar_95": barbell_metrics.get("cvar_95"),
             "fractional_kelly_fat_tail": barbell_metrics.get("fractional_kelly_fat_tail"),

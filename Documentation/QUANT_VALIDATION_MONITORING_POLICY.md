@@ -3,7 +3,7 @@
 **Version**: 0.1
 **Scope**: Time-series forecaster / signal quant validation (`logs/signals/quant_validation.jsonl`) and brutal/CI health checks.
 **Status**: Draft calibration memo – codifies current behaviour and outlines how to tighten it.
-**Current status (2026-01-07)**: Brutal suite quant health is GREEN; thresholds and scripts here remain the production monitoring source (see `Documentation/PROJECT_STATUS.md`).
+**Current status (2026-04-12)**: `check_quant_validation_health` is GREEN in the latest gate stack; unattended readiness overall is still blocked by warmup-covered semantics. Thresholds and scripts here mirror the live monitoring config (see `Documentation/PROJECT_STATUS.md`).
 
 > **Delta (2026-04-08):** Canonical objective policy now lives in
 > `Documentation/REPO_WIDE_MATRIX_FIRST_REMEDIATION_2026-04-08.md`.
@@ -42,10 +42,10 @@ forecaster_monitoring:
 
     # Global ceilings used by check_quant_validation_health.py
     # to gate CI/brutal runs. With these values, a global
-    # FAIL fraction above 90% or more than half of entries
+    # FAIL fraction above 85% or more than half of entries
     # having negative expected_profit will trip the hard gate
     # and mark the run RED.
-    max_fail_fraction: 0.90
+    max_fail_fraction: 0.85
     max_negative_expected_profit_fraction: 0.5
 
     # Softer global warning band used to classify runs as
@@ -192,15 +192,15 @@ This makes each brutal run self-describing with respect to quant health.
 
 With the current configuration:
 
-- `max_fail_fraction = 0.90`:
-  - Brutal/CI will mark runs **RED** when more than 90% of quant regimes fail.
-  - Example: a run with 8.3% PASS and 91.7% FAIL is RED (current state).
+- `max_fail_fraction = 0.85`:
+  - Brutal/CI will mark runs **RED** when more than 85% of quant regimes fail.
+  - Example: a run with 14.9% PASS and 85.1% FAIL is RED.
   - This is intentionally strict: the global system should not be considered healthy when almost all quant validations fail.
 - `max_negative_expected_profit_fraction = 0.50`:
   - At most half of the entries may have negative expected profit; otherwise the run is RED.
   - This is a baseline sanity check for positive expectation in most windows.
 - Warning band (`warn_fail_fraction = 0.80`, `warn_negative_expected_profit_fraction = 0.40`):
-  - A run where ~85% of regimes fail is YELLOW – better than catastrophic, but still “research / needs attention”.
+  - A run where ~80% of regimes fail is YELLOW - better than catastrophic, but still "research / needs attention".
   - A run with ~75% fail but only 30% negative expected profit might be GREEN, indicating overall acceptable health with localized weaknesses.
 
 This design separates:
