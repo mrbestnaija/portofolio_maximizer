@@ -2136,7 +2136,16 @@ class TimeSeriesSignalGenerator:
             "omega_robustness_score",
             "omega_monotonicity_ok",
             "omega_above_hurdle_margin",
+            "omega_cliff_drop_ratio",
+            "omega_cliff_ok",
             "omega_robustness_complete",
+            "omega_ci_lower",
+            "omega_ci_upper",
+            "omega_right_tail_ok",
+            "omega_ci_width",
+            "expected_shortfall_raw",
+            "expected_shortfall_to_edge",
+            "es_to_edge_bounded",
             "fractional_kelly_fat_tail",
             "ngn_daily_threshold",
             "ngn_annual_hurdle_pct",
@@ -2209,6 +2218,9 @@ class TimeSeriesSignalGenerator:
             market_data=market_data,
             position_value=position_value,
         )
+        # Track detected_regime for the CRISIS barbell block (Gap 4)
+        _prov = signal.provenance if isinstance(signal.provenance, dict) else {}
+        _detected_regime_for_gate = str(_prov.get("detected_regime") or "").upper()
         if path_metrics:
             metrics.update(
                 {
@@ -2221,6 +2233,7 @@ class TimeSeriesSignalGenerator:
                     "barbell_path_risk_ok": path_metrics.get("barbell_path_risk_ok"),
                 }
             )
+        metrics["detected_regime"] = _detected_regime_for_gate
         structural_gates = self._evaluate_success_criteria(
             criteria_cfg=criteria_cfg,
             metrics=metrics,
@@ -2259,6 +2272,21 @@ class TimeSeriesSignalGenerator:
                     )
 
         structural_gates = self._canonicalize_criteria(structural_gates)
+
+        # Gap 4 — CRISIS regime barbell block (anti-omega failure mode 4):
+        # Liquidity and path risk are most dangerous in CRISIS regimes because
+        # gap risk spikes, spreads widen, and depth collapses simultaneously.
+        # When the regime is CRISIS AND path risk is failing, inject a hard
+        # synthetic gate that cannot be configured away.  This is distinct from
+        # the configurable bucket_hard_gate_criteria — it is a structural
+        # invariant that a barbell system must not accept new speculative
+        # exposure when the market regime is CRISIS and path risk is uncleared.
+        if (
+            "CRISIS" in _detected_regime_for_gate
+            and not bool(metrics.get("barbell_path_risk_ok", True))
+            and action != "HOLD"
+        ):
+            structural_gates["crisis_regime_path_risk_block"] = False
 
         viz_cfg = config.get('visualization') or {}
         visualization_result = None
@@ -2382,6 +2410,18 @@ class TimeSeriesSignalGenerator:
                 'omega_robustness_score': metrics.get('omega_robustness_score'),
                 'omega_monotonicity_ok': metrics.get('omega_monotonicity_ok'),
                 'omega_above_hurdle_margin': metrics.get('omega_above_hurdle_margin'),
+                # Gap 1: cliff-drop guard
+                'omega_cliff_drop_ratio': metrics.get('omega_cliff_drop_ratio'),
+                'omega_cliff_ok': metrics.get('omega_cliff_ok'),
+                # Gap 2: right-tail bootstrap CI
+                'omega_ci_lower': metrics.get('omega_ci_lower'),
+                'omega_ci_upper': metrics.get('omega_ci_upper'),
+                'omega_right_tail_ok': metrics.get('omega_right_tail_ok'),
+                'omega_ci_width': metrics.get('omega_ci_width'),
+                # Gap 3: left-tail ES relative to edge
+                'expected_shortfall_raw': metrics.get('expected_shortfall_raw'),
+                'expected_shortfall_to_edge': metrics.get('expected_shortfall_to_edge'),
+                'es_to_edge_bounded': metrics.get('es_to_edge_bounded'),
                 'payoff_asymmetry': performance_snapshot.get('payoff_asymmetry'),
                 'trimmed_payoff_asymmetry': performance_snapshot.get('trimmed_payoff_asymmetry'),
                 'winner_concentration_ratio': performance_snapshot.get('winner_concentration_ratio'),
@@ -2392,6 +2432,9 @@ class TimeSeriesSignalGenerator:
                 'gap_risk_to_edge': metrics.get('gap_risk_to_edge'),
                 'liquidity_to_depth': metrics.get('liquidity_to_depth'),
                 'barbell_path_risk_ok': metrics.get('barbell_path_risk_ok'),
+                # Gap 4: CRISIS regime block
+                'detected_regime': metrics.get('detected_regime'),
+                'crisis_regime_path_risk_block': structural_gates.get('crisis_regime_path_risk_block'),
             },
             'diagnostics': {
                 'win_rate': performance_snapshot.get('win_rate'),
@@ -2943,6 +2986,14 @@ class TimeSeriesSignalGenerator:
         # expected_profit remains a non-negotiable economic viability gate whenever present.
         if "expected_profit" in structural_gates and "expected_profit" not in hard_gate_keys:
             hard_gate_keys.insert(0, "expected_profit")
+
+        # crisis_regime_path_risk_block is a structural invariant: cannot be
+        # removed from hard-gate set via config.  CRISIS + bad path risk = hard FAIL.
+        if (
+            "crisis_regime_path_risk_block" in structural_gates
+            and "crisis_regime_path_risk_block" not in hard_gate_keys
+        ):
+            hard_gate_keys.append("crisis_regime_path_risk_block")
 
         if isinstance(criteria_cfg, dict):
             bucket_cfg = criteria_cfg.get("bucket_hard_gate_criteria")

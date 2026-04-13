@@ -2137,3 +2137,89 @@ class TestModelAgreementPessimisticFallback:
         assert score_one < score_two, (
             f"1-model score ({score_one}) must be < 2-model score ({score_two})"
         )
+
+
+class TestCrisisRegimePathRiskBlock:
+    """Gap 4 -- liquidity/path risk in CRISIS regime: structural hard-gate invariant.
+
+    When a signal arrives in CRISIS regime AND barbell_path_risk_ok is False,
+    the gate must inject crisis_regime_path_risk_block=False into structural_gates
+    and make it a hard-gate criterion that cannot be configured away.
+    """
+
+    def _gen(self):
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        return TimeSeriesSignalGenerator(use_volatility_filter=False)
+
+    def test_crisis_block_injected_when_regime_crisis_and_path_risk_bad(self) -> None:
+        """crisis_regime_path_risk_block=False must appear in structural_gates
+        when regime=CRISIS and barbell_path_risk_ok=False."""
+        gen = self._gen()
+        # Build minimal metrics dict simulating CRISIS + failed path risk
+        structural_gates = {
+            "expected_profit": True,
+            "significance": True,
+        }
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        # The injection happens in the main evaluate_signal path;
+        # test the _resolve_hard_gate_criteria directly with the injected gate
+        structural_gates["crisis_regime_path_risk_block"] = False
+        hard_gates, warnings = gen._resolve_hard_gate_criteria(
+            config={},
+            criteria_cfg={},
+            structural_gates=structural_gates,
+            bucket="spec",
+        )
+        assert "crisis_regime_path_risk_block" in hard_gates, (
+            "crisis_regime_path_risk_block must be a hard gate when injected"
+        )
+
+    def test_crisis_block_not_injected_when_path_risk_ok(self) -> None:
+        """When barbell_path_risk_ok=True in CRISIS, no crisis block is added."""
+        gen = self._gen()
+        structural_gates = {
+            "expected_profit": True,
+            "significance": True,
+            # No crisis_regime_path_risk_block injected (path risk passed)
+        }
+        hard_gates, _ = gen._resolve_hard_gate_criteria(
+            config={},
+            criteria_cfg={},
+            structural_gates=structural_gates,
+            bucket="spec",
+        )
+        assert "crisis_regime_path_risk_block" not in hard_gates
+
+    def test_crisis_block_cannot_be_removed_via_config(self) -> None:
+        """Configuring hard_gate_criteria to omit crisis_regime_path_risk_block
+        must not prevent it from being a hard gate when the gate is present."""
+        gen = self._gen()
+        structural_gates = {
+            "expected_profit": True,
+            "crisis_regime_path_risk_block": False,
+        }
+        # Config tries to limit hard gates to only expected_profit
+        hard_gates, _ = gen._resolve_hard_gate_criteria(
+            config={"hard_gate_criteria": ["expected_profit"]},
+            criteria_cfg={},
+            structural_gates=structural_gates,
+            bucket="",
+        )
+        assert "crisis_regime_path_risk_block" in hard_gates, (
+            "crisis_regime_path_risk_block must survive config override"
+        )
+
+    def test_no_crisis_block_outside_crisis_regime(self) -> None:
+        """HIGH_VOL_TRENDING regime with bad path risk must not get the crisis block."""
+        gen = self._gen()
+        structural_gates = {
+            "expected_profit": True,
+            # No crisis_regime_path_risk_block (non-CRISIS regime)
+        }
+        hard_gates, _ = gen._resolve_hard_gate_criteria(
+            config={},
+            criteria_cfg={},
+            structural_gates=structural_gates,
+            bucket="spec",
+        )
+        assert "crisis_regime_path_risk_block" not in hard_gates

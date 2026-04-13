@@ -50,6 +50,8 @@ __all__ = [
     "omega_ratio",
     "omega_curve",
     "omega_robustness_summary",
+    "omega_bootstrap_ci",
+    "expected_shortfall_to_edge_ratio",
     "payoff_asymmetry_ratio",
     "payoff_asymmetry_support_metrics",
     "fractional_kelly_fat_tail",
@@ -624,6 +626,7 @@ def omega_robustness_summary(
     returns: pd.Series,
     *,
     execution_drag_hurdle: float | None = None,
+    cliff_drop_max: float = 0.60,
 ) -> Dict[str, Any]:
     """
     Summarize whether Omega survives realistic hurdle escalation.
@@ -631,6 +634,20 @@ def omega_robustness_summary(
     `omega_ratio` remains the headline metric, but a barbell claim is only
     robust when Omega stays healthy at the NGN hurdle and after adding realized
     execution drag.
+
+    Anti-omega failure mode 1 — threshold chosen badly:
+    `omega_cliff_drop_ratio` measures how much Omega collapses from K0 (zero)
+    to K1 (NGN hurdle).  A large cliff-drop signals that the strategy's edge is
+    concentrated in a thin band just above zero — any realistic hurdle destroys
+    the case.  `omega_cliff_ok` is False when drop exceeds `cliff_drop_max`
+    (default 60%) AND the score is halved as a penalty.
+
+    Parameters
+    ----------
+    cliff_drop_max : Maximum tolerated fractional drop from K0 to K1.
+                     0.60 means Omega may fall by at most 60% when the hurdle
+                     rises from 0 to the NGN threshold.  Set lower for stricter
+                     acceptance (0.40 requires Omega to survive most friction).
     """
     curve = omega_curve(returns, execution_drag_hurdle=execution_drag_hurdle)
     omega_zero = curve.get("zero", {}).get("omega")
@@ -654,15 +671,45 @@ def omega_robustness_summary(
     if isinstance(omega_hurdle, (int, float)) and not math.isnan(float(omega_hurdle)):
         omega_above_hurdle_margin = float(omega_hurdle) - 1.0
 
+    # Gap 1: cliff-drop guard — bad threshold detection
+    omega_cliff_drop_ratio: Optional[float] = None
+    omega_cliff_ok: Optional[bool] = None
+    cliff_drop_max_f = float(np.clip(cliff_drop_max, 0.0, 0.99))
+    if isinstance(omega_zero, (int, float)) and isinstance(omega_hurdle, (int, float)):
+        zero_inf = not math.isfinite(float(omega_zero))
+        hurdle_inf = not math.isfinite(float(omega_hurdle))
+        if zero_inf and hurdle_inf:
+            # Both infinite: omega is infinite at all thresholds — no cliff whatsoever
+            omega_cliff_drop_ratio = 0.0
+            omega_cliff_ok = True
+        elif zero_inf and not hurdle_inf:
+            # Omega collapses from inf to finite at the hurdle — maximum cliff
+            omega_cliff_drop_ratio = 1.0
+            omega_cliff_ok = bool(omega_cliff_drop_ratio <= cliff_drop_max_f)
+        elif math.isfinite(float(omega_zero)) and float(omega_zero) > 1e-9:
+            omega_zero_f = float(omega_zero)
+            omega_hurdle_f = (
+                float(omega_hurdle)
+                if math.isfinite(float(omega_hurdle))
+                else omega_zero_f  # hurdle inf while zero finite: treat as no drop
+            )
+            raw_drop = (omega_zero_f - omega_hurdle_f) / omega_zero_f
+            omega_cliff_drop_ratio = float(np.clip(raw_drop, 0.0, 1.0))
+            omega_cliff_ok = bool(omega_cliff_drop_ratio <= cliff_drop_max_f)
+
     complete = cost_threshold is not None
     robustness_score: Optional[float] = None
     if complete and all(
         isinstance(point, (int, float)) and not math.isnan(float(point))
         for point in (omega_zero, omega_hurdle, omega_cost)
     ):
-        omega_zero_f = max(float(omega_zero), 0.0)
-        omega_hurdle_f = max(float(omega_hurdle), 0.0)
-        omega_cost_f = max(float(omega_cost), 0.0)
+        # Cap infinite omega values at a large finite sentinel for ratio arithmetic.
+        # inf/inf = nan; capping at 100 preserves ordering (higher is better) while
+        # avoiding NaN propagation.
+        _cap = 100.0
+        omega_zero_f = min(max(float(omega_zero), 0.0), _cap)
+        omega_hurdle_f = min(max(float(omega_hurdle), 0.0), _cap)
+        omega_cost_f = min(max(float(omega_cost), 0.0), _cap)
         hurdle_strength = float(np.clip((omega_hurdle_f - 1.0) / 1.0, 0.0, 1.0))
         drag_strength = float(np.clip((omega_cost_f - 1.0) / 1.0, 0.0, 1.0))
         retention = float(np.clip(omega_cost_f / max(omega_hurdle_f, 1e-6), 0.0, 1.0))
@@ -675,6 +722,9 @@ def omega_robustness_summary(
         )
         if not monotonicity_ok:
             robustness_score *= 0.50
+        # Cliff-drop penalty: halve score when threshold choice is catastrophic
+        if omega_cliff_ok is False:
+            robustness_score *= 0.50
         robustness_score = float(np.clip(robustness_score, 0.0, 1.0))
 
     return {
@@ -682,12 +732,193 @@ def omega_robustness_summary(
         "omega_robustness_score": robustness_score,
         "omega_monotonicity_ok": bool(monotonicity_ok),
         "omega_above_hurdle_margin": omega_above_hurdle_margin,
+        "omega_cliff_drop_ratio": omega_cliff_drop_ratio,
+        "omega_cliff_ok": omega_cliff_ok,
         "omega_robustness_complete": bool(complete),
         "execution_drag_hurdle": (
             float(execution_drag_hurdle)
             if execution_drag_hurdle is not None
             else None
         ),
+    }
+
+
+def omega_bootstrap_ci(
+    returns: pd.Series,
+    *,
+    n_bootstrap: int = 500,
+    confidence_level: float = 0.95,
+    threshold: float | None = None,
+    rng: Optional[np.random.Generator] = None,
+) -> Dict[str, Any]:
+    """
+    Bootstrap confidence interval around the Omega ratio.
+
+    Anti-omega failure mode 2 — right tail overestimated:
+    A single lucky fat-tail winner can inflate the point-estimate Omega
+    substantially above the true distribution mean.  The bootstrap CI
+    exposes this: when the lower bound is well below 1.0 despite a high
+    point estimate, the edge claim is not yet proven.
+
+    Parameters
+    ----------
+    n_bootstrap      : Number of bootstrap resamples (default 500).
+    confidence_level : CI width, e.g. 0.95 for [2.5%, 97.5%] percentile.
+    threshold        : Omega threshold. None -> DAILY_NGN_THRESHOLD.
+    rng              : Optional numpy random generator for reproducibility.
+
+    Returns
+    -------
+    Dict with:
+      omega_point_estimate  : float
+      omega_ci_lower        : float — conservative barbell bound
+      omega_ci_upper        : float
+      omega_ci_level        : float (confidence_level)
+      omega_ci_n_bootstrap  : int
+      omega_right_tail_ok   : bool — lower CI bound >= 1.0 (barbell claim survives tail test)
+      omega_ci_width        : float — wide CI signals high variance / outlier-driven
+    """
+    clean = _clean_return_series(returns)
+    tau = DAILY_NGN_THRESHOLD if threshold is None else float(threshold)
+
+    point = omega_ratio(clean, tau)
+    n = len(clean)
+
+    if n < 10:
+        return {
+            "omega_point_estimate": point,
+            "omega_ci_lower": None,
+            "omega_ci_upper": None,
+            "omega_ci_level": confidence_level,
+            "omega_ci_n_bootstrap": 0,
+            "omega_right_tail_ok": None,
+            "omega_ci_width": None,
+        }
+
+    generator = rng if rng is not None else np.random.default_rng()
+    boot_omegas: List[float] = []
+    arr = clean.to_numpy()
+    # Large finite sentinel: omega >= _INF_SENTINEL means "strategy always above threshold"
+    _INF_SENTINEL = 1e6
+    for _ in range(int(n_bootstrap)):
+        sample = generator.choice(arr, size=n, replace=True)
+        val = omega_ratio(sample, tau)
+        # Replace inf with sentinel so consistently-winning strategies give right_tail_ok=True.
+        # nan / -inf (pathological) are still dropped.
+        if math.isfinite(val):
+            boot_omegas.append(val)
+        elif val == math.inf:
+            boot_omegas.append(_INF_SENTINEL)
+
+    if not boot_omegas:
+        return {
+            "omega_point_estimate": point,
+            "omega_ci_lower": None,
+            "omega_ci_upper": None,
+            "omega_ci_level": confidence_level,
+            "omega_ci_n_bootstrap": 0,
+            "omega_right_tail_ok": None,
+            "omega_ci_width": None,
+        }
+
+    alpha = 1.0 - float(confidence_level)
+    lower = float(np.percentile(boot_omegas, 100 * alpha / 2))
+    upper = float(np.percentile(boot_omegas, 100 * (1 - alpha / 2)))
+    ci_width = upper - lower
+
+    return {
+        "omega_point_estimate": point,
+        "omega_ci_lower": lower,
+        "omega_ci_upper": upper,
+        "omega_ci_level": confidence_level,
+        "omega_ci_n_bootstrap": len(boot_omegas),
+        "omega_right_tail_ok": bool(lower >= 1.0),
+        "omega_ci_width": ci_width,
+    }
+
+
+def expected_shortfall_to_edge_ratio(
+    returns: pd.Series,
+    *,
+    expected_daily_edge: float | None = None,
+    tail_percentile: float = 0.10,
+) -> Dict[str, Any]:
+    """
+    Expected shortfall (CVaR) expressed as a multiple of the expected daily edge.
+
+    Anti-omega failure mode 3 — left tail not truly bounded:
+    A dollar-floor for ES (e.g. "ES must be > -$100") is meaningless without
+    context: -$100 may be catastrophic for a small account but trivial for a
+    large one.  Expressing ES relative to expected daily edge provides a
+    domain-calibrated bound: if the left tail is deeper than N times the daily
+    edge, the downside is structurally unbounded relative to what the strategy
+    earns.
+
+    Parameters
+    ----------
+    expected_daily_edge : Expected return per trade/day (fractional or dollar,
+                          same units as `returns`).  If None, uses the mean of
+                          positive returns as a proxy.
+    tail_percentile     : Fraction of worst outcomes to average (default 0.10 =
+                          worst 10%).  Must be in (0, 1).
+
+    Returns
+    -------
+    Dict with:
+      expected_shortfall_raw        : float — average of worst-tail returns (negative)
+      expected_shortfall_to_edge    : float — |ES| / |edge|; lower is better
+      es_to_edge_bounded            : bool — ratio <= 10.0 (tail depth <= 10x daily edge)
+      edge_used                     : float — the edge value actually applied
+      edge_source                   : str — 'provided' or 'positive_mean_proxy'
+    """
+    clean = _clean_return_series(returns)
+    if len(clean) < 5:
+        return {
+            "expected_shortfall_raw": None,
+            "expected_shortfall_to_edge": None,
+            "es_to_edge_bounded": None,
+            "edge_used": None,
+            "edge_source": "insufficient_data",
+        }
+
+    tail_n = max(1, int(math.floor(len(clean) * float(tail_percentile))))
+    sorted_ret = clean.sort_values()
+    es_raw = float(sorted_ret.iloc[:tail_n].mean())
+
+    # Determine edge
+    edge_source = "insufficient_data"
+    edge_used: Optional[float] = None
+    if expected_daily_edge is not None:
+        try:
+            edge_used = abs(float(expected_daily_edge))
+            edge_source = "provided"
+        except (TypeError, ValueError):
+            edge_used = None
+
+    if edge_used is None or edge_used < 1e-12:
+        wins = clean[clean > 0]
+        if not wins.empty:
+            edge_used = float(wins.mean())
+            edge_source = "positive_mean_proxy"
+        else:
+            return {
+                "expected_shortfall_raw": es_raw,
+                "expected_shortfall_to_edge": None,
+                "es_to_edge_bounded": None,
+                "edge_used": None,
+                "edge_source": "no_positive_returns",
+            }
+
+    ratio = abs(es_raw) / max(edge_used, 1e-12)
+    # Bounded when left tail depth is at most 10x the expected daily edge
+    es_to_edge_bounded = bool(ratio <= 10.0)
+
+    return {
+        "expected_shortfall_raw": es_raw,
+        "expected_shortfall_to_edge": float(ratio),
+        "es_to_edge_bounded": es_to_edge_bounded,
+        "edge_used": float(edge_used),
+        "edge_source": edge_source,
     }
 
 
@@ -914,10 +1145,21 @@ def portfolio_metrics_ngn(
         execution_drag_hurdle=execution_drag_hurdle,
     )
     asymmetry_support = payoff_asymmetry_support_metrics(returns)
+    omega_ci = omega_bootstrap_ci(returns)
+    es_edge = expected_shortfall_to_edge_ratio(returns)
     ngn_ext: Dict[str, object] = {
         "omega_ratio": omega,
         **omega_robustness,
         **asymmetry_support,
+        # Gap 2: right-tail bootstrap CI
+        "omega_ci_lower": omega_ci.get("omega_ci_lower"),
+        "omega_ci_upper": omega_ci.get("omega_ci_upper"),
+        "omega_right_tail_ok": omega_ci.get("omega_right_tail_ok"),
+        "omega_ci_width": omega_ci.get("omega_ci_width"),
+        # Gap 3: left-tail bounded relative to edge
+        "expected_shortfall_raw": es_edge.get("expected_shortfall_raw"),
+        "expected_shortfall_to_edge": es_edge.get("expected_shortfall_to_edge"),
+        "es_to_edge_bounded": es_edge.get("es_to_edge_bounded"),
         "fractional_kelly_fat_tail": fractional_kelly_fat_tail(returns),
         "ngn_daily_threshold": DAILY_NGN_THRESHOLD,
         "ngn_annual_hurdle_pct": round(

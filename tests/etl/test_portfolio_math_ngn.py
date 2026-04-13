@@ -325,3 +325,147 @@ class TestPortfolioMetricsNGN:
         m = portfolio_metrics_ngn(profitable_series)
         assert isinstance(m, dict)
         assert len(m) > 5  # has both base + NGN keys
+
+
+# ---------------------------------------------------------------------------
+# Anti-omega hardening tests (Gaps 1-3 in portfolio_math.py)
+# ---------------------------------------------------------------------------
+
+from etl.portfolio_math import (
+    omega_robustness_summary,
+    omega_bootstrap_ci,
+    expected_shortfall_to_edge_ratio,
+    omega_curve,
+)
+
+
+class TestOmegaCliffDropGuard:
+    """Gap 1 -- threshold chosen badly: cliff-drop check."""
+
+    def test_cliff_fields_present_in_robustness_summary(self):
+        rng = np.random.default_rng(0)
+        returns = pd.Series(rng.normal(0.005, 0.008, 200))
+        result = omega_robustness_summary(returns, execution_drag_hurdle=0.0002)
+        assert "omega_cliff_drop_ratio" in result
+        assert "omega_cliff_ok" in result
+
+    def test_cliff_fails_when_edge_is_thin(self):
+        # Most returns below NGN hurdle -- edge disappears at hurdle
+        returns = pd.Series([0.0001] * 90 + [0.01] * 10)
+        result = omega_robustness_summary(returns, execution_drag_hurdle=0.0002)
+        assert result["omega_cliff_drop_ratio"] is not None
+        # Omega at K0 (zero) will be high; at K1 (NGN hurdle) it should crater
+        assert result["omega_cliff_drop_ratio"] > 0.40, (
+            f"Expected large cliff drop, got {result['omega_cliff_drop_ratio']:.3f}"
+        )
+
+    def test_cliff_penalizes_robustness_score(self):
+        # Thin-edge strategy should score lower robustness than fat-edge strategy
+        thin = omega_robustness_summary(
+            pd.Series([0.0001] * 90 + [0.01] * 10),
+            execution_drag_hurdle=0.0002,
+        )
+        fat = omega_robustness_summary(
+            pd.Series([0.003] * 100),
+            execution_drag_hurdle=0.0002,
+        )
+        if thin["omega_robustness_score"] is not None and fat["omega_robustness_score"] is not None:
+            assert thin["omega_robustness_score"] <= fat["omega_robustness_score"]
+
+    def test_cliff_fields_key_present_in_short_series(self):
+        result = omega_robustness_summary(pd.Series([0.01] * 5))
+        assert "omega_cliff_drop_ratio" in result
+        assert "omega_cliff_ok" in result
+
+
+class TestOmegaBootstrapCI:
+    """Gap 2 -- right tail overestimated: bootstrap CI around omega."""
+
+    def test_ci_lower_present_with_sufficient_obs(self):
+        rng = np.random.default_rng(7)
+        returns = pd.Series(rng.normal(0.003, 0.01, 50))
+        result = omega_bootstrap_ci(returns, n_bootstrap=200, rng=np.random.default_rng(7))
+        assert result["omega_ci_lower"] is not None
+        assert result["omega_ci_upper"] is not None
+        assert result["omega_ci_lower"] <= result["omega_point_estimate"]
+        assert result["omega_ci_upper"] >= result["omega_ci_lower"]
+
+    def test_ci_absent_below_10_obs(self):
+        result = omega_bootstrap_ci(pd.Series([0.01] * 5), n_bootstrap=100)
+        assert result["omega_ci_lower"] is None
+        assert result["omega_right_tail_ok"] is None
+
+    def test_right_tail_ok_false_for_single_outlier_series(self):
+        # One large winner + many tiny losses: CI lower should be < 1
+        returns = pd.Series([-0.001] * 49 + [0.15])
+        result = omega_bootstrap_ci(
+            returns, n_bootstrap=500, rng=np.random.default_rng(99)
+        )
+        if result["omega_right_tail_ok"] is not None:
+            assert result["omega_right_tail_ok"] is False, (
+                f"Expected right_tail_ok=False for outlier-driven series, "
+                f"ci_lower={result['omega_ci_lower']:.3f}"
+            )
+
+    def test_right_tail_ok_true_for_consistent_winners(self):
+        # Returns consistently above NGN hurdle -> lower CI bound should exceed 1.0
+        returns = pd.Series([0.005] * 100)
+        result = omega_bootstrap_ci(
+            returns, n_bootstrap=300, rng=np.random.default_rng(42)
+        )
+        assert result["omega_right_tail_ok"] is True
+
+    def test_wide_ci_signals_high_variance(self):
+        # Use extreme sigma contrast (10x) with a large sample to ensure deterministic ordering.
+        # Calm series is constant -- every bootstrap resample gives the same omega --> width=0.
+        volatile = pd.Series(np.random.default_rng(13).normal(0.002, 0.15, 200))
+        calm = pd.Series([0.004] * 200)  # constant -> CI width is 0 by construction
+        r_v = omega_bootstrap_ci(volatile, n_bootstrap=300, rng=np.random.default_rng(1))
+        r_c = omega_bootstrap_ci(calm, n_bootstrap=300, rng=np.random.default_rng(1))
+        if r_v["omega_ci_width"] is not None and r_c["omega_ci_width"] is not None:
+            assert r_v["omega_ci_width"] >= r_c["omega_ci_width"]
+
+
+class TestExpectedShortfallToEdge:
+    """Gap 3 -- left tail not truly bounded: ES relative to daily edge."""
+
+    def test_es_to_edge_fields_present(self):
+        rng = np.random.default_rng(5)
+        returns = pd.Series(rng.normal(0.002, 0.01, 100))
+        result = expected_shortfall_to_edge_ratio(returns)
+        assert result["expected_shortfall_raw"] is not None
+        assert result["expected_shortfall_to_edge"] is not None
+        assert result["es_to_edge_bounded"] is not None
+
+    def test_bounded_when_tail_shallow_relative_to_edge(self):
+        returns = pd.Series([0.03] * 60 + [-0.001] * 40)
+        result = expected_shortfall_to_edge_ratio(returns)
+        assert result["es_to_edge_bounded"] is True
+
+    def test_unbounded_when_tail_deep_relative_to_edge(self):
+        returns = pd.Series([0.0001] * 90 + [-0.20] * 10)
+        result = expected_shortfall_to_edge_ratio(returns)
+        assert result["es_to_edge_bounded"] is False, (
+            f"Expected unbounded ES, ratio={result['expected_shortfall_to_edge']}"
+        )
+
+    def test_provided_edge_is_preferred_over_proxy(self):
+        returns = pd.Series([0.01] * 50 + [-0.005] * 50)
+        r1 = expected_shortfall_to_edge_ratio(returns)
+        r2 = expected_shortfall_to_edge_ratio(returns, expected_daily_edge=0.01)
+        assert r2["edge_source"] == "provided"
+        assert r1["edge_source"] == "positive_mean_proxy"
+
+    def test_absent_below_min_obs(self):
+        result = expected_shortfall_to_edge_ratio(pd.Series([0.01] * 3))
+        assert result["expected_shortfall_to_edge"] is None
+
+    def test_portfolio_metrics_ngn_includes_all_anti_omega_fields(self):
+        rng = np.random.default_rng(3)
+        m = portfolio_metrics_ngn(pd.Series(rng.normal(0.002, 0.01, 100)))
+        for key in (
+            "omega_cliff_drop_ratio", "omega_cliff_ok",
+            "omega_ci_lower", "omega_right_tail_ok",
+            "expected_shortfall_raw", "expected_shortfall_to_edge", "es_to_edge_bounded",
+        ):
+            assert key in m, f"Missing key: {key}"
