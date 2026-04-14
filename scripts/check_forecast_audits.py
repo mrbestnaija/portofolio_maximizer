@@ -1151,7 +1151,16 @@ def _collect_audit_files(
                 continue
             seen.add(rp)
             files.append(path)
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # production_eval/ files always win the per-key dedup over production/ files,
+    # regardless of mtime. Live forecast audits (production/) never contain
+    # evaluation_metrics; production_eval/ audits (from _run_oos_evaluation_audit)
+    # do. A production/ file written after a production_eval/ file for the same
+    # date window must not displace it and collapse effective_n.
+    # Within the same directory, newest-first ordering is preserved.
+    _eval_dir_name = DEFAULT_AUDIT_PRODUCTION_EVAL_DIR.name
+    files.sort(
+        key=lambda p: (0 if p.parent.name == _eval_dir_name else 1, -p.stat().st_mtime)
+    )
     return files[:max(0, int(max_files))]
 
 
