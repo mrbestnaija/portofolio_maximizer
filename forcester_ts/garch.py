@@ -222,6 +222,7 @@ class GARCHForecaster:
         best_fit = None
         best_aic = np.inf
         best_order = (self.p, self.q)
+        _best_convergence_ok = True  # tracks convergence of the SELECTED model only
 
         # Phase 7.10b: Use configurable mean model (AR for directional signal).
         # 'AR' adds an AR(1) conditional mean; 'Zero' is the old default.
@@ -296,10 +297,9 @@ class GARCHForecaster:
                         if _convergence_failed:
                             logger.warning(
                                 "GARCH(%s,%s, %s) optimizer did not converge; "
-                                "will trigger GJR fallback.",
+                                "considering GJR fallback if selected.",
                                 p_candidate, q_candidate, dist_try,
                             )
-                            self._convergence_ok = False
                         aic = float(getattr(fitted, "aic", np.inf))
                         if np.isfinite(aic) and aic < best_aic:
                             best_aic = aic
@@ -307,9 +307,19 @@ class GARCHForecaster:
                             best_fit = fitted
                             best_order = (p_candidate, q_candidate)
                             best_dist = dist_try
+                            # Track convergence of the *selected* model only.
+                            # Earlier failed orders must not poison this flag —
+                            # the stability guard at line ~351 acts on the final
+                            # selected model, not on any rejected candidates.
+                            _best_convergence_ok = not _convergence_failed
                         break  # Use first dist that fits
                     except Exception:  # pragma: no cover - best-effort search
                         continue
+
+        # Write convergence status for the selected model once, after grid search.
+        # Doing this inside the loop would set _convergence_ok=False from any
+        # rejected candidate, even when the finally selected model converged.
+        self._convergence_ok = _best_convergence_ok
 
         self.p, self.q = best_order
         self.model = best_model

@@ -201,6 +201,88 @@ class TestGARCHConvergenceHardening:
         assert "upper_ci" in result
         assert all(result["upper_ci"] > result["lower_ci"])
 
+    def test_convergence_ok_reflects_selected_model_not_rejected_candidates(self):
+        """_convergence_ok must reflect only the selected (best-AIC) model.
+
+        When GARCH(1,1) fails convergence but GARCH(2,1) succeeds with a better AIC
+        and is therefore selected, _convergence_ok must be True (the selected model
+        converged). Previously, setting self._convergence_ok=False inside the grid
+        loop meant the flag was poisoned by any rejected candidate, triggering
+        unnecessary GJR fallback and 1.5x CI inflation.
+        """
+        try:
+            from arch import arch_model as _am  # noqa: F401
+        except ImportError:
+            pytest.skip("arch library not installed")
+
+        call_count = [0]
+
+        class _GoodResult:
+            """Simulates a converged fit with a better AIC."""
+            aic = 500.0
+            bic = 510.0
+            convergence_flag = 0
+
+            @property
+            def params(self):
+                return {"alpha[1]": 0.04, "beta[1]": 0.90}
+
+            def forecast(self, horizon):
+                idx = pd.Index(range(1, horizon + 1), name="horizon")
+                result = MagicMock()
+                result.variance = pd.DataFrame([[0.0001] * horizon], columns=idx)
+                result.mean = pd.DataFrame([[0.0] * horizon], columns=idx)
+                return result
+
+        class _BadResult:
+            """Simulates a non-converged fit with a worse AIC."""
+            aic = 900.0
+            bic = 910.0
+            convergence_flag = 0
+
+            @property
+            def params(self):
+                return {"alpha[1]": 0.03, "beta[1]": 0.85}
+
+            def forecast(self, horizon):
+                idx = pd.Index(range(1, horizon + 1), name="horizon")
+                result = MagicMock()
+                result.variance = pd.DataFrame([[0.0001] * horizon], columns=idx)
+                result.mean = pd.DataFrame([[0.0] * horizon], columns=idx)
+                return result
+
+        def _make_fit(bad_on_first: bool):
+            """Returns a fit() callable that fails convergence on the first call."""
+            def _fit(disp="off"):
+                call_count[0] += 1
+                if bad_on_first and call_count[0] == 1:
+                    # First candidate: emit convergence warning but still return a fit
+                    warnings.warn(
+                        "The optimizer returned code 9. Iteration limit reached",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    return _BadResult()
+                # Second candidate: clean convergence, better AIC
+                return _GoodResult()
+            return _fit
+
+        forecaster = GARCHForecaster(auto_select=True, max_p=2, max_q=1)
+        returns = _make_returns(200)
+
+        with patch("forcester_ts.garch.arch_model") as mock_arch:
+            fake_model = MagicMock()
+            fake_model.fit = _make_fit(bad_on_first=True)
+            mock_arch.return_value = fake_model
+            forecaster.fit(returns)
+
+        # The SELECTED model (second call, better AIC=500) converged cleanly.
+        # _convergence_ok must reflect that, not the rejected first candidate.
+        assert forecaster._convergence_ok is True, (
+            "_convergence_ok was poisoned by a rejected candidate; "
+            "it should reflect only the selected (best-AIC) model's convergence."
+        )
+
     def test_ewma_summary_exposes_guardrail_metadata(self):
         forecaster = object.__new__(GARCHForecaster)
         forecaster.backend = "ewma"

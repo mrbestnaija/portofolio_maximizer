@@ -2404,9 +2404,14 @@ class TimeSeriesForecaster:
                     dataset.get("length"),
                     dataset.get("forecast_horizon"),
                 )
-                if window in seen_windows:
+                # An all-None window means no dataset section — treat each file
+                # as its own window (use the filename as tiebreaker) so that
+                # audit files lacking dataset metadata are not silently collapsed
+                # to a single entry.
+                dedup_key = window if any(v is not None for v in window) else (path.name,)
+                if dedup_key in seen_windows:
                     continue
-                seen_windows.add(window)
+                seen_windows.add(dedup_key)
                 _extract_from_audit(path)
 
         if current_metrics:
