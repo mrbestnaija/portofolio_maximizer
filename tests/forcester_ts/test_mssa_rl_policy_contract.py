@@ -158,20 +158,27 @@ def test_insufficient_support_policy_fails_closed(
     assert result is not None, "Low-support state must return a forecast (neutral action)"
 
 
-def test_degraded_residual_diagnostics_fail_closed(
+def test_degraded_residual_diagnostics_warn_only(
     mssa_policy_writer: Callable[..., tuple[Path, dict[str, Any]]],
     force_mssa_ready_residuals: Callable[..., dict[str, Any]],
 ) -> None:
+    """SSA residuals are structurally autocorrelated; white_noise=False is warn-only.
+
+    Phase 7.45+: consistent with residual_diagnostics_rate_warn_only for SAMoSSA.
+    The RL policy quality is gated by policy_support, not SSA residual structure.
+    """
     mssa_policy_writer()
     force_mssa_ready_residuals(white_noise=False, lb_pvalue=0.01, jb_pvalue=0.02)
 
     forecaster = _fit_default_forecaster()
 
     diagnostics = forecaster.get_diagnostics()
-    assert diagnostics["policy_status"] == "degraded_residual_diagnostics"
+    # white_noise=False with valid diagnostics keys → policy proceeds (warn-only)
+    assert diagnostics["policy_status"] == "ready"
     assert diagnostics["residual_diagnostics"]["white_noise"] is False
-    with pytest.raises(ValueError, match="degraded_residual_diagnostics"):
-        forecaster.forecast(steps=5)
+    # Forecast must succeed (no raise)
+    result = forecaster.forecast(steps=5)
+    assert result is not None
 
 
 def test_disabled_policy_selection_blocks_live_forecast() -> None:

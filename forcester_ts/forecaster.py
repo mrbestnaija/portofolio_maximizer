@@ -2607,7 +2607,7 @@ class TimeSeriesForecaster:
             )
         )
         recent_window = max(1, int(cfg.get("strict_preselection_recent_window", 5) or 5))
-        min_effective = max(1, int(cfg.get("strict_preselection_min_effective_audits", 1) or 1))
+        min_effective = max(1, int(cfg.get("strict_preselection_min_effective_audits", 3) or 3))
 
         history = self._audit_history_stats(limit=max(200, recent_window))
         ratios = list(history.get("ratios") or [])
