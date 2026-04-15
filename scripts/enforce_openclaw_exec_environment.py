@@ -28,7 +28,7 @@ DEFAULT_EXEC_HOST_CONF = PROJECT_ROOT / "config" / "exec_host.conf"
 VALID_EXEC_HOSTS = {"sandbox", "gateway", "node"}
 VALID_SANDBOX_MODES = {"off", "main", "non-main", "all"}
 VALID_SANDBOX_MODES_FOR_SANDBOX_HOST = {"non-main", "all"}
-DEFAULT_SANDBOX_FALLBACK_HOST = "node"
+DEFAULT_SANDBOX_FALLBACK_HOST = "gateway"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -90,6 +90,32 @@ def _docker_sandbox_available(timeout_seconds: float = 5.0) -> bool:
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
     return int(proc.returncode) == 0
+
+
+def _node_host_available(timeout_seconds: float = 6.0) -> bool:
+    """Return True if at least one OpenClaw node is paired and reachable."""
+    try:
+        proc = subprocess.run(
+            ["openclaw", "nodes", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    if int(proc.returncode) != 0:
+        return False
+    try:
+        payload = json.loads(proc.stdout or "")
+    except Exception:
+        return False
+    if isinstance(payload, list):
+        nodes = payload
+    elif isinstance(payload, dict):
+        nodes = payload.get("nodes") or []
+    else:
+        return False
+    return bool(nodes)
 
 
 def _agent_ids(cfg: dict[str, Any]) -> list[str]:
@@ -277,6 +303,9 @@ def enforce_config_file(
     if effective_host == "sandbox" and not _docker_sandbox_available():
         effective_host = DEFAULT_SANDBOX_FALLBACK_HOST
         fallback_reason = "docker_sandbox_unavailable"
+    elif effective_host == "node" and not _node_host_available():
+        effective_host = "gateway"
+        fallback_reason = "node_host_unavailable"
 
     updated, changes = enforce_exec_environment(
         cfg,

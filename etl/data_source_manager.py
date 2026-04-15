@@ -24,6 +24,7 @@ import pandas as pd
 from importlib import import_module
 
 from etl.base_extractor import BaseExtractor, ExtractorMetadata
+from etl.env_flags import parse_env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,9 @@ class DataSourceManager:
         """
         providers = self.config.get('providers', [])
         enabled: List[Dict[str, Any]] = []
-        enable_synthetic_env = os.getenv("ENABLE_SYNTHETIC_PROVIDER") or os.getenv("ENABLE_SYNTHETIC_DATA_SOURCE")
-        synthetic_only = os.getenv("SYNTHETIC_ONLY")
+
+        enable_synthetic_env = parse_env_bool("ENABLE_SYNTHETIC_PROVIDER") or parse_env_bool("ENABLE_SYNTHETIC_DATA_SOURCE")
+        synthetic_only = parse_env_bool("SYNTHETIC_ONLY")
         preferred_source = (
             os.getenv("DATA_SOURCE")
             or os.getenv("PMX_PREFERRED_DATA_SOURCE")

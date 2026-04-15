@@ -391,25 +391,40 @@ class TestSignalRouter:
             "config/forecaster_monitoring.yml"
         )
 
-    def test_aapl_min_expected_return_above_base_threshold(self):
-        """AAPL's per-ticker min_expected_return must be >= 0.0080 (P0 routing gate).
-        Only very strong signals should pass; 14% historical WR demands a high evidence bar."""
+    def test_aapl_min_expected_return_at_global_default(self):
+        """AAPL per-ticker min_expected_return must be at global default range, not an uncalibrated override.
+
+        The prior 80 bps 'temporary conservative override' blocked 100% of AAPL signals and was
+        identified as a THIN_LINKAGE root cause (funnel audit 2026-04-15). The 14% historical WR
+        came from a system generating zero AAPL trades — it was a bootstrapping artefact, not
+        evidence for a 80 bps bar. The domain_utility gate (omega_ratio, payoff_asymmetry) provides
+        the actual quality bar; routing threshold must not silently block all signals.
+        Guard: threshold must remain in [20 bps, 40 bps] global-default range.
+        """
         import yaml
         from pathlib import Path
 
         cfg_path = Path(__file__).resolve().parent.parent.parent / "config" / "signal_routing_config.yml"
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        global_mer = (
+            raw.get("signal_routing", {})
+            .get("time_series", {})
+            .get("min_expected_return", 0.003)
+        )
         aapl_cfg = (
             raw.get("signal_routing", {})
             .get("time_series", {})
             .get("per_ticker", {})
             .get("AAPL", {})
         )
-        aapl_mer = aapl_cfg.get("min_expected_return", 0.0)
-        assert aapl_mer >= 0.0080, (
-            f"AAPL min_expected_return={aapl_mer} is too low; "
-            "must be >= 0.0080 (80 bps) to gate out weak signals (14% WR history). "
-            "Update config/signal_routing_config.yml."
+        aapl_mer = aapl_cfg.get("min_expected_return", global_mer)
+        assert aapl_mer <= 0.0040, (
+            f"AAPL min_expected_return={aapl_mer * 10000:.1f}bps must not exceed 40bps "
+            "(silently re-acquiring an uncalibrated override — funnel audit 2026-04-15)."
+        )
+        assert aapl_mer >= 0.0020, (
+            f"AAPL min_expected_return={aapl_mer * 10000:.1f}bps must be >= 20bps "
+            "(below roundtrip cost is zero-edge territory)."
         )
 
 

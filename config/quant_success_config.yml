@@ -30,9 +30,9 @@ quant_validation:
     min_sharpe: -0.10            # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     min_sortino: -0.10           # Deprecated diagnostic-only threshold; ignored by live PASS/FAIL
     max_drawdown: 0.45           # Phase 7.10: Widened from 0.40 to accommodate volatility
-    min_omega_ratio: 1.00        # Barbell-aware hurdle: require gain mass to beat loss mass around NGN hurdle
-    min_omega_robustness_score: 0.45  # Require Omega to survive realistic hurdle escalation, not just K=0
-    min_payoff_asymmetry: 1.25   # Avg winner must exceed avg loser by 25%+; 2.65x realized profile remains a soft upside target, not a hard gate
+    min_omega_ratio: 1.00        # Forward EV gate (tau=0): conf*upside / (1-conf)*stop > 1.0; positive expected-value requirement per signal. NOT the NGN portfolio hurdle (which is a portfolio-level goal, not a per-trade filter). Data source: signal-level Bernoulli distribution from target/stop/confidence, not historical daily bar returns.
+    min_omega_robustness_score: 0.45  # Require Omega to survive realistic hurdle escalation. Computable only when execution_drag_hurdle is present; absent value is excluded gracefully via strict_weight_coverage=false.
+    min_payoff_asymmetry: 0.60   # Forward R:R ratio = upside_pct / stop_pct (from ATR-based stop and forecast target). Threshold 0.60 = max 1.67:1 risk vs reward. Combined with omega_ratio>1.0, this requires BOTH positive EV AND a meaningful R:R setup. Previously 1.25 applied to historical avg_win/avg_loss from daily bar returns (wrong data source). Data source: signal.target_price vs signal.stop_loss.
     min_trimmed_payoff_asymmetry: 1.10  # Support-aware asymmetry floor after trimming concentrated tail winners/losses
     max_winner_concentration_ratio: 0.60  # One winner must not dominate realized convexity proof
     min_profit_factor: 0.80      # Retained as a secondary realized-quality metric; lower weight than payoff asymmetry because PF mixes hit-rate with payoff shape
@@ -42,7 +42,6 @@ quant_validation:
     # Forecast-edge criteria (used when validation_mode=forecast_edge).
     max_rmse_ratio_vs_baseline: 1.20  # Phase 7.10: Widened from 1.10 to allow more candidates through
     min_terminal_directional_accuracy: 0.45  # Canonical directional gate for multi-bar trade alignment
-    min_directional_accuracy: 0.45           # Deprecated alias; kept for one compatibility pass
     min_expected_shortfall: -0.0108         # 10× NGN daily hurdle (~1.08%/day CVaR floor); ES is tail loss not return hurdle
     bucket_hard_gate_criteria:
       safe: []
@@ -68,7 +67,7 @@ quant_validation:
   # Layer 2: continuous domain utility on asymmetric upside and bounded downside.
   scoring_mode: domain_utility        # 'domain_utility' (canonical) or 'all_pass' (legacy)
   pass_threshold: 0.60               # Minimum weighted score to PASS (0.0-1.0)
-  strict_weight_coverage: true       # Fail when a utility component lacks an explicit/known weight or value
+  strict_weight_coverage: false      # OOS metrics (terminal_ci_coverage, terminal_directional_accuracy) are not always computable at signal time; missing components are excluded from the weighted score rather than hard-failing the signal
   hard_gate_criteria:
     - expected_profit
     - significance
@@ -86,7 +85,7 @@ quant_validation:
     expected_profit: 0.18            # Economic viability of the proposed trade; also remains a hard gate by default
     omega_ratio: 0.20                # Primary realized-distribution hurdle vs NGN carry/friction
     omega_robustness_score: 0.10     # Survives threshold escalation from K=0 to NGN+execution drag
-    payoff_asymmetry: 0.14           # Direct barbell engine: avg_gain / |avg_loss|
+    payoff_asymmetry: 0.14           # Forward R:R: upside_pct / stop_pct from signal's target/stop (replaces historical avg_gain/|avg_loss|)
     profit_factor: 0.10              # Secondary realized quality context
     terminal_directional_accuracy: 0.10  # Multi-step directional alignment with realized trade payoff
     terminal_ci_coverage: 0.10      # CI quality gate — did realized price land inside forecast CI?

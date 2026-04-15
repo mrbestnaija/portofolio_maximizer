@@ -61,6 +61,60 @@ pmx_require_wsl() {
   fi
 }
 
+pmx_find_wsl_python() {
+  # Return the first Python 3.10-3.12 executable found in WSL. Refuses 3.13+.
+  local candidate=""
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    local path=""
+    path="$(command -v "${candidate}" 2>/dev/null || true)"
+    [[ -z "${path}" ]] && continue
+    local ver=""
+    ver="$("${path}" -c 'import sys; print(sys.version_info[:2])' 2>/dev/null || true)"
+    # Accept (3,10) / (3,11) / (3,12); reject anything else.
+    if [[ "${ver}" == "(3, 10)" || "${ver}" == "(3, 11)" || "${ver}" == "(3, 12)" ]]; then
+      echo "${path}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pmx_bootstrap_simpletrader_env() {
+  # Create simpleTrader_env under <root> using a WSL Python 3.10-3.12.
+  # This is the ONLY authorised environment name for this repo.
+  local root="${1:-}"
+  [[ -n "${root}" ]] || root="$(pmx_repo_root)"
+
+  local env_dir="${root}/simpleTrader_env"
+  pmx_log "INFO" "simpleTrader_env not found at ${env_dir} — bootstrapping..."
+
+  local py=""
+  py="$(pmx_find_wsl_python)" || pmx_die \
+    "No compatible Python (3.10-3.12) found in WSL. Install python3.10/3.11/3.12 and retry. (see Documentation/RUNTIME_GUARDRAILS.md)"
+
+  pmx_log "INFO" "Using interpreter: ${py} ($("${py}" -V 2>&1))"
+
+  # Prefer virtualenv when available (preserves pip-wheel cache), fall back to venv.
+  if "${py}" -m virtualenv --version >/dev/null 2>&1; then
+    "${py}" -m virtualenv "${env_dir}"
+  else
+    "${py}" -m venv "${env_dir}"
+  fi
+
+  pmx_log "INFO" "simpleTrader_env created at ${env_dir}"
+
+  # Install pinned dependencies if requirements.txt is present.
+  local req="${root}/requirements.txt"
+  if [[ -f "${req}" ]]; then
+    pmx_log "INFO" "Installing dependencies from requirements.txt..."
+    "${env_dir}/bin/pip" install --upgrade pip --quiet
+    "${env_dir}/bin/pip" install -r "${req}"
+    pmx_log "INFO" "Dependencies installed"
+  else
+    pmx_log "WARN" "No requirements.txt found at ${req}; skipping pip install"
+  fi
+}
+
 pmx_activate_simpletrader_env() {
   pmx_require_wsl
   local root=""
@@ -70,7 +124,13 @@ pmx_activate_simpletrader_env() {
   fi
 
   local activate_path="${root}/simpleTrader_env/bin/activate"
-  [[ -f "${activate_path}" ]] || pmx_die "Missing WSL virtualenv: ${activate_path} (see Documentation/RUNTIME_GUARDRAILS.md)"
+
+  # Auto-create the authorised environment if it is absent.
+  if [[ ! -f "${activate_path}" ]]; then
+    pmx_bootstrap_simpletrader_env "${root}"
+  fi
+
+  [[ -f "${activate_path}" ]] || pmx_die "Failed to bootstrap simpleTrader_env at ${root} (see Documentation/RUNTIME_GUARDRAILS.md)"
 
   # shellcheck source=/dev/null
   source "${activate_path}"

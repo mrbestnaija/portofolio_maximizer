@@ -401,16 +401,26 @@ class TestPerTickerThresholdResolution:
         assert t["confidence_threshold"] == pytest.approx(0.70)
 
     def test_production_aapl_msft_get_minimum_bps_floor(self):
-        """Live production config must give AAPL >= 80bps, MSFT >= 20bps floor (Phase 7.34)."""
+        """Production config: AAPL and MSFT must use calibrated thresholds not uncalibrated overrides.
+
+        The prior 80 bps AAPL override (Phase 7.34 "temporary conservative override") was never
+        evidence-calibrated — it blocked 100% of AAPL signals during evidence accumulation.
+        Funnel audit (2026-04-15) confirmed it was a structural THIN_LINKAGE root cause.
+        Reset to global defaults: AAPL=30bps, MSFT=20bps.
+        """
         if not Path("config/signal_routing_config.yml").exists():
             pytest.skip("config/signal_routing_config.yml not present")
 
         from models.signal_generator_factory import build_signal_generator
         gen = build_signal_generator()
-        # Phase 7.34: AAPL raised to 80bps (conviction floor), MSFT remains 20bps
+        # AAPL: reset to global default 30 bps (was 80 bps — uncalibrated "temporary" override)
         aapl = gen._resolve_thresholds_for_ticker("AAPL")
-        assert aapl["min_expected_return"] >= 0.0080, (
-            f"AAPL should have >= 80bps floor (Phase 7.34). "
+        assert aapl["min_expected_return"] >= 0.0020, (
+            f"AAPL min_expected_return should be at global default (>=20bps). "
+            f"Got {aapl['min_expected_return'] * 10000:.1f}bps."
+        )
+        assert aapl["min_expected_return"] <= 0.0040, (
+            f"AAPL min_expected_return must not re-acquire an uncalibrated high override (<=40bps). "
             f"Got {aapl['min_expected_return'] * 10000:.1f}bps."
         )
         msft = gen._resolve_thresholds_for_ticker("MSFT")

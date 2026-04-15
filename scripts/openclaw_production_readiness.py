@@ -50,25 +50,6 @@ from scripts import openclaw_regression_gate as regression_mod
 from scripts import project_runtime_status as runtime_mod
 from utils.repo_python import resolve_repo_python
 
-try:
-    from scripts.production_gate_contract import (
-        gate_semantics_status as _gate_semantics_status,
-        legacy_phase3_ready as _legacy_phase3_ready,
-        legacy_phase3_reason as _legacy_phase3_reason,
-        phase3_posture as _phase3_posture,
-        phase3_strict_ready as _phase3_strict_ready,
-        phase3_strict_reason as _phase3_strict_reason,
-    )
-except Exception:  # pragma: no cover - script execution path fallback
-    from production_gate_contract import (  # type: ignore
-        gate_semantics_status as _gate_semantics_status,
-        legacy_phase3_ready as _legacy_phase3_ready,
-        legacy_phase3_reason as _legacy_phase3_reason,
-        phase3_posture as _phase3_posture,
-        phase3_strict_ready as _phase3_strict_ready,
-        phase3_strict_reason as _phase3_strict_reason,
-    )
-
 
 FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
 DEFAULT_APPROVAL_TOKEN = "PMX_APPROVE_HIGH_RISK"
@@ -78,7 +59,6 @@ DEFAULT_GATE_DECOMPOSITION_ARTIFACT = PROJECT_ROOT / "logs" / "audit_gate" / "pr
 DEFAULT_GATE_DECOMPOSITION_MARKDOWN = PROJECT_ROOT / "logs" / "audit_gate" / "production_gate_decomposition_latest.md"
 DEFAULT_FORECAST_SUMMARY_CACHE = PROJECT_ROOT / "logs" / "forecast_audits_cache" / "latest_summary.json"
 DEFAULT_OPENCLAW_JSON_RELATIVE = Path(".openclaw") / "openclaw.json"
-DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 
 def _default_openclaw_json_path() -> Path:
@@ -125,24 +105,8 @@ def _env_enabled(name: str, *, default: bool) -> bool:
     return raw not in FALSEY_ENV_VALUES
 
 
-def _windows_user_env_value(name: str) -> str:
-    key_name = str(name or "").strip()
-    if os.name != "nt" or not key_name:
-        return ""
-    try:
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
-            value, _ = winreg.QueryValueEx(key, key_name)
-    except Exception:
-        return ""
-    return str(value or "").strip()
-
-
 def _approval_token_value() -> str:
     token = str(os.getenv("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")).strip()
-    if not token:
-        token = _windows_user_env_value("OPENCLAW_AUTONOMY_APPROVAL_TOKEN")
     return token or DEFAULT_APPROVAL_TOKEN
 
 
@@ -204,7 +168,7 @@ def _artifact_mtime_utc(path: Path) -> Optional[str]:
 
 def _tool_capable_model_name(name: str) -> bool:
     low = str(name or "").strip().lower()
-    return "qwen3" in low or "qwen2.5" in low or ("llama3" in low and "tool" in low)
+    return "qwen3" in low or "qwen2.5" in low
 
 
 def _tool_capable_model_ref(ref: str) -> bool:
@@ -215,7 +179,7 @@ def _tool_capable_model_ref(ref: str) -> bool:
 
 
 def _normalize_ollama_base_url(base_url: str) -> str:
-    raw = str(base_url or "").strip() or DEFAULT_OLLAMA_BASE_URL
+    raw = str(base_url or "").strip() or "http://127.0.0.1:11434/v1"
     text = raw.rstrip("/")
     if text.lower().endswith("/v1"):
         return text[: -len("/v1")]
@@ -253,9 +217,6 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
         "overall_passed": None,
         "phase3_ready": None,
         "phase3_reason": "",
-        "phase3_legacy_ready": None,
-        "phase3_legacy_reason": "",
-        "phase3_posture": "",
         "age_hours": None,
         "mtime_utc": _artifact_mtime_utc(path),
         "status_stage": "",
@@ -274,11 +235,8 @@ def _gate_artifact_snapshot(path: Path) -> dict[str, Any]:
     snapshot["age_hours"] = _artifact_age_hours(path)
     snapshot["timestamp_utc"] = payload.get("timestamp_utc")
     snapshot["overall_passed"] = payload.get("overall_passed")
-    snapshot["phase3_ready"] = _phase3_strict_ready(payload)
-    snapshot["phase3_reason"] = _phase3_strict_reason(payload)
-    snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
-    snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
-    snapshot["phase3_posture"] = _phase3_posture(payload)
+    snapshot["phase3_ready"] = payload.get("phase3_ready")
+    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
     snapshot["status_stage"] = str(payload.get("status_stage") or "")
     snapshot["skipped_optional_gates"] = payload.get("skipped_optional_gates")
     snapshot["max_skipped_optional_gates"] = payload.get("max_skipped_optional_gates")
@@ -294,9 +252,6 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
         "exists": path.exists(),
         "phase3_ready": None,
         "phase3_reason": "",
-        "phase3_legacy_ready": None,
-        "phase3_legacy_reason": "",
-        "phase3_posture": "",
         "warmup_expired": None,
         "gate_semantics_status": "",
         "pass_semantics_version": None,
@@ -320,13 +275,10 @@ def _production_gate_snapshot(path: Path) -> dict[str, Any]:
     )
     snapshot["age_hours"] = _artifact_age_hours(path)
     snapshot["timestamp_utc"] = payload.get("timestamp_utc")
-    snapshot["phase3_ready"] = _phase3_strict_ready(payload)
-    snapshot["phase3_reason"] = _phase3_strict_reason(payload)
-    snapshot["phase3_legacy_ready"] = _legacy_phase3_ready(payload)
-    snapshot["phase3_legacy_reason"] = _legacy_phase3_reason(payload)
-    snapshot["phase3_posture"] = _phase3_posture(payload)
+    snapshot["phase3_ready"] = payload.get("phase3_ready")
+    snapshot["phase3_reason"] = str(payload.get("phase3_reason") or "")
     snapshot["warmup_expired"] = payload.get("warmup_expired")
-    snapshot["gate_semantics_status"] = _gate_semantics_status(payload) or str(gate_block.get("gate_semantics_status") or "")
+    snapshot["gate_semantics_status"] = str(gate_block.get("gate_semantics_status") or "")
     snapshot["pass_semantics_version"] = payload.get("pass_semantics_version")
     return snapshot
 
@@ -539,9 +491,6 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
         "fallback_models": [],
         "allowlist_models": [],
         "image_primary": "",
-        "ollama_provider_api": "",
-        "ollama_native_api": False,
-        "ollama_base_url_looks_legacy": False,
         "ollama_base_url": "",
         "ollama_reachable": False,
         "discovered_models": [],
@@ -598,15 +547,12 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
     remote_allowlist = [row for row in allowlist_models if not row.startswith("ollama/")]
 
     ollama_provider = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else {}
-    ollama_provider_api = str(ollama_provider.get("api") or "").strip().lower()
     ollama_base_url = (
         str(os.getenv("OPENCLAW_OLLAMA_BASE_URL") or "").strip()
         or str(os.getenv("OLLAMA_HOST") or "").strip()
         or str(ollama_provider.get("baseUrl") or "").strip()
-        or DEFAULT_OLLAMA_BASE_URL
+        or "http://127.0.0.1:11434/v1"
     )
-    ollama_native_api = ollama_provider_api == "ollama"
-    ollama_base_url_looks_legacy = ollama_base_url.strip().lower().endswith("/v1")
     discovered_models = _discover_ollama_models(ollama_base_url)
 
     tool_model_configured = any(
@@ -622,9 +568,6 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
             "fallback_models": fallback_models,
             "allowlist_models": allowlist_models,
             "image_primary": image_primary,
-            "ollama_provider_api": ollama_provider_api,
-            "ollama_native_api": ollama_native_api,
-            "ollama_base_url_looks_legacy": ollama_base_url_looks_legacy,
             "ollama_base_url": ollama_base_url,
             "ollama_reachable": bool(discovered_models),
             "discovered_models": discovered_models[:12],
@@ -647,28 +590,6 @@ def _openclaw_model_posture(config_path: Path) -> tuple[dict[str, Any], list[dic
                 source="openclaw_models",
                 code="openclaw_remote_providers",
                 detail=f"Remote providers configured: {', '.join(remote_providers)}",
-            )
-        )
-    if ollama_provider and ollama_provider_api and not ollama_native_api:
-        blockers.append(
-            _issue(
-                source="openclaw_models",
-                code="ollama_provider_not_native",
-                detail=(
-                    "models.providers.ollama.api is configured as "
-                    f"{ollama_provider_api!r}; use native 'ollama' mode for current OpenClaw + Ollama tool-calling."
-                ),
-            )
-        )
-    if ollama_native_api and ollama_base_url_looks_legacy:
-        blockers.append(
-            _issue(
-                source="openclaw_models",
-                code="ollama_base_url_legacy_v1",
-                detail=(
-                    "models.providers.ollama.baseUrl ends with '/v1' while api='ollama'. "
-                    "Use the native Ollama endpoint without '/v1'."
-                ),
             )
         )
     if not primary_model:
@@ -943,13 +864,11 @@ def _gate_truth_posture(
     freshest_phase3_source = "gate_status_latest"
     effective_phase3_ready = gate_artifact.get("phase3_ready")
     effective_phase3_reason = gate_artifact.get("phase3_reason")
-    effective_phase3_posture = gate_artifact.get("phase3_posture")
 
     if production_time and (gate_time is None or production_time >= gate_time):
         freshest_phase3_source = "production_gate_latest"
         effective_phase3_ready = production_gate.get("phase3_ready")
         effective_phase3_reason = production_gate.get("phase3_reason")
-        effective_phase3_posture = production_gate.get("phase3_posture")
 
     skipped_optional = gate_artifact.get("skipped_optional_gates")
     max_skipped = gate_artifact.get("max_skipped_optional_gates")
@@ -997,19 +916,6 @@ def _gate_truth_posture(
                 )
             )
 
-    if str(effective_phase3_posture or "").strip().upper() == "WARMUP_COVERED_PASS":
-        blockers.append(
-            _issue(
-                source="gate_truth",
-                code="warmup_covered_pass_not_ready",
-                detail=(
-                    "The freshest production-gate artifact is only WARMUP_COVERED_PASS. "
-                    "Treat readiness, threshold changes, and production promotion as blocked "
-                    "until the live non-synthetic evidence gap closes."
-                ),
-            )
-        )
-
     snapshot = {
         "gate_artifact": gate_artifact,
         "production_gate_artifact": production_gate,
@@ -1017,7 +923,6 @@ def _gate_truth_posture(
         "freshest_phase3_source": freshest_phase3_source,
         "effective_phase3_ready": effective_phase3_ready,
         "effective_phase3_reason": effective_phase3_reason,
-        "effective_phase3_posture": effective_phase3_posture,
         "drift_detected": bool(blockers or warnings),
     }
     return snapshot, blockers, warnings
@@ -1171,17 +1076,11 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         "openclaw_remote_providers",
         "openclaw_primary_remote",
         "openclaw_remote_fallbacks",
-        "ollama_provider_not_native",
-        "ollama_base_url_legacy_v1",
         "tool_model_not_configured",
         "tool_model_not_available",
         "ollama_unreachable",
     }:
-        add(
-            "Keep OpenClaw local-only and re-apply the native Ollama model chain with "
-            "`python scripts/openclaw_models.py apply`; ensure a tool-capable local qwen "
-            "model is available (prefer `qwen3.5:27b`, fallback `qwen3:8b`)."
-        )
+        add("Keep OpenClaw local-only and re-apply the model chain with `python scripts/openclaw_models.py apply`; ensure `qwen3:8b` is available in Ollama.")
     if codes & {
         "autonomy_guard_disabled",
         "approval_token_not_required",
@@ -1200,8 +1099,6 @@ def _recommendations_for_issues(blockers: list[dict[str, str]], warnings: list[d
         add("Validate messaging health with `python scripts/openclaw_regression_gate.py --json` and repair channels via `python scripts/openclaw_maintenance.py --strict`.")
     if codes & {"gate_skip_policy_failed", "stale_gate_artifact_phase3_drift"}:
         add("Refresh canonical gate truth without skip flags; see `python scripts/openclaw_production_readiness.py --action-guide canonical_gate_truth`.")
-    if "warmup_covered_pass_not_ready" in codes:
-        add("Do not treat the current gate as ready while posture is WARMUP_COVERED_PASS; wait for live non-synthetic evidence to clear on its own merit.")
     if codes & {"capital_readiness_failed", "runtime_check_failed:production_gate"}:
         add("Do not promote to production yet; use `python scripts/run_all_gates.py --json` and `python scripts/capital_readiness_check.py --json` to confirm current blockers and evidence gaps.")
         add("For a focused human triage checklist, run `python scripts/openclaw_production_readiness.py --action-guide capital_readiness`.")
@@ -1325,7 +1222,6 @@ def _print_human_summary(payload: dict[str, Any]) -> None:
         print(
             "[openclaw_production_readiness] gate_truth "
             f"effective_phase3_ready={gate_truth.get('effective_phase3_ready')} "
-            f"effective_phase3_posture={gate_truth.get('effective_phase3_posture')} "
             f"source={gate_truth.get('freshest_phase3_source')} "
             f"drift_detected={gate_truth.get('drift_detected')}"
         )

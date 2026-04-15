@@ -10,7 +10,11 @@ def test_quant_success_config_weight_schema_contract() -> None:
 
     assert qv.get("objective_mode") == "domain_utility"
     assert qv.get("scoring_mode") == "domain_utility"
-    assert bool(qv.get("strict_weight_coverage")) is True
+    # strict_weight_coverage must be False: OOS metrics (terminal_ci_coverage,
+    # terminal_directional_accuracy) are not computable at forecast time.
+    # When True, any signal lacking these keys is hard-FAILed before scoring
+    # — a structural THIN_LINKAGE root cause (funnel audit 2026-04-15).
+    assert bool(qv.get("strict_weight_coverage")) is False
     assert qv.get("hard_gate_criteria") == [
         "expected_profit",
         "significance",

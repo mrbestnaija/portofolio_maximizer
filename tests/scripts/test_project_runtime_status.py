@@ -122,6 +122,8 @@ def test_exec_env_check_accepts_utf8_bom(monkeypatch, tmp_path) -> None:
     }
     cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
     monkeypatch.setattr(mod.Path, "home", lambda: tmp_path)
+    if hasattr(mod, "_node_host_available"):
+        monkeypatch.setattr(mod, "_node_host_available", lambda timeout_seconds=6.0: True)
 
     check = mod._openclaw_exec_environment_check()
     assert check["ok"] is True

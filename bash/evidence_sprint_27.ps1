@@ -21,11 +21,46 @@
 #
 # Usage:
 #   cd C:\Users\Bestman\personal_projects\portfolio_maximizer_v45\portfolio_maximizer_v45
-#   .\simpleTrader_env\Scripts\Activate.ps1
 #   .\bash\evidence_sprint_27.ps1
+#
+# PRE-REQUISITE (WSL migration): Windows venv was replaced by WSL venvs.
+#   If no venv exists, create one first:
+#     C:\Users\Bestman\AppData\Local\Programs\Python\Python312\python.exe -m venv simpleTrader_env_win
+#     .\simpleTrader_env_win\Scripts\pip install -r requirements.txt
+#   Then re-run this script.
 
 $ErrorActionPreference = "Continue"
-$PYTHON   = ".\simpleTrader_env\Scripts\python.exe"
+
+# Auto-detect Python executable (WSL migration: Scripts\python.exe no longer exists)
+$_candidates = @(
+    ".\simpleTrader_env_win\Scripts\python.exe",
+    ".\simpleTrader_env\Scripts\python.exe",
+    ".\simpleTrader_env.windows-backup-20260414003046\Scripts\python.exe",
+    "C:\Users\Bestman\AppData\Local\Programs\Python\Python312\python.exe",
+    "C:\Python314\python.exe",
+    "python"
+)
+$PYTHON = $null
+foreach ($_c in $_candidates) {
+    try {
+        $null = & $_c --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $PYTHON = $_c; break }
+    } catch {}
+}
+if (-not $PYTHON) {
+    Write-Error "ERROR: No working Python found. Create a Windows venv first:"
+    Write-Error "  C:\Users\Bestman\AppData\Local\Programs\Python\Python312\python.exe -m venv simpleTrader_env_win"
+    Write-Error "  .\simpleTrader_env_win\Scripts\pip install -r requirements.txt"
+    exit 1
+}
+Write-Host "Using Python: $PYTHON" -ForegroundColor Cyan
+# Verify project packages are available
+& $PYTHON -c "import pandas, yfinance" 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "ERROR: Python at '$PYTHON' is missing project packages."
+    Write-Error "Run:  & '$PYTHON' -m pip install -r requirements.txt"
+    exit 1
+}
 $SCRIPT   = "scripts\run_auto_trader.py"
 $TICKERS  = "AAPL"
 $LOOKBACK = 365

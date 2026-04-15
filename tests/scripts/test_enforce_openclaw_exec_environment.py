@@ -97,6 +97,7 @@ def test_enforce_config_file_accepts_utf8_bom(tmp_path: Path, monkeypatch) -> No
     payload = {"tools": {"exec": {"host": "node"}}, "agents": {"defaults": {"sandbox": {"mode": "non-main"}}}}
     cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
     monkeypatch.setattr(mod, "_docker_sandbox_available", lambda timeout_seconds=5.0: True)
+    monkeypatch.setattr(mod, "_node_host_available", lambda timeout_seconds=6.0: True)
 
     report = mod.enforce_config_file(
         config_path=cfg_path,
@@ -150,7 +151,7 @@ def test_enforce_exec_environment_repairs_exec_capable_agent_sandbox_overrides()
     assert any("agents.list[training].sandbox.mode" in change for change in changes)
 
 
-def test_enforce_config_file_falls_back_to_node_when_docker_sandbox_unavailable(
+def test_enforce_config_file_falls_back_to_gateway_when_docker_sandbox_unavailable(
     tmp_path: Path, monkeypatch
 ) -> None:
     cfg_path = tmp_path / "openclaw.json"
@@ -172,7 +173,7 @@ def test_enforce_config_file_falls_back_to_node_when_docker_sandbox_unavailable(
 
     updated = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert report["ok"] is True
-    assert report["host"] == "node"
+    assert report["host"] == "gateway"
     assert report["requested_host"] == "sandbox"
     assert report["fallback_reason"] == "docker_sandbox_unavailable"
-    assert updated["tools"]["exec"]["host"] == "node"
+    assert updated["tools"]["exec"]["host"] == "gateway"

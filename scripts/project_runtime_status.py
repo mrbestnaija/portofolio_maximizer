@@ -109,6 +109,38 @@ def _docker_sandbox_available(timeout_seconds: float = 5.0) -> bool:
     return int(proc.returncode) == 0
 
 
+def _node_host_available(timeout_seconds: float = 6.0) -> bool:
+    """Return True if at least one OpenClaw node is paired and reachable.
+
+    Calls ``openclaw nodes list --json`` with a short timeout. Any failure
+    (missing CLI, non-zero exit, empty list, JSON parse error) is treated as
+    unavailable — matching the pattern of ``_docker_sandbox_available``.
+    """
+    try:
+        proc = subprocess.run(
+            ["openclaw", "nodes", "list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    if int(proc.returncode) != 0:
+        return False
+    try:
+        payload = json.loads(proc.stdout or "")
+    except Exception:
+        return False
+    # Accept a top-level list or a dict with a "nodes" key.
+    if isinstance(payload, list):
+        nodes = payload
+    elif isinstance(payload, dict):
+        nodes = payload.get("nodes") or []
+    else:
+        return False
+    return bool(nodes)
+
+
 def _read_openclaw_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8-sig"))
     return payload if isinstance(payload, dict) else {}
@@ -498,6 +530,14 @@ def _openclaw_exec_environment_check() -> dict[str, Any]:
     if host == "sandbox" and not _docker_sandbox_available():
         check["signals"] = ["sandbox_runtime_unavailable"]
         check["stderr"] = "docker daemon unavailable for sandbox host"
+        return check
+
+    if host == "node" and not _node_host_available():
+        check["signals"] = ["node_host_unavailable"]
+        check["stderr"] = (
+            "tools.exec.host=node but no paired node found via 'openclaw nodes list'; "
+            "run: python scripts/enforce_openclaw_exec_environment.py --host gateway"
+        )
         return check
 
     invalid_override_agents = _invalid_sandbox_override_agents(cfg)

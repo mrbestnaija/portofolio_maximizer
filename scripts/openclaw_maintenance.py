@@ -1594,7 +1594,15 @@ def _gateway_health_and_heal(
                 out["manual_actions"],
                 "run: openclaw channels login --channel whatsapp --account default --verbose"
             )
-        elif final_issue in {"whatsapp_channel_down", "whatsapp_handshake_timeout"}:
+        elif final_issue == "whatsapp_handshake_timeout":
+            # 428/408 handshake failures require a Baileys version hotfix + fresh auth,
+            # not just a re-login. Direct to the dedicated relink helper.
+            _append_unique(
+                out["manual_actions"],
+                "run: python scripts/openclaw_whatsapp_relink.py --fresh-auth --force-wa-version-hotfix",
+            )
+            _append_unique(out["manual_actions"], "run: openclaw channels logs --channel whatsapp --lines 200")
+        elif final_issue == "whatsapp_channel_down":
             _append_unique(
                 out["manual_actions"],
                 "run: openclaw channels login --channel whatsapp --account default --verbose"

@@ -57,7 +57,7 @@ _HARDENED_RMSE_MONITOR_DEFAULTS: Dict[str, Any] = {
     "strict_preselection_gate_enabled": True,
     "strict_preselection_max_rmse_ratio": 1.1,
     "strict_preselection_recent_window": 5,
-    "strict_preselection_min_effective_audits": 1,
+    "strict_preselection_min_effective_audits": 3,  # require ≥3 audit windows before DISABLE_DEFAULT fires; 1 noisy ratio is not signal
 }
 
 

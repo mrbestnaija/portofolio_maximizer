@@ -51,11 +51,11 @@ signal_routing:
         confidence_threshold: 0.55
         min_expected_return: 0.0020
       "AAPL":
-        confidence_threshold: 0.60  # Temporary conservative override pending payoff-calibrated re-evaluation
-        min_expected_return: 0.0080  # Temporary conservative override; not evidence of calibrated edge
+        confidence_threshold: 0.55  # Reset to global default; 0.60 override was uncalibrated ("temporary" label, no evidence)
+        min_expected_return: 0.0030  # Reset to global default; 80 bps was 2.7× global floor with no evidence basis
       "GS":
-        confidence_threshold: 0.65  # Temporary conservative override pending payoff-calibrated re-evaluation
-        min_expected_return: 0.0120  # Temporary conservative override; not evidence of calibrated edge
+        confidence_threshold: 0.55  # Reset to global default; 0.65 override was uncalibrated ("temporary" label, no evidence)
+        min_expected_return: 0.0030  # Reset to global default; 120 bps had no evidence basis
 
     # Research/diagnostic overrides live in automation scripts via DIAGNOSTIC_MODE/TS_DIAGNOSTIC_MODE=1
     # so production thresholds stay conservative while evidence is gathered.
