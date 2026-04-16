@@ -455,6 +455,97 @@ def test_time_exit_uses_bar_count_not_calendar_days():
     db.close()
 
 
+def test_build_close_allocations_live_lots_consumed_before_synthetic():
+    """INT-06: live (is_synthetic=0) lots must be consumed BEFORE synthetic lots.
+
+    Without the sort fix, evidence-sprint synthetic opens have older trade_dates
+    and win FIFO, causing every live close to be marked is_contaminated=1 and
+    excluded from THIN_LINKAGE counting.  This test verifies that when the
+    portfolio has a synthetic lot and a live lot for the same ticker, a live
+    close consumes the live lot first and is NOT contaminated.
+    """
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+
+    # Synthetic opener (older trade_date — would win legacy FIFO)
+    synthetic_id = db.save_trade_execution(
+        ticker="AAPL",
+        trade_date=datetime(2021, 2, 19, tzinfo=timezone.utc).date(),
+        action="BUY",
+        shares=1,
+        price=80.0,
+        total_value=80.0,
+        commission=0.0,
+        execution_mode="synthetic",
+        is_synthetic=1,
+    )
+    # Live opener (newer trade_date — should win with INT-06 sort)
+    live_id = db.save_trade_execution(
+        ticker="AAPL",
+        trade_date=datetime(2026, 4, 14, tzinfo=timezone.utc).date(),
+        action="BUY",
+        shares=1,
+        price=200.0,
+        total_value=200.0,
+        commission=0.0,
+        execution_mode="live",
+        is_synthetic=0,
+    )
+
+    # Populate entry_lots with BOTH synthetic (first/older) and live (second/newer)
+    engine.portfolio.entry_lots["AAPL"] = [
+        {
+            "trade_id": synthetic_id,
+            "action": "BUY",
+            "remaining_shares": 1.0,
+            "is_synthetic": 1,
+        },
+        {
+            "trade_id": live_id,
+            "action": "BUY",
+            "remaining_shares": 1.0,
+            "is_synthetic": 0,
+        },
+    ]
+    engine.portfolio.positions["AAPL"] = 2
+    engine.portfolio.entry_prices["AAPL"] = 140.0
+    engine.portfolio.entry_timestamps["AAPL"] = datetime(2026, 4, 14, tzinfo=timezone.utc)
+    engine.portfolio.entry_trade_ids["AAPL"] = live_id
+
+    result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(210.0),
+        proof_mode=True,
+    )
+
+    assert result.status == "EXECUTED"
+    assert result.trade is not None
+    # The live close must have consumed the LIVE lot — NOT contaminated
+    assert result.trade.is_contaminated == 0, (
+        "INT-06: live close consumed synthetic opener; entry_lots sort is broken"
+    )
+
+    row = db.cursor.execute(
+        "SELECT COALESCE(is_contaminated, 0) AS is_contaminated, entry_trade_id "
+        "FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert int(row["is_contaminated"]) == 0, (
+        "INT-06: DB record is_contaminated=1; live lot was not consumed first"
+    )
+    assert row["entry_trade_id"] == live_id, (
+        f"INT-06: expected entry_trade_id={live_id} (live), got {row['entry_trade_id']}"
+    )
+
+    db.close()
+
+
 def test_confidence_calibrated_saved_to_db():
     """Phase 7.14-E: confidence_calibrated flows from signal dict to trade_executions DB."""
     db = DatabaseManager(":memory:")

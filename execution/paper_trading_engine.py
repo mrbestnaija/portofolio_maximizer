@@ -314,7 +314,18 @@ class PaperTradingEngine:
         remaining = close_size_f
         allocations: List[Dict[str, Any]] = []
 
-        for lot in lots:
+        # INT-06: Sort lots so live (is_synthetic=0) lots are consumed before synthetic
+        # lots, preserving FIFO within each provenance group.  Without this ordering,
+        # evidence-sprint synthetic opens (with historical trade_dates) always win FIFO
+        # against current-session live opens, causing every live close to be paired with
+        # a synthetic opener and marked is_contaminated=1 — permanently blocking
+        # THIN_LINKAGE accumulation.
+        ordered_lots = sorted(
+            lots,
+            key=lambda lot: (int(lot.get("is_synthetic") or 0), int(lot.get("trade_id") or 0)),
+        )
+
+        for lot in ordered_lots:
             if remaining <= 1e-9:
                 break
             if str(lot.get("action") or "").upper() != target_open_action:
