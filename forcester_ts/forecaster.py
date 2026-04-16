@@ -2553,19 +2553,29 @@ class TimeSeriesForecaster:
         if result:
             return result
 
-        # Secondary scan: production_eval/ (OOS eval audits written by ETL/CV runs).
-        # Live auto_trader instances need OOS metrics from prior ETL runs to activate
-        # RMSE-rank scoring in derive_model_confidence().  Without this, RMSE-rank is
-        # permanently dead in live mode because auto_trader never writes evaluation_metrics.
-        # production_eval/ is the canonical location for RMSE_ONLY audit files after
-        # the evidence split (commit 525c661).  Look for it as a sibling of _audit_dir.
+        # Secondary scan: production_eval/ (RMSE_ONLY audits from evidence-sprint runs).
+        # These files currently have no evaluation_metrics — auto_trader never calls
+        # evaluate() so they're empty.  Keep scan for forward-compatibility.
         eval_dir = self._audit_dir.parent / "production_eval"
         if eval_dir != self._audit_dir and eval_dir.exists():
             result = _scan_dir_for_oos(eval_dir)
             if result:
                 return result
 
-        # Post-scan: log if the primary dir had files but no metric match.
+        # Tertiary scan: research/ (ETL/CV audit files written by run_etl_pipeline.py
+        # with --use-cv).  These are the ONLY files that contain evaluation_metrics
+        # because evaluate() requires actual future prices, which only CV runs have.
+        # Without this scan, RMSE-rank is permanently dead in live auto_trader mode:
+        # production/ and production_eval/ never have evaluation_metrics, so
+        # _load_trailing_oos_metrics() always returns {} and RMSE-rank falls back to
+        # heuristic SAMoSSA-EVR/GARCH-AIC scoring, capping confidence at ~0.35.
+        research_dir = self._audit_dir.parent / "research"
+        if research_dir != self._audit_dir and research_dir.exists():
+            result = _scan_dir_for_oos(research_dir)
+            if result:
+                return result
+
+        # Post-scan: log if the primary dir had files but no metric match in any dir.
         try:
             primary_count = sum(1 for _ in self._audit_dir.glob("forecast_audit_*.json"))
         except Exception:
@@ -2573,7 +2583,7 @@ class TimeSeriesForecaster:
         if primary_count:
             logger.warning(
                 "[TS_MODEL] _load_trailing_oos_metrics: scanned %d audit file(s) in %s "
-                "(+ production_eval if present) for ticker=%s horizon=%s — "
+                "(+ production_eval + research if present) for ticker=%s horizon=%s — "
                 "no matching file with evaluation_metrics found. "
                 "RMSE-rank will fall back to heuristic scoring.",
                 primary_count,

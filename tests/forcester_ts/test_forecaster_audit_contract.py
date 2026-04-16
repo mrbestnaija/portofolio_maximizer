@@ -873,3 +873,54 @@ def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
     assert result == {}, (
         "production_eval/ fallback must NOT return MSFT metrics when current ticker is AAPL"
     )
+
+
+def test_load_trailing_oos_metrics_falls_back_to_research_dir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Tertiary scan: when production/ and production_eval/ have no evaluation_metrics,
+    research/ (ETL/CV audit files) must be scanned.
+
+    Root cause of live RMSE-rank being dead: production/ and production_eval/ only
+    receive auto_trader audit files which never call evaluate() → no evaluation_metrics.
+    Only ETL/CV runs write evaluation_metrics, and those go to research/.
+    Without the research/ scan, RMSE-rank is permanently disabled in live mode and
+    confidence stays at heuristic baseline (~0.23-0.38, well below 0.55 gate threshold).
+    """
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+    # production/ file: no evaluation_metrics (typical live auto_trader file)
+    no_metrics_audit = {
+        "dataset": {"ticker": "AAPL", "forecast_horizon": 30, "length": 100},
+        "artifacts": {},
+    }
+    (production_dir / "forecast_audit_live.json").write_text(json.dumps(no_metrics_audit))
+
+    # production_eval/ file: also no evaluation_metrics (RMSE_ONLY auto_trader sprint)
+    eval_dir = tmp_path / "production_eval"
+    eval_dir.mkdir()
+    (eval_dir / "forecast_audit_sprint.json").write_text(json.dumps(no_metrics_audit))
+
+    # research/ file: HAS evaluation_metrics (ETL CV run with --use-cv)
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_etl_cv.json", "AAPL", 30)
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, (
+        "Tertiary research/ scan must find ETL/CV evaluation_metrics; "
+        "live RMSE-rank is permanently dead without this scan"
+    )
+    assert "samossa" in result, f"Expected samossa key from research/ metrics; got {list(result)}"
