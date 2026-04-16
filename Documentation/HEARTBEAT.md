@@ -1,20 +1,24 @@
 # HEARTBEAT.md
 
-## System Status (2026-04-15, commit 29806ac)
+## System Status (2026-04-16, commit 914527a)
 
-- **Gate**: PASS (semantics=PASS) — warmup EXPIRED today; THIN_LINKAGE now hard-enforced
+- **Gate**: PASS (semantics=PASS, warmup_expired=0) — WARMUP_COVERED_PASS posture
 - **Lift decision**: KEEP (lift_fraction=57.14%, threshold 25%)
 - **Violation rate**: 31.43% (11/35 effective) — within 35% ceiling
 - **Recent window**: 4/10 effective — INCONCLUSIVE (data, not code)
-- **Warmup**: EXPIRED 2026-04-15 — THIN_LINKAGE now requires matched >= 10
-- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; 8 more live round-trips required
-- **MSSA-RL**: NOW ONLINE — white_noise hard gate removed (warn-only); policy_support=43-47 adequate
-- **GARCH**: Universal EWMA fallback on all tickers (high-vol regime, volatility_ratio 15-22, persistence 0.92-0.99) — working as designed; 1.5x CI inflation active
+- **Warmup**: gate reports warmup_expired=0 (still active); expiry date=None in artifact
+- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; root cause fixed (INT-06); 8 more clean live round-trips required
+- **INT-06 FIXED**: `_build_close_allocations` now prioritizes live lots over synthetic — all future live closes will pair with live openers and count toward THIN_LINKAGE
+- **Open live positions**: AAPL(332), AMZN(334,350?), NVDA(335,351?), GOOG(352?) — these are next THIN_LINKAGE candidates when closed
+- **production_closed_trades**: only 3 non-legacy entries (322 NVDA, 321 AMZN, 260 AAPL); 333/320/318 contaminated by INT-06 (pre-fix)
+- **MSSA-RL**: ONLINE — white_noise warn-only; policy_support=43-47 adequate
+- **GARCH**: Universal EWMA fallback (high-vol regime) — working as designed; 1.5x CI inflation active
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
-- **Last commit**: 29806ac (GARCH convergence_ok grid loop isolation + seen_windows dedup fix)
-- **Test count**: 2371 passed, 0 failed, 14 xfailed (fast lane, 2026-04-15)
-- **Phase**: Post-DCR Hardening — quant gate forward-looking, MSSA-RL online, GARCH convergence isolated
+- **MSFT cache**: CLEARED (was stale to 2026-03-02)
+- **Last commit**: 914527a (INT-06 PTE live-lot priority fix + regression test)
+- **Test count**: 2433 passed, 0 failed, 14 xfailed (fast lane, 2026-04-16)
+- **Phase**: Post-DCR Hardening — INT-06 fixed; ready for live market-hours cycles to accumulate THIN_LINKAGE
 
 ## Gate Summary
 
@@ -46,17 +50,23 @@
 | matched/eligible ratio | 100% | >= 80% | PASS |
 | eligible | 2 | > 0 | PASS |
 
-**Root cause resolved (2026-04-15 funnel fixes):** 4 bugs were blocking ALL live trades (weight_coverage FAIL, AAPL 80bps threshold, deprecated DA gate, SYNTHETIC_ONLY raw getenv). All fixed. Next live cycles will produce genuine trade opportunities.
+**Root cause resolved (2026-04-15 funnel fixes + INT-06 2026-04-16):** 4 bugs were blocking ALL live trades (weight_coverage FAIL, AAPL 80bps threshold, deprecated DA gate, SYNTHETIC_ONLY raw getenv). All fixed. INT-06 (synthetic lot priority) now ensures live closes accumulate toward THIN_LINKAGE.
 
 **What still needs data:**
-1. 8 more live closed round-trips linked to audit windows
-2. MSFT market data stale to 2026-03-02 — clear `data/raw/MSFT*.parquet` before next run
-3. GS OOS metrics absent — run `python scripts/run_etl_pipeline.py --tickers GS` once
+1. 8 more live closed round-trips linked to audit windows (INT-06 fix ensures they will count)
+2. GS OOS metrics absent — run `python scripts/run_etl_pipeline.py --tickers GS` once
 
-## Confirmed Fixes — 2026-04-15 Session
+**Live open positions (candidates for THIN_LINKAGE when closed):**
+- id=332: AAPL BUY, live, audit file exists (`ts_AAPL_20260415T212533Z_81d8_0001`)
+- id=334: AMZN BUY, live, audit file exists (`ts_AMZN_20260416T055350Z_3b3b_0001`)
+- id=335: NVDA BUY, live, audit file exists (`ts_NVDA_20260416T055350Z_3b3b_0002`)
+- id=350,351,352: AAPL/NVDA/GOOG BUY, live (run 20260416_060351)
+
+## Confirmed Fixes — 2026-04-15/16 Sessions
 
 | Bug | Severity | File:Line | Commit |
 |-----|----------|-----------|--------|
+| INT-06: live closes paired with synthetic openers (all marks is_contaminated=1) | CRITICAL | `paper_trading_engine.py:317` | 914527a |
 | GARCH convergence_ok poisoned by rejected grid candidates | HIGH | `garch.py:302` | 29806ac |
 | seen_windows all-None dedup collapses audit files without dataset section | MEDIUM | `forecaster.py:2394` | 29806ac |
 | MSSA-RL white_noise hard gate blocks all forecasts in high-vol regimes | HIGH | `mssa_rl.py:773` | 48fc989 |
