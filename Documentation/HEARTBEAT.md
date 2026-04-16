@@ -1,6 +1,6 @@
 # HEARTBEAT.md
 
-## System Status (2026-04-16, commit 3d0dcda)
+## System Status (2026-04-16, commit aa7ffb5)
 
 - **Gate**: PASS (semantics=PASS, warmup_expired=0) — WARMUP_COVERED_PASS posture
 - **Lift decision**: KEEP (lift_fraction=57.14%, threshold 25%)
@@ -10,14 +10,16 @@
 - **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; INT-06 fixed; 9 live open positions pending close
 - **INT-06 FIXED**: `_build_close_allocations` prioritizes live lots over synthetic — future closes pair with live openers
 - **OOS SCAN FIXED**: `_load_trailing_oos_metrics()` now scans research/ (433 ETL CV files with eval_metrics); was dead in live mode
+- **OPENCLAW FIXED**: sandbox.mode non-main→off for ops/trading/training agents; 18 cron jobs updated to simpleTrader_env_win venv — all 23 jobs were failing with Docker error
 - **Open live positions (9)**: AAPL(332,350,353), AMZN(334), NVDA(335,351,354), GOOG(352,355) — each close = +1 THIN_LINKAGE
-- **Live signal quality**: confidence 0.23-0.38 (gate=0.55), SNR 0.11-0.84 (gate=1.5) — new BUYs blocked; existing positions close via PTE stop/target/time-exit
+- **Live signal quality**: confidence 0.23-0.38 (gate=0.55), SNR 0.11-0.84 (gate=1.5) — new BUYs blocked; existing positions close via PTE stop/target/time-exit; not code-fixable (GARCH EWMA 1.5x CI inflation, market conditions)
 - **production_closed_trades**: 3 non-legacy entries (322 NVDA, 321 AMZN, 260 AAPL); 333/320/318 contaminated (pre-INT-06)
 - **MSSA-RL**: ONLINE — white_noise warn-only; policy_support=43-47 adequate
 - **GARCH**: Universal EWMA fallback (high-vol regime) — 1.5x CI inflation widens CI, depresses SNR
+- **Adaptive weights**: Updated 2026-04-16 — GARCH dominant in 1-model/2-model candidates (EWMA high-vol regime); SAMoSSA displaced
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
-- **Last commit**: 3d0dcda (fix OOS research/ scan + 914527a INT-06)
+- **Last commit**: aa7ffb5 (adaptive weights + 3d0dcda OOS scan + 914527a INT-06)
 - **Test count**: 2437 passed, 0 failed, 14 xfailed (fast lane, 2026-04-16)
 - **Phase**: Post-DCR Hardening — awaiting 9 live position closes to hit THIN_LINKAGE=10
 
