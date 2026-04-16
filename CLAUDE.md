@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Portfolio Maximizer is an autonomous quantitative trading system that extracts financial data, forecasts market regimes, routes trading signals, and executes trades automatically. It's a production-ready Python system with institutional-grade ETL pipelines, LLM integration, and comprehensive testing.
 
-**Current Phase**: Domain-Calibrated Remediation — Phases 1+2+3 complete (2026-04-05); all DCR heuristic distortion fixes verified resolved (2026-04-13 audit)
+**Current Phase**: Post-DCR Hardening (2026-04-15) — quant gate forward-looking, MSSA-RL online, GARCH convergence isolated; THIN_LINKAGE warmup EXPIRED, matched=2/10 (need 8 more live round-trips)
 **Completed Phases**: DCR-P1 (missing-baseline bypass, residual enforcement, diagnostics_score pessimistic fallback, GARCH EWMA floor, funnel audit logging), DCR-P2B (CV OOS proxy), DCR-P3A (confidence calibration script), DCR-P3B (MSSA-RL neutral-on-low-support), Post-P4 Adversarial Remediation (Items 1/2/4 complete; Item 3 data-driven), P4 Remediation (stale xfail removed, trained-artifact tests, vol-band piecewise-linear), 10c (OOS selector wiring P0/P1, GARCH threshold fix, P3 evidence generation, gate PASS semantics=PASS 33.33%), 10b (Gate PASS via INCONCLUSIVE_ALLOWED, CI horizon-scaling, terminal DA/CI-coverage, Platt hardening), 10 (SARIMAX Re-enable, RMSE-Rank Hybrid, OpenClaw), 9 (Directional Classifier), 7.45 (EnsembleConfig Boundary), 7.44 (Evidence Hygiene), 7.40 (R5 Lift Semantics), 7.39 (Paranoid Review), 7.38 (PAG Cache Fix), 7.37 (Ticker Eligibility Gating), 7.35 (Signal Quality Pipeline), 7.34 (Capital Readiness), 7.17 (Ensemble Health Audit), 7.14 (Gate Recalibration A-E), 7.13 (Arch Sanitization), 7.9 (PnL Integrity + Proof Mode)
-**Last Updated**: 2026-04-05
+**Last Updated**: 2026-04-15
 
 ---
 
