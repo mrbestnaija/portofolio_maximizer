@@ -1,24 +1,25 @@
 # HEARTBEAT.md
 
-## System Status (2026-04-16, commit 914527a)
+## System Status (2026-04-16, commit 3d0dcda)
 
 - **Gate**: PASS (semantics=PASS, warmup_expired=0) — WARMUP_COVERED_PASS posture
 - **Lift decision**: KEEP (lift_fraction=57.14%, threshold 25%)
 - **Violation rate**: 31.43% (11/35 effective) — within 35% ceiling
 - **Recent window**: 4/10 effective — INCONCLUSIVE (data, not code)
 - **Warmup**: gate reports warmup_expired=0 (still active); expiry date=None in artifact
-- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; root cause fixed (INT-06); 8 more clean live round-trips required
-- **INT-06 FIXED**: `_build_close_allocations` now prioritizes live lots over synthetic — all future live closes will pair with live openers and count toward THIN_LINKAGE
-- **Open live positions**: AAPL(332), AMZN(334,350?), NVDA(335,351?), GOOG(352?) — these are next THIN_LINKAGE candidates when closed
-- **production_closed_trades**: only 3 non-legacy entries (322 NVDA, 321 AMZN, 260 AAPL); 333/320/318 contaminated by INT-06 (pre-fix)
+- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; INT-06 fixed; 9 live open positions pending close
+- **INT-06 FIXED**: `_build_close_allocations` prioritizes live lots over synthetic — future closes pair with live openers
+- **OOS SCAN FIXED**: `_load_trailing_oos_metrics()` now scans research/ (433 ETL CV files with eval_metrics); was dead in live mode
+- **Open live positions (9)**: AAPL(332,350,353), AMZN(334), NVDA(335,351,354), GOOG(352,355) — each close = +1 THIN_LINKAGE
+- **Live signal quality**: confidence 0.23-0.38 (gate=0.55), SNR 0.11-0.84 (gate=1.5) — new BUYs blocked; existing positions close via PTE stop/target/time-exit
+- **production_closed_trades**: 3 non-legacy entries (322 NVDA, 321 AMZN, 260 AAPL); 333/320/318 contaminated (pre-INT-06)
 - **MSSA-RL**: ONLINE — white_noise warn-only; policy_support=43-47 adequate
-- **GARCH**: Universal EWMA fallback (high-vol regime) — working as designed; 1.5x CI inflation active
+- **GARCH**: Universal EWMA fallback (high-vol regime) — 1.5x CI inflation widens CI, depresses SNR
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
-- **MSFT cache**: CLEARED (was stale to 2026-03-02)
-- **Last commit**: 914527a (INT-06 PTE live-lot priority fix + regression test)
-- **Test count**: 2433 passed, 0 failed, 14 xfailed (fast lane, 2026-04-16)
-- **Phase**: Post-DCR Hardening — INT-06 fixed; ready for live market-hours cycles to accumulate THIN_LINKAGE
+- **Last commit**: 3d0dcda (fix OOS research/ scan + 914527a INT-06)
+- **Test count**: 2437 passed, 0 failed, 14 xfailed (fast lane, 2026-04-16)
+- **Phase**: Post-DCR Hardening — awaiting 9 live position closes to hit THIN_LINKAGE=10
 
 ## Gate Summary
 
