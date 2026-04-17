@@ -1,18 +1,19 @@
 # HEARTBEAT.md
 
-## System Status (2026-04-17, commit d9d08bf)
+## System Status (2026-04-17, zombie retirement applied)
 
 - **Gate**: PASS (semantics=PASS, warmup_expired=0) — WARMUP_COVERED_PASS posture
 - **Lift decision**: KEEP (lift_fraction=57.14%, threshold 25%)
 - **Violation rate**: 31.43% (11/35 effective) — within 35% ceiling
 - **Recent window**: 4/10 effective — INCONCLUSIVE (data, not code)
 - **Warmup**: active until 2026-04-24 (first_audit=2026-03-25 + 30d); NOT expired
-- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; 9 live open positions pending close; warmup covers until 2026-04-24
+- **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; 4 live open positions pending close; warmup covers until 2026-04-24
+- **ZOMBIE LOTS RETIRED**: 30 zombie open legs marked is_synthetic=1/zombie_retired via `retire_zombie_opens.py`; INT-06 FIFO now routes next 4 closes to April 2026 lots with audit files → expected matched=6 after all close
 - **INT-06 FIXED**: `_build_close_allocations` prioritizes live lots over synthetic — future closes pair with live openers
 - **OOS SCAN FIXED**: `_load_trailing_oos_metrics()` now scans research/ (433 ETL CV files with eval_metrics); was dead in live mode; 30-day staleness guard added
 - **OPENCLAW FIXED**: sandbox.mode non-main→off for ops/trading/training agents; 18 cron jobs updated to simpleTrader_env_win venv — all 23 jobs were failing with Docker error
 - **CONFIDENCE CALIBRATED**: edge_score divisor /3.0→/10.0 (full credit at 2% return, not 0.6%); SNR upper anchor 2.0→3.5 (based on observed live range 0-7.13); gate-threshold signals (SNR=1.5) now score 0.33 not 0.67
-- **Open live positions (9)**: AAPL(332,350,353), AMZN(334), NVDA(335,351,354), GOOG(352,355) — each close = +1 THIN_LINKAGE
+- **Open live positions (4)**: AAPL(378), AMZN(381), NVDA(379,382), GOOG(380) — each close = +1 THIN_LINKAGE; all have April 2026 audit files
 - **Live signal quality**: confidence 0.23-0.38 (gate=0.55), SNR 0.11-0.84 (gate=1.5) — new BUYs blocked; existing positions close via PTE stop/target/time-exit; not code-fixable (GARCH EWMA 1.5x CI inflation, market conditions)
 - **production_closed_trades**: 3 non-legacy entries (322 NVDA, 321 AMZN, 260 AAPL); 333/320/318 contaminated (pre-INT-06)
 - **MSSA-RL**: ONLINE — white_noise warn-only; policy_support=43-47 adequate
@@ -22,7 +23,7 @@
 - **Integrity**: ALL PASSED (0 violations)
 - **Last commit**: d9d08bf (confidence calibration + OOS staleness guard + HEARTBEAT fix)
 - **Test count**: 2420 passed, 0 failed, 14 xfailed (fast lane, 2026-04-17)
-- **Phase**: Post-DCR Hardening — awaiting 9 live position closes to hit THIN_LINKAGE=10
+- **Phase**: Post-DCR Hardening — awaiting 4 live position closes + 4 more to hit THIN_LINKAGE=10
 
 ## Gate Summary
 
@@ -57,14 +58,15 @@
 **Root cause resolved (2026-04-15 funnel fixes + INT-06 2026-04-16):** 4 bugs were blocking ALL live trades (weight_coverage FAIL, AAPL 80bps threshold, deprecated DA gate, SYNTHETIC_ONLY raw getenv). All fixed. INT-06 (synthetic lot priority) now ensures live closes accumulate toward THIN_LINKAGE.
 
 **What still needs data:**
-1. 8 more live closed round-trips linked to audit windows (INT-06 fix ensures they will count)
+1. 4 live position closes (zombie retirement unblocks FIFO) + 4 more new round-trips before 2026-04-24
 2. GS OOS metrics absent — run `python scripts/run_etl_pipeline.py --tickers GS` once
 
-**Live open positions (candidates for THIN_LINKAGE when closed):**
-- id=332: AAPL BUY, live, audit file exists (`ts_AAPL_20260415T212533Z_81d8_0001`)
-- id=334: AMZN BUY, live, audit file exists (`ts_AMZN_20260416T055350Z_3b3b_0001`)
-- id=335: NVDA BUY, live, audit file exists (`ts_NVDA_20260416T055350Z_3b3b_0002`)
-- id=350,351,352: AAPL/NVDA/GOOG BUY, live (run 20260416_060351)
+**Live open positions — post zombie-retirement (candidates for THIN_LINKAGE when closed):**
+- id=378: AAPL BUY, live, audit file exists (`ts_AAPL_20260416T221557Z_4a45_0001`)
+- id=381: AMZN BUY, live, audit file exists (`ts_AMZN_20260417T205613Z_e1b4_0001`)
+- id=379: NVDA BUY, live, audit file exists (`ts_NVDA_20260416T221557Z_4a45_0003`)
+- id=382: NVDA BUY, live, audit file exists (`ts_NVDA_20260417T205613Z_e1b4_0002`)
+- id=380: GOOG BUY, live, audit file exists (`ts_GOOG_20260416T221557Z_4a45_0004`)
 
 ## Confirmed Fixes — 2026-04-15/16/17 Sessions
 
