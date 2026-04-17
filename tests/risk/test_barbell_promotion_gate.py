@@ -9,6 +9,7 @@ from risk.barbell_promotion_gate import (
     BarbellPromotionDecision,
     decide_promotion_from_report,
     load_promotion_evidence,
+    summarize_regime_realism,
     write_promotion_evidence,
 )
 from risk.barbell_policy import BarbellConfig
@@ -106,6 +107,7 @@ def test_build_barbell_market_context_extracts_gap_risk_and_regime() -> None:
 
 def _full_barbell_metrics(**overrides):
     """Return a barbell_sized metrics dict with all required evidence fields."""
+    regime_summary = summarize_regime_realism(["RANGE"] * 5 + ["TREND"] * 4 + ["CRISIS"] * 3)
     base = {
         "total_trades": 40,
         "losing_trades": 10,
@@ -113,32 +115,130 @@ def _full_barbell_metrics(**overrides):
         "max_drawdown": 0.18,
         "total_return_pct": 0.06,
         "expected_shortfall": -0.025,
+        "omega_ratio": 1.8,
         # barbell robustness evidence
         "omega_robustness_score": 0.55,
+        "omega_monotonicity_ok": True,
+        "omega_cliff_drop_ratio": 0.12,
+        "omega_cliff_ok": True,
+        "omega_ci_lower": 1.05,
+        "omega_ci_upper": 1.55,
+        "omega_ci_width": 0.50,
+        "omega_right_tail_ok": True,
+        "expected_shortfall_to_edge": 0.8,
+        "es_to_edge_bounded": True,
+        "payoff_asymmetry": 1.70,
         "payoff_asymmetry_support_ok": True,
         "payoff_asymmetry_effective": 1.50,
         "winner_concentration_ratio": 0.45,
         # path-risk evidence
         "path_risk_trade_count": 30,
         "path_risk_ok_rate": 0.85,
+        "barbell_path_risk_ok": True,
     }
+    base.update(regime_summary)
     base.update(overrides)
     return base
 
 
-def test_decide_promotion_requires_trades_and_losses() -> None:
-    payload = {
+def _base_report(**barbell_overrides):
+    return {
         "evidence_source": "trade_history",
         "metrics": {
             "ts_only": {
-                "total_trades": 40, "losing_trades": 10, "profit_factor": 1.2,
-                "max_drawdown": 0.2, "total_return_pct": 0.05,
+                "total_trades": 40,
+                "losing_trades": 10,
+                "profit_factor": 1.2,
+                "max_drawdown": 0.2,
+                "total_return_pct": 0.05,
                 "expected_shortfall": -0.030,
             },
-            "barbell_sized": _full_barbell_metrics(),
+            "barbell_sized": _full_barbell_metrics(**barbell_overrides),
             "delta": {"profit_factor": 0.1, "max_drawdown": -0.02, "total_return_pct": 0.01},
         },
     }
+
+
+def test_summarize_regime_realism_rejects_thin_label_support() -> None:
+    summary = summarize_regime_realism(["RANGE"] + [None] * 9)
+
+    assert summary["regime_realism_ok"] is False
+    assert summary["regime_realism_labeled_trade_count"] == 1
+    assert summary["regime_realism_coverage_rate"] == pytest.approx(0.1)
+    assert "coverage_rate" in summary["regime_realism_reason"]
+
+
+def test_summarize_regime_realism_rejects_dominated_regime() -> None:
+    summary = summarize_regime_realism(["RANGE"] * 9 + ["TREND"] * 3)
+
+    assert summary["regime_realism_ok"] is False
+    assert summary["regime_realism_dominance_rate"] == pytest.approx(0.75)
+    assert "dominance_rate" in summary["regime_realism_reason"]
+
+
+def test_decide_promotion_passes_with_full_robustness_bundle() -> None:
+    payload = _base_report()
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is True, f"Expected PASS, got: {decision.reason}\nchecks: {decision.checks}"
+    assert decision.checks["omega_monotonicity"]["passed"] is True
+    assert decision.checks["omega_cliff"]["passed"] is True
+    assert decision.checks["omega_right_tail"]["passed"] is True
+    assert decision.checks["left_tail_bounded"]["passed"] is True
+    assert decision.checks["regime_realism"]["passed"] is True
+
+
+def test_decide_promotion_rejects_bad_omega_cliff_even_with_high_omega() -> None:
+    payload = _base_report(omega_ratio=2.25, omega_robustness_score=0.82, omega_cliff_ok=False)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "omega_cliff" in decision.reason
+
+
+def test_decide_promotion_rejects_overestimated_right_tail() -> None:
+    payload = _base_report(omega_right_tail_ok=False, omega_ci_lower=0.97)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "omega_right_tail" in decision.reason
+
+
+def test_decide_promotion_rejects_unbounded_left_tail() -> None:
+    payload = _base_report(es_to_edge_bounded=False, expected_shortfall_to_edge=14.0)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "left_tail_bounded" in decision.reason
+
+
+def test_decide_promotion_rejects_unsupported_payoff_asymmetry() -> None:
+    payload = _base_report(payoff_asymmetry_support_ok=False, payoff_asymmetry_effective=0.95)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "payoff_asymmetry_support" in decision.reason
+
+
+def test_decide_promotion_rejects_missing_path_risk_evidence() -> None:
+    payload = _base_report(path_risk_trade_count=0, path_risk_ok_rate=None, barbell_path_risk_ok=None)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "path_risk_evidence" in decision.reason
+
+
+def test_decide_promotion_rejects_dominated_regime_evidence() -> None:
+    regime_summary = summarize_regime_realism(["RANGE"] * 9 + ["TREND"] * 3)
+    payload = _base_report(**regime_summary)
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "regime_realism" in decision.reason
+
+
+def test_decide_promotion_requires_trades_and_losses() -> None:
+    payload = _base_report()
     decision = decide_promotion_from_report(payload)
     assert decision.passed is True, f"Expected PASS, got: {decision.reason}\nchecks: {decision.checks}"
 
@@ -164,3 +264,38 @@ def test_promotion_evidence_roundtrip(tmp_path: Path) -> None:
     archived_loaded = load_promotion_evidence(archived[-1])
     assert archived_loaded.passed is True
     assert archived_loaded.reason == "ok"
+
+
+def test_decide_promotion_rejects_none_anti_omega_fields() -> None:
+    # omega_cliff_ok absent (None via .get()) must fail — confirms `is True` sentinel is enforced
+    barbell = _full_barbell_metrics()
+    barbell.pop("omega_cliff_ok")
+    payload = {"evidence_source": "trade_history", "metrics": {"ts_only": {"total_trades": 40, "losing_trades": 10, "profit_factor": 1.2, "max_drawdown": 0.2, "total_return_pct": 0.05, "expected_shortfall": -0.030}, "barbell_sized": barbell, "delta": {"profit_factor": 0.1, "max_drawdown": -0.02, "total_return_pct": 0.01}}}
+
+    decision = decide_promotion_from_report(payload)
+    assert decision.passed is False
+    assert "omega_cliff" in decision.reason
+
+
+def test_summarize_regime_realism_rejects_single_regime() -> None:
+    # Only 1 unique regime → min_unique_regimes=2 policy must reject
+    summary = summarize_regime_realism(["RANGE"] * 15)
+
+    assert summary["regime_realism_ok"] is False
+    assert len(summary["regime_realism_unique_regimes"]) == 1
+    assert "unique_regimes" in summary["regime_realism_reason"]
+
+
+def test_regime_realism_boundary_coverage() -> None:
+    # Exactly at coverage=0.80 boundary (25 RANGE + 15 TREND + 10 None = 50 total, 40 labeled)
+    pass_labels = ["RANGE"] * 25 + ["TREND"] * 15 + [None] * 10
+    pass_summary = summarize_regime_realism(pass_labels)
+    assert pass_summary["regime_realism_coverage_rate"] == pytest.approx(0.80)
+    assert pass_summary["regime_realism_ok"] is True, pass_summary["regime_realism_reason"]
+
+    # Just below coverage=0.80 (20 RANGE + 15 TREND + 15 None = 50 total, 35 labeled → 0.70)
+    fail_labels = ["RANGE"] * 20 + ["TREND"] * 15 + [None] * 15
+    fail_summary = summarize_regime_realism(fail_labels)
+    assert fail_summary["regime_realism_coverage_rate"] == pytest.approx(0.70)
+    assert fail_summary["regime_realism_ok"] is False
+    assert "coverage_rate" in fail_summary["regime_realism_reason"]

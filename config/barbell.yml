@@ -86,6 +86,10 @@ barbell:
     max_winner_concentration_ratio: 0.60
     min_path_risk_ok_rate: 0.80
     require_path_risk_evidence: true
+    min_regime_realism_labeled_trades: 10
+    min_regime_coverage_rate: 0.80
+    max_regime_dominance_rate: 0.70
+    min_unique_regimes: 2
 
   # Per-market caps for nested barbell constraints (DM vs EM/NGX, crypto).
   market_caps:
