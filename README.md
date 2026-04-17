@@ -14,14 +14,14 @@
 
 **Version**: 4.5
 **Status**: Phase 11 active — Nigeria production path, lot-aware close linkage, domain-calibrated barbell objective
-**Last Updated**: 2026-04-12
+**Last Updated**: 2026-04-18
 
 ## Contributing
 
 Contribution policy lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 Telemetry changes must follow the Evidence Integrity Contract (schema version bump + adversarial coverage update).
 
-## Current Repo Truth (2026-04-12)
+## Current Repo Truth (2026-04-18)
 
 - **Canonical objective**: `domain_utility` barbell mode — omega_ratio vs NGN 31% annual hurdle
   (`DAILY_NGN_THRESHOLD = (1.31)^(1/252)-1 ≈ 0.00108/day`) is the primary metric. Win rate is
@@ -36,12 +36,10 @@ Telemetry changes must follow the Evidence Integrity Contract (schema version bu
   hardened to reject synthetic-ancestry matches. `PaperTradingEngine` does FIFO lot matching
   at close time and persists allocation rows automatically.
 
-- **Gate state (2026-04-12)**:
-  - `ci_integrity_gate`: **PASS** — cross-mode contamination blocker cleared; current closes are clean.
-  - `check_quant_validation_health`: **PASS** (728 PASS, 0 FAIL)
-  - `production_audit_gate`: **PASS** (`WARMUP_COVERED_PASS`) — warmup exemption covers the gap; this is not a genuine unattended pass.
-  - `institutional_unattended_gate`: **FAIL** — intentionally blocks unattended claims while posture is still warmup-covered.
-  - `overall_passed`: **False** — current stack is operationally cleaner, but it still does not genuinely pass on its own merit yet.
+- **Gate state (2026-04-18)**:
+  - `production_audit_gate`: **PASS** in semantics, **FAIL** in posture (`EVIDENCE_HYGIENE_FAIL` on the current workspace snapshot); this is not a genuine unattended pass.
+  - `institutional_unattended_gate`: **FAIL** — the unattended latch still blocks while posture is not genuine.
+  - `overall_passed`: **False** — the current workspace does not pass on its own merit.
 
 - **Live data-source contract**: default secure profile still prioritizes `yfinance`, but `DATA_SOURCE=ctrader`
   is now honoured by `DataSourceManager` and `run_auto_trader.py` warns when live runs are using
@@ -74,7 +72,7 @@ Telemetry changes must follow the Evidence Integrity Contract (schema version bu
   - Result: **2375 passed, 3 skipped, 45 deselected, 10 xfailed** (2026-04-12)
   - `python scripts/ci_integrity_gate.py` → `[PASS] All integrity checks passed.`
   - `python scripts/production_audit_gate.py --unattended-profile` → `PASS, Phase3 ready=1`
-  - `python scripts/run_all_gates.py --json` → `overall_passed=false`, blocked only by the genuine-readiness latch (`WARMUP_COVERED_PASS ≠ GENUINE_PASS`)
+  - `python scripts/run_all_gates.py --json` → `overall_passed=false`, blocked by `production_audit_gate` posture FAIL (`EVIDENCE_HYGIENE_FAIL`) on the current workspace snapshot
 
 Historical sections below preserve earlier phase notes for chronology; use this section as the
 current repo baseline.

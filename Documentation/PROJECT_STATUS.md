@@ -12,11 +12,10 @@
 - Implemented documentation rule: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
 - Older sections in this file remain useful evidence, but when they describe Sharpe, win rate, or generic forecast neatness as the primary goal, treat that wording as historical context rather than the current repo-wide default.
 
-## Delta (2026-04-12)
+## Delta (2026-04-18)
 
-- Latest unattended gate snapshot is materially cleaner, but not genuinely green end-to-end: `ci_integrity_gate`, `check_quant_validation_health`, `production_audit_gate`, and `production_gate_schema` are green, while `institutional_unattended_gate` still fails because `WARMUP_COVERED_PASS` is not accepted as unattended-ready.
-- The earlier cross-mode contamination blocker is cleared in the current snapshot, and quant-validation health is GREEN with `728 PASS / 0 FAIL`.
-- Treat the current warmup-covered posture as an operational improvement, not as proof that the repo now passes on its own merit.
+- Latest unattended gate snapshot is not genuinely green end-to-end: `production_audit_gate` currently reports `gate_semantics=PASS` but `posture=FAIL` because of `EVIDENCE_HYGIENE_FAIL` on the current workspace snapshot, and `institutional_unattended_gate` still blocks unattended claims.
+- The current blocker is evidence hygiene, not a threshold dodge; treat any warmup-covered wording in older notes as historical context only.
 
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 

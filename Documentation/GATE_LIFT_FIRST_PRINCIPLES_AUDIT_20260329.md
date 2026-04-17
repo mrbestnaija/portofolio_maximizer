@@ -7,7 +7,7 @@
 
 **Updated**: 2026-04-04
 **Head commit (current)**: `dd9a633`
-**Gate state (current)**: `PASS (semantics=PASS)` — RMSE violation rate 32.35% (11/34 effective audits), warmup expires 2026-04-15
+**Gate state (current as of 2026-04-04)**: `PASS (semantics=PASS)` — RMSE violation rate 32.35% (11/34 effective audits). Historical note: warmup expired on 2026-04-15.
 
 ---
 

@@ -508,7 +508,7 @@ def stress_test_portfolio(
 # Phase 11 — Nigeria Production Extensions
 # Additive only. No existing function modified. All 2208+ tests unaffected.
 # Implementation date: 2026-04-06. Wiring (Phases B-E) begins after
-# THIN_LINKAGE ≥ 10 (warmup expires 2026-04-15).
+# THIN_LINKAGE ≥ 10 once the warmup window is no longer active.
 # ---------------------------------------------------------------------------
 
 import os as _os

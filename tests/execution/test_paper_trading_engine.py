@@ -384,6 +384,62 @@ def test_execute_signal_persists_multi_lot_close_allocations_for_same_ticker():
     db.close()
 
 
+def test_execute_signal_reverse_through_flat_persists_residual_open_lot_and_resume_linkage(tmp_path):
+    db_path = tmp_path / "reverse_through_flat.db"
+    db = DatabaseManager(str(db_path))
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=10_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    engine._calculate_position_size = lambda signal, confidence_score, market_data, current_position: 2 if str(signal.get("action") or "").upper() == "BUY" else 5  # type: ignore[method-assign]
+
+    entry_result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(100.0),
+    )
+    assert entry_result.status == "EXECUTED"
+
+    reverse_result = engine.execute_signal(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9, "execution_mode": "live"},
+        make_market_data(110.0),
+    )
+    assert reverse_result.status == "EXECUTED"
+    assert engine.portfolio.positions.get("AAPL") == -3
+    assert "AAPL" in engine.portfolio.entry_lots
+    assert len(engine.portfolio.entry_lots["AAPL"]) == 1
+    assert engine.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
+
+    reverse_row = db.cursor.execute(
+        "SELECT id, entry_trade_id, is_close, position_before, position_after "
+        "FROM trade_executions ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert reverse_row is not None
+    assert int(reverse_row["is_close"]) == 1
+    assert int(reverse_row["entry_trade_id"]) > 0
+    assert float(reverse_row["position_before"]) == pytest.approx(2.0)
+    assert float(reverse_row["position_after"]) == pytest.approx(-3.0)
+    assert engine.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
+    assert engine.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
+
+    # Persist and ensure the residual opener can be reconstructed after restart.
+    engine.save_state()
+    resumed = PaperTradingEngine(
+        initial_capital=10_000.0,
+        db_path=str(db_path),
+        resume_from_db=True,
+    )
+    assert resumed.portfolio.positions.get("AAPL") == -3
+    assert resumed.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
+    assert resumed.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
+    assert resumed.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
+
+    db.close()
+
+
 def test_lob_fallback_uses_depth_profiles_when_depth_missing(monkeypatch):
     """When Depth/Spread are missing, LOB simulator should fall back to configured profiles."""
     db = DatabaseManager(":memory:")

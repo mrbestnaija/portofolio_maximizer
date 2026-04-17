@@ -15,6 +15,7 @@ Guardrails:
 from __future__ import annotations
 
 import logging
+import math
 import random
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -90,22 +91,50 @@ class StrategyOptimizer:
 
     def _apply_constraints(self, metrics: Dict[str, float]) -> bool:
         """Return True if metrics satisfy configured min/max constraints."""
-        # If no trades were evaluated, allow the candidate to pass so that we
-        # can still compare candidates without filtering everything out.
-        if "total_trades" in metrics and metrics.get("total_trades") == 0:
-            return True
+        total_trades = metrics.get("total_trades")
+        if total_trades is not None:
+            try:
+                parsed_trades = float(total_trades)
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(parsed_trades) or parsed_trades <= 0.0:
+                return False
 
         minimums = self.constraints.get("min", {}) or {}
         maximums = self.constraints.get("max", {}) or {}
 
         for key, threshold in minimums.items():
             value = metrics.get(key)
-            if value is None or value < threshold:
+            if value is None:
+                return False
+            try:
+                parsed_value = float(value)
+            except (TypeError, ValueError):
+                return False
+            if math.isnan(parsed_value):
+                return False
+            if math.isinf(parsed_value):
+                if parsed_value < 0.0:
+                    return False
+                continue
+            if parsed_value < float(threshold):
                 return False
 
         for key, threshold in maximums.items():
             value = metrics.get(key)
-            if value is None or value > threshold:
+            if value is None:
+                return False
+            try:
+                parsed_value = float(value)
+            except (TypeError, ValueError):
+                return False
+            if math.isnan(parsed_value):
+                return False
+            if math.isinf(parsed_value):
+                if parsed_value > 0.0:
+                    return False
+                continue
+            if parsed_value > float(threshold):
                 return False
 
         return True
@@ -115,14 +144,27 @@ class StrategyOptimizer:
 
         Infinite values (e.g., omega_ratio=inf when there are no losses) are capped
         at _BARBELL_SCORE_CAP to keep the score finite and comparable across candidates.
+        NaN values fail closed instead of silently dropping out of the objective.
         """
+        if not self.objectives:
+            return 0.0
+
         _BARBELL_SCORE_CAP = 1e6
         score = 0.0
         for name, weight in self.objectives.items():
             value = metrics.get(name)
             if value is None:
-                continue
-            capped = max(-_BARBELL_SCORE_CAP, min(_BARBELL_SCORE_CAP, float(value)))
+                return float("-inf")
+            try:
+                parsed_value = float(value)
+            except (TypeError, ValueError):
+                return float("-inf")
+            if math.isnan(parsed_value):
+                return float("-inf")
+            if math.isinf(parsed_value):
+                capped = math.copysign(_BARBELL_SCORE_CAP, parsed_value)
+            else:
+                capped = max(-_BARBELL_SCORE_CAP, min(_BARBELL_SCORE_CAP, parsed_value))
             score += float(weight) * capped
         return score
 
@@ -155,6 +197,9 @@ class StrategyOptimizer:
             if not self._apply_constraints(metrics):
                 continue
             score = self.score_metrics(metrics)
+            if not math.isfinite(score):
+                logger.warning("Evaluation produced a non-finite score; skipping candidate.")
+                continue
             evaluations.append(
                 StrategyEvaluation(candidate=candidate, metrics=metrics, score=score)
             )

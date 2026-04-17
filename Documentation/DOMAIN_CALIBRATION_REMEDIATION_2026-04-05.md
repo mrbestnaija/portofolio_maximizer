@@ -28,12 +28,12 @@ Warmup expires **2026-04-15**. This plan must be actioned before that date.
 | Lift fraction | 57.14% (20/35) | ≥25% | No — passes on merit |
 | Effective audits | 35 | ≥30 holding period | No — passes on merit |
 | Recent window | 4/10 effective | need 10 | INCONCLUSIVE (data) |
-| THIN_LINKAGE | 1/309 matched (0.32%) | ≥10 matched, ≥80% ratio | **YES — warmup masks** |
+| THIN_LINKAGE | 1/309 matched (0.32%) | ≥10 matched, ≥80% ratio | Historical warmup coverage; not a genuine pass |
 | Residuals non-WN | 100% | ≤75% (warn_only=true) | **YES — enforcement removed** |
 | PnL | +$620.01, PF=1.73, 40% WR | profitable | No |
 | Trading days | 10/21 required | ≥21 for full proof | Partially — proof still valid |
 
-**What breaks on 2026-04-15 (warmup expiry):**
+**What broke at warmup expiry (historical note):**
 1. THIN_LINKAGE hard-fails: needs 10 matched outcomes, has 1
 2. Recent window remains INCONCLUSIVE until 6 more audits accumulate
 3. Profitability proof loses `is_proof_valid=True` until 11 more trading days
@@ -224,8 +224,9 @@ OOS metrics missing in CV runs
    Phase 1-B's funnel audit has run for ≥10 cycles and proves blocked forecasts had
    `terminal_DA > 0.52`. Threshold changes without evidence = threshold dodging.
 
-3. **Do NOT add more warmup exemptions** to cover Phase 4-B's contract change. The current
-   warmup covers THIN_LINKAGE. Additional exemptions compound the bypass pattern.
+3. **Do NOT add more warmup exemptions** to cover Phase 4-B's contract change. The historical
+   warmup coverage around THIN_LINKAGE was only a bridge, not a genuine pass; additional
+   exemptions compound the bypass pattern.
 
 4. **Do NOT implement P2-A** until confirming that `terminal_directional_accuracy` is
    actually written to audit JSON files. Adding a co-gate on a field that is absent is

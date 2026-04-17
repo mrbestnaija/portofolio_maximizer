@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 import yaml
 
@@ -12,6 +11,7 @@ import scripts.run_strategy_optimization as strategy_opt
 
 def test_run_strategy_optimization_keeps_low_win_rate_candidate_when_asymmetry_is_strong(monkeypatch):
     saved_metrics: list[dict] = []
+    captured_optimizer = {}
 
     class FakeDB:
         def __init__(self, db_path: str):
@@ -32,27 +32,47 @@ def test_run_strategy_optimization_keeps_low_win_rate_candidate_when_asymmetry_i
     class FakeOptimizer:
         def __init__(self, search_space, objectives, constraints=None, random_state=None):
             self.search_space = search_space
+            self.objectives = objectives
+            self.constraints = constraints or {}
+            captured_optimizer["constraints"] = self.constraints
+            captured_optimizer["objectives"] = self.objectives
 
         def run(self, n_candidates, evaluation_fn, regime=None):
             candidate = strategy_opt.StrategyCandidate(params={"alpha": 0.5}, regime=regime)
             metrics = evaluation_fn(candidate)
             return [SimpleNamespace(candidate=candidate, metrics=metrics, score=1.0)]
 
-    def fake_backtest_candidate(**kwargs):
-        returns = pd.Series([0.04, -0.01, 0.05, -0.015, 0.03, -0.01, 0.06, -0.02, 0.04, -0.01, 0.05, -0.015])
-        return SimpleNamespace(
-            total_profit=25.0,
-            total_return=0.25,
-            profit_factor=2.1,
-            win_rate=0.20,
-            total_trades=6,
-            max_drawdown=0.08,
-            strategy_returns=returns,
-        )
+    def fake_simulate_candidate(**kwargs):
+        return {
+            "total_profit": 25.0,
+            "total_return": 0.25,
+            "profit_factor": 2.1,
+            "win_rate": 0.20,
+            "total_trades": 6,
+            "max_drawdown": 0.08,
+            "omega_ratio": 2.40,
+            "payoff_asymmetry": 1.70,
+            "payoff_asymmetry_support_ok": True,
+            "payoff_asymmetry_effective": 1.50,
+            "expected_shortfall": -0.012,
+            "cvar_95": -0.020,
+            "fractional_kelly_fat_tail": 0.05,
+            "omega_cliff_drop_ratio": 0.15,
+            "omega_cliff_ok": True,
+            "omega_right_tail_ok": True,
+            "omega_ci_lower": 1.20,
+            "omega_ci_upper": 3.10,
+            "omega_ci_width": 1.90,
+            "expected_shortfall_raw": -0.012,
+            "expected_shortfall_to_edge": 2.5,
+            "es_to_edge_bounded": True,
+            "rmse_ratio_vs_baseline": 0.95,
+            "rmse_within_threshold": 1.0,
+        }
 
     monkeypatch.setattr(strategy_opt, "DatabaseManager", FakeDB)
     monkeypatch.setattr(strategy_opt, "StrategyOptimizer", FakeOptimizer)
-    monkeypatch.setattr(strategy_opt, "backtest_candidate", fake_backtest_candidate)
+    monkeypatch.setattr(strategy_opt, "simulate_candidate", fake_simulate_candidate)
 
     strategy_opt.main.callback(
         config_path="config/strategy_optimization_config.yml",
@@ -67,6 +87,16 @@ def test_run_strategy_optimization_keeps_low_win_rate_candidate_when_asymmetry_i
     assert saved_metrics[0]["profit_factor"] == 2.1
     assert saved_metrics[0]["omega_ratio"] is not None
     assert saved_metrics[0]["payoff_asymmetry"] is not None
+    assert saved_metrics[0]["payoff_asymmetry_effective"] is not None
+    assert saved_metrics[0]["rmse_ratio_vs_baseline"] == 0.95
+    assert saved_metrics[0]["rmse_within_threshold"] == 1.0
+    assert "payoff_asymmetry" not in captured_optimizer["objectives"]
+    assert "payoff_asymmetry_effective" in captured_optimizer["objectives"]
+    assert captured_optimizer["constraints"]["min"]["omega_ratio"] == pytest.approx(1.0)
+    assert captured_optimizer["constraints"]["min"]["payoff_asymmetry_effective"] == pytest.approx(1.10)
+    assert captured_optimizer["constraints"]["min"]["total_return"] == pytest.approx(0.0)
+    assert captured_optimizer["constraints"]["max"]["max_drawdown"] == pytest.approx(0.30)
+    assert captured_optimizer["constraints"]["max"]["rmse_ratio_vs_baseline"] == pytest.approx(1.10)
 
 
 def test_run_strategy_optimization_fails_closed_when_regression_summary_missing(monkeypatch):
@@ -92,21 +122,27 @@ def test_run_strategy_optimization_fails_closed_when_regression_summary_missing(
             evaluation_fn(candidate)
             return []
 
-    def fake_backtest_candidate(**kwargs):
-        returns = pd.Series([0.02] * 12)
-        return SimpleNamespace(
-            total_profit=10.0,
-            total_return=0.10,
-            profit_factor=1.5,
-            win_rate=0.40,
-            total_trades=4,
-            max_drawdown=0.05,
-            strategy_returns=returns,
-        )
+    def fake_simulate_candidate(**kwargs):
+        return {
+            "total_profit": 10.0,
+            "total_return": 0.10,
+            "profit_factor": 1.5,
+            "win_rate": 0.40,
+            "total_trades": 4,
+            "max_drawdown": 0.05,
+            "omega_ratio": 1.20,
+            "payoff_asymmetry": 1.05,
+            "payoff_asymmetry_effective": 1.02,
+            "expected_shortfall": -0.02,
+            "cvar_95": -0.03,
+            "fractional_kelly_fat_tail": 0.03,
+            "rmse_ratio_vs_baseline": 1.20,
+            "rmse_within_threshold": 0.0,
+        }
 
     monkeypatch.setattr(strategy_opt, "DatabaseManager", FakeDB)
     monkeypatch.setattr(strategy_opt, "StrategyOptimizer", FakeOptimizer)
-    monkeypatch.setattr(strategy_opt, "backtest_candidate", fake_backtest_candidate)
+    monkeypatch.setattr(strategy_opt, "simulate_candidate", fake_simulate_candidate)
 
     with pytest.raises(Exception) as excinfo:
         strategy_opt.main.callback(

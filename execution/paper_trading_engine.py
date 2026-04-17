@@ -408,18 +408,31 @@ class PaperTradingEngine:
             portfolio.entry_lots.pop(ticker, None)
         self._sync_entry_trade_id_map(portfolio, ticker)
 
-    def _append_open_lot_to_portfolio(self, portfolio: Portfolio, trade: Trade, trade_id: int) -> None:
+    def _append_open_lot_to_portfolio(
+        self,
+        portfolio: Portfolio,
+        trade: Trade,
+        trade_id: int,
+        *,
+        remaining_shares: Optional[float] = None,
+    ) -> None:
         try:
             trade_id_i = int(trade_id)
         except (TypeError, ValueError):
             return
         if trade_id_i <= 0:
             return
+        try:
+            lot_shares = float(trade.shares if remaining_shares is None else remaining_shares)
+        except (TypeError, ValueError):
+            return
+        if lot_shares <= 1e-9:
+            return
         portfolio.entry_lots.setdefault(trade.ticker, []).append(
             {
                 "trade_id": trade_id_i,
                 "action": str(trade.action).upper(),
-                "remaining_shares": float(trade.shares),
+                "remaining_shares": lot_shares,
                 "is_synthetic": int(trade.is_synthetic or 0),
                 "trade_date": trade.timestamp.date().isoformat() if isinstance(trade.timestamp, datetime) else None,
                 "bar_timestamp": trade.bar_timestamp.isoformat() if isinstance(trade.bar_timestamp, datetime) else None,
@@ -823,12 +836,31 @@ class PaperTradingEngine:
             stored = self._store_trade_execution(trade)
             trade.realized_pnl = stored.realized_pnl
             trade.realized_pnl_pct = stored.realized_pct
+            reversal_residual_shares = 0.0
+            if stored.is_close and current_position != 0 and stored.position_after != 0:
+                # Reverse-through-flat trades are both a close and a new open.
+                # Persist the residual side as an opener lot so resume/replay can
+                # reconstruct it and later closes keep their `entry_trade_id`
+                # linkage intact.
+                crossed_flat = (
+                    (current_position > 0 and stored.position_after < 0)
+                    or (current_position < 0 and stored.position_after > 0)
+                )
+                if crossed_flat:
+                    reversal_residual_shares = abs(float(stored.position_after))
             if stored.is_close:
                 self._apply_close_allocations_to_portfolio(
                     updated_portfolio,
                     trade.ticker,
                     stored.close_allocations,
                 )
+                if reversal_residual_shares > 1e-9:
+                    self._append_open_lot_to_portfolio(
+                        updated_portfolio,
+                        trade,
+                        stored.trade_id,
+                        remaining_shares=reversal_residual_shares,
+                    )
                 if not stored.close_allocations and updated_portfolio.positions.get(trade.ticker, 0) == 0:
                     updated_portfolio.entry_lots.pop(trade.ticker, None)
                     updated_portfolio.entry_trade_ids.pop(trade.ticker, None)

@@ -2408,6 +2408,11 @@ class DatabaseManager:
         Remaining quantity is computed from the effective linkage view so the
         result stays correct for both legacy scalar entry_trade_id closes and
         allocation-aware multi-lot closes.
+
+        Reverse-through-flat close rows are also treated as synthetic opener
+        lots when they carry a non-zero residual position_after.  This keeps
+        the post-reversal side recoverable after restart without requiring a
+        separate opener row in the DB.
         """
         tickers_clean = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
         params: List[Any] = []
@@ -2417,7 +2422,18 @@ class DatabaseManager:
             where.append(f"UPPER(o.ticker) IN ({placeholders})")
             params.extend(tickers_clean)
 
-        sql = f"""
+        self.cursor.execute("PRAGMA table_info(trade_executions)")
+        trade_cols = {str(row[1]) for row in self.cursor.fetchall() if len(row) > 1}
+        has_reversal_columns = {"position_before", "position_after"}.issubset(trade_cols)
+
+        link_subquery = """
+            SELECT
+                entry_trade_id,
+                SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
+            FROM trade_close_linkages
+            GROUP BY entry_trade_id
+        """
+        base_sql = f"""
             SELECT
                 o.id,
                 o.ticker,
@@ -2426,23 +2442,46 @@ class DatabaseManager:
                 o.trade_date,
                 o.bar_timestamp,
                 COALESCE(o.is_synthetic, 0) AS is_synthetic,
-                COALESCE(link.used_qty, 0.0) AS used_qty
+                COALESCE(link.used_qty, 0.0) AS used_qty,
+                0 AS source_rank
             FROM trade_executions o
-            LEFT JOIN (
-                SELECT
-                    entry_trade_id,
-                    SUM(COALESCE(allocated_shares, 0.0)) AS used_qty
-                FROM trade_close_linkages
-                GROUP BY entry_trade_id
-            ) link
+            LEFT JOIN ({link_subquery}) link
               ON link.entry_trade_id = o.id
             WHERE {" AND ".join(where)}
-            ORDER BY o.trade_date, o.id
         """
+        sql = base_sql
+        if has_reversal_columns:
+            residual_where = ["COALESCE(c.is_close, 0) = 1", "COALESCE(c.is_diagnostic, 0) = 0"]
+            if tickers_clean:
+                placeholders = ", ".join("?" for _ in tickers_clean)
+                residual_where.append(f"UPPER(c.ticker) IN ({placeholders})")
+            sql += f"""
+            UNION ALL
+            SELECT
+                c.id,
+                c.ticker,
+                c.action,
+                ABS(COALESCE(c.position_after, 0.0)) AS shares,
+                c.trade_date,
+                c.bar_timestamp,
+                COALESCE(c.is_synthetic, 0) AS is_synthetic,
+                COALESCE(link.used_qty, 0.0) AS used_qty,
+                1 AS source_rank
+            FROM trade_executions c
+            LEFT JOIN ({link_subquery}) link
+              ON link.entry_trade_id = c.id
+            WHERE {" AND ".join(residual_where)}
+              AND COALESCE(c.position_before, 0.0) * COALESCE(c.position_after, 0.0) < 0
+            """
+        sql += " ORDER BY trade_date, id, source_rank"
+
+        query_params = list(params)
+        if has_reversal_columns and tickers_clean:
+            query_params.extend(tickers_clean)
 
         lots_by_ticker: Dict[str, List[Dict[str, Any]]] = {}
         try:
-            rows = self.conn.execute(sql, tuple(params)).fetchall()
+            rows = self.conn.execute(sql, tuple(query_params)).fetchall()
         except Exception as exc:
             safe_error = sanitize_error(exc)
             logger.warning("Failed to load open entry lots: %s", safe_error)
@@ -2453,6 +2492,7 @@ class DatabaseManager:
                 trade_id = int(row["id"])
                 total_shares = float(row["shares"] or 0.0)
                 used_qty = float(row["used_qty"] or 0.0)
+                source_rank = int(row["source_rank"] or 0)
             except (KeyError, TypeError, ValueError):
                 continue
             remaining_qty = max(0.0, total_shares - used_qty)
@@ -2469,6 +2509,7 @@ class DatabaseManager:
                     "is_synthetic": int(row["is_synthetic"] or 0),
                     "trade_date": str(row["trade_date"] or "") or None,
                     "bar_timestamp": str(row["bar_timestamp"] or "") or None,
+                    "source_rank": source_rank,
                 }
             )
 

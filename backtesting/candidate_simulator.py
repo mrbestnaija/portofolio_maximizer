@@ -20,6 +20,7 @@ import pandas as pd
 
 from etl.time_series_forecaster import TimeSeriesForecaster, TimeSeriesForecasterConfig
 from etl.database_manager import DatabaseManager
+from etl.portfolio_math import portfolio_metrics_ngn
 from execution.paper_trading_engine import PaperTradingEngine
 from models.signal_generator_factory import build_signal_generator
 
@@ -107,17 +108,32 @@ def simulate_candidate(
     candidate_params: Dict[str, Any],
     guardrails: Dict[str, Any],
     initial_capital: float = 100000.0,
-) -> Dict[str, float]:
+    include_strategy_returns: bool = False,
+) -> Dict[str, Any]:
     """
     Run a simple simulation for a candidate over a historical window.
     Guardrails (min_expected_return, max_risk_score) are read but not changed.
     """
     if not tickers:
-        return {"total_return": 0.0, "profit_factor": 0.0, "win_rate": 0.0, "max_drawdown": 0.0, "total_trades": 0}
+        return {
+            "total_profit": 0.0,
+            "total_return": 0.0,
+            "profit_factor": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown": 0.0,
+            "total_trades": 0,
+        }
 
     ohlcv = source_db.load_ohlcv(list(tickers), start_date=start_date, end_date=end_date)
     if ohlcv.empty:
-        return {"total_return": 0.0, "profit_factor": 0.0, "win_rate": 0.0, "max_drawdown": 0.0, "total_trades": 0}
+        return {
+            "total_profit": 0.0,
+            "total_return": 0.0,
+            "profit_factor": 0.0,
+            "win_rate": 0.0,
+            "max_drawdown": 0.0,
+            "total_trades": 0,
+        }
 
     # Create isolated in-memory DB for simulation to avoid polluting the main DB.
     sim_db = DatabaseManager(db_path=":memory:")
@@ -235,10 +251,37 @@ def simulate_candidate(
     win_rate = summary.get("win_rate") or 0.0
     total_trades = summary.get("total_trades") or 0
 
-    return {
-        "total_return": float(total_profit),
+    equity_values: List[float] = [float(initial_capital)]
+    for point in equity:
+        try:
+            equity_values.append(float(point.get("equity", equity_values[-1])))
+        except Exception:
+            equity_values.append(float(equity_values[-1]))
+
+    if len(equity_values) > 1:
+        strategy_returns = pd.Series(equity_values, dtype=float).pct_change().dropna()
+    else:
+        strategy_returns = pd.Series(dtype=float)
+
+    performance = portfolio_metrics_ngn(strategy_returns) if not strategy_returns.empty else {}
+    final_equity = float(equity_values[-1]) if equity_values else float(initial_capital)
+    normalized_return = (
+        float(performance.get("total_return"))
+        if isinstance(performance.get("total_return"), (int, float))
+        else (final_equity / max(float(initial_capital), 1e-12)) - 1.0
+    )
+
+    metrics: Dict[str, Any] = {
+        "total_profit": float(total_profit),
+        "total_return": float(normalized_return),
         "profit_factor": float(profit_factor),
         "win_rate": float(win_rate),
-        "max_drawdown": float(max_dd),
+        "max_drawdown": float(performance.get("max_drawdown", max_dd)),
         "total_trades": int(total_trades),
     }
+    metrics.update(performance)
+
+    if include_strategy_returns:
+        metrics["strategy_returns"] = [float(x) for x in strategy_returns.tolist()]
+
+    return metrics

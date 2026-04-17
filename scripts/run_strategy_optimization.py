@@ -8,13 +8,13 @@ Stochastic, configuration-driven strategy optimization.
 This script:
 - Loads a strategy optimization config (search space, objectives, constraints).
 - Samples candidate configurations via StrategyOptimizer.
-- Evaluates each candidate using realized performance metrics from the database.
+- Evaluates each candidate using the causal walk-forward simulator and the
+  barbell-aware portfolio metric bundle.
 
 IMPORTANT:
 - This is infrastructure only. It does not hardcode any "best" strategy.
-- The evaluation function currently uses aggregate performance summary as a
-  placeholder. Future work should plug in per-candidate backtests that respect
-  min_expected_return, max_risk_score, and other guardrails.
+- The evaluation function must stay causal: no same-bar look-ahead and no
+  fallback to heuristic placeholder backtests.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import click
 import yaml
@@ -32,12 +32,20 @@ if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
 
 from etl.database_manager import DatabaseManager
-from etl.portfolio_math import portfolio_metrics_ngn
 from etl.strategy_optimizer import StrategyOptimizer, StrategyCandidate
-from backtesting.candidate_backtester import backtest_candidate
+from backtesting.candidate_simulator import simulate_candidate
 
 
 logger = logging.getLogger(__name__)
+
+_OBJECTIVE_THRESHOLD_POLARITY = {
+    "total_return": "min",
+    "omega_ratio": "min",
+    "payoff_asymmetry_effective": "min",
+    "profit_factor": "min",
+    "expected_shortfall": "min",
+    "max_drawdown": "max",
+}
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -63,6 +71,45 @@ def _load_signal_guardrails(path: Path) -> Dict[str, Any]:
         payload = yaml.safe_load(handle) or {}
     signal_routing = payload.get("signal_routing") if isinstance(payload, dict) else {}
     return (signal_routing or {}).get("time_series") or {}
+
+
+def _merge_hard_constraints(
+    base_constraints: Dict[str, Any],
+    objective_thresholds: Dict[str, Any],
+    *,
+    max_rmse_ratio_vs_baseline: float,
+) -> Dict[str, Dict[str, float]]:
+    """Merge soft config thresholds into fail-closed min/max constraints."""
+    merged: Dict[str, Dict[str, float]] = {
+        "min": dict((base_constraints or {}).get("min", {}) or {}),
+        "max": dict((base_constraints or {}).get("max", {}) or {}),
+    }
+
+    def _merge(bucket: str, key: str, value: Any) -> None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(f"Invalid threshold for {key!r}: {value!r}") from exc
+        existing = merged[bucket].get(key)
+        if existing is None:
+            merged[bucket][key] = parsed
+            return
+        try:
+            existing_value = float(existing)
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(f"Invalid existing constraint for {key!r}: {existing!r}") from exc
+        merged[bucket][key] = max(existing_value, parsed) if bucket == "min" else min(existing_value, parsed)
+
+    for key, value in (objective_thresholds or {}).items():
+        polarity = _OBJECTIVE_THRESHOLD_POLARITY.get(str(key))
+        if polarity is None:
+            raise click.ClickException(
+                f"Unsupported objective_thresholds metric {key!r}; add an explicit polarity mapping before using it."
+            )
+        _merge(polarity, str(key), value)
+
+    _merge("max", "rmse_ratio_vs_baseline", max_rmse_ratio_vs_baseline)
+    return merged
 
 
 @click.command()
@@ -109,15 +156,30 @@ def main(
     search_space = cfg.get("search_space", {})
     objectives = cfg.get("objectives", {})
     constraints = cfg.get("constraints", {})
+    objective_thresholds = cfg.get("objective_thresholds", {}) or {}
     evaluation_cfg = cfg.get("evaluation", {}) or {}
     regimes_cfg = cfg.get("regimes", {}) or {}
     if not search_space:
         raise click.UsageError("Empty search_space in strategy optimization config.")
 
+    monitoring_cfg_path = ROOT_PATH / "config" / "forecaster_monitoring.yml"
+    if not monitoring_cfg_path.exists():
+        raise click.ClickException(f"Missing monitoring config: {monitoring_cfg_path}")
+    cfg_raw = yaml.safe_load(monitoring_cfg_path.read_text(encoding="utf-8")) or {}
+    fm_cfg = cfg_raw.get("forecaster_monitoring") or {}
+    rm_cfg = fm_cfg.get("regression_metrics") or {}
+    max_ratio = float(rm_cfg.get("max_rmse_ratio_vs_baseline", 1.10))
+
+    hard_constraints = _merge_hard_constraints(
+        constraints,
+        objective_thresholds,
+        max_rmse_ratio_vs_baseline=max_ratio,
+    )
+
     optimizer = StrategyOptimizer(
         search_space=search_space,
         objectives=objectives,
-        constraints=constraints,
+        constraints=hard_constraints,
     )
 
     db_manager = DatabaseManager(db_path=db_path)
@@ -135,23 +197,17 @@ def main(
             "Strategy optimization requires ticker-backed OHLCV data; no distinct tickers were available."
         )
 
-    def evaluation_fn(candidate: StrategyCandidate) -> Dict[str, float]:
+    def evaluation_fn(candidate: StrategyCandidate) -> Dict[str, Any]:
         """
-        Evaluate a candidate using realized performance metrics for a regime.
+        Evaluate a candidate using causal walk-forward simulation and realized
+        regression health for the configured regime.
 
         Notes
         -----
-        - Regime-aware via the evaluation window and uses ONLY realized trades
-          stored in the database; it does not synthesize new signals/trades.
-        - Consults time series forecaster regression metrics
-          (RMSE/sMAPE/tracking_error) stored in time_series_forecasts so that
-          candidates are only rewarded when the TS ensemble is performing
-          above configured monitoring thresholds.
-        - Barbell/tail-risk aware evaluation (Sortino, Omega, CVaR, antifragility
-          scenarios) is intentionally deferred to the portfolio math layer and
-          `BARBELL_INTEGRATION_TODO.md` so that this function remains a thin,
-          config-driven hook into realized PnL/health metrics instead of
-          hardcoding any specific risk model.
+        - Uses the walk-forward simulator so the evaluation source matches the
+          live causal execution path.
+        - Keeps raw upside metrics visible while scoring on support-aware and
+          tail-aware fields.
         """
         from datetime import datetime, timedelta, timezone as _tz; UTC = _tz.utc  # noqa: E702
 
@@ -167,40 +223,20 @@ def main(
         start_iso = start_date.isoformat()
         end_iso = end_date.isoformat()
 
-        backtest = backtest_candidate(
-            db_manager=db_manager,
+        simulation = simulate_candidate(
+            source_db=db_manager,
             tickers=tickers,
-            start=start_iso,
-            end=end_iso,
+            start_date=start_iso,
+            end_date=end_iso,
             candidate_params=candidate.params,
             guardrails=signal_guardrails,
         )
-        total_profit = float(backtest.total_profit)
-        total_return = float(backtest.total_return)
-        profit_factor = float(backtest.profit_factor)
-        win_rate = float(backtest.win_rate)
-        total_trades = int(backtest.total_trades)
-        max_dd = float(backtest.max_drawdown)
-        strategy_returns = backtest.strategy_returns
-
-        barbell_metrics: Dict[str, float] = {}
-        if strategy_returns is not None and not strategy_returns.empty:
-            try:
-                barbell_metrics = portfolio_metrics_ngn(strategy_returns)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("Unable to compute barbell metrics for candidate %s: %s", candidate.params, exc)
+        metrics = dict(simulation or {})
+        metrics.pop("strategy_returns", None)
 
         # Incorporate forecaster monitoring thresholds (RMSE-aware).
         # Missing or malformed regression summaries are fatal because the
         # optimizer must not score candidates against mismatched evidence.
-        monitoring_cfg_path = ROOT_PATH / "config" / "forecaster_monitoring.yml"
-        if not monitoring_cfg_path.exists():
-            raise click.ClickException(f"Missing monitoring config: {monitoring_cfg_path}")
-
-        cfg_raw = yaml.safe_load(monitoring_cfg_path.read_text()) or {}
-        fm_cfg = cfg_raw.get("forecaster_monitoring") or {}
-        rm_cfg = fm_cfg.get("regression_metrics") or {}
-        max_ratio = float(rm_cfg.get("max_rmse_ratio_vs_baseline", 1.10))
         regression_summary = db_manager.get_forecast_regression_summary(
             start_date=start_iso,
             end_date=end_iso,
@@ -225,21 +261,14 @@ def main(
         rmse_ratio_vs_baseline = float(ensemble_rmse) / float(baseline_rmse)
         rmse_within_threshold = rmse_ratio_vs_baseline <= max_ratio
 
-        return {
-            "total_return": float(total_return),
-            "total_profit": float(total_profit),
-            "profit_factor": float(profit_factor),
-            "win_rate": float(win_rate),
-            "total_trades": int(total_trades),
-            "max_drawdown": float(max_dd),
-            "omega_ratio": barbell_metrics.get("omega_ratio"),
-            "payoff_asymmetry": barbell_metrics.get("payoff_asymmetry"),
-            "expected_shortfall": barbell_metrics.get("expected_shortfall"),
-            "cvar_95": barbell_metrics.get("cvar_95"),
-            "fractional_kelly_fat_tail": barbell_metrics.get("fractional_kelly_fat_tail"),
-            "rmse_ratio_vs_baseline": float(rmse_ratio_vs_baseline),
-            "rmse_within_threshold": float(1.0 if rmse_within_threshold else 0.0),
-        }
+        metrics.update(
+            {
+                "rmse_ratio_vs_baseline": float(rmse_ratio_vs_baseline),
+                "rmse_within_threshold": float(1.0 if rmse_within_threshold else 0.0),
+            }
+        )
+
+        return metrics
 
     evaluations = optimizer.run(
         n_candidates=n_candidates,
