@@ -286,6 +286,7 @@ def test_forecast_records_exog_policy_artifacts(monkeypatch) -> None:
 
 def _write_audit(audit_dir: Path, name: str, ticker: str, horizon: int) -> None:
     """Write a minimal audit file with evaluation_metrics for the given ticker/horizon."""
+    audit_dir.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any] = {
         "dataset": {"ticker": ticker, "forecast_horizon": horizon, "length": 100},
         "artifacts": {
@@ -924,3 +925,76 @@ def test_load_trailing_oos_metrics_falls_back_to_research_dir(
         "live RMSE-rank is permanently dead without this scan"
     )
     assert "samossa" in result, f"Expected samossa key from research/ metrics; got {list(result)}"
+
+
+def test_oos_staleness_guard_rejects_stale_research_files(monkeypatch, tmp_path: Path) -> None:
+    """research/ files older than 30 days must be ignored; function returns {}.
+
+    Stale CV fold metrics from a prior market regime should not pollute live
+    RMSE-rank model selection. The staleness guard (max_age_sec=30*86400) was
+    added specifically for the research/ tertiary scan.
+    """
+    import os
+    import time
+
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_old_cv.json", "AAPL", 30)
+
+    # Back-date the research/ file to 31 days ago
+    stale_path = research_dir / "forecast_audit_old_cv.json"
+    stale_mtime = time.time() - 31 * 86400
+    os.utime(stale_path, (stale_mtime, stale_mtime))
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result == {} or result is None or not result, (
+        "Stale research/ files (>30 days) must be rejected; "
+        f"got {result}"
+    )
+
+
+def test_oos_staleness_guard_passes_fresh_research_files(monkeypatch, tmp_path: Path) -> None:
+    """research/ files within 30 days must be accepted normally.
+
+    Staleness guard should not block fresh CV metrics.
+    """
+    production_dir = tmp_path / "production"
+    production_dir.mkdir()
+
+    research_dir = tmp_path / "research"
+    research_dir.mkdir()
+    _write_audit(research_dir, "forecast_audit_fresh_cv.json", "AAPL", 30)
+    # mtime is current (just written) — well within 30-day window
+
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(production_dir))
+    config = TimeSeriesForecasterConfig(
+        sarimax_enabled=False, garch_enabled=False,
+        samossa_enabled=False, mssa_rl_enabled=False,
+        ensemble_enabled=False,
+    )
+    forecaster = TimeSeriesForecaster(config=config)
+    index = pd.date_range("2024-01-01", periods=60, freq="D")
+    forecaster.fit(pd.Series(list(range(60)), dtype=float, index=index), ticker="AAPL")
+    forecaster._instrumentation.set_dataset_metadata(forecast_horizon=30)
+
+    result = forecaster._load_trailing_oos_metrics()
+
+    assert result, (
+        "Fresh research/ files (< 30 days) must be accepted by staleness guard"
+    )
+    assert "samossa" in result, f"Expected samossa key; got {list(result)}"

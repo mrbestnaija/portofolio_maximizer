@@ -657,15 +657,15 @@ class TestTimeSeriesSignalGenerator:
             min_expected_return=0.003,
             max_risk_score=0.7,
             per_ticker_thresholds={
-                "AAPL": {"min_expected_return": 0.01},
+                "AAPL": {"min_expected_return": 0.04},  # 4% per-ticker floor blocks AAPL
             },
             quant_validation_config={"enabled": False},
         )
 
-        # Use a stronger return (0.7%) so MSFT (min_return=0.3%) passes confidence gate
-        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic). AAPL's higher
-        # per-ticker min_return (1.0%) still blocks it.
-        forecast = pd.Series([100.7, 100.7, 100.7])
+        # Use 3% return so MSFT (min_return=0.3%) passes the confidence gate with the
+        # calibrated edge_score formula (full credit at 10x threshold = 3%). AAPL's
+        # per-ticker min_return (4%) still blocks it via the min_return gate.
+        forecast = pd.Series([103.0, 103.0, 103.0])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -708,9 +708,11 @@ class TestTimeSeriesSignalGenerator:
             quant_validation_config={"enabled": False},
         )
 
-        # Use a stronger return (-0.7%) so the SELL signal passes confidence gate
-        # even with snr_score=0.0 (H6 fix: SNR=None is now pessimistic 0.0 not neutral 0.5).
-        forecast = pd.Series([99.3, 99.3, 99.3])
+        # Use -3% return so the SELL signal clears the confidence gate with the
+        # calibrated edge_score divisor (/10.0). At 0.003 min_return, 10x threshold
+        # = 3%, so net_return 2.9% = edge_ratio 9.7 → edge_score 0.97 → conf passes 0.55
+        # even with snr_score=0.0 (H6 fix: SNR=None is pessimistic 0.0).
+        forecast = pd.Series([97.0, 97.0, 97.0])
         forecast_bundle = {
             "horizon": 30,
             "ensemble_forecast": {"forecast": forecast},
@@ -738,8 +740,8 @@ class TestTimeSeriesSignalGenerator:
         ctx = signal.provenance.get("decision_context") or {}
         assert signal.action == "SELL"
         assert ctx.get("roundtrip_cost_bps") == pytest.approx(10.0)
-        assert ctx.get("expected_return") == pytest.approx(-0.007)
-        assert ctx.get("expected_return_net") == pytest.approx(-0.006)
+        assert ctx.get("expected_return") == pytest.approx(-0.030)
+        assert ctx.get("expected_return_net") == pytest.approx(-0.029)
         # Net should be closer to zero than gross for SELL signals.
         assert ctx["expected_return_net"] > ctx["expected_return"]
 
@@ -2074,12 +2076,12 @@ class TestSNRNonePessimisticFallback:
         )
 
     def test_snr_none_does_not_credit_neutral(self) -> None:
-        """conf(snr=None) < conf(snr=1.5) — snr=None uses score=0.0, snr=1.5 uses score=0.667.
+        """conf(snr=None) < conf(snr=1.5) — snr=None uses score=0.0, snr=1.5 uses score=0.333.
         Note: snr=0.5 maps to score=0.0 (same as None), so comparison must use snr > 0.5."""
         conf_none = self._conf(None)
-        conf_moderate = self._conf(1.5)  # snr_score = clamp01((1.5-0.5)/1.5) = 0.667
+        conf_moderate = self._conf(1.5)  # snr_score = clamp01((1.5-0.5)/3.0) = 0.333
         assert conf_none < conf_moderate, (
-            f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.667); "
+            f"SNR=None (score=0.0) must be strictly lower than snr=1.5 (score=0.333); "
             f"got none={conf_none:.4f}, snr_moderate={conf_moderate:.4f}"
         )
 
@@ -2223,3 +2225,108 @@ class TestCrisisRegimePathRiskBlock:
             bucket="spec",
         )
         assert "crisis_regime_path_risk_block" not in hard_gates
+
+
+class TestEdgeScoreDiscrimination:
+    """Edge score must NOT saturate at 3x threshold (0.6% at 20bps min).
+
+    Pre-fix: divisor was 3.0, so edge_score=1.0 for any return > 0.6%.
+    Post-fix: divisor is 10.0, so full credit at 2.0% (10x the 20bps minimum).
+    This means live BUY signals with 1-5% expected_return are now discriminated.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.02,
+        min_expected_return=0.002,  # 20bps — Phase 7.14 production value
+        volatility=0.20,
+        model_agreement=0.80,
+        diagnostics_score=0.70,
+        snr=2.0,
+        ticker="TEST",
+    )
+
+    def _conf(self, net_trade_return: float) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(net_trade_return=net_trade_return, **self._BASE_KWARGS)
+
+    def test_edge_score_not_saturated_at_1pct_return(self) -> None:
+        """1% return (5x 20bps threshold) must give edge_score < 1.0 (was 1.0 pre-fix).
+
+        With divisor=10.0: edge_ratio = 0.01/0.002 = 5.0, edge_score = clamp01(5/10) = 0.5.
+        The 40% component weight means signals in the 1-2% return range are now
+        discriminated from each other rather than uniformly capped at full credit.
+        """
+        conf_1pct = self._conf(0.01)  # 1% return, 5x threshold
+        conf_2pct = self._conf(0.02)  # 2% return, 10x threshold (full credit)
+        assert conf_1pct < conf_2pct, (
+            f"1% return should have lower confidence than 2% (edge still growing); "
+            f"got conf(1%)={conf_1pct:.4f}, conf(2%)={conf_2pct:.4f}"
+        )
+
+    def test_edge_score_full_credit_at_10x_threshold(self) -> None:
+        """2% return (10x 20bps threshold) must saturate at edge_score=1.0.
+
+        With divisor=10.0: edge_ratio = 0.02/0.002 = 10.0, edge_score = clamp01(10/10) = 1.0.
+        5% return (25x) also saturates; both should produce identical confidence.
+        """
+        conf_2pct = self._conf(0.02)
+        conf_5pct = self._conf(0.05)  # 25x threshold — also saturates at 1.0
+        assert abs(conf_2pct - conf_5pct) < 0.001, (
+            f"Both 2% and 5% return should produce identical confidence (edge_score=1.0); "
+            f"got conf(2%)={conf_2pct:.4f}, conf(5%)={conf_5pct:.4f}"
+        )
+
+
+class TestSNRAnchorCalibration:
+    """SNR upper anchor raised from 2.0 to 3.5 based on observed live data range (0-7.13).
+
+    Pre-fix: snr_score = clamp01((snr - 0.5) / 1.5) -> full credit at SNR=2.0.
+    Post-fix: snr_score = clamp01((snr - 0.5) / 3.0) -> full credit at SNR=3.5.
+    """
+
+    _BASE_KWARGS = dict(
+        expected_return=0.05,
+        net_trade_return=0.05,
+        min_expected_return=0.002,
+        volatility=0.20,
+        model_agreement=0.80,
+        diagnostics_score=0.70,
+        ticker="TEST",
+    )
+
+    def _conf(self, snr: float | None) -> float:
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        gen = TimeSeriesSignalGenerator(use_volatility_filter=True)
+        return gen._calculate_confidence(snr=snr, **self._BASE_KWARGS)
+
+    def test_snr_at_gate_threshold_gives_modest_score(self) -> None:
+        """SNR=1.5 (routing gate minimum) must yield snr_score ~0.333, not 0.667.
+
+        Pre-fix: (1.5-0.5)/1.5 = 0.667 — signals barely past gate got 2/3 SNR credit.
+        Post-fix: (1.5-0.5)/3.0 = 0.333 — correctly modest for gate-threshold signals.
+        SNR=3.5 (full credit) must be meaningfully better than gate-threshold confidence.
+        """
+        conf_gate = self._conf(1.5)
+        conf_strong = self._conf(3.5)
+        assert conf_strong > conf_gate, (
+            f"SNR=3.5 (full credit) must exceed SNR=1.5 (gate threshold); "
+            f"got conf(1.5)={conf_gate:.4f}, conf(3.5)={conf_strong:.4f}"
+        )
+        margin = conf_strong - conf_gate
+        assert margin > 0.05, (
+            f"Expected >5pp margin between SNR=1.5 and SNR=3.5; got {margin:.4f}"
+        )
+
+    def test_snr_upper_anchor_at_3_5(self) -> None:
+        """SNR=3.5 and SNR=5.0 should produce identical confidence (both saturate at 1.0).
+
+        Pre-fix: saturation at SNR=2.0; SNR=2.0 and SNR=5.0 were identical.
+        Post-fix: saturation at SNR=3.5; SNR=3.5 and SNR=5.0 are identical.
+        """
+        conf_3_5 = self._conf(3.5)
+        conf_5_0 = self._conf(5.0)
+        assert abs(conf_3_5 - conf_5_0) < 0.001, (
+            f"SNR=3.5 and SNR=5.0 should both saturate at snr_score=1.0; "
+            f"got conf(3.5)={conf_3_5:.4f}, conf(5.0)={conf_5_0:.4f}"
+        )

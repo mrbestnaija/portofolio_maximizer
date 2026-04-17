@@ -2485,13 +2485,19 @@ class TimeSeriesForecaster:
 
         def _scan_dir_for_oos(
             scan_dir: Path,
+            max_age_sec: Optional[float] = None,
         ) -> Optional[Dict[str, Dict[str, Any]]]:
             """Scan one audit directory for the most recent matching OOS metrics.
 
             Returns a non-empty per-model dict on the first match, or None when
             the directory is absent, empty, or contains no files with
             evaluation_metrics for this ticker + horizon.
+
+            max_age_sec: if set, skip files older than this many seconds (staleness
+            guard). Used for research/ tertiary scan to prevent CV metrics from a
+            prior market regime silently polluting live RMSE-rank model selection.
             """
+            import time as _time
             try:
                 dir_files = sorted(
                     scan_dir.glob("forecast_audit_*.json"),
@@ -2502,6 +2508,19 @@ class TimeSeriesForecaster:
                 return None
             if not dir_files:
                 return None
+
+            if max_age_sec is not None:
+                _now = _time.time()
+                dir_files = [p for p in dir_files if (_now - p.stat().st_mtime) <= max_age_sec]
+                if not dir_files:
+                    logger.warning(
+                        "[TS_MODEL] _load_trailing_oos_metrics: all %s audit files "
+                        "are older than %.0f days — RMSE-rank disabled for this run. "
+                        "Re-run ETL pipeline to refresh OOS metrics.",
+                        scan_dir.name,
+                        max_age_sec / 86400,
+                    )
+                    return None
 
             for path in dir_files:
                 try:
@@ -2571,7 +2590,7 @@ class TimeSeriesForecaster:
         # heuristic SAMoSSA-EVR/GARCH-AIC scoring, capping confidence at ~0.35.
         research_dir = self._audit_dir.parent / "research"
         if research_dir != self._audit_dir and research_dir.exists():
-            result = _scan_dir_for_oos(research_dir)
+            result = _scan_dir_for_oos(research_dir, max_age_sec=30 * 86400)
             if result:
                 return result
 

@@ -1584,7 +1584,7 @@ class TimeSeriesSignalGenerator:
         # 1) Edge score: 0 when net edge is tiny, 1 when it is meaningfully above threshold.
         threshold = max(float(min_expected_return), 1e-6)
         edge_ratio = float(net_trade_return) / threshold if threshold > 0 else float(net_trade_return)
-        edge_score = self._clamp01(edge_ratio / 3.0)  # 3x threshold -> full credit
+        edge_score = self._clamp01(edge_ratio / 10.0)  # 10x threshold -> full credit (2% at 20bps min)
 
         # 2) Uncertainty score from SNR (CI-implied).
         if snr is None:
@@ -1595,7 +1595,7 @@ class TimeSeriesSignalGenerator:
             )
             snr_score = 0.0
         else:
-            snr_score = self._clamp01((float(snr) - 0.5) / 1.5)  # 0.5 -> 0, 2.0 -> 1
+            snr_score = self._clamp01((float(snr) - 0.5) / 3.0)  # 0.5 -> 0, 3.5 -> 1
 
         # 3) Volatility factor (optional soft penalty; don't artificially inflate).
         # Piecewise-linear between anchor points to eliminate cliff-edge jumps:

@@ -29,7 +29,7 @@
 |------|--------|------------|
 | ci_integrity_gate | PASS | 40 round-trips, ALL checks passed |
 | check_quant_validation_health | PASS | 0.0% fail rate |
-| production_audit_gate | PASS (semantics=PASS) | KEEP decision; warmup expired |
+| production_audit_gate | PASS (semantics=PASS) | KEEP decision; warmup active until 2026-04-24 |
 | THIN_LINKAGE | **FAIL** | matched=2/10 — blocking post-warmup; need 8 more round-trips |
 | MSSA-RL | ONLINE | policy_status=ready on all tickers (white_noise warn-only) |
 
@@ -45,7 +45,7 @@
 | System Health Check | Every 6h | Running |
 | Weekly Session Cleanup | Sunday 3 AM | Silent |
 
-## THIN_LINKAGE Critical Path (warmup EXPIRED 2026-04-15)
+## THIN_LINKAGE Critical Path (warmup EXPIRES 2026-04-24)
 
 | Check | Current | Required | Status |
 |-------|---------|----------|--------|
