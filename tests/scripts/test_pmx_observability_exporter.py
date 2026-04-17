@@ -51,6 +51,8 @@ def _runner_ok(cmd: list[str]):
             "primary_status": "OK",
             "channels_status_elapsed_ms": 4321,
             "recovery_mode": "channels_status_timeout_softened",
+            "fallback_ready": ["telegram"],
+            "fallback_ready_count": 1,
         }
         return 0, payload, json.dumps(payload), ""
     if "check_model_improvement.py" in joined:
@@ -189,6 +191,7 @@ def test_exporter_builds_required_metrics_from_existing_artifacts(tmp_path: Path
                     "name": "[P0] Production Gate Check",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 7 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {
                         "lastStatus": "success",
                         "lastRunAtMs": int(datetime(2026, 3, 28, 7, 0, tzinfo=timezone.utc).timestamp() * 1000),
@@ -254,6 +257,89 @@ def test_exporter_builds_required_metrics_from_existing_artifacts(tmp_path: Path
     assert health["warning_count"] == 0
 
 
+def test_exporter_surfaces_malformed_cron_jobs_and_fallback_readiness(tmp_path: Path) -> None:
+    dashboard = tmp_path / "dashboard_data.json"
+    metrics_summary = tmp_path / "metrics_summary.json"
+    production_gate = tmp_path / "production_gate_latest.json"
+    maintenance = tmp_path / "openclaw_maintenance_latest.json"
+    cron_jobs = tmp_path / "jobs.json"
+    state_path = tmp_path / "logs" / "exporter_state.json"
+
+    _write_json(dashboard, {"meta": {"generated_utc": "2026-03-28T08:29:00Z"}})
+    _write_json(metrics_summary, {"generated_utc": "2026-03-28T08:28:00Z", "status": "OK"})
+    _write_json(
+        production_gate,
+        {
+            "timestamp_utc": "2026-03-28T08:27:00Z",
+            "phase3_ready": True,
+            "phase3_reason": "READY",
+            "profitability_proof": {"evidence_progress": {"closed_trades": 40, "remaining_trading_days": 11}},
+        },
+    )
+    _write_json(
+        maintenance,
+        {
+            "timestamp_utc": "2026-03-28T08:26:00Z",
+            "steps": {
+                "fast_supervisor": {"action": "soft_timeout_skip", "reason": "channels_status_timeout_softened"},
+                "gateway_health": {"rpc_ok": True, "service_status": "running", "warnings": []},
+            },
+        },
+    )
+    _write_json(
+        cron_jobs,
+        {
+            "jobs": [
+                {
+                    "id": "bad-job",
+                    "name": "[P2] Gate and Readiness Check",
+                    "agentId": "trading",
+                    "enabled": True,
+                    "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                    "payload": {"kind": "agentTurn", "message": "do work"},
+                    "delivery": {"channel": "whatsapp"},
+                    "state": {"lastStatus": "pending", "consecutiveErrors": 0},
+                },
+                {
+                    "id": "good-job",
+                    "name": "[P1] Healthy Job",
+                    "agentId": "ops",
+                    "enabled": True,
+                    "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                    "sessionTarget": "isolated",
+                    "payload": {"kind": "agentTurn", "message": "ok"},
+                    "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                    "state": {"lastStatus": "success", "consecutiveErrors": 0},
+                },
+            ]
+        },
+    )
+
+    exporter = mod.ObservabilityExporter(
+        dashboard_path=dashboard,
+        metrics_summary_path=metrics_summary,
+        production_gate_path=production_gate,
+        maintenance_path=maintenance,
+        cron_jobs_path=cron_jobs,
+        db_path=tmp_path / "pmx.db",
+        state_path=state_path,
+        command_runner=_runner_ok,
+        sqlite_checker=lambda _: (True, None),
+        now_provider=lambda: FIXED_NOW,
+    )
+    exporter.refresh(force=True)
+
+    text = exporter.get_metrics_text()
+    assert 'pmx_openclaw_fallback_ready_count{component="openclaw"} 1' in text
+    assert 'pmx_openclaw_cron_jobs_total{component="cron"} 2' in text
+    assert 'pmx_openclaw_cron_invalid_session_target_total{component="cron"} 1' in text
+    assert 'pmx_openclaw_cron_malformed_jobs_total{component="cron"} 1' in text
+    assert 'pmx_openclaw_cron_delivery_fallback_ready_count{component="cron"} 1' in text
+
+    health = exporter.get_health_payload()
+    assert any("cron_invalid_session_target_count:1" in warning for warning in health["warnings"])
+
+
 def test_exporter_fails_soft_when_noncritical_inputs_are_missing_or_corrupt(tmp_path: Path) -> None:
     dashboard = tmp_path / "dashboard_data.json"
     maintenance = tmp_path / "openclaw_maintenance_latest.json"
@@ -301,6 +387,7 @@ def test_exporter_persists_last_successful_cron_timestamp(tmp_path: Path) -> Non
                     "name": "[P0] Production Gate Check",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 7 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {"lastStatus": "success", "lastRunAtMs": success_ms, "consecutiveErrors": 0},
                 }
             ]
@@ -329,6 +416,7 @@ def test_exporter_persists_last_successful_cron_timestamp(tmp_path: Path) -> Non
                     "name": "[P0] Production Gate Check",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 7 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {"lastStatus": "error", "lastRunAtMs": success_ms + 5000, "consecutiveErrors": 2},
                 }
             ]
@@ -363,6 +451,7 @@ def test_exporter_filters_cron_metrics_to_required_job_inventory(tmp_path: Path)
                     "name": "[P0] Production Gate Check",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 7 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {"lastStatus": "success", "lastRunAtMs": int(FIXED_NOW.timestamp() * 1000)},
                 },
                 {
@@ -370,6 +459,7 @@ def test_exporter_filters_cron_metrics_to_required_job_inventory(tmp_path: Path)
                     "name": "[P1] Signal Linkage Monitor",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {"lastStatus": "success", "lastRunAtMs": int(FIXED_NOW.timestamp() * 1000)},
                 },
                 {
@@ -377,6 +467,7 @@ def test_exporter_filters_cron_metrics_to_required_job_inventory(tmp_path: Path)
                     "name": "[P1] Something Else",
                     "enabled": True,
                     "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+                    "payload": {"kind": "system"},
                     "state": {"lastStatus": "success", "lastRunAtMs": int(FIXED_NOW.timestamp() * 1000)},
                 },
             ]

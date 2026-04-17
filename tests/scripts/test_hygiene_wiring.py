@@ -691,3 +691,110 @@ class TestRoutingTaxonomyFields:
             shutil.rmtree(str(prod))
             chosen2 = prod if prod.exists() else fallback
             assert chosen2 == fallback, "Must fall back to root when production/ absent"
+
+
+def test_generate_time_series_forecast_prefers_explicit_execution_mode_over_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live runs must route audits from the resolved execution mode, not stale env.
+
+    This is the structural fix for split-brain routing: the forecast writer must
+    honor the run's explicit execution_mode so a dirty EXECUTION_MODE shell value
+    cannot silently send live evidence to the synthetic/research path.
+    """
+    import scripts.run_auto_trader as run_auto_trader
+
+    monkeypatch.setenv("EXECUTION_MODE", "synthetic")
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path / "logs" / "forecast_audits"))
+
+    captured: Dict[str, Any] = {}
+
+    class _DummyForecaster:
+        def __init__(self, config):
+            captured["audit_log_dir"] = (config.ensemble_kwargs or {}).get("audit_log_dir")
+
+        def fit(self, *args, **kwargs):
+            return None
+
+        def forecast(self):
+            return {
+                "forecast_audit_path": str(
+                    tmp_path / "logs" / "forecast_audits" / "production" / "forecast_audit_live.json"
+                )
+            }
+
+    monkeypatch.setattr(run_auto_trader, "TimeSeriesForecaster", _DummyForecaster)
+    monkeypatch.setattr(run_auto_trader, "_run_oos_evaluation_audit", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "Open": [99.5, 100.5, 101.5, 102.5, 103.5],
+            "High": [100.5, 101.5, 102.5, 103.5, 104.5],
+            "Low": [99.0, 100.0, 101.0, 102.0, 103.0],
+            "Volume": [1_000, 1_000, 1_000, 1_000, 1_000],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="D"),
+    )
+
+    bundle, current_price = run_auto_trader._generate_time_series_forecast(
+        frame,
+        3,
+        ticker="AAPL",
+        execution_mode="live",
+    )
+
+    assert bundle is not None
+    assert current_price == pytest.approx(104.0)
+    assert str(captured["audit_log_dir"]).replace("\\", "/").endswith("logs/forecast_audits/production")
+
+
+def test_generate_time_series_forecast_defaults_to_live_when_execution_mode_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.run_auto_trader as run_auto_trader
+
+    monkeypatch.setenv("EXECUTION_MODE", "synthetic")
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path / "logs" / "forecast_audits"))
+
+    captured: Dict[str, Any] = {}
+
+    class _DummyForecaster:
+        def __init__(self, config):
+            captured["audit_log_dir"] = (config.ensemble_kwargs or {}).get("audit_log_dir")
+
+        def fit(self, *args, **kwargs):
+            return None
+
+        def forecast(self):
+            return {
+                "forecast_audit_path": str(
+                    tmp_path / "logs" / "forecast_audits" / "production" / "forecast_audit_live.json"
+                )
+            }
+
+    monkeypatch.setattr(run_auto_trader, "TimeSeriesForecaster", _DummyForecaster)
+    monkeypatch.setattr(run_auto_trader, "_run_oos_evaluation_audit", lambda *args, **kwargs: None)
+
+    frame = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "Open": [99.5, 100.5, 101.5, 102.5, 103.5],
+            "High": [100.5, 101.5, 102.5, 103.5, 104.5],
+            "Low": [99.0, 100.0, 101.0, 102.0, 103.0],
+            "Volume": [1_000, 1_000, 1_000, 1_000, 1_000],
+        },
+        index=pd.date_range("2024-01-01", periods=5, freq="D"),
+    )
+
+    bundle, current_price = run_auto_trader._generate_time_series_forecast(
+        frame,
+        3,
+        ticker="AAPL",
+    )
+
+    assert bundle is not None
+    assert current_price == pytest.approx(104.0)
+    assert str(captured["audit_log_dir"]).replace("\\", "/").endswith("logs/forecast_audits/production")

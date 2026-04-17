@@ -9,13 +9,18 @@
 **Scope**: Mathematical foundations, statistical rigor, production readiness
 **Standard**: Institutional-grade quantitative finance systems
 
+> Historical note: this review mixes dated findings with later remediation updates.
+> Treat any standalone "production ready" phrasing as superseded unless it is
+> backed by the current production audit and profitability proof gates.
+
 ---
 
 ## Executive Summary
 - Overall assessment: **C (temporarily)** – the 2025-11-15 brutal run exposed blocking failures (database corruption, MSSA serialization crash, dashboard regression), so the platform is not production ready until those issues are closed.
 - Architecture, validation, and risk controls are solid; test suite spans 196+ cases (100% passing).
 - LLM integration operational with 3 models available; Ollama health check issues resolved.
-- System is production ready for live trading; mathematical enhancements remain for institutional deployment.
+- Historical claim from the original review; the current repo posture is still
+  gated by the production audit and profitability-proof checks.
 
 ### 2025-12-03 Delta (diagnostic mode + invariants)
 - DIAGNOSTIC_MODE/TS/EXECUTION relax TS thresholds (confidence=0.10, min_return=0, max_risk=1.0, volatility filter off), disable quant validation, and allow PaperTradingEngine to size at least 1 share; LLM latency guard bypassed in diagnostics; `volume_ma_ratio` now guards zero/NaN volume.
@@ -250,3 +255,22 @@ Risk management upgrades expected to reduce tail risk ~30% and improve confidenc
 5. Execute Phase 5 (TS Forecaster Evaluation & Brutal Harness) before modifying core TS models (orders, features, MSSA/SAMOSSA internals); current evidence shows the primary gaps are in **gating, monitoring, and data sufficiency**, not fundamental model inability. As of the 2025‑12‑07 deltas above, the core tooling (numeric invariants, quant validation, TS model search, and automation dashboard) is now aligned with institutional-grade expectations; remaining work is primarily in tightening thresholds and completing the higher-order hyperopt loop described in `OPTIMIZATION_IMPLEMENTATION_PLAN.md`.
 
 **Priority**: Immediate focus on Phase 1 items; statistical rigor and stress testing follow within two weeks. Maintain documentation updates in `implementation_checkpoint.md` after each milestone.
+
+---
+
+## 2026-04-17 Verification Note
+
+The pasted external plan is useful as a remediation draft, but several claims should be treated as live status checks rather than new facts.
+
+- Verified production snapshot: 42 round-trips, realized PnL `+$567.30`, win rate `38.1%`, profit factor `1.63`.
+- Verified close-link integrity is clean in the repo's own definition: `CLOSE_WITHOUT_ENTRY_LINK = 0` (`entry_trade_id IS NULL` on closed trades).
+- Verified current monitoring config is still on the older pre-remediation posture: `holding_period_audits: 30`, `fail_on_violation_during_holding_period: false`, `disable_ensemble_if_no_lift: false`, `strict_preselection_max_rmse_ratio: 1.1`.
+- Verified the live runtime is Windows + `simpleTrader_env_win`, so the plan's Docker/container assumption does not match the active deployment path.
+- Verified the repo already has explicit `execution_mode` propagation and cron/sessionTarget hardening work, so further changes should focus on real wiring and evidence integrity, not on threshold-dodge edits or fixture-only diagnostics.
+- Not verified as current facts: `rmse_rank_active` enforcement, the `THIN_LINKAGE matched=2` backlog claim, and the `post-21:00 UTC` Platt timing. Treat those as live-data assertions that need a fresh snapshot before they are promoted into requirements.
+
+### Real Fixes vs Diagnostics Only
+
+- Real fixes move the live funnel: schema guards, execution-mode wiring, immutable evidence, and current config alignment.
+- Diagnostics-only improvements help surface slop, but they do not by themselves increase non-synthetic closed trades or change gate posture.
+- Audit-dir routing is already covered by existing wiring tests, so any new tests should target the remaining gaps rather than re-proving already-correct paths.

@@ -156,3 +156,11 @@ def test_promotion_evidence_roundtrip(tmp_path: Path) -> None:
     loaded = load_promotion_evidence(path)
     assert loaded.passed is True
     assert loaded.reason == "ok"
+
+    archive_dir = tmp_path / "evidence_history"
+    archived = sorted(archive_dir.glob("evidence_*.json"))
+    assert archived, "expected immutable archive copy of promotion evidence"
+    assert (archive_dir / "manifest.jsonl").exists(), "expected archive manifest"
+    archived_loaded = load_promotion_evidence(archived[-1])
+    assert archived_loaded.passed is True
+    assert archived_loaded.reason == "ok"

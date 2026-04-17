@@ -1,7 +1,11 @@
-# Time Series Forecasting Implementation - Complete ✅
+# Time Series Forecasting Implementation - Historical Summary
+
+> Historical note: this document captures the original delivery state of the
+> time-series stack. The current live funnel is stricter than the prose below,
+> and model output existing does not imply trade eligibility or default status.
 
 **Date**: 2025-01-27  
-**Status**: ✅ **100% IMPLEMENTED & WIRED**
+**Status**: historical implementation snapshot
 
 ---
 
@@ -250,5 +254,5 @@ volatility = forecast['volatility_forecast']['volatility']
 ---
 
 **Last Updated**: 2025-01-27  
-**Status**: ✅ **PRODUCTION READY**
+**Status**: historical snapshot
 

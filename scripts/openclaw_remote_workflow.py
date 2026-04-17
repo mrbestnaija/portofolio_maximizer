@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.openclaw_cron_contract import load_cron_jobs_payload, summarize_cron_jobs
+
 OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
 CRON_JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
 OPENCLAW_MAINTENANCE_PATH = PROJECT_ROOT / "logs" / "automation" / "openclaw_maintenance_latest.json"
@@ -62,13 +64,14 @@ def _load_config() -> Dict[str, Any]:
         return {}
 
 
+def _load_cron_jobs_payload() -> Tuple[Dict[str, Any], Optional[str]]:
+    return load_cron_jobs_payload(CRON_JOBS_PATH)
+
+
 def _load_cron_jobs() -> List[Dict[str, Any]]:
-    if not CRON_JOBS_PATH.exists():
-        return []
-    try:
-        return json.loads(CRON_JOBS_PATH.read_text(encoding="utf-8")).get("jobs", [])
-    except Exception:
-        return []
+    payload, _ = _load_cron_jobs_payload()
+    jobs = payload.get("jobs", [])
+    return jobs if isinstance(jobs, list) else []
 
 
 def _parse_json_best_effort(raw: str) -> Any:
@@ -701,24 +704,38 @@ def _check_agents(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _check_cron_jobs() -> Dict[str, Any]:
-    jobs = _load_cron_jobs()
-    if not jobs:
+    payload, err = _load_cron_jobs_payload()
+    summary = summarize_cron_jobs(payload)
+    if err:
+        summary = dict(summary)
+        summary["status"] = "FAIL"
+        summary["detail"] = err
+
+    jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
+    if not jobs and summary.get("jobs_total", 0) == 0:
         return {
             "check": "cron_jobs",
             "required": False,
-            "status": "WARN",
-            "detail": "No cron jobs found",
+            "status": summary.get("status", "WARN"),
+            "detail": summary.get("detail", "No cron jobs found"),
+            "jobs_total": 0,
+            "jobs_invalid": 0,
+            "invalid_session_target_count": 0,
+            "delivery_fallback_ready_count": 0,
         }
 
-    total = len(jobs)
-    enabled = [j for j in jobs if j.get("enabled", False)]
+    total = summary.get("jobs_total", len(jobs))
+    enabled = [j for j in jobs if isinstance(j, dict) and j.get("enabled", False)]
     failing = [j for j in enabled if j.get("state", {}).get("consecutiveErrors", 0) > 0]
     delivery_failures = [
         j for j in failing if "delivery" in str(j.get("state", {}).get("lastError", "")).lower()
     ]
     with_fallback = [j for j in enabled if "fallback" in j.get("delivery", {})]
 
-    status = "WARN" if failing else "OK"
+    malformed_count = int(summary.get("jobs_invalid", 0) or 0)
+    summary_status = str(summary.get("status", "OK")).strip().upper() or "OK"
+    invalid_session_target_count = int(summary.get("invalid_session_target_count", 0) or 0)
+    status = "FAIL" if summary_status == "FAIL" else ("WARN" if summary_status == "WARN" or failing else "OK")
     return {
         "check": "cron_jobs",
         "required": False,
@@ -728,10 +745,16 @@ def _check_cron_jobs() -> Dict[str, Any]:
         "failing": len(failing),
         "delivery_failures": len(delivery_failures),
         "with_telegram_fallback": len(with_fallback),
+        "delivery_fallback_ready_count": int(summary.get("delivery_fallback_ready_count", 0) or 0),
+        "jobs_invalid": malformed_count,
+        "invalid_session_target_count": invalid_session_target_count,
+        "job_rows": summary.get("job_rows", []),
+        "invalid_jobs": summary.get("invalid_jobs", []),
         "failing_names": [j["name"] for j in failing],
-        "detail": (
+        "detail": summary.get(
+            "detail",
             f"{len(enabled)} enabled, {len(failing)} failing "
-            f"({len(delivery_failures)} delivery), {len(with_fallback)} have fallback"
+            f"({len(delivery_failures)} delivery), {len(with_fallback)} have fallback",
         ),
     }
 
@@ -862,6 +885,7 @@ def cmd_health(as_json: bool = False) -> int:
         "primary_channel": PRIMARY_CHANNEL_DEFAULT,
         "primary_status": channels.get("primary_status"),
         "fallback_ready": channels.get("fallback_ready", []),
+        "fallback_ready_count": len(channels.get("fallback_ready", [])) if isinstance(channels.get("fallback_ready", []), list) else 0,
         "binding_ok": binding.get("status") == "OK",
         "channels_status_timeout": bool(channels_info.get("timeout")),
         "channels_status_elapsed_ms": channels_info.get("elapsed_ms"),
@@ -919,11 +943,18 @@ def cmd_diagnose(as_json: bool = False) -> int:
         maintenance_age_minutes=maintenance_age_minutes,
     )
 
-    jobs = _load_cron_jobs()
-    failing = [j for j in jobs if j.get("state", {}).get("consecutiveErrors", 0) > 0]
-    diag["cron_total"] = len(jobs)
+    cron_payload, cron_err = _load_cron_jobs_payload()
+    cron_summary = summarize_cron_jobs(cron_payload)
+    if cron_err:
+        cron_summary = dict(cron_summary)
+        cron_summary["status"] = "FAIL"
+        cron_summary["detail"] = cron_err
+    jobs = cron_payload.get("jobs") if isinstance(cron_payload.get("jobs"), list) else []
+    failing = [j for j in jobs if isinstance(j, dict) and j.get("state", {}).get("consecutiveErrors", 0) > 0]
+    diag["cron_total"] = cron_summary.get("jobs_total", len(jobs))
     diag["cron_failing"] = len(failing)
     diag["cron_failing_names"] = [j["name"] for j in failing]
+    diag["cron_summary"] = cron_summary
     diag["interactions_api"] = _check_interactions_api()
     diag["gateway_check"] = _check_gateway(
         cfg,
@@ -955,15 +986,42 @@ def cmd_diagnose(as_json: bool = False) -> int:
 
 
 def cmd_cron_health(as_json: bool = False) -> int:
-    jobs = _load_cron_jobs()
     check = _check_cron_jobs()
+    payload, _ = _load_cron_jobs_payload()
+    jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
+    validation_lookup = {
+        row.get("index"): row
+        for row in (check.get("job_rows", []) if isinstance(check.get("job_rows"), list) else [])
+        if isinstance(row, dict)
+    }
     rows = []
-    for j in jobs:
+    for index, j in enumerate(jobs):
+        validation_row = validation_lookup.get(index) or {}
+        if not isinstance(j, dict):
+            rows.append(
+                {
+                    "name": validation_row.get("name") or f"job-{index}",
+                    "agent": validation_row.get("agentId", "?"),
+                    "enabled": False,
+                    "schedule": "?",
+                    "consecutive_errors": 0,
+                    "last_status": "invalid",
+                    "last_error": "job_not_object",
+                    "delivery_channel": "?",
+                    "has_fallback": False,
+                    "fallback_channel": "",
+                    "payload_kind": validation_row.get("payload_kind") or "",
+                    "session_target": validation_row.get("sessionTarget"),
+                    "validation_status": validation_row.get("status", "FAIL"),
+                    "validation_issues": validation_row.get("issues", ["job_not_object"]),
+                }
+            )
+            continue
         state = j.get("state", {})
         delivery = j.get("delivery", {})
         rows.append(
             {
-                "name": j["name"],
+                "name": j.get("name", f"job-{index}"),
                 "agent": j.get("agentId", "?"),
                 "enabled": j.get("enabled", False),
                 "schedule": j.get("schedule", {}).get("expr", "?"),
@@ -973,15 +1031,19 @@ def cmd_cron_health(as_json: bool = False) -> int:
                 "delivery_channel": delivery.get("channel", "?"),
                 "has_fallback": "fallback" in delivery,
                 "fallback_channel": delivery.get("fallback", {}).get("channel", ""),
+                "payload_kind": j.get("payload", {}).get("kind", "") if isinstance(j.get("payload"), dict) else "",
+                "session_target": j.get("sessionTarget"),
+                "validation_status": validation_row.get("status", "OK") if validation_row else "OK",
+                "validation_issues": validation_row.get("issues", []) if validation_row else [],
             }
         )
 
-    result = {"summary": check, "jobs": rows}
+    result = {"summary": check, "jobs": rows, "invalid_jobs": check.get("invalid_jobs", [])}
     if as_json:
         print(json.dumps(result, indent=2))
     else:
         print(f"\n[cron-health] {check['detail']}")
-    return 0 if check["status"] == "OK" else 1
+    return 0 if check["status"] == "OK" else (1 if check["status"] == "WARN" else 2)
 
 
 def cmd_channel_test(as_json: bool = False) -> int:

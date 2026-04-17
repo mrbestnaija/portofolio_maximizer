@@ -222,3 +222,47 @@ def write_promoted_json_artifact(
         "latest_path": str(latest_path) if latest_path is not None else None,
         "validation_reason": validation_reason,
     }
+
+
+def write_versioned_json_artifact(
+    *,
+    latest_path: Path,
+    payload: dict[str, Any],
+    archive_root: Optional[Path] = None,
+    archive_name: Optional[str] = None,
+    validate_fn: Optional[ValidationResult] = None,
+    quarantine_dir: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Write a latest JSON artifact plus an immutable timestamped archive copy.
+
+    The latest path remains the operator-facing pointer, while the archive copy
+    preserves a historical record for later audits, calibration review, and PnL
+    provenance checks.
+    """
+    base_name = (archive_name or latest_path.stem or "artifact").strip() or "artifact"
+    if archive_root is None:
+        archive_root = latest_path.parent / f"{base_name}_history"
+
+    stamped_path = archive_root / f"{base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}{latest_path.suffix}"
+    result = write_promoted_json_artifact(
+        stamped_path=stamped_path,
+        latest_path=latest_path,
+        payload=payload,
+        validate_fn=validate_fn,
+        quarantine_dir=quarantine_dir,
+    )
+    result["archive_root"] = str(archive_root)
+    result["archive_path"] = str(stamped_path)
+
+    if result.get("ok"):
+        manifest_path = archive_root / "manifest.jsonl"
+        manifest_entry = build_manifest_entry(
+            stamped_path,
+            source="utils.evidence_io.write_versioned_json_artifact",
+            extra={"latest_path": str(latest_path)},
+        )
+        if manifest_entry is not None:
+            upsert_jsonl_record(manifest_path, manifest_entry)
+            result["manifest_path"] = str(manifest_path)
+
+    return result

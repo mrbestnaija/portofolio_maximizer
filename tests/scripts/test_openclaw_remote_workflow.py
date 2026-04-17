@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from scripts import openclaw_remote_workflow as workflow
 
 
@@ -237,3 +240,136 @@ def test_bridge_test_runs_orchestrator_against_whatsapp_target() -> None:
 
     assert rc == 0
     assert calls == [("whatsapp", "+2347000000000", "status")]
+
+
+def test_cron_health_reports_missing_session_target_without_crashing(tmp_path: Path, monkeypatch) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "bad-job",
+                        "name": "[P2] Gate and Readiness Check",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "do work",
+                        },
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    },
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "ok",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    assert rc == 2
+
+    # Re-run through the summary helper to keep the assertion focused on product behavior.
+    summary = workflow._check_cron_jobs()
+    assert summary["status"] == "FAIL"
+    assert summary["jobs_invalid"] == 1
+    assert summary["invalid_session_target_count"] == 1
+    assert summary["delivery_fallback_ready_count"] == 1
+
+
+def test_cron_health_surfaces_warn_rows_in_validation_output(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "warn-job",
+                        "name": "[P2] Missing Payload",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "sessionTarget": "isolated",
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    },
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "ok",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 1
+    assert result["jobs"][0]["validation_status"] == "WARN"
+    assert "payload_missing" in result["jobs"][0]["validation_issues"]
+
+
+def test_cron_health_rejects_non_string_session_target_without_hiding_it(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "bad-job",
+                        "name": "[P2] Gate and Readiness Check",
+                        "agentId": "trading",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "*/10 * * * *"},
+                        "sessionTarget": 123,
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": "do work",
+                        },
+                        "delivery": {"channel": "whatsapp"},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 2
+    assert result["jobs"][0]["validation_status"] == "FAIL"
+    assert "sessionTarget_not_string" in result["jobs"][0]["validation_issues"]

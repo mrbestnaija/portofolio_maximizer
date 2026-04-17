@@ -184,7 +184,8 @@ OOS metrics missing in CV runs
 **P3-A: Confidence → win_rate calibration script**
 - New file: `scripts/calibrate_confidence_thresholds.py`
 - Input: `production_closed_trades` view (40 trades)
-- Output: `logs/confidence_calibration.json` — bins of `(conf_low, conf_high) → win_rate, n`
+- Output: `logs/confidence_calibration.json` plus immutable history under
+  `logs/confidence_calibration_history/` — bins of `(conf_low, conf_high) → win_rate, n`
 - Use: basis for future signal routing threshold changes; do NOT change thresholds yet
 - Test: with 40 trades, produces JSON with non-decreasing win_rate per confidence bin
 

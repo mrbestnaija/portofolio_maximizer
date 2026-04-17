@@ -40,7 +40,7 @@ _SECRET_ALIASES: Dict[str, tuple[str, ...]] = {
     "DISCORD_APP_INSTALL_LINK": ("DISCORD_INSTALL_LINK", "DISCORD_APP_INSTALL_URL"),
     "SLACK_BOT_TOKEN": ("SLACK_TOKEN",),
     "SLACK_APP_TOKEN": ("SLACK_SOCKET_MODE_TOKEN",),
-    "TELEGRAM_BOT_TOKEN": ("TELEGRAM_HTTP_API_TOKEN",),
+    "TELEGRAM_BOT_TOKEN": ("TELEGRAM_HTTP_API_TOKEN", "OPENCLAW_TELEGRAM_BOT_TOKEN"),
 }
 
 
@@ -84,6 +84,28 @@ def _csv_env_aliases(name: str) -> list[str]:
         if key:
             out.append(key)
     return out
+
+
+def _mirror_secret_aliases_into_env() -> None:
+    """Mirror known alias env vars into their canonical names for subprocesses."""
+    for canonical, aliases in _SECRET_ALIASES.items():
+        canonical_value = (os.getenv(canonical) or "").strip()
+        if not canonical_value:
+            for alias in aliases:
+                alias_value = (os.getenv(alias) or "").strip()
+                if alias_value:
+                    os.environ[canonical] = alias_value
+                    canonical_value = alias_value
+                    break
+
+        canonical_file = f"{canonical}_FILE"
+        canonical_file_value = (os.getenv(canonical_file) or "").strip()
+        if not canonical_file_value:
+            for alias in aliases:
+                alias_file = (os.getenv(f"{alias}_FILE") or "").strip()
+                if alias_file:
+                    os.environ[canonical_file] = alias_file
+                    break
 
 
 def _resolve_aliases(env_var_name: str) -> list[str]:
@@ -154,6 +176,7 @@ def bootstrap_dotenv() -> None:
                 if not key or not value:
                     continue
                 os.environ.setdefault(key, str(value))
+            _mirror_secret_aliases_into_env()
             return
         except Exception:
             pass
@@ -163,6 +186,7 @@ def bootstrap_dotenv() -> None:
         parsed = _parse_env_file(env_path)
         for key, value in parsed.items():
             os.environ.setdefault(key, value)
+        _mirror_secret_aliases_into_env()
     except Exception:
         return
 

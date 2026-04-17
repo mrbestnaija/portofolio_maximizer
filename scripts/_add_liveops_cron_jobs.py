@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from scripts.openclaw_cron_contract import DEFAULT_SESSION_TARGET
+
 JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
 
 NEW_JOBS = [
@@ -18,7 +20,7 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "22 23 * * *"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
@@ -54,7 +56,7 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "48 23 * * *"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
@@ -105,7 +107,7 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "17 9 * * 0"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
@@ -138,7 +140,7 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "23 9 * * 1"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",
@@ -180,7 +182,7 @@ NEW_JOBS = [
         "createdAtMs": 1773878400000,
         "updatedAtMs": 1773878400000,
         "schedule": {"kind": "cron", "expr": "47 18 * * 5"},
-        "sessionTarget": "isolated",
+        "sessionTarget": DEFAULT_SESSION_TARGET,
         "wakeMode": "now",
         "payload": {
             "kind": "agentTurn",

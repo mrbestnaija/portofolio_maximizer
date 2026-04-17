@@ -266,7 +266,8 @@ OpenClaw supports multiple channels. On Windows, the most reliable "remote" opti
 
 1. Set the channel token(s) in `.env` (do not commit):
 
-- `TELEGRAM_BOT_TOKEN` (Telegram)
+- `TELEGRAM_BOT_TOKEN` (Telegram, preferred)
+- `OPENCLAW_TELEGRAM_BOT_TOKEN` (legacy alias accepted)
 - `DISCORD_BOT_TOKEN` (Discord)
 - `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` (Slack, if you use it)
 

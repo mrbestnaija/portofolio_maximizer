@@ -209,7 +209,9 @@ def test_run_writes_output_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     """Output JSON must be written to OUTPUT_PATH (via main())."""
     import scripts.calibrate_confidence_thresholds as mod
     out = tmp_path / "confidence_calibration.json"
+    archive_dir = tmp_path / "confidence_calibration_history"
     monkeypatch.setattr(mod, "OUTPUT_PATH", out)
+    monkeypatch.setattr(mod, "ARCHIVE_DIR", archive_dir)
 
     row_data = [{"conf": 0.60 + i * 0.01, "pnl": 5.0} for i in range(MIN_TRADES)]
     db = _make_db(tmp_path, row_data)
@@ -224,6 +226,12 @@ def test_run_writes_output_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert "bins" in payload
     assert "profit_factor" in payload
+
+    archive_files = sorted(archive_dir.glob("confidence_calibration_*.json"))
+    assert archive_files, "Expected immutable calibration archive copy"
+    assert (archive_dir / "manifest.jsonl").exists(), "Expected calibration archive manifest"
+    archived_payload = json.loads(archive_files[-1].read_text(encoding="utf-8"))
+    assert archived_payload == payload
 
 
 def test_mechanical_exit_reasons_coverage() -> None:

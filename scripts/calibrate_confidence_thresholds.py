@@ -3,7 +3,8 @@ P3-A: Calibrate confidence thresholds from realized trades.
 
 Bins closed round-trip trades by confidence quintile and reports win-rate,
 trade count, and realized PnL per bin. Output written to
-logs/confidence_calibration.json for downstream threshold calibration.
+logs/confidence_calibration.json for downstream threshold calibration, with
+timestamped archive copies under logs/confidence_calibration_history/.
 
 Usage:
     python scripts/calibrate_confidence_thresholds.py [--db PATH] [--bins N]
@@ -28,6 +29,8 @@ import numpy as np
 ROOT_PATH = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_PATH))
 
+from utils.evidence_io import write_versioned_json_artifact
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -36,6 +39,7 @@ logger = logging.getLogger("calibrate_confidence_thresholds")
 
 DEFAULT_DB = ROOT_PATH / "data" / "portfolio_maximizer.db"
 OUTPUT_PATH = ROOT_PATH / "logs" / "confidence_calibration.json"
+ARCHIVE_DIR = ROOT_PATH / "logs" / "confidence_calibration_history"
 MIN_TRADES = 20  # below this threshold, calibration is unreliable
 
 
@@ -187,9 +191,17 @@ def main() -> int:
 
     status = payload["status"]
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    logger.info("Calibration written to %s", OUTPUT_PATH)
+    write_result = write_versioned_json_artifact(
+        latest_path=OUTPUT_PATH,
+        payload=payload,
+        archive_root=ARCHIVE_DIR,
+        archive_name="confidence_calibration",
+    )
+    logger.info(
+        "Calibration written to %s (archive=%s)",
+        OUTPUT_PATH,
+        write_result.get("archive_path"),
+    )
 
     if args.json:
         print(json.dumps(payload, indent=2))

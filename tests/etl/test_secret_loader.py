@@ -11,6 +11,7 @@ from unittest.mock import patch, mock_open
 import tempfile
 
 from etl.secret_loader import (
+    _mirror_secret_aliases_into_env,
     load_secret,
     load_api_key,
     load_alpha_vantage_key,
@@ -105,6 +106,18 @@ class TestSecretLoader:
                 assert result == 'auto_detected_secret'
         finally:
             os.unlink(secret_file_path)
+
+    def test_load_secret_accepts_openclaw_telegram_alias(self):
+        """Telegram token should load from the OpenClaw alias used by older .env files."""
+        with patch.dict(os.environ, {'OPENCLAW_TELEGRAM_BOT_TOKEN': 'telegram_alias_token'}, clear=True):
+            result = load_secret('TELEGRAM_BOT_TOKEN')
+            assert result == 'telegram_alias_token'
+
+    def test_mirror_secret_aliases_into_env_exports_canonical_telegram_var(self):
+        """Bootstrap should mirror the Telegram alias into the canonical env var for subprocesses."""
+        with patch.dict(os.environ, {'OPENCLAW_TELEGRAM_BOT_TOKEN': 'telegram_alias_token'}, clear=True):
+            _mirror_secret_aliases_into_env()
+            assert os.environ['TELEGRAM_BOT_TOKEN'] == 'telegram_alias_token'
 
 
 class TestConvenienceFunctions:

@@ -463,7 +463,7 @@ def main() -> int:
         if ("telegram" in combined and "not configured" in combined) or "telegram token not configured" in combined:
             print(
                 "[openclaw_notify] Hint: Telegram channel isn't configured. "
-                "Set TELEGRAM_BOT_TOKEN in .env, then run "
+                "Set TELEGRAM_BOT_TOKEN (or OPENCLAW_TELEGRAM_BOT_TOKEN) in .env, then run "
                 "`python scripts/openclaw_env.py channels add --channel telegram --use-env` "
                 "and `openclaw gateway restart`.",
                 file=sys.stderr,

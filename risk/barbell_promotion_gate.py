@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from utils.evidence_io import write_versioned_json_artifact
+
 
 ROOT_PATH = Path(__file__).resolve().parent.parent
 BARBELL_CONFIG_PATH = ROOT_PATH / "config" / "barbell.yml"
@@ -211,7 +213,7 @@ def write_promotion_evidence(
     path: Path,
     decision: BarbellPromotionDecision,
     report_path: Optional[Path] = None,
-) -> None:
+) -> Dict[str, Any]:
     out = {
         "passed": bool(decision.passed),
         "reason": str(decision.reason),
@@ -219,8 +221,14 @@ def write_promotion_evidence(
         "report_path": str(report_path) if report_path else decision.report_path,
         "checks": dict(decision.checks or {}),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
+    archive_name = path.stem[:-7] if path.stem.endswith("_latest") else path.stem
+    archive_root = path.parent / f"{archive_name}_history"
+    return write_versioned_json_artifact(
+        latest_path=path,
+        payload=out,
+        archive_root=archive_root,
+        archive_name=archive_name,
+    )
 
 
 def load_promotion_evidence(path: Path) -> BarbellPromotionDecision:

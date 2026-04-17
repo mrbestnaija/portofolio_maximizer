@@ -402,6 +402,7 @@ def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path:
         current_price=100.0,
         market_data=_market_frame(),
         run_id="20260409_093000",
+        execution_mode="live",
     )
 
     assert report is not None
@@ -427,6 +428,7 @@ def test_preorder_block_preserves_entry_timestamps_through_audit_patch(tmp_path:
     payload = json.loads(audit_file.read_text(encoding="utf-8"))
     signal_context = payload["signal_context"]
     assert signal_context["entry_ts"] == "2026-04-09T09:00:00+00:00"
+    assert signal_context["execution_mode"] == "live"
     assert signal_context["expected_close_ts"] == "2026-05-09T09:00:00+00:00"
     assert signal_context["expected_close_source"] == "forecast_index"
     assert signal_context["routing_reason"] == "NON_POSITIVE_NET_EDGE"

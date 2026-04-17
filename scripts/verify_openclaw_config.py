@@ -20,7 +20,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.openclaw_cron_contract import load_cron_jobs_payload, summarize_cron_jobs
+
 OPENCLAW_JSON = Path.home() / ".openclaw" / "openclaw.json"
+OPENCLAW_CRON_JOBS = Path.home() / ".openclaw" / "cron" / "jobs.json"
 RECOMMENDED_BOOTSTRAP_MAX_CHARS = 20000
 WORKSPACE_BOOTSTRAP_FILES = ("SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md", "USER.md")
 FALSEY_VALUES = {"0", "false", "no", "off"}
@@ -79,6 +82,10 @@ def _env_enabled(raw: str | None, *, default: bool) -> bool:
 
 def _load_cfg() -> dict:
     return json.loads(OPENCLAW_JSON.read_text(encoding="utf-8-sig"))
+
+
+def _load_cron_jobs_payload() -> tuple[dict, str | None]:
+    return load_cron_jobs_payload(OPENCLAW_CRON_JOBS)
 
 
 def _describe_agent_tools_policy(agent_tools: dict) -> str:
@@ -305,6 +312,18 @@ def main() -> int:
     else:
         warnings.append(f".env OPENCLAW_LOCAL_ONLY = {env_local_only} (remote models allowed!)")
 
+    env_edge_safe_runtime = env.get("PMX_EDGE_SAFE_RUNTIME", "")
+    edge_safe_enabled = bool(env_edge_safe_runtime) and _env_enabled(env_edge_safe_runtime, default=False)
+    if edge_safe_enabled:
+        ok.append(f".env PMX_EDGE_SAFE_RUNTIME = {env_edge_safe_runtime}")
+        if not _env_enabled(env_local_only, default=False):
+            issues.append("[ERROR] PMX_EDGE_SAFE_RUNTIME requires OPENCLAW_LOCAL_ONLY=1")
+        for runtime_flag in ("ENABLE_PARALLEL_FORECASTS", "ENABLE_PARALLEL_TICKER_PROCESSING", "ENABLE_GPU_PARALLEL"):
+            if _env_enabled(env.get(runtime_flag), default=False):
+                issues.append(f"[ERROR] {runtime_flag} must be disabled when PMX_EDGE_SAFE_RUNTIME=1")
+    elif env_edge_safe_runtime:
+        warnings.append(f".env PMX_EDGE_SAFE_RUNTIME = {env_edge_safe_runtime} (disabled)")
+
     env_model_order = env.get("OPENCLAW_OLLAMA_MODEL_ORDER", "")
     if env_model_order:
         models_ordered = [m.strip() for m in env_model_order.split(",") if m.strip()]
@@ -455,6 +474,38 @@ def main() -> int:
         orphan_bindings = bound_agents - defined_ids
         if orphan_bindings:
             issues.append(f"[ERROR] Bindings reference undefined agents: {orphan_bindings}")
+
+    # ===== 11. CRON JOB SCHEMA =====
+    cron_payload, cron_error = _load_cron_jobs_payload()
+    cron_summary = summarize_cron_jobs(cron_payload)
+    if cron_error:
+        issues.append(f"[CRITICAL] {cron_error}")
+    elif cron_summary["status"] == "FAIL":
+        invalid_session_targets = int(cron_summary.get("invalid_session_target_count", 0) or 0)
+        malformed_jobs = int(cron_summary.get("jobs_invalid", 0) or 0)
+        if invalid_session_targets > 0:
+            issues.append(
+                "[CRITICAL] Cron jobs contain malformed agentTurn records: "
+                f"{invalid_session_targets} missing sessionTarget or invalid sessionTarget"
+            )
+        remaining_malformed = max(0, malformed_jobs - invalid_session_targets)
+        if remaining_malformed > 0:
+            issues.append(
+                "[CRITICAL] Cron jobs contain additional malformed records: "
+                f"{remaining_malformed}"
+            )
+    elif cron_summary["status"] == "WARN":
+        warnings.append(
+            "Cron jobs have structural warnings: "
+            f"{cron_summary.get('malformed_job_count', 0)} malformed, "
+            f"{cron_summary.get('delivery_fallback_ready_count', 0)} fallback-ready"
+        )
+    else:
+        ok.append(
+            "Cron jobs schema clean: "
+            f"{cron_summary.get('jobs_total', 0)} jobs, "
+            f"{cron_summary.get('delivery_fallback_ready_count', 0)} fallback-ready"
+        )
 
     # agentToAgent
     a2a = tools_cfg.get("agentToAgent", {})

@@ -1125,6 +1125,42 @@ def _write_performance_artifact(kind: str, payload: Dict[str, Any]) -> None:
         logger.debug("Unable to write performance artifact %s", kind, exc_info=True)
 
 
+def _edge_safe_runtime_enabled() -> bool:
+    """Return True when the runtime should default to compact CPU-safe behavior."""
+    return _env_flag("PMX_EDGE_SAFE_RUNTIME") is True
+
+
+def _normalize_execution_mode(raw_mode: Optional[str], *, default: str = "live") -> str:
+    """Normalize execution mode values without consulting ambient env state."""
+    mode = str(raw_mode or default).strip().lower()
+    if mode not in {"live", "synthetic", "auto"}:
+        return default
+    return mode
+
+
+def _resolve_parallel_runtime_profile() -> Dict[str, Any]:
+    """Resolve fan-out defaults for the current runtime profile."""
+    edge_safe_runtime = _edge_safe_runtime_enabled()
+    default_parallel = not edge_safe_runtime
+
+    parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
+    if parallel_forecasts is None:
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_forecasts = legacy_parallel if legacy_parallel is not None else default_parallel
+
+    parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
+    if parallel_ticker_processing is None:
+        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
+        parallel_ticker_processing = legacy_parallel if legacy_parallel is not None else default_parallel
+
+    return {
+        "edge_safe_runtime": edge_safe_runtime,
+        "parallel_forecasts": bool(parallel_forecasts),
+        "parallel_ticker_processing": bool(parallel_ticker_processing),
+        "parallel_workers": _parse_int_env("PARALLEL_TICKER_WORKERS"),
+    }
+
+
 def _gpu_parallel_enabled() -> bool:
     """Return True when torch+CUDA is available and GPU parallel is enabled."""
     global _GPU_PARALLEL_ENABLED
@@ -1133,7 +1169,7 @@ def _gpu_parallel_enabled() -> bool:
 
     enabled = _env_flag("ENABLE_GPU_PARALLEL")
     if enabled is None:
-        enabled = True
+        enabled = not _edge_safe_runtime_enabled()
 
     if not enabled or torch is None:
         _GPU_PARALLEL_ENABLED = False
@@ -1276,6 +1312,7 @@ def _generate_time_series_forecast(
     *,
     ticker: str = "",
     interval: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """Fit the ensemble forecaster and return the forecast bundle + latest price."""
     if "Close" not in price_frame.columns:
@@ -1306,13 +1343,11 @@ def _generate_time_series_forecast(
         fcfg = _get_forecasting_config()
         ensemble_cfg = fcfg.get("ensemble", {})
         ensemble_kwargs = {k: v for k, v in ensemble_cfg.items() if k != "enabled"}
-        # Route audit files: live runs → production/, synthetic/research runs → research/.
-        # Synthetic auto_trader runs produce audit files with ts_signal_ids that never
-        # appear in production_closed_trades (is_synthetic=1 excluded), so routing
-        # them to production/ contaminates the THIN_LINKAGE and EVIDENCE_HYGIENE gates.
-        _audit_execution_mode = str(
-            os.getenv("EXECUTION_MODE", "live")
-        ).strip().lower()
+        # Route audit files from the resolved run mode only. Ambient EXECUTION_MODE
+        # is ignored here so a stale shell cannot redirect live evidence to research/.
+        _audit_execution_mode = _normalize_execution_mode(execution_mode, default="live")
+        if _audit_execution_mode not in {"live", "synthetic"}:
+            _audit_execution_mode = "live"
         _audit_subdir = (
             "research"
             if _audit_execution_mode == "synthetic"
@@ -1394,6 +1429,7 @@ def _generate_forecasts_bulk(
     parallel: bool,
     max_workers: Optional[int] = None,
     interval: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> Dict[str, Tuple[Optional[Dict], Optional[float]]]:
     """
     Generate forecasts for many tickers, optionally in parallel.
@@ -1411,6 +1447,7 @@ def _generate_forecasts_bulk(
                 horizon,
                 ticker=symbol,
                 interval=interval,
+                execution_mode=execution_mode,
             )
         return out
 
@@ -1424,6 +1461,7 @@ def _generate_forecasts_bulk(
                 horizon,
                 ticker=symbol,
                 interval=interval,
+                execution_mode=execution_mode,
             ): symbol
             for symbol in tickers
         }
@@ -1519,12 +1557,14 @@ def _prepare_candidate_with_forecast(
     frame: pd.DataFrame,
     preprocessor: Preprocessor,
     horizon: int,
+    execution_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     candidate = _prepare_ticker_candidate(ticker=ticker, frame=frame, preprocessor=preprocessor)
     forecast_bundle, current_price = _generate_time_series_forecast(
         candidate["frame"],
         horizon,
         ticker=ticker,
+        execution_mode=execution_mode,
     )
     candidate["forecast_bundle"] = forecast_bundle
     candidate["current_price"] = current_price
@@ -1538,6 +1578,7 @@ def _build_candidates_with_forecasts(
     horizon: int,
     parallel: bool,
     max_workers: Optional[int],
+    execution_mode: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not entries:
         return []
@@ -1550,6 +1591,7 @@ def _build_candidates_with_forecasts(
                 frame=entry["frame"],
                 preprocessor=preprocessor,
                 horizon=horizon,
+                execution_mode=execution_mode,
             )
             candidate.update(entry)
             out.append(candidate)
@@ -1565,6 +1607,7 @@ def _build_candidates_with_forecasts(
                 frame=entry["frame"],
                 preprocessor=preprocessor,
                 horizon=horizon,
+                execution_mode=execution_mode,
             ): entry
             for entry in entries
         }
@@ -1870,6 +1913,7 @@ def _attach_signal_context_to_forecast_audit(
         "ts_signal_id": incoming_tsid or None,
         "ticker": ticker,
         "run_id": run_id,
+        "execution_mode": execution_report.get("execution_mode"),
         "entry_ts": incoming_entry_ts,
         "forecast_horizon": forecast_bundle.get("horizon"),
         "signal_context_missing": not bool(incoming_tsid),
@@ -1968,6 +2012,8 @@ def _attach_signal_context_to_forecast_audit(
         merged["ts_signal_id"] = incoming_tsid or (existing_tsid or None)
         merged["ticker"] = canonical_context.get("ticker") or merged.get("ticker")
         merged["run_id"] = canonical_context.get("run_id") or merged.get("run_id")
+        if canonical_context.get("execution_mode") not in (None, "", []):
+            merged["execution_mode"] = str(canonical_context.get("execution_mode")).strip().lower()
         merged["entry_ts"] = canonical_context.get("entry_ts") or merged.get("entry_ts")
 
         # Use dataset's forecast_horizon from the audit file to avoid HORIZON_MISMATCH.
@@ -2066,6 +2112,7 @@ def _attach_signal_context_to_forecast_audit(
         payload["execution_decision"] = {
             "executed": bool(execution_report.get("executed")),
             "execution_policy_blocked": bool(merged.get("execution_policy_blocked")),
+            "execution_mode": merged.get("execution_mode"),
             "status": str(execution_report.get("status") or ""),
             "reason": str(execution_report.get("reason") or ""),
             "routed_action": routed_action or execution_report.get("action"),
@@ -2400,6 +2447,7 @@ def _execute_signal(
             "status": "REJECTED",
             "reason": str(primary_payload.get("execution_policy_detail") or "execution_policy_blocked"),
             "executed": False,
+            "execution_mode": execution_mode,
             "execution_policy_blocked": True,
             "admission_override_reason_codes": reason_codes,
             "evidence_source_classification": "producer-native",
@@ -2449,6 +2497,7 @@ def _execute_signal(
             "status": result.status,
             "reason": result.reason,
             "executed": False,
+            "execution_mode": execution_mode,
             "signal_id": primary_payload.get("signal_id"),
             "ts_signal_id": primary_payload.get("ts_signal_id"),
             "action": routed_action,
@@ -2944,12 +2993,13 @@ def main(
         logger.info("As-of date override active: %s", resolved_as_of_date.isoformat())
 
     base_tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-    # CLI --execution-mode takes priority over EXECUTION_MODE env var (Phase 7.13-A1)
-    if execution_mode is not None:
-        os.environ["EXECUTION_MODE"] = execution_mode.strip().lower()
-    execution_mode = (os.getenv("EXECUTION_MODE") or "live").strip().lower()
-    if execution_mode not in {"live", "synthetic", "auto"}:
-        execution_mode = "live"
+    # Resolve execution mode once, then mirror the resolved value into env for child
+    # processes. Lower-level code should consume the explicit argument, not re-read env.
+    execution_mode = _normalize_execution_mode(
+        execution_mode if execution_mode is not None else os.getenv("EXECUTION_MODE"),
+        default="live",
+    )
+    os.environ["EXECUTION_MODE"] = execution_mode
     forecasting_cfg = _get_forecasting_config()
     ensemble_cfg = (
         forecasting_cfg.get("ensemble", {})
@@ -3236,15 +3286,16 @@ def main(
     else:
         logger.warning("Bar-aware trading DISABLED; loop may trade repeatedly on the same bar.")
 
-    parallel_forecasts = _env_flag("ENABLE_PARALLEL_FORECASTS")
-    if parallel_forecasts is None:
-        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
-        parallel_forecasts = legacy_parallel if legacy_parallel is not None else True
-    parallel_workers = _parse_int_env("PARALLEL_TICKER_WORKERS")
-    parallel_ticker_processing = _env_flag("ENABLE_PARALLEL_TICKER_PROCESSING")
-    if parallel_ticker_processing is None:
-        legacy_parallel = _env_flag("ENABLE_PARALLEL_TICKERS")
-        parallel_ticker_processing = legacy_parallel if legacy_parallel is not None else True
+    runtime_profile = _resolve_parallel_runtime_profile()
+    edge_safe_runtime = bool(runtime_profile["edge_safe_runtime"])
+    parallel_forecasts = bool(runtime_profile["parallel_forecasts"])
+    parallel_workers = runtime_profile["parallel_workers"]
+    parallel_ticker_processing = bool(runtime_profile["parallel_ticker_processing"])
+    if edge_safe_runtime:
+        logger.info(
+            "Edge-safe runtime active: serial CPU defaults for candidate prep, forecasts, and GPU; "
+            "set ENABLE_PARALLEL_* or ENABLE_GPU_PARALLEL explicitly to opt back in."
+        )
     if _gpu_parallel_enabled():
         logger.info("GPU parallel path available (torch CUDA detected).")
     else:
@@ -3272,11 +3323,11 @@ def main(
         effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
         # Historical as-of-date runs replay past market windows; always tag synthetic
         # so trades are excluded from production_closed_trades and orphan checks.
-        # Also propagate to EXECUTION_MODE env var so _generate_time_series_forecast
-        # routes audit files to research/ instead of production/.
         if resolved_as_of_date is not None:
             effective_execution_mode = "synthetic"
-            os.environ["EXECUTION_MODE"] = "synthetic"
+        # Keep lower-level audit routing and any env fallback in lock-step with the
+        # resolved run mode so stale shells cannot leak synthetic/production drift.
+        os.environ["EXECUTION_MODE"] = effective_execution_mode
         last_dataset_id = window_dataset_id or last_dataset_id
         last_generator_version = window_generator_version or last_generator_version
         last_execution_mode = effective_execution_mode
@@ -3439,6 +3490,7 @@ def main(
                 parallel=True,
                 max_workers=parallel_workers,
                 interval=interval,
+                execution_mode=effective_execution_mode,
             )
 
         for candidate in candidates:
@@ -3472,6 +3524,7 @@ def main(
                     forecast_horizon,
                     ticker=ticker,
                     interval=interval,
+                    execution_mode=effective_execution_mode,
                 )
 
             if not forecast_bundle or current_price is None:
