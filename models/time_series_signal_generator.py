@@ -2062,6 +2062,18 @@ class TimeSeriesSignalGenerator:
         else:  # SELL
             stop_loss = current_price * (1 + stop_loss_pct)
 
+        # Enforce minimum R:R of 2:1 — target distance must be ≥ 2× stop distance.
+        # A signal that risked $10 to gain $0.09 (the AAPL case) is structurally
+        # unprofitable at any win rate below 91%. Extend the target rather than
+        # tightening the stop so ATR-based risk sizing is preserved.
+        stop_dist = abs(current_price - stop_loss)
+        target_dist = abs(target_price - current_price)
+        if stop_dist > 0 and target_dist < 2.0 * stop_dist:
+            if action == 'BUY':
+                target_price = current_price + 2.0 * stop_dist
+            else:
+                target_price = current_price - 2.0 * stop_dist
+
         return target_price, stop_loss
 
     def _build_reasoning(self,

@@ -1448,10 +1448,9 @@ class PaperTradingEngine:
                 except (TypeError, ValueError):
                     horizon = None
                 if horizon is not None and horizon > 0:
-                    # Phase 7.10: Cap max holding to avoid multi-day drag.
-                    # Adversarial audit found multi-day trades net -$229.49.
-                    # Cap at 10 bars unless proof-mode sets tighter limits.
-                    cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "10"))
+                    # Cap max holding. High-SNR signals may pass forecast_horizon=15
+                    # from run_auto_trader.py; default cap raised to 15 to allow them runway.
+                    cap = int(os.getenv("MAX_HOLDING_DAYS_CAP", "15"))
                     new_portfolio.max_holding_days[trade.ticker] = min(horizon, cap)
 
         # Update total value
@@ -1508,6 +1507,40 @@ class PaperTradingEngine:
             target_price_f = float(target_price) if target_price is not None else None
         except (TypeError, ValueError):
             target_price_f = None
+
+        # Trailing stop ratchet — lock in gains once position is meaningfully in profit.
+        # ATR is approximated from the initial stop distance: stop was set at entry ± ATR×2.0,
+        # so effective_atr ≈ |entry - initial_stop| / 2.0. Ratchet updates the persisted
+        # stop_losses entry so the new floor is applied on every subsequent cycle too.
+        entry_price = self.portfolio.entry_prices.get(ticker)
+        if entry_price and stop_loss_f is not None:
+            try:
+                effective_atr = abs(float(entry_price) - stop_loss_f) / 2.0
+            except (TypeError, ValueError):
+                effective_atr = 0.0
+            if effective_atr > 0:
+                if shares > 0:
+                    profit = current_price - float(entry_price)
+                    if profit >= 1.5 * effective_atr:
+                        new_stop = float(entry_price) + 0.5 * effective_atr
+                    elif profit >= 1.0 * effective_atr:
+                        new_stop = float(entry_price)
+                    else:
+                        new_stop = None
+                    if new_stop is not None and new_stop > stop_loss_f:
+                        self.portfolio.stop_losses[ticker] = new_stop
+                        stop_loss_f = new_stop
+                else:  # short position
+                    profit = float(entry_price) - current_price
+                    if profit >= 1.5 * effective_atr:
+                        new_stop = float(entry_price) - 0.5 * effective_atr
+                    elif profit >= 1.0 * effective_atr:
+                        new_stop = float(entry_price)
+                    else:
+                        new_stop = None
+                    if new_stop is not None and new_stop < stop_loss_f:
+                        self.portfolio.stop_losses[ticker] = new_stop
+                        stop_loss_f = new_stop
 
         # Stop/target checks are evaluated first (price-based exits).
         if shares > 0:

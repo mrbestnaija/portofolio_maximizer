@@ -2650,6 +2650,15 @@ def _execute_signal(
         raw_signal_id = primary_payload.get("signal_id")
         if isinstance(raw_signal_id, str) and raw_signal_id.strip():
             primary_payload["ts_signal_id"] = raw_signal_id.strip()
+
+    # High-conviction signals (SNR ≥ 2.0) get a longer runway so developing winners
+    # are not prematurely TIME_EXIT'd before reaching the extended target.
+    try:
+        if routing_snr is not None and float(routing_snr) >= 2.0:
+            primary_payload.setdefault("forecast_horizon", 15)
+    except (TypeError, ValueError):
+        pass
+
     if run_id:
         primary_payload["run_id"] = run_id
     if execution_mode:

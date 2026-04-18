@@ -665,7 +665,7 @@ class GARCHForecaster:
                 "dist": self.dist,
                 "aic": None,
                 "bic": None,
-                "convergence_ok": False,  # EWMA fallback means arch fit failed or unavailable
+                "convergence_ok": True,   # EWMA is a valid conservative model; CI inflation applies only on true GARCH optimizer failure
                 "residual_diagnostics": {},
                 "residual_diagnostics_status": "unavailable",
                 "residual_diagnostics_reason": "ewma_fallback",

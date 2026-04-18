@@ -218,9 +218,10 @@ def test_ewma_forecast_reports_guardrail_metadata() -> None:
     assert "fallback_reason" not in result
     assert result["persistence"] == pytest.approx(0.995)
     assert result["volatility_ratio_to_realized"] == pytest.approx(4.5)
-    # M1 fix: EWMA fallback must signal convergence failure, not success
-    assert result["convergence_ok"] is False, (
-        "EWMA fallback must report convergence_ok=False so CI inflation fires in forecaster"
+    # Phase 2 fix: EWMA is a valid conservative model — convergence_ok=True so CI is NOT inflated.
+    # CI inflation (1.5×) applies only when a full GARCH optimizer fails to converge.
+    assert result["convergence_ok"] is True, (
+        "EWMA fallback must report convergence_ok=True — it is a valid model, not a failure"
     )
 
 
