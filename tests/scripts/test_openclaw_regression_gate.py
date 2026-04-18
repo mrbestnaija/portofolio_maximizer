@@ -173,6 +173,47 @@ def test_run_regression_gate_softens_known_non_json_probe_when_remote_workflow_i
     assert "channels_probe_non_json_softened" in report["warnings"]
 
 
+def test_run_regression_gate_softens_config_only_timeout_when_remote_workflow_is_healthy(monkeypatch) -> None:
+    config_only_stderr = "\n".join(
+        [
+            "Gateway not reachable; showing config-only status.",
+            "Config: C:\\Users\\ExampleUser\\.openclaw\\openclaw.json",
+            "Mode: local",
+            "",
+            "- Telegram default: enabled, configured, mode:polling, token:config",
+            "- WhatsApp default: enabled, configured, linked",
+        ]
+    )
+    health_payload = {"overall": "OK", "primary_status": "OK", "recovery_mode": "channels_status_timeout_softened"}
+
+    def fake_run(cmd: list[str], *, timeout_seconds: float):
+        del timeout_seconds
+        text = " ".join(cmd)
+        if "channels status --probe" in text:
+            return gate._CmdResult(False, 124, cmd, "", config_only_stderr)
+        if "openclaw_remote_workflow.py" in text:
+            return gate._CmdResult(True, 0, cmd, json.dumps(health_payload), "")
+        if "openclaw_maintenance.py" in text:
+            return gate._CmdResult(True, 0, cmd, "[openclaw_maintenance] status=PASS", "")
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(gate, "_run", fake_run)
+
+    ok, report = gate.run_regression_gate(
+        openclaw_command="openclaw",
+        python_bin="python",
+        primary_channel="whatsapp",
+        timeout_seconds=5.0,
+        allow_missing_openclaw=False,
+    )
+
+    assert ok is True
+    assert report["status"] == "PASS"
+    assert report["checks"]["channels_probe"]["softened"] is True
+    assert report["checks"]["primary_channel"]["reason"] == "channels_probe_non_json_softened"
+    assert "channels_probe_non_json_softened" in report["warnings"]
+
+
 def test_run_regression_gate_fails_known_non_json_probe_when_remote_workflow_is_not_healthy(monkeypatch) -> None:
     config_only_stdout = "\n".join(
         [

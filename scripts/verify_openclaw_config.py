@@ -84,6 +84,18 @@ def _load_cfg() -> dict:
     return json.loads(OPENCLAW_JSON.read_text(encoding="utf-8-sig"))
 
 
+def _print_unreadable_config_report(exc: Exception) -> None:
+    print("=" * 65)
+    print("  OpenClaw Configuration Validation Report")
+    print("  Config: " + str(OPENCLAW_JSON))
+    print("=" * 65)
+    print()
+    print("ISSUES (1):")
+    print(f"  [CRITICAL] OpenClaw config unreadable: {OPENCLAW_JSON} ({exc})")
+    print()
+    print("RESULT: FAIL (1 issues, 0 warnings)")
+
+
 def _load_cron_jobs_payload() -> tuple[dict, str | None]:
     return load_cron_jobs_payload(OPENCLAW_CRON_JOBS)
 
@@ -125,7 +137,12 @@ def main() -> int:
     warnings: list[str] = []
     ok: list[str] = []
 
-    cfg = _load_cfg()
+    try:
+        cfg = _load_cfg()
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        _print_unreadable_config_report(exc)
+        return 1
+
     env = _load_env()
     llm_cfg = _load_llm_config()
 
@@ -340,20 +357,6 @@ def main() -> int:
     else:
         ok.append(".env OPENCLAW_AUTONOMY_GUARD_ENABLED not set (runtime default: enabled)")
 
-    env_autonomy_approval = env.get("OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN", "")
-    if env_autonomy_approval and not _env_enabled(env_autonomy_approval, default=True):
-        issues.append("[CRITICAL] OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN is disabled")
-    elif env_autonomy_approval:
-        ok.append(f".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN = {env_autonomy_approval}")
-    else:
-        ok.append(".env OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN not set (runtime default: enabled)")
-
-    env_autonomy_prefix = env.get("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED", "")
-    if env_autonomy_prefix and not _env_enabled(env_autonomy_prefix, default=True):
-        warnings.append("OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED is disabled")
-    elif env_autonomy_prefix:
-        ok.append(f".env OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED = {env_autonomy_prefix}")
-
     env_injection_block = env.get("OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS", "")
     if env_injection_block and _env_enabled(env_injection_block, default=False):
         ok.append(f".env OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS = {env_injection_block}")
@@ -363,12 +366,28 @@ def main() -> int:
             "(recommended for fully autonomous web-heavy workflows)"
         )
 
-    env_approval_token = env.get("OPENCLAW_AUTONOMY_APPROVAL_TOKEN", "")
-    if env_approval_token:
-        if len(env_approval_token.strip()) < 8:
-            warnings.append("OPENCLAW_AUTONOMY_APPROVAL_TOKEN is short; use a non-trivial token")
+    env_approve_high_risk = env.get("OPENCLAW_APPROVE_HIGH_RISK", "")
+    if env_approve_high_risk:
+        if _env_enabled(env_approve_high_risk, default=False):
+            ok.append(f".env OPENCLAW_APPROVE_HIGH_RISK = {env_approve_high_risk}")
         else:
-            ok.append(".env OPENCLAW_AUTONOMY_APPROVAL_TOKEN = [set]")
+            warnings.append("OPENCLAW_APPROVE_HIGH_RISK is disabled; high-risk prompt-mode actions will stay blocked unless the run passes --approve-high-risk.")
+
+    legacy_autonomy_vars = [
+        name
+        for name in (
+            "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN",
+            "OPENCLAW_AUTONOMY_APPROVAL_TOKEN",
+            "OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED",
+        )
+        if env.get(name, "").strip()
+    ]
+    if legacy_autonomy_vars:
+        warnings.append(
+            "Legacy OpenClaw autonomy env vars are ignored by the current runtime: "
+            + ", ".join(sorted(legacy_autonomy_vars))
+            + ". Use OPENCLAW_APPROVE_HIGH_RISK or --approve-high-risk for trusted high-risk runs."
+        )
 
     # ===== 9. LLM CONFIG ALIGNMENT =====
     llm = llm_cfg.get("llm", {})

@@ -53,8 +53,8 @@ def _base_snapshot() -> dict:
             "blockers": [
                 {
                     "source": "security",
-                    "code": "weak_approval_token",
-                    "detail": "OPENCLAW_AUTONOMY_APPROVAL_TOKEN is unset or still using the default token.",
+                    "code": "prompt_injection_block_disabled",
+                    "detail": "OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS is disabled.",
                 },
                 {
                     "source": "capital_readiness",
@@ -95,7 +95,7 @@ def test_classify_ops_issues_separates_governance_security_and_economics() -> No
     economics = grouped["human_economic_action_required"]
 
     assert any(row["code"] == "overall_passed_false" for row in governance)
-    assert any(row["code"] == "weak_approval_token" for row in security)
+    assert any(row["code"] == "prompt_injection_block_disabled" for row in security)
     assert any(row["code"] == "capital_readiness_failed" for row in economics)
 
     overall = ops._build_overall_status(issue_classes=grouped, components=snapshot["components"])

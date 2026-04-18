@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import tempfile
 import sys
 import urllib.error
 import urllib.request
@@ -39,6 +41,7 @@ from typing import Any, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+_AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _bootstrap_dotenv() -> None:
@@ -67,6 +70,49 @@ def _split_command(command: str) -> list[str]:
         return _split(command)
     except Exception:
         return [str(command or "openclaw").strip() or "openclaw"]
+
+
+def _auth_store_root() -> Path:
+    return Path.home() / ".openclaw" / "agents"
+
+
+def _validate_agent_id(agent_id: str) -> str:
+    text = str(agent_id or "").strip()
+    if not text:
+        raise ValueError("agent_id is required")
+    if not _AGENT_ID_PATTERN.fullmatch(text):
+        raise ValueError(f"invalid agent_id: {text!r}")
+    return text
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            delete=False,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as tmp:
+            tmp.write(str(text))
+            tmp.flush()
+            try:
+                os.fsync(tmp.fileno())
+            except Exception:
+                pass
+            tmp_path = Path(tmp.name)
+        os.replace(str(tmp_path), str(path))
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -171,7 +217,7 @@ def _update_openclaw_json_agents_list(
             agents = {}
             payload["agents"] = agents
         agents["list"] = list(agents_list)
-        config_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        _write_text_atomic(config_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return _CmdResult(ok=True, returncode=0, stdout="", stderr="")
     except FileNotFoundError as exc:
         return _CmdResult(ok=False, returncode=127, stdout="", stderr=str(exc))
@@ -327,7 +373,16 @@ def _simple_model_def(*, model_id: str, name: Optional[str] = None, input_types:
 
 
 def _auth_store_path_for_agent(agent_id: str) -> Path:
-    return Path.home() / ".openclaw" / "agents" / agent_id / "agent" / "auth-profiles.json"
+    safe_agent_id = _validate_agent_id(agent_id)
+    agent_root = _auth_store_root() / safe_agent_id / "agent"
+    store_path = agent_root / "auth-profiles.json"
+    resolved_agent_root = agent_root.resolve(strict=False)
+    resolved_store_path = store_path.resolve(strict=False)
+    try:
+        resolved_store_path.relative_to(resolved_agent_root)
+    except Exception as exc:
+        raise ValueError(f"refusing auth store path outside agent directory: {safe_agent_id!r}") from exc
+    return store_path
 
 
 def _detect_default_agent_id(*, oc_base: list[str]) -> str:
@@ -441,8 +496,7 @@ def _sync_auth_store(
         return changed, ["DRY-RUN: " + m for m in msgs]
 
     if changed:
-        store_path.parent.mkdir(parents=True, exist_ok=True)
-        store_path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        _write_text_atomic(store_path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
 
     return changed, msgs
 
@@ -529,8 +583,12 @@ def _cmd_status(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
     model_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.model", timeout_seconds=10.0) or {}
     img_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.imageModel", timeout_seconds=10.0) or {}
@@ -594,8 +652,12 @@ def _cmd_sync_auth(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
     openai_key = _load_secret("OPENAI_API_KEY")
     anthropic_key = _load_secret("ANTHROPIC_API_KEY") or _load_secret("CLAUDE_API_KEY")
@@ -627,8 +689,12 @@ def _cmd_apply(args) -> int:
     _bootstrap_dotenv()
 
     oc_base = _split_command(args.command)
-    agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
-    store_path = _auth_store_path_for_agent(agent_id)
+    try:
+        agent_id = (args.agent_id or "").strip() or _detect_default_agent_id(oc_base=oc_base)
+        store_path = _auth_store_path_for_agent(agent_id)
+    except ValueError as exc:
+        print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
+        return 2
 
     dry_run = bool(args.dry_run)
 
