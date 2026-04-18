@@ -1632,7 +1632,7 @@ class TestATRStopLoss:
         }, index=dates)
 
     def test_atr_stop_uses_bar_data(self):
-        """ATR-based stop should equal current_price - ATR*1.5 for BUY."""
+        """ATR-based stop should equal current_price - ATR*2.0 for BUY."""
         gen = self._make_generator()
         price = 100.0
         bar_range = 2.0  # High-Low range per bar; ATR(14) ≈ 2.0
@@ -1649,7 +1649,7 @@ class TestATRStopLoss:
             action="BUY",
             market_data=market_data,
         )
-        expected_stop = price * (1 - max((atr * 1.5) / price, 0.015))
+        expected_stop = price * (1 - max((atr * 2.0) / price, 0.015))
         assert stop == pytest.approx(expected_stop, rel=1e-6)
 
     def test_atr_stop_fallback_no_ohlc(self):
@@ -2329,4 +2329,106 @@ class TestSNRAnchorCalibration:
         assert abs(conf_3_5 - conf_5_0) < 0.001, (
             f"SNR=3.5 and SNR=5.0 should both saturate at snr_score=1.0; "
             f"got conf(3.5)={conf_3_5:.4f}, conf(5.0)={conf_5_0:.4f}"
+        )
+
+
+class TestSignalLevelOverrides:
+    """Tests for _build_signal_level_overrides() — forward-looking omega/payoff injection."""
+
+    def _make_signal(self, **kwargs) -> "TimeSeriesSignal":
+        from models.time_series_signal_generator import TimeSeriesSignal
+        defaults = dict(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.7,
+            entry_price=100.0,
+            target_price=103.0,
+            stop_loss=98.5,
+        )
+        defaults.update(kwargs)
+        return TimeSeriesSignal(**defaults)
+
+    def test_overrides_inject_forward_omega_into_metrics(self) -> None:
+        """Valid BUY signal with entry/target/stop returns omega_ratio and payoff_asymmetry."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        signal = self._make_signal(entry_price=100.0, target_price=103.0, stop_loss=98.5, confidence=0.7)
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert "omega_ratio" in result, "omega_ratio must be present for valid BUY signal"
+        assert "payoff_asymmetry" in result, "payoff_asymmetry must be present for valid BUY signal"
+        assert result["omega_ratio"] is not None
+        assert result["payoff_asymmetry"] is not None
+
+    def test_overrides_payoff_asymmetry_is_forward_rr(self) -> None:
+        """payoff_asymmetry = upside_pct / stop_pct (forward R:R), not historical avg_win/avg_loss.
+
+        entry=100, target=104, stop=98 -> upside=4%, downside=2% -> R:R = 2.0.
+        """
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator
+        signal = self._make_signal(entry_price=100.0, target_price=104.0, stop_loss=98.0, confidence=0.65)
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        expected_rr = (104.0 - 100.0) / 100.0 / ((100.0 - 98.0) / 100.0)  # 4% / 2% = 2.0
+        assert "payoff_asymmetry" in result
+        assert abs(result["payoff_asymmetry"] - expected_rr) < 1e-9, (
+            f"Expected forward R:R={expected_rr}, got {result['payoff_asymmetry']}"
+        )
+
+    def test_overrides_merged_into_metrics_before_domain_utility(self) -> None:
+        """_build_quant_success_profile must use forward omega_ratio from signal overrides.
+
+        The forward-computed omega_ratio (from Bernoulli distribution) must match what
+        _build_signal_level_overrides returns directly, confirming the merge happens
+        before domain utility scoring.
+        """
+        import pandas as pd
+        import numpy as np
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator, TimeSeriesSignal
+
+        # Build minimal market_data so _build_quant_success_profile doesn't bail out early.
+        np.random.seed(42)
+        n = 130
+        prices = 100.0 + np.cumsum(np.random.randn(n) * 0.5)
+        prices = np.maximum(prices, 1.0)
+        market_data = pd.DataFrame({"Close": prices})
+
+        signal = TimeSeriesSignal(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.65,
+            entry_price=100.0,
+            target_price=104.0,
+            stop_loss=98.0,
+        )
+
+        # Compute expected forward omega directly.
+        expected_overrides = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert "omega_ratio" in expected_overrides, "Precondition: overrides must contain omega_ratio"
+
+        gen = TimeSeriesSignalGenerator(
+            use_volatility_filter=False,
+            quant_validation_config={"enabled": True},
+        )
+        profile = gen._build_quant_success_profile("AAPL", market_data, signal)
+        assert profile is not None, "_build_quant_success_profile returned None"
+        assert "omega_ratio" in profile.get("metrics", profile), (
+            "omega_ratio must be present in quant success profile"
+        )
+        metrics = profile.get("metrics", profile)
+        assert abs(metrics["omega_ratio"] - expected_overrides["omega_ratio"]) < 1e-9, (
+            f"Profile omega_ratio {metrics['omega_ratio']} != forward override {expected_overrides['omega_ratio']}"
+        )
+
+    def test_overrides_absent_when_signal_missing_stop(self) -> None:
+        """Signal missing stop_loss must return empty dict (graceful degradation)."""
+        from models.time_series_signal_generator import TimeSeriesSignalGenerator, TimeSeriesSignal
+        signal = TimeSeriesSignal(
+            ticker="AAPL",
+            action="BUY",
+            confidence=0.65,
+            entry_price=100.0,
+            target_price=104.0,
+            stop_loss=None,
+        )
+        result = TimeSeriesSignalGenerator._build_signal_level_overrides(signal)
+        assert result == {} or "omega_ratio" not in result, (
+            "Missing stop_loss must yield empty overrides or no omega_ratio"
         )

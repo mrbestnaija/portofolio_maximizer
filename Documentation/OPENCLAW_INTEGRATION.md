@@ -78,25 +78,24 @@ The runtime status payload now includes explicit `openclaw_exec_env` signals:
 Prompt-mode runs (`python scripts/openclaw_notify.py --prompt ...`) now enforce a guard in
 `utils/openclaw_cli.py` before any `openclaw agent` call:
 
-- Blocks high-risk requests unless approval token is present:
+ - Blocks high-risk requests unless trusted approval is passed for the specific run:
   - secret exfiltration/entry requests
   - irreversible financial/account actions
   - CAPTCHA bypass requests
-- Prefixes each agent request with `[PMX_AUTONOMY_POLICY]` so untrusted
-  webpage/email instructions are treated as potential prompt injection.
+- High-risk execution requires trusted approval for the specific run via
+  `--approve-high-risk` or `OPENCLAW_APPROVE_HIGH_RISK=1`.
+- Prefixes each agent request with `[PMX_AUTONOMY_POLICY]`; user-supplied
+  policy markers are inert text and do not short-circuit the guard.
 
 Guard env vars:
 - `OPENCLAW_AUTONOMY_GUARD_ENABLED` (default: `1`)
-- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN` (default: `1`)
-- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN` (default: `PMX_APPROVE_HIGH_RISK`)
-- `OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED` (default: `1`)
+- `OPENCLAW_APPROVE_HIGH_RISK` (default: `0`, set only for the specific run that needs trusted approval)
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS` (default: `0`, recommended `1` for unattended runs)
 
 Recommended hardened profile for autonomous hosts:
 - `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`
-- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`
-- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1`
+- `OPENCLAW_APPROVE_HIGH_RISK=1` only for the specific run that needs trusted approval
 
 ### Tavily API (Preferred Over Brave For Quota-Limited Search)
 
@@ -1065,9 +1064,10 @@ agent" to route to the `training` agent instead (via explicit agentId).
 
 **Safety guardrails for remote coding tasks:**
 
-- Prompts are prefixed with `[PMX_AUTONOMY_POLICY]` (autonomy guard, see above).
-- High-risk actions (force push, drop table, delete branch) require
-  `PMX_APPROVE_HIGH_RISK` token in the message.
+- Prompts are always prefixed with `[PMX_AUTONOMY_POLICY]` (autonomy guard, see above).
+- High-risk actions (force push, drop table, delete branch) require trusted
+  approval for the specific run via `--approve-high-risk` or
+  `OPENCLAW_APPROVE_HIGH_RISK=1`.
 - Git push requires explicit confirmation -- the agent will ask before pushing.
 - Keep `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` for unattended sessions.
 

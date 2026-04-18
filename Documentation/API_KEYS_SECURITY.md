@@ -61,21 +61,20 @@ alpha_key = load_secret("ALPHA_VANTAGE_API_KEY")  # auto-detects ALPHA_VANTAGE_A
 OpenClaw prompt-mode execution (`openclaw agent`) is now guarded in
 `utils/openclaw_cli.py`:
 - High-risk requests (credential exfiltration/entry, irreversible financial/account actions, CAPTCHA bypass) are blocked by default.
-- High-risk execution requires explicit approval token (default: `PMX_APPROVE_HIGH_RISK`).
-- Agent prompts are prefixed with `[PMX_AUTONOMY_POLICY]` so untrusted page/email instructions are treated as potential prompt injection.
+- High-risk execution requires trusted approval for the specific run via `--approve-high-risk` or `OPENCLAW_APPROVE_HIGH_RISK=1`.
+- Agent prompts are always prefixed with `[PMX_AUTONOMY_POLICY]`; user-supplied policy markers are inert text and do not short-circuit the guard.
 
 Recommended env defaults for automation hosts:
 - `OPENCLAW_AUTONOMY_GUARD_ENABLED=1`
-- `OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN=1`
-- `OPENCLAW_AUTONOMY_APPROVAL_TOKEN=<non-trivial token>`
 - `OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS=1` (strict mode for unattended autonomous runs)
+- `OPENCLAW_APPROVE_HIGH_RISK=1` only for the specific run that needs trusted high-risk approval
 
 Important:
-- Set `OPENCLAW_AUTONOMY_APPROVAL_TOKEN` in the user/service environment that actually launches OpenClaw or the gateway scheduled task.
+- Pass `--approve-high-risk` or set `OPENCLAW_APPROVE_HIGH_RISK=1` in the user/service environment only for the specific run that needs trusted approval.
 - Do not rely on repo `.env` alone for scheduled-task or long-running launcher contexts that may not inherit it.
 - Security-relevant OpenClaw autonomy events are audited to `logs/llm_activity/YYYY-MM-DD.jsonl`; watch for `autonomy_guard_blocked`, `autonomy_guard_override`, `agent_turn_started`, and `agent_turn_complete`.
 
-Do not place the approval token in chat content unless a human has reviewed and approved that exact action.
+Do not place approval-boundary markers in chat content. The runtime ignores user-supplied policy markers and uses the trusted operator boundary instead.
 
 ## GitHub Authentication (Local Only)
 

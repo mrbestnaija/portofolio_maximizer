@@ -178,19 +178,31 @@ def calculate_enhanced_portfolio_metrics(
             if tracking_error > 1e-8
             else 0.0
         )
-
-        slope, intercept, r_value, _, _ = stats.linregress(
-            benchmark_returns, portfolio_returns
-        )
-        alpha = intercept * TRADING_DAYS
-        beta = slope
+        if benchmark_returns.shape[0] < 2 or float(np.nanstd(benchmark_returns)) <= 1e-12:
+            # Degenerate benchmark series: keep alpha visible, but avoid a
+            # numerical failure in linregress when the benchmark is constant.
+            alpha = float(np.mean(excess_returns) * TRADING_DAYS)
+            beta = 0.0
+            r_squared = 0.0
+        else:
+            try:
+                slope, intercept, r_value, _, _ = stats.linregress(
+                    benchmark_returns, portfolio_returns
+                )
+                alpha = intercept * TRADING_DAYS
+                beta = slope
+                r_squared = r_value**2
+            except Exception:
+                alpha = float(np.mean(excess_returns) * TRADING_DAYS)
+                beta = 0.0
+                r_squared = 0.0
 
         metrics.update(
             {
                 "information_ratio": float(information_ratio),
                 "alpha": float(alpha),
                 "beta": float(beta),
-                "r_squared": float(r_value**2),
+                "r_squared": float(r_squared),
                 "tracking_error": float(tracking_error),
             }
         )
@@ -1106,6 +1118,7 @@ def portfolio_metrics_ngn(
     returns: pd.Series,
     *,
     execution_drag_hurdle: float | None = None,
+    benchmark_returns: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Full Nigeria-calibrated metric set.
@@ -1128,7 +1141,8 @@ def portfolio_metrics_ngn(
       - ngn_daily_threshold   : Current daily NGN hurdle rate
       - ngn_annual_hurdle_pct : Annualised hurdle in % (inflation + friction)
       - beats_ngn_hurdle      : bool, omega_ratio > 1.0
-
+      - alpha / beta / tracking_error / information_ratio when benchmark_returns
+        are supplied.
     Notes
     -----
     The "beats_ngn_hurdle" flag is the canonical Phase 11 success criterion.
@@ -1137,7 +1151,14 @@ def portfolio_metrics_ngn(
     """
     arr = np.array(returns).reshape(-1, 1)
     weights = np.ones(1)
-    base: Dict[str, float] = calculate_enhanced_portfolio_metrics(arr, weights)
+    benchmark_arr = None
+    if benchmark_returns is not None:
+        benchmark_arr = np.asarray(benchmark_returns, dtype=float).reshape(-1)
+    base: Dict[str, float] = calculate_enhanced_portfolio_metrics(
+        arr,
+        weights,
+        benchmark_returns=benchmark_arr,
+    )
 
     omega = omega_ratio(returns)
     omega_robustness = omega_robustness_summary(

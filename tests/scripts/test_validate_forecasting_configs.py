@@ -236,3 +236,63 @@ def test_validate_configs_flags_monte_carlo_sync_mismatch(tmp_path: Path) -> Non
     report = vfc.validate_configs(forecasting, pipeline)
     assert report["ok"] is False
     assert any("sync: monte_carlo mismatch" in msg for msg in report["errors"])
+
+
+def test_validate_configs_flags_ensemble_confidence_sync_mismatch(tmp_path: Path) -> None:
+    forecasting = tmp_path / "forecasting.yml"
+    pipeline = tmp_path / "pipeline.yml"
+
+    base_forecasting = {
+        "forecasting": {
+            "sarimax": {"enabled": True},
+            "garch": {"enabled": True},
+            "samossa": {"enabled": True},
+            "mssa_rl": {"enabled": True},
+            "ensemble": {
+                "enabled": True,
+                "confidence_scaling": True,
+                "track_directional_accuracy": True,
+                "prefer_diversified_candidate": True,
+                "diversity_tolerance": 0.05,
+                "minimum_component_weight": 0.05,
+                "da_floor": 0.1,
+                "da_weight_cap": 0.1,
+                "candidate_weights": [{"garch": 1.0}],
+            },
+            "regime_detection": {"regime_candidate_weights": {"CRISIS": [{"garch": 1.0}]}},
+            "monte_carlo": {"enabled": False, "paths": 1000, "seed": None},
+        }
+    }
+    base_pipeline = {
+        "pipeline": {
+            "forecasting": {
+                "sarimax": {"enabled": True},
+                "garch": {"enabled": True},
+                "samossa": {"enabled": True},
+                "mssa_rl": {"enabled": True},
+                "ensemble": {
+                    "enabled": True,
+                    "confidence_scaling": False,
+                    "track_directional_accuracy": True,
+                    "prefer_diversified_candidate": True,
+                    "diversity_tolerance": 0.15,
+                    "minimum_component_weight": 0.05,
+                    "da_floor": 0.2,
+                    "da_weight_cap": 0.05,
+                    "candidate_weights": [{"garch": 1.0}],
+                },
+                "regime_detection": {"regime_candidate_weights": {"CRISIS": [{"garch": 1.0}]}},
+                "monte_carlo": {"enabled": False, "paths": 1000, "seed": None},
+            }
+        }
+    }
+
+    forecasting.write_text(yaml.safe_dump(base_forecasting), encoding="utf-8")
+    pipeline.write_text(yaml.safe_dump(base_pipeline), encoding="utf-8")
+
+    report = vfc.validate_configs(forecasting, pipeline)
+    assert report["ok"] is False
+    assert any("sync: ensemble.confidence_scaling mismatch" in msg for msg in report["errors"])
+    assert any("sync: ensemble.diversity_tolerance mismatch" in msg for msg in report["errors"])
+    assert any("sync: ensemble.da_floor mismatch" in msg for msg in report["errors"])
+    assert any("sync: ensemble.da_weight_cap mismatch" in msg for msg in report["errors"])

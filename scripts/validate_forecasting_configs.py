@@ -164,6 +164,28 @@ def _sync_checks(
             "sync: sarimax.enabled mismatch between forecasting and pipeline configs"
         )
 
+    f_ensemble = forecasting_cfg.get("ensemble") if isinstance(forecasting_cfg, dict) else {}
+    p_ensemble = pipeline_cfg.get("ensemble") if isinstance(pipeline_cfg, dict) else {}
+    if not isinstance(f_ensemble, dict):
+        f_ensemble = {}
+    if not isinstance(p_ensemble, dict):
+        p_ensemble = {}
+
+    for key in (
+        "enabled",
+        "confidence_scaling",
+        "track_directional_accuracy",
+        "prefer_diversified_candidate",
+        "diversity_tolerance",
+        "minimum_component_weight",
+        "da_floor",
+        "da_weight_cap",
+    ):
+        if f_ensemble.get(key) != p_ensemble.get(key):
+            errors.append(
+                f"sync: ensemble.{key} mismatch between forecasting and pipeline configs"
+            )
+
     f_candidates = ((forecasting_cfg.get("ensemble") or {}).get("candidate_weights") or [])
     p_candidates = ((pipeline_cfg.get("ensemble") or {}).get("candidate_weights") or [])
     if f_candidates != p_candidates:

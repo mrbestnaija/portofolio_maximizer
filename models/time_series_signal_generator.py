@@ -2048,9 +2048,9 @@ class TimeSeriesSignalGenerator:
         # Stop loss: ATR-based (preferred) or volatility-based fallback
         atr = self._compute_atr(market_data)
         if atr is not None and current_price > 0:
-            # ATR * 1.5 positions stop below 1.5 average noise ranges.
+            # ATR * 2.0 positions stop below 2 average noise ranges.
             # No upper cap -- high-vol names need wider stops to avoid noise fires.
-            stop_loss_pct = max((atr * 1.5) / current_price, 0.015)
+            stop_loss_pct = max((atr * 2.0) / current_price, 0.015)
         elif volatility is not None:
             # Fallback: model-implied vol, 1.5%-5% clamp
             stop_loss_pct = max(0.015, min(0.05, volatility * 0.5))

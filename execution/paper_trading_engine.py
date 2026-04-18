@@ -928,7 +928,7 @@ class PaperTradingEngine:
             signal: Trading signal
             confidence_score: Adjusted confidence (0-1)
             market_data: Historical data for risk estimation
-            current_position: Existing shares held (long only)
+            current_position: Existing shares held (positive long / negative short)
 
         Returns:
             Number of shares to trade
@@ -954,6 +954,11 @@ class PaperTradingEngine:
             max_short_pct = 0.05
             conf_floor = 0.10
 
+        _, _, current_price_ref, _ = self._find_last_market_observation(market_data)
+        current_price = self._safe_float(current_price_ref)
+        if current_price is None or current_price <= 0.0:
+            return 0
+
         # Maximum position size (scaled by per-ticker regime state when available)
         portfolio_value = self._current_portfolio_value()
         max_position_value = portfolio_value * max_pos_pct
@@ -968,19 +973,37 @@ class PaperTradingEngine:
             risk_mult = self._get_regime_risk_multiplier(ticker)
             max_position_value *= risk_mult
         action = signal.get("action", "HOLD").upper()
+
+        reducing_exposure = (action == "SELL" and current_position > 0) or (
+            action == "BUY" and current_position < 0
+        )
+
         if action == "SELL":
             # Tighter cap for shorts
             max_position_value = portfolio_value * max_short_pct
 
+        if not reducing_exposure:
+            candidate_cap = self._candidate_kelly_cap(signal)
+            diversification_scale = self._candidate_diversification_scale(
+                signal,
+                portfolio_value=portfolio_value,
+                current_position=current_position,
+                current_price=current_price,
+            )
+            candidate_scale = candidate_cap * diversification_scale
+            if candidate_scale != 1.0:
+                logger.debug(
+                    "Candidate sizing modifiers for %s: cap=%.3f diversification=%.3f scale=%.3f",
+                    ticker or "<unknown>",
+                    candidate_cap,
+                    diversification_scale,
+                    candidate_scale,
+                )
+            max_position_value *= candidate_scale
+
         # Adjust by confidence (floor configurable via risk mode)
         confidence_weight = max(confidence_score, conf_floor)
         position_value = max_position_value * confidence_weight
-
-        # Calculate shares
-        _, _, current_price_ref, _ = self._find_last_market_observation(market_data)
-        current_price = self._safe_float(current_price_ref)
-        if current_price is None or current_price <= 0.0:
-            return 0
 
         if action == "SELL":
             desired = max(0, int(position_value / current_price))
@@ -1012,6 +1035,30 @@ class PaperTradingEngine:
                     shares = 1
 
         return max(1, shares) if diag_mode else max(0, shares)
+
+    def _candidate_kelly_cap(self, signal: Dict[str, Any]) -> float:
+        raw_cap = self._safe_float(signal.get("sizing_kelly_fraction_cap"))
+        if raw_cap is None:
+            return 1.0
+        return max(0.0, min(1.0, raw_cap))
+
+    def _candidate_diversification_scale(
+        self,
+        signal: Dict[str, Any],
+        *,
+        portfolio_value: float,
+        current_position: int,
+        current_price: float,
+    ) -> float:
+        raw_penalty = self._safe_float(signal.get("diversification_penalty"))
+        if raw_penalty is None or raw_penalty <= 0.0:
+            return 1.0
+        if portfolio_value <= 0.0 or current_price <= 0.0 or current_position == 0:
+            return 1.0
+
+        penalty = max(0.0, min(1.0, raw_penalty))
+        exposure_ratio = min(abs(current_position) * current_price / max(portfolio_value, 1e-12), 1.0)
+        return 1.0 / (1.0 + penalty * exposure_ratio)
 
     def _get_regime_risk_multiplier(self, ticker: str) -> float:
         """

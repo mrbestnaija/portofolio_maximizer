@@ -102,6 +102,49 @@ def test_update_openclaw_json_agents_list_accepts_utf8_bom(tmp_path, monkeypatch
     assert updated["agents"]["list"] == [{"id": "ops", "model": "ollama/qwen3:8b"}]
 
 
+def test_auth_store_path_for_agent_rejects_path_traversal() -> None:
+    with pytest.raises(ValueError, match="invalid agent_id"):
+        mod._auth_store_path_for_agent("../../evil")
+
+
+def test_write_text_atomic_replaces_target_file(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "auth-profiles.json"
+    calls: list[tuple[str, str]] = []
+    real_replace = mod.os.replace
+
+    def fake_replace(src, dst):
+        calls.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(mod.os, "replace", fake_replace)
+
+    mod._write_text_atomic(path, json.dumps({"ok": True}, sort_keys=True) + "\n")
+
+    assert path.exists()
+    assert json.loads(path.read_text(encoding="utf-8")) == {"ok": True}
+    assert calls and calls[0][1] == str(path)
+
+
+def test_sync_auth_store_writes_auth_profiles_atomically(tmp_path) -> None:
+    store_path = tmp_path / "agents" / "ops" / "agent" / "auth-profiles.json"
+
+    changed, msgs = mod._sync_auth_store(
+        store_path=store_path,
+        openai_key="oa-key-123",
+        anthropic_key="anth-key-456",
+        ollama_key="local",
+        dry_run=False,
+    )
+
+    assert changed is True
+    assert store_path.exists()
+    payload = json.loads(store_path.read_text(encoding="utf-8"))
+    assert payload["profiles"]["openai:default"]["key"] == "oa-key-123"
+    assert payload["profiles"]["anthropic:default"]["key"] == "anth-key-456"
+    assert payload["profiles"]["ollama:default"]["key"] == "local"
+    assert any("Synced OpenAI key" in msg for msg in msgs)
+
+
 def test_cmd_apply_normalizes_legacy_ollama_base_url_before_writing(monkeypatch) -> None:
     writes: list[tuple[str, object]] = []
 

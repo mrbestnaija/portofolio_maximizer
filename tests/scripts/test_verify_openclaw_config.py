@@ -15,6 +15,19 @@ def test_load_cfg_accepts_utf8_bom(tmp_path, monkeypatch) -> None:
     assert cfg["tools"]["exec"]["host"] == "node"
 
 
+def test_main_fails_closed_when_openclaw_json_is_malformed(tmp_path, monkeypatch, capsys) -> None:
+    cfg_path = tmp_path / "openclaw.json"
+    cfg_path.write_text("{\"gateway\": {\"mode\": \"local\",}}\n", encoding="utf-8")
+    monkeypatch.setattr(mod, "OPENCLAW_JSON", cfg_path)
+
+    rc = mod.main()
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "OpenClaw config unreadable" in captured.out
+    assert "Traceback" not in captured.err
+
+
 def test_describe_agent_tools_policy_marks_explicit_policy() -> None:
     policy = mod._describe_agent_tools_policy({"allow": ["exec", "read"], "deny": ["browser"]})
     assert policy == "tools.policy=explicit"
@@ -119,10 +132,8 @@ def _valid_env(*, edge_safe: bool = True) -> dict:
         "OPENCLAW_LOCAL_ONLY": "1",
         "OPENCLAW_OLLAMA_MODEL_ORDER": "qwen3:8b,deepseek-r1:8b",
         "OPENCLAW_AUTONOMY_GUARD_ENABLED": "1",
-        "OPENCLAW_AUTONOMY_REQUIRE_APPROVAL_TOKEN": "1",
-        "OPENCLAW_AUTONOMY_POLICY_PREFIX_ENABLED": "1",
         "OPENCLAW_AUTONOMY_BLOCK_INJECTION_PATTERNS": "1",
-        "OPENCLAW_AUTONOMY_APPROVAL_TOKEN": "supersecret-token",
+        "OPENCLAW_APPROVE_HIGH_RISK": "1",
     }
     if edge_safe:
         env["PMX_EDGE_SAFE_RUNTIME"] = "1"

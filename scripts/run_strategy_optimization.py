@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 _OBJECTIVE_THRESHOLD_POLARITY = {
     "total_return": "min",
+    "alpha": "min",
+    "information_ratio": "min",
     "omega_ratio": "min",
     "payoff_asymmetry_effective": "min",
     "profit_factor": "min",
@@ -186,6 +188,11 @@ def main(
     signal_guardrails = _load_signal_guardrails(
         ROOT_PATH / str(evaluation_cfg.get("signal_routing_config_path") or "config/signal_routing_config.yml")
     )
+    forecasting_config_path = Path(
+        evaluation_cfg.get("forecasting_config_path") or "config/forecasting_config.yml"
+    )
+    if not forecasting_config_path.is_absolute():
+        forecasting_config_path = ROOT_PATH / forecasting_config_path
     raw_ticker_limit = evaluation_cfg.get("ticker_limit")
     try:
         ticker_limit = int(raw_ticker_limit) if raw_ticker_limit is not None else None
@@ -230,6 +237,7 @@ def main(
             end_date=end_iso,
             candidate_params=candidate.params,
             guardrails=signal_guardrails,
+            forecasting_config_path=str(forecasting_config_path),
         )
         metrics = dict(simulation or {})
         metrics.pop("strategy_returns", None)

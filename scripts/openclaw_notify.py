@@ -133,6 +133,12 @@ def main() -> int:
         except Exception:
             return fallback
 
+    def _env_enabled(name: str, fallback: bool = False) -> bool:
+        raw = str(os.getenv(name, "")).strip().lower()
+        if not raw:
+            return bool(fallback)
+        return raw not in {"0", "false", "no", "off"}
+
     parser = argparse.ArgumentParser(description="Send a notification via OpenClaw.")
     parser.add_argument(
         "--to",
@@ -200,6 +206,18 @@ def main() -> int:
         "--local-agent",
         action="store_true",
         help="(Prompt mode) Run embedded agent locally (`openclaw agent --local`). Requires model provider keys.",
+    )
+    parser.add_argument(
+        "--approve-high-risk",
+        dest="approve_high_risk",
+        action="store_true",
+        help="(Prompt mode) Trust this run to execute high-risk actions (or set OPENCLAW_APPROVE_HIGH_RISK=1).",
+    )
+    parser.add_argument(
+        "--no-approve-high-risk",
+        dest="approve_high_risk",
+        action="store_false",
+        help="(Prompt mode) Force high-risk approval off for this run, even if the environment enables it.",
     )
     parser.add_argument(
         "--reply-channel",
@@ -274,6 +292,7 @@ def main() -> int:
         action="store_false",
         help="Never prompt interactively for a missing target.",
     )
+    parser.set_defaults(approve_high_risk=None)
     args = parser.parse_args()
 
     if args.to == _MISSING_VALUE:
@@ -396,6 +415,7 @@ def main() -> int:
                 agent_id=agent_id,
                 thinking=thinking,
                 local=bool(args.local_agent),
+                approve_high_risk=args.approve_high_risk,
             )
         except Exception as exc:
             print(f"[openclaw_notify] FAILED (agent mode): {exc}", file=sys.stderr)

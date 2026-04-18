@@ -244,6 +244,80 @@ def test_regime_state_risk_multiplier_scales_position_size(tmp_path, monkeypatch
     db.close()
 
 
+def test_candidate_sizing_knobs_reduce_new_exposure_but_not_exits():
+    db = DatabaseManager(":memory:")
+    validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+    engine = PaperTradingEngine(
+        initial_capital=100_000.0,
+        slippage_pct=0.0,
+        transaction_cost_pct=0.0,
+        database_manager=db,
+        signal_validator=validator,
+    )
+    engine.portfolio.total_value = 100_000.0
+
+    market_data = make_market_data(100.0)
+    base_open = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=0,
+    )
+    capped_open = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "sizing_kelly_fraction_cap": 0.25,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=0,
+    )
+    assert capped_open < base_open
+
+    baseline_add = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "BUY", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    penalized_add = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "diversification_penalty": 1.0,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    assert penalized_add < baseline_add
+
+    baseline_exit = engine._calculate_position_size(
+        {"ticker": "AAPL", "action": "SELL", "confidence": 0.9},
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    penalized_exit = engine._calculate_position_size(
+        {
+            "ticker": "AAPL",
+            "action": "SELL",
+            "confidence": 0.9,
+            "sizing_kelly_fraction_cap": 0.25,
+            "diversification_penalty": 1.0,
+        },
+        confidence_score=0.9,
+        market_data=market_data,
+        current_position=500,
+    )
+    assert penalized_exit == baseline_exit
+
+    db.close()
+
+
 def test_lob_execution_price_moves_with_order_size():
     db = DatabaseManager(":memory:")
     validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
@@ -432,12 +506,14 @@ def test_execute_signal_reverse_through_flat_persists_residual_open_lot_and_resu
         db_path=str(db_path),
         resume_from_db=True,
     )
-    assert resumed.portfolio.positions.get("AAPL") == -3
-    assert resumed.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
-    assert resumed.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
-    assert resumed.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
-
-    db.close()
+    try:
+        assert resumed.portfolio.positions.get("AAPL") == -3
+        assert resumed.portfolio.entry_trade_ids["AAPL"] == int(reverse_row["id"])
+        assert resumed.portfolio.entry_lots["AAPL"][0]["trade_id"] == int(reverse_row["id"])
+        assert resumed.portfolio.entry_lots["AAPL"][0]["remaining_shares"] == pytest.approx(3.0)
+    finally:
+        resumed.db_manager.close()
+        db.close()
 
 
 def test_lob_fallback_uses_depth_profiles_when_depth_missing(monkeypatch):
