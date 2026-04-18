@@ -71,6 +71,15 @@ The correct representation is scenario ranges with an interaction discount.
 
 ---
 
+## Validation Status
+
+- **Confirmed**: `portfolio_cash_state.initial_capital` is $25,000.
+- **Confirmed**: the current live metrics snapshot in `visualizations/performance/metrics_summary.json` is the 40-trade / $620.01 / 10.8% annualized file, not the earlier 42-trade / $567.30 snapshot.
+- **Code-backed (2026-04-18)**: `scripts/compute_capital_utilization.py` is now the canonical KPI calculator for time-weighted deployment. Run `python scripts/compute_capital_utilization.py` to reproduce $457/day. Formula pinned by 11 regression tests in `tests/scripts/test_compute_capital_utilization.py` — denominator is `(capital × total_days)`, not sum-of-notionals or trade count.
+- **Not yet reproducible from the latest live run**: the latest `production_gate_latest.json` still reports `WARMUP_COVERED_PASS`, and `scripts/institutional_unattended_gate.py --json` still fails `prior_gate_execution`.
+
+---
+
 ## Rebased Gap Analysis
 
 | Metric | Value |
