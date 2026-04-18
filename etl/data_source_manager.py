@@ -406,8 +406,11 @@ class DataSourceManager:
                 data = extractor.extract_ohlcv(tickers, start_date, end_date)
 
                 if data is not None and not data.empty:
-                    logger.info(f"OK Failover successful: {source_name} returned {len(data)} rows")
-                    self.active_extractor = extractor  # Switch active extractor
+                    logger.warning(
+                        "Failover: fetched from %s this cycle (primary %s unavailable). "
+                        "active_extractor NOT switched — execution_mode contamination prevented.",
+                        source_name, failed_source,
+                    )
                     return data
 
             except Exception as e:

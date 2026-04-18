@@ -534,6 +534,39 @@ class PaperTradingEngine:
                     signal["confidence"] = 0.5
                 forced_exit_shares = abs(int(current_position))
 
+        # For forced exits, resolve the opening leg's is_synthetic so the CLOSE
+        # trade inherits the OPEN's production/synthetic status rather than the
+        # current cycle's data-source mode.  A live OPEN must close as live even
+        # if the fetcher temporarily fell back to synthetic data this cycle.
+        # This is the primary guard against THIN_LINKAGE contamination:
+        #   active_extractor may switch to "synthetic" on yfinance failure,
+        #   setting effective_execution_mode="synthetic" for the cycle, which
+        #   would tag the close is_synthetic=1 and exclude it from
+        #   production_closed_trades.  Best-effort: if DB lookup fails,
+        #   fall through to the default execution_mode-based logic.
+        _forced_is_synthetic: Optional[int] = None
+        if forced_exit_reason:
+            _opener_id = self.portfolio.entry_trade_ids.get(ticker)
+            if _opener_id:
+                try:
+                    _row = self.db_manager.conn.execute(
+                        "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id=?",
+                        (int(_opener_id),),
+                    ).fetchone()
+                    if _row is not None:
+                        _forced_is_synthetic = int(_row[0])
+                        logger.debug(
+                            "[LIVE_FUNNEL] Forced exit %s: inherited is_synthetic=%d "
+                            "from opener trade_id=%d",
+                            ticker, _forced_is_synthetic, int(_opener_id),
+                        )
+                except Exception as _fe_exc:
+                    logger.debug(
+                        "[LIVE_FUNNEL] Could not look up opener is_synthetic for %s "
+                        "(trade_id=%s): %s — using execution_mode fallback",
+                        ticker, _opener_id, _fe_exc,
+                    )
+
         # Exit eligibility diagnostic log for every open position.
         if current_position != 0 and current_price:
             _stop = self.portfolio.stop_losses.get(ticker)
@@ -810,10 +843,12 @@ class PaperTradingEngine:
             effective_confidence=signal.get("confidence"),
             confidence_calibrated=signal.get("confidence_calibrated"),
             is_diagnostic=1 if diag_mode else 0,
-            is_synthetic=1 if (
-                (data_source and "synthetic" in str(data_source).lower())
-                or str(execution_mode or "").lower() == "synthetic"
-            ) else 0,
+            is_synthetic=_forced_is_synthetic if _forced_is_synthetic is not None else (
+                1 if (
+                    (data_source and "synthetic" in str(data_source).lower())
+                    or str(execution_mode or "").lower() == "synthetic"
+                ) else 0
+            ),
             is_forced_exit=1 if bool(signal.get("forced_exit")) else 0,
         )
         mid_price_hint = signal.get("mid_price_hint")
@@ -1694,6 +1729,27 @@ class PaperTradingEngine:
 
             contamination_flag = max(int(trade.is_contaminated or 0), int(is_contaminated_ref or 0))
             trade.is_contaminated = contamination_flag
+
+            # Diagnostic: warn if a live opener is closed by a synthetic closer.
+            # After FIX-1 (_forced_is_synthetic lookup), this should never fire for
+            # forced exits; if it does, the DB lookup silently fell back and the
+            # execution_mode-based path produced an incorrect is_synthetic=1.
+            if entry_trade_id_ref and int(trade.is_synthetic or 0) == 1:
+                try:
+                    _opener_row = self.db_manager.conn.execute(
+                        "SELECT COALESCE(is_synthetic, 0) FROM trade_executions WHERE id=?",
+                        (int(entry_trade_id_ref),),
+                    ).fetchone()
+                    if _opener_row and _opener_row[0] == 0:
+                        logger.warning(
+                            "[INT-05] live-open/synthetic-close mismatch detected for %s "
+                            "(opener trade_id=%d is_synthetic=0, closer is_synthetic=1). "
+                            "This close WILL be excluded from production_closed_trades. "
+                            "Check _forced_is_synthetic DB lookup path.",
+                            trade.ticker, int(entry_trade_id_ref),
+                        )
+                except Exception:
+                    pass
 
             trade_id = self.db_manager.save_trade_execution(
                 ticker=trade.ticker,

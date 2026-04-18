@@ -712,3 +712,125 @@ def test_confidence_calibrated_saved_to_db():
     assert abs(row[0] - 0.62) < 1e-6
 
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: Forced exits inherit OPEN leg's is_synthetic, not current cycle mode
+# ---------------------------------------------------------------------------
+
+class TestForcedExitSyntheticInheritance:
+    """Verify that forced-exit CLOSE legs inherit is_synthetic from the DB opener,
+    preventing execution_mode drift from contaminating live positions."""
+
+    @staticmethod
+    def _make_engine_with_open_position(
+        db, is_synthetic_open: int, entry_price: float = 100.0, stop_loss: float = 130.0
+    ):
+        """Create engine with an open BUY position and a stop_loss that market data will breach.
+
+        stop_loss=130.0 is above entry=100.0 so that make_market_data(120.0) (last bar ≈123.5)
+        satisfies current_price <= stop_loss → STOP_LOSS forced exit fires.
+        """
+        validator = DummyValidator(DummyValidationResult(True, "EXECUTE", 0.9))
+        engine = PaperTradingEngine(
+            initial_capital=10_000.0,
+            slippage_pct=0.0,
+            transaction_cost_pct=0.0,
+            database_manager=db,
+            signal_validator=validator,
+        )
+        exec_mode = "synthetic" if is_synthetic_open else "live"
+        opener_id = db.save_trade_execution(
+            ticker="AAPL",
+            trade_date=datetime(2026, 4, 1, tzinfo=timezone.utc).date(),
+            action="BUY",
+            shares=1,
+            price=entry_price,
+            total_value=entry_price,
+            commission=0.0,
+            execution_mode=exec_mode,
+            is_synthetic=is_synthetic_open,
+        )
+        engine.portfolio.positions["AAPL"] = 1
+        engine.portfolio.entry_prices["AAPL"] = entry_price
+        engine.portfolio.entry_timestamps["AAPL"] = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        engine.portfolio.entry_trade_ids["AAPL"] = opener_id
+        engine.portfolio.stop_losses["AAPL"] = stop_loss  # price that triggers STOP_LOSS
+        engine.portfolio.entry_lots["AAPL"] = [
+            {"trade_id": opener_id, "action": "BUY", "remaining_shares": 1.0,
+             "is_synthetic": is_synthetic_open}
+        ]
+        return engine, opener_id
+
+    def test_forced_exit_of_live_position_stays_live(self):
+        """CLOSE forced by stop_loss breach of a live OPEN must be is_synthetic=0,
+        even when the current cycle's execution_mode is 'synthetic'."""
+        db = DatabaseManager(":memory:")
+        # stop_loss=130.0 → market data last price ≈123.5 ≤ 130.0 → STOP_LOSS fires
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=0)
+
+        # BUY signal with synthetic execution_mode (simulates data-source fallback cycle)
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "synthetic",  # current cycle fell back to synthetic
+        }
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED"
+        assert result.trade is not None, "No trade returned"
+        assert result.trade.is_forced_exit == 1 or result.trade.exit_reason is not None, (
+            "Expected forced exit (STOP_LOSS) but got normal execution — "
+            "check stop_loss and market data price"
+        )
+        assert result.trade.is_synthetic == 0, (
+            "Live opener forced-exit was tagged synthetic — THIN_LINKAGE would miss this close"
+        )
+
+        row = db.cursor.execute(
+            "SELECT is_synthetic FROM trade_executions WHERE is_close=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert int(row["is_synthetic"]) == 0, "DB close leg has is_synthetic=1 for live opener"
+        db.close()
+
+    def test_forced_exit_of_synthetic_position_stays_synthetic(self):
+        """CLOSE forced by stop_loss of a synthetic OPEN must remain is_synthetic=1."""
+        db = DatabaseManager(":memory:")
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=1)
+
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "synthetic",
+        }
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED"
+        assert result.trade is not None
+        assert result.trade.is_forced_exit == 1 or result.trade.exit_reason is not None, (
+            "Expected forced exit (STOP_LOSS)"
+        )
+        assert result.trade.is_synthetic == 1, (
+            "Synthetic opener forced-exit was incorrectly tagged is_synthetic=0"
+        )
+        db.close()
+
+    def test_forced_exit_falls_back_gracefully_when_db_unavailable(self):
+        """When opener DB lookup fails, fall back to current execution_mode — no crash."""
+        db = DatabaseManager(":memory:")
+        engine, _ = self._make_engine_with_open_position(db, is_synthetic_open=0)
+
+        # Corrupt entry_trade_ids to a non-existent ID to trigger the fallback path
+        engine.portfolio.entry_trade_ids["AAPL"] = 99999
+
+        signal = {
+            "ticker": "AAPL",
+            "action": "BUY",
+            "confidence": 0.9,
+            "execution_mode": "live",
+        }
+        # Must not raise
+        result = engine.execute_signal(signal, make_market_data(120.0))
+        assert result.status == "EXECUTED", "Graceful fallback path crashed"
+        db.close()

@@ -427,5 +427,71 @@ class TestErrorHandling:
         # This depends on implementation - adjust as needed
 
 
+class TestFailoverDoesNotPollutePrimaryExtractor:
+    """FIX 3: _failover_extraction must NOT mutate active_extractor on success.
+
+    Permanently switching active_extractor causes all subsequent cycles to see
+    'synthetic' as the active source, setting effective_execution_mode='synthetic'
+    and tagging forced exits of live positions as is_synthetic=1.
+    """
+
+    def _make_manager_with_two_extractors(self, temp_config_dir, temp_storage):
+        config_path = temp_config_dir / "data_sources_config.yml"
+        manager = DataSourceManager(
+            config_path=str(config_path),
+            storage=temp_storage,
+        )
+        primary = Mock(spec=BaseExtractor)
+        primary.name = "yfinance"
+        primary.extract_ohlcv = Mock(return_value=None)  # primary fails
+        fallback = Mock(spec=BaseExtractor)
+        fallback.name = "synthetic"
+        fallback_data = pd.DataFrame({"Close": [100.0, 101.0]})
+        fallback.extract_ohlcv = Mock(return_value=fallback_data)
+
+        manager.extractors = {"yfinance": primary, "synthetic": fallback}
+        manager.active_extractor = primary
+        return manager, primary, fallback
+
+    def test_fallback_does_not_switch_active_extractor(self, temp_config_dir, temp_storage):
+        """After successful fallback, active_extractor must still point to primary."""
+        manager, primary, fallback = self._make_manager_with_two_extractors(
+            temp_config_dir, temp_storage
+        )
+        original_extractor = manager.active_extractor
+
+        data = manager._failover_extraction(
+            tickers=["AAPL"],
+            start_date="2026-01-01",
+            end_date="2026-01-10",
+            failed_source="yfinance",
+        )
+
+        assert data is not None, "Failover should return data from synthetic"
+        assert manager.active_extractor is original_extractor, (
+            "active_extractor was mutated after fallback — execution_mode contamination risk"
+        )
+
+    def test_get_active_source_still_returns_primary_after_fallback(
+        self, temp_config_dir, temp_storage
+    ):
+        """get_active_source() must return 'yfinance' even after a fallback to synthetic."""
+        manager, primary, fallback = self._make_manager_with_two_extractors(
+            temp_config_dir, temp_storage
+        )
+        manager._failover_extraction(
+            tickers=["AAPL"],
+            start_date="2026-01-01",
+            end_date="2026-01-10",
+            failed_source="yfinance",
+        )
+        # active_extractor is still primary → get_active_source() must not return "synthetic"
+        source = manager.get_active_source()
+        assert source != "synthetic", (
+            f"get_active_source() returned 'synthetic' after fallback: {source!r}. "
+            "This would cause effective_execution_mode='synthetic' in all subsequent cycles."
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
