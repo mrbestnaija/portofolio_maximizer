@@ -768,6 +768,7 @@ def _build_linkage_waterfall(window_counts: Dict[str, Any], *, production_audit_
     )
     non_trade = _safe_int(window_counts.get("n_outcome_windows_non_trade_context"), 0)
     invalid_context = _safe_int(window_counts.get("n_outcome_windows_invalid_context"), 0)
+    misrouted_rmse_only = _safe_int(window_counts.get("n_misrouted_rmse_only_records"), 0)
     linked = _safe_int(window_counts.get("n_outcome_windows_eligible"), 0)
     matched = _safe_int(window_counts.get("n_outcome_windows_matched"), 0)
     readiness_included = _safe_int(window_counts.get("n_readiness_denominator_included"), 0)
@@ -783,6 +784,7 @@ def _build_linkage_waterfall(window_counts: Dict[str, Any], *, production_audit_
         "matched": matched,
         "excluded_non_trade_context": non_trade,
         "excluded_invalid_context": invalid_context,
+        "excluded_misrouted_rmse_only": misrouted_rmse_only,
         "matched_over_linked": _safe_ratio(matched, linked),
         "linked_over_production_only": _safe_ratio(linked, production_only_count),
         "hygiene_over_production_only": _safe_ratio(hygiene_pass_count, production_only_count),
@@ -1459,7 +1461,14 @@ def main() -> int:
     execution_rejected_count = _safe_int(
         window_counts.get("n_outcome_windows_execution_rejected"), 0
     )
-    dirty_invalid_count = max(0, invalid_context_count - execution_rejected_count)
+    misrouted_rmse_only_count = _safe_int(
+        window_counts.get("n_misrouted_rmse_only_records"),
+        0,
+    )
+    dirty_invalid_count = max(
+        0,
+        invalid_context_count - execution_rejected_count - misrouted_rmse_only_count,
+    )
     scope_block = lift_summary.get("scope", {}) if isinstance(lift_summary.get("scope"), dict) else {}
     production_audit_only = bool(
         scope_block.get(
@@ -1706,6 +1715,7 @@ def main() -> int:
             "invalid_context_count": invalid_context_count,
             "execution_rejected_count": execution_rejected_count,
             "dirty_invalid_count": dirty_invalid_count,
+            "misrouted_rmse_only_records": misrouted_rmse_only_count,
             "linkage_waterfall": linkage_waterfall,
             "production_audit_only": production_audit_only,
             "high_integrity_violation_count": high_integrity_violation_count,
@@ -1744,6 +1754,7 @@ def main() -> int:
             "quarantined_records": quarantined_records,
             "duplicate_conflicts": duplicate_conflicts,
             "missing_execution_metadata_records": admission_missing_execution_metadata_records,
+            "misrouted_rmse_only_records": misrouted_rmse_only_count,
             "contract_version_drift": bool(contract_version_drift),
             "cohort_fingerprint_drift": bool(cohort_fingerprint_drift),
             "production_audit_only": production_audit_only,
