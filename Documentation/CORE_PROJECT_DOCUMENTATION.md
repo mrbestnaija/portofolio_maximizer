@@ -32,6 +32,12 @@ This document is intentionally “policy-like”: it tells you what must be true
 - Binding economic objective: **Barbell asymmetry is the primary economic objective. The system optimizes for asymmetric upside with bounded downside, not for symmetric textbook efficiency metrics.**
 - Conflict rule: if any older document implies Sharpe, win rate, or balanced classification-style accuracy is the primary target, that statement is superseded by the barbell-asymmetry policy above.
 
+## Delta (2026-04-18)
+
+- Evidence-first alpha pipeline added: `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md`.
+- The repo now treats `preprocess_health` and `evidence_health` as operational contracts that must be visible in ETL, forecasting, live trading, dashboarding, and gate output.
+- Current robust verification for the new pipeline: focused evidence/preprocess contract slice `159 passed`; repo fast lane `2534 passed, 6 skipped, 45 deselected, 11 xfailed`.
+
 ---
 
 ## 1. Canonical Documents (Single Source of Truth)
@@ -52,6 +58,9 @@ The project contains many documents; the following are the **core** ones that sh
 - **Quant gating policy (GREEN/YELLOW/RED)**: `Documentation/QUANT_VALIDATION_MONITORING_POLICY.md`
 - **Numeric invariants (guard rails)**: `Documentation/NUMERIC_INVARIANTS_AND_SCALING_TESTS.md`
 - **Metrics + evaluation definitions (math)**: `Documentation/METRICS_AND_EVALUATION.md`
+- **Evidence-first alpha pipeline**: `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md` (preprocess validation, evidence-health contracts, provenance, dashboard wiring, robust testing).
+- **Weak-ticker rotation + NAV rebalance plan**: `Documentation/WEAK_TICKER_ROTATION_AND_NAV_REBALANCE_PLAN_2026-04-18.md` (automated demotion/promotion of weak vs strong tickers under evidence-first governance).
+- **Weak-ticker NAV sidecar artifact**: `logs/automation/nav_rebalance_plan_latest.json` (shadow-first output from `scripts/build_nav_rebalance_plan.py`).
 - **Ensemble governance (2026-01-11 / refreshed 2026-01-20)**: Ensemble is **enabled** in `config/forecasting_config.yml` with Phase 7.3 tuning (higher SARIMAX order caps, wider SAMOSSA window, stricter MSSA-RL change-point gate). Keep the promotion bar: require ≥20 effective audits with lift_fraction ≥10% vs BEST_SINGLE and violation_rate within cap; disable if those regressions appear in fresh audits.
 - **Profitability remediation playbook**: `Documentation/CRITICAL_PROFITABILITY_ANALYSIS_AND_REMEDIATION_PLAN.md` is the canonical “what broke and how to fix” ledger (synthetic/test contamination, missing exits, remediation gates). Keep it in sync when profitability fixes land.
 
@@ -128,7 +137,8 @@ Use this ladder to claim increasingly strong confidence.
 
 - Cron/Task Scheduler runs keep evidence fresh:
   - `bash/production_cron.sh auto_trader_core`
-  - Windows wrapper: `schedule_backfill.bat` (WSL-enabled default)
+  - Windows wrapper: `scripts/run_core_auto_trader_once.ps1` (Task Scheduler-friendly; calls the thin `run_core_auto_trader_once.bat` WSL entrypoint)
+  - The core cron path sanitizes forecast-audit artifacts before the cycle starts, relocating legacy RMSE-only production rows out of `logs/forecast_audits/production/` before evidence counting.
 
 ---
 

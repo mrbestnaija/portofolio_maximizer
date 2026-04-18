@@ -32,6 +32,7 @@ from scripts.run_auto_trader import (  # noqa: E402
     _attach_signal_context_to_forecast_audit,
     _build_cohort_identity,
     _build_semantic_admission,
+    _coerce_open_position_shares,
     _execute_signal,
 )
 
@@ -427,6 +428,13 @@ def test_execute_signal_returns_auditable_preorder_block(monkeypatch) -> None:
     assert result["execution_policy_blocked"] is True
     assert result["admission_override_reason_codes"] == ["NON_POSITIVE_NET_EDGE"]
     assert result["evidence_source_classification"] == "producer-native"
+
+
+def test_coerce_open_position_shares_handles_mocked_and_string_inputs() -> None:
+    assert _coerce_open_position_shares(MagicMock()) == 0
+    assert _coerce_open_position_shares("3") == 3
+    assert _coerce_open_position_shares("3.9") == 3
+    assert _coerce_open_position_shares(None) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -42,3 +42,4 @@ def test_extract_ohlcv_chunks_batches_and_concatenates() -> None:
     assert len(extractor.calls) == 3
     assert set(df["ticker"].unique()) == set(tickers)
     assert len(df) == len(tickers) * 2
+    assert df.attrs.get("source") == "dummy"

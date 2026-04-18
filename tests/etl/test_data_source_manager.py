@@ -259,6 +259,8 @@ class TestDataExtraction:
         assert result is not None
         assert not result.empty
         assert mock_fetch.called
+        assert result.attrs.get("source") == "yfinance"
+        assert result.attrs.get("data_source") == "yfinance"
 
     @patch('etl.yfinance_extractor.fetch_ticker_data')
     def test_extract_ohlcv_with_prefer_source(self, mock_fetch, temp_config_dir, temp_storage):
@@ -284,6 +286,7 @@ class TestDataExtraction:
                                        prefer_source='yfinance')
 
         assert result is not None
+        assert result.attrs.get("source") == "yfinance"
 
 
 class TestCacheStatistics:
@@ -468,6 +471,7 @@ class TestFailoverDoesNotPollutePrimaryExtractor:
         )
 
         assert data is not None, "Failover should return data from synthetic"
+        assert data.attrs.get("source") == "synthetic"
         assert manager.active_extractor is original_extractor, (
             "active_extractor was mutated after fallback — execution_mode contamination risk"
         )

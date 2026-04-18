@@ -127,6 +127,16 @@ preprocessing:
   validation:
     enabled: true
 
+    # Post-fill / post-pad quality contract.  These thresholds are staged so
+    # the live lane can remain narrow while ETL backfill improves evidence
+    # coverage over time.
+    post_preprocess:
+      enabled: true
+      min_usable_bars: 120
+      max_imputed_fraction: 0.30
+      max_padding_fraction: 0.20
+      on_failure: "raise"
+
     # Check data integrity after preprocessing
     checks:
       no_missing_values: true  # Ensure all missing handled

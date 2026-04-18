@@ -1,10 +1,10 @@
 # Project Status - Portfolio Maximizer
 
-**Last verified (focused)**: 2026-04-12
+**Last verified (focused)**: 2026-04-18
 **Last full-suite**: 2026-04-11
 **Dependency sanity check**: 2026-01-04
 **Scope**: Engineering/integration health + paper-window MVS validation (not live profitability)
-**Document updated**: 2026-04-12
+**Document updated**: 2026-04-18
 
 ## Delta (2026-04-08)
 
@@ -16,6 +16,10 @@
 
 - Latest unattended gate snapshot is not genuinely green end-to-end: `production_audit_gate` currently reports `gate_semantics=PASS` but `posture=FAIL` because of `EVIDENCE_HYGIENE_FAIL` on the current workspace snapshot, and `institutional_unattended_gate` still blocks unattended claims.
 - The current blocker is evidence hygiene, not a threshold dodge; treat any warmup-covered wording in older notes as historical context only.
+- Repo-wide evidence-first alpha pipeline is now documented in `Documentation/EVIDENCE_FIRST_ALPHA_PIPELINE_2026-04-18.md`.
+- Weak-ticker rotation and NAV rebalance plan is now documented in `Documentation/WEAK_TICKER_ROTATION_AND_NAV_REBALANCE_PLAN_2026-04-18.md`.
+- Verified evidence/preprocess contract slice: `159 passed`.
+- Verified repo fast lane: `2534 passed, 6 skipped, 45 deselected, 11 xfailed`.
 
 ## Phase 7.32 — Adversarial Hardening Round 2 (2026-03-02)
 

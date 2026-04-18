@@ -754,6 +754,7 @@ def _build_action_plan(
     cash_ratio: Optional[float],
     forecaster_health: Dict[str, Any],
     quant_health: Dict[str, Any],
+    orchestration_health: Optional[Dict[str, Any]] = None,
 ) -> list[str]:
     """Translate profitability/liquidity/forecast health into next-step prompts."""
     actions: list[str] = []
@@ -822,12 +823,250 @@ def _build_action_plan(
                 f"Quant validation failing {fail_frac:.2f}>{max_fail:.2f}; pause risky buckets until signals improve."
             )
 
+    if isinstance(orchestration_health, dict):
+        summary = orchestration_health.get("summary") or {}
+        latest = orchestration_health.get("latest") or {}
+        source_counts = summary.get("oos_source_counts") or {}
+        if isinstance(source_counts, dict):
+            heuristic_n = int(source_counts.get("heuristic_fallback") or 0)
+            proxy_n = int(source_counts.get("cv_fold_proxy") or 0)
+            if heuristic_n > 0 or proxy_n > 0:
+                actions.append(
+                    "Refresh trailing OOS evidence before trusting the ensemble; current runs still fall back to proxy/heuristic selection."
+                )
+        if latest.get("mssa_eligible") is False and latest.get("mssa_white_noise") is False:
+            actions.append(
+                "Keep MSSA-RL containment-only until residual white-noise passes; it is excluded from ensemble confidence on this run."
+            )
+        if latest.get("garch_unstable") is True:
+            actions.append(
+                "Reduce GARCH reliance in unstable regimes; the latest cycle hit a degraded volatility fallback."
+            )
+        if latest.get("preprocess_production_ok") is False:
+            actions.append(
+                "Keep sparse / high-impute windows out of live capital; preprocessing health is research-only on the latest run."
+            )
+        if latest.get("evidence_production_ok") is False:
+            actions.append(
+                "Refresh observed OOS evidence before promoting the path; the latest evidence bundle is not production-ready."
+            )
+
     if not actions:
         actions.append(
             "Metrics within thresholds; continue current playbook and monitor dashboards."
         )
 
     return actions
+
+
+def _extract_orchestration_health_snapshot(
+    forecast_bundle: Dict[str, Any],
+    *,
+    ticker: str,
+    run_id: str,
+    cycle: int,
+    data_source: Optional[str],
+) -> Dict[str, Any]:
+    """Compact per-ticker orchestration health snapshot for dashboard tracking."""
+    if not isinstance(forecast_bundle, dict):
+        return {}
+
+    raw_health = forecast_bundle.get("ensemble_health")
+    if not isinstance(raw_health, dict):
+        ensemble_meta = forecast_bundle.get("ensemble_metadata") or {}
+        if isinstance(ensemble_meta, dict):
+            raw_health = ensemble_meta.get("health")
+    if not isinstance(raw_health, dict):
+        return {}
+
+    oos = raw_health.get("oos_evidence") if isinstance(raw_health.get("oos_evidence"), dict) else {}
+    mssa = raw_health.get("mssa_rl") if isinstance(raw_health.get("mssa_rl"), dict) else {}
+    garch = raw_health.get("garch") if isinstance(raw_health.get("garch"), dict) else {}
+    ensemble = raw_health.get("ensemble") if isinstance(raw_health.get("ensemble"), dict) else {}
+    evidence = forecast_bundle.get("evidence_health") if isinstance(forecast_bundle.get("evidence_health"), dict) else {}
+    preprocess = forecast_bundle.get("preprocess_health") if isinstance(forecast_bundle.get("preprocess_health"), dict) else {}
+
+    return {
+        "ticker": str(ticker or "").upper(),
+        "run_id": run_id,
+        "cycle": int(cycle),
+        "data_source": data_source,
+        "status": raw_health.get("status") or "UNKNOWN",
+        "issues": list(raw_health.get("issues") or []),
+        "oos_source": oos.get("source_kind"),
+        "oos_quality": oos.get("quality"),
+        "oos_source_dir": oos.get("source_dir"),
+        "oos_source_path": oos.get("source_path"),
+        "oos_models": oos.get("finite_rmse_models"),
+        "oos_rank_active": bool(oos.get("rmse_rank_active")),
+        "mssa_eligible": mssa.get("eligible"),
+        "mssa_white_noise": mssa.get("white_noise"),
+        "mssa_policy_status": mssa.get("policy_status"),
+        "garch_fallback_mode": garch.get("fallback_mode"),
+        "garch_unstable": garch.get("degraded"),
+        "garch_white_noise": garch.get("white_noise"),
+        "ensemble_status": ensemble.get("ensemble_status") or raw_health.get("ensemble_status"),
+        "ensemble_reason": ensemble.get("ensemble_decision_reason") or raw_health.get("ensemble_decision_reason"),
+        "allow_as_default": ensemble.get("allow_as_default"),
+        "evidence_source_kind": evidence.get("source_kind"),
+        "evidence_freshness_status": evidence.get("freshness_status"),
+        "evidence_oos_metrics_available": evidence.get("oos_metrics_available"),
+        "evidence_rmse_rank_active": evidence.get("rmse_rank_active"),
+        "evidence_fallback_class": evidence.get("fallback_class"),
+        "evidence_production_ok": evidence.get("production_ok"),
+        "preprocess_status": preprocess.get("status"),
+        "preprocess_quality_tag": preprocess.get("quality_tag"),
+        "preprocess_production_ok": preprocess.get("production_ok"),
+        "preprocess_reason": preprocess.get("reason"),
+    }
+
+
+def _summarize_orchestration_health(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-ticker orchestration health into a run-level summary."""
+    if not records:
+        return {
+            "status": "MISSING",
+            "summary": {
+                "snapshots": 0,
+                "oos_source_counts": {},
+                "evidence_source_counts": {},
+                "mssa_white_noise_failures": 0,
+                "garch_unstable_runs": 0,
+                "rmse_rank_active_runs": 0,
+                "allow_as_default_runs": 0,
+                "preprocess_blocked_runs": 0,
+                "preprocess_research_only_runs": 0,
+            },
+            "latest": {},
+            "issues": [],
+        }
+
+    source_counts: Dict[str, int] = {}
+    evidence_source_counts: Dict[str, int] = {}
+    issues: list[str] = []
+    mssa_failures = 0
+    garch_unstable = 0
+    rmse_rank_active = 0
+    allow_default = 0
+    preprocess_blocked = 0
+    preprocess_research_only = 0
+    for rec in records:
+        source = str(rec.get("oos_source") or "unknown")
+        source_counts[source] = source_counts.get(source, 0) + 1
+        evidence_source = str(rec.get("evidence_source_kind") or "unknown")
+        evidence_source_counts[evidence_source] = evidence_source_counts.get(evidence_source, 0) + 1
+        if rec.get("mssa_eligible") is False and rec.get("mssa_white_noise") is False:
+            mssa_failures += 1
+            issues.append("mssa_rl_white_noise_failed")
+        if rec.get("garch_unstable") is True:
+            garch_unstable += 1
+            issues.append("garch_unstable_reliance")
+        if rec.get("oos_rank_active") is True:
+            rmse_rank_active += 1
+        if rec.get("allow_as_default") is True:
+            allow_default += 1
+        if source in {"heuristic_fallback", "cv_fold_proxy", "none"}:
+            issues.append("oos_proxy_or_heuristic")
+        if evidence_source in {"heuristic_fallback", "cv_fold_proxy", "none", "stale_rejected"}:
+            issues.append("evidence_proxy_or_heuristic")
+        if rec.get("evidence_production_ok") is False:
+            issues.append("evidence_not_production_ok")
+        if rec.get("preprocess_production_ok") is False:
+            preprocess_blocked += 1
+            issues.append("preprocess_research_only")
+        if str(rec.get("preprocess_quality_tag") or "").upper() in {"SPARSE_DATA", "HIGH_IMPUTE"}:
+            preprocess_research_only += 1
+
+    unique_issues = sorted(set(issues))
+    status = "OK"
+    if not records:
+        status = "MISSING"
+    elif unique_issues:
+        status = "WARN"
+
+    return {
+        "status": status,
+        "summary": {
+            "snapshots": len(records),
+            "oos_source_counts": source_counts,
+            "evidence_source_counts": evidence_source_counts,
+            "mssa_white_noise_failures": mssa_failures,
+            "garch_unstable_runs": garch_unstable,
+            "rmse_rank_active_runs": rmse_rank_active,
+            "allow_as_default_runs": allow_default,
+            "preprocess_blocked_runs": preprocess_blocked,
+            "preprocess_research_only_runs": preprocess_research_only,
+        },
+        "latest": records[-1],
+        "issues": unique_issues,
+    }
+
+
+def _summarize_preprocess_health(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate per-ticker preprocess health into a run-level summary."""
+    if not records:
+        return {
+            "status": "MISSING",
+            "summary": {
+                "snapshots": 0,
+                "status_counts": {},
+                "quality_tag_counts": {},
+                "production_ok_runs": 0,
+                "research_only_runs": 0,
+                "sparse_runs": 0,
+                "high_impute_runs": 0,
+            },
+            "latest": {},
+            "issues": [],
+        }
+
+    status_counts: Dict[str, int] = {}
+    quality_tag_counts: Dict[str, int] = {}
+    production_ok_runs = 0
+    research_only_runs = 0
+    sparse_runs = 0
+    high_impute_runs = 0
+    issues: list[str] = []
+
+    for rec in records:
+        status = str(rec.get("status") or "UNKNOWN").upper()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        quality_tag = str(rec.get("quality_tag") or "UNKNOWN").upper()
+        quality_tag_counts[quality_tag] = quality_tag_counts.get(quality_tag, 0) + 1
+        if rec.get("production_ok") is True:
+            production_ok_runs += 1
+        else:
+            research_only_runs += 1
+            issues.append("preprocess_research_only")
+        if quality_tag == "SPARSE_DATA":
+            sparse_runs += 1
+        if quality_tag == "HIGH_IMPUTE":
+            high_impute_runs += 1
+            issues.append("preprocess_high_impute")
+        if status == "FAIL":
+            issues.append("preprocess_blocked")
+
+    unique_issues = sorted(set(issues))
+    status = "OK"
+    if unique_issues:
+        status = "WARN"
+    if status_counts.get("FAIL", 0) > 0:
+        status = "FAIL"
+
+    return {
+        "status": status,
+        "summary": {
+            "snapshots": len(records),
+            "status_counts": status_counts,
+            "quality_tag_counts": quality_tag_counts,
+            "production_ok_runs": production_ok_runs,
+            "research_only_runs": research_only_runs,
+            "sparse_runs": sparse_runs,
+            "high_impute_runs": high_impute_runs,
+        },
+        "latest": records[-1],
+        "issues": unique_issues,
+    }
 
 
 def _llm_signals_ready_for_trading(
@@ -1479,11 +1718,38 @@ def _prepare_ticker_candidate(
     ticker: str,
     frame: pd.DataFrame,
     preprocessor: Preprocessor,
+    preprocess_policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute quality, preprocess, and derive mid-price for a ticker frame."""
     raw_frame = frame.copy()
     quality = _compute_quality_metrics(raw_frame)
     processed = _trim_trailing_unpriced_rows(_ensure_min_length(preprocessor.handle_missing(frame)))
+    preprocess_cfg = preprocess_policy if isinstance(preprocess_policy, dict) else {}
+    validate_post_preprocess = getattr(preprocessor, "validate_post_preprocess", None)
+    if callable(validate_post_preprocess):
+        preprocess_health = validate_post_preprocess(
+            raw_frame,
+            processed,
+            min_usable_bars=int(
+                preprocess_cfg.get("min_usable_bars", MIN_SERIES_POINTS) or MIN_SERIES_POINTS
+            ),
+            max_imputed_fraction=float(preprocess_cfg.get("max_imputed_fraction", 0.30) or 0.30),
+            max_padding_fraction=float(preprocess_cfg.get("max_padding_fraction", 0.20) or 0.20),
+            on_failure=str(preprocess_cfg.get("on_failure", "warn") or "warn"),
+        )
+    else:
+        preprocess_health = {
+            "status": "PASS",
+            "reason": "VALIDATOR_UNAVAILABLE",
+            "quality_tag": "UNKNOWN",
+            "production_ok": True,
+            "research_ok": True,
+            "raw_length": int(len(raw_frame)),
+            "processed_length": int(len(processed)),
+            "usable_bars": int(len(processed)),
+            "imputed_fraction": 0.0,
+            "padding_fraction": 0.0,
+        }
     mid_price = _compute_mid_price(processed)
     return {
         "ticker": ticker,
@@ -1491,6 +1757,7 @@ def _prepare_ticker_candidate(
         "raw_frame": raw_frame,
         "frame": processed,
         "quality": quality,
+        "preprocess_health": preprocess_health,
         "mid_price": mid_price,
     }
 
@@ -1501,6 +1768,7 @@ def _build_ticker_candidates(
     preprocessor: Preprocessor,
     parallel: bool,
     max_workers: Optional[int],
+    preprocess_policy: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Prepare per-ticker candidates (quality + preprocessed frames), optionally in parallel.
@@ -1516,6 +1784,7 @@ def _build_ticker_candidates(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
             )
             candidate.update(entry)
             out.append(candidate)
@@ -1530,6 +1799,7 @@ def _build_ticker_candidates(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
             ): entry
             for entry in entries
         }
@@ -1544,6 +1814,13 @@ def _build_ticker_candidates(
                     "raw_frame": entry["frame"],
                     "frame": entry["frame"],
                     "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "preprocess_health": {
+                        "status": "FAIL",
+                        "reason": "CANDIDATE_PREPARATION_FAILED",
+                        "quality_tag": "BLOCKED",
+                        "production_ok": False,
+                        "research_ok": False,
+                    },
                     "mid_price": None,
                 }
             candidate.update(entry)
@@ -1557,9 +1834,15 @@ def _prepare_candidate_with_forecast(
     frame: pd.DataFrame,
     preprocessor: Preprocessor,
     horizon: int,
+    preprocess_policy: Optional[Dict[str, Any]] = None,
     execution_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    candidate = _prepare_ticker_candidate(ticker=ticker, frame=frame, preprocessor=preprocessor)
+    candidate = _prepare_ticker_candidate(
+        ticker=ticker,
+        frame=frame,
+        preprocessor=preprocessor,
+        preprocess_policy=preprocess_policy,
+    )
     forecast_bundle, current_price = _generate_time_series_forecast(
         candidate["frame"],
         horizon,
@@ -1578,6 +1861,7 @@ def _build_candidates_with_forecasts(
     horizon: int,
     parallel: bool,
     max_workers: Optional[int],
+    preprocess_policy: Optional[Dict[str, Any]] = None,
     execution_mode: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not entries:
@@ -1590,6 +1874,7 @@ def _build_candidates_with_forecasts(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
                 horizon=horizon,
                 execution_mode=execution_mode,
             )
@@ -1606,6 +1891,7 @@ def _build_candidates_with_forecasts(
                 ticker=entry["ticker"],
                 frame=entry["frame"],
                 preprocessor=preprocessor,
+                preprocess_policy=preprocess_policy,
                 horizon=horizon,
                 execution_mode=execution_mode,
             ): entry
@@ -1622,6 +1908,13 @@ def _build_candidates_with_forecasts(
                     "raw_frame": entry["frame"],
                     "frame": entry["frame"],
                     "quality": {"quality_score": 0.0, "missing_pct": 1.0, "coverage": 0.0, "outlier_frac": 0.0},
+                    "preprocess_health": {
+                        "status": "FAIL",
+                        "reason": "CANDIDATE_PREPARATION_FAILED",
+                        "quality_tag": "BLOCKED",
+                        "production_ok": False,
+                        "research_ok": False,
+                    },
                     "mid_price": None,
                     "forecast_bundle": None,
                     "current_price": None,
@@ -2262,6 +2555,23 @@ def _validate_market_window(validator: DataValidator, data: pd.DataFrame) -> boo
     return False
 
 
+def _coerce_open_position_shares(value: Any) -> int:
+    """Return a non-negative integer share count for anti-pyramiding checks."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    try:
+        text = str(value).strip()
+        if not text:
+            return 0
+        return max(0, int(float(text)))
+    except Exception:
+        return 0
+
+
 def _execute_signal(
     router: SignalRouter,
     trading_engine: PaperTradingEngine,
@@ -2295,6 +2605,20 @@ def _execute_signal(
     primary = bundle.primary_signal
     if not primary:
         logger.info("No actionable signal produced for %s", ticker)
+        return None
+
+    # Anti-pyramiding: one open leg per ticker. Extra BUYs into an existing long create
+    # additional open legs that each need a CLOSE to count toward THIN_LINKAGE, delaying
+    # round-trip accumulation. Demote to HOLD when position already open.
+    _current_position = _coerce_open_position_shares(
+        getattr(getattr(trading_engine, "portfolio", None), "positions", {}).get(ticker, 0)
+    )
+    if _current_position > 0 and str(primary.get("action", "")).upper() == "BUY":
+        logger.info(
+            "[ANTI_PYRAMID] Demoting BUY to HOLD for %s — already hold %s shares. "
+            "One open leg per ticker enforced.",
+            ticker, _current_position,
+        )
         return None
 
     primary_provenance = primary.get("provenance") if isinstance(primary.get("provenance"), dict) else {}
@@ -2691,8 +3015,10 @@ def _emit_dashboard_json(
     win_rate: float = 0.0,
     latencies: Optional[Dict[str, float]] = None,
     quality_summary: Optional[Dict[str, Any]] = None,
+    preprocess_health: Optional[Dict[str, Any]] = None,
     forecaster_health: Optional[Dict[str, Any]] = None,
     quant_validation_health: Optional[Dict[str, Any]] = None,
+    orchestration_health: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the latest auto-trader producer snapshot for the dashboard bridge."""
     def _json_safe(obj: Any) -> Any:
@@ -2708,6 +3034,8 @@ def _emit_dashboard_json(
         "latency": latencies or {},
         "forecaster_health": forecaster_health or {},
         "quant_validation_health": quant_validation_health or {},
+        "orchestration_health": orchestration_health or {},
+        "preprocess_health": preprocess_health or {},
         "routing": {
             "ts_signals": routing_stats.get("time_series_signals", 0),
             "llm_signals": routing_stats.get("llm_fallback_signals", 0),
@@ -2764,6 +3092,19 @@ def _load_ai_companion_config(config_path: Path = AI_COMPANION_CONFIG_PATH) -> D
         return {}
 
     return payload
+
+
+def _load_preprocessing_config() -> Dict[str, Any]:
+    """Load preprocessing configuration for post-fill / post-pad health checks."""
+    cfg_path = ROOT_PATH / "config" / "preprocessing_config.yml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logger.warning("Failed to load preprocessing config: %s", exc)
+        return {}
+    return raw.get("preprocessing", raw) if isinstance(raw, dict) else {}
 
 
 def _activate_ai_companion_guardrails(companion_config: Dict[str, Any]) -> None:
@@ -3237,6 +3578,13 @@ def main(
     for warning in routing_contract_warnings:
         logger.warning("%s (ignored/no-op unless strict mode enabled)", warning)
 
+    preprocessing_cfg = _load_preprocessing_config()
+    post_preprocess_cfg = {}
+    if isinstance(preprocessing_cfg, dict):
+        validation_cfg = preprocessing_cfg.get("validation") or {}
+        if isinstance(validation_cfg, dict):
+            post_preprocess_cfg = validation_cfg.get("post_preprocess") or {}
+
     ts_cfg = dict(routing_cfg.get("time_series") or {})
     strict_ts = str(os.getenv("PMX_PROOF_STRICT_THRESHOLDS") or "0") == "1"
     if proof_mode and strict_ts:
@@ -3301,6 +3649,8 @@ def main(
     else:
         logger.info("GPU parallel path unavailable; using CPU threads.")
 
+    orchestration_health_records: list[Dict[str, Any]] = []
+    preprocess_health_records: list[Dict[str, Any]] = []
     for cycle in range(1, cycles + 1):
         logger.info("=== Trading Cycle %s/%s ===", cycle, cycles)
         try:
@@ -3318,7 +3668,13 @@ def main(
 
         window_dataset_id = raw_window.attrs.get("dataset_id") if hasattr(raw_window, "attrs") else None
         window_generator_version = raw_window.attrs.get("generator_version") if hasattr(raw_window, "attrs") else None
-        active_source = data_source_manager.get_active_source()
+        active_source = (
+            str(
+                (raw_window.attrs.get("source") if hasattr(raw_window, "attrs") else None)
+                or (raw_window.attrs.get("data_source") if hasattr(raw_window, "attrs") else None)
+                or data_source_manager.get_active_source()
+            )
+        )
         synthetic_only = bool(_env_flag("SYNTHETIC_ONLY"))  # consistent with line 3041
         effective_execution_mode = "synthetic" if active_source == "synthetic" or synthetic_only else "live"
         # Historical as-of-date runs replay past market windows; always tag synthetic
@@ -3344,7 +3700,16 @@ def main(
             except Exception:
                 logger.debug("Failed to record run provenance", exc_info=True)
 
-        interval = getattr(getattr(data_source_manager, "active_extractor", None), "interval", None)
+        active_extractor = None
+        get_extractor = getattr(data_source_manager, "get_extractor", None)
+        if callable(get_extractor):
+            try:
+                active_extractor = get_extractor(active_source)
+            except Exception:
+                active_extractor = None
+        if active_extractor is None:
+            active_extractor = getattr(data_source_manager, "active_extractor", None)
+        interval = getattr(active_extractor, "interval", None)
 
         cycle_results = []
         price_map: Dict[str, float] = {}
@@ -3371,7 +3736,7 @@ def main(
                             "reason": "same_bar",
                             "bar_timestamp": current_bar,
                             "last_processed_bar_timestamp": prev_bar,
-                            "data_source": getattr(data_source_manager.active_extractor, "name", None),
+                            "data_source": active_source,
                         }
                         cycle_results.append(skip_report)
                         recent_signals.append(skip_report)
@@ -3396,6 +3761,7 @@ def main(
         candidates = _build_ticker_candidates(
             pre_entries,
             preprocessor=preprocessor,
+            preprocess_policy=post_preprocess_cfg,
             parallel=parallel_ticker_processing,
             max_workers=parallel_workers,
         )
@@ -3408,10 +3774,8 @@ def main(
             ticker_frame = candidate["frame"]
             quality = candidate["quality"]
             mid_price = candidate["mid_price"]
-            try:
-                data_source = getattr(data_source_manager.active_extractor, "name", None)
-            except Exception:
-                data_source = None
+            preprocess_health = candidate.get("preprocess_health") or {}
+            data_source = active_source
 
             try:
                 trading_engine.db_manager.save_quality_snapshot(
@@ -3424,6 +3788,10 @@ def main(
                     outlier_frac=quality.get("outlier_frac", 0.0),
                     quality_score=quality.get("quality_score", 0.0),
                     source=data_source,
+                    note=(
+                        f"preprocess_status={preprocess_health.get('status') if isinstance(preprocess_health, dict) else 'UNKNOWN'} "
+                        f"quality_tag={preprocess_health.get('quality_tag') if isinstance(preprocess_health, dict) else 'UNKNOWN'}"
+                    ),
                 )
             except Exception:
                 logger.debug("Skipping quality snapshot persistence for %s", ticker)
@@ -3435,9 +3803,12 @@ def main(
                     "missing_pct": quality.get("missing_pct", 1.0),
                     "coverage": quality.get("coverage", 0.0),
                     "outlier_frac": quality.get("outlier_frac", 0.0),
+                    "preprocess_health": preprocess_health,
                     "source": data_source,
                 }
             )
+            if preprocess_health:
+                preprocess_health_records.append(preprocess_health)
 
             if quality.get("quality_score", 0.0) < MIN_QUALITY_SCORE:
                 logger.info(
@@ -3531,6 +3902,49 @@ def main(
                 logger.warning("Forecasting failed for %s; skipping.", ticker)
                 continue
 
+            evidence_health = {}
+            if isinstance(forecast_bundle, dict):
+                evidence_health = forecast_bundle.get("evidence_health") or {}
+                if not isinstance(evidence_health, dict):
+                    evidence_health = {}
+                if not evidence_health and isinstance(forecast_bundle.get("health"), dict):
+                    health_block = forecast_bundle.get("health") or {}
+                    evidence_health = health_block.get("evidence_health") if isinstance(health_block.get("evidence_health"), dict) else {}
+            if evidence_health:
+                forecast_bundle["evidence_health"] = evidence_health
+            if preprocess_health:
+                forecast_bundle["preprocess_health"] = preprocess_health
+            if preprocess_health and not bool(preprocess_health.get("production_ok", True)):
+                skip_report = {
+                    "ticker": ticker,
+                    "status": "SKIPPED_PREPROCESS_RESEARCH_ONLY",
+                    "reason": preprocess_health.get("reason") or "PREPROCESS_RESEARCH_ONLY",
+                    "quality": quality,
+                    "preprocess_health": preprocess_health,
+                    "evidence_health": evidence_health,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+                cycle_results.append(skip_report)
+                recent_signals.append(skip_report)
+                _log_execution_event(run_id, cycle, skip_report)
+                continue
+            if evidence_health and not bool(evidence_health.get("production_ok", True)):
+                skip_report = {
+                    "ticker": ticker,
+                    "status": "SKIPPED_EVIDENCE_RESEARCH_ONLY",
+                    "reason": evidence_health.get("reason") or evidence_health.get("fallback_class") or "EVIDENCE_RESEARCH_ONLY",
+                    "quality": quality,
+                    "preprocess_health": preprocess_health,
+                    "evidence_health": evidence_health,
+                    "data_source": data_source,
+                    "mid_price": mid_price,
+                }
+                cycle_results.append(skip_report)
+                recent_signals.append(skip_report)
+                _log_execution_event(run_id, cycle, skip_report)
+                continue
+
             # Persist forecast snapshots so monitoring health uses fresh data.
             try:
                 last_bar_ts = _extract_last_bar_timestamp(ticker_frame)
@@ -3565,6 +3979,16 @@ def main(
             )
 
             if execution_report:
+                orchestration_snapshot = _extract_orchestration_health_snapshot(
+                    forecast_bundle,
+                    ticker=ticker,
+                    run_id=run_id,
+                    cycle=cycle,
+                    data_source=data_source,
+                )
+                if orchestration_snapshot:
+                    execution_report["orchestration_health"] = orchestration_snapshot
+                    orchestration_health_records.append(orchestration_snapshot)
                 _attach_signal_context_to_forecast_audit(
                     forecast_bundle=forecast_bundle,
                     execution_report=execution_report,
@@ -3575,6 +3999,10 @@ def main(
                 execution_report["data_source"] = data_source
                 if execution_report.get("mid_price") is None and mid_price is not None:
                     execution_report["mid_price"] = mid_price
+                if preprocess_health:
+                    execution_report["preprocess_health"] = preprocess_health
+                if evidence_health:
+                    execution_report["evidence_health"] = evidence_health
                 cycle_results.append(execution_report)
                 recent_signals.append(execution_report)
                 if execution_report.get("status") == "EXECUTED":
@@ -3796,14 +4224,54 @@ def main(
             forecaster_health = {}
             quant_health = {}
 
+    orchestration_health = _summarize_orchestration_health(orchestration_health_records)
+    preprocess_health = _summarize_preprocess_health(preprocess_health_records)
+    latest_orchestration = orchestration_health.get("latest") if isinstance(orchestration_health, dict) else {}
+    latest_orchestration = latest_orchestration if isinstance(latest_orchestration, dict) else {}
+    forecaster_health["evidence_health"] = {
+        "status": "OK" if latest_orchestration.get("evidence_production_ok", True) else "WARN",
+        "source_kind": latest_orchestration.get("evidence_source_kind"),
+        "freshness_status": latest_orchestration.get("evidence_freshness_status"),
+        "oos_metrics_available": latest_orchestration.get("evidence_oos_metrics_available"),
+        "rmse_rank_active": latest_orchestration.get("evidence_rmse_rank_active"),
+        "fallback_class": latest_orchestration.get("evidence_fallback_class"),
+        "production_ok": latest_orchestration.get("evidence_production_ok"),
+        "issues": list(orchestration_health.get("issues") or []),
+    }
+
     quality_summary = {}
     if quality_records:
         scores = [q["quality_score"] for q in quality_records if q.get("quality_score") is not None]
         if scores:
+            preprocess_status_counts: Dict[str, int] = {}
+            preprocess_quality_tag_counts: Dict[str, int] = {}
+            preprocess_production_ok = 0
+            preprocess_research_only = 0
+            for record in quality_records:
+                preprocess = record.get("preprocess_health") or {}
+                if not isinstance(preprocess, dict):
+                    continue
+                status = str(preprocess.get("status") or "UNKNOWN").upper()
+                preprocess_status_counts[status] = preprocess_status_counts.get(status, 0) + 1
+                quality_tag = str(preprocess.get("quality_tag") or "UNKNOWN").upper()
+                preprocess_quality_tag_counts[quality_tag] = preprocess_quality_tag_counts.get(quality_tag, 0) + 1
+                if preprocess.get("production_ok") is True:
+                    preprocess_production_ok += 1
+                else:
+                    preprocess_research_only += 1
             quality_summary = {
                 "average": sum(scores) / len(scores),
                 "minimum": min(scores),
                 "records": quality_records,
+                "preprocess": {
+                    "status": preprocess_health.get("status"),
+                    "summary": preprocess_health.get("summary") or {},
+                    "issues": preprocess_health.get("issues") or [],
+                    "status_counts": preprocess_status_counts,
+                    "quality_tag_counts": preprocess_quality_tag_counts,
+                    "production_ok_runs": preprocess_production_ok,
+                    "research_only_runs": preprocess_research_only,
+                },
             }
 
     # Emit dashboard snapshot for visualization
@@ -3909,8 +4377,10 @@ def main(
         win_rate=win_rate,
         latencies=latencies,
         quality_summary=quality_summary,
+        preprocess_health=preprocess_health,
         forecaster_health=forecaster_health,
         quant_validation_health=quant_health,
+        orchestration_health=orchestration_health,
     )
     _emit_dashboard_png(
         path=ROOT_PATH / "visualizations" / "dashboard_snapshot.png",
@@ -3935,6 +4405,7 @@ def main(
         cash_ratio=cash_ratio,
         forecaster_health=forecaster_health,
         quant_health=quant_health,
+        orchestration_health=orchestration_health,
     )
     run_summary_record = {
         "run_id": run_id,
@@ -3971,6 +4442,7 @@ def main(
             "metrics": forecaster_health.get("metrics") if isinstance(forecaster_health, dict) else {},
             "status": forecaster_health.get("status") if isinstance(forecaster_health, dict) else {},
         },
+        "orchestration": orchestration_health,
         "quant_validation": quant_health,
         "next_actions": action_plan,
     }

@@ -95,3 +95,67 @@ def test_preprocessing_pipeline_integration(preprocessor, sample_data_with_missi
         assert not normalized[col].isna().any(), f"{col} should have no NaN after pipeline"
         assert np.abs(normalized[col].mean()) < 1e-10, f"{col} should be normalized"
         assert np.abs(normalized[col].std() - 1.0) < 1e-10, f"{col} should have unit variance"
+
+
+def test_validate_post_preprocess_marks_clean_frame_production_ready(preprocessor, sample_data):
+    health = preprocessor.validate_post_preprocess(
+        sample_data,
+        sample_data.copy(),
+        min_usable_bars=50,
+        max_imputed_fraction=0.30,
+        max_padding_fraction=0.20,
+    )
+
+    assert health["status"] == "PASS"
+    assert health["production_ok"] is True
+    assert health["research_ok"] is True
+    assert health["quality_tag"] == "CLEAN"
+    assert health["imputed_fraction"] == pytest.approx(0.0)
+    assert health["padding_fraction"] == pytest.approx(0.0)
+
+
+def test_validate_post_preprocess_marks_sparse_frames_research_only(preprocessor, sample_data_with_missing):
+    raw = sample_data_with_missing.iloc[:10].copy()
+    filled = preprocessor.handle_missing(raw, method="forward")
+
+    health = preprocessor.validate_post_preprocess(
+        raw,
+        filled,
+        min_usable_bars=5,
+        max_imputed_fraction=0.10,
+        max_padding_fraction=0.0,
+    )
+
+    assert health["status"] == "WARN"
+    assert health["production_ok"] is False
+    assert health["research_ok"] is True
+    assert health["quality_tag"] in {"SPARSE_DATA", "HIGH_IMPUTE"}
+    assert health["imputed_fraction"] > 0.10
+
+
+def test_validate_post_preprocess_fails_on_structural_defects(preprocessor):
+    raw = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0, 102.0],
+            "Volume": [1_000_000, 1_100_000, 1_200_000],
+        },
+        index=pd.date_range("2024-01-01", periods=3, freq="D"),
+    )
+    processed = raw.copy()
+    processed.index = pd.to_datetime([
+        "2024-01-01",
+        "2024-01-01",
+        "2024-01-03",
+    ])
+    processed.loc[processed.index[1], "Close"] = np.inf
+
+    health = preprocessor.validate_post_preprocess(
+        raw,
+        processed,
+        min_usable_bars=3,
+    )
+
+    assert health["status"] == "FAIL"
+    assert health["production_ok"] is False
+    assert health["research_ok"] is False
+    assert "DUPLICATE_ROWS" in health["reason"] or "INFINITE_VALUES" in health["reason"]

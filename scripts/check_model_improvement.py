@@ -94,6 +94,12 @@ LAYER_REQUIRED_KEYS: dict[int, set[str]] = {
         "lift_ci_high",         # Phase 7.25: upper 95% bootstrap CI bound
         "lift_win_fraction",    # Phase 7.25: fraction of windows with positive lift
         "lift_ci_insufficient_data",  # Phase 7.25: True when < 5 valid windows for CI
+        "source_kind",
+        "freshness_status",
+        "oos_metrics_available",
+        "rmse_rank_active",
+        "fallback_class",
+        "evidence_health",
     },
     2: {"overall_passed", "n_gates_passed", "n_gates_failed"},
     3: {"win_rate", "profit_factor", "total_pnl", "n_trades", "interpretation"},
@@ -123,6 +129,59 @@ def _empty_metrics(layer: int, **overrides) -> dict:
     base = {k: None for k in LAYER_REQUIRED_KEYS[layer]}
     base.update(overrides)
     return base
+
+
+def _extract_audit_evidence_health(audit: dict) -> dict:
+    """Best-effort pull of the structured evidence-health bundle from an audit."""
+    if not isinstance(audit, dict):
+        return {}
+
+    artifacts = audit.get("artifacts") if isinstance(audit.get("artifacts"), dict) else {}
+    evidence = {}
+    for key in ("evidence_health", "health"):
+        candidate = artifacts.get(key) if isinstance(artifacts, dict) else None
+        if isinstance(candidate, dict):
+            evidence = dict(candidate)
+            break
+    if not evidence:
+        for key in ("evidence_health", "health", "ensemble_health"):
+            candidate = audit.get(key)
+            if isinstance(candidate, dict):
+                evidence = dict(candidate)
+                break
+
+    source_kind = str(
+        evidence.get("source_kind")
+        or evidence.get("oos_source")
+        or evidence.get("quality")
+        or "unknown"
+    ).strip() or "unknown"
+    freshness_status = str(
+        evidence.get("freshness_status")
+        or evidence.get("freshness")
+        or "unknown"
+    ).strip() or "unknown"
+    fallback_class = str(
+        evidence.get("fallback_class")
+        or evidence.get("reason")
+        or evidence.get("quality")
+        or source_kind
+    ).strip() or source_kind
+    oos_metrics_available = evidence.get("oos_metrics_available")
+    if oos_metrics_available is None:
+        oos_metrics_available = bool(evidence.get("tracked_models") or evidence.get("finite_rmse_models"))
+    rmse_rank_active = evidence.get("rmse_rank_active")
+    if rmse_rank_active is None:
+        rmse_rank_active = bool(evidence.get("finite_rmse_models"))
+    return {
+        "source_kind": source_kind,
+        "freshness_status": freshness_status,
+        "oos_metrics_available": bool(oos_metrics_available),
+        "rmse_rank_active": bool(rmse_rank_active),
+        "fallback_class": fallback_class,
+        "production_ok": bool(evidence.get("production_ok", True)),
+        "issues": list(evidence.get("issues") or []),
+    }
 
 
 def _json_safe(value):  # type: ignore[no-untyped-def]
@@ -299,6 +358,7 @@ def run_layer1_forecast_quality(
 
     n_malformed = 0
     raw_audits: list[dict] = []
+    evidence_records: list[dict] = []
     for f in files:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
@@ -330,7 +390,10 @@ def run_layer1_forecast_quality(
         if w is None:
             n_missing += 1
         else:
+            evidence = _extract_audit_evidence_health(raw)
+            w["_evidence_health"] = evidence
             windows.append(w)
+            evidence_records.append(evidence)
 
     n_used = len(windows)
     # coverage_ratio = usable windows / total files (after dedup); WARN when < 20%.
@@ -374,6 +437,28 @@ def run_layer1_forecast_quality(
                 lift_ci_high=None,
                 lift_win_fraction=0.0,
                 lift_ci_insufficient_data=True,
+                source_kind="unknown",
+                freshness_status="unknown",
+                oos_metrics_available=False,
+                rmse_rank_active=False,
+                fallback_class="unknown",
+                evidence_health={
+                    "source_kind": "unknown",
+                    "freshness_status": "unknown",
+                    "oos_metrics_available": False,
+                    "rmse_rank_active": False,
+                    "fallback_class": "unknown",
+                    "coverage_ratio": coverage_ratio,
+                    "n_used_windows": n_used,
+                    "n_skipped_missing_metrics": n_missing,
+                    "lift_ci_low": None,
+                    "lift_ci_high": None,
+                    "samossa_da_zero_pct": 0.0,
+                    "source_kind_counts": {},
+                    "freshness_status_counts": {},
+                    "fallback_class_counts": {},
+                    "production_ok": False,
+                },
             ),
             summary=(
                 f"SKIP -- 0 usable windows "
@@ -423,6 +508,59 @@ def run_layer1_forecast_quality(
     # Phase 7.25: bootstrap CI for mean lift
     sig = compute_lift_significance(windows_sorted)
 
+    source_kind_counts: dict[str, int] = {}
+    freshness_status_counts: dict[str, int] = {}
+    fallback_class_counts: dict[str, int] = {}
+    oos_metrics_available_count = 0
+    rmse_rank_active_count = 0
+    latest_evidence = evidence_records[-1] if evidence_records else {}
+    for evidence in evidence_records:
+        source_kind = str(evidence.get("source_kind") or "unknown").strip() or "unknown"
+        freshness_status = str(evidence.get("freshness_status") or "unknown").strip() or "unknown"
+        fallback_class = str(evidence.get("fallback_class") or source_kind).strip() or source_kind
+        source_kind_counts[source_kind] = source_kind_counts.get(source_kind, 0) + 1
+        freshness_status_counts[freshness_status] = freshness_status_counts.get(freshness_status, 0) + 1
+        fallback_class_counts[fallback_class] = fallback_class_counts.get(fallback_class, 0) + 1
+        if evidence.get("oos_metrics_available"):
+            oos_metrics_available_count += 1
+        if evidence.get("rmse_rank_active"):
+            rmse_rank_active_count += 1
+
+    latest_source_kind = str(latest_evidence.get("source_kind") or "unknown").strip() or "unknown"
+    latest_freshness_status = str(latest_evidence.get("freshness_status") or "unknown").strip() or "unknown"
+    latest_fallback_class = str(latest_evidence.get("fallback_class") or latest_source_kind).strip() or latest_source_kind
+    latest_oos_metrics_available = bool(latest_evidence.get("oos_metrics_available")) if latest_evidence else bool(n_used)
+    latest_rmse_rank_active = bool(latest_evidence.get("rmse_rank_active")) if latest_evidence else bool(n_used)
+    status = "PASS"
+    reasons: list[str] = []
+
+    evidence_health = {
+        "source_kind": latest_source_kind,
+        "freshness_status": latest_freshness_status,
+        "oos_metrics_available": latest_oos_metrics_available,
+        "rmse_rank_active": latest_rmse_rank_active,
+        "fallback_class": latest_fallback_class,
+        "coverage_ratio": coverage_ratio,
+        "n_used_windows": n_used,
+        "n_skipped_missing_metrics": n_missing,
+        "lift_ci_low": sig["ci_low"],
+        "lift_ci_high": sig["ci_high"],
+        "samossa_da_zero_pct": samossa_da_zero_pct,
+        "source_kind_counts": source_kind_counts,
+        "freshness_status_counts": freshness_status_counts,
+        "fallback_class_counts": fallback_class_counts,
+        "oos_metrics_available_count": oos_metrics_available_count,
+        "rmse_rank_active_count": rmse_rank_active_count,
+        "production_ok": bool(
+            coverage_ratio >= 0.20
+            and n_missing == 0
+            and latest_oos_metrics_available
+            and latest_rmse_rank_active
+            and latest_source_kind not in {"heuristic_fallback", "cv_fold_proxy", "none", "blocked"}
+            and latest_freshness_status not in {"stale", "missing", "proxy", "blocked"}
+        ),
+    }
+
     metrics = {
         **quality,
         "baseline_model": baseline_model,
@@ -435,11 +573,13 @@ def run_layer1_forecast_quality(
         "lift_ci_high": sig["ci_high"],
         "lift_win_fraction": sig["lift_win_fraction"],
         "lift_ci_insufficient_data": sig["insufficient_data"],
+        "source_kind": latest_source_kind,
+        "freshness_status": latest_freshness_status,
+        "oos_metrics_available": latest_oos_metrics_available,
+        "rmse_rank_active": latest_rmse_rank_active,
+        "fallback_class": latest_fallback_class,
+        "evidence_health": evidence_health,
     }
-
-    # Determine status (FAIL > WARN > PASS, checked in order)
-    status = "PASS"
-    reasons: list[str] = []
 
     # THR-01 fix: critically-low coverage_ratio escalates to FAIL (not just WARN) when there
     # are enough windows to be statistically meaningful. coverage_ratio < 5% with n_used >= 50
@@ -492,11 +632,19 @@ def run_layer1_forecast_quality(
             f"(win_fraction={sig['lift_win_fraction']:.1%}) -- ensemble consistently worse than best single"
         )
 
+    if not evidence_health["production_ok"]:
+        if status == "PASS":
+            status = "WARN"
+        reasons.append(
+            f"evidence_health={latest_source_kind}/{latest_freshness_status}"
+        )
+
     reason_str = " | " + "; ".join(reasons) if reasons else ""
     summary = (
         f"{status} | baseline={baseline_model} lift_threshold={lift_threshold_rmse_ratio:.3f} "
         f"lift_global={lift_global:.3f} lift_recent={lift_recent:.3f} "
-        f"samossa_da_zero={samossa_da_zero_pct:.1%} n_used={n_used}{reason_str}"
+        f"samossa_da_zero={samossa_da_zero_pct:.1%} n_used={n_used} "
+        f"source={latest_source_kind} freshness={latest_freshness_status}{reason_str}"
     )
     return LayerResult(layer=1, name="Forecast Quality", status=status, metrics=metrics, summary=summary)
 

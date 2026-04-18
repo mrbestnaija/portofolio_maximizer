@@ -571,6 +571,7 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0, strict: bool = Fals
     whitelist_ids = str(
         os.getenv("INTEGRITY_UNLINKED_CLOSE_WHITELIST_IDS", "66")
     ).strip() or "66"
+    production_gate_timeout_seconds = max(float(timeout_seconds), float(os.getenv("PROJECT_RUNTIME_STATUS_PRODUCTION_GATE_TIMEOUT_SECONDS", "240")))
 
     checks: list[dict[str, Any]] = []
 
@@ -606,7 +607,7 @@ def collect_runtime_status(*, timeout_seconds: float = 90.0, strict: bool = Fals
                 str(PROJECT_ROOT / "scripts" / "production_audit_gate.py"),
                 "--unattended-profile",
             ],
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=production_gate_timeout_seconds,
         )
     )
     checks.append(

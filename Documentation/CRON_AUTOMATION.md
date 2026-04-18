@@ -20,9 +20,10 @@ tasks using a single entrypoint script: `bash/production_cron.sh`.
 
 For Windows hosts, the recommended operational equivalent to cron is:
 
-- Windows Task Scheduler calls `schedule_backfill.bat` (repo root).
-- `schedule_backfill.bat` defaults to `auto_trader_core` and invokes WSL:
-  - `bash/production_cron.sh auto_trader_core`
+- Windows Task Scheduler can call `scripts/run_core_auto_trader_once.ps1` for the minimal core cycle.
+  - That wrapper self-skips outside market hours, then invokes `run_core_auto_trader_once.bat`, which runs `bash/production_cron.sh auto_trader_core`.
+  - The core cron path now sanitizes forecast-audit artifacts first, relocating legacy RMSE-only production rows into `logs/forecast_audits/production_eval/` before the trading heartbeat or target check runs.
+- `schedule_backfill.bat` remains available for the broader WSL-backed scheduler flow when you want backfills or task multiplexing.
 
 Optional daily automation:
 - `bash/run_daily_trader.sh` (WSL) or `run_daily_trader.bat` (Windows Task Scheduler) runs a **daily + intraday** pass with `--resume` to keep positions across sessions.
@@ -61,10 +62,11 @@ Key tasks (first positional argument):
 - `env_sanity` â€“ Environment validation before trading hours.
 - `ts_threshold_sweep` â€“ TS threshold sweep over realised trades; writes JSON to `logs/automation/`.
 - `transaction_costs` â€“ Transaction cost estimation grouped by ticker/asset class to `logs/automation/`.
-- `auto_trader_core` â€“ Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP; stops once â‰¥30 total and â‰¥10 per-ticker closed trades).
+- `sanitize_forecast_audits` â€“ Audit hygiene task that relocates legacy RMSE-only production artifacts to `logs/forecast_audits/production_eval/` and rebuilds manifests.
+- `auto_trader_core` â€“ Core tickers with trade-count gate (defaults: AAPL,MSFT,GC=F,COOP; stops once â‰¥30 total and â‰¥10 per-ticker closed trades). Sanitizes `logs/forecast_audits/production/` before the cycle so RMSE-only artifacts do not contaminate live evidence counts.
 - `ticker_discovery_stub` â€“ Placeholder for future Phase 5.2 ticker discovery.
 - `optimizer_stub` â€“ Placeholder for future Phase 5.3 optimizer pipeline.
-- `weekly_sleeve_maintenance` â€“ Sleeve summary + promotion/demotion plan writer (see `bash/weekly_sleeve_maintenance.sh`).
+- `weekly_sleeve_maintenance` â€“ Sleeve summary + promotion/demotion plan writer, plus the shadow-first NAV rebalance sidecar (see `bash/weekly_sleeve_maintenance.sh`).
 - `synthetic_refresh` â€“ Generate a synthetic dataset (config-driven) for offline regression/smoke testing; respects `CRON_SYNTHETIC_*` env overrides.
 - `training_priority_cycle` – Prioritized forecaster/LLM training-finetune chain driven by `config/training_priority.yml`.
 - `self_improvement_review_forward` – Forward pending self-improvement proposals to human reviewers via OpenClaw targets (WhatsApp/Discord/Telegram).
@@ -390,8 +392,10 @@ To surface a unified â€œwhat should we change next?â€ view for humans a
   - Reads (when present):
     - `logs/automation/ts_threshold_sweep.json`
     - `logs/automation/transaction_costs.json`
-    - `logs/automation/sleeve_summary.json`
-    - `logs/automation/sleeve_promotion_plan.json`
+  - `logs/automation/sleeve_summary.json`
+  - `logs/automation/sleeve_promotion_plan.json`
+  - `logs/automation/nav_rebalance_plan_latest.json`
+    - `logs/automation/nav_rebalance_plan_latest.json`
     - `logs/automation/config_proposals.json`
     - best cached strategy config from `strategy_configs` (via `DatabaseManager`)
   - Writes:
@@ -400,6 +404,7 @@ To surface a unified â€œwhat should we change next?â€ view for humans a
     - TS threshold tuning,
     - friction assumptions,
     - sleeve promotion/demotion,
+    - NAV rebalance recommendations,
     - higher-order strategy optimization output.
 
 Example cron wiring (run after the other automation tasks have completed):

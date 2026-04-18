@@ -63,6 +63,26 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
         "metrics": {"profit_factor": 1.5},
         "status": {"profit_factor_ok": True},
     }
+    orchestration_health = {
+        "status": "WARN",
+        "summary": {
+            "snapshots": 1,
+            "oos_source_counts": {"latest_metrics": 1},
+            "mssa_white_noise_failures": 0,
+            "garch_unstable_runs": 1,
+            "rmse_rank_active_runs": 1,
+            "allow_as_default_runs": 1,
+        },
+        "latest": {
+            "oos_source": "latest_metrics",
+            "oos_quality": "observed_holdout",
+            "mssa_eligible": True,
+            "mssa_white_noise": True,
+            "garch_fallback_mode": "exploding_variance_ratio",
+            "garch_unstable": True,
+        },
+        "issues": ["garch_unstable_reliance"],
+    }
     quant_validation_health = {
         "total": 10,
         "pass_count": 8,
@@ -84,6 +104,7 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
         quality_summary=quality_summary,
         forecaster_health=forecaster_health,
         quant_validation_health=quant_validation_health,
+        orchestration_health=orchestration_health,
     )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -105,6 +126,7 @@ def test_dashboard_payload_pnl_matches_equity(tmp_path: Path) -> None:
     assert payload["routing"]["llm_signals"] == routing_stats["llm_fallback_signals"]
     assert "forecaster_health" in payload and payload["forecaster_health"]
     assert "quant_validation_health" in payload and payload["quant_validation_health"]
+    assert "orchestration_health" in payload and payload["orchestration_health"]
 
 
 def test_run_auto_trader_snapshot_path_is_separate_from_canonical_dashboard() -> None:
@@ -131,3 +153,41 @@ def test_dashboard_payload_serializes_nan_as_null(tmp_path: Path) -> None:
     assert payload["equity"][0]["v"] is None
     assert payload["signals"][0]["entry_price"] is None
     assert payload["trade_events"][0]["price"] is None
+
+
+def test_build_action_plan_includes_orchestration_health_followups() -> None:
+    from scripts.run_auto_trader import _build_action_plan
+
+    actions = _build_action_plan(
+        pnl_dollars=12.0,
+        profit_factor=1.3,
+        win_rate=0.55,
+        realized_trades=4,
+        cash_ratio=0.2,
+        forecaster_health={"status": {}, "metrics": {}},
+        quant_health={},
+        orchestration_health={
+            "status": "WARN",
+            "summary": {
+                "snapshots": 2,
+                "oos_source_counts": {"heuristic_fallback": 1, "latest_metrics": 1},
+                "mssa_white_noise_failures": 1,
+                "garch_unstable_runs": 1,
+                "rmse_rank_active_runs": 1,
+                "allow_as_default_runs": 1,
+            },
+            "latest": {
+                "oos_source": "heuristic_fallback",
+                "oos_quality": "heuristic_fallback",
+                "mssa_eligible": False,
+                "mssa_white_noise": False,
+                "mssa_policy_status": "ready",
+                "garch_fallback_mode": "exploding_variance_ratio",
+                "garch_unstable": True,
+            },
+        },
+    )
+
+    assert any("Refresh trailing OOS evidence" in action for action in actions)
+    assert any("Keep MSSA-RL containment-only" in action for action in actions)
+    assert any("Reduce GARCH reliance" in action for action in actions)

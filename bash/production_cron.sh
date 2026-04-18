@@ -39,6 +39,20 @@ run_with_logging() {
   } >> "${LOG_FILE}" 2>&1
 }
 
+sanitize_forecast_audits() {
+  local forecast_audit_dir="${CRON_FORECAST_AUDIT_DIR:-logs/forecast_audits/production}"
+  local forecast_eval_audit_dir="${CRON_FORECAST_EVAL_AUDIT_DIR:-logs/forecast_audits/production_eval}"
+  local forecast_quarantine_dir="${CRON_FORECAST_QUARANTINE_DIR:-${forecast_audit_dir}/quarantine}"
+  run_with_logging "sanitize_forecast_audits: sanitize_production_forecast_audits.py" \
+    "${PYTHON_BIN}" scripts/sanitize_production_forecast_audits.py \
+      --audit-dir "${forecast_audit_dir}" \
+      --eval-audit-dir "${forecast_eval_audit_dir}" \
+      --quarantine-dir "${forecast_quarantine_dir}" \
+      --manifest-path "${forecast_audit_dir}/forecast_audit_manifest.jsonl" \
+      --eval-manifest-path "${forecast_eval_audit_dir}/forecast_audit_manifest.jsonl" \
+      --apply
+}
+
 case "${TASK}" in
   daily_etl)
     # Once-per-day ETL refresh using the main pipeline.
@@ -71,6 +85,12 @@ case "${TASK}" in
     CORE_DB_PATH="${CRON_CORE_DB_PATH:-data/portfolio_maximizer.db}"
     CORE_TOTAL_TARGET="${CRON_CORE_TOTAL_TARGET:-30}"
     CORE_PER_TARGET="${CRON_CORE_PER_TICKER_TARGET:-10}"
+
+    # Clean legacy RMSE-only production artifacts before the core cycle or
+    # target check so summary/counting never sees contaminated production rows.
+    if ! sanitize_forecast_audits; then
+      echo "[CRON] sanitize_forecast_audits failed; continuing with auto_trader_core." >&2
+    fi
 
     "${PYTHON_BIN}" - <<PY
 import sqlite3, sys, pathlib
@@ -110,6 +130,10 @@ PY
     fi
     run_with_logging "auto_trader_core: run_auto_trader.py (tickers=${CORE_TICKERS})" \
       "${PYTHON_BIN}" scripts/run_auto_trader.py --tickers "${CORE_TICKERS}" "$@"
+    ;;
+
+  sanitize_forecast_audits)
+    sanitize_forecast_audits
     ;;
 
   synthetic_refresh)

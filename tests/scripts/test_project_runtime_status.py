@@ -264,6 +264,50 @@ def test_collect_runtime_status_runs_production_gate_in_unattended_profile(monke
     assert "--unattended-profile" in prod_cmd
 
 
+def test_collect_runtime_status_uses_longer_timeout_for_production_gate(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "repo"
+    data_dir = project_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "portfolio_maximizer.db").write_text("", encoding="utf-8")
+
+    captured: list[tuple[str, float]] = []
+
+    def fake_run_check(name, cmd, timeout_seconds, **kwargs):
+        del cmd, kwargs
+        captured.append((str(name), float(timeout_seconds)))
+        return {
+            "name": str(name),
+            "ok": True,
+            "returncode": 0,
+            "duration_seconds": 0.0,
+            "command": str(name),
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(mod, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(mod, "_run_check", fake_run_check)
+    monkeypatch.setattr(
+        mod,
+        "_openclaw_exec_environment_check",
+        lambda: {
+            "name": "openclaw_exec_env",
+            "ok": True,
+            "returncode": 0,
+            "duration_seconds": 0.0,
+            "command": "validate",
+            "stdout": "ok",
+            "stderr": "",
+            "signals": ["exec_env_valid"],
+        },
+    )
+
+    payload = mod.collect_runtime_status(timeout_seconds=1.0)
+    assert payload["status"] == "ok"
+    by_name = {name: timeout for name, timeout in captured}
+    assert by_name["production_gate"] >= 240.0
+
+
 def test_collect_runtime_status_strict_fails_on_inconclusive_allowed_gate(monkeypatch, tmp_path) -> None:
     project_root = tmp_path / "repo"
     (project_root / "data").mkdir(parents=True, exist_ok=True)

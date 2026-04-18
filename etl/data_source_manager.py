@@ -171,6 +171,19 @@ class DataSourceManager:
             env_override = os.getenv("SYNTHETIC_CONFIG_PATH") or env_override
         return env_override or provider_config.get("config_file")
 
+    @staticmethod
+    def _tag_extracted_frame(data: pd.DataFrame, source_name: str) -> pd.DataFrame:
+        """Annotate extracted data with the actual source that produced it."""
+        if not isinstance(data, pd.DataFrame):
+            return data
+        tagged = data.copy()
+        try:
+            tagged.attrs["source"] = source_name
+            tagged.attrs["data_source"] = source_name
+        except Exception:
+            pass
+        return tagged
+
     def _instantiate_extractor(self, provider_config: Dict[str, Any]) -> Optional[BaseExtractor]:
         """Dynamically instantiate data source extractor.
 
@@ -345,6 +358,7 @@ class DataSourceManager:
                 data = extractor.extract_ohlcv(list(batch), start_date, end_date)
                 if data is None or data.empty:
                     raise RuntimeError(f"{extractor.name} returned empty data")
+                data = self._tag_extracted_frame(data, extractor.name)
                 logger.info("OK Extracted %s rows from %s", len(data), extractor.name)
                 mem_mb = _memory_mb(data)
                 if mem_mb > 0:
@@ -368,7 +382,7 @@ class DataSourceManager:
             if not all_frames:
                 return pd.DataFrame()
             combined = pd.concat(all_frames, ignore_index=False)
-            return combined
+            return self._tag_extracted_frame(combined, extractor.name)
 
         return _extract_batch(tickers)
 
@@ -406,6 +420,7 @@ class DataSourceManager:
                 data = extractor.extract_ohlcv(tickers, start_date, end_date)
 
                 if data is not None and not data.empty:
+                    data = self._tag_extracted_frame(data, source_name)
                     logger.warning(
                         "Failover: fetched from %s this cycle (primary %s unavailable). "
                         "active_extractor NOT switched — execution_mode contamination prevented.",

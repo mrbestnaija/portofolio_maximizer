@@ -21,8 +21,9 @@ This directory contains the repository’s human-friendly operational entrypoint
 ### Automation (cron / scheduler)
 
 - `bash/production_cron.sh` – task multiplexer (see `Documentation/CRON_AUTOMATION.md`)
+- `bash/production_cron.sh sanitize_forecast_audits` – standalone audit hygiene task that relocates legacy RMSE-only production audits into `production_eval`
 - `bash/run_core_auto_trader_once.sh` – WSL-friendly wrapper for `production_cron.sh auto_trader_core`
-  - Windows Task Scheduler wrapper: `run_daily_trader.bat` (repo root) for daily+intraday passes
+  - Windows Task Scheduler wrapper: `scripts/run_core_auto_trader_once.ps1` (repo root) for the core auto-trader cycle
 
 ### Evidence and test gates
 

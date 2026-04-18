@@ -44,6 +44,14 @@ def test_live_dashboard_is_real_time_and_not_demo() -> None:
         "audit-diversity",
         "audit-denominator",
         "audit-issues",
+        "orchestration-status",
+        "orchestration-source",
+        "orchestration-mssa",
+        "orchestration-garch",
+        "orchestration-rank",
+        "orchestration-default",
+        "orchestration-context",
+        "orchestration-issues",
     ):
         assert f'id="{element_id}"' in html
 
@@ -102,3 +110,16 @@ def test_live_dashboard_operator_console_wiring() -> None:
     assert "maintenance.recovery_events" in html
     assert "reconnects=" in html
     assert "fast_action=" in html
+
+
+def test_live_dashboard_orchestration_health_wiring() -> None:
+    html = Path("visualizations/live_dashboard.html").read_text(encoding="utf-8")
+
+    assert "function renderOrchestrationHealth(data)" in html
+    assert "renderOrchestrationHealth(null);" in html
+    assert "renderOrchestrationHealth(data);" in html
+    assert "orchestration_health" in html
+    assert "No orchestration evidence loaded." in html
+    assert "white-noise fail" in html
+    assert "preprocess_health" in html
+    assert "evidence=" in html

@@ -463,6 +463,38 @@
           </div>
         </div>
         <div class="card">
+          <h3>Orchestration Health</h3>
+          <div class="subtitle">Per-run model routing state: OOS evidence, MSSA-RL containment, and GARCH degradation tracking.</div>
+          <div class="diag-grid">
+            <div class="diag">
+              <div class="label">Status</div>
+              <div class="value" id="orchestration-status">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">OOS Source</div>
+              <div class="value" id="orchestration-source">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">MSSA-RL</div>
+              <div class="value" id="orchestration-mssa">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">GARCH</div>
+              <div class="value" id="orchestration-garch">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">OOS Rank</div>
+              <div class="value" id="orchestration-rank">--</div>
+            </div>
+            <div class="diag">
+              <div class="label">Default Path</div>
+              <div class="value" id="orchestration-default">--</div>
+            </div>
+          </div>
+          <div class="subtitle" id="orchestration-context" style="margin-top:8px;">Context: --</div>
+          <div class="subtitle" id="orchestration-issues" style="margin-top:6px;">No orchestration evidence loaded.</div>
+        </div>
+        <div class="card">
           <h3>Robustness</h3>
           <div class="subtitle">Read-only quality pipeline summary (advisory only)</div>
           <div class="diag-grid">
@@ -1767,6 +1799,77 @@
       });
     }
 
+    function renderOrchestrationHealth(data) {
+      const statusEl = document.getElementById('orchestration-status');
+      const sourceEl = document.getElementById('orchestration-source');
+      const mssaEl = document.getElementById('orchestration-mssa');
+      const garchEl = document.getElementById('orchestration-garch');
+      const rankEl = document.getElementById('orchestration-rank');
+      const defaultEl = document.getElementById('orchestration-default');
+      const contextEl = document.getElementById('orchestration-context');
+      const issuesEl = document.getElementById('orchestration-issues');
+      if (!statusEl || !sourceEl || !mssaEl || !garchEl || !rankEl || !defaultEl || !contextEl || !issuesEl) return;
+
+      const orchestration = data?.orchestration_health || data?.forecaster_health?.model_health || {};
+      const summary = orchestration.summary || {};
+      const latest = orchestration.latest || {};
+      const issues = Array.isArray(orchestration.issues) ? orchestration.issues : [];
+      const sourceCounts = summary.oos_source_counts || {};
+      const evidence = data?.forecaster_health?.evidence_health || {};
+      const preprocess = data?.preprocess_health || {};
+      const status = String(orchestration.status || 'MISSING').toUpperCase();
+
+      statusEl.classList.remove('status-ok', 'status-warn', 'status-error', 'status-unknown');
+      if (['ERROR', 'FAIL', 'FATAL'].includes(status)) {
+        statusEl.classList.add('status-error');
+      } else if (['WARN', 'DEGRADED', 'STALE'].includes(status)) {
+        statusEl.classList.add('status-warn');
+      } else if (['PASS', 'OK'].includes(status)) {
+        statusEl.classList.add('status-ok');
+      } else {
+        statusEl.classList.add('status-unknown');
+      }
+      statusEl.textContent = status;
+
+      const sourcePairs = Object.entries(sourceCounts)
+        .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+        .map(([key, value]) => `${key}:${value}`);
+      sourceEl.textContent = sourcePairs.length ? sourcePairs.join(' / ') : '--';
+
+      if (latest.mssa_eligible === false) {
+        const reason = latest.mssa_white_noise === false
+          ? 'white-noise fail'
+          : (latest.mssa_policy_status || 'policy');
+        mssaEl.textContent = `excluded (${reason})`;
+      } else if (latest.mssa_eligible === true) {
+        mssaEl.textContent = `eligible / policy=${latest.mssa_policy_status || '--'}`;
+      } else {
+        mssaEl.textContent = '--';
+      }
+
+      garchEl.textContent = latest.garch_fallback_mode
+        ? `${latest.garch_fallback_mode}${latest.garch_unstable ? ' / degraded' : ''}`
+        : '--';
+      rankEl.textContent = latest.oos_rank_active
+        ? `active / models=${latest.oos_models ?? '--'}`
+        : `inactive / models=${latest.oos_models ?? '--'}`;
+      defaultEl.textContent = latest.ensemble_status
+        ? `${latest.ensemble_status}${latest.allow_as_default === false ? ' / holdout gate' : ''}`
+        : '--';
+
+      contextEl.textContent =
+        `Context: snapshots=${Number(summary.snapshots || 0)} | `
+        + `rmse_rank_active_runs=${Number(summary.rmse_rank_active_runs || 0)} | `
+        + `garch_unstable_runs=${Number(summary.garch_unstable_runs || 0)} | `
+        + `allow_default_runs=${Number(summary.allow_as_default_runs || 0)} | `
+        + `evidence=${String(evidence.status || evidence.source_kind || '--').toUpperCase()} | `
+        + `preprocess=${String(preprocess.status || preprocess.quality_tag || '--').toUpperCase()}`;
+
+      issuesEl.textContent = issues.length
+        ? `Issues: ${issues.slice(0, 4).join(', ')}`
+        : 'No orchestration issues flagged.';
+    }
+
     function renderRobustness(data) {
       const statusEl = document.getElementById('robustness-status');
       const eligEl = document.getElementById('robustness-eligibility');
@@ -1996,6 +2099,14 @@
         setText('payload-storage', 'DB: --');
         setText('diag-pf', '--'); setText('diag-win', '--'); setText('diag-trades', '--');
         setText('diag-sharpe', '--'); setText('diag-dd', '--'); setText('diag-avg', '--'); setText('diag-largest', '--');
+        setText('orchestration-status', '--');
+        setText('orchestration-source', '--');
+        setText('orchestration-mssa', '--');
+        setText('orchestration-garch', '--');
+        setText('orchestration-rank', '--');
+        setText('orchestration-default', '--');
+        setText('orchestration-context', 'Context: --');
+        setText('orchestration-issues', 'No orchestration evidence loaded.');
         setText('kpi-last-close', '--');
         setText('kpi-position', '--');
         setText('kpi-last-pnl', '--');
@@ -2011,6 +2122,7 @@
         renderLiveDenominator(null);
         renderAuditConsole(null);
         renderOperatorConsole(null);
+        renderOrchestrationHealth(null);
         return;
       }
 
@@ -2186,6 +2298,7 @@
       renderLiveDenominator(data);
       renderAuditConsole(data);
       renderOperatorConsole(data);
+      renderOrchestrationHealth(data);
     }
 
     let refreshBusy = false;
