@@ -5,6 +5,8 @@ Date: 2026-04-18
 ## What Was Hardened
 
 - Candidate evaluation is now benchmark-relative and causal.
+- Live candidate sizing knobs now only reduce additive exposure, not exits, so alpha repair does not distort the close-side lifecycle.
+- Benchmark-relative NGN metrics now expose `alpha`, `information_ratio`, `beta`, and `tracking_error` for downstream scoring and audit.
 - Barbell acceptance no longer depends on a single attractive `omega_ratio` or a high `payoff_asymmetry`.
 - The simulator now publishes an explicit `anti_barbell_evidence` bundle from executed trades:
   - `omega_monotonicity_ok` and `omega_cliff_ok` for threshold sensitivity
@@ -42,6 +44,7 @@ Raw upside metrics remain visible for audit, but they are no longer sufficient f
 
 Focused tests:
 
+- `python -m pytest tests/execution/test_paper_trading_engine.py tests/etl/test_portfolio_math_ngn.py -q`
 - `python -m pytest tests/backtesting/test_candidate_simulator.py tests/scripts/test_run_backtest_for_candidate.py tests/scripts/test_run_strategy_optimization.py tests/etl/test_strategy_optimizer.py tests/scripts/test_validate_forecasting_configs.py -q`
 
 Fast regression lane:
@@ -50,8 +53,9 @@ Fast regression lane:
 
 Observed results:
 
+- live sizing + NGN alpha tests: `69 passed`
 - focused alpha/config tests: `27 passed`
-- fast regression lane: `2511 passed, 6 skipped, 45 deselected, 11 xfailed`
+- fast regression lane: `2515 passed, 6 skipped, 45 deselected, 11 xfailed`
 
 ## Review Note
 

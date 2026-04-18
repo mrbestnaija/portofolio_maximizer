@@ -326,6 +326,20 @@ class TestPortfolioMetricsNGN:
         assert isinstance(m, dict)
         assert len(m) > 5  # has both base + NGN keys
 
+    def test_benchmark_returns_expose_alpha_and_information_ratio(self):
+        strategy = pd.Series([0.02, 0.01, -0.005, 0.03, 0.015])
+        benchmark = pd.Series([0.01, 0.0, -0.01, 0.01, 0.005])
+        m = portfolio_metrics_ngn(strategy, benchmark_returns=benchmark)
+        assert "alpha" in m
+        assert "information_ratio" in m
+        assert "beta" in m
+        assert "tracking_error" in m
+        assert math.isfinite(m["alpha"])
+        assert math.isfinite(m["information_ratio"])
+        assert math.isfinite(m["beta"])
+        assert math.isfinite(m["tracking_error"])
+        assert m["alpha"] > 0
+
 
 # ---------------------------------------------------------------------------
 # Anti-omega hardening tests (Gaps 1-3 in portfolio_math.py)
