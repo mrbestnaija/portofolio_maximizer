@@ -276,3 +276,6 @@ htmlcov/
 .coverage
 .coverage.*
 .pytest_cache/
+
+# Obsidian vault (external note-taking app for research)
+obsidian/
