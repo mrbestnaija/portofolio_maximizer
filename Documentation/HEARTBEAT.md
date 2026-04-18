@@ -10,7 +10,7 @@
 - **THIN_LINKAGE**: matched=2 (need 10) — BLOCKING; 4 live open positions pending close; warmup covers until 2026-04-24
 - **ZOMBIE LOTS RETIRED**: 30 zombie open legs marked is_synthetic=1/zombie_retired via `retire_zombie_opens.py`; INT-06 FIFO now routes next 4 closes to April 2026 lots with audit files → expected matched=6 after all close
 - **INT-06 FIXED**: `_build_close_allocations` prioritizes live lots over synthetic — future closes pair with live openers
-- **OOS SCAN FIXED**: `_load_trailing_oos_metrics()` now scans research/ (433 ETL CV files with eval_metrics); was dead in live mode; 30-day staleness guard added
+- **OOS SCAN FIXED**: `_load_trailing_oos_metrics()` now scans research/ (433 ETL CV files with eval_metrics); was dead in live mode; 30-day staleness guard + evidence_health audit artifact added (fe806fb)
 - **OPENCLAW FIXED**: sandbox.mode non-main→off for ops/trading/training agents; 18 cron jobs updated to simpleTrader_env_win venv — all 23 jobs were failing with Docker error
 - **CONFIDENCE CALIBRATED**: edge_score divisor /3.0→/10.0 (full credit at 2% return, not 0.6%); SNR upper anchor 2.0→3.5 (based on observed live range 0-7.13); gate-threshold signals (SNR=1.5) now score 0.33 not 0.67
 - **Open live positions (4)**: AAPL(378), AMZN(381), NVDA(379,382), GOOG(380) — each close = +1 THIN_LINKAGE; all have April 2026 audit files
@@ -21,7 +21,7 @@
 - **Adaptive weights**: Updated 2026-04-16 — GARCH dominant in 1-model/2-model candidates (EWMA high-vol regime); SAMoSSA displaced
 - **PnL**: 40 round-trips, +$620.01, 40% WR, profit factor 1.73, avg hold 1.1 days
 - **Integrity**: ALL PASSED (0 violations)
-- **Last commit**: d9d08bf (confidence calibration + OOS staleness guard + HEARTBEAT fix)
+- **Last commit**: fe806fb (OOS evidence health tracking + staleness guard); prior: d9d08bf (confidence calibration), 37ffd03 (hygiene fix), eb6f1ca (FIX1+2+3 live funnel)
 - **Test count**: 2420 passed, 0 failed, 14 xfailed (fast lane, 2026-04-17)
 - **Phase**: Post-DCR Hardening — awaiting 4 live position closes + 4 more to hit THIN_LINKAGE=10
 
