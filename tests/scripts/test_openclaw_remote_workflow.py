@@ -373,3 +373,38 @@ def test_cron_health_rejects_non_string_session_target_without_hiding_it(tmp_pat
     assert rc == 2
     assert result["jobs"][0]["validation_status"] == "FAIL"
     assert "sessionTarget_not_string" in result["jobs"][0]["validation_issues"]
+
+
+def test_cron_health_surfaces_stale_python_path_count(tmp_path: Path, monkeypatch, capsys) -> None:
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "rewrite-job",
+                        "name": "[P1] Rewrite Stale Python Path",
+                        "agentId": "training",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 3 * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {
+                            "kind": "agentTurn",
+                            "message": ".\\simpleTrader_env\\Scripts\\python.exe scripts\\check_classifier_readiness.py --json",
+                        },
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "pending"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(workflow, "CRON_JOBS_PATH", jobs_path)
+
+    rc = workflow.cmd_cron_health(as_json=True)
+    stdout = capsys.readouterr().out
+    result = json.loads(stdout)
+
+    assert rc == 0
+    assert result["summary"]["stale_python_path_count"] == 1

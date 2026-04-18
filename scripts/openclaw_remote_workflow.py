@@ -722,6 +722,7 @@ def _check_cron_jobs() -> Dict[str, Any]:
             "jobs_invalid": 0,
             "invalid_session_target_count": 0,
             "delivery_fallback_ready_count": 0,
+            "stale_python_path_count": 0,
         }
 
     total = summary.get("jobs_total", len(jobs))
@@ -748,6 +749,7 @@ def _check_cron_jobs() -> Dict[str, Any]:
         "delivery_fallback_ready_count": int(summary.get("delivery_fallback_ready_count", 0) or 0),
         "jobs_invalid": malformed_count,
         "invalid_session_target_count": invalid_session_target_count,
+        "stale_python_path_count": int(summary.get("stale_python_path_count", 0) or 0),
         "job_rows": summary.get("job_rows", []),
         "invalid_jobs": summary.get("invalid_jobs", []),
         "failing_names": [j["name"] for j in failing],

@@ -929,6 +929,70 @@ class TestErrorClassification:
         calls = [" ".join(str(x) for x in (call.args[0] if call.args else [])) for call in mock_run.call_args_list]
         assert not any("gateway restart" in cmd for cmd in calls)
 
+    @patch("utils.openclaw_cli.time.sleep", return_value=None)
+    @patch("utils.openclaw_cli.send_message")
+    @patch("utils.openclaw_cli.subprocess.run")
+    def test_run_agent_turn_routes_missing_listener_reply_via_telegram_fallback(
+        self,
+        mock_run: MagicMock,
+        mock_send_message: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        send_fail = MagicMock(returncode=1, stdout="", stderr="No active WhatsApp Web listener (account: default).")
+        status_not_ready = MagicMock(
+            returncode=0,
+            stdout=(
+                '{"channels":{"whatsapp":{"running":false,"connected":false}},'
+                '"channelAccounts":{"whatsapp":[{"enabled":true,"running":false,"connected":false}]}}'
+            ),
+            stderr="",
+        )
+        restart_ok = MagicMock(returncode=0, stdout="restarted", stderr="")
+        status_ready = MagicMock(
+            returncode=0,
+            stdout=(
+                '{"channels":{"whatsapp":{"running":true,"connected":true}},'
+                '"channelAccounts":{"whatsapp":[{"enabled":true,"running":true,"connected":true}]}}'
+            ),
+            stderr="",
+        )
+        no_deliver_ok = MagicMock(returncode=0, stdout='{"response":"reply text"}', stderr="")
+        mock_run.side_effect = [send_fail, status_not_ready, restart_ok, status_ready, no_deliver_ok]
+        mock_send_message.return_value = OpenClawResult(ok=True, returncode=0, command=["openclaw"], stdout="sent", stderr="")
+
+        with patch.dict(
+            "utils.openclaw_cli._listener_recovery_state",
+            {"last_restart_monotonic": 0.0},
+            clear=True,
+        ):
+            with patch.dict(
+                "utils.openclaw_cli.os.environ",
+                {
+                    "OPENCLAW_AUTO_RECOVER_LISTENER": "1",
+                    "OPENCLAW_LISTENER_FALLBACK_CHANNEL": "telegram",
+                },
+                clear=False,
+            ):
+                result = run_agent_turn(
+                    to="+15551234567",
+                    message="hello",
+                    command="openclaw",
+                    timeout_seconds=5.0,
+                    deliver=True,
+                    channel="whatsapp",
+                    reply_channel="whatsapp",
+                    reply_to="@telegram_handle",
+                    reply_account="default",
+                    max_retries=0,
+                    skip_dedup=True,
+                    skip_rate_limit=True,
+                )
+
+        assert result.ok is True
+        assert mock_send_message.call_count == 1
+        assert mock_send_message.call_args.kwargs["channel"] == "telegram"
+        assert mock_send_message.call_args.kwargs["to"] == "@telegram_handle"
+
     @patch("utils.openclaw_cli._rate_limiter.acquire", return_value=True)
     @patch("utils.openclaw_cli.socket.getaddrinfo", side_effect=OSError("temporary dns failure"))
     @patch("utils.openclaw_cli.subprocess.run")

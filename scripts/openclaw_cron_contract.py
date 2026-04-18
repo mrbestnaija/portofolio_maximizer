@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from utils.repo_python import resolve_repo_python
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 AGENT_TURN_PAYLOAD_KIND = "agentTurn"
 DEFAULT_SESSION_TARGET = "isolated"
+LEGACY_WINDOWS_PYTHON_PATH_RE = re.compile(r"(?i)(?:\.\\)?simpleTrader_env[\\/]+Scripts[\\/]+python\.exe")
 
 
 def _coerce_text(value: Any) -> str:
@@ -23,6 +30,41 @@ def _normalize_session_target(value: Any) -> Optional[str]:
         return None
     text = value.strip()
     return text or None
+
+
+def _rewrite_legacy_python_paths(value: Any, *, replacement: str) -> tuple[Any, bool]:
+    if not replacement:
+        return value, False
+    if isinstance(value, str):
+        new_value, count = LEGACY_WINDOWS_PYTHON_PATH_RE.subn(lambda _match: replacement, value)
+        return new_value, count > 0
+    if isinstance(value, list):
+        changed = False
+        items: list[Any] = []
+        for item in value:
+            new_item, item_changed = _rewrite_legacy_python_paths(item, replacement=replacement)
+            changed = changed or item_changed
+            items.append(new_item)
+        return items, changed
+    if isinstance(value, dict):
+        changed = False
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            new_item, item_changed = _rewrite_legacy_python_paths(item, replacement=replacement)
+            changed = changed or item_changed
+            out[key] = new_item
+        return out, changed
+    return value, False
+
+
+def _contains_legacy_python_path(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(LEGACY_WINDOWS_PYTHON_PATH_RE.search(value))
+    if isinstance(value, list):
+        return any(_contains_legacy_python_path(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_legacy_python_path(item) for item in value.values())
+    return False
 
 
 def load_cron_jobs_payload(path: Path) -> Tuple[Dict[str, Any], Optional[str]]:
@@ -114,6 +156,7 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
             "agent_turn_invalid": 0,
             "invalid_session_target_count": 0,
             "malformed_job_count": 0,
+            "stale_python_path_count": 0,
             "delivery_fallback_ready_count": 0,
             "job_rows": [],
             "invalid_jobs": [],
@@ -132,6 +175,7 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
             "agent_turn_invalid": 0,
             "invalid_session_target_count": 0,
             "malformed_job_count": 0,
+            "stale_python_path_count": 0,
             "delivery_fallback_ready_count": 0,
             "job_rows": [],
             "invalid_jobs": [],
@@ -149,6 +193,7 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
             "agent_turn_invalid": 0,
             "invalid_session_target_count": 0,
             "malformed_job_count": 0,
+            "stale_python_path_count": 0,
             "delivery_fallback_ready_count": 0,
             "job_rows": [],
             "invalid_jobs": [],
@@ -167,6 +212,9 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
             "missing_sessionTarget" in row["issues"]
             or "sessionTarget_not_string" in row["issues"]
         )
+    ]
+    stale_python_path_jobs = [
+        row for row, job in zip(rows, jobs) if isinstance(job, dict) and _contains_legacy_python_path(job)
     ]
     fallback_ready_jobs: List[Dict[str, Any]] = []
     for index, job in enumerate(jobs):
@@ -205,6 +253,7 @@ def summarize_cron_jobs(payload: Any) -> Dict[str, Any]:
         "agent_turn_invalid": len(invalid_session_target),
         "invalid_session_target_count": len(invalid_session_target),
         "malformed_job_count": len(malformed_jobs),
+        "stale_python_path_count": len(stale_python_path_jobs),
         "delivery_fallback_ready_count": len(fallback_ready_jobs),
         "job_rows": rows,
         "invalid_jobs": invalid_jobs,
@@ -216,12 +265,21 @@ def sanitize_cron_jobs_payload(
     payload: Any,
     *,
     default_session_target: str = DEFAULT_SESSION_TARGET,
+    python_executable: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     sanitized = copy.deepcopy(payload) if isinstance(payload, dict) else {}
     jobs = sanitized.get("jobs") if isinstance(sanitized.get("jobs"), list) else []
     sanitized_jobs: List[Dict[str, Any]] = []
     backfilled_jobs: List[Dict[str, Any]] = []
     quarantined_jobs: List[Dict[str, Any]] = []
+    rewritten_jobs: List[Dict[str, Any]] = []
+
+    resolved_python = str(python_executable or "").strip()
+    if not resolved_python:
+        try:
+            resolved_python = resolve_repo_python(PROJECT_ROOT)
+        except Exception:
+            resolved_python = ""
 
     for index, job in enumerate(jobs):
         if not isinstance(job, dict):
@@ -261,15 +319,29 @@ def sanitize_cron_jobs_payload(
                         "reason": "missing_or_invalid_sessionTarget_backfilled",
                     }
                 )
+        if resolved_python:
+            rewritten_job, changed = _rewrite_legacy_python_paths(job, replacement=resolved_python)
+            if changed:
+                job = rewritten_job if isinstance(rewritten_job, dict) else job
+                rewritten_jobs.append(
+                    {
+                        "index": index,
+                        "name": _coerce_text(job.get("name")) or None,
+                        "id": _coerce_text(job.get("id")) or None,
+                        "replacement": resolved_python,
+                    }
+                )
         sanitized_jobs.append(job)
 
     sanitized["jobs"] = sanitized_jobs
     report = {
-        "changed": bool(backfilled_jobs or quarantined_jobs or len(sanitized_jobs) != len(jobs)),
+        "changed": bool(backfilled_jobs or quarantined_jobs or rewritten_jobs or len(sanitized_jobs) != len(jobs)),
         "default_session_target": default_session_target,
         "backfilled_count": len(backfilled_jobs),
         "quarantined_count": len(quarantined_jobs),
         "backfilled_jobs": backfilled_jobs,
         "quarantined_jobs": quarantined_jobs,
+        "rewritten_count": len(rewritten_jobs),
+        "rewritten_jobs": rewritten_jobs,
     }
     return sanitized, report

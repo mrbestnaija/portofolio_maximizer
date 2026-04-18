@@ -1575,9 +1575,9 @@ def _maybe_recover_missing_whatsapp_listener(
         return False, "recovery_cooldown_active"
 
     try:
-        restart_attempts = max(1, int(os.getenv("OPENCLAW_LISTENER_RECOVERY_RESTART_ATTEMPTS", "2")))
+        restart_attempts = max(1, int(os.getenv("OPENCLAW_LISTENER_RECOVERY_RESTART_ATTEMPTS", "1")))
     except Exception:
-        restart_attempts = 2
+        restart_attempts = 1
     try:
         recheck_delay = max(1.0, float(os.getenv("OPENCLAW_LISTENER_RECOVERY_RECHECK_SECONDS", "2.5")))
     except Exception:
@@ -1616,6 +1616,18 @@ def _maybe_recover_missing_whatsapp_listener(
                 return True, f"listener_ready_after_restart_attempt:{attempt}"
         last_reason = f"listener_not_ready_after_restart_attempt:{attempt}"
     return False, last_reason
+
+
+def _resolve_listener_fallback_channel(current_channel: Optional[str] = None) -> Optional[str]:
+    raw = str(os.getenv("OPENCLAW_LISTENER_FALLBACK_CHANNEL", "telegram")).strip().lower()
+    if not raw or raw == "whatsapp":
+        return None
+    current = str(current_channel or "").strip().lower()
+    if raw == current:
+        return None
+    if raw not in {"telegram"}:
+        return None
+    return raw
 
 
 def _extract_agent_reply_text(raw: str) -> str:
@@ -1913,6 +1925,7 @@ def send_message(
             note_lines.append(
                 "[PMX] If this persists, relink with: openclaw channels login --channel whatsapp --account default --verbose"
             )
+        note_lines.append("[PMX] relink_required=true")
         last_result = OpenClawResult(
             ok=False,
             returncode=last_result.returncode,
@@ -2018,6 +2031,8 @@ def run_agent_turn(
     local: bool = False,
     json_output: bool = False,
     max_retries: int = 1,
+    skip_dedup: bool = False,
+    skip_rate_limit: bool = False,
 ) -> OpenClawResult:
     try:
         configured_cli_timeout = float(os.getenv("OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS", "120"))
@@ -2034,6 +2049,8 @@ def run_agent_turn(
         "local": bool(local),
         "json_output": bool(json_output),
         "max_retries": int(max_retries),
+        "skip_dedup": bool(skip_dedup),
+        "skip_rate_limit": bool(skip_rate_limit),
         "guard_enabled": bool(autonomy["guard_enabled"]),
         "approval_required": bool(autonomy["approval_required"]),
         "injection_block_enabled": bool(autonomy["injection_block_enabled"]),
@@ -2188,7 +2205,7 @@ def run_agent_turn(
 
     # Pre-flight: detect and clear stuck gateway sessions (prevents queue blocking)
     stuck_age_threshold = int(os.getenv("OPENCLAW_STUCK_SESSION_MAX_AGE_SECONDS", "300"))
-    if stuck_age_threshold > 0:
+    if stuck_age_threshold > 0 and not skip_dedup and not skip_rate_limit:
         _clear_stuck_gateway_sessions(
             command=command,
             cwd=cwd,
@@ -2245,6 +2262,8 @@ def run_agent_turn(
 
     if deliver and _is_missing_listener_error(last_result):
         fallback_send_result: Optional[OpenClawResult] = None
+        fallback_reply_channel = _resolve_listener_fallback_channel(effective_reply_channel or channel)
+        fallback_reply_to = effective_reply_to or to
         no_deliver_cmd = build_agent_turn_command(
             command=command,
             to=to,
@@ -2265,23 +2284,35 @@ def run_agent_turn(
         if no_deliver_result.ok:
             reply_text = _extract_agent_reply_text(no_deliver_result.stdout)
             if reply_text.strip():
+                reply_channel_for_fallback = fallback_reply_channel or effective_reply_channel or channel
                 send_result = send_message(
-                    to=(effective_reply_to or to),
+                    to=fallback_reply_to,
                     message=reply_text,
                     command=command,
                     cwd=cwd,
                     timeout_seconds=max(20.0, min(60.0, float(timeout_seconds))),
-                    channel=effective_reply_channel or channel,
+                    channel=reply_channel_for_fallback,
                     skip_dedup=True,
+                    skip_rate_limit=skip_rate_limit,
                 )
                 if send_result.ok:
+                    effective_reply_channel = reply_channel_for_fallback
+                    effective_reply_to = fallback_reply_to
                     return _finalize_turn_result(
                         OpenClawResult(
                             ok=True,
                             returncode=0,
                             command=send_result.command,
                             stdout=no_deliver_result.stdout,
-                            stderr=((last_result.stderr or "").strip() + "\n[PMX] Recovered via fallback send.").strip(),
+                            stderr=(
+                                (last_result.stderr or "").strip()
+                                + "\n[PMX] Recovered via fallback send"
+                                + (
+                                    f" via {reply_channel_for_fallback}."
+                                    if reply_channel_for_fallback
+                                    else "."
+                                )
+                            ).strip(),
                         ),
                         event_type="agent_turn_recovered_via_fallback_send",
                     )
@@ -2309,6 +2340,7 @@ def run_agent_turn(
                         (last_result.stderr or "").strip()
                         + "\n[PMX] Missing WhatsApp listener. Try `openclaw gateway restart` and, if needed, "
                         "`openclaw channels login --channel whatsapp --account default --verbose`."
+                        "\n[PMX] relink_required=true"
                     ).strip(),
                 )
 

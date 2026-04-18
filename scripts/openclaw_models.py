@@ -242,11 +242,15 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
     """
     Keep a tool-capable model first for OpenClaw agent turns.
     """
-    models = [str(x).strip() for x in order if str(x).strip()]
+    models = _filter_safe_local_tool_models(order)
     if not models:
         return models
     if (os.getenv("OPENCLAW_RESPECT_ENV_MODEL_ORDER") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return models
+
+    canonical_primary = "qwen3:8b"
+    if canonical_primary in models:
+        return [canonical_primary, *[m for m in models if m != canonical_primary]]
 
     tool_candidates: list[str] = []
     for m in models:
@@ -259,6 +263,25 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
 
     first_tool = tool_candidates[0]
     return [first_tool, *[m for m in models if m != first_tool]]
+
+
+def _is_unsafe_local_tool_model(model_id: str) -> bool:
+    low = (model_id or "").lower().strip()
+    return "qwen3.5" in low
+
+
+def _filter_safe_local_tool_models(order: list[str]) -> list[str]:
+    models: list[str] = []
+    seen: set[str] = set()
+    for raw in order:
+        m = str(raw or "").strip()
+        if not m or _is_unsafe_local_tool_model(m):
+            continue
+        if m in seen:
+            continue
+        seen.add(m)
+        models.append(m)
+    return models
 
 
 def _prune_non_local_allowlist_refs(existing_models: Any) -> tuple[dict[str, Any], list[str]]:
@@ -643,10 +666,12 @@ def _cmd_apply(args) -> int:
         (args.ollama_base_url or "").strip()
         or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
     )
-    ollama_models = _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
-    discovered = _discover_ollama_models(ollama_base_url, timeout_seconds=2.0)
+    ollama_models = _filter_safe_local_tool_models(
+        _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
+    )
+    discovered = _filter_safe_local_tool_models(_discover_ollama_models(ollama_base_url, timeout_seconds=2.0))
     if not ollama_models:
-        ollama_models = discovered or _default_ollama_model_order()
+        ollama_models = discovered or _filter_safe_local_tool_models(_default_ollama_model_order())
 
     if bool(args.enable_ollama_provider):
         ollama_provider = {
@@ -739,7 +764,8 @@ def _cmd_apply(args) -> int:
     preferred_local = _default_ollama_model_order()
     preferred_local = _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODEL_ORDER", "")) or preferred_local
     preferred_local = _promote_tool_primary(preferred_local)
-    local_primary = _pick_primary(preferred_local, discovered or ollama_models)
+    available_local_models = discovered or ollama_models
+    local_primary = _pick_primary(preferred_local, available_local_models)
 
     include_openai = bool(args.enable_openai_provider) and (
         _auth_has_provider_key(store_path=store_path, provider="openai") or bool(openai_key) or dry_run
@@ -759,8 +785,8 @@ def _cmd_apply(args) -> int:
         fallbacks = env_fallbacks
     elif strategy == "remote-first":
         primary = "qwen-portal/coder-model"
-        local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
-            m for m in (discovered or ollama_models) if m not in set(preferred_local)
+        local_ordered = [m for m in preferred_local if m in available_local_models] + [
+            m for m in available_local_models if m not in set(preferred_local)
         ]
         fallbacks = _build_fallbacks(
             local_models_ordered=local_ordered,
@@ -773,6 +799,7 @@ def _cmd_apply(args) -> int:
     else:
         # auto / local-first
         # local-first NEVER uses remote models -- prevents 429 quota errors.
+        canonical_local_primary = "qwen3:8b"
         include_remote_qwen = False
         if strategy == "auto" and not local_only:
             include_remote_qwen = True
@@ -788,19 +815,23 @@ def _cmd_apply(args) -> int:
             else:
                 print(
                     "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 ignoring OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK=1"
-                )
-        have_local_now = bool(discovered)
+        )
+        have_local_now = bool(available_local_models)
+        safe_preferred_local = _filter_safe_local_tool_models(preferred_local)
+        safe_discovered = available_local_models
         if strategy == "auto" and not have_local_now and not local_only:
             primary = "qwen-portal/coder-model"
+        elif local_only or strategy == "local-first":
+            primary = f"ollama/{canonical_local_primary}"
         elif local_primary:
             primary = f"ollama/{local_primary}"
         else:
             # Even if Ollama is unreachable, set local model as primary.
             # OpenClaw will retry when Ollama comes back online.
-            primary = f"ollama/{preferred_local[0]}" if preferred_local else "ollama/qwen3:8b"
+            primary = f"ollama/{canonical_local_primary}"
 
-        local_ordered = [m for m in preferred_local if m in (discovered or ollama_models)] + [
-            m for m in (discovered or ollama_models) if m not in set(preferred_local)
+        local_ordered = [m for m in safe_preferred_local if m in safe_discovered] + [
+            m for m in safe_discovered if m not in set(safe_preferred_local)
         ]
         fallbacks = _build_fallbacks(
             local_models_ordered=[m for m in local_ordered if f"ollama/{m}" != primary],

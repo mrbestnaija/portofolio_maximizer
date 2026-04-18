@@ -40,6 +40,7 @@ def test_sandbox_host_modes_are_consistent_repo_wide() -> None:
 
 def test_maintenance_wrapper_enforces_exec_env_before_maintenance() -> None:
     text = _read_repo_file("scripts/run_openclaw_maintenance.ps1")
+    assert "simpleTrader_env_win\\Scripts\\python.exe" in text
     assert '$enforceCmd = "cd \'$repoWsl\' && python scripts/enforce_openclaw_exec_environment.py"' in text
     assert "& wsl bash -lc $enforceCmd" in text
     assert '$execEnvArgs = @("scripts/enforce_openclaw_exec_environment.py")' in text
@@ -49,6 +50,7 @@ def test_maintenance_wrapper_enforces_exec_env_before_maintenance() -> None:
 
 def test_guardian_enforces_exec_env_before_watch_launch() -> None:
     text = _read_repo_file("scripts/start_openclaw_guardian.ps1")
+    assert "simpleTrader_env_win\\Scripts\\python.exe" in text
     assert '$remoteWorkflowScript = Join-Path $repoRoot "scripts\\openclaw_remote_workflow.py"' in text
     assert '$execEnvScript = Join-Path $repoRoot "scripts\\enforce_openclaw_exec_environment.py"' in text
     assert '$execEnvArgs = @($execEnvScript)' in text

@@ -777,3 +777,23 @@ Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
 - Add an explicit GPU profile instead of relying on host-specific behavior.
 - Update runtime guardrails and docs so the canonical live path is unambiguous.
 - Run a one-cycle smoke test that writes audits, PnL evidence, and calibration history inside the container.
+
+---
+
+## 2026-04-17 Safe Autonomous-Run Bootstrap Note
+
+**Real fixes applied:**
+- Normalized repo Python resolution so OpenClaw launchers and helpers prefer `PMX_PYTHON_BIN`, then `simpleTrader_env_win`, then the legacy `simpleTrader_env` fallback.
+- Hardened the local model bootstrap so `qwen3:8b` remains the canonical tool-calling primary and `qwen3.5` variants are filtered out of safe local fallback chains.
+- Updated the local-LLM setup script to use the Windows venv path explicitly and keep `OPENCLAW_LOCAL_ONLY=1` with a local-first model order.
+- Sanitized cron jobs so stale `simpleTrader_env\\Scripts\\python.exe` payload text is rewritten during migration and reported in cron-health.
+- Added Telegram fallback behavior for WhatsApp listener failures while keeping relink manual and explicit.
+- Made health/orchestration fall back to deterministic evidence when all narration models fail, instead of hard-failing the status path.
+
+**Guardrails preserved:**
+- No trading thresholds, confidence gates, or ranking cutoffs were loosened.
+- The stuck-session cleanup still exists, but it now respects the low-level skip flags so deterministic test and recovery paths remain stable.
+
+**Validation:**
+- `python -m pytest tests/scripts/test_openclaw_models.py tests/utils/test_repo_python.py tests/scripts/test_openclaw_cron_contract.py tests/utils/test_openclaw_cli.py tests/scripts/test_llm_bridge_whatsapp_serialization.py tests/scripts/test_setup_openclaw_local_llm_contract.py tests/scripts/test_observability_stack_contract.py tests/scripts/test_openclaw_implementation_contract.py tests/scripts/test_openclaw_remote_workflow.py -q`
+  - `91 passed, 2 skipped, 1 xfailed`

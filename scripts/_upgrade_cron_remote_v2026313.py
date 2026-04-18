@@ -19,6 +19,10 @@ from scripts.openclaw_cron_contract import (
     load_cron_jobs_payload,
     sanitize_cron_jobs_payload,
 )
+from utils.repo_python import resolve_repo_python
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 JOBS_PATH = Path.home() / ".openclaw" / "cron" / "jobs.json"
 QUARANTINE_DIR = JOBS_PATH.parent / "quarantine"
@@ -39,7 +43,11 @@ def main() -> None:
     if not isinstance(data.get("jobs"), list):
         raise SystemExit(f"cron jobs payload missing jobs list: {JOBS_PATH}")
 
-    sanitized, report = sanitize_cron_jobs_payload(data, default_session_target=DEFAULT_SESSION_TARGET)
+    sanitized, report = sanitize_cron_jobs_payload(
+        data,
+        default_session_target=DEFAULT_SESSION_TARGET,
+        python_executable=resolve_repo_python(PROJECT_ROOT),
+    )
 
     changed = 0
     for job in sanitized["jobs"]:
@@ -91,6 +99,13 @@ def main() -> None:
                 f"sessionTarget={item.get('sessionTarget')}"
             )
 
+    if report.get("rewritten_count", 0) > 0:
+        for item in report["rewritten_jobs"]:
+            print(
+                f"  [+rewrite]   {item.get('name') or item.get('id') or 'job'} "
+                f"python={item.get('replacement')}"
+            )
+
     if report.get("changed") or changed > 0 or report.get("quarantined_count", 0) > 0 or report.get("backfilled_count", 0) > 0:
         _write_json(JOBS_PATH, sanitized)
 
@@ -98,6 +113,7 @@ def main() -> None:
         "\nDone: "
         f"{changed} delivery updates, "
         f"{report.get('backfilled_count', 0)} backfills, "
+        f"{report.get('rewritten_count', 0)} rewrites, "
         f"{report.get('quarantined_count', 0)} quarantined, "
         f"{len(sanitized['jobs'])} active jobs."
     )
