@@ -323,8 +323,10 @@ pipeline:
 
     ensemble:
       enabled: true
-      confidence_scaling: false
-      diversity_tolerance: 0.15  # Phase 7.9: lowered from default to reduce blend dilution
+      confidence_scaling: true
+      track_directional_accuracy: true
+      prefer_diversified_candidate: true
+      diversity_tolerance: 0.05
       candidate_weights:
         - {sarimax: 0.50, garch: 0.30, mssa_rl: 0.20}
         - {sarimax: 0.45, samossa: 0.35, garch: 0.20}
@@ -337,6 +339,8 @@ pipeline:
         - {samossa: 1.0}
         - {sarimax: 1.0}
       minimum_component_weight: 0.05
+      da_floor: 0.1
+      da_weight_cap: 0.1
 
     # Phase 7.5: Regime Detection for Adaptive Model Selection
     regime_detection:

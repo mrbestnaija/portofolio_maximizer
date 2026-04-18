@@ -166,6 +166,18 @@ def test_profit_factor_constraint_can_reject_candidates():
     assert evaluations == []
 
 
+def test_boolean_constraints_fail_closed_for_anti_barbell_gate():
+    optimizer = StrategyOptimizer(
+        search_space={"alpha": {"type": "continuous", "bounds": [0.0, 1.0]}},
+        objectives={"total_return": 1.0},
+        constraints={"min": {"anti_barbell_ok": True}},
+        random_state=9,
+    )
+
+    assert optimizer._apply_constraints({"anti_barbell_ok": True, "total_trades": 1}) is True
+    assert optimizer._apply_constraints({"anti_barbell_ok": False, "total_trades": 1}) is False
+
+
 def test_strategy_config_persistence_roundtrip(tmp_path):
     db_file = tmp_path / "test_strategy.db"
     db = DatabaseManager(db_path=str(db_file))
@@ -224,3 +236,5 @@ def test_equity_curve_and_backtester_sanity(tmp_path):
     assert result.profit_factor >= 0
     assert result.strategy_returns is not None
     assert result.total_return >= 0
+    assert result.benchmark_proxy == "equal_weight_universe"
+    assert isinstance(result.benchmark_metrics_status, str)
