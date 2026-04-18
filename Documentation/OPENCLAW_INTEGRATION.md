@@ -19,6 +19,18 @@ OpenClaw loads workspace skills from `<workspace>/skills`. This repo ships a wor
 
 Once your OpenClaw workspace points at the repo root, the skill becomes available to guide safe commands (tests, audits, offline runs) without bypassing the project's TS-first and risk guardrails.
 
+## Local Model Policy
+
+OpenClaw model selection remains conservative by default:
+
+- `qwen3:8b` stays the default tool-calling primary.
+- `qwen3.5:*` models are only allowed into the safe chain when an explicit benchmark-policy file approves them.
+- Default policy path: `logs/openclaw_model_policy.json`
+- Override path with `OPENCLAW_QWEN35_POLICY_PATH`
+- Temporary fallback-only override: `OPENCLAW_ALLOW_QWEN35_FALLBACK=1`
+
+The helper script `scripts/openclaw_models.py` prints the resolved policy in `status` output and only promotes an approved `qwen3.5` primary when the policy says it is benchmark-approved.
+
 ## OpenClaw Notifications
 
 If you have the OpenClaw CLI installed/configured, Portfolio Maximizer can send notifications via:

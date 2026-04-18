@@ -32,6 +32,26 @@ def test_promote_tool_primary_drops_qwen35_variants_from_safe_chain() -> None:
     assert promoted == ["deepseek-r1:8b"]
 
 
+def test_promote_tool_primary_prefers_approved_qwen35_primary_over_qwen3() -> None:
+    policy = mod.Qwen35Policy(
+        fallback_allowed=True,
+        primary_allowed=True,
+        preferred_primary="qwen3.5:27b",
+        policy_path=Path("logs/openclaw_model_policy.json"),
+        benchmark_status="PASS",
+        benchmark_model="qwen3.5:27b",
+        source="file",
+    )
+
+    promoted = mod._promote_tool_primary(
+        ["qwen3:8b", "qwen3.5:27b", "deepseek-r1:8b"],
+        qwen35_policy=policy,
+    )
+
+    assert promoted[0] == "qwen3.5:27b"
+    assert "qwen3:8b" in promoted[1:]
+
+
 def test_build_fallbacks_preserves_local_order_for_canonical_models() -> None:
     fallbacks = mod._build_fallbacks(
         local_models_ordered=["qwen3:8b", "deepseek-r1:8b", "deepseek-r1:32b"],
@@ -331,3 +351,71 @@ def test_cmd_apply_filters_qwen35_variants_from_local_only_ollama_models(monkeyp
     model_block = next(value for path, value in writes if path == "agents.defaults.model")
     assert model_block["primary"] == "ollama/qwen3:8b"
     assert all("qwen3.5" not in str(fb) for fb in model_block.get("fallbacks", []))
+
+
+def test_cmd_apply_promotes_approved_qwen35_primary_in_local_first(monkeypatch) -> None:
+    writes: list[tuple[str, object]] = []
+    approved_policy = mod.Qwen35Policy(
+        fallback_allowed=True,
+        primary_allowed=True,
+        preferred_primary="qwen3.5:27b",
+        policy_path=Path("logs/openclaw_model_policy.json"),
+        benchmark_status="PASS",
+        benchmark_model="qwen3.5:27b",
+        source="file",
+    )
+
+    monkeypatch.setattr(mod, "_bootstrap_dotenv", lambda: None)
+    monkeypatch.setattr(mod, "_split_command", lambda command: ["openclaw"])
+    monkeypatch.setattr(mod, "_detect_default_agent_id", lambda oc_base: "ops")
+    monkeypatch.setattr(mod, "_auth_store_path_for_agent", lambda agent_id: Path("auth-store.json"))
+    monkeypatch.setattr(mod, "_load_secret", lambda name: None)
+    monkeypatch.setattr(mod, "_sync_auth_store", lambda **kwargs: (False, []))
+    monkeypatch.setattr(mod, "load_qwen35_policy", lambda base_dir: approved_policy)
+    monkeypatch.setattr(mod, "_discover_ollama_models", lambda base_url, timeout_seconds=2.0: ["qwen3.5:27b", "qwen3:8b"])
+
+    def fake_set_json(*, oc_base, path, value, timeout_seconds, dry_run):
+        writes.append((path, value))
+        return mod._CmdResult(ok=True, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "_oc_config_set_json", fake_set_json)
+    monkeypatch.setattr(mod, "_restart_gateway", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(mod, "_sync_explicit_agent_models", lambda agents_list, primary: (agents_list, [], False))
+    monkeypatch.setattr(mod, "_oc_config_get_json", lambda **kwargs: [])
+    monkeypatch.setattr(mod, "_update_openclaw_json_agents_list", lambda **kwargs: mod._CmdResult(ok=True, returncode=0, stdout="", stderr=""))
+
+    args = SimpleNamespace(
+        command="openclaw",
+        agent_id="ops",
+        dry_run=False,
+        sync_auth=False,
+        ollama_base_url="http://127.0.0.1:11434",
+        ollama_models="",
+        enable_ollama_provider=True,
+        openai_models="",
+        enable_openai_provider=False,
+        anthropic_models="",
+        enable_anthropic_provider=False,
+        enable_remote_qwen=False,
+        strategy="local-first",
+        openai_primary_model="gpt-4o-mini",
+        anthropic_primary_model="claude-sonnet-4-6",
+        openai_model="gpt-4o-mini",
+        anthropic_model="claude-sonnet-4-6",
+        remote_qwen_text_model="qwen-portal/coder-model",
+        remote_qwen_image_model="qwen-portal/vision-model",
+        set_image_defaults=False,
+        image_primary="",
+        openai_image_model="gpt-4o",
+        restart_gateway=False,
+    )
+
+    rc = mod._cmd_apply(args)
+
+    assert rc == 0
+    provider = next(value for path, value in writes if path == "models.providers.ollama")
+    model_ids = [m["id"] for m in provider["models"]]
+    assert model_ids[0] == "qwen3.5:27b"
+    assert "qwen3:8b" in model_ids
+    model_block = next(value for path, value in writes if path == "agents.defaults.model")
+    assert model_block["primary"] == "ollama/qwen3.5:27b"

@@ -270,3 +270,101 @@ def test_main_rejects_edge_safe_runtime_conflicts(tmp_path: Path, monkeypatch, c
     assert "ENABLE_PARALLEL_FORECASTS" in stdout
     assert "ENABLE_PARALLEL_TICKER_PROCESSING" in stdout
     assert "ENABLE_GPU_PARALLEL" in stdout
+
+
+def test_main_rejects_qwen35_primary_without_benchmark_policy(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    cron_path = tmp_path / "jobs.json"
+    cron_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {"kind": "agentTurn", "message": "ok"},
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "OPENCLAW_CRON_JOBS", cron_path)
+    cfg = _valid_cfg(repo_root)
+    cfg["agents"]["defaults"]["model"]["primary"] = "ollama/qwen3.5:27b"
+    cfg["agents"]["defaults"]["models"] = ["ollama/qwen3.5:27b", "ollama/qwen3:8b", "ollama/deepseek-r1:8b"]
+    monkeypatch.setattr(mod, "_load_cfg", lambda: cfg)
+    monkeypatch.setattr(
+        mod,
+        "_load_llm_config",
+        lambda: {"llm": {"active_model": "qwen3.5:27b", "models": {"primary": {"name": "qwen3.5:27b"}}}},
+    )
+    monkeypatch.setenv("OPENCLAW_OLLAMA_MODEL_ORDER", "qwen3.5:27b,qwen3:8b")
+    monkeypatch.setenv("OPENCLAW_QWEN35_POLICY_PATH", str(tmp_path / "missing-policy.json"))
+
+    rc = mod.main()
+    stdout = capsys.readouterr().out
+
+    assert rc == 1
+    assert "qwen3.5 model 'qwen3.5:27b' without benchmark-approved primary policy" in stdout
+
+
+def test_main_accepts_qwen35_primary_with_benchmark_policy(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    cron_path = tmp_path / "jobs.json"
+    cron_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "good-job",
+                        "name": "[P1] Healthy Job",
+                        "agentId": "ops",
+                        "enabled": True,
+                        "schedule": {"kind": "cron", "expr": "0 * * * *"},
+                        "sessionTarget": "isolated",
+                        "payload": {"kind": "agentTurn", "message": "ok"},
+                        "delivery": {"channel": "whatsapp", "fallback": {"channel": "telegram", "to": "+2347"}},
+                        "state": {"consecutiveErrors": 0, "lastStatus": "success"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "openclaw_model_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "preferred_primary": "qwen3.5:27b",
+                "primary_allowed": True,
+                "fallback_allowed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "OPENCLAW_CRON_JOBS", cron_path)
+    cfg = _valid_cfg(repo_root)
+    cfg["agents"]["defaults"]["model"]["primary"] = "ollama/qwen3.5:27b"
+    cfg["agents"]["defaults"]["models"] = ["ollama/qwen3.5:27b", "ollama/qwen3:8b", "ollama/deepseek-r1:8b"]
+    monkeypatch.setattr(mod, "_load_cfg", lambda: cfg)
+    monkeypatch.setattr(
+        mod,
+        "_load_llm_config",
+        lambda: {"llm": {"active_model": "qwen3.5:27b", "models": {"primary": {"name": "qwen3.5:27b"}}}},
+    )
+    monkeypatch.setenv("OPENCLAW_OLLAMA_MODEL_ORDER", "qwen3.5:27b,qwen3:8b")
+    monkeypatch.setenv("OPENCLAW_QWEN35_POLICY_PATH", str(policy_path))
+
+    rc = mod.main()
+    stdout = capsys.readouterr().out
+
+    assert rc == 0
+    assert "approved qwen3.5 primary" in stdout

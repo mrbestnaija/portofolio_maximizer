@@ -43,6 +43,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 _AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+from utils.openclaw_model_policy import (  # noqa: E402
+    Qwen35Policy,
+    is_qwen35_variant,
+    load_qwen35_policy,
+)
+
 
 def _bootstrap_dotenv() -> None:
     try:
@@ -284,15 +290,23 @@ def _pick_primary(preferred: list[str], available: list[str]) -> Optional[str]:
     return available[0] if available else None
 
 
-def _promote_tool_primary(order: list[str]) -> list[str]:
+def _promote_tool_primary(
+    order: list[str],
+    *,
+    qwen35_policy: Optional[Qwen35Policy] = None,
+) -> list[str]:
     """
     Keep a tool-capable model first for OpenClaw agent turns.
     """
-    models = _filter_safe_local_tool_models(order)
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
+    models = _filter_safe_local_tool_models(order, qwen35_policy=policy)
     if not models:
         return models
     if (os.getenv("OPENCLAW_RESPECT_ENV_MODEL_ORDER") or "").strip().lower() in {"1", "true", "yes", "on"}:
         return models
+
+    if policy.primary_allowed and policy.preferred_primary:
+        return [policy.preferred_primary, *[m for m in models if m != policy.preferred_primary]]
 
     canonical_primary = "qwen3:8b"
     if canonical_primary in models:
@@ -301,27 +315,42 @@ def _promote_tool_primary(order: list[str]) -> list[str]:
     tool_candidates: list[str] = []
     for m in models:
         low = m.lower()
+        if is_qwen35_variant(m):
+            continue
         if "qwen3" in low or "qwen2.5" in low:
             tool_candidates.append(m)
 
     if not tool_candidates:
+        if policy.fallback_allowed:
+            qwen35_candidates = [m for m in models if is_qwen35_variant(m)]
+            if qwen35_candidates:
+                first_tool = qwen35_candidates[0]
+                return [first_tool, *[m for m in models if m != first_tool]]
         return models
 
     first_tool = tool_candidates[0]
     return [first_tool, *[m for m in models if m != first_tool]]
 
 
-def _is_unsafe_local_tool_model(model_id: str) -> bool:
+def _is_unsafe_local_tool_model(model_id: str, *, qwen35_policy: Optional[Qwen35Policy] = None) -> bool:
     low = (model_id or "").lower().strip()
-    return "qwen3.5" in low
+    if "qwen3.5" not in low:
+        return False
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
+    return not (policy.fallback_allowed or policy.primary_allowed)
 
 
-def _filter_safe_local_tool_models(order: list[str]) -> list[str]:
+def _filter_safe_local_tool_models(
+    order: list[str],
+    *,
+    qwen35_policy: Optional[Qwen35Policy] = None,
+) -> list[str]:
+    policy = qwen35_policy or load_qwen35_policy(base_dir=PROJECT_ROOT)
     models: list[str] = []
     seen: set[str] = set()
     for raw in order:
         m = str(raw or "").strip()
-        if not m or _is_unsafe_local_tool_model(m):
+        if not m or _is_unsafe_local_tool_model(m, qwen35_policy=policy):
             continue
         if m in seen:
             continue
@@ -590,6 +619,7 @@ def _cmd_status(args) -> int:
         print(f"[openclaw_models] invalid agent id: {exc}", file=sys.stderr)
         return 2
 
+    qwen35_policy = load_qwen35_policy(base_dir=PROJECT_ROOT)
     model_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.model", timeout_seconds=10.0) or {}
     img_cfg = _oc_config_get_json(oc_base=oc_base, path="agents.defaults.imageModel", timeout_seconds=10.0) or {}
     providers = _oc_config_get_json(oc_base=oc_base, path="models.providers", timeout_seconds=10.0) or {}
@@ -640,6 +670,12 @@ def _cmd_status(args) -> int:
     print(f"  OpenClaw auth anthropic: {'yes' if has_anth_store else 'no'}")
     print(f"  OpenClaw auth ollama: {'yes' if has_ollama_store else 'no'}")
     print(f"  Ollama reachable: {'yes' if bool(discovered) else 'no'} (models={len(discovered)})")
+    print(f"  qwen3.5 policy path: {qwen35_policy.policy_path}")
+    print(f"  qwen3.5 benchmark status: {qwen35_policy.benchmark_status}")
+    print(f"  qwen3.5 fallback allowed: {'yes' if qwen35_policy.fallback_allowed else 'no'}")
+    print(f"  qwen3.5 primary allowed: {'yes' if qwen35_policy.primary_allowed else 'no'}")
+    if qwen35_policy.preferred_primary:
+        print(f"  qwen3.5 preferred primary: {qwen35_policy.preferred_primary}")
     if bool(args.list_ollama_models) and discovered:
         for name in discovered[:50]:
             print(f"    - {name}")
@@ -701,6 +737,7 @@ def _cmd_apply(args) -> int:
     openai_key = _load_secret("OPENAI_API_KEY")
     anthropic_key = _load_secret("ANTHROPIC_API_KEY") or _load_secret("CLAUDE_API_KEY")
     ollama_key = (os.getenv("OPENCLAW_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "local").strip() or "local"
+    qwen35_policy = load_qwen35_policy(base_dir=PROJECT_ROOT)
 
     if bool(args.sync_auth):
         _, msgs = _sync_auth_store(
@@ -733,9 +770,13 @@ def _cmd_apply(args) -> int:
         or (os.getenv("OPENCLAW_OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").strip()
     )
     ollama_models = _filter_safe_local_tool_models(
-        _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", ""))
+        _parse_csv(args.ollama_models or "") or _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODELS", "")),
+        qwen35_policy=qwen35_policy,
     )
-    discovered = _filter_safe_local_tool_models(_discover_ollama_models(ollama_base_url, timeout_seconds=2.0))
+    discovered = _filter_safe_local_tool_models(
+        _discover_ollama_models(ollama_base_url, timeout_seconds=2.0),
+        qwen35_policy=qwen35_policy,
+    )
     if not ollama_models:
         ollama_models = discovered or _filter_safe_local_tool_models(_default_ollama_model_order())
 
@@ -829,7 +870,7 @@ def _cmd_apply(args) -> int:
 
     preferred_local = _default_ollama_model_order()
     preferred_local = _parse_csv(os.getenv("OPENCLAW_OLLAMA_MODEL_ORDER", "")) or preferred_local
-    preferred_local = _promote_tool_primary(preferred_local)
+    preferred_local = _promote_tool_primary(preferred_local, qwen35_policy=qwen35_policy)
     available_local_models = discovered or ollama_models
     local_primary = _pick_primary(preferred_local, available_local_models)
 
@@ -883,12 +924,12 @@ def _cmd_apply(args) -> int:
                     "[openclaw_models] OPENCLAW_LOCAL_ONLY=1 ignoring OPENCLAW_INCLUDE_REMOTE_QWEN_FALLBACK=1"
         )
         have_local_now = bool(available_local_models)
-        safe_preferred_local = _filter_safe_local_tool_models(preferred_local)
-        safe_discovered = available_local_models
+        safe_preferred_local = _filter_safe_local_tool_models(preferred_local, qwen35_policy=qwen35_policy)
+        safe_discovered = _filter_safe_local_tool_models(available_local_models, qwen35_policy=qwen35_policy)
         if strategy == "auto" and not have_local_now and not local_only:
             primary = "qwen-portal/coder-model"
         elif local_only or strategy == "local-first":
-            primary = f"ollama/{canonical_local_primary}"
+            primary = f"ollama/{local_primary or canonical_local_primary}"
         elif local_primary:
             primary = f"ollama/{local_primary}"
         else:

@@ -784,7 +784,7 @@ Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
 
 **Real fixes applied:**
 - Normalized repo Python resolution so OpenClaw launchers and helpers prefer `PMX_PYTHON_BIN`, then `simpleTrader_env_win`, then the legacy `simpleTrader_env` fallback.
-- Hardened the local model bootstrap so `qwen3:8b` remains the canonical tool-calling primary and `qwen3.5` variants are filtered out of safe local fallback chains.
+- Hardened the local model bootstrap so `qwen3:8b` stays the default tool-calling primary, while `qwen3.5` variants only enter the safe chain when an explicit benchmark-policy file approves them.
 - Updated the local-LLM setup script to use the Windows venv path explicitly and keep `OPENCLAW_LOCAL_ONLY=1` with a local-first model order.
 - Sanitized cron jobs so stale `simpleTrader_env\\Scripts\\python.exe` payload text is rewritten during migration and reported in cron-health.
 - Added Telegram fallback behavior for WhatsApp listener failures while keeping relink manual and explicit.
@@ -797,3 +797,28 @@ Test status (command: `simpleTrader_env/bin/python -m pytest -q`):
 **Validation:**
 - `python -m pytest tests/scripts/test_openclaw_models.py tests/utils/test_repo_python.py tests/scripts/test_openclaw_cron_contract.py tests/utils/test_openclaw_cli.py tests/scripts/test_llm_bridge_whatsapp_serialization.py tests/scripts/test_setup_openclaw_local_llm_contract.py tests/scripts/test_observability_stack_contract.py tests/scripts/test_openclaw_implementation_contract.py tests/scripts/test_openclaw_remote_workflow.py -q`
   - `91 passed, 2 skipped, 1 xfailed`
+
+---
+
+## 2026-04-18 Functional Verification Note
+
+**Verified healthy:**
+- The targeted OpenClaw / live-funnel regressions are green, including the anti-pyramiding coercion fix and the runtime-status timeout fix.
+- `python -m pytest -m "not gpu and not slow" -q`
+  - `2540 passed, 6 skipped, 45 deselected, 11 xfailed`
+- `python -m pytest tests/scripts/test_hygiene_wiring.py tests/scripts/test_run_auto_trader_rejection_taxonomy.py -q`
+  - `33 passed`
+- `python -m pytest tests/scripts/test_project_runtime_status.py -q`
+  - `13 passed`
+- `python scripts/production_audit_gate.py --unattended-profile`
+  - `PASS` with `lift`, `proof`, and `gate` all passing.
+- `python scripts/project_runtime_status.py --pretty`
+  - `status: ok` after increasing the production-gate timeout budget.
+- `openclaw gateway probe --timeout 20000`
+  - `Reachable: yes`
+- `openclaw status --deep --timeout 20000`
+  - `Gateway reachable`, `Telegram OK`, `WhatsApp LINKED`.
+
+**Residual caveat:**
+- The default OpenClaw probe budgets are still too short on this machine. The gateway is healthy, but `openclaw status` without a larger timeout can report a false timeout.
+- The OpenClaw security audit still warns that the current live posture uses `sandbox=off` with web tools enabled for the small local model; that is an existing policy warning, not a repo regression.
