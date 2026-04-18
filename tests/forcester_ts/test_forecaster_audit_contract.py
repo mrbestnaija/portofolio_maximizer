@@ -151,6 +151,21 @@ def test_forecast_returns_written_audit_path(monkeypatch, tmp_path: Path) -> Non
     assert audit_path.name.startswith("forecast_audit_")
 
 
+def test_forecast_audit_includes_structured_evidence_health(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
+    forecaster = _minimal_forecaster()
+
+    result = forecaster.forecast(steps=2)
+
+    audit_path = Path(result["forecast_audit_path"])
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    evidence = payload["artifacts"]["evidence_health"]
+    assert "source_kind" in evidence
+    assert "freshness_status" in evidence
+    assert "rmse_rank_active" in evidence
+    assert "production_ok" in evidence
+
+
 def test_forecast_uses_unique_audit_paths_across_consecutive_writes(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("TS_FORECAST_AUDIT_DIR", str(tmp_path))
     forecaster = _minimal_forecaster()
@@ -519,6 +534,10 @@ def test_build_ensemble_uses_trailing_oos_metrics_for_confidence_and_da(
         "samossa": 0.63,
         "garch": 0.51,
     }
+    health = result.get("metadata", {}).get("health", {})
+    assert health, "Expected ensemble health metadata in _build_ensemble output"
+    assert health.get("oos_evidence", {}).get("rmse_rank_active") is True
+    assert health.get("oos_evidence", {}).get("quality") in {"observed_oos", "proxy"}
 
 
 def test_build_ensemble_prefers_same_instance_latest_metrics_over_disk_metrics(
@@ -592,6 +611,9 @@ def test_build_ensemble_prefers_same_instance_latest_metrics_over_disk_metrics(
         "samossa": 0.61,
         "garch": 0.56,
     }
+    health = result.get("metadata", {}).get("health", {})
+    assert health.get("oos_evidence", {}).get("source_kind") == "latest_metrics"
+    assert health.get("oos_evidence", {}).get("rmse_rank_active") is True
 
 
 def test_load_trailing_oos_metrics_fails_closed_when_ticker_unknown(monkeypatch, tmp_path: Path) -> None:
@@ -843,6 +865,8 @@ def test_load_trailing_oos_metrics_falls_back_to_production_eval_dir(
         "live auto_trader RMSE-rank is permanently dead without this"
     )
     assert "samossa" in result, f"Expected samossa metrics in result; got keys: {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_production_eval"
+    assert forecaster._oos_selection_health.get("quality") == "observed_oos"
 
 
 def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
@@ -874,6 +898,7 @@ def test_load_trailing_oos_metrics_eval_dir_respects_ticker_scope(
     assert result == {}, (
         "production_eval/ fallback must NOT return MSFT metrics when current ticker is AAPL"
     )
+    assert forecaster._oos_selection_health.get("source_kind") in {"no_match", "none", "blocked"}
 
 
 def test_load_trailing_oos_metrics_falls_back_to_research_dir(
@@ -925,6 +950,8 @@ def test_load_trailing_oos_metrics_falls_back_to_research_dir(
         "live RMSE-rank is permanently dead without this scan"
     )
     assert "samossa" in result, f"Expected samossa key from research/ metrics; got {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_research"
+    assert forecaster._oos_selection_health.get("quality") == "observed_oos"
 
 
 def test_oos_staleness_guard_rejects_stale_research_files(monkeypatch, tmp_path: Path) -> None:
@@ -966,6 +993,7 @@ def test_oos_staleness_guard_rejects_stale_research_files(monkeypatch, tmp_path:
         "Stale research/ files (>30 days) must be rejected; "
         f"got {result}"
     )
+    assert forecaster._oos_selection_health.get("quality") == "stale_rejected"
 
 
 def test_oos_staleness_guard_passes_fresh_research_files(monkeypatch, tmp_path: Path) -> None:
@@ -998,3 +1026,5 @@ def test_oos_staleness_guard_passes_fresh_research_files(monkeypatch, tmp_path: 
         "Fresh research/ files (< 30 days) must be accepted by staleness guard"
     )
     assert "samossa" in result, f"Expected samossa key; got {list(result)}"
+    assert forecaster._oos_selection_health.get("source_kind") == "disk_research"
+    assert forecaster._oos_selection_health.get("freshness_status") == "fresh"
