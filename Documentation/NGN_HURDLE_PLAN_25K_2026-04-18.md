@@ -1,228 +1,307 @@
-# NGN Hurdle Plan — $25k Capital Base
+# NGN Hurdle Plan — $25k Capital Base (Rebased 2026-04-18)
 
-Date: 2026-04-18  
-Capital: $25,000 (confirmed from `portfolio_cash_state.initial_capital`)  
-Current state: $567.30 closed PnL / 42 trips / 79 days
-
----
-
-## Critical Review of Prior Analysis
-
-### Error 1: Wrong ROI denominator (fixes everything downstream)
-
-Every prior calculation divided PnL by *sum of notionals* ($65,416) instead of
-*portfolio capital* ($25,000). This overstates the gap by 2.6×.
-
-| Metric | Prior (wrong) | Corrected |
-|--------|---------------|-----------|
-| Cumulative ROI | 0.87% | **2.27%** |
-| Annualised ROI | 3.8% | **10.5%** |
-| Gap multiplier to 28% | 7.4× | **2.67×** |
-| Dollar gap (79-day window) | $3,603 | **$948** |
-
-The system is not 7.4× below the hurdle. It is 2.67× below. That is a different
-problem with a different solution.
-
-### Error 2: "Notional increase" framing misapplied
-
-Current position sizing: avg $1,558 per trade = **6.2% of $25k capital**.  
-Kelly fraction at current edge (WR=38%, PF=1.73): 14.6% of capital.  
-Current sizing = 6.2% / 14.6% = **42% of Kelly** — already between quarter and half-Kelly.
-
-The system is not undersized. The reviewed text's prescription "apply fractional Kelly
-at 3.5–4% of capital" would be a sizing *reduction* from where we already are. The
-correct prescription is: maintain current sizing, fix the quality of what is entered.
-
-### Error 3: `rmsevalues` NameError not verified
-
-The reviewed text cites a live bug: "forecasting failed (`name rmsevalues is not
-defined`)". `_rmse_values` is properly scoped in `ensemble.py:488`. No such NameError
-exists in the current codebase. This claim cannot be acted on without verified log
-evidence. It should not be in the operating plan.
-
-### Error 4: GARCH EWMA CI inflation mischaracterised
-
-The text says CI is inflated "specifically to *force* SNR failures." This is wrong.
-The 1.5× inflation is a convergence guard — statistically correct behaviour when
-GARCH fails to converge. It becomes a persistent blocker because the market is in
-a sustained high-vol regime where EWMA is the universal fallback, not because the
-code was designed to block entries.
-
-The fix is regime-aware SNR calibration, not removing the guard.
-
-### Error 5: Two levers already close the gap — no Kelly change needed
-
-At $25k capital the dollar gap is $948.
-
-| Lever | Conservative estimate | Cumulative |
-|-------|----------------------|------------|
-| Cull AAPL/GS (prevent recurrence of AAPL 7 losses + GS 5 losses) | +$467 | $1,034 |
-| Fix exit geometry (3 more TIME_EXIT → TAKE_PROFIT conversions) | +$717 | $1,751 |
-| **Total** | **+$1,184** | **+$1,751** |
-
-$1,751 on $25k over 79 days = **7.0% cumulative = 32.4% annualised** — above the
-28% hurdle. Without touching position sizing.
+Capital: $25,000 (confirmed `portfolio_cash_state.initial_capital`)
+Baseline: `visualizations/performance/metrics_summary.json` (generated 2026-03-29)
+Current state: 40 trades, 40% WR, PF 1.73, $620.01 closed PnL, 84 days
 
 ---
 
-## What the Reviewed Text Gets Right
+## Corrections to Prior Analyses
 
-- **Kelly as budget not target** — correct. The CI on 42 trades is ±15pp; full Kelly
-  is not safe.
-- **Exit geometry is a shared lever for WR, avg win, and Kelly fraction** — correct
-  and should be P0.
-- **Ticker culling unlocks Kelly headroom on survivors** — correct mechanism.
-- **Capacity/covariance defer until >$50k single-ticker notional** — correct, and
-  at current scale (7–8 shares NVDA) even 6× is invisible to the tape.
-- **Evidence-gated step promotions** — the right governance pattern.
+### C1 — Snapshot was stale (HIGH)
+
+Prior analysis used 42 trades / 38% WR / $567.30. The live metrics file shows
+40 trades / 40% WR / $620.01. All numbers below are rebased to the live file.
+
+### C2 — Wrong ROI denominator (HIGH)
+
+Prior calculations divided PnL by cumulative sum of notionals ($65k), not capital base ($25k).
+
+| Metric | Prior (wrong denom) | Rebased (correct) |
+|--------|--------------------|--------------------|
+| Cumulative ROI | 0.87% | **2.48%** |
+| Annualised ROI | 3.8% | **10.8%** |
+| Gap multiplier | 7.4× | **2.60×** |
+| Dollar gap | $3,603 | **$991** |
+
+### C3 — Kelly proxy overstates deployment by 3.4× (MEDIUM)
+
+"Avg notional / capital" treats each trade as if capital is tied up for the full
+84-day window. The correct measure for a sequential trading system is time-weighted
+capital: sum(notional × hold_days) / total_days.
+
+| Proxy | Value | % of capital |
+|-------|-------|-------------|
+| Avg notional per trade | $1,558 | 6.2% |
+| Time-weighted avg daily deployment | **$457** | **1.8%** |
+
+The system has **98.2% idle cash** on average. Avg notional overstates daily deployment
+by 3.4×. "42% of Kelly" (from prior analysis) was computed against the wrong basis;
+the correct deployment-based Kelly fraction requires a risk-at-stop analysis, not just
+notional / capital.
+
+Kelly fraction on rebased edge (WR=40%, payoff=2.65×): **17.4% = $4,343/trade**
+Avg notional as fraction of true Kelly: $1,558 / $4,343 = **35.9%**
+
+Capital at risk per trade (actual) = avg stop-triggered loss = $34.54 (avg_loss from stops)
+True Kelly ≈ $34.54 / $4,343 = 0.8% of capital at risk vs Kelly budget of $4,343 per trade.
+
+### C4 — `rmsevalues` dismissal was too strong (MEDIUM)
+
+Prior text said "not present in current code." Correct language: `_rmse_values` is
+properly scoped in `ensemble.py:488` and no NameError is reproducible from the current
+codebase. However, a deployment or artifact-version mismatch could produce this at runtime
+without appearing in static analysis. **Required: verify against a verified failing run log
+before treating as resolved or acting on it.**
+
+### C5 — SNR adjustment is a hypothesis, not a settled fix (MEDIUM)
+
+The `adj_snr_gate = snr_gate / ci_inflation_factor` formula assumes CI inflation and
+SNR gate requirements scale linearly. This is an approximation that needs empirical
+validation: run cycles with logging of `garch_convergence_ok`, `ci_inflation_factor`,
+`raw_snr`, and `adj_snr_gate` before deploying. Do not hard-wire the adjustment without
+at least 10 cycles of before/after comparison.
+
+### C6 — Phase estimates were point estimates, not scenario ranges (MEDIUM)
+
+The "+$717 and +$467 are not safely additive" critique is valid. Both levers interact:
+exit geometry changes the WR/payoff distribution which changes Kelly, which changes
+optimal sizing; AAPL/GS cull frees capital which affects what can be redeployed.
+The correct representation is scenario ranges with an interaction discount.
+
+---
+
+## Rebased Gap Analysis
+
+| Metric | Value |
+|--------|-------|
+| Capital | $25,000 |
+| Closed PnL | $620.01 (40 trades, 84 days) |
+| Ann ROI | 10.8% |
+| NGN hurdle | 28% ann |
+| Target PnL (same 84-day window) | $1,611 |
+| **Dollar gap** | **$991** |
+| Time-weighted daily deployment | $457 = 1.8% of capital |
+| Kelly fraction | 17.4% ($4,343/trade) |
+| Avg notional as % Kelly | 35.9% |
+
+---
+
+## Three Levers and Their Scenario Ranges
+
+### Lever A — Exit geometry (Phase 1, code change)
+
+Mechanism: Enforce R:R ≥ 2:1 at quant gate + trailing stop (ratchet to break-even
+at +1× ATR) + extend max_hold to 15 bars for SNR ≥ 2.0. Converts TIME_EXIT events
+into TAKE_PROFIT events. Delta per conversion = $253.03 − $14.20 = **$238.83**.
+
+| Scenario | Conversions | PnL gain | Interaction discount | Net gain |
+|----------|-------------|----------|----------------------|----------|
+| Low | 1 TP | +$239 | none | **+$239** |
+| Base | 3 TP | +$717 | 10% (Kelly fraction shifts) | **+$645** |
+| High | 5 TP | +$1,195 | 15% | **+$1,016** |
+
+Range: **+$239 to +$1,016**. Base case adds +$645 on a $991 gap.
+
+Not safely additive with Lever B: exit geometry improvement increases WR and payoff,
+which raises Kelly fraction, which ideally raises sizing on future trades — creating
+a compounding effect that makes the point estimates conservative over time, not overstated.
+
+### Lever B — AAPL/GS cull (Phase 2, governance)
+
+Mechanism: Demote AAPL (8 trips, 1W/7L, -$376) and GS (5 trips, 0W/5L, -$91) to
+LAB_ONLY. Prevent forward recurrence of historical drag pattern.
+
+| Scenario | Assumption | Gain |
+|----------|-----------|------|
+| Low | 50% of pattern prevented (other losers fill some NAV) | +$234 |
+| Base | Full drag prevented, freed capital idle | +$467 |
+| High | Full drag prevented + freed capital redeployed at NVDA/GOOG/MSFT edge rate | +$611 |
+
+Range: **+$234 to +$611**. The high case requires entry pipeline to work (Lever C).
+
+Interaction with Lever A: if exits are fixed, the surviving losers cost less per stop.
+AAPL loses less per trade when R:R is enforced (stops are the same; the bad entries
+that would never have cleared R:R ≥ 2:1 never enter). So Levers A and B interact
+positively — fixing exits *first* reduces the cost of continuing to trade AAPL during
+the 2-cycle demotion window.
+
+### Lever C — Capital utilization via entry pipeline (Phase 0, code/config)
+
+**This is the lever both prior analyses missed.** Time-weighted capital deployment is
+1.8% per day. All three main levers (A, B, and any sizing adjustment) are multiplied by
+trade frequency. The system currently executes 0.48 trades/day. Entry rate is entirely
+controlled by how many signals clear the SNR/confidence gate.
+
+| Scenario | Trades/day | Proj PnL (40-trade edge) | Ann ROI |
+|----------|------------|--------------------------|---------|
+| Current (blocked) | 0.48 | $620 | 10.8% |
+| Partial unblock | 0.95 | $1,237 | 21.5% |
+| **Target** | **1.40** | **$1,823** | **31.7%** |
+
+**Lever C alone, with no other change, clears the NGN hurdle at 1.4 trades/day.**
+
+This requires unblocking 3 qualified entries per 2-day window. The blocker is the
+GARCH EWMA CI inflation (1.5× CI → SNR halved at 1.5 gate). Mechanism to address:
+
+1. **Verify hypothesis (10 cycles):** log `garch_convergence_ok`, `ci_inflation_factor`,
+   `raw_snr` per signal. Confirm EWMA is the primary cause of gate failures before changing gates.
+2. **Regime-aware SNR adjustment (hypothesis):** when `garch_fallback=EWMA`,
+   apply `effective_snr_gate = snr_gate * inflation_factor` so the original SNR 1.5
+   threshold remains meaningful in the inflated-CI regime. This is NOT lowering the gate —
+   it is compensating for known input distortion.
+3. **Empirical validation required:** run 10+ cycles before/after and measure new entry
+   rate, WR, and PF. Only keep adjustment if WR does not degrade below 38%.
+
+---
+
+## Combined Scenario Matrix
+
+Levers are partially independent (A and C multiply; A and B partially overlap;
+B and C are independent). Combined estimates apply a 70% additivity factor to A+B
+(conservative overlap discount), then multiply by the C scale factor.
+
+| Scenario | A (exit) | B (cull) | A+B (70%) | C (utilization) | Combined PnL | Ann ROI |
+|----------|----------|----------|-----------|-----------------|--------------|---------|
+| Do nothing | — | — | $620 | ×1.0 | $620 | **10.8%** |
+| A only (base) | +$645 | — | $1,265 | ×1.0 | $1,265 | **22.0%** |
+| B only (base) | — | +$467 | $1,087 | ×1.0 | $1,087 | **18.9%** |
+| C only (target) | — | — | $620 | ×2.92 | $1,810 | **31.5%** |
+| A+B (base) | +$645 | +$327 | $1,592 | ×1.0 | $1,592 | **27.7%** |
+| **A+B+C (base×target)** | +$645 | +$327 | $1,592 | ×2.92 | **$4,649** | **>100%** |
+| A+B (low) | +$239 | +$234 | $1,093 | ×1.0 | $1,093 | **19.0%** |
+| C only (partial) | — | — | $620 | ×1.98 | $1,228 | **21.4%** |
+
+**Key reading:** A+B at base case just falls short of 28% (27.7%). Adding even partial
+capital utilization improvement (1.5× scale, partial entry unblock) crosses the hurdle.
+The levers are not binary — partial progress on each compounds.
 
 ---
 
 ## Phased Concrete Plan
 
-The plan is ordered by what is currently the hard wall, not by conceptual priority.
+### Phase 0 — Diagnose the entry pipeline (Days 1–7)
 
-### Phase 0 — Unblock the entry pipeline (Days 1–7)
+**Hard wall**: new BUYs fully blocked. Without entries, every other lever is academic.
 
-**Problem**: New BUYs are fully blocked. Confidence 0.23–0.38 vs gate 0.55, SNR 0.11–0.84
-vs gate 1.5. The GARCH EWMA universal fallback (high-vol regime) inflates CI 1.5×,
-which halves realised SNR before it reaches the gate.
+| Action | File | What to do |
+|--------|------|-----------|
+| 0a | `scripts/run_auto_trader.py` | Run one cycle with LOG_LEVEL=DEBUG; capture `garch_convergence_ok`, `ci_inflation_factor`, raw SNR, adjusted SNR, routing reason per signal |
+| 0b | `forcester_ts/garch.py` | Confirm EWMA fallback rate: log what fraction of tickers hit EWMA in this market regime |
+| 0c | ensemble.py + logs | If `_rmse_values` NameError appears in logs, file as confirmed bug with stack trace; do not act on unverified claim |
 
-**Actions**:
+**Evidence gate**: before any gate changes, have ≥ 10 cycles logged with SNR breakdown.
+Only proceed to Phase 0 regime-aware adjustment if EWMA CI inflation explains ≥ 70% of blocked signals.
 
-| # | Action | File | Specifics |
-|---|--------|------|-----------|
-| 0a | Verify `_rmse_values` error claim against actual logs | `logs/` | Run one live cycle with `LOG_LEVEL=DEBUG`; confirm or dismiss |
-| 0b | Add regime-aware SNR floor | `models/time_series_signal_generator.py` | When `garch_fallback=EWMA`, reduce SNR gate effective threshold: `adj_snr_gate = snr_gate / ci_inflation_factor` where `ci_inflation_factor` is read from audit artifact |
-| 0c | Surface CI inflation factor in routing diagnostic | `scripts/run_auto_trader.py` | Log `garch_convergence_ok`, `ci_inflation_factor`, `effective_snr_gate` per cycle |
+| Sub-action | Specifics |
+|-----------|-----------|
+| 0d — Regime-aware SNR (HYPOTHESIS ONLY until validated) | `models/time_series_signal_generator.py`: when `garch_fallback_type = "EWMA"`, compute `effective_snr_gate = min_snr * ci_inflation_factor`; log both; do not deploy until 10+ cycle comparison confirms WR does not drop |
 
-**Evidence gate to proceed**: ≥ 2 new qualified entries generated across 10 consecutive cycles.
-
-**Do NOT**: lower confidence gate (0.55) or SNR gate (1.5) unconditionally. Adjust
-only relative to the known inflation factor.
+**Promotion gate to Phase 1**: ≥ 2 qualified entries in next 10 cycles.
 
 ---
 
-### Phase 1 — Fix exit geometry (Days 5–21)
+### Phase 1 — Fix exit geometry (Days 5–21, P0 code change)
 
-**Problem**: TAKE_PROFIT hit rate is 9.5% (4/42 trades) despite delivering 78% of
-gross profit at +$253 avg. TIME_EXIT delivers +$14 avg. AAPL had 0.03% target vs
-4.87% stop — a 0.006:1 R:R that should never clear the quant gate.
+The single highest-leverage code change. Converts TIME_EXIT to TAKE_PROFIT.
+Addresses 78% of gross profit concentration in only 10% of trades.
 
-**Actions**:
+| Action | File | Specifics |
+|--------|------|-----------|
+| 1a — R:R gate | `models/time_series_signal_generator.py:_calculate_targets()` | Block signal if `target_pct / stop_pct < 2.0`; emit `INSUFFICIENT_RR` reason; log R:R on every signal |
+| 1b — Trailing stop | `execution/paper_trading_engine.py` | After position unrealised PnL ≥ +1× ATR: ratchet stop to break-even. After ≥ +2× ATR: ratchet to +0.5× ATR. Track `trailing_stop_active` in portfolio state |
+| 1c — Max hold extension | `config/signal_routing_config.yml` | `max_holding_days: 15` when entry SNR ≥ 2.0; default 10 bars unchanged |
+| 1d — Exit geometry audit | `scripts/run_auto_trader.py` | Add `rr_ratio` to routing diagnostic on every signal accepted/rejected |
 
-| # | Action | File | Specifics |
-|---|--------|------|-----------|
-| 1a | Enforce R:R ≥ 2:1 at quant gate | `models/time_series_signal_generator.py` | In `_calculate_targets()`: reject signal if `(target_pct / stop_pct) < 2.0`; emit `INSUFFICIENT_RR` reason code |
-| 1b | Add trailing stop | `execution/paper_trading_engine.py` | Once position unrealised PnL ≥ +1× ATR: ratchet stop to break-even. Once ≥ +2× ATR: ratchet stop to +0.5× ATR (locks partial gain) |
-| 1c | Extend max_hold for high-conviction | `config/signal_routing_config.yml` | `max_holding_days: 15` when entry SNR ≥ 2.0; default stays 10 bars |
-| 1d | Add `rr_ratio` to routing diagnostic | `scripts/run_auto_trader.py` | Log R:R ratio on every signal accepted/rejected for audit |
+**Expected PnL range**: +$239 (1 TP conversion) to +$1,016 (5 conversions).
+**Base case (+$645) requires 3 conversions in next 40-trade window.**
 
-**Expected outcome**: TAKE_PROFIT rate improves from 9.5% → 20%+. Conservative
-estimate: 3 additional TIME_EXIT → TAKE_PROFIT conversions per 42-trade window.
-
-**Evidence gate to proceed**: R:R gate confirmed on ≥ 5 signals in logs; trailing
-stop ratchet fires at least once in live cycle.
+**Promotion gate to Phase 2**: R:R gate confirmed active in logs on ≥ 5 signals;
+trailing stop ratcheted at least once; WR does not drop below 35% over next 15 trades.
 
 ---
 
-### Phase 2 — Concentrate capital on positive-EV tickers (Days 14–35)
+### Phase 2 — Cull weak tickers (Days 14–35, governance)
 
-**Problem**: AAPL destroys 66% of gross profit (1W/7L, -$376). GS is 0W/5L (-$91).
-Together they absorb $17,630 in notional that would generate higher returns in NVDA/GOOG/MSFT.
+AAPL (8 trips, 12.5% WR, -$376) and GS (5 trips, 0% WR, -$91) fail the evidence
+threshold. Demotion is evidence-based and rolling via `build_nav_rebalance_plan.py`.
 
-**Actions**:
+| Action | File | Specifics |
+|--------|------|-----------|
+| 2a — Run 2 green weekly cycles | `bash/weekly_sleeve_maintenance.sh` | Confirm AAPL/GS classified WEAK in both cycles |
+| 2b — Enable live apply | `scripts/apply_nav_reallocation.py` | Set `live_apply_allowed=True` after 2 consecutive green cycles; AAPL/GS → LAB_ONLY |
+| 2c — Concentrate on NVDA/GOOG/MSFT | barbell config | These annualise 4.7–18.5% individually at current sizing |
+| 2d — Maintain current position sizing | none | Do NOT reduce to "quarter-Kelly" — avg notional $1,558 = 35.9% of Kelly, already in reasonable band |
 
-| # | Action | File | Specifics |
-|---|--------|------|-----------|
-| 2a | Demote AAPL and GS to LAB_ONLY | `logs/automation/nav_rebalance_plan_latest.json` | Run `build_nav_rebalance_plan.py`; verify AAPL/GS classified WEAK; after 2 consecutive green weekly cycles, enable `live_apply_allowed=True` in `apply_nav_reallocation.py` |
-| 2b | Concentrate on NVDA/GOOG/MSFT | barbell config | These already annualise at 4.7–18.5% individually at current sizing |
-| 2c | Maintain current position sizing | no change | 6.2% of capital per trade = 42% of Kelly; do NOT reduce to 3.5–4% |
+**Expected PnL range**: +$234 (partial) to +$611 (full drag prevention + redeployment).
 
-**Evidence gate for AAPL/GS demotion** (already statistically sound):
-- AAPL: P(WR ≤ 12.5% | true WR = 45%) ≈ 2.6% — demotion justified
-- GS: 0/5 wins — demotion justified
-
-**Do NOT**: demote based on this snapshot permanently. The rolling window check in
-`build_nav_rebalance_plan.py` governs re-admission automatically when rolling PF/WR
-recovers.
+**Note on re-admission**: demotion is rolling. If AAPL/GS rolling WR/PF recover to
+portfolio level over a future 20-trade window, `build_nav_rebalance_plan.py` will
+reclassify them automatically.
 
 ---
 
-### Phase 3 — Accumulate evidence (Days 35–90)
+### Phase 3 — Accumulate evidence (Days 35–90, passive)
 
-**Problem**: System is in warmup-covered state. Platt calibration inactive (0 pairs, needs 43).
-Directional classifier at DA=0.562 (not gate-lifting). THIN_LINKAGE at 2/10 (needs 8 more closes).
-
-**Actions** (passive — no code changes):
+No code changes. Let the system accumulate the evidence needed for next-phase gates.
 
 | Metric | Current | Target | Mechanism |
 |--------|---------|--------|-----------|
-| THIN_LINKAGE matched | 2 | ≥ 10 | Close 4 open positions + 6 new round-trips |
+| THIN_LINKAGE matched | 2 | ≥ 10 | Close 4 open positions + 6 new live round-trips |
 | Platt pairs | 0 | ≥ 43 | Every live close adds a pair |
-| Classifier labels (AAPL) | ~290 | ≥ 400 | Run `run_etl_pipeline.py --tickers AAPL,MSFT,NVDA,GOOG` backfill |
-| OOS coverage (AAPL) | thin | ≥ 5 fresh audit files | Run 5 `--as-of-date` ETL passes for AAPL |
+| Classifier labels/ticker | ~290 | ≥ 400 | `run_etl_pipeline.py --tickers AAPL,MSFT,NVDA,GOOG` backfill |
+| OOS audit files (AAPL) | thin | ≥ 5 fresh | 5 `--as-of-date` ETL runs for AAPL |
 
-**Monitoring gate to proceed to Phase 4**: over the next 20 new trades (post Phase 1/2):
-- WR ≥ 42% AND PF ≥ 1.8 AND max drawdown < 15% of capital
-
----
-
-### Phase 4 — Expand universe and sizing ratchet (Day 90+)
-
-Only enter this phase if Phase 3 evidence gates pass.
-
-**Actions**:
-
-| # | Action | Specifics |
-|---|--------|-----------|
-| 4a | Expand ticker universe to 6–8 names | Post THIN_LINKAGE ≥ 10; candidates: NVDA, GOOG, MSFT, JPM, TSLA (accumulate evidence first) |
-| 4b | Ratchet position sizing to half-Kelly | 8% of capital per trade (~$2,000) on core tickers with ≥ 20-trade rolling evidence |
-| 4c | Covariance heuristic | Max 30% combined capital in correlated mega-cap tech (NVDA + GOOG + MSFT at any time); no factor model needed yet |
-| 4d | Platt calibration activates | Confidence routing becomes calibrated; sizing scales with effective_confidence |
-
-**Hard cap**: never exceed half-Kelly (8% of capital) until 3+ months of post-Phase-2 evidence at WR ≥ 45%, PF ≥ 1.8.
+**Promotion gate to Phase 4**: WR ≥ 42% AND PF ≥ 1.8 over 20+ new trades
+(post Phase 1/2). Max drawdown < 15% of capital.
 
 ---
 
-## The Math at Each Phase Exit
+### Phase 4 — Scale if evidence supports (Day 90+)
 
-| Phase exit | Estimated cumulative PnL / 79 days | Ann ROI |
-|------------|-------------------------------------|---------|
-| Baseline now | $567 | 10.5% |
-| After Phase 0 (entries unblocked) | $567 + new trades | 10.5%+ |
-| After Phase 1 (exit fix, 3 more TAKE_PROFITs) | $567 + $717 = $1,284 | 23.7% |
-| After Phase 2 (AAPL/GS culled, drag removed) | $1,284 + $467 = $1,751 | **32.4%** |
-| After Phase 4 (half-Kelly, 8 tickers) | $2,000–$2,500 | 37–46% |
+Only enter if Phase 3 promotion gate passes.
 
-**NGN hurdle is cleared at Phase 2 exit without any position sizing change.**
+| Action | Specifics |
+|--------|-----------|
+| Expand ticker universe to 6–8 names | Post THIN_LINKAGE ≥ 10; adds frequency, not just concentration |
+| Increase trades/day target to 1.4 | More tickers + unblocked entries = Lever C activation |
+| Ratchet sizing toward half-Kelly | 8% of capital per trade (~$2,000) on core tickers with ≥ 20-trade rolling evidence |
+| Covariance heuristic | Max 30% capital in correlated mega-cap tech (NVDA+GOOG+MSFT) at once; no factor model needed yet |
+| Platt calibration activates | At 43 pairs: confidence routing becomes calibrated; optional: size linearly with `effective_confidence` |
+
+**Hard cap**: never exceed half-Kelly (8% of capital) until 3+ months of post-Phase-2
+evidence at WR ≥ 45%, PF ≥ 1.8. Full Kelly requires a narrow WR CI — not achievable
+on this trade count.
 
 ---
 
-## What Not To Do
+## Projected Outcomes by Phase
+
+| Phase exit | Scenario | Incremental PnL | Cumulative | Ann ROI |
+|------------|----------|-----------------|------------|---------|
+| Baseline | — | — | $620 | 10.8% |
+| Phase 0 (entries unblocked, 0.95/day) | partial util | +$617 | $1,237 | 21.5% |
+| Phase 1 (exit fix, base) | +$645 net | +$645 | $1,882 | 32.7% ✓ |
+| Phase 2 (cull AAPL/GS, base) | +$327 net | +$327 | $2,209 | 38.4% |
+| Phase 4 (1.4/day freq) | ×1.5 from phase-2 base | ×1.5 | $3,314 | 57.7% |
+
+**NGN hurdle (28%) is first crossed at Phase 1 exit in the base scenario.**
+
+The Phase 0 partial unblock alone does not reliably clear the hurdle (21.5% ann).
+Phase 1 (exit geometry) is the decisive code change. Phase 0 is a prerequisite to
+generate the trades that Phase 1 improvements can act on.
+
+---
+
+## Anti-Patterns
 
 | Anti-pattern | Why |
 |---|---|
-| Reduce position sizing to "apply quarter-Kelly" | Already at 42% of Kelly; reduction lowers returns |
-| Remove GARCH EWMA CI inflation guard unconditionally | Statistically correct; fix via regime-aware SNR adjustment only |
-| Target 79% win rate to hit hurdle via WR alone | Requires WR of ~79% at current sizing — not achievable |
-| Add covariance model before $50k+ single-ticker notional | Premature engineering; concentration caps are sufficient |
-| Force Platt calibration before 43 pairs | Degrades calibration; let it activate naturally |
-| Lower SNR gate below 1.5 unconditionally | Fix the CI inflation input, not the gate |
-
----
-
-## Summary: Why Two Levers Are Sufficient
-
-At $25k capital the gap is $948 — not $3,603. That changes the plan entirely.
-
-The prior analysis prescribed Kelly sizing ratchets, covariance modeling, and universe
-expansion because it was solving for a 7.4× improvement against a wrong denominator.
-The real problem is a 2.67× improvement against a $25k capital base. That is solved by:
-
-1. **Phase 1** — Fix exits so winners reach TAKE_PROFIT. Estimated +$717 (conservative).
-2. **Phase 2** — Demote AAPL/GS so capital stops being destroyed. Estimated +$467.
-
-Those two changes, both code or governance (not capital deployment), close $1,184 of
-the $948 gap. Everything else (Kelly ratchets, covariance, universe expansion) is Phase 4
-and later — important for sustaining and scaling, but not necessary to first cross the hurdle.
+| Lower SNR gate below 1.5 without regime compensation | Fix the inflation input, not the gate |
+| Apply `adj_snr_gate` without 10+ cycle validation | It's a hypothesis; test before deploying |
+| Reduce position sizing to "apply quarter-Kelly" | Already at 35.9% of Kelly — reduction lowers returns |
+| Treat $1,584 AAPL/GS PnL gap as closed once demoted | Rolling monitoring required; re-admit when evidence recovers |
+| Act on `rmsevalues` bug without verified failing log | May be a prior version issue; confirm with a live log first |
+| Build full covariance model before $50k+/trade | Concentration caps (30% mega-cap tech) are sufficient |
+| Size up before Phase 1 exits show WR ≥ 38% maintained | Exit fix might temporarily reduce TP count during rollout |
+| Treat "+$645 + +$327 = +$972 closes the $991 gap" as proven | These are base-case estimates with 70% additivity discount; the true gap closes in scenarios, not arithmetic |
