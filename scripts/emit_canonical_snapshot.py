@@ -112,6 +112,77 @@ def _query_open_risk(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+_PRODUCTION_AUDIT_DIR = ROOT / "logs" / "forecast_audits" / "production"
+_THIN_LINKAGE_THRESHOLD = 10
+_WARMUP_DEADLINE = "2026-04-24"
+
+
+def _load_audit_tsids(audit_dir: Path) -> set:
+    """Return the set of ts_signal_ids found in production audit files."""
+    tsids: set = set()
+    if not audit_dir.exists():
+        return tsids
+    for f in audit_dir.glob("forecast_audit_*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            sc = d.get("signal_context") or {}
+            tsid = str(sc.get("ts_signal_id") or "").strip()
+            if tsid:
+                tsids.add(tsid)
+        except Exception:
+            pass
+    return tsids
+
+
+def _query_thin_linkage(
+    conn: sqlite3.Connection,
+    gate_summary: Optional[Dict[str, Any]],
+    audit_dir: Path = _PRODUCTION_AUDIT_DIR,
+) -> Dict[str, Any]:
+    """THIN_LINKAGE countdown: classify open lots by audit file coverage.
+
+    Each covered lot that closes gives +1 to gate matched.
+    Legacy-tsid lots give 0 credit even when they close.
+    """
+    audit_tsids = _load_audit_tsids(audit_dir)
+
+    rows = conn.execute("""
+        SELECT ticker, ts_signal_id FROM trade_executions
+        WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
+          AND ts_signal_id IS NOT NULL
+    """).fetchall()
+
+    covered: Dict[str, int] = {}
+    legacy_n = 0
+    other_n = 0
+    for ticker, tsid in rows:
+        tsid_s = str(tsid or "").strip()
+        if tsid_s in audit_tsids:
+            covered[ticker] = covered.get(ticker, 0) + 1
+        elif tsid_s.startswith("legacy_"):
+            legacy_n += 1
+        else:
+            other_n += 1
+
+    matched = int((gate_summary or {}).get("matched") or 0)
+    return {
+        "matched_current": matched,
+        "matched_threshold": _THIN_LINKAGE_THRESHOLD,
+        "matched_needed": max(0, _THIN_LINKAGE_THRESHOLD - matched),
+        "warmup_deadline": _WARMUP_DEADLINE,
+        "open_lots_total": len(rows),
+        "open_lots_with_audit_coverage": sum(covered.values()),
+        "open_lots_legacy_no_coverage": legacy_n,
+        "open_lots_other_no_coverage": other_n,
+        "covered_lots_by_ticker": covered,
+        "note": (
+            "Each covered-lot close increments matched by 1. "
+            "Legacy lots (legacy_ prefix) give 0 credit when they close. "
+            "Code cannot force closes — only stop/target price action before deadline."
+        ),
+    }
+
+
 def _read_gate_artifact() -> Optional[Dict[str, Any]]:
     """Read production_gate_latest.json if present (not always up-to-date)."""
     for gate_path in _gate_artifact_candidates():
@@ -144,6 +215,16 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
         pnl = _query_closed_pnl(conn)
         cap = _query_capital(conn)
         risk = _query_open_risk(conn)
+        # thin_linkage needs conn open; gate_summary filled after gate load below.
+        # ts_signal_id may be absent on schema-minimal test DBs — degrade to empty.
+        try:
+            _thin_linkage_raw_rows = conn.execute("""
+                SELECT ticker, ts_signal_id FROM trade_executions
+                WHERE is_close = 0 AND COALESCE(is_synthetic, 0) = 0
+                  AND ts_signal_id IS NOT NULL
+            """).fetchall()
+        except Exception:
+            _thin_linkage_raw_rows = []
     finally:
         conn.close()
 
@@ -162,6 +243,45 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
             "eligible": gate.get("readiness", {}).get("outcome_eligible"),
             "artifact_path": str(gate_path),
         }
+
+    # Build thin_linkage from pre-fetched rows (conn already closed)
+    audit_tsids = _load_audit_tsids(_PRODUCTION_AUDIT_DIR)
+    _tl_covered: Dict[str, int] = {}
+    _tl_legacy = 0
+    _tl_other = 0
+    for _ticker, _tsid in _thin_linkage_raw_rows:
+        _tsid_s = str(_tsid or "").strip()
+        if _tsid_s in audit_tsids:
+            _tl_covered[_ticker] = _tl_covered.get(_ticker, 0) + 1
+        elif _tsid_s.startswith("legacy_"):
+            _tl_legacy += 1
+        else:
+            _tl_other += 1
+    _tl_matched = int((gate_summary or {}).get("matched") or 0)
+    thin_linkage = {
+        "matched_current": _tl_matched,
+        "matched_threshold": _THIN_LINKAGE_THRESHOLD,
+        "matched_needed": max(0, _THIN_LINKAGE_THRESHOLD - _tl_matched),
+        "warmup_deadline": _WARMUP_DEADLINE,
+        "open_lots_total": len(_thin_linkage_raw_rows),
+        "open_lots_with_audit_coverage": sum(_tl_covered.values()),
+        "open_lots_legacy_no_coverage": _tl_legacy,
+        "open_lots_other_no_coverage": _tl_other,
+        "covered_lots_by_ticker": _tl_covered,
+        # Lots with canonical tsids but no production audit file are pipeline defects.
+        # Common causes: audit written to research/ (ETL run) or quarantine/ (hygiene sweep).
+        "pipeline_defects": {
+            "canonical_tsid_lots_without_audit": _tl_other,
+            "action_required": _tl_other > 0,
+        },
+        "note": (
+            "Each covered-lot close increments matched by 1. "
+            "Legacy lots (legacy_ prefix) give 0 credit when they close. "
+            "pipeline_defects.canonical_tsid_lots_without_audit > 0 means audit files exist "
+            "but are in research/ or quarantine/ — not a missing write, a misrouted file. "
+            "Code cannot force closes — only stop/target price action before deadline."
+        ),
+    }
 
     # Unattended gate status
     unattended_status = "NOT_CHECKED"
@@ -206,6 +326,7 @@ def emit_snapshot(db_path: Path) -> Dict[str, Any]:
         "open_risk": risk,
         "utilization": util,
         "gate": gate_summary,
+        "thin_linkage": thin_linkage,
         # ── Derived summary ──
         "summary": {
             "ann_roi_pct": ann_roi,
@@ -257,6 +378,20 @@ def main(db: str, output: str, as_json: bool) -> None:
     if gate:
         print(f"  Phase3 posture     : {gate.get('posture')}  "
               f"matched={gate.get('matched')}/{gate.get('eligible')}")
+    tl = snapshot.get("thin_linkage") or {}
+    if tl:
+        covered_str = "  ".join(
+            f"{t}x{n}" for t, n in sorted((tl.get("covered_lots_by_ticker") or {}).items())
+        )
+        print(
+            f"  THIN_LINKAGE       : {tl['matched_current']}/{tl['matched_threshold']} matched  "
+            f"need {tl['matched_needed']} more  deadline={tl['warmup_deadline']}"
+        )
+        print(
+            f"    covered lots     : {tl['open_lots_with_audit_coverage']} ({covered_str})  "
+            f"legacy={tl['open_lots_legacy_no_coverage']}  "
+            f"other={tl['open_lots_other_no_coverage']}"
+        )
     print(f"\nArtifact: {output}")
 
 

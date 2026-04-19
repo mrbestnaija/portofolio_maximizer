@@ -177,3 +177,172 @@ class TestCanonicalSnapshot:
         assert Path(snapshot["source_contract"]["ui_only"]["metrics_summary"]).as_posix().endswith(
             "visualizations/performance/metrics_summary.json"
         )
+
+
+# ---------------------------------------------------------------------------
+# THIN_LINKAGE countdown tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def thin_linkage_db(tmp_path):
+    """DB with ts_signal_id column to exercise thin_linkage classification."""
+    db = tmp_path / "tl_test.db"
+    conn = sqlite3.connect(str(db))
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE portfolio_cash_state (
+            id INTEGER PRIMARY KEY, cash REAL, initial_capital REAL, updated_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE trade_executions (
+            id INTEGER PRIMARY KEY, ticker TEXT, trade_date TEXT, action TEXT,
+            shares REAL, price REAL, total_value REAL, realized_pnl REAL,
+            holding_period_days REAL, is_close INTEGER DEFAULT 0,
+            is_synthetic INTEGER DEFAULT 0, is_diagnostic INTEGER DEFAULT 0,
+            entry_trade_id INTEGER, exit_reason TEXT, ts_signal_id TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE VIEW production_closed_trades AS
+        SELECT * FROM trade_executions
+        WHERE is_close = 1
+          AND COALESCE(is_synthetic, 0) = 0
+          AND COALESCE(is_diagnostic, 0) = 0
+    """)
+
+    cur.execute("INSERT INTO portfolio_cash_state VALUES (1, 24000.0, 25000.0, '2026-01-01')")
+
+    # Open lots: 2 canonical-tsid, 2 legacy, 1 other-format
+    cur.executemany(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "total_value, is_close, is_synthetic, ts_signal_id) VALUES (?,?,?,?,?,?,?,0,0,?)",
+        [
+            (1, "AMZN", "2026-04-01", "BUY", 1, 100.0, 100.0, "ts_AMZN_20260402_aabb_0001"),
+            (2, "AMZN", "2026-04-02", "BUY", 1, 101.0, 101.0, "ts_AMZN_20260402_aabb_0002"),
+            (3, "AAPL", "2026-03-01", "BUY", 1, 200.0, 200.0, "legacy_2026-03-01_7"),
+            (4, "GS",   "2026-02-01", "BUY", 1, 150.0, 150.0, "legacy_2026-02-01_9"),
+            (5, "NVDA", "2026-04-01", "BUY", 1, 800.0, 800.0, "ts_NVDA_20260402_ccdd_0001_no_audit"),
+        ],
+    )
+    # Closed lot (should not appear in thin_linkage open-lot counts)
+    cur.execute(
+        "INSERT INTO trade_executions (id, ticker, trade_date, action, shares, price, "
+        "total_value, realized_pnl, is_close, is_synthetic, entry_trade_id, ts_signal_id) "
+        "VALUES (6, 'AMZN', '2026-04-10', 'SELL', 1, 102.0, 102.0, 2.0, 1, 0, 1, "
+        "'ts_AMZN_20260402_aabb_0001')"
+    )
+
+    conn.commit()
+    conn.close()
+    return db
+
+
+@pytest.fixture
+def audit_dir_with_two_tsids(tmp_path):
+    """Production audit dir containing files for exactly 2 of the open tsids."""
+    adir = tmp_path / "production"
+    adir.mkdir()
+    for tsid in ("ts_AMZN_20260402_aabb_0001", "ts_AMZN_20260402_aabb_0002"):
+        (adir / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+    # ts_NVDA_20260402_ccdd_0001_no_audit intentionally absent
+    return adir
+
+
+class TestThinLinkageSection:
+
+    def test_thin_linkage_section_present_with_required_fields(
+        self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
+    ):
+        """thin_linkage key must be present with all required fields."""
+        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        assert "thin_linkage" in snapshot, "thin_linkage section missing from snapshot"
+        tl = snapshot["thin_linkage"]
+        required_fields = {
+            "matched_current", "matched_threshold", "matched_needed",
+            "warmup_deadline", "open_lots_total", "open_lots_with_audit_coverage",
+            "open_lots_legacy_no_coverage", "open_lots_other_no_coverage",
+            "covered_lots_by_ticker", "note",
+        }
+        missing = required_fields - set(tl.keys())
+        assert not missing, f"Missing thin_linkage fields: {missing}"
+
+    def test_covered_lots_by_ticker_sum_matches_total_covered(
+        self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
+    ):
+        """covered_lots_by_ticker values must sum to open_lots_with_audit_coverage."""
+        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        assert sum(tl["covered_lots_by_ticker"].values()) == tl["open_lots_with_audit_coverage"]
+        # The 2 AMZN open lots both have audit files
+        assert tl["covered_lots_by_ticker"].get("AMZN") == 2
+        assert tl["open_lots_with_audit_coverage"] == 2
+
+    def test_legacy_tsids_land_in_legacy_no_coverage(
+        self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
+    ):
+        """Lots with legacy_ prefix tsids must appear in open_lots_legacy_no_coverage."""
+        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        # 2 legacy lots (AAPL id=3, GS id=4)
+        assert tl["open_lots_legacy_no_coverage"] == 2
+        # 1 other lot (NVDA id=5, canonical format but no audit file)
+        assert tl["open_lots_other_no_coverage"] == 1
+        # closed lot must not inflate counts
+        assert tl["open_lots_total"] == 5
+
+    def test_pipeline_defects_flagged_when_other_lots_present(
+        self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
+    ):
+        """Canonical-tsid lots without audit files must be flagged as pipeline defects."""
+        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        defects = tl.get("pipeline_defects", {})
+        # NVDA id=5 has canonical tsid but no audit → defect count = 1
+        assert defects["canonical_tsid_lots_without_audit"] == 1
+        assert defects["action_required"] is True
+
+    def test_research_and_quarantine_subdirs_excluded_from_coverage(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """Audit files in research/ or quarantine/ subdirs must NOT satisfy THIN_LINKAGE coverage.
+
+        This is a regression test for the known pipeline defect where audit files get
+        routed to research/ (ETL run) or quarantine/ (hygiene sweep) instead of the
+        production audit dir root.  Both subdirs are intentionally excluded from the
+        production THIN_LINKAGE scan.
+        """
+        # Build an audit dir with one canonical tsid — but placed in research/ subdir
+        adir = tmp_path / "production_misrouted"
+        (adir / "research").mkdir(parents=True)
+        (adir / "quarantine").mkdir(parents=True)
+        tsid = "ts_AMZN_20260402_aabb_0001"
+        # File in research/ — must NOT count
+        (adir / "research" / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+        # File in quarantine/ — must NOT count
+        tsid2 = "ts_AMZN_20260402_aabb_0002"
+        (adir / "quarantine" / f"forecast_audit_{tsid2}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid2, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", adir)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        # Both AMZN open lots (id=1, id=2) should be "other" — misrouted to subdirs
+        assert tl["open_lots_with_audit_coverage"] == 0, (
+            "Audit files in research/ or quarantine/ must not satisfy coverage"
+        )
+        assert tl["open_lots_other_no_coverage"] == 3  # 2 AMZN + 1 NVDA = 3 without coverage
+        assert tl["pipeline_defects"]["action_required"] is True
