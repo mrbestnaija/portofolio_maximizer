@@ -253,30 +253,39 @@ def audit_dir_with_two_tsids(tmp_path):
     return adir
 
 
+def _set_thin_linkage_paths(monkeypatch, audit_dir: Path) -> None:
+    """Point the canonical snapshot at a temporary forecast-audit tree."""
+    monkeypatch.setattr(mod, "_FORECAST_AUDIT_ROOT", audit_dir.parent)
+
+
 class TestThinLinkageSection:
 
     def test_thin_linkage_section_present_with_required_fields(
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
     ):
         """thin_linkage key must be present with all required fields."""
-        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         assert "thin_linkage" in snapshot, "thin_linkage section missing from snapshot"
         tl = snapshot["thin_linkage"]
         required_fields = {
             "matched_current", "matched_threshold", "matched_needed",
-            "warmup_deadline", "open_lots_total", "open_lots_with_audit_coverage",
+            "warmup_deadline", "status", "query_error", "audit_scan_errors",
+            "open_lots_total", "open_lots_with_audit_coverage",
             "open_lots_legacy_no_coverage", "open_lots_other_no_coverage",
-            "covered_lots_by_ticker", "note",
+            "covered_lots_by_ticker", "pipeline_defects", "note",
         }
         missing = required_fields - set(tl.keys())
         assert not missing, f"Missing thin_linkage fields: {missing}"
+        assert tl["status"] == "ok"
+        assert tl["query_error"] is None
+        assert tl["audit_scan_errors"] == 0
 
     def test_covered_lots_by_ticker_sum_matches_total_covered(
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
     ):
         """covered_lots_by_ticker values must sum to open_lots_with_audit_coverage."""
-        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         tl = snapshot["thin_linkage"]
         assert sum(tl["covered_lots_by_ticker"].values()) == tl["open_lots_with_audit_coverage"]
@@ -288,12 +297,12 @@ class TestThinLinkageSection:
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
     ):
         """Lots with legacy_ prefix tsids must appear in open_lots_legacy_no_coverage."""
-        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         tl = snapshot["thin_linkage"]
         # 2 legacy lots (AAPL id=3, GS id=4)
         assert tl["open_lots_legacy_no_coverage"] == 2
-        # 1 other lot (NVDA id=5, canonical format but no audit file)
+        # 1 other lot (NVDA id=5, canonical format but no production-root audit file)
         assert tl["open_lots_other_no_coverage"] == 1
         # closed lot must not inflate counts
         assert tl["open_lots_total"] == 5
@@ -301,13 +310,15 @@ class TestThinLinkageSection:
     def test_pipeline_defects_flagged_when_other_lots_present(
         self, thin_linkage_db, audit_dir_with_two_tsids, monkeypatch
     ):
-        """Canonical-tsid lots without audit files must be flagged as pipeline defects."""
-        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", audit_dir_with_two_tsids)
+        """Canonical-tsid lots without production-root audits must be flagged as defects."""
+        _set_thin_linkage_paths(monkeypatch, audit_dir_with_two_tsids)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         tl = snapshot["thin_linkage"]
         defects = tl.get("pipeline_defects", {})
         # NVDA id=5 has canonical tsid but no audit → defect count = 1
-        assert defects["canonical_tsid_lots_without_audit"] == 1
+        assert defects["canonical_tsid_lots_without_production_audit"] == 1
+        assert defects["missing_audit_lots"] == 1
+        assert defects["misrouted_audit_lots_by_subdir"] == {}
         assert defects["action_required"] is True
 
     def test_research_and_quarantine_subdirs_excluded_from_coverage(
@@ -320,24 +331,25 @@ class TestThinLinkageSection:
         production audit dir root.  Both subdirs are intentionally excluded from the
         production THIN_LINKAGE scan.
         """
-        # Build an audit dir with one canonical tsid — but placed in research/ subdir
-        adir = tmp_path / "production_misrouted"
-        (adir / "research").mkdir(parents=True)
-        (adir / "quarantine").mkdir(parents=True)
+        # Build a forecast-audit tree with one canonical tsid in research/ and one in production/quarantine/
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        (root / "research").mkdir(parents=True)
+        (production / "quarantine").mkdir(parents=True)
         tsid = "ts_AMZN_20260402_aabb_0001"
         # File in research/ — must NOT count
-        (adir / "research" / f"forecast_audit_{tsid}.json").write_text(
+        (root / "research" / f"forecast_audit_{tsid}.json").write_text(
             json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
             encoding="utf-8",
         )
-        # File in quarantine/ — must NOT count
+        # File in production/quarantine/ — must NOT count
         tsid2 = "ts_AMZN_20260402_aabb_0002"
-        (adir / "quarantine" / f"forecast_audit_{tsid2}.json").write_text(
+        (production / "quarantine" / f"forecast_audit_{tsid2}.json").write_text(
             json.dumps({"signal_context": {"ts_signal_id": tsid2, "ticker": "AMZN"}}),
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(mod, "_PRODUCTION_AUDIT_DIR", adir)
+        _set_thin_linkage_paths(monkeypatch, production)
         snapshot = mod.emit_snapshot(thin_linkage_db)
         tl = snapshot["thin_linkage"]
         # Both AMZN open lots (id=1, id=2) should be "other" — misrouted to subdirs
@@ -345,4 +357,42 @@ class TestThinLinkageSection:
             "Audit files in research/ or quarantine/ must not satisfy coverage"
         )
         assert tl["open_lots_other_no_coverage"] == 3  # 2 AMZN + 1 NVDA = 3 without coverage
+        defects = tl["pipeline_defects"]
+        assert defects["canonical_tsid_lots_without_production_audit"] == 3
+        assert defects["missing_audit_lots"] == 1
+        assert defects["misrouted_audit_lots_by_subdir"]["research"] == 1
+        assert defects["misrouted_audit_lots_by_subdir"]["production/quarantine"] == 1
         assert tl["pipeline_defects"]["action_required"] is True
+
+    def test_schema_minimal_db_reports_explicit_status(
+        self, minimal_db
+    ):
+        """Missing ts_signal_id must surface as explicit schema_minimal status, not zero counts."""
+        snapshot = mod.emit_snapshot(minimal_db)
+        tl = snapshot["thin_linkage"]
+        assert tl["status"] == "schema_minimal"
+        assert "ts_signal_id" in tl["query_error"]
+        assert tl["open_lots_total"] is None
+        assert tl["pipeline_defects"]["action_required"] is True
+
+    def test_audit_scan_errors_surface_explicitly(
+        self, thin_linkage_db, tmp_path, monkeypatch
+    ):
+        """Malformed audit JSON must be reported, not silently ignored."""
+        root = tmp_path / "forecast_audits"
+        production = root / "production"
+        production.mkdir(parents=True)
+        # One valid production audit and one malformed file.
+        tsid = "ts_AMZN_20260402_aabb_0001"
+        (production / f"forecast_audit_{tsid}.json").write_text(
+            json.dumps({"signal_context": {"ts_signal_id": tsid, "ticker": "AMZN"}}),
+            encoding="utf-8",
+        )
+        (production / "forecast_audit_broken.json").write_text("{not-json", encoding="utf-8")
+
+        _set_thin_linkage_paths(monkeypatch, production)
+        snapshot = mod.emit_snapshot(thin_linkage_db)
+        tl = snapshot["thin_linkage"]
+        assert tl["status"] == "audit_scan_error"
+        assert tl["audit_scan_errors"] == 1
+        assert tl["query_error"]

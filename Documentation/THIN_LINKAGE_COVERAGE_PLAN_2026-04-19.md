@@ -2,11 +2,11 @@
 
 ## Canonical Constraint
 
-Of the 58 open lots, 40 have `legacy_` ts_signal_ids and contribute **zero** THIN_LINKAGE
+Of the 58 open lots, 38 have `legacy_` ts_signal_ids and contribute **zero** THIN_LINKAGE
 credit when they close. 18 have matching production audit files (the "covered" ceiling) and
 each contributes +1 to `matched` when closed. 2 lots have canonical-format tsids but their
-audit files were misrouted (one to `research/`, one to `quarantine/`) and also contribute 0
-until the misrouting is corrected.
+audit files were misrouted (one to `research/`, one to `production/quarantine/`) and also
+contribute 0 until the misrouting is corrected.
 
 Code cannot force any close. The only path to `matched >= 10` before 2026-04-24 is
 stop/target price action on the 18 covered lots, plus future round-trips opened after those
@@ -49,7 +49,12 @@ eligible=1`. These figures diverge because:
 - Coverage count measures **open** lots whose future closes *could* match (ceiling = 18).
 
 The gate is the authoritative source for confirmed matched. The coverage count is a
-planning estimate for maximum achievable matched.
+planning estimate for maximum achievable matched. The canonical snapshot also surfaces an
+explicit `status` field for the linkage scan (`ok`, `schema_minimal`, `query_error`,
+`audit_scan_error`) so a schema/query problem never silently turns into empty counts.
+If `status=audit_scan_error`, the scan found malformed audit JSON under
+`logs/forecast_audits/`; the open-lot counts still reflect valid files, but the tree is
+not clean and should be sanitized before anyone treats the snapshot as green.
 
 ## Pipeline Defect: Misrouted Audit Files
 
@@ -59,19 +64,19 @@ audit root:
 | Trade ID | Ticker | ts_signal_id | Audit location | Root cause |
 |----------|--------|-------------|---------------|------------|
 | 253 | AAPL | `ts_AAPL_20260305T202651Z_6077_0003` | `research/` | Opened by ETL run (not auto-trader) |
-| 316 | NVDA | `ts_NVDA_20260402_818b_0003` | `quarantine/` | Moved by evidence hygiene sweep |
+| 316 | NVDA | `ts_NVDA_20260402_818b_0003` | `production/quarantine/` | Moved by evidence hygiene sweep |
 
 **Fix:** Do NOT create stub audit files to patch this — that manufactures evidence.
 The correct fix is:
 1. For the quarantine lot (NVDA): verify the file was moved legitimately before potentially
-   restoring it. Check `quarantine/` filenames for hygiene violation reasons.
+   restoring it. Check `production/quarantine/` filenames for hygiene violation reasons.
 2. For the research lot (AAPL): ETL-originated live trades should write audit files to
    `production/` not `research/`. Diagnose whether `run_etl_pipeline.py` uses the correct
    `audit_log_dir` when `execution_mode=live`.
 
 A regression test (`TestThinLinkageSection::test_research_and_quarantine_subdirs_excluded_from_coverage`
-in `tests/scripts/test_emit_canonical_snapshot.py`) documents that research/ and quarantine/
-subdirs are intentionally excluded from the production THIN_LINKAGE scan.
+in `tests/scripts/test_emit_canonical_snapshot.py`) documents that research/ and
+production/quarantine/ subdirs are intentionally excluded from the production THIN_LINKAGE scan.
 
 ## What Code Can and Cannot Do
 
@@ -107,6 +112,9 @@ The human-readable CLI output shows:
 THIN_LINKAGE       : 1/10 matched  need 9 more  deadline=2026-04-24
   covered lots     : 18 (AAPLx1  AMZNx6  GOOGx5  NVDAx6)  legacy=38  other=2
 ```
+
+If the scan is degraded, the CLI prints an explicit `status` line and an error sample
+instead of silently falling back to empty counts.
 
 `matched_current` increments when the gate artifact is refreshed by a successful close. To
 force a gate re-run:
