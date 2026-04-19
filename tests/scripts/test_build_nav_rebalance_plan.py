@@ -481,3 +481,35 @@ risk_buckets:
     assert payload["rollout"]["gate_lift_ready"] is True
     assert payload["rollout"]["mode"] == "live"
     assert payload["rollout"]["live_apply_blockers"] == []
+
+
+def test_direct_cli_invocation_does_not_raise_module_not_found_error() -> None:
+    """Direct subprocess invocation (as cron would call it) must not raise ModuleNotFoundError.
+
+    The CliRunner path injects sys.path via pytest conftest, so it cannot catch the
+    real failure mode. This test invokes the script as an external process — no PYTHONPATH
+    set — to reproduce the cron environment and confirm the sys.path bootstrap works.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent.parent / "scripts" / "build_nav_rebalance_plan.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        # Deliberately omit PYTHONPATH to mirror the cron/shell invocation environment
+        env={k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"},
+    )
+    assert result.returncode == 0, (
+        f"Direct CLI invocation failed (exit={result.returncode}).\n"
+        f"stdout: {result.stdout[:500]}\n"
+        f"stderr: {result.stderr[:500]}"
+    )
+    assert "ModuleNotFoundError" not in result.stderr, (
+        f"sys.path bootstrap missing — first-party imports failed:\n{result.stderr[:500]}"
+    )
+    assert "Usage:" in result.stdout, (
+        f"Expected Click help output; got: {result.stdout[:200]}"
+    )

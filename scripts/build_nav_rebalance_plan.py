@@ -19,17 +19,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+# Bootstrap repo root onto sys.path so direct CLI invocation (cron, shell) works
+# without requiring the caller to set PYTHONPATH. Must happen before any first-party
+# imports. Mirrors the pattern in run_auto_trader.py:43-46.
+ROOT_PATH = Path(__file__).resolve().parent.parent
+if str(ROOT_PATH) not in sys.path:
+    sys.path.insert(0, str(ROOT_PATH))
 
 import click
 import yaml
 
 from risk.nav_allocator import BucketBudgets, apply_nav_allocator, load_budgets
 from utils.evidence_io import write_versioned_json_artifact
-
-ROOT_PATH = Path(__file__).resolve().parent.parent
 
 DEFAULT_ELIGIBILITY_PATH = ROOT_PATH / "logs" / "ticker_eligibility.json"
 DEFAULT_ELIGIBILITY_GATES_PATH = ROOT_PATH / "logs" / "ticker_eligibility_gates.json"
